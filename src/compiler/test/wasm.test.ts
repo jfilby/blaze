@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateWasmHost, wasmSignature, wasmValueType } from "../src/compiler/toolchain/wasm.ts";
-import { parseType } from "../src/compiler/semantics/contract.ts";
-import { run } from "../src/compiler/core/process.ts";
-import { encodeRunRequest, type TestVector } from "../src/compiler/toolchain/verifier.ts";
-import type { FunctionContract } from "../src/compiler/core/types.ts";
+import { generateWasmHost, wasmSignature, wasmValueType } from "../toolchain/wasm.ts";
+import { parseType } from "../semantics/contract.ts";
+import { run } from "../core/process.ts";
+import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
+import type { FunctionContract } from "../core/types.ts";
 
 /** The WebAssembly surface this test uses; @types/node does not declare it. */
 interface WasmModuleHandle {

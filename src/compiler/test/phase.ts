@@ -4,9 +4,9 @@
  * the tests exercise are then the same path.
  */
 
-import { frontendFor } from "../src/compiler/semantics/frontend.ts";
-import { entryContract, runContractPhase } from "../src/compiler/semantics/program.ts";
-import type { FunctionContract, ProgramContract, SourceInput } from "../src/compiler/core/types.ts";
+import { frontendFor } from "../semantics/frontend.ts";
+import { entryContract, runContractPhase } from "../semantics/program.ts";
+import type { FunctionContract, ProgramContract, SourceInput } from "../core/types.ts";
 
 const ENTRY_PATH: Record<string, string> = { nim: "module.nim", typescript: "module.ts" };
 

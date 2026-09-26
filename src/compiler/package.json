@@ -5,13 +5,13 @@
   "type": "module",
   "private": true,
   "bin": {
-    "blaze": "src/compiler/cli.ts"
+    "blaze": "cli.ts"
   },
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
-    "aic": "node src/compiler/cli.ts",
+    "aic": "node cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts"
   },

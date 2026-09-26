@@ -4,6 +4,13 @@
 
 This is Blaze, an AI compiler to generate assembly from traditional source.
 
+## Layout
+
+`src/compiler` is the npm package: manifest, lockfile, tsconfig, sources and
+tests all live there. Run commands from it.
+- `npm run typecheck`, `npm test`, `npm run aic -- <args>`
+
+
 
 ## Libraries
 

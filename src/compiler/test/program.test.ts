@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { frontendFor } from "../src/compiler/semantics/frontend.ts";
-import { entryContract, INLINE_MODULE, runContractPhase } from "../src/compiler/semantics/program.ts";
-import type { ProgramContract, SourceInput, SourceModule } from "../src/compiler/core/types.ts";
+import { frontendFor } from "../semantics/frontend.ts";
+import { entryContract, INLINE_MODULE, runContractPhase } from "../semantics/program.ts";
+import type { ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
 import { programOf } from "./phase.ts";
 
 const SCALE = "export function scale(x: number): number {\n  return x * 2;\n}\n";

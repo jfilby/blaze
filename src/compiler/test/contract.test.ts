@@ -12,8 +12,8 @@ import {
   valuesMatch,
   type BufferValue,
   type Value,
-} from "../src/compiler/semantics/contract.ts";
-import type { FunctionContract } from "../src/compiler/core/types.ts";
+} from "../semantics/contract.ts";
+import type { FunctionContract } from "../core/types.ts";
 
 function dotProductContract(): FunctionContract {
   return {

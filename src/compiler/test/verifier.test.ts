@@ -6,13 +6,13 @@ import {
   encodeRunRequest,
   planTestVectors,
   vectorValues,
-} from "../src/compiler/toolchain/verifier.ts";
-import { parseContract, referenceResult, type BufferValue } from "../src/compiler/semantics/contract.ts";
-import { createJsonStore, hashText, serializeJson } from "../src/compiler/core/json-store.ts";
+} from "../toolchain/verifier.ts";
+import { parseContract, referenceResult, type BufferValue } from "../semantics/contract.ts";
+import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FunctionContract, TestConfig } from "../src/compiler/core/types.ts";
+import type { FunctionContract, TestConfig } from "../core/types.ts";
 
 const CONTRACT: FunctionContract = {
   version: "1",

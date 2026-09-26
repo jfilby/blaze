@@ -4,8 +4,8 @@ import { createServer } from "node:http";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runBuild } from "../src/compiler/compiler.ts";
-import type { SourceInput } from "../src/compiler/core/types.ts";
+import { runBuild } from "../compiler.ts";
+import type { SourceInput } from "../core/types.ts";
 
 /**
  * A stand-in for a chat completions endpoint. It answers with whatever the

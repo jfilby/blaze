@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readAssemblyStructure, validateAssembly } from "../src/compiler/toolchain/assembler.ts";
-import { CompilerError } from "../src/compiler/core/errors.ts";
-import { parseContract } from "../src/compiler/semantics/contract.ts";
-import type { FunctionContract } from "../src/compiler/core/types.ts";
+import { readAssemblyStructure, validateAssembly } from "../toolchain/assembler.ts";
+import { CompilerError } from "../core/errors.ts";
+import { parseContract } from "../semantics/contract.ts";
+import type { FunctionContract } from "../core/types.ts";
 
 const REFERENCE = `	.globl	dotProduct
 	.type	dotProduct, @function

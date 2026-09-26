@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { frontendFor } from "../src/compiler/semantics/frontend.ts";
-import { parseContract } from "../src/compiler/semantics/contract.ts";
+import { frontendFor } from "../semantics/frontend.ts";
+import { parseContract } from "../semantics/contract.ts";
 import { contractOf } from "./phase.ts";
 
 const DOT_PRODUCT = `proc dotProduct(a: ptr float32, b: ptr float32, n: usize): float32 =

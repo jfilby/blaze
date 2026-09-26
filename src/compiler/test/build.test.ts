@@ -3,14 +3,14 @@ import { test } from "node:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../src/compiler/compiler.ts";
-import { run } from "../src/compiler/core/process.ts";
-import { CompilerError } from "../src/compiler/core/errors.ts";
-import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../src/compiler/core/types.ts";
+import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../compiler.ts";
+import { run } from "../core/process.ts";
+import { CompilerError } from "../core/errors.ts";
+import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
-const EXAMPLE = new URL("../src/examples/hello_world/blaze.json", import.meta.url).pathname;
+const EXAMPLE = new URL("../../examples/hello_world/blaze.json", import.meta.url).pathname;
 
 const INPUT: SourceInput = {
   language: "nim",

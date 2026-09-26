@@ -3,25 +3,25 @@ import { test } from "node:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runBuild, STATE_DIRECTORY } from "../src/compiler/compiler.ts";
-import { run } from "../src/compiler/core/process.ts";
+import { runBuild, STATE_DIRECTORY } from "../compiler.ts";
+import { run } from "../core/process.ts";
 import {
   isRuntimeSymbol,
   RUNTIME_ABI,
   RUNTIME_NAME,
   runtimeHeaderSource,
   runtimeSourceSource,
-} from "../src/compiler/runtime/abi.ts";
-import { generateRuntimeAdapterSource } from "../src/compiler/runtime/nim.ts";
-import { buildUserPrompt, type PromptRequest } from "../src/compiler/ai/prompt.ts";
-import { entryContract } from "../src/compiler/semantics/program.ts";
+} from "../runtime/abi.ts";
+import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
+import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
+import { entryContract } from "../semantics/program.ts";
 import { programOf } from "./phase.ts";
-import type { SourceInput } from "../src/compiler/core/types.ts";
+import type { SourceInput } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
 const C_REPLAY = new URL("./fixtures/runtime-dot-product-c-replay.json", import.meta.url).pathname;
-const EXAMPLE = new URL("../src/examples/hosted_dot_product/blaze.json", import.meta.url).pathname;
-const EXAMPLE_CANDIDATES = new URL("../src/examples/hosted_dot_product/candidates.json", import.meta.url).pathname;
+const EXAMPLE = new URL("../../examples/hosted_dot_product/blaze.json", import.meta.url).pathname;
+const EXAMPLE_CANDIDATES = new URL("../../examples/hosted_dot_product/candidates.json", import.meta.url).pathname;
 
 const INPUT: SourceInput = {
   language: "nim",

@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
-import { frontendFor } from "../src/compiler/semantics/frontend.ts";
-import { CompilerError } from "../src/compiler/core/errors.ts";
-import { parseContract } from "../src/compiler/semantics/contract.ts";
+import { frontendFor } from "../semantics/frontend.ts";
+import { CompilerError } from "../core/errors.ts";
+import { parseContract } from "../semantics/contract.ts";
 import { contractOf } from "./phase.ts";
 
 const typescript = frontendFor("typescript");
 
-const HELLO_WORLD = new URL("../src/examples/hello_world/hello_world.ts", import.meta.url).pathname;
+const HELLO_WORLD = new URL("../../examples/hello_world/hello_world.ts", import.meta.url).pathname;
 
 test("the shipped example compiles to the expected contract", async () => {
   const source = await readFile(HELLO_WORLD, "utf8");

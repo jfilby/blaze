@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { cp, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run } from "../src/compiler/core/process.ts";
+import { run } from "../core/process.ts";
 
-const CLI = new URL("../src/compiler/cli.ts", import.meta.url).pathname;
-const EXAMPLE = new URL("../src/examples/hello_world", import.meta.url).pathname;
+const CLI = new URL("../cli.ts", import.meta.url).pathname;
+const EXAMPLE = new URL("../../examples/hello_world", import.meta.url).pathname;
 const REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
 
 /** A project directory named after the project it contains, as the example is. */

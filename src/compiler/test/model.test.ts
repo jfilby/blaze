@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveModel, OPENROUTER_BASE_URL } from "../src/compiler/ai/model.ts";
-import { CompilerError } from "../src/compiler/core/errors.ts";
-import { createBackend, extractAssembly, VercelAiBackend } from "../src/compiler/ai/backend.ts";
+import { resolveModel, OPENROUTER_BASE_URL } from "../ai/model.ts";
+import { CompilerError } from "../core/errors.ts";
+import { createBackend, extractAssembly, VercelAiBackend } from "../ai/backend.ts";
 
 function diagnostic(run: () => unknown): string {
   try {
