@@ -19,8 +19,9 @@
  *     with or without `export`, and the statements of a program (see
  *     typescript-program.ts), which come after every declaration
  *   - statements: let/const/var with an initialiser, counted for loops in
- *     either direction, if/else, assignments, compound assignments, `i++`,
- *     calls, returns and console.log
+ *     either direction, for-of loops, while, do-while, break, continue,
+ *     if/else, assignments, compound assignments, `i++`, calls, returns and
+ *     console.log
  *   - expressions: number and bigint literals, null, identifiers, indexing,
  *     field reads, calls, object literals, `process.argv`, the comparison,
  *     logical, shift and arithmetic operators, the conditional operator and
@@ -29,8 +30,8 @@
  *     value that is a reference to an object
  *   - a function is compiled whatever it does: only the contracts that can
  *     be written as one expression describe a result, so a body that
- *     branches, recurses, allocates or prints is refused at the contract
- *     phase rather than silently given a contract it does not meet
+ *     branches, recurses, allocates or prints is contracted by what it does,
+ *     the contract carrying the statements themselves as a definition
  */
 
 import { parseType, typeToString } from "./contract.ts";
@@ -130,7 +131,30 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
 
 
 /** Statements the parser reads to the end of the statement and reports. */
-const UNSUPPORTED_STATEMENTS = ["while", "do", "switch", "try", "throw", "break", "continue", "class", "interface", "type", "enum", "import"];
+/** The operators the contract expression language states a result with. */
+const CONTRACT_OPERATORS: readonly BinaryOp[] = [
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "<<",
+  ">>",
+  "<",
+  "<=",
+  ">",
+  ">=",
+  "==",
+  "!=",
+  "&&",
+  "||",
+];
+
+const UNSUPPORTED_STATEMENTS = ["switch", "try", "throw", "class", "interface", "type", "enum", "import"];
+
+/** What a function body may say, as the refusals of what it may not say state it. */
+const FUNCTION_BODY =
+  "a function is declarations, counted loops, while and do-while loops, for-of loops, break and continue, conditionals, calls, assignments, returns and console.log";
 
 /* -------------------------------------------------------------------------- */
 /* Type annotations                                                           */
@@ -159,7 +183,7 @@ const PRIMITIVES: Record<string, string> = {
 const NOTHING: TypeExpr = { kind: "void" };
 
 /** Maps a TypeScript type annotation onto a contract type. */
-function mapTypeScriptType(text: string, position: string): TypeExpr {
+export function mapTypeScriptType(text: string, position: string): TypeExpr {
   const source = text.trim();
   if (source in PRIMITIVES) return parseType(PRIMITIVES[source]);
   if (source in TYPED_ARRAYS) return { kind: "slice", of: parseType(TYPED_ARRAYS[source]) };
@@ -184,7 +208,7 @@ export interface Token {
   /** The character the string was written with. */
   quote?: string;
 }
-const PUNCTUATION = ["===", "!==", "==", "!=", "<=", ">=", "<<", ">>", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "&", "|", "^"];
+const PUNCTUATION = ["===", "!==", "**=", "**", "==", "!=", "<=", ">=", "<<", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
@@ -273,6 +297,8 @@ class TypeScriptParser {
   private readonly path: string;
   private readonly diagnostics: Diagnostics;
   private position = 0;
+  /** How many loops the statement being read is written in. */
+  private loops = 0;
 
   constructor(tokens: Token[], path: string, diagnostics: Diagnostics) {
     this.tokens = tokens;
@@ -321,6 +347,20 @@ class TypeScriptParser {
     return this.hole();
   }
 
+  /** Reads on to the end of the statement, or to one token of it. */
+  private synchronizeTo(terminator: string): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      // The terminator is one of the brackets, so it is read before they are
+      // counted: a `)` that closes the header ends it.
+      if (token.text === terminator && depth <= 0) return;
+      if (token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
+      else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+    }
+  }
+
   /** Reads on to the end of the statement, so the next one can be read. */
   private synchronize(consumeTerminator = true): void {
     let depth = 0;
@@ -331,8 +371,15 @@ class TypeScriptParser {
       else if (token.text === "}" && depth === 0) {
         this.position -= 1;
         return;
-      } else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
-      else if (token.text === ";" && depth <= 0) {
+      } else if (token.text === ")" || token.text === "]" || token.text === "}") {
+        // A bracket that closes what is being read is not part of this
+        // statement: the construct that opened it reads it next.
+        if (depth === 0) {
+          this.position -= 1;
+          return;
+        }
+        depth -= 1;
+      } else if (token.text === ";" && depth <= 0) {
         if (!consumeTerminator) this.position -= 1;
         return;
       }
@@ -562,6 +609,35 @@ class TypeScriptParser {
 
     if (this.at("for")) return this.readLoop();
     if (this.at("if")) return this.readIf();
+    if (this.at("while")) return this.readWhile();
+    if (this.at("do")) return this.readDoWhile();
+    if (this.at("break") || this.at("continue")) {
+      const keyword = this.next();
+      if (this.peek().kind === "ident") {
+        const label = this.next();
+        this.report(
+          `a ${keyword.text} names the loop it leaves, and a function body reads no labels`,
+          `"${label.text}" is a name a program does not use here; write break; to leave the loop`,
+          label,
+        );
+        this.accept(";");
+        this.synchronize();
+        return { kind: "expression", value: this.hole(), line: keyword.line };
+      }
+      if (this.loops === 0) {
+        this.report(
+          `"${keyword.text}" is not within a loop`,
+          "a function leaves a loop with break, and goes on with continue",
+          keyword,
+        );
+        this.synchronize();
+        return { kind: "expression", value: this.hole(), line: keyword.line };
+      }
+      this.accept(";");
+      return keyword.text === "break"
+        ? { kind: "break", line: keyword.line }
+        : { kind: "continue", line: keyword.line };
+    }
     if (this.at("return")) {
       this.next();
       if (this.at(";")) {
@@ -578,7 +654,7 @@ class TypeScriptParser {
     if (UNSUPPORTED_STATEMENTS.includes(token.text)) {
       this.report(
         `"${token.text}" is not supported`,
-        "a function is declarations, counted loops, conditionals, calls, assignments, returns and console.log",
+        FUNCTION_BODY,
         token,
       );
       this.synchronize();
@@ -707,7 +783,10 @@ class TypeScriptParser {
     return { kind: "print", value, line: start.line };
   }
 
-  /** `for (let i = from; i < to; i++)`, and the `<=`, `>` and `>=` forms. */
+  /**
+   * `for (let i = from; i < to; i++)`, the `<=`, `>` and `>=` forms, and
+   * `for (const x of values)`, which walks a typed array instead.
+   */
   private readLoop(): Statement {
     const start = this.next();
     this.expect("(");
@@ -723,6 +802,7 @@ class TypeScriptParser {
       this.synchronize();
       return { kind: "expression", value: this.hole(), line: start.line };
     }
+    if (this.at("of")) return this.readForOf(start, variable.text);
     this.expect("=");
     const from = this.readExpression();
     this.expect(";");
@@ -756,7 +836,7 @@ class TypeScriptParser {
       inclusive: comparison.text === "<=" || comparison.text === ">=",
       step,
       down: comparison.text === ">" || comparison.text === ">=",
-      body: this.readBody(),
+      body: this.loopBody(),
       line: start.line,
     };
   }
@@ -796,13 +876,73 @@ class TypeScriptParser {
     return { kind: "if", condition, then, otherwise, line: start.line };
   }
 
+  /**
+   * `for (const x of values)`: it walks the elements of a typed array, whose
+   * length the source may name as `values.length`, so nothing else is read.
+   */
+  private readForOf(start: Token, variable: string): Statement {
+    this.expect("of");
+    const of = this.next();
+    if (of.kind !== "ident") {
+      this.report("a for-of loop walks a typed array by name", `near "${of.text}"`, of);
+      this.skipLoop();
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
+    this.expect(")");
+    return { kind: "forOf", variable, of: of.text, body: this.loopBody(), line: start.line };
+  }
+
+  private readWhile(): Statement {
+    const start = this.next();
+    this.expect("(");
+    const condition = this.readExpression();
+    this.expect(")");
+    return { kind: "while", condition, body: this.loopBody(), line: start.line };
+  }
+
+  private readDoWhile(): Statement {
+    const start = this.next();
+    const body = this.loopBody();
+    if (!this.accept("while")) {
+      this.report("a do-while loop ends with `while (condition);`", `near "${this.peek().text}"`);
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
+    this.expect("(");
+    const condition = this.readExpression();
+    this.expect(")");
+    this.accept(";");
+    return { kind: "doWhile", condition, body, line: start.line };
+  }
+
+  /**
+   * The body of a loop, read one level deeper: a `break` or a `continue` inside
+   * it leaves the loop it is written in.
+   */
+  private loopBody(): Statement[] {
+    this.loops += 1;
+    const body = this.readBody();
+    this.loops -= 1;
+    return body;
+  }
+
+  /**
+   * Reads past a loop whose header the parser could not finish, so the
+   * statements after it are read from the start of the next one rather than
+   * from somewhere inside a body.
+   */
+  private skipLoop(): void {
+    this.synchronizeTo(")");
+    if (this.at("{")) this.skipBlock();
+    else this.synchronize();
+  }
+
   readExpression(): Expression {
     return this.readConditional();
   }
 
   /** `c ? a : b`, the loosest operator an expression has. */
   private readConditional(): Expression {
-    const condition = this.readLogicalOr();
+    const condition = this.readNullish();
     if (!this.at("?")) return condition;
     this.next();
     const then = this.readExpression();
@@ -823,6 +963,10 @@ class TypeScriptParser {
 
   private readLogicalOr(): Expression {
     return this.readBinaryLevel(["||"], () => this.readLogicalAnd());
+  }
+
+  private readNullish(): Expression {
+    return this.readBinaryLevel(["??"], () => this.readLogicalOr());
   }
 
   private readLogicalAnd(): Expression {
@@ -846,12 +990,27 @@ class TypeScriptParser {
   }
 
   private readMultiplicative(): Expression {
-    return this.readBinaryLevel(["*", "/", "%"], () => this.readUnary());
+    return this.readBinaryLevel(["*", "/", "%"], () => this.readPower());
+  }
+
+  /** `a ** b`: right associative, and tighter than a sign on its left. */
+  private readPower(): Expression {
+    const base = this.readUnary();
+    if (!this.at("**")) return base;
+    this.next();
+    // A sign belongs to the exponent: `2 ** -1` is a power, not a subtraction.
+    const exponent = this.at("-") || this.at("+") ? this.readSigned() : this.readPower();
+    return { k: "binary", op: "**", left: base, right: exponent };
+  }
+
+  private readSigned(): Expression {
+    const token = this.next();
+    return { k: "unary", op: token.text as UnaryOp, operand: this.readUnary() };
   }
 
   private readUnary(): Expression {
     const token = this.peek();
-    if (token.kind === "punct" && (token.text === "!" || token.text === "-" || token.text === "+")) {
+    if (token.kind === "punct" && (token.text === "!" || token.text === "-" || token.text === "+" || token.text === "~")) {
       this.next();
       return { k: "unary", op: token.text as UnaryOp, operand: this.readUnary() };
     }
@@ -1092,6 +1251,17 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
         expression(one.to);
         one.body.forEach(statement);
         return;
+      case "while":
+      case "doWhile":
+        expression(one.condition);
+        one.body.forEach(statement);
+        return;
+      case "forOf":
+        one.body.forEach(statement);
+        return;
+      case "break":
+      case "continue":
+        return;
       case "update":
         return;
     }
@@ -1138,6 +1308,13 @@ interface LoopContext {
   lo: string;
   hiExclusive: string;
 }
+
+/**
+ * A loop a reduction cannot state. A counted loop over a range is one the
+ * contract can say; every other loop leaves the body to the definition.
+ */
+const LOOP_REMEDY =
+  "a contract is one expression the result must equal, so this body is contracted as a definition: the contract carries the statements themselves";
 
 class BodyAnalysis {
   private readonly declaration: TypeScriptFunction;
@@ -1206,6 +1383,16 @@ class BodyAnalysis {
       case "loop":
         this.executeLoop(statement);
         return;
+      case "while":
+        this.uncontractable("loops while a condition holds", statement.line, LOOP_REMEDY);
+      case "doWhile":
+        this.uncontractable("loops until a condition fails", statement.line, LOOP_REMEDY);
+      case "forOf":
+        this.uncontractable(`walks "${statement.of}"`, statement.line, LOOP_REMEDY);
+      case "break":
+        this.uncontractable("leaves a loop", statement.line, LOOP_REMEDY);
+      case "continue":
+        this.uncontractable("skips the rest of a loop body", statement.line, LOOP_REMEDY);
       case "if":
         this.uncontractable(
           "branches",
@@ -1337,8 +1524,22 @@ class BodyAnalysis {
         return bound;
       }
       case "unary":
+        if (expression.op === "~") {
+          this.uncontractable(
+            "inverts a number bit by bit, which a contract cannot state",
+            line,
+            "the body is contracted as a definition, which is what a function that branches or calls has",
+          );
+        }
         return `(${expression.op}${this.serialize(expression.operand, loop, line)})`;
       case "binary":
+        if (!CONTRACT_OPERATORS.includes(expression.op)) {
+          this.uncontractable(
+            `computes with ${expression.op}, which a contract cannot state`,
+            line,
+            "the body is contracted as a definition, which is what a function that branches or calls has",
+          );
+        }
         return `(${this.serialize(expression.left, loop, line)} ${expression.op} ${this.serialize(expression.right, loop, line)})`;
       case "index": {
         if (expression.base.k !== "ident") {

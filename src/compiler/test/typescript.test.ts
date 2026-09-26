@@ -219,14 +219,15 @@ test("every construct outside the subset is reported at once", () => {
         "  return 1;",
         "}",
         "export function spin(x: number): number {",
-        "  while (x > 0) return 1;",
+        "  switch (x) { return 1; }",
         "  return 0;",
         "}",
         "export function odd(x: Date): number {",
         "  return 0;",
         "}",
         "export function pick(x: number): number {",
-        "  return ~x;",
+        "  class Hidden {}",
+        "  return 0;",
         "}",
         "",
       ].join("\n"),
@@ -235,9 +236,41 @@ test("every construct outside the subset is reported at once", () => {
 
   assert.match(message, /4 constructs of module\.ts are outside the subset the compiler reads/);
   assert.match(message, /line 1: every function declares what it returns/);
-  assert.match(message, /line 5: "while" is not supported/);
+  assert.match(message, /line 5: "switch" is not supported/);
   assert.match(message, /line 8: unsupported TypeScript type "Date"/);
-  assert.match(message, /line 12: unsupported token "~"/);
+  assert.match(message, /line 12: "class" is not supported/);
+});
+
+test("a loop a reduction cannot state is contracted as a definition", () => {
+  // while, do-while and for-of have no range a contract can name, so the
+  // statements themselves are what the contract carries.
+  const contract = contractOf("typescript", `export function report(values: Float64Array, limit: number): number {
+  let total = 0;
+  for (const value of values) {
+    if (value > limit) break;
+    total += value;
+  }
+  let i = 0;
+  while (i < values.length) {
+    i = i + 1;
+    if (i == 1) continue;
+    console.log(\`i \${i}\`);
+  }
+  do {
+    total = total - 1;
+  } while (total > 0);
+  return total;
+}
+`);
+  assert.deepEqual(contract.ensures, []);
+  assert.deepEqual(contract.effects, ["io"]);
+  assert.equal(contract.definition?.prints, true);
+  assert.deepEqual(
+    contract.definition?.statements.map((statement) => statement.kind),
+    ["declare", "forOf", "declare", "while", "doWhile", "result"],
+  );
+  const walk = contract.definition?.statements[1];
+  assert.deepEqual(walk?.kind === "forOf" ? walk.body.map((one) => one.kind) : null, ["if", "assign"]);
 });
 
 test("the language is selected by name", () => {

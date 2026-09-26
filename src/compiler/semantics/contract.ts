@@ -642,7 +642,9 @@ function sumType(body: TypeExpr): TypeExpr {
   if (body.kind !== "primitive" || !isNumericType(body.name)) {
     throw contractError(`sum() body must be numeric, got ${describeType(body)}`);
   }
-  if (isIntegerType(body.name) && isSignedType(body.name)) return { kind: "primitive", name: "i64" };
+  // A sum of whole numbers is a whole number, and it is not held at the width
+  // of the elements: summing 52 bytes of 5 is 260, not 4.
+  if (isIntegerType(body.name)) return { kind: "primitive", name: isSignedType(body.name) ? "i64" : "u64" };
   return body;
 }
 
@@ -856,14 +858,19 @@ function applyReduce(op: ReduceOp, accumulator: Value, value: Value, bodyType: S
 }
 
 function normalizeReduceResult(value: Value, op: ReduceOp, bodyType: StaticType): Value {
-  if ((op === "sum" || op === "product") && bodyType.kind === "primitive" && isIntegerType(bodyType.name) && typeof value === "bigint") {
-    return wrapInteger(value, bodyType.name);
+  // The reduction is held at the type it has, which is wider than the elements
+  // it sums: a sum of 100 bytes of 5 is 500, and not 244.
+  if (op !== "sum" && op !== "product" || bodyType.kind === "null") return value;
+  const type = op === "sum" ? sumType(bodyType) : productType(bodyType);
+  if (type.kind === "primitive" && isIntegerType(type.name) && typeof value === "bigint") {
+    return wrapInteger(value, type.name);
   }
-  if ((op === "sum" || op === "product") && bodyType.kind === "primitive" && bodyType.name === "f32" && typeof value === "number") {
+  if (type.kind === "primitive" && type.name === "f32" && typeof value === "number") {
     return Math.fround(value);
   }
   return value;
 }
+
 
 function evaluateBinary(expression: Expr & { t: "binary" }, context: EvalContext): Value {
   if (expression.op === "&&" || expression.op === "||") {
@@ -1191,7 +1198,18 @@ export function comparisonTolerance(returns: TypeExpr, terms: number): number | 
 
 export function valuesMatch(expected: Value, actual: Value, tolerance: number | null): boolean {
   if (typeof expected === "bigint" || typeof actual === "bigint") {
-    return typeof expected === "bigint" && typeof actual === "bigint" && expected === actual;
+    if (typeof expected === "bigint" && typeof actual === "bigint") return expected === actual;
+    // The reference computes in the type its expression has and the candidate
+    // in the type it returns, so one side is a whole number and the other a
+    // double. They agree when the double is that whole number and no other,
+    // and a double past 2^53 cannot name every whole number, so it is compared
+    // as the number it is.
+    const whole = typeof expected === "bigint" ? expected : actual;
+    const floating = typeof expected === "bigint" ? actual : expected;
+    if (typeof whole !== "bigint" || typeof floating !== "number") return false;
+    if (!Number.isInteger(floating)) return false;
+    if (floating > Number.MAX_SAFE_INTEGER || floating < Number.MIN_SAFE_INTEGER) return floating === Number(whole);
+    return BigInt(floating) === whole;
   }
   if (typeof expected === "boolean" || typeof actual === "boolean") {
     return typeof expected === "boolean" && typeof actual === "boolean" && expected === actual;

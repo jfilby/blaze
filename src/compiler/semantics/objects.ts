@@ -146,6 +146,19 @@ class BodyTypes {
         this.statements(statement.then);
         this.statements(statement.otherwise);
         return;
+      case "while":
+      case "doWhile":
+        this.expression(statement.condition);
+        this.statements(statement.body);
+        return;
+      case "forOf":
+        // The loop walks a name it is given, so its variable is one element of it.
+        this.environment.set(statement.variable, { kind: "type", type: this.element(statement.of) });
+        this.statements(statement.body);
+        return;
+      case "break":
+      case "continue":
+        return;
     }
   }
 
@@ -228,6 +241,11 @@ class BodyTypes {
       case "update":
         return this.environment.get(expression.name) ?? { kind: "type", type: F64 };
     }
+  }
+
+  /** What one element of a named buffer holds. */
+  private element(name: string): TypeExpr {
+    return elementOf(this.expression({ k: "ident", name }));
   }
 
   /** Registers the object a literal writes, and returns its key. */

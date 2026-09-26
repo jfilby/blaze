@@ -7,7 +7,7 @@ import {
   planTestVectors,
   vectorValues,
 } from "../toolchain/verifier.ts";
-import { parseContract, referenceResult, type BufferValue } from "../semantics/contract.ts";
+import { parseContract, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
 import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -138,6 +138,57 @@ test("the bench request reuses the run protocol with a mode header", () => {
   const [vector] = planTestVectors(parsed, { ...CONFIG, randomCases: 0 });
   const request = encodeBenchRequest(CONTRACT, vector, 500);
   assert.ok(request.startsWith("bench 500\n"));
+});
+
+/** A contract that sums bytes, which is where a reduction is held too narrowly. */
+const BYTES: FunctionContract = {
+  ...CONTRACT,
+  function: {
+    name: "total",
+    symbol: "total",
+    params: [
+      { name: "a", type: "ptr<u8>" },
+      { name: "n", type: "usize" },
+    ],
+    returns: "f64",
+  },
+  requires: ["a != null", "len(a) >= n"],
+  ensures: ["result == sum(i = 0..<n, a[i])"],
+  memory: { reads: ["a[0:n]"], writes: [], aliasing: [] },
+};
+
+/** The values of one call of a function that sums `count` bytes of `value`. */
+function bytes(count: number, value: bigint): Map<string, BufferValue | bigint> {
+  return new Map<string, BufferValue | bigint>([
+    ["a", { type: { kind: "primitive", name: "u8" }, values: new Array(count).fill(value) }],
+    ["n", BigInt(count)],
+  ]);
+}
+
+test("a sum of whole numbers is not held at the width of the elements", () => {
+  const parsed = parseContract(BYTES);
+
+  // The language sums 52 bytes of 5 as 260, and not as 4.
+  assert.equal(Number(referenceResult(parsed, bytes(52, 5n))), 260);
+  assert.equal(Number(referenceResult(parsed, bytes(100, 5n))), 500);
+  assert.equal(Number(referenceResult(parsed, bytes(4, 5n))), 20);
+});
+
+test("a whole number and the double that holds it are the same result", () => {
+  // The reference computes in the type its expression has and the candidate in
+  // the type it returns, so `return 42;` is a bigint on one side and a double
+  // on the other. They are the same result.
+  assert.equal(valuesMatch(42n, 42, null), true);
+  assert.equal(valuesMatch(42, 42n, null), true);
+  assert.equal(valuesMatch(0n, -0, null), true);
+  // A double past 2^53 cannot name every whole number, so the two are compared
+  // as the numbers they are, and a difference it cannot hold is not a failure.
+  assert.equal(valuesMatch(2n ** 60n, Number(2n ** 60n), null), true);
+
+  assert.equal(valuesMatch(42n, 43, null), false);
+  assert.equal(valuesMatch(42n, 42.5, null), false);
+  assert.equal(valuesMatch(2n ** 50n, 2n ** 50n + 1n, null), false);
+  assert.equal(valuesMatch(1n, true, null), false);
 });
 
 test("the store keeps every path inside its root", async () => {

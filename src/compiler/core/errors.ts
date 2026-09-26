@@ -56,6 +56,7 @@ export class CompilerError extends Error {
     this.functionName = init.function;
     this.candidate = init.candidate;
     this.detail = init.detail;
+    this.project = init.project;
   }
 
   toJSON(): SerializedCompilerError {

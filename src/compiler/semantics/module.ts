@@ -41,27 +41,90 @@ export interface DeclaredFunction {
 /**
  * A value a running program names. A program is not contracted: it is the
  * statements of the entry module, in the order they run, and every function
- * it calls is contracted and compiled like any other.
+ * it calls is contracted and compiled like any other. What a contract cannot
+ * state is therefore the driver's work, which is why these are statements and
+ * expressions of the source language rather than anything about a machine.
  */
 export type ProgramValue =
   /** A number, exactly as the source wrote it. */
   | { k: "number"; text: string }
+  /** A whole number too large for a double, as `1n` is written. */
+  | { k: "bigint"; text: string }
+  | { k: "boolean"; value: boolean }
+  | { k: "null" }
   /** A string, with the values a template string interpolates. */
   | { k: "text"; parts: ProgramText[] }
   /** A buffer written out element by element, as a typed array literal is. */
-  | { k: "buffer"; values: string[] }
+  | { k: "buffer"; values: ProgramValue[] }
   | { k: "name"; name: string }
-  | { k: "length"; buffer: string }
+  /** `name.length`, of a buffer or of a string. */
+  | { k: "length"; of: string }
   | { k: "element"; buffer: string; index: ProgramValue }
-  | { k: "call"; function: string; args: ProgramValue[] };
+  | { k: "call"; function: string; args: ProgramValue[] }
+  | { k: "binary"; op: ProgramBinaryOp; left: ProgramValue; right: ProgramValue }
+  | { k: "unary"; op: ProgramUnaryOp; operand: ProgramValue }
+  | { k: "conditional"; condition: ProgramValue; then: ProgramValue; otherwise: ProgramValue };
+
+/** The operators a program value may use, as the source language writes them. */
+export type ProgramBinaryOp =
+  | "+"
+  | "-"
+  | "*"
+  | "/"
+  | "%"
+  | "**"
+  | "<<"
+  | ">>"
+  | "&"
+  | "|"
+  | "^"
+  | "<"
+  | "<="
+  | ">"
+  | ">="
+  | "==="
+  | "!=="
+  | "=="
+  | "!="
+  | "&&"
+  | "||"
+  | "??";
+
+export type ProgramUnaryOp = "-" | "+" | "!" | "~";
+
+/** What an assignment does to what it is written on. */
+export type ProgramAssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=";
 
 /** One piece of a string: text as written, or a value interpolated into it. */
 export type ProgramText = { k: "text"; value: string } | { k: "value"; value: ProgramValue };
 
 /** A statement a program runs. */
 export type ProgramStatement =
-  | { kind: "declare"; name: string; value: ProgramValue; line: number }
-  | { kind: "print"; value: ProgramValue; line: number }
+  | { kind: "declare"; name: string; mutable: boolean; type: string | null; value: ProgramValue; line: number }
+  | { kind: "assign"; name: string; op: ProgramAssignOp; value: ProgramValue; line: number }
+  | { kind: "elementAssign"; buffer: string; index: ProgramValue; op: ProgramAssignOp; value: ProgramValue; line: number }
+  | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; line: number }
+  | { kind: "print"; values: ProgramValue[]; line: number }
+  | { kind: "if"; condition: ProgramValue; then: ProgramStatement[]; otherwise: ProgramStatement[]; line: number }
+  | { kind: "while"; condition: ProgramValue; body: ProgramStatement[]; line: number }
+  | { kind: "doWhile"; condition: ProgramValue; body: ProgramStatement[]; line: number }
+  | {
+      kind: "for";
+      variable: string;
+      from: ProgramValue;
+      to: ProgramValue;
+      inclusive: boolean;
+      down: boolean;
+      type: string | null;
+      /** How the index moves, or null for one step the way it travels. */
+      step: ProgramValue | null;
+      body: ProgramStatement[];
+      line: number;
+    }
+  | { kind: "forOf"; variable: string; of: string; body: ProgramStatement[]; line: number }
+  | { kind: "break"; line: number }
+  | { kind: "continue"; line: number }
+  | { kind: "block"; body: ProgramStatement[]; line: number }
   /** A call kept for what it does, as in `main();`. */
   | { kind: "invoke"; function: string; args: ProgramValue[]; line: number };
 

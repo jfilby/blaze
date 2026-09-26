@@ -1,17 +1,14 @@
 /**
- * The program driver.
+ * The program driver, in C.
  *
- * A program is the statements of its entry module, and the compiler runs it
- * from a driver it writes itself: the same division of labour as the harness,
- * one step further on. The model writes the functions; the driver allocates
- * what the program declares, calls those functions through their contracted
- * signatures, and prints what the program prints.
+ * A program build delivers a binary, not a harness: the statements of the
+ * entry module are run by this driver, which the compiler writes from the
+ * resolved program (see program.ts) and links with the objects of the
+ * functions the program compiled. The walk over the program is shared with the
+ * Nim host (see program-emit.ts); what is here is how C spells it.
  *
- * The driver is the C host of a standalone build (`runtime: none`). A hosted
- * build gets the same program written in Nim (see runtime/nim-program.ts).
- * Both print numbers through the runtime, which formats them the way the source
- * language does, because the build compares the program's output against the
- * output of the source itself; see toolchain/program.ts for the rule.
+ * The driver owns everything a contract cannot state: what a program prints,
+ * what it allocates, and the strings and arithmetic it builds on the way.
  */
 
 import { writeFile } from "node:fs/promises";
@@ -19,17 +16,137 @@ import { parseType, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
-import type { Binding, ResolvedCall, ResolvedProgram, ResolvedStatement, ResolvedValue } from "./program.ts";
-import { typeOfValue } from "./program.ts";
+import { generateProgramSource, type PrintKind, type ProgramTarget, type ValueKind } from "./program-emit.ts";
+import type { ResolvedCall, ResolvedProgram } from "./program.ts";
 import type { FunctionSignature, Runner, TypeExpr } from "../core/types.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
 import { ARGV, ARGV_LENGTH } from "../semantics/builtins.ts";
 
-/**
- * Prints one double the way `Number::toString` does: the shortest decimal that
- * reads back as the same value, written in full from 1e-6 up to 1e21 and in
- * exponential form outside that range.
- */
+/** The names C reserves, and the names the driver itself holds. */
+const RESERVED: Record<string, true> = {
+  auto: true,
+  break: true,
+  case: true,
+  char: true,
+  const: true,
+  continue: true,
+  default: true,
+  do: true,
+  double: true,
+  else: true,
+  enum: true,
+  extern: true,
+  float: true,
+  for: true,
+  goto: true,
+  if: true,
+  inline: true,
+  int: true,
+  long: true,
+  register: true,
+  restrict: true,
+  return: true,
+  short: true,
+  signed: true,
+  sizeof: true,
+  static: true,
+  struct: true,
+  switch: true,
+  typedef: true,
+  union: true,
+  unsigned: true,
+  void: true,
+  volatile: true,
+  while: true,
+  arguments: true,
+};
+
+/** The operator C spells for the one the source used. */
+const C_OPERATORS: Record<string, string> = {
+  "+": "+",
+  "-": "-",
+  "*": "*",
+  "/": "/",
+  "<<": "<<",
+  ">>": ">>",
+  "&": "&",
+  "|": "|",
+  "^": "^",
+  "<": "<",
+  "<=": "<=",
+  ">": ">",
+  ">=": ">=",
+};
+
+/** The helpers a program needs that the runtime does not provide. */
+const DRIVER_HELPERS = `/* A string the program built, held as a NUL terminated managed value. */
+static const char* program_string(const char* text, size_t length) {
+  const char* copy = (const char*)${RUNTIME_NAME}_string_new((const unsigned char*)text, length);
+  if (copy == NULL) program_fail("out of memory");
+  return copy;
+}
+
+static const char* program_concat(const char* left, const char* right) {
+  const size_t left_length = left == NULL ? 0 : strlen(left);
+  const size_t right_length = right == NULL ? 0 : strlen(right);
+  char* joined = (char*)${RUNTIME_NAME}_allocate(left_length + right_length + 1);
+  if (joined == NULL) program_fail("out of memory");
+  if (left_length > 0) memcpy(joined, left, left_length);
+  if (right_length > 0) memcpy(joined + left_length, right, right_length);
+  joined[left_length + right_length] = '\\0';
+  return joined;
+}
+
+static size_t program_string_length(const char* text) {
+  return text == NULL ? 0 : strlen(text);
+}
+
+static bool program_string_equal(const char* left, const char* right) {
+  if (left == NULL || right == NULL) return left == right;
+  return strcmp(left, right) == 0;
+}
+
+static void program_print_string(const char* text) {
+  if (text != NULL) fputs(text, stdout);
+}
+
+/* A number as the language writes it, which is what a string interpolates. */
+static const char* program_number_text(double value) {
+  char text[64];
+  ${RUNTIME_NAME}_format_number(value, (unsigned char*)text, sizeof text);
+  return program_string(text, strlen(text));
+}
+
+static const char* program_integer_text(long long value) {
+  char text[32];
+  snprintf(text, sizeof text, "%lld", value);
+  return program_string(text, strlen(text));
+}
+
+/* fmax and fmin answer with the number that is there; the language carries a
+   NaN through, so a value that is not a number is answered with. */
+static double program_max(double left, double right) {
+  return isnan(left) || isnan(right) ? left + right : fmax(left, right);
+}
+
+static double program_min(double left, double right) {
+  return isnan(left) || isnan(right) ? left + right : fmin(left, right);
+}
+
+/* A half is rounded up, as the language rounds it, and a value that rounds to
+   zero from below keeps its sign, which is what the source prints. */
+static double program_round(double value) {
+  const double rounded = floor(value + 0.5);
+  return rounded == 0.0 && value < 0.0 ? -0.0 : rounded;
+}
+
+static const char* program_unsigned_text(unsigned long long value) {
+  char text[32];
+  snprintf(text, sizeof text, "%llu", value);
+  return program_string(text, strlen(text));
+}
+`;
+
 const DRIVER_PRELUDE = `/* Generated by the blaze compiler from a program. Do not edit. */
 #include <stdbool.h>
 #include <math.h>
@@ -39,6 +156,7 @@ const DRIVER_PRELUDE = `/* Generated by the blaze compiler from a program. Do no
 #include <string.h>
 
 #include "${RUNTIME_NAME}.h"
+
 /* One command line argument as the number the source reads it as: a whole
    argument, or 0 when it is not a number at all. */
 static double program_number_of(const char* text) {
@@ -52,7 +170,8 @@ static void program_fail(const char* message) {
   fprintf(stderr, "program: %s\\n", message);
   exit(2);
 }
-`;
+
+${DRIVER_HELPERS}`;
 
 function driverError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "LinkError", stage: "link", message, detail });
@@ -64,7 +183,8 @@ function cStringLiteral(text: string): string {
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
     .replace(/\t/g, "\\t")
-    .replace(/\r/g, "\\r");
+    .replace(/\r/g, "\\r")
+    .replace(/\0/g, "\\0");
   return `"${escaped}"`;
 }
 
@@ -73,193 +193,234 @@ function isFloat(type: TypeExpr | null): boolean {
 }
 
 /** One number as the C type of the value it initializes. */
-function literal(text: string, element: string): string {
-  if (element === "bool") return text === "0" ? "false" : "true";
-  if (element !== "f32" && element !== "f64") return text;
-  if (/^[+-]?0[xX]/.test(text)) return `${BigInt(text).toString()}.0`;
+function literal(text: string, type: string): string {
+  if (type === "bool") return text === "0" ? "false" : "true";
+  if (type !== "f32" && type !== "f64") return text;
+  if (/^[+-]?0[xX]/.test(text)) {
+    // BigInt takes the sign of a decimal literal only, so a negative
+    // hexadecimal one is negated rather than converted with its sign.
+    const negative = text.startsWith("-");
+    const digits = negative ? text.slice(1) : text;
+    const value = BigInt(digits);
+    return `${negative ? "-" : ""}${value.toString()}.0`;
+  }
   // A whole number written without a point is an integer in C, and a value too
   // large for one cannot be written that way at all.
   return /^[+-]?[0-9]+$/.test(text) ? `${text}.0` : text;
 }
 
-/** The C driver of one program, written out statement by statement. */
-class CDriver {
-  /** A buffer literal the program did not declare, named for this statement. */
-  private readonly temporaries = new Map<Binding, string>();
-  /** Every buffer the program allocated, released before the runtime ends. */
-  private readonly allocated = new Set<string>();
-  private readonly program: ResolvedProgram;
-  private emitted = 0;
-
-  constructor(program: ResolvedProgram) {
-    this.program = program;
-  }
-
-  emit(): string {
-    const objects = cObjectDeclarations(this.program.objects);
+/** The C driver of one program. */
+class CDriver implements ProgramTarget {
+  prelude(program: ResolvedProgram): string {
+    const objects = cObjectDeclarations(program.objects);
+    const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
     return `${DRIVER_PRELUDE}
-${objects === "" ? "" : `${objects}\n`}${this.program.functions.map((signature) => this.declaration(signature)).join("\n")}
-
-int main(int argc, char** argv) {
-  /* The driver is the host program: the runtime lives for the whole run. */
-  ${RUNTIME_NAME}_initialize();
-  /* The program is given the arguments it was started with, as numbers: an
-     argument that is not a number is 0, which is what the source reads. */
-  double arguments[argc > 1 ? argc - 1 : 1];
-  for (int index = 1; index < argc; index += 1) arguments[index - 1] = program_number_of(argv[index]);
-  ${RUNTIME_NAME}_arguments_set(arguments, (size_t)(argc > 1 ? argc - 1 : 0));
-${this.program.statements.map((statement) => this.statement(statement)).join("\n")}
-${this.releases()}
-  ${RUNTIME_NAME}_finalize();
-  return 0;
-}
-`;
+${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
+  /** A function a program calls, declared as the driver links it. */
   private declaration(signature: FunctionSignature): string {
     const returns = parseType(signature.returns);
     if (returns.kind === "ptr" || returns.kind === "slice" || returns.kind === "array") {
       throw driverError(
         `a program cannot call ${signature.name}`,
-        `${typeToString(returns)} is returned, and a program holds numbers`,
+        `${typeToString(returns)} is returned, and a program holds numbers and strings`,
       );
     }
     const parameters = signature.params.map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`);
     return `extern ${cDeclarationType(returns)} ${signature.symbol}(${parameters.join(", ") || "void"});`;
   }
 
-  private releases(): string {
-    return [...this.allocated].map((name) => `  ${RUNTIME_NAME}_release(${name});`).join("\n");
+  openProgram(): string[] {
+    return [
+      "",
+      "int main(int argc, char** argv) {",
+      "  /* The driver is the host program: the runtime lives for the whole run. */",
+      `  ${RUNTIME_NAME}_initialize();`,
+      "  /* The program is given the arguments it was started with, as numbers: an",
+      "     argument that is not a number is 0, which is what the source reads. */",
+      "  double arguments[argc > 1 ? argc - 1 : 1];",
+      "  for (int index = 1; index < argc; index += 1) arguments[index - 1] = program_number_of(argv[index]);",
+      `  ${RUNTIME_NAME}_arguments_set(arguments, (size_t)(argc > 1 ? argc - 1 : 0));`,
+    ];
   }
 
-  /** The name a buffer value is stored under, or null when it is not a buffer. */
-  private bufferName(value: ResolvedValue): string | null {
-    if (value.k === "buffer") return this.temporaries.get(value.binding) ?? null;
-    if (value.k === "reference" && value.binding.kind === "buffer") return value.name;
-    return null;
+  closeProgram(releases: readonly string[]): string[] {
+    return [...releases, `${RUNTIME_NAME}_finalize();`, "return 0;", "}"];
   }
 
-  private statement(statement: ResolvedStatement): string {
-    this.emitted += 1;
-    this.temporaries.clear();
-    if (statement.kind === "invoke") {
-      const hoisted = this.hoist({ k: "call", call: statement.call });
-      return [...hoisted, `  ${this.callExpression(statement.call)};`].join("\n");
-    }
-    const hoisted = this.hoist(statement.value, statement.kind === "declare" ? statement.name : undefined);
-    if (statement.kind === "print") {
-      return [...hoisted, ...this.print(statement.value), "  fputc('\\n', stdout);"].join("\n");
-    }
-    return [...hoisted, this.declarationOf(statement)].join("\n");
-  }
-
-  /** Names every buffer literal a value tree holds, and allocates it. */
-  private hoist(value: ResolvedValue, declaredAs?: string): string[] {
-    if (value.k === "buffer") {
-      const binding = value.binding;
-      if (this.temporaries.has(binding)) return [];
-      const name = declaredAs ?? `buffer_${this.emitted}_${this.temporaries.size}`;
-      this.temporaries.set(binding, name);
-      this.allocated.add(name);
-      const element = cDeclarationType(parseType(binding.element ?? "f64"));
-      return [
-        `  ${element}* ${name} = (${element}*)${RUNTIME_NAME}_allocate(${binding.length} * sizeof(${element}));`,
-        `  if (${name} == NULL) program_fail("out of memory");`,
-        ...binding.values.map((text, index) => `  ${name}[${index}] = ${literal(text, binding.element ?? "f64")};`),
-      ];
-    }
-    if (value.k === "call") return value.call.args.flatMap((argument) => this.hoist(argument));
-    if (value.k === "element") return this.hoist(value.index);
-    if (value.k === "text") {
-      return value.parts.flatMap((part) => (part.k === "value" ? this.hoist(part.value) : []));
-    }
+  epilogue(): string[] {
     return [];
   }
 
-  private declarationOf(statement: ResolvedStatement & { kind: "declare" }): string {
-    const value = statement.value;
-    if (value.k === "buffer") {
-      return `  const size_t ${statement.name}_length = ${value.binding.length};`;
-    }
-    if (value.k === "reference" && value.binding.kind === "buffer") {
-      const element = cDeclarationType(parseType(value.binding.element ?? "f64"));
-      return [
-        `  ${element}* ${statement.name} = ${value.name};`,
-        `  const size_t ${statement.name}_length = ${value.name}_length;`,
-      ].join("\n");
-    }
-    if (value.k === "text") {
-      const text = value.parts
-        .filter((part) => part.k === "text")
-        .map((part) => part.value)
-        .join("");
-      return `  const char* ${statement.name} = ${cStringLiteral(text)};`;
-    }
-    const type = typeOfValue(value);
-    if (type === null) throw driverError(`the driver cannot declare "${statement.name}"`);
-    return `  ${cDeclarationType(type)} ${statement.name} = ${this.expression(value)};`;
+  type(type: TypeExpr): string {
+    return cDeclarationType(type);
   }
 
-  /** The C statements that write one printed value. */
-  private print(value: ResolvedValue): string[] {
-    if (value.k === "text") {
-      const body: string[] = [];
-      let literalText = "";
-      for (const part of value.parts) {
-        if (part.k === "text") {
-          literalText += part.value;
-          continue;
-        }
-        if (literalText !== "") {
-          body.push(`  fputs(${cStringLiteral(literalText)}, stdout);`);
-          literalText = "";
-        }
-        body.push(...this.print(part.value));
-      }
-      if (literalText !== "") body.push(`  fputs(${cStringLiteral(literalText)}, stdout);`);
-      return body;
-    }
-    if (value.k === "reference" && value.binding.kind === "string") {
-      return [`  fputs(${cStringLiteral(value.binding.value)}, stdout);`];
-    }
-    const scalar: ResolvedValue =
-      value.k === "reference" && value.binding.kind === "scalar"
-        ? { k: "literal", binding: { kind: "scalar", type: value.binding.type, text: value.name } }
-        : value;
-    const type = typeOfValue(scalar);
-    if (type === null || type.kind !== "primitive") throw driverError("a program prints numbers and strings");
-    if (isFloat(type)) return [`  ${RUNTIME_NAME}_print_number((double)(${this.expression(scalar)}));`];
-    if (type.name === "bool") return [`  fputs(${this.expression(scalar)} ? "true" : "false", stdout);`];
-    const unsigned = type.name.startsWith("u") || type.name === "usize";
+  cast(type: TypeExpr, expression: string): string {
+    return `(${cDeclarationType(type)})(${expression})`;
+  }
+
+  literal(text: string, type: string): string {
+    return literal(text, type);
+  }
+
+  declare(name: string, type: TypeExpr | null, value: string): string {
+    return `${type === null ? "const char*" : cDeclarationType(type)} ${name} = ${value};`;
+  }
+
+  allocate(name: string, element: TypeExpr, length: number, values: string[]): string[] {
+    const written = cDeclarationType(element);
+    const bytes = length === 0 ? 1 : length;
+    return [
+      `const size_t ${name}_length = ${length};`,
+      `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate(${bytes} * sizeof(${written}));`,
+      `if (${name} == NULL) program_fail("out of memory");`,
+      ...values.map((text, index) => `${name}[${index}] = ${text};`),
+    ];
+  }
+
+  alias(name: string, element: TypeExpr, source: string, length: string): string[] {
+    const written = cDeclarationType(element);
+    return [`const size_t ${name}_length = ${length};`, `${written}* ${name} = ${source};`];
+  }
+
+  element(buffer: string, index: string): string {
+    return `${buffer}[${index}]`;
+  }
+
+  assign(name: string, operator: string, value: string, type: TypeExpr | null): string {
+    // A string grows: `+=` is a new value rather than an addition in place.
+    if (type === null && operator === "+=") return `${name} = program_concat(${name}, ${value});`;
+    return `${name} ${operator} ${value};`;
+  }
+
+  elementAssign(buffer: string, index: string, operator: string, value: string): string {
+    return `${buffer}[${index}] ${operator} ${value};`;
+  }
+
+  update(name: string, operator: string, prefix: boolean): string {
+    return `${prefix ? operator : ""}${name}${prefix ? "" : operator};`;
+  }
+
+  release(name: string): string {
+    return `${RUNTIME_NAME}_release(${name});`;
+  }
+
+  condition(expression: string, kind: ValueKind): string {
+    // A string holds when it has text in it, and an object holds when it is
+    // there at all: an empty string is false, as it is in the language.
+    if (kind === "text") return `(${expression})[0] != '\\0'`;
+    if (kind === "reference") return `(${expression}) != NULL`;
+    if (kind === "boolean") return `(${expression})`;
+    return `(${expression}) != 0`;
+  }
+
+  openBlock(): string {
+    return "{";
+  }
+
+  closeBody(): string {
+    return "}";
+  }
+
+  emptyBody(): null {
+    return null;
+  }
+
+  openIf(condition: string): string {
+    return `if (${condition}) {`;
+  }
+
+  openElse(): string {
+    return "} else {";
+  }
+
+  openWhile(condition: string): string {
+    return `while (${condition}) {`;
+  }
+
+  openDo(_condition: string): string[] {
+    return ["do {"];
+  }
+
+  closeDo(condition: string): string[] {
+    return [`} while (${condition});`];
+  }
+
+  openFor(
+    variable: string,
+    type: TypeExpr,
+    from: string,
+    to: string,
+    inclusive: boolean,
+    down: boolean,
+    step: string | null,
+  ): string[] {
+    const bound = down ? (inclusive ? ">=" : ">") : inclusive ? "<=" : "<";
+    const move = step === null ? `${variable}${down ? "--" : "++"}` : `${variable} += ${step}`;
+    return [`for (${cDeclarationType(type)} ${variable} = ${from}; ${variable} ${bound} ${to}; ${move}) {`];
+  }
+
+  openForOf(index: string, variable: string, type: TypeExpr, buffer: string, length: string): string[] {
+    return [
+      `for (size_t ${index} = 0; ${index} < (${length}); ${index} += 1) {`,
+      `  const ${cDeclarationType(type)} ${variable} = ${buffer}[${index}];`,
+    ];
+  }
+
+  breakLine(): string {
+    return "break;";
+  }
+
+  continueLine(): string {
+    return "continue;";
+  }
+
+  conditional(condition: string, then: string, otherwise: string): string {
+    return `((${condition}) ? (${then}) : (${otherwise}))`;
+  }
+
+  discard(expression: string, _returnsNothing: boolean): string {
+    return `${expression};`;
+  }
+
+  print(value: string, type: TypeExpr | null, kind: PrintKind): string[] {
+    if (kind === "text") return [`program_print_string(${value});`];
+    if (kind === "null") return [`program_print_string("null");`];
+    if (kind === "boolean") return [`fputs((${value}) ? "true" : "false", stdout);`];
+    if (isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
+    const unsigned = type !== null && type.kind === "primitive" && (type.name.startsWith("u") || type.name === "usize");
     const format = unsigned ? "%llu" : "%lld";
     const cast = unsigned ? "unsigned long long" : "long long";
-    return [`  printf("${format}", (${cast})(${this.expression(scalar)}));`];
+    return [`printf("${format}", (${cast})(${value}));`];
   }
 
-  /** The C expression for a value, in the type its use asks for. */
-  private expression(value: ResolvedValue, target: TypeExpr | null = null): string {
-    const source = typeOfValue(value);
-    const expression = this.raw(value);
-    if (target === null || source === null || source.kind !== "primitive" || target.kind !== "primitive") {
-      return expression;
-    }
-    return source.name === target.name ? expression : `(${cDeclarationType(target)})(${expression})`;
+  separator(): string {
+    return `fputc(' ', stdout);`;
   }
 
-  /** The C expression for a builtin, which the driver implements itself. */
-  private builtin(call: ResolvedCall): string {
-    const argument = (index: number): string => this.argument(call.args[index], null);
+  newline(): string {
+    return `fputc('\\n', stdout);`;
+  }
+
+  call(call: ResolvedCall, argumentsText: string[]): string {
+    return `${call.name}(${argumentsText.join(", ")})`;
+  }
+
+  builtin(call: ResolvedCall, argumentsText: string[]): string {
+    const argument = (index: number): string => argumentsText[index] ?? "0.0";
     switch (call.name) {
       case "Math.max":
-        return `fmax(${argument(0)}, ${argument(1)})`;
+        return `program_max(${argument(0)}, ${argument(1)})`;
       case "Math.min":
-        return `fmin(${argument(0)}, ${argument(1)})`;
+        return `program_min(${argument(0)}, ${argument(1)})`;
       case "Math.abs":
         return `fabs(${argument(0)})`;
       case "Math.floor":
         return `floor(${argument(0)})`;
       case "Math.round":
-        return `round(${argument(0)})`;
+        return `program_round(${argument(0)})`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
       case ARGV_LENGTH:
@@ -273,63 +434,78 @@ ${this.releases()}
     }
   }
 
-  /** The C expression for a value, in the type it already has. */
-  private raw(value: ResolvedValue): string {
-    const buffer = this.bufferName(value);
-    if (buffer !== null) return buffer;
-    switch (value.k) {
-      case "literal":
-        return literal(value.binding.text, value.binding.type ?? "f64");
-      case "length":
-        return `${value.buffer}_length`;
-      case "element":
-        return `${value.buffer}[${this.expression(value.index, parseType("usize"))}]`;
-      case "call":
-        return value.call.builtin ? this.builtin(value.call) : this.callExpression(value.call);
-      case "reference":
-        if (value.binding.kind === "scalar") return value.name;
-        if (value.binding.kind === "string") return value.name;
-        throw driverError("the driver cannot write this value down");
-      case "text":
-        throw driverError("a string is not a value of a contracted function");
+  argument(type: TypeExpr, expression: string): string {
+    if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
+      return `(${cDeclarationType(type.of)}*)(${expression})`;
     }
-    throw driverError("the driver cannot write this value down");
+    return expression;
   }
 
-  /** The C expression for an argument, in the type its parameter declares. */
-  private argument(value: ResolvedValue, target: TypeExpr | null = null): string {
-    if (target === null) {
-      return this.raw(value);
-    }
-    if (target.kind === "ptr" || target.kind === "slice" || target.kind === "array") {
-      const buffer = this.bufferName(value);
-      if (buffer === null) throw driverError(`a ${typeToString(target)} parameter takes a buffer`);
-      const element = cDeclarationType(target.of);
-      return `(${element}*)${buffer}`;
-    }
-    if (target.kind === "ref") {
-      if (value.k !== "reference" || value.binding.kind !== "reference") {
-        throw driverError(`a ${typeToString(target)} parameter takes a reference to an object`);
-      }
-      return value.name;
-    }
-    if (target.kind !== "primitive") throw driverError(`a program cannot pass ${typeToString(target)}`);
-    if (target.name === "bool") return `(bool)(${this.raw(value)})`;
-    return this.expression(value, target);
+  stringLiteral(text: string): string {
+    return cStringLiteral(text);
   }
 
-  /** The call of a value, with every argument in the type its parameter takes. */
-  private callExpression(call: ResolvedCall): string {
-    const argumentsList = call.args.map(
-      (argument, index) => this.argument(argument, parseType(call.signature.params[index].type)),
-    );
-    return `${call.name}(${argumentsList.join(", ")})`;
+  stringConcat(left: string, right: string): string {
+    return `program_concat(${left}, ${right})`;
+  }
+
+  stringLength(value: string): string {
+    return `program_string_length(${value})`;
+  }
+
+  stringEqual(left: string, right: string): string {
+    return `program_string_equal(${left}, ${right})`;
+  }
+
+  numberText(value: string, type: TypeExpr | null): string {
+    if (type !== null && type.kind === "primitive" && type.name === "bool") {
+      return `(${value} ? "true" : "false")`;
+    }
+    if (isFloat(type)) return `program_number_text((double)(${value}))`;
+    const unsigned = type !== null && type.kind === "primitive" && (type.name.startsWith("u") || type.name === "usize");
+    return unsigned
+      ? `program_unsigned_text((unsigned long long)(${value}))`
+      : `program_integer_text((long long)(${value}))`;
+  }
+
+  isNull(value: string, negate: boolean): string {
+    return `((${value}) ${negate ? "!=" : "=="} NULL)`;
+  }
+
+  nullLiteral(): string {
+    return "NULL";
+  }
+
+  modulo(left: string, right: string): string {
+    return `((${left}) % (${right}))`;
+  }
+
+  power(left: string, right: string): string {
+    return `pow((${left}), (${right}))`;
+  }
+
+  bitwiseNot(value: string): string {
+    return `(~(${value}))`;
+  }
+
+  logicalNot(value: string): string {
+    return `!(${value})`;
+  }
+
+  operator(op: string): string {
+    const written = C_OPERATORS[op];
+    if (written === undefined) throw driverError(`the driver cannot write ${op} down`);
+    return written;
+  }
+
+  escape(name: string): string {
+    return RESERVED[name] === true ? `${name}_` : name;
   }
 }
 
 /** Emits the C driver for a program. The driver is compiler code. */
 export function generateProgramDriver(program: ResolvedProgram): string {
-  return new CDriver(program).emit();
+  return generateProgramSource(program, new CDriver());
 }
 
 export interface ProgramDriverRequest {
@@ -349,7 +525,8 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   await writeFile(driverPath, generateProgramDriver(request.program), "utf8");
   const inputs = [driverPath, ...request.objectPaths];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
-  const result = run("gcc", ["-std=c11", "-O2", "-o", request.outputPath, ...inputs], { timeoutMs: 120_000 });
+  // A program computes with the maths library, so the driver links it.
+  const result = run("gcc", ["-std=c11", "-O2", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

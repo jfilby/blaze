@@ -60,44 +60,54 @@ test("a program's statements are read in the order they run", () => {
   );
 
   assert.deepEqual(body, [
-    { kind: "declare", name: "a", value: { k: "buffer", values: ["1", "2"] }, line: 2 },
+    { kind: "declare", name: "a", mutable: false, type: null, value: { k: "buffer", values: [{ k: "number", text: "1" }, { k: "number", text: "2" }] }, line: 2 },
     {
       kind: "declare",
       name: "total",
+      mutable: false,
+      type: null,
       value: {
         k: "call",
         function: "dot",
         args: [
           { k: "name", name: "a" },
           { k: "name", name: "a" },
-          { k: "length", buffer: "a" },
+          { k: "length", of: "a" },
         ],
       },
       line: 3,
     },
     {
       kind: "print",
-      value: {
-        k: "text",
-        parts: [
-          { k: "text", value: "total: " },
-          { k: "value", value: { k: "name", name: "total" } },
-        ],
-      },
+      values: [
+        {
+          k: "text",
+          parts: [
+            { k: "text", value: "total: " },
+            { k: "value", value: { k: "name", name: "total" } },
+          ],
+        },
+      ],
       line: 4,
     },
   ]);
 });
 
-test("a number the source negated is read as written", () => {
+test("a number the source negated is read as the value it negates", () => {
   assert.deepEqual(bodyOf("console.log(-1.5e-7);\n"), [
-    { kind: "print", value: { k: "number", text: "-1.5e-7" }, line: 1 },
+    {
+      kind: "print",
+      values: [{ k: "unary", op: "-", operand: { k: "number", text: "1.5e-7" } }],
+      line: 1,
+    },
   ]);
 });
 
 test("a statement a program cannot run is refused", () => {
   assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
-  assert.match(diagnostic(() => bodyOf("for (let i = 0; i < 4; i++) {}\n")), /"for" is not a statement of a program/);
+  const refused = diagnostic(() => bodyOf("switch (total) {\n}\n"));
+  assert.match(refused, /"switch/);
+  assert.match(refused, /is not a statement of a program/);
 });
 
 test("a declaration after the program is refused, because a program runs last", () => {
@@ -129,7 +139,17 @@ test("a value takes the type of the call it is passed to", () => {
   assert.deepEqual(call.args[0], {
     k: "reference",
     name: "a",
-    binding: { kind: "buffer", element: "f64", length: 2, values: ["1", "2"] },
+    binding: {
+      kind: "buffer",
+      name: "a",
+      mutable: false,
+      element: "f64",
+      length: 2,
+      values: [
+        { k: "literal", binding: { kind: "scalar", name: "", mutable: false, type: null, text: "1" } },
+        { k: "literal", binding: { kind: "scalar", name: "", mutable: false, type: null, text: "2" } },
+      ],
+    },
   });
   assert.deepEqual(call.args[2], { k: "length", buffer: "a", type: "usize" });
   assert.deepEqual(call.returns, { kind: "primitive", name: "f64" });
@@ -214,6 +234,130 @@ async function numberProgram(runtime?: "nim"): Promise<{ directory: string; bina
   return { directory, binary: outcome.outputPath };
 }
 
+/** A program that runs what a contract cannot state: the whole statement language. */
+const LANGUAGE = [
+  "let total = 0;",
+  "for (let i = 1; i <= 10; i += 1) {",
+  "  if (i % 2 === 0) {",
+  "    continue;",
+  "  }",
+  "  total += i;",
+  "}",
+  'console.log("odd total", total);',
+  "let n = 0;",
+  "while (n < 3) { n += 1; }",
+  "do { n -= 1; } while (n > 0);",
+  "console.log(`n is ${n}, half of total is ${total / 2}`);",
+  "const data = new Float64Array([1, 2, 3]);",
+  "let sum = 0;",
+  "for (const value of data) { sum += value; }",
+  "console.log(sum > 5 ? \"big\" : \"small\", data.length, 2 ** 10, 7 % 3);",
+  // A name declared with const still names an array the program may change, an
+  // element is a value like any other, and a string grows rather than adds.
+  "data[1] = 20;",
+  "data[2] += 5;",
+  'let text = "a";',
+  'text += "b";',
+  "console.log(data[0], data[1], data[2], text, text.length);",
+  'let empty = "";',
+  "console.log(empty ? \"yes\" : \"no\", text ? \"yes\" : \"no\");",
+  "for (let round = 0; round < 3; round += 1) {",
+  "  const inner = new Float64Array([round]);",
+  "  console.log(inner[0] * 10);",
+  "}",
+  "",
+].join("\n");
+
+/** Builds a program of one entry module, and returns the binary it delivers. */
+async function program(source: string, runtime?: "nim"): Promise<{ directory: string; binary: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-program-"));
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeFile(
+    join(directory, "blaze.json"),
+    JSON.stringify({
+      language: "typescript",
+      sourceFile: "main.ts",
+      model: { provider: "replay", file: REPLAY },
+      output: "machine",
+      ...(runtime === undefined ? {} : { runtime }),
+    }),
+    "utf8",
+  );
+  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  return { directory, binary: outcome.outputPath };
+}
+
+test("a program runs the statements a function body is written in", () => {
+  const body = bodyOf(LANGUAGE);
+  assert.deepEqual(
+    body.map((statement) => statement.kind),
+    [
+      "declare",
+      "for",
+      "print",
+      "declare",
+      "while",
+      "doWhile",
+      "print",
+      "declare",
+      "declare",
+      "forOf",
+      "print",
+      "elementAssign",
+      "elementAssign",
+      "declare",
+      "assign",
+      "print",
+      "declare",
+      "print",
+      "for",
+    ],
+  );
+
+  // A counted loop carries its bound and how its index moves, so the driver can
+  // put the step in the loop header where `continue` runs it.
+  const counted = body[1];
+  assert.equal(counted.kind, "for");
+  if (counted.kind !== "for") throw new Error("expected a counted loop");
+  assert.deepEqual(
+    { from: counted.from, to: counted.to, inclusive: counted.inclusive, down: counted.down, step: counted.step },
+    { from: { k: "number", text: "1" }, to: { k: "number", text: "10" }, inclusive: true, down: false, step: { k: "number", text: "1" } },
+  );
+});
+
+test("a name declared in a block is a variable of its own", () => {
+  const program = resolved({
+    "main.ts": ["let total = 0;", "{", "  let total = 10;", "  total += 1;", "}", "console.log(total);", ""].join("\n"),
+  });
+  const inner = program.statements[1];
+  assert.equal(inner.kind, "block");
+  if (inner.kind !== "block") throw new Error("expected a block");
+  const declared = inner.body[0];
+  assert.equal(declared.kind, "declare");
+  if (declared.kind !== "declare") throw new Error("expected a declaration");
+  // The block declares `total_2`, so the outer `total` is untouched by it.
+  assert.equal(declared.name, "total_2");
+  assert.equal(program.statements[0].kind === "declare" ? program.statements[0].name : "", "total");
+});
+
+test("a value declared with const cannot be changed", () => {
+  assert.match(
+    diagnostic(() => resolved({ "main.ts": ["const total = 0;", "total = 1;", ""].join("\n") })),
+    /"total" is declared with const and cannot be changed/,
+  );
+});
+
+test("a loop that moves by whole numbers counts with a whole number", () => {
+  const program = resolved({
+    "main.ts": ["for (let i = 0; i < 4; i += 1) {", "  console.log(i);", "}", ""].join("\n"),
+  });
+  const loop = program.statements[0];
+  assert.equal(loop.kind, "for");
+  if (loop.kind !== "for") throw new Error("expected a counted loop");
+  assert.deepEqual(loop.type, { kind: "primitive", name: "i64" });
+});
+
 test("a program prints numbers the way the language it was written in prints them", async () => {
   const { directory, binary } = await numberProgram();
   const source = run("node", ["numbers.ts"], { cwd: directory, timeoutMs: 60_000 });
@@ -263,6 +407,200 @@ test("a program that prints something else is reported against the line it diffe
   });
   assert.equal(different.passed, false);
   assert.deepEqual(different.difference, { line: 2, expected: "", actual: "extra" });
+});
+
+const languageProgram = (runtime?: "nim") => program(LANGUAGE, runtime);
+
+test("a program runs its own statements, and the two drivers run them alike", async (t) => {
+  const { directory, binary } = await languageProgram();
+  const source = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(source.code, 0, source.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  // The build compares the two already; the test states what they printed, so a
+  // driver that builds and runs the wrong program fails here.
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), [
+    "odd total 25",
+    "n is 0, half of total is 12.5",
+    "big 3 1024 1",
+    "1 20 8 ab 2",
+    "no yes",
+    "0",
+    "10",
+    "20",
+  ]);
+  assert.equal(delivered.stdout, source.stdout);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const hosted = await languageProgram("nim");
+  const hostedOutput = run(hosted.binary, [], { timeoutMs: 60_000 });
+  assert.equal(hostedOutput.code, 0, hostedOutput.stderr);
+  assert.equal(hostedOutput.stdout, source.stdout);
+});
+
+/** A program that computes every way a number can come out differently. */
+const ARITHMETIC = [
+  "console.log(0.1 + 0.2, 1 / 3, 2 ** 0.5, 7 % 3, -7 % 3, 7 % -3);",
+  "console.log(Math.max(1, 2), Math.min(1, 2), Math.abs(-3), Math.floor(1.7), Math.round(2.5), Math.round(-1.5), Math.trunc(-1.7));",
+  "console.log(1 < 2, 2 <= 2, 3 > 4, 3 >= 4, 1 === 1, 1 !== 2, true && false, true || false, !true);",
+  "console.log(5 & 3, 5 | 3, 5 ^ 3, ~5, 1 << 4, 256 >> 4);",
+  "let n = 0;",
+  // `&&`, `||` and `??` are one of their operands, not a truth.
+  "console.log(n || 7, n ?? 7, 0 ?? 7, n && 3, 2 && 3, 1 || 0);",
+  "console.log(Math.round(0.5), Math.round(1.5), Math.round(-0.5), Math.round(-1.5));",
+  "const a = new Float64Array([1.5, -2.5]);",
+  "console.log(a[0] + a[1], a.length, a[0] > 0 ? a[1] : -a[1]);",
+  "",
+].join("\n");
+
+test("a program computes what the language computes, in both drivers", async (t) => {
+  const { directory, binary } = await program(ARITHMETIC);
+  const source = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, source.stdout);
+  // A half is rounded up and a value that rounds to zero from below keeps its
+  // sign, a remainder keeps the sign of the left side, and `&&` is one of its
+  // operands: the lines are what say so.
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), [
+    "0.30000000000000004 0.3333333333333333 1.4142135623730951 1 -1 1",
+    "2 1 3 1 3 -1 -1",
+    "true true false false true true false true false",
+    "1 7 6 -6 16 16",
+    "7 0 0 0 3 1",
+    "1 2 -0 -1",
+    "-1 2 -2.5",
+  ]);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const hosted = await program(ARITHMETIC, "nim");
+  const hostedOutput = run(hosted.binary, [], { timeoutMs: 60_000 });
+  assert.equal(hostedOutput.code, 0, hostedOutput.stderr);
+  assert.equal(hostedOutput.stdout, source.stdout);
+});
+
+/**
+ * The shapes a program is written in that a number or a name decides: a length
+ * is a whole number, a string grows by text, a loop that moves in fractions
+ * counts in fractions, and a `break` inside a block leaves the loop.
+ */
+const SHAPES = [
+  "const a = new Float64Array([1, 2, 3]);",
+  "console.log(a.length - 10, 0 - a.length, ~a.length, a.length * 2);",
+  'let s = "x";',
+  "s += 1;",
+  'console.log(s, "abc" === 5, "abc" === "abc", `a number is a double: ${1 / 3}`);',
+  "for (let i = 0; i < 3; i++) { a[i] = a[i] + 1; }",
+  "for (let j = 3; j > 0; j--) { console.log(j); }",
+  "console.log(a[0], a[1], a[2]);",
+  "let i = 0;",
+  "do { i += 1; if (i < 3) continue; console.log(i); } while (i < 3);",
+  "let n = 0;",
+  'while (n < 3) { n += 1; { if (n === 2) { break; } console.log("in", n); } }',
+  'console.log("out", n);',
+  "for (let k = 0.0; k < 0.5; k += 0.1) { console.log(k); }",
+  "console.log(Math.max(0 / 0, 1), Math.min(0 / 0, 1), -0x1f, `${true}`);",
+  "for (let m = 3; m > 0; m--) {",
+  "  const inner = new Float64Array([m]);",
+  "  if (m > 1) continue;",
+  "  console.log(inner[0]);",
+  "}",
+  "",
+].join("\n");
+
+/** A program built for a runtime, run beside the source it was written as. */
+async function agreesWithNode(source: string, runtime?: "nim"): Promise<void> {
+  const { directory, binary } = await program(source, runtime);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+}
+
+test("a program runs the shapes a number and a name decide", async (t) => {
+  const { directory, binary } = await program(SHAPES);
+  const source = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, source.stdout);
+  // A length is a whole number, and arithmetic on one is a double, so
+  // `length - 10` is -7 and not a very large unsigned number. A string grows by
+  // text, a strict comparison across types is false, a loop that moves in
+  // fractions counts the doubles it reaches, and a NaN is carried through.
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), [
+    "-7 -3 -4 6",
+    "x1 false true a number is a double: 0.3333333333333333",
+    "3",
+    "2",
+    "1",
+    "2 3 4",
+    "3",
+    "in 1",
+    "out 2",
+    "0",
+    "0.1",
+    "0.2",
+    "0.30000000000000004",
+    "0.4",
+    "NaN NaN -31 true",
+    "1",
+  ]);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  await agreesWithNode(SHAPES, "nim");
+});
+
+test("a program refuses what the language has no answer for", () => {
+  // A typed array has no element outside itself, and a whole operator rounds
+  // what it is given, which the language raises on rather than doing.
+  assert.match(
+    diagnostic(() => resolved({ "main.ts": ["const a = new Float64Array([1, 2]);", "a[5] = 9;", ""].join("\n") })),
+    /a\[5\] is outside the array/,
+  );
+  assert.match(
+    diagnostic(() => resolved({ "main.ts": ["console.log(7.5 % 2);", ""].join("\n") })),
+    /"%" needs whole numbers/,
+  );
+  assert.match(
+    diagnostic(() => resolved({ "main.ts": ["break;", ""].join("\n") })),
+    /"break" is not within a loop/,
+  );
+});
+
+test("a value with no decimal of its own is written the way the language writes it", async (t) => {
+  // A value that is not finite has no shortest decimal, so the source writes it
+  // as Infinity, -Infinity or NaN, and a negative zero keeps its sign. The
+  // driver has to write the same, which is what the comparison is for.
+  const values = ["-0", "1 / 0", "-1 / 0", "0 / 0", "2 ** 1024", "-(1 / 0)"];
+  const printed = ["-0", "Infinity", "-Infinity", "NaN", "Infinity", "-Infinity"];
+  const { directory, binary } = await program(`${values.map((text) => `console.log(${text});`).join("\n")}\n`);
+  const source = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), printed);
+  assert.equal(delivered.stdout, source.stdout);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const hosted = await program(`${values.map((text) => `console.log(${text});`).join("\n")}\n`, "nim");
+  const hostedOutput = run(hosted.binary, [], { timeoutMs: 60_000 });
+  assert.equal(hostedOutput.code, 0, hostedOutput.stderr);
+  assert.equal(hostedOutput.stdout, source.stdout);
 });
 
 test("a program in a language the compiler cannot run is refused", async () => {

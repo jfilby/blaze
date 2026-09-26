@@ -22,14 +22,16 @@ export type BinaryOp =
   | "<="
   | ">"
   | ">="
+  | "**"
   | "==="
   | "!=="
   | "=="
   | "!="
   | "&&"
-  | "||";
+  | "||"
+  | "??";
 
-export type UnaryOp = "-" | "+" | "!";
+export type UnaryOp = "-" | "+" | "!" | "~";
 
 /** One piece of a string: text as written, or a value interpolated into it. */
 export type TextPart = { k: "text"; value: string } | { k: "value"; value: Expression };
@@ -80,6 +82,12 @@ export type Statement =
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; line: number }
   | { kind: "result"; value: Expression; line: number }
   | { kind: "if"; condition: Expression; then: Statement[]; otherwise: Statement[]; line: number }
+  | { kind: "while"; condition: Expression; body: Statement[]; line: number }
+  | { kind: "doWhile"; condition: Expression; body: Statement[]; line: number }
+  /** Walks the elements of a parameter, as in `for (const x of values)`. */
+  | { kind: "forOf"; variable: string; of: string; body: Statement[]; line: number }
+  | { kind: "break"; line: number }
+  | { kind: "continue"; line: number }
   | { kind: "print"; value: Expression; line: number }
   /** A call kept for what it does, as in `main();`. */
   | { kind: "expression"; value: Expression; line: number }

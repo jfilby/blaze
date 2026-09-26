@@ -194,6 +194,17 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "Writes no newline: the program decides where a line ends.",
   ),
   entry(
+    "blaze_rt_format_number",
+    "size_t",
+    [
+      ["value", "double"],
+      ["buffer", "unsigned char*"],
+      ["size", "size_t"],
+    ],
+    "Writes the text of a number into a buffer, NUL terminated.",
+    "Writes into the caller's buffer and returns the length, which is never more than size - 1.",
+  ),
+  entry(
     "blaze_rt_print_newline",
     "void",
     [],
@@ -409,15 +420,29 @@ void blaze_rt_print_text(const char* text) {
   fputs(text, stdout);
 }
 
-void blaze_rt_print_number(double value) {
+size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) {
   /* The shortest decimal that reads back as this value, placed the way the
      source language places it: in full from 1e-6 up to 1e21, and in exponential
      form outside that range. The program this build delivers is compared
-     against the source, so both have to print a number the same way. */
-  if (value == 0.0) { fputs(signbit(value) ? "-0" : "0", stdout); return; }
+     against the source, so both have to write a number the same way. A value
+     that is not finite has no shortest decimal, so the language writes those as
+     Infinity, -Infinity and NaN. A negative zero keeps its sign, which is what
+     the source prints for it. */
+  const char* fixed = NULL;
+  if (isnan(value)) fixed = "NaN";
+  else if (isinf(value)) fixed = signbit(value) ? "-Infinity" : "Infinity";
+  else if (value == 0.0) fixed = signbit(value) ? "-0" : "0";
+  if (fixed != NULL) {
+    const size_t length = strlen(fixed);
+    if (size > 0) {
+      memcpy(buffer, fixed, length < size - 1 ? length : size - 1);
+      buffer[length < size ? length : size - 1] = '\\0';
+    }
+    return length;
+  }
+
   const int negative = signbit(value);
   const double magnitude = negative ? -value : value;
-
   char text[40];
   int precision = 0;
   for (; precision < 17; precision += 1) {
@@ -438,25 +463,51 @@ void blaze_rt_print_number(double value) {
   digits[count] = '\\0';
   const int point = exponent + 1;
 
-  if (negative) fputc('-', stdout);
+  char written[64];
+  int used = 0;
+  if (negative) written[used++] = '-';
   if (point >= -5 && point <= 21) {
     if (point <= 0) {
-      fputs("0.", stdout);
-      for (int index = 0; index < -point; index += 1) fputc('0', stdout);
-      fputs(digits, stdout);
+      used += snprintf(written + used, sizeof written - (size_t)used, "0.");
+      for (int index = 0; index < -point; index += 1) written[used++] = '0';
+      memcpy(written + used, digits, (size_t)count);
+      used += count;
+      written[used] = '\\0';
     } else if (point >= count) {
-      fputs(digits, stdout);
-      for (int index = 0; index < point - count; index += 1) fputc('0', stdout);
+      used += snprintf(written + used, sizeof written - (size_t)used, "%s", digits);
+      for (int index = 0; index < point - count; index += 1) written[used++] = '0';
+      written[used] = '\\0';
     } else {
-      fwrite(digits, 1, (size_t)point, stdout);
-      fputc('.', stdout);
-      fputs(digits + point, stdout);
+      written[used++] = '\\0';
+      memcpy(written + used - 1, digits, (size_t)point);
+      used += point - 1;
+      written[used++] = '.';
+      memcpy(written + used, digits + point, (size_t)(count - point));
+      used += count - point;
+      written[used] = '\\0';
     }
-    return;
+  } else {
+    written[used++] = digits[0];
+    if (count > 1) {
+      written[used++] = '.';
+      memcpy(written + used, digits + 1, (size_t)(count - 1));
+      used += count - 1;
+    }
+    used += snprintf(written + used, sizeof written - (size_t)used, "e%c%d", point - 1 < 0 ? '-' : '+', point - 1 < 0 ? 1 - point : point - 1);
   }
-  fputc(digits[0], stdout);
-  if (count > 1) { fputc('.', stdout); fputs(digits + 1, stdout); }
-  printf("e%c%d", point - 1 < 0 ? '-' : '+', point - 1 < 0 ? 1 - point : point - 1);
+
+  const size_t length = (size_t)used;
+  if (size > 0) {
+    memcpy(buffer, written, length < size - 1 ? length : size - 1);
+    buffer[length < size ? length : size - 1] = '\\0';
+  }
+  return length;
+}
+
+void blaze_rt_print_number(double value) {
+  char text[64];
+  blaze_rt_format_number(value, (unsigned char*)text, sizeof text);
+  fputs(text, stdout);
 }
 
 void blaze_rt_print_newline(void) {

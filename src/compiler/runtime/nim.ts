@@ -257,11 +257,13 @@ proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
 
 ## The shortest decimal that reads back as the value, placed the way the source
 ## language places it: in full from 1e-6 up to 1e21, and in exponential form
-## outside that range.
+## outside that range. A value that is not finite has no shortest decimal, so
+## it is written as the language writes it, and a negative zero keeps its sign.
 proc blazeShortest(value: float64): string =
-  let negative = value < 0.0 or classify(value) == fcNegZero
-  if value == 0.0:
-    return if negative: "-0" else: "0"
+  if classify(value) == fcNan: return "NaN"
+  if classify(value) in {fcInf, fcNegInf}: return if value < 0.0: "-Infinity" else: "Infinity"
+  if value == 0.0: return (if classify(value) == fcNegZero: "-0" else: "0")
+  let negative = value < 0.0
   let magnitude = if negative: -value else: value
 
   var text = ""
@@ -296,6 +298,14 @@ proc blazeShortest(value: float64): string =
 
 proc blaze_rt_print_number*(value: float64) {.exportc, cdecl.} =
   stdout.write(blazeShortest(value))
+
+proc blaze_rt_format_number*(value: float64, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =
+  let text = blazeShortest(value)
+  if size > 0:
+    let written = min(csize_t(text.len), size - 1)
+    if written > 0: copyMem(buffer, unsafeAddr text[0], int(written))
+    cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
+  csize_t(text.len)
 
 proc blaze_rt_print_newline*() {.exportc, cdecl.} =
   stdout.write("\\n")
