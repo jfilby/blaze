@@ -5,10 +5,12 @@
  * function body: what does the result equal, and which parts of which buffers
  * does it read? Turning that into requires, memory ranges and a contract is
  * language independent, so it lives here rather than in either frontend.
+ *
+ * A contract names no target: what runs it is chosen by the build, beside the
+ * contract, so one contract serves every backend.
  */
 
 import { isBufferType, normalizeNumeric, normalizeOptimize, typeToString } from "./contract.ts";
-import { assertBuildableTarget, normalizeTarget } from "../core/target.ts";
 import type { FunctionContract, FunctionParam, SourceInput, TypeExpr } from "../core/types.ts";
 
 /** A half open range `[lo, hi)` of buffer elements the function reads. */
@@ -39,9 +41,6 @@ export function assembleContract(assembly: ContractAssembly): FunctionContract {
   const { name, params, returns, accesses, input } = assembly;
 
   const parameters: FunctionParam[] = params.map((param) => ({ name: param.name, type: typeToString(param.type) }));
-  const target = normalizeTarget(input.target);
-  assertBuildableTarget(target, name);
-
   const reads: string[] = [];
   const seenRanges = new Set<string>();
   for (const access of accesses) {
@@ -73,7 +72,6 @@ export function assembleContract(assembly: ContractAssembly): FunctionContract {
     memory: { reads, writes: [], aliasing: [] },
     effects: [],
     numeric: normalizeNumeric(input.numeric),
-    target,
     optimize: normalizeOptimize(input.optimize),
   };
 }

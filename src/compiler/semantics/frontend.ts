@@ -1,12 +1,14 @@
 /**
- * Frontend: high level source -> Native Function Contract.
+ * Frontend: Nim module -> module analysis and function contracts.
  *
- * Version 0.1 supports exactly one language: a pure subset of Nim. The
- * frontend is the only component that understands the source language; the
- * contract is the boundary between source semantics and native code
- * generation, so nothing about the internal AST or IR leaks past it.
+ * The frontend is the only component that understands the source language. It
+ * parses a module into what it declares and imports (see module.ts), and turns
+ * one declared proc at a time into a contract. Nothing about its internal AST
+ * or IR leaves the file.
  *
  * Supported Nim subset:
+ *
+ *   import ./other
  *
  *   proc name(p: T, ...): R =
  *     var acc: T = <literal>
@@ -22,16 +24,12 @@
  *   - pure functions only: writing through a pointer or an indexed element is
  *     rejected, so every accepted contract has effects: [] and writes: []
  */
-
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 import { assembleContract } from "./contract-build.ts";
 import { CompilerError } from "../core/errors.ts";
 import { typeScriptFrontend } from "./typescript.ts";
-import type { FunctionContract, SourceInput, TypeExpr } from "../core/types.ts";
-
-export interface Frontend {
-  compile(input: SourceInput): Promise<FunctionContract>;
-}
+import type { Frontend, ModuleImport } from "./module.ts";
+import type { TypeExpr } from "../core/types.ts";
 
 function frontendError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
@@ -652,43 +650,49 @@ function dependsOn(expression: NimExpr, name: string): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Contract construction                                                      */
-/* -------------------------------------------------------------------------- */
-
-function buildContract(procedure: NimProc, input: SourceInput): FunctionContract {
-  const analysis = new BodyAnalysis(procedure, `proc ${procedure.name}`).run(procedure.body);
-  return assembleContract({
-    name: procedure.name,
-    params: procedure.params.map((param) => ({ name: param.name, type: param.type })),
-    returns: procedure.returns,
-    result: analysis.result,
-    accesses: analysis.reads,
-    input,
-  });
-}
-
-/* -------------------------------------------------------------------------- */
 /* Entry point                                                                */
 /* -------------------------------------------------------------------------- */
 
 export const nimFrontend: Frontend = {
-  async compile(input: SourceInput): Promise<FunctionContract> {
-    if (typeof input.source !== "string" || input.source.trim() === "") {
-      throw frontendError("input.source is empty");
+  analyze(source, path) {
+    if (typeof source !== "string" || source.trim() === "") {
+      throw frontendError(`module ${path} is empty`);
     }
-    const procedures = parseProcedures(input.source);
-    if (procedures.length === 0) {
-      throw frontendError("no proc found in source", "the frontend accepts pure procedures");
+    const functions = parseProcedures(source).map((procedure) => ({
+      name: procedure.name,
+      // Every top level proc of a Nim module is part of its interface.
+      exported: true,
+      params: procedure.params.map((param) => ({ name: param.name, type: param.type })),
+      returns: procedure.returns,
+      handle: procedure,
+    }));
+    if (functions.length === 0) {
+      throw frontendError(`no proc found in ${path}`, "a module declares pure procs");
     }
-    const entry = input.entry;
-    const procedure =
-      entry === undefined || entry === ""
-        ? procedures[0]
-        : procedures.find((candidate) => candidate.name === entry);
-    if (procedure === undefined) {
-      throw frontendError(`entry "${entry}" not found`, `available: ${procedures.map((candidate) => candidate.name).join(", ")}`);
+    return { path, imports: parseImports(source), functions };
+  },
+
+  contractFor(analysis, declared, input) {
+    const procedure = declared.handle as NimProc;
+    const body = new BodyAnalysis(procedure, `${analysis.path}: proc ${procedure.name}`).run(procedure.body);
+    return assembleContract({
+      name: procedure.name,
+      params: procedure.params.map((param) => ({ name: param.name, type: param.type })),
+      returns: procedure.returns,
+      result: body.result,
+      accesses: body.reads,
+      input,
+    });
+  },
+
+  resolveImport(specifier) {
+    if (!specifier.startsWith(".")) {
+      throw frontendError(
+        `cannot import "${specifier}"`,
+        "a module imports project modules by relative path, as in `import ./other`",
+      );
     }
-    return buildContract(procedure, input);
+    return [specifier.endsWith(".nim") ? specifier : `${specifier}.nim`];
   },
 };
 
@@ -697,4 +701,23 @@ export function frontendFor(language: string): Frontend {
   if (name === "nim") return nimFrontend;
   if (name === "typescript" || name === "ts") return typeScriptFrontend;
   throw frontendError(`unsupported language "${language}"`, "supported languages: nim, typescript");
+}
+
+/* -------------------------------------------------------------------------- */
+/* Imports                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/** `import ./other` and `include ./other` name another file of the project. */
+function parseImports(source: string): ModuleImport[] {
+  const imports: ModuleImport[] = [];
+  for (const line of toSourceLines(source)) {
+    const match = /^(?:import|include)\s+(.+)$/.exec(line.text);
+    if (match === null) continue;
+    for (const piece of match[1].split(",")) {
+      const specifier = piece.trim().replace(/^['"]|['"]$/g, "").split(/\s+/)[0];
+      // An unqualified import brings every export of the module into scope.
+      imports.push({ specifier, names: null, line: line.number });
+    }
+  }
+  return imports;
 }

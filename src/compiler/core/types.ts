@@ -4,6 +4,10 @@
  * The canonical representation of a function contract is JSON (see
  * private-docs/specs/contract dsl.md). Everything the compiler reads or writes
  * on disk is described here.
+ *
+ * Contracts are target independent: a contract states what a function or a
+ * whole program must do, never what machine it runs on. The target is chosen
+ * by the build and reaches a backend beside the contract, never inside it.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -125,8 +129,53 @@ export interface FunctionContract {
   memory: MemoryContract;
   effects: Effect[];
   numeric: NumericContract;
-  target: TargetSpec;
   optimize: OptimizeSpec;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Program contract                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A source file as the program sees it. The path is relative to the project
+ * directory, so the same program always produces the same contract.
+ */
+export interface SourceModule {
+  path: string;
+  source: string;
+}
+
+/**
+ * The contract of one file: every function it exports, and the files it
+ * imports. A contract names no target, so one program contract serves every
+ * backend.
+ */
+export interface FileContract {
+  path: string;
+  functions: Record<string, FunctionContract>;
+  imports: string[];
+}
+
+/** One resolved import: which file, and which symbols it binds. */
+export interface ContractEdge {
+  /** The importing file. */
+  from: string;
+  /** The imported file. */
+  to: string;
+  /** Symbols taken from it, in source order. */
+  symbols: string[];
+}
+
+/**
+ * The whole program, contracted: one contract per file plus the edges between
+ * them. Target generation does not start until this exists and validates.
+ */
+export interface ProgramContract {
+  version: "1";
+  language: string;
+  entry: { file: string; function: string };
+  files: FileContract[];
+  edges: ContractEdge[];
 }
 
 /* -------------------------------------------------------------------------- */

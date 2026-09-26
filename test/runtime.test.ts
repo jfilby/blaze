@@ -13,7 +13,9 @@ import {
   runtimeSourceSource,
 } from "../src/compiler/runtime/abi.ts";
 import { generateRuntimeAdapterSource } from "../src/compiler/runtime/nim.ts";
-import { buildUserPrompt } from "../src/compiler/ai/prompt.ts";
+import { buildUserPrompt, type PromptRequest } from "../src/compiler/ai/prompt.ts";
+import { entryContract } from "../src/compiler/semantics/program.ts";
+import { programOf } from "./phase.ts";
 import type { SourceInput } from "../src/compiler/core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
@@ -87,19 +89,19 @@ test("the managed object representation is the same in the header and in the ada
 });
 
 test("the prompt tells the model which runtime entry points it may call", () => {
-  const contract = {
-    version: "1",
-    function: { name: "dotProduct", params: [{ name: "a", type: "ptr<f32>" }], returns: "f32" },
-    requires: [],
-    ensures: ["result == 0"],
-    memory: { reads: [], writes: [], aliasing: [] },
-    effects: [],
-    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+  const files = { "module.nim": "proc dotProduct(a: ptr float32): float32 = 0.0\n" };
+  const program = programOf("nim", files, "module.nim");
+  const request: Omit<PromptRequest, "runtime"> = {
+    contract: entryContract(program),
+    program,
+    sources: [{ path: "module.nim", source: files["module.nim"] }],
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-    optimize: { primary: "throughput" },
-  } as unknown as Parameters<typeof buildUserPrompt>[0]["contract"];
+    output: "machine",
+    candidate: 1,
+    attempt: 1,
+  };
 
-  const hosted = buildUserPrompt({ contract, target: contract.target, output: "machine", runtime: "nim", candidate: 1, attempt: 1 });
+  const hosted = buildUserPrompt({ ...request, runtime: "nim" });
   assert.match(hosted, /RUNTIME/);
   assert.match(hosted, /Nim host runtime/);
   assert.match(hosted, /void\* blaze_rt_allocate\(size_t bytes\)/);
@@ -109,7 +111,7 @@ test("the prompt tells the model which runtime entry points it may call", () => 
     "a hosted candidate may allocate, so the prompt must not tell the model the function is pure",
   );
 
-  const standalone = buildUserPrompt({ contract, target: contract.target, output: "machine", runtime: "none", candidate: 1, attempt: 1 });
+  const standalone = buildUserPrompt({ ...request, runtime: "none" });
   assert.match(standalone, /compiler runtime/);
 });
 

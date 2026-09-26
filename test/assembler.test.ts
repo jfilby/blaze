@@ -42,8 +42,7 @@ function contract(): FunctionContract {
     memory: { reads: ["a[0:n]"], writes: [], aliasing: [] },
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
-    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-    optimize: { primary: "throughput" },
+      optimize: { primary: "throughput" },
   };
 }
 

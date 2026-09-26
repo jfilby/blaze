@@ -30,10 +30,13 @@ import type {
   BenchmarkResult,
   CandidateOutcome,
   FunctionContract,
+  ProgramContract,
   RuntimeKind,
   GenerationConfig,
   OutputKind,
   Runner,
+  SourceModule,
+  TargetSpec,
   TestConfig,
   VerificationResult,
 } from "./core/types.ts";
@@ -69,7 +72,11 @@ export interface GenerationProgress {
 export interface CodegenRequest extends CandidateEvaluationRequest {
   contract: FunctionContract;
   parsed: ParsedContract;
-  target: FunctionContract["target"];
+  /** The whole program, contracted: what a backend needs about every file. */
+  program: ProgramContract;
+  /** Every module of the program, with the source each contract came from. */
+  sources: readonly SourceModule[];
+  target: TargetSpec;
   output: OutputKind;
   /**
    * Built on demand: a build that reuses stored assembly must not need model
@@ -136,7 +143,7 @@ function diagnosticFor(failure: CandidateOutcome["failure"], attempt: number): s
 export interface CandidateEvaluationRequest {
   contract: FunctionContract;
   parsed: ParsedContract;
-  target: FunctionContract["target"];
+  target: TargetSpec;
   output: OutputKind;
   workspace: CodegenWorkspace;
   test: TestConfig;
@@ -417,6 +424,8 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
         const generated = await generationBackend().generate(
           {
             contract: request.contract,
+            program: request.program,
+            sources: request.sources,
             target: request.target,
             output: request.output,
             runtime: request.runtime,
@@ -488,7 +497,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
     {
       contract: request.contract,
       parsed: request.parsed,
-      target: request.contract.target,
+      target: request.target,
       output: request.output,
       runtime: request.runtime,
       workspace: request.workspace,

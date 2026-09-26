@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../src/compiler/compiler.ts";
 import { run } from "../src/compiler/core/process.ts";
 import { CompilerError } from "../src/compiler/core/errors.ts";
-import type { BuildStatus, SourceInput, VerificationResult } from "../src/compiler/core/types.ts";
+import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../src/compiler/core/types.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
@@ -46,10 +46,11 @@ test("a build produces assembly, a native executable and a complete record", asy
   assert.equal(outcome.build.selectedCandidate, "c1");
   assert.equal(outcome.outputPath, join(directory, STATE_DIRECTORY, "projects/input/output/input"));
 
-  const contract = JSON.parse(
+  const program = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/contract.json"), "utf8"),
-  ) as { ensures: string[] };
-  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
+  ) as ProgramContract;
+  assert.deepEqual(program.entry, { file: "<inline>", function: "dotProduct" });
+  assert.deepEqual(program.files[0].functions.dotProduct.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
 
   const verification = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/verification.json"), "utf8"),
@@ -292,17 +293,32 @@ test("the shipped TypeScript example builds and computes what it claims", async 
   assert.equal(Number(execution.stdout.trim().split(" ")[1]), 11);
 });
 
-/** Runs a program on a real terminal, which is what a bare `./binary` gives it. */
+/**
+ * Runs a program with a real terminal on its standard input and output, which
+ * is what a bare `./binary` gives it. The output is drained until the terminal
+ * is closed, so every line the program wrote is seen.
+ */
 function runOnTerminal(command: string, timeoutMs = 30_000): { code: number | null; output: string } {
   const driver = `
-import os, pty, sys
+import os, pty, select, subprocess, sys
+master, slave = pty.openpty()
+program = subprocess.Popen([${JSON.stringify(command)}], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
 chunks = []
-def read(fd):
-    chunks.append(os.read(fd, 4096))
-    return b""
-status = pty.spawn([${JSON.stringify(command)}], read)
+while True:
+    ready, _, _ = select.select([master], [], [], ${timeoutMs / 1000})
+    if not ready:
+        break
+    try:
+        data = os.read(master, 4096)
+    except OSError:
+        break
+    if not data:
+        break
+    chunks.append(data)
+program.wait()
 sys.stdout.write(b"".join(chunks).decode("utf8", "replace"))
-sys.exit(os.waitstatus_to_exitcode(status))
+sys.exit(program.returncode)
 `;
   const result = run("python3", ["-c", driver], { timeoutMs });
   return { code: result.code, output: result.stdout };
@@ -404,17 +420,81 @@ test("a source file given in place of a project file is named as one", async () 
   );
 });
 
-test("a program with imports is reported as not being a pure function", async () => {
+test("a module that runs code at the top level is rejected as not being a module", async () => {
   const directory = await workspace("program-source");
   await writeFile(join(directory, "module.ts"), 'import { f } from "./f.ts";\nconsole.log(f());\n');
+  await writeFile(join(directory, "f.ts"), "export function f(): number {\n  return 1;\n}\n");
   await writeFile(
     join(directory, "input.json"),
     JSON.stringify({ ...INPUT, language: "typescript", sourceFile: "module.ts", entry: "f" }),
   );
   await assert.rejects(
     () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
-    /the source is a program, not a pure function/,
+    /"console" is not a declaration in module.ts/,
   );
+});
+
+/** A project whose entry module imports another module of the same directory. */
+async function multiFileProject(name: string, helper: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  await writeFile(
+    join(directory, "dot.ts"),
+    [
+      'import { scale } from "./scale.ts";',
+      "",
+      "export function dotProduct(a: Float64Array, b: Float64Array, n: number): number {",
+      "  let total = 0;",
+      "  for (let i = 0; i < n; i++) {",
+      "    total += a[i] * b[i];",
+      "  }",
+      "  return total;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(join(directory, "scale.ts"), helper);
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({
+      language: "typescript",
+      sourceFile: "dot.ts",
+      entry: "dotProduct",
+      target: INPUT.target,
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+      test: { randomCases: 4, maxLength: 32, seed: 3 },
+      benchmark: { iterations: 100 },
+    }),
+  );
+  return directory;
+}
+
+const SCALE = "export function scale(x: number): number {\n  return x * 2;\n}\n";
+
+test("every file of a program is contracted before any code is generated", async () => {
+  const directory = await multiFileProject("program", SCALE);
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(outcome.program.files.map((file) => file.path), ["dot.ts", "scale.ts"]);
+  assert.deepEqual(outcome.program.edges, [{ from: "dot.ts", to: "scale.ts", symbols: ["scale"] }]);
+  // The imported module is contracted too, not only the module being compiled.
+  assert.deepEqual(outcome.program.files[1].functions.scale.ensures, ["result == (x * 2)"]);
+  assert.equal(outcome.program.entry.function, "dotProduct");
+});
+
+test("a contract failure stops the build before a model is asked for code", async () => {
+  const directory = await multiFileProject("unresolved", "export function other(x: number): number {\n  return x;\n}\n");
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}` }, quiet, "build"),
+    /imports "scale" from ".\/scale.ts", which does not export it/,
+  );
+  // Nothing was generated: the failure came from the contract phase itself.
+  await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"));
 });
 
 test("an unknown project is reported, not guessed", async () => {

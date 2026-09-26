@@ -1,8 +1,12 @@
 /**
  * The compiler pipeline.
  *
- *   source -> frontend -> contract -> AI -> assembly -> assembler -> verifier
- *          -> native output
+ *   program -> contract phase -> target generation -> verification -> output
+ *
+ * The contract phase (semantics/program.ts) reads and contracts every file of
+ * the program and validates the whole graph. Nothing generates target code
+ * until that phase has produced a valid program contract, and every backend is
+ * handed the source and that contract.
  *
  * Everything the compiler produces lives under `.blaze/` in the directory the
  * compiler was run from: JSON build records, intermediate artifacts and the
@@ -10,18 +14,19 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, readdir } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
+import { entryContract, INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { assertAssemblerSupportsArch } from "./toolchain/assembler.ts";
 import { evaluateStoredCandidate, generateCandidates, implementationLabel, runtimePreparer } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
-import { createJsonStore, hashText, hashValue, type JsonStore } from "./core/json-store.ts";
+import { createJsonStore, hashValue, type JsonStore } from "./core/json-store.ts";
 import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel } from "./ai/model.ts";
-import { normalizeTarget } from "./core/target.ts";
+import { assertBuildableTarget, normalizeTarget } from "./core/target.ts";
 import {
   DEFAULT_BENCHMARK,
   DEFAULT_GENERATION,
@@ -33,10 +38,12 @@ import {
   type BuildStatus,
   OUTPUT_KINDS,
   type FunctionContract,
+  type ProgramContract,
   type GenerationConfig,
   type ModelSelection,
   type OutputKind,
   type SourceInput,
+  type SourceModule,
   type TestConfig,
   type VerificationResult,
 } from "./core/types.ts";
@@ -73,6 +80,8 @@ export interface BuildOutcome {
   project: string;
   build: BuildStatus;
   contract: FunctionContract;
+  /** The validated contract graph every file of the program took part in. */
+  program: ProgramContract;
   candidates: AssemblyCandidate[];
   verification: VerificationResult[];
   benchmark: BenchmarkResult[];
@@ -176,7 +185,16 @@ function projectPaths(id: string): ProjectPaths {
   };
 }
 
-function readInput(path: string): SourceInput {
+/** A project file, plus what the compiler needs to read the program it names. */
+interface ProjectInput {
+  input: SourceInput;
+  /** The module the build compiles, with the path the project knows it by. */
+  entry: SourceModule;
+  /** The directory the project file lives in; imports resolve against it. */
+  directory: string;
+}
+
+function readInput(path: string): ProjectInput {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -217,9 +235,11 @@ function readInput(path: string): SourceInput {
     throw new CompilerError({ category: "InputError", stage: "input", message: `${path} must define "language"` });
   }
   rejectCredentials(path, input);
-
-  // `sourceFile` names a source file next to the input, so the example projects
-  // compile the real file instead of a copy of it pasted into JSON.
+  const directory = dirname(path);
+  // `sourceFile` names a source file next to the project file, so the example
+  // projects compile the real file instead of a copy of it pasted into JSON.
+  // Its path is the one the program is known by, so it names every contract.
+  let entryPath = INLINE_MODULE;
   if (input.sourceFile !== undefined) {
     if (typeof input.sourceFile !== "string" || input.sourceFile === "") {
       throw new CompilerError({
@@ -228,8 +248,9 @@ function readInput(path: string): SourceInput {
         message: `${path} has an empty "sourceFile"`,
       });
     }
-    const sourcePath = resolve(dirname(path), input.sourceFile);
+    const sourcePath = resolve(directory, input.sourceFile);
     try {
+      entryPath = relative(directory, sourcePath);
       input.source = readFileSync(sourcePath, "utf8");
     } catch (cause) {
       throw new CompilerError({
@@ -248,7 +269,15 @@ function readInput(path: string): SourceInput {
       message: `${path} must define "source" or "sourceFile"`,
     });
   }
-  return input as SourceInput;
+  return { input: input as SourceInput, entry: { path: entryPath, source: input.source }, directory };
+}
+
+/** Reads a module the program imports, by the path its importer used. */
+function moduleReader(directory: string): (path: string) => string | null {
+  return (path) => {
+    const full = resolve(directory, path);
+    return existsSync(full) ? readFileSync(full, "utf8") : null;
+  };
 }
 
 /** A key in a project file is a leak waiting to happen; the environment holds them. */
@@ -353,8 +382,9 @@ export async function runBuild(
   const id = projectIdFor(absoluteInput);
   const paths = projectPaths(id);
 
-  const input = readInput(absoluteInput);
-  const target = normalizeTarget(input.target);
+  const project = readInput(absoluteInput);
+  const input = project.input;
+  const target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
   const outputKind = resolveOutputKind(options.output ?? input.output);
   const runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
 
@@ -378,7 +408,6 @@ export async function runBuild(
   await store.mkdirp(paths.output);
   await copyFile(absoluteInput, store.resolve(paths.input));
 
-  const sourceHash = hashText(input.source);
   const createdAt = new Date().toISOString();
   const build: BuildStatus = {
     id,
@@ -390,7 +419,7 @@ export async function runBuild(
     runtime: runtimeKind,
     createdAt,
     updatedAt: createdAt,
-    sourceHash,
+    sourceHash: "",
     contractHash: "",
     model: model?.id ?? modelName ?? "unset",
     modelConfig: model?.id ?? previousBuild?.modelConfig ?? "reused",
@@ -399,16 +428,42 @@ export async function runBuild(
   await writeBuildRecord(store, paths, build);
 
   try {
-    const contract = await frontendFor(input.language).compile(input);
+    // The contract phase comes first and asks no model: every file of the
+    // program is read, contracted and validated before any target code exists.
+    const phase = runContractPhase({
+      frontend: frontendFor(input.language),
+      input,
+      entry: project.entry,
+      read: moduleReader(project.directory),
+    });
+    const program = phase.program;
+    const contract = entryContract(program);
     const parsed = parseContract(contract);
-    build.contractHash = hashValue(contract);
-    await store.write(paths.contract, contract);
-    reporter.stage("contract", "ok", `Contract generated for ${contract.function.name}`);
+    const sourceHash = hashValue(phase.modules.map((module) => [module.path, module.source]));
+    build.sourceHash = sourceHash;
+    build.contractHash = hashValue(program);
+    await store.write(paths.contract, program);
+    await writeBuildRecord(store, paths, build);
+    reporter.stage(
+      "contract",
+      "ok",
+      `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${contract.function.name} in ${program.entry.file}`,
+    );
 
-    assertAssemblerSupportsArch(contract.target);
+    assertAssemblerSupportsArch(target);
 
     const existing: AssemblyCandidate[] = [];
     if (options.reuse) {
+      // A build that failed has no contract hash of its own, so it is reported
+      // as the failure it was instead of as a change of source.
+      if (previousBuild !== undefined && previousBuild.status !== "success") {
+        throw new CompilerError({
+          category: "StorageError",
+          stage: "reuse",
+          message: `the last build of ${id} failed`,
+          detail: previousBuild.error?.message ?? "run blaze build without --reuse to rebuild it",
+        });
+      }
       if (previousBuild !== undefined && previousBuild.sourceHash !== sourceHash) {
         throw new CompilerError({
           category: "StorageError",
@@ -432,7 +487,9 @@ export async function runBuild(
     const generation = generateCandidates({
       contract,
       parsed,
-      target: contract.target,
+      program,
+      sources: phase.modules,
+      target,
       output: outputKind,
       runtime: runtimeKind,
       backend: () =>
@@ -552,6 +609,7 @@ export async function runBuild(
       project: id,
       build,
       contract,
+      program,
       candidates: result.candidates,
       verification: result.outcomes.map((outcome) => outcome.verification).filter((entry) => entry !== undefined),
       benchmark: result.outcomes.map((outcome) => outcome.benchmark).filter((entry) => entry !== undefined),
@@ -593,7 +651,8 @@ async function loadStored(store: JsonStore, project: string): Promise<{ paths: P
       detail: `no contract at ${paths.contract}`,
     });
   }
-  const contract = await store.read<FunctionContract>(paths.contract);
+  const program = await store.read<ProgramContract>(paths.contract);
+  const contract = entryContract(program);
   return { paths, contract, parsed: parseContract(contract) };
 }
 
@@ -617,15 +676,18 @@ export async function runStored(
   const build = await store.exists(paths.build) ? await store.read<BuildStatus>(paths.build) : undefined;
   const candidates = await store.read<AssemblyCandidate[]>(paths.candidates);
   const chosen = build?.selectedCandidate;
-  const target =
+  const candidate =
     chosen === undefined ? candidates[candidates.length - 1] : candidates.find((entry) => entry.id === chosen);
-  if (target === undefined) {
+  if (candidate === undefined) {
     throw new CompilerError({
       category: "StorageError",
       stage: action,
       message: `project "${project}" has no candidate to ${action}`,
     });
   }
+  // The contract names no target, so the one the build ran for is what the
+  // stored candidate is tested and measured against.
+  const target = build?.target ?? normalizeTarget(input.target);
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
@@ -634,10 +696,10 @@ export async function runStored(
   const result = await evaluateStoredCandidate({
     contract,
     parsed,
-    target: contract.target,
+    target,
     output,
     runtime,
-    candidate: target,
+    candidate,
     workspace,
     prepareRuntime: runtimePreparer({ output, runtime, workspace }),
     test: testConfigFor(input, options),
@@ -660,7 +722,7 @@ export async function runStored(
       `Benchmark completed (${result.benchmark?.iterations ?? 0} iterations, ${result.benchmark?.durationNs ?? 0} ns)`,
     );
   }
-  return { project, candidate: target.id, verification: result.verification, benchmark: result.benchmark };
+  return { project, candidate: candidate.id, verification: result.verification, benchmark: result.benchmark };
 }
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {
@@ -681,4 +743,9 @@ export async function listProjects(cwd: string): Promise<string[]> {
   const store = createJsonStore(join(cwd, STATE_DIRECTORY));
   const entries = await readdir(store.resolve("projects"), { withFileTypes: true }).catch(() => []);
   return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+/** How many functions the program contract covers, for the build report. */
+function contractedFunctionCount(program: ProgramContract): number {
+  return program.files.reduce((total, file) => total + Object.keys(file.functions).length, 0);
 }

@@ -1,9 +1,11 @@
 /**
- * Frontend: TypeScript -> Native Function Contract.
+ * Frontend: TypeScript module -> module analysis and function contracts.
  *
  * The contract is language neutral, so a second frontend is a parser and an
  * analysis, nothing more. This one accepts the pure subset of TypeScript that
  * a numeric kernel is written in:
+ *
+ *   import { dotProduct } from "./dot.ts";
  *
  *   export function name(a: Float64Array, b: Float64Array): number {
  *     let total = 0;
@@ -13,7 +15,8 @@
  *     return total;
  *   }
  *
- *   - declarations: function, with a block body or an expression body
+ *   - top level: `import { name } from "./other.ts";`, function declarations
+ *     with or without `export`, and nothing that runs
  *   - statements: let/const with a literal initialiser, counted for loops,
  *     assignments, compound assignments, return
  *   - expressions: number and bigint literals, identifiers, indexing,
@@ -26,8 +29,8 @@
 import { parseType, typeToString } from "./contract.ts";
 import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { CompilerError } from "../core/errors.ts";
-import type { FunctionContract, SourceInput, TypeExpr } from "../core/types.ts";
-import type { Frontend } from "./frontend.ts";
+import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import type { TypeExpr } from "../core/types.ts";
 
 function frontendError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
@@ -111,7 +114,13 @@ function tokenize(source: string): Token[] {
       continue;
     }
     if (character === '"' || character === "'" || character === "`") {
-      throw frontendError("string literals are not supported", `line ${line}: the contract types describe numbers, not text`);
+      // Only an import may name a module, so the string is kept and the parser
+      // decides where a string is allowed.
+      const end = source.indexOf(character, index + 1);
+      if (end < 0) throw frontendError("unterminated string", `line ${line}`);
+      tokens.push({ kind: "string", text: source.slice(index + 1, end), line });
+      index = end + 1;
+      continue;
     }
     if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(source[index + 1] ?? ""))) {
       const match = /^(?:0[xX][0-9a-fA-F]+|[0-9]*\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(source.slice(index));
@@ -213,23 +222,85 @@ class TypeScriptParser {
     throw frontendError(message, `line ${token.line} near "${token.text}"`);
   }
 
-  /** Parses every exported function in the file. */
-  parseFunctions(): TypeScriptFunction[] {
-    const functions: TypeScriptFunction[] = [];
+  /** Parses a module: the imports it binds and the functions it declares. */
+  parseModule(path: string): ModuleAnalysis {
+    const imports: ModuleImport[] = [];
+    const functions: DeclaredFunction[] = [];
     while (this.peek().kind !== "end") {
-      if (this.accept("export")) this.expect("function");
-      else this.expect("function");
+      if (this.at("import")) {
+        this.next();
+        imports.push(this.readImport());
+        continue;
+      }
+      const token = this.peek();
+      if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
+        throw frontendError(
+          `"${token.text}" is not a declaration in ${path}`,
+          `line ${token.line}: a module declares functions and imports from other modules; it cannot execute code`,
+        );
+      }
+      const exported = this.accept("export");
+      if (exported && this.at("default")) {
+        throw frontendError("a default export is not supported", `line ${token.line} of ${path}: export the function by name`);
+      }
+      if (exported && !this.at("function")) {
+        throw frontendError(
+          `only functions can be exported from ${path}`,
+          `line ${token.line}: a module offers functions, not ${this.peek().text}`,
+        );
+      }
+      this.expect("function");
       const name = this.next();
       if (name.kind !== "ident") this.fail("expected a function name");
-      functions.push(this.parseFunction(name));
+      const parsed = this.parseFunction(name);
+      functions.push({
+        name: parsed.name,
+        exported,
+        params: parsed.params,
+        returns: parsed.returns,
+        handle: parsed,
+      });
     }
-    return functions;
+    return { path, imports, functions };
+  }
+
+  /** `import { f, g } from "./other.ts";` is the only import form a module has. */
+  private readImport(): ModuleImport {
+    const start = this.peek();
+    if (!this.at("{")) {
+      throw frontendError(
+        `unsupported import form near "${start.text}"`,
+        `line ${start.line}: a module imports named exports, as in import { f } from "./other.ts"`,
+      );
+    }
+    this.next();
+    const names: string[] = [];
+    while (!this.at("}")) {
+      const name = this.next();
+      if (name.kind !== "ident") this.fail("expected an imported name");
+      if (this.at("as")) {
+        throw frontendError("renaming an import is not supported", `line ${name.line}`);
+      }
+      names.push(name.text);
+      if (!this.accept(",")) break;
+    }
+    this.expect("}");
+    if (!this.at("from")) {
+      this.fail(`expected "from" after the imported names`);
+    }
+    this.next();
+    const specifier = this.next();
+    if (specifier.kind !== "string") this.fail("expected the imported module as a string");
+    this.expect(";");
+    return { specifier: specifier.text, names, line: start.line };
   }
 
   private parseFunction(name: Token): TypeScriptFunction {
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
-    if (!this.at(")")) {
+    if (this.at(")")) {
+      this.next();
+    } else {
       for (;;) {
         const parameter = this.next();
         if (parameter.kind !== "ident") this.fail("expected a parameter name");
@@ -418,6 +489,9 @@ class TypeScriptParser {
   private readPrimary(): Expression {
     const token = this.next();
     if (token.kind === "number") return { k: "literal", text: token.text };
+    if (token.kind === "string") {
+      throw frontendError("string literals are not supported", `line ${token.line}: the contract types describe numbers, not text`);
+    }
     if (token.kind === "bigint") return { k: "bigint", text: token.text };
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
@@ -638,49 +712,43 @@ function dependsOn(expression: Expression, name: string): boolean {
 /* -------------------------------------------------------------------------- */
 
 export const typeScriptFrontend: Frontend = {
-  async compile(input: SourceInput): Promise<FunctionContract> {
-    if (typeof input.source !== "string" || input.source.trim() === "") {
-      throw frontendError("input.source is empty");
+  analyze(source, path) {
+    if (typeof source !== "string" || source.trim() === "") {
+      throw frontendError(`module ${path} is empty`);
     }
-    // A program with imports, printing or top-level statements is not what
-    // this frontend compiles. Saying that is more useful than failing on the
-    // first string it finds in an import path.
-    if (/^\s*(import|export\s+default)\b/m.test(input.source)) {
-      throw frontendError(
-        "the source is a program, not a pure function",
-        "the frontend compiles one exported function per file; point sourceFile at the module that exports it",
-      );
-    }
-    const declarations = new TypeScriptParser(tokenize(input.source)).parseFunctions();
-    if (declarations.length === 0) {
-      throw frontendError("no function found in source", "the frontend accepts pure functions");
-    }
-    const entry = input.entry;
-    const declaration =
-      entry === undefined || entry === ""
-        ? declarations[0]
-        : declarations.find((candidate) => candidate.name === entry);
-    if (declaration === undefined) {
-      throw frontendError(`entry "${entry}" not found`, `available: ${declarations.map((candidate) => candidate.name).join(", ")}`);
-    }
+    return new TypeScriptParser(tokenize(source)).parseModule(path);
+  },
 
-    const analysis = new BodyAnalysis(declaration).run();
+  contractFor(analysis, declared, input) {
+    const declaration = declared.handle as TypeScriptFunction;
+    const body = new BodyAnalysis(declaration).run();
     // A buffer length is a property of the value, not of the pointer the callee
     // receives: the implementation cannot observe it, so the result may not
     // depend on it. Preconditions may, because the caller checks them.
-    if (analysis.result.includes("len(")) {
+    if (body.result.includes("len(")) {
       throw frontendError(
         `the result of ${declaration.name} depends on a buffer length`,
-        "the callee only receives the pointer, so pass the length as a parameter and loop over that",
+        `${analysis.path}: the callee only receives the pointer, so pass the length as a parameter and loop over that`,
       );
     }
     return assembleContract({
       name: declaration.name,
       params: declaration.params,
       returns: declaration.returns,
-      result: analysis.result,
-      accesses: analysis.accesses,
+      result: body.result,
+      accesses: body.accesses,
       input,
     });
+  },
+
+  resolveImport(specifier) {
+    if (!specifier.startsWith(".")) {
+      throw frontendError(
+        `cannot import "${specifier}"`,
+        "a module imports project modules by relative path, as in \"./other.ts\"",
+      );
+    }
+    if (specifier.endsWith(".ts") || specifier.endsWith(".tsx")) return [specifier];
+    return [`${specifier}.ts`, `${specifier}/index.ts`];
   },
 };

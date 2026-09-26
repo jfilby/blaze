@@ -3,10 +3,13 @@
  *
  * The prompt states the target, the ABI, the function signature, the semantic
  * and memory requirements, the numerical semantics and the optimization
- * objective. It never dictates an implementation strategy.
+ * objective. It also states the program the function belongs to: the source of
+ * the module being written, the contract of every other file, and the imports
+ * between them, so a backend never has to infer a cross-file contract. It
+ * never dictates an implementation strategy.
  */
 
-import type { FunctionContract, OutputKind, RuntimeKind, TargetSpec } from "../core/types.ts";
+import type { FunctionContract, OutputKind, ProgramContract, RuntimeKind, SourceModule, TargetSpec } from "../core/types.ts";
 import { isBufferType, parseType, typeToString } from "../semantics/contract.ts";
 import { cSignature, cSourceRules } from "../toolchain/csource.ts";
 import { wasmSignature } from "../toolchain/wasm.ts";
@@ -14,7 +17,16 @@ import { cDeclarationType, sysvArgumentLocations } from "../toolchain/linker.ts"
 import { runtimePromptSection, runtimeRules } from "../runtime/abi.ts";
 
 export interface PromptRequest {
+  /** The contract of the function this candidate implements. */
   contract: FunctionContract;
+  /**
+   * The contract of every file of the program, not only the one being written.
+   * A backend is handed the whole program so that no cross-file semantics are
+   * left for it to infer, and it may not change any of it.
+   */
+  program: ProgramContract;
+  /** The source each contract was derived from, in program order. */
+  sources: readonly SourceModule[];
   target: TargetSpec;
   output: OutputKind;
   runtime: RuntimeKind;
@@ -111,6 +123,35 @@ function renderTypes(contract: FunctionContract): string {
   return entries.join("\n");
 }
 
+/** The whole program: the module being written, and the contract of every other. */
+function renderProgram(request: PromptRequest): string {
+  const program = request.program;
+  const source = request.sources.find((module) => module.path === program.entry.file);
+  const lines = [
+    `language: ${program.language}`,
+    `entry: ${program.entry.function} in ${program.entry.file}`,
+    ...(source === undefined ? [] : [`source of ${source.path}:`, "```", source.source.trimEnd(), "```"]),
+  ];
+  for (const file of program.files.filter((entry) => entry.path !== program.entry.file)) {
+    lines.push(
+      `${file.path} exports ${Object.keys(file.functions).join(", ") || "nothing"}${
+        file.imports.length === 0 ? "" : `; imports ${file.imports.join(", ")}`
+      }`,
+    );
+    for (const [name, contract] of Object.entries(file.functions)) {
+      lines.push(
+        `  ${name}(${contract.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${contract.function.returns}`,
+        ...contract.requires.map((requirement) => `    requires ${requirement}`),
+        ...contract.ensures.map((condition) => `    ensures ${condition}`),
+      );
+    }
+  }
+  for (const edge of program.edges) {
+    lines.push(`${edge.from} imports ${edge.symbols.join(", ")} from ${edge.to}`);
+  }
+  return ["PROGRAM", ...lines].join("\n");
+}
+
 /** A diagnostic is a multi-line block; a bullet only covers its first line. */
 function asBullet(entry: string): string {
   const [head, ...rest] = entry.split("\n");
@@ -127,6 +168,7 @@ export function buildUserPrompt(request: PromptRequest): string {
 
   const sections: string[] = [];
   sections.push(`CONTRACT\n${JSON.stringify(contract, null, 2)}`);
+  sections.push(renderProgram(request));
   sections.push(`TARGET\n${JSON.stringify(target, null, 2)}`);
   if (output !== "wasm") sections.push(`RUNTIME\n${runtimePromptSection(runtime)}`);
   sections.push(["OUTPUT LANGUAGE", `Write ${language.language}.`, ...rules.map((rule) => `- ${rule}`)].join("\n"));
