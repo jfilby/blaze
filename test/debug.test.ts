@@ -12,9 +12,22 @@ import type { SourceInput } from "../src/compiler/core/types.ts";
  * caller queued, so a test can drive the real backend, prompt and all, without
  * a credential.
  */
-async function chatEndpoint(t: TestContext, answers: string[]): Promise<{ url: string; prompts: string[] }> {
+async function chatEndpoint(
+  t: TestContext,
+  answers: string[],
+  options: { until?: number } = {},
+): Promise<{ url: string; prompts: string[]; peak: () => number }> {
   const prompts: string[] = [];
   let served = 0;
+  // Requests are held until `until` of them have arrived, so a test can tell a
+  // fan-out from a queue: a serial client never gets the second one in flight.
+  let inFlight = 0;
+  let peak = 0;
+  let arrived = 0;
+  let release: (() => void) | undefined;
+  const gate = options.until === undefined ? undefined : new Promise<void>((resolve) => (release = resolve));
+  const openGate = setTimeout(() => release?.(), 5_000);
+  openGate.unref();
   const server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -25,17 +38,26 @@ async function chatEndpoint(t: TestContext, answers: string[]): Promise<{ url: s
       prompts.push(body.messages.map((message) => message.content).join("\n\n"));
       const content = answers[Math.min(served, answers.length - 1)];
       served += 1;
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          id: "stub",
-          object: "chat.completion",
-          created: 0,
-          model: "stub",
-          choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        }),
-      );
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      arrived += 1;
+      if (options.until !== undefined && arrived >= options.until) release?.();
+      const answer = () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            id: "stub",
+            object: "chat.completion",
+            created: 0,
+            model: "stub",
+            choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+        );
+        inFlight -= 1;
+      };
+      if (gate === undefined) answer();
+      else void gate.then(answer);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -46,6 +68,7 @@ async function chatEndpoint(t: TestContext, answers: string[]): Promise<{ url: s
   process.env.AI_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.AI_API_KEY = "test-key";
   t.after(() => {
+    clearTimeout(openGate);
     server.closeAllConnections();
     server.close();
     for (const [name, value] of [
@@ -57,7 +80,7 @@ async function chatEndpoint(t: TestContext, answers: string[]): Promise<{ url: s
     }
   });
 
-  return { url: `http://127.0.0.1:${port}/v1`, prompts };
+  return { url: `http://127.0.0.1:${port}/v1`, prompts, peak: () => peak };
 }
 
 const SQUARE: SourceInput = {
@@ -81,6 +104,56 @@ async function project(t: TestContext, answers: string[]): Promise<string> {
   await writeFile(join(directory, "blaze.json"), JSON.stringify(SQUARE), "utf8");
   return directory;
 }
+
+/** A project that produces `candidates` implementations, `concurrency` at a time. */
+async function fanOutProject(
+  t: TestContext,
+  answers: string[],
+  input: Partial<SourceInput>,
+  until?: number,
+): Promise<{ directory: string; peak: () => number }> {
+  const endpoint = await chatEndpoint(t, answers, until === undefined ? {} : { until });
+  const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
+  const project: SourceInput = {
+    ...SQUARE,
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+    ...input,
+  };
+  await writeFile(join(directory, "blaze.json"), JSON.stringify(project), "utf8");
+  return { directory, peak: endpoint.peak };
+}
+
+test("candidates are generated at the same time when concurrency allows it", async (t) => {
+  // The endpoint answers only once three requests are in flight, so a client
+  // that generated candidates one at a time could never get past the first.
+  // The guard timeout is a deadlock escape for that case, not a synchronisation
+  // point: it can only turn a real fan-out into a failure, never the reverse.
+  const { directory, peak } = await fanOutProject(
+    t,
+    [SQUARE_ASSEMBLY],
+    { generation: { maxCandidates: 3, maxAttempts: 1, concurrency: 3 } },
+    3,
+  );
+
+  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(peak(), 3, "three candidates should have been in flight together");
+});
+
+test("concurrency of one generates candidates one at a time", async (t) => {
+  const { directory, peak } = await fanOutProject(
+    t,
+    [SQUARE_ASSEMBLY],
+    { generation: { maxCandidates: 3, maxAttempts: 1, concurrency: 1 } },
+  );
+
+  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(peak(), 1, "a candidate must be answered before the next is asked for");
+  // One record per candidate, whatever order they were produced in.
+  assert.deepEqual(outcome.candidates.map((entry) => entry.id), ["c1", "c2", "c3"]);
+  assert.deepEqual(outcome.candidates.map((entry) => entry.candidate), [1, 2, 3]);
+});
 
 test("without --debug the prompts stay out of the way", async (t) => {
   const endpoint = await chatEndpoint(t, [SQUARE_ASSEMBLY]);

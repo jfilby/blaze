@@ -69,6 +69,8 @@ Options:
                             from the contract alone
   --max-attempts <n>        attempts per candidate: the first generates, the
                             rest repair the output the last one was rejected for
+  --concurrency <n>          candidates to generate at the same time (default 4);
+                            verification and benchmarking stay serial
   --debug                   print the prompt sent to the model for every attempt
   --random-cases <n>        randomized test cases per build
   --max-length <n>          maximum generated buffer length
@@ -143,6 +145,9 @@ function buildOptions(values: Record<string, unknown>): BuildOptions {
     ...(optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") === undefined
       ? {}
       : { maxAttempts: optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") }),
+    ...(optionNumber(values["concurrency"] as string | undefined, "--concurrency") === undefined
+      ? {}
+      : { concurrency: optionNumber(values["concurrency"] as string | undefined, "--concurrency") }),
     ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases") === undefined
       ? {}
       : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases") }),
@@ -179,6 +184,7 @@ async function main(argv: string[]): Promise<number> {
       debug: { type: "boolean" },
       "max-candidates": { type: "string" },
       "max-attempts": { type: "string" },
+      concurrency: { type: "string" },
       "random-cases": { type: "string" },
       "max-length": { type: "string" },
       help: { type: "boolean", short: "h" },

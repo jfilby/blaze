@@ -143,6 +143,15 @@ export interface GenerationConfig {
    */
   maxAttempts: number;
   /**
+   * Candidates generated at the same time. Candidates never wait on each
+   * other, only on their own previous attempt, so this is how much of the
+   * model latency a build overlaps. 1 generates one candidate at a time.
+   * Verification and benchmarking are never overlapped: candidates are
+   * compared on measured speed, and that comparison is only meaningful when
+   * nothing else is competing for the machine.
+   */
+  concurrency: number;
+  /**
    * Optional wall clock budget for one model request, retries included. Unset
    * means wait as long as the model takes.
    */
@@ -225,6 +234,7 @@ export interface SourceInput {
 export const DEFAULT_GENERATION: GenerationConfig = {
   maxCandidates: 5,
   maxAttempts: 3,
+  concurrency: 4,
 };
 
 export const DEFAULT_TEST: TestConfig = {

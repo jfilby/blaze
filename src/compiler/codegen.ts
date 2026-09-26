@@ -18,7 +18,7 @@ import { buildWasm } from "./toolchain/wasm.ts";
 import { compileC } from "./toolchain/csource.ts";
 import { generateHarness, link } from "./toolchain/linker.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
-import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
+import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } from "./runtime/standalone.ts";
 import { writeFile } from "node:fs/promises";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { AiBackend } from "./ai/backend.ts";
@@ -142,6 +142,34 @@ export interface CandidateEvaluationRequest {
   test: TestConfig;
   benchmark: BenchmarkConfig;
   runtime: RuntimeKind;
+  /**
+   * Writes and compiles the compiler runtime, once for the whole build. Every
+   * native candidate links against the same runtime, and candidates can be
+   * generated at the same time, so two of them writing the same header would
+   * race. Returns undefined for a WebAssembly build, which links no runtime.
+   */
+  prepareRuntime: () => Promise<StandaloneRuntime | undefined>;
+}
+
+/**
+ * Builds the runtime once and hands the same one to every candidate. Callers
+ * own the result, so nothing is shared but the promise.
+ */
+export function runtimePreparer(request: {
+  output: OutputKind;
+  runtime: RuntimeKind;
+  workspace: CodegenWorkspace;
+}): () => Promise<StandaloneRuntime | undefined> {
+  let pending: Promise<StandaloneRuntime | undefined> | null = null;
+  return () => {
+    pending ??= (async (): Promise<StandaloneRuntime | undefined> => {
+      if (request.output === "wasm") return undefined;
+      if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory);
+      await writeRuntimeHeader(request.workspace.workDirectory);
+      return undefined;
+    })();
+    return pending;
+  };
 }
 
 /** A candidate built far enough to be executed. */
@@ -175,12 +203,9 @@ async function materialize(
     return { runner: module.runner, sizeBytes: module.moduleSizeBytes, textSizeBytes: 0, implementationPath: paths.implementation };
   }
   // The ABI header exists before the candidate is compiled: a C candidate may
-  // include it, and the harness always does.
-  const runtime =
-    request.runtime === "none"
-      ? await buildStandaloneRuntime(request.workspace.workDirectory)
-      : undefined;
-  if (runtime === undefined) await writeRuntimeHeader(request.workspace.workDirectory);
+  // include it, and the harness always does. It is written and compiled once
+  // for the whole build, not once per candidate.
+  const runtime = await request.prepareRuntime();
 
   const object =
     request.output === "c"
@@ -357,46 +382,76 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
   let backend: AiBackend | null = null;
   const generationBackend = (): AiBackend => (backend ??= request.backend());
 
-  const { maxAttempts, maxCandidates } = request.generation;
+  const { maxAttempts, maxCandidates, concurrency } = request.generation;
   // Candidate records are numbered from the stored ones, so a build that reuses
   // assembly keeps naming the implementations it already wrote.
-  let sequence = request.existing.length;
+  const firstSequence = request.existing.length;
   let modelDurationNs = 0n;
 
-  // Candidates are independent. Each is generated from the contract alone and
-  // is then repaired in place for as long as the toolchain rejects it. A repair
-  // receives everything that candidate has collected so far, not just the last
-  // round, and nothing crosses into the next candidate.
-  for (let candidate = 1; candidate <= maxCandidates; candidate += 1) {
-    const diagnostics: string[] = [];
-    let rejected: AssemblyCandidate | undefined;
+  // Each candidate owns a contiguous block of records and collects its own, so
+  // the build reads the same way whatever order the candidates finish in.
+  const chains = Array.from({ length: maxCandidates }, () => ({
+    candidates: [] as AssemblyCandidate[],
+    outcomes: [] as CandidateOutcome[],
+  }));
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      request.onGenerate?.({ candidate, candidates: maxCandidates, attempt, attempts: maxAttempts, repair: attempt > 1 });
-      const startedAt = process.hrtime.bigint();
-      sequence += 1;
-      const generated = await generationBackend().generate(
-        {
-          contract: request.contract,
-          target: request.target,
-          output: request.output,
-          runtime: request.runtime,
-          candidate,
-          attempt,
-          ...(rejected === undefined ? {} : { previous: rejected.assembly }),
-          ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
-        },
-        sequence,
-      );
-      modelDurationNs += process.hrtime.bigint() - startedAt;
-      candidates.push(generated);
-      rejected = generated;
+  // Candidates are independent chains. One is generated from the contract alone
+  // and is then repaired in place for as long as the toolchain rejects it; a
+  // repair receives everything that candidate has collected so far, not just
+  // the last round, and nothing crosses into the next candidate. A candidate
+  // only ever waits on its own previous attempt, so chains overlap: a repair
+  // runs while the candidates that are still generating keep going.
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < chains.length) {
+      const index = next;
+      next += 1;
+      const chain = chains[index];
+      const candidate = index + 1;
+      const diagnostics: string[] = [];
+      let rejected: AssemblyCandidate | undefined;
 
-      const outcome = await evaluateCandidate(request, generated, benchmarkVector, demoRequest);
-      outcomes.push(outcome);
-      if (outcome.valid) break;
-      diagnostics.push(diagnosticFor(outcome.failure, attempt));
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        request.onGenerate?.({ candidate, candidates: maxCandidates, attempt, attempts: maxAttempts, repair: attempt > 1 });
+        const startedAt = process.hrtime.bigint();
+        const generated = await generationBackend().generate(
+          {
+            contract: request.contract,
+            target: request.target,
+            output: request.output,
+            runtime: request.runtime,
+            candidate,
+            attempt,
+            ...(rejected === undefined ? {} : { previous: rejected.assembly }),
+            ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
+          },
+          firstSequence + index * maxAttempts + attempt,
+        );
+        modelDurationNs += process.hrtime.bigint() - startedAt;
+        chain.candidates.push(generated);
+        rejected = generated;
+
+        // Verification and benchmarking are blocking, so candidates are measured
+        // one at a time even though they were generated together.
+        const outcome = await evaluateCandidate(request, generated, benchmarkVector, demoRequest);
+        chain.outcomes.push(outcome);
+        if (outcome.valid) break;
+        diagnostics.push(diagnosticFor(outcome.failure, attempt));
+      }
     }
+  };
+
+  const workers = Math.max(1, Math.min(concurrency, maxCandidates));
+  // A request that fails outright fails the build, so every chain is allowed to
+  // settle before the first failure is reported: a chain that is still running
+  // must not go on writing work files after the build has given up on it.
+  const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()));
+  const failure = settled.find((entry) => entry.status === "rejected");
+  if (failure !== undefined && failure.status === "rejected") throw failure.reason;
+
+  for (const chain of chains) {
+    candidates.push(...chain.candidates);
+    outcomes.push(...chain.outcomes);
   }
 
   if (candidates.length === 0) {
@@ -439,6 +494,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       workspace: request.workspace,
       test: request.test,
       benchmark: request.benchmark,
+      prepareRuntime: request.prepareRuntime,
     },
     request.candidate,
     benchmarkVector,

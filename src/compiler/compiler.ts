@@ -16,7 +16,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { createBackend, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { assertAssemblerSupportsArch } from "./toolchain/assembler.ts";
-import { evaluateStoredCandidate, generateCandidates, implementationLabel } from "./codegen.ts";
+import { evaluateStoredCandidate, generateCandidates, implementationLabel, runtimePreparer } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, hashText, hashValue, type JsonStore } from "./core/json-store.ts";
 import { frontendFor } from "./semantics/frontend.ts";
@@ -57,6 +57,8 @@ export interface BuildOptions {
   reuse: boolean;
   maxCandidates?: number;
   maxAttempts?: number;
+  /** Candidates generated at the same time; 1 generates them one at a time. */
+  concurrency?: number;
   randomCases?: number;
   maxLength?: number;
   /** What the build delivers; overrides the input file. */
@@ -327,6 +329,7 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
   return {
     maxCandidates: options.maxCandidates ?? input.generation?.maxCandidates ?? DEFAULT_GENERATION.maxCandidates,
     maxAttempts: options.maxAttempts ?? input.generation?.maxAttempts ?? DEFAULT_GENERATION.maxAttempts,
+    concurrency: options.concurrency ?? input.generation?.concurrency ?? DEFAULT_GENERATION.concurrency,
     timeoutSeconds: input.generation?.timeoutSeconds ?? DEFAULT_GENERATION.timeoutSeconds,
   };
 }
@@ -425,6 +428,7 @@ export async function runBuild(
       existing.push(...(await store.read<AssemblyCandidate[]>(paths.candidates)));
     }
 
+    const workspace = { workDirectory: store.resolve(paths.work), functionName: contract.function.name };
     const generation = generateCandidates({
       contract,
       parsed,
@@ -439,7 +443,8 @@ export async function runBuild(
       generation: generationConfigFor(input, options),
       test: testConfigFor(input, options),
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
-      workspace: { workDirectory: store.resolve(paths.work), functionName: contract.function.name },
+      workspace,
+      prepareRuntime: runtimePreparer({ output: outputKind, runtime: runtimeKind, workspace }),
       existing,
       onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
         reporter.stage(
@@ -623,14 +628,18 @@ export async function runStored(
   }
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
+  const output = build?.outputKind ?? "machine";
+  const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
+  const workspace = { workDirectory: store.resolve(paths.work), functionName: contract.function.name };
   const result = await evaluateStoredCandidate({
     contract,
     parsed,
     target: contract.target,
-    output: build?.outputKind ?? "machine",
-    runtime: resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, build?.outputKind ?? "machine"),
+    output,
+    runtime,
     candidate: target,
-    workspace: { workDirectory: store.resolve(paths.work), functionName: contract.function.name },
+    workspace,
+    prepareRuntime: runtimePreparer({ output, runtime, workspace }),
     test: testConfigFor(input, options),
     benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
   });

@@ -190,7 +190,6 @@ export class ReplayBackend implements AiBackend {
   readonly id: string;
   private readonly configuration: ModelConfiguration;
   private entries: string[] | null = null;
-  private cursor = 0;
 
   constructor(configuration: ModelConfiguration) {
     this.configuration = configuration;
@@ -229,8 +228,10 @@ export class ReplayBackend implements AiBackend {
 
   async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
     const entries = await this.load();
-    const entry = entries[Math.min(this.cursor, entries.length - 1)];
-    this.cursor += 1;
+    // Answers are served by record position, not by a shared cursor: candidates
+    // are generated at the same time, and a cursor would hand them out in
+    // whatever order they happened to reach the backend.
+    const entry = entries[Math.min(sequence - 1, entries.length - 1)];
     return {
       id: `c${sequence}`,
       assembly: extractAssembly(entry),
