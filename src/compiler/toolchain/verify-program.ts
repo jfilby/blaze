@@ -59,6 +59,11 @@ function firstDifference(expected: string, actual: string): ProgramDifference | 
   return null;
 }
 
+/** What a program printed before it failed, so a report says where it stopped. */
+function describeOutput(printed: string): string {
+  return printed === "" ? "" : `it printed:\n${printed.slice(0, 400)}\n`;
+}
+
 /**
  * Runs the source and the delivered binary, and compares what they print. The
  * source is the specification: a binary that says anything else is wrong, even
@@ -96,12 +101,20 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   }
 
   const binary = run(request.runner.command, [...request.runner.args, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
-  if (binary.code !== 0) {
+  const printed = binary.stdout.trim();
+  const failed = binary.timedOut
+    ? "the delivered program did not finish"
+    : binary.signal !== null
+      ? `the delivered program was terminated by ${binary.signal}`
+      : binary.code !== 0
+        ? `the delivered program exited with status ${binary.code}`
+        : null;
+  if (failed !== null) {
     throw new CompilerError({
       category: "VerificationError",
       stage: "verify",
-      message: "the delivered program did not finish",
-      detail: `${formatCommand(request.runner.command, [...request.runner.args, ...arguments_])}\n${binary.stderr.trim()}`,
+      message: failed,
+      detail: `${formatCommand(request.runner.command, [...request.runner.args, ...arguments_])}\n${describeOutput(printed)}${binary.stderr.trim()}`,
     });
   }
 

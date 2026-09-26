@@ -1276,6 +1276,10 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
  * the program contract, the target and the module source are what a backend
  * writes from, and the compiler checks the result by running the program.
  */
+/** The symbol a program entry named `main` is compiled under: a program is
+ *  hosted by one that has a `main` of its own, so the two cannot share it. */
+const PROGRAM_ENTRY_SYMBOL = "blaze_main";
+
 function definitionContract(declaration: TypeScriptFunction, input: SourceInput): FunctionContract {
   const usage = usageOf(declaration.body);
   const effects: Effect[] = [];
@@ -1286,7 +1290,7 @@ function definitionContract(declaration: TypeScriptFunction, input: SourceInput)
     version: "1",
     function: {
       name: declaration.name,
-      symbol: declaration.name === "main" ? "blaze_main" : declaration.name,
+      symbol: declaration.name === "main" ? PROGRAM_ENTRY_SYMBOL : declaration.name,
       params: declaration.params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
       returns: typeToString(declaration.returns),
     },
@@ -1700,6 +1704,7 @@ export const typeScriptFrontend: Frontend = {
     }
     return assembleContract({
       name: declaration.name,
+      symbol: declaration.name === "main" ? PROGRAM_ENTRY_SYMBOL : declaration.name,
       params: declaration.params,
       returns: declaration.returns,
       result: body.result,

@@ -189,12 +189,11 @@ function vectorCounters(types: readonly TypeExpr[], names: readonly string[]): s
 
 /** Reads the header line of the next vector into the static arguments. */
 function headerReader(types: readonly TypeExpr[], names: readonly string[]): string {
-  const body: string[] = [
-    "  if (getline(&input_line, &input_capacity, input) <= 0) return 0;",
-    "  if (is_blank(input_line)) return read_header();",
-    "  char* cursor = input_line;",
-  ];
-
+  const body: string[] = ["  if (getline(&input_line, &input_capacity, input) <= 0) return 0;"];
+  // A vector of a function that takes nothing is an empty line, so a blank one
+  // is only a line to skip where there are arguments on it to read.
+  if (types.length > 0) body.push("  if (is_blank(input_line)) return read_header();");
+  body.push("  char* cursor = input_line;");
   types.forEach((type, index) => {
     const name = names[index];
     if (type.kind === "primitive") {

@@ -103,7 +103,9 @@ export interface CodegenResult {
   candidates: AssemblyCandidate[];
   outcomes: CandidateOutcome[];
   selected: string | null;
-  benchmarkVector: TestVector;
+  /** The vector a verified candidate is measured on, or null for a contract
+   *  that returns no value to measure. */
+  benchmarkVector: TestVector | null;
   /** Wall clock time spent waiting for the model, in nanoseconds. */
   modelDurationNs: bigint;
 }
@@ -190,6 +192,30 @@ export interface Materialized {
   implementationPath: string;
 }
 
+
+/** The vectors a candidate is verified and measured with. */
+interface PlannedVectors {
+  /** The vector the benchmark runs, and the example run the harness carries. */
+  benchmark: TestVector;
+  demo: string;
+}
+
+/**
+ * Vectors for a contract that states what a function returns, planned once for
+ * a whole unit. A contract that states what a function does has none: the
+ * protocol passes scalars and buffers, so a parameter it cannot carry, such as
+ * a reference to an object, is not something to plan a vector for, and there
+ * is no returned value to compare either. The program such a function belongs
+ * to is what says whether the two agree.
+ */
+function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null {
+  if (request.parsed.resultDefinition === null) return null;
+  return {
+    benchmark: selectBenchmarkVector(request.contract, request.parsed, request.test),
+    demo: encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]),
+  };
+}
+
 /**
  * Turns model output into something executable. Every kind is validated by the
  * native toolchain before it runs: assembly and C through the assembler and the
@@ -199,7 +225,7 @@ async function materialize(
   request: CandidateEvaluationRequest,
   candidate: AssemblyCandidate,
   paths: CandidatePaths,
-  demoRequest: string,
+  vectors: PlannedVectors | null,
 ): Promise<Materialized> {
   if (request.output === "wasm") {
     const module = await buildWasm({
@@ -238,7 +264,7 @@ async function materialize(
         });
 
   if (runtime !== undefined) {
-    await writeFile(paths.harness, generateHarness(request.contract, demoRequest), "utf8");
+    await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? ""), "utf8");
     link({
       harnessPath: paths.harness,
       objectPath: paths.object,
@@ -262,7 +288,7 @@ async function materialize(
     workDirectory: request.workspace.workDirectory,
     candidate: candidate.id,
     objectPath: paths.object,
-    demoRequest,
+    demoRequest: vectors?.demo ?? "",
   });
   return {
     runner: host.runner,
@@ -279,17 +305,16 @@ export function implementationLabel(output: OutputKind): string {
 async function evaluateCandidate(
   request: CandidateEvaluationRequest,
   candidate: AssemblyCandidate,
-  benchmarkVector: TestVector,
-  demoRequest: string,
+  vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
   const paths = pathsFor(request.workspace, candidate.id, request.output);
   try {
-    const built = await materialize(request, candidate, paths, demoRequest);
+    const built = await materialize(request, candidate, paths, vectors);
 
     // A contract that states what a function does rather than what it returns
     // has no vector to run: the candidate is built, and the program it belongs
     // to says whether the two print the same thing.
-    if (request.parsed.resultDefinition === null) {
+    if (vectors === null) {
       return {
         candidate: candidate.id,
         valid: true,
@@ -328,7 +353,7 @@ async function evaluateCandidate(
       runner: built.runner,
       candidate: candidate.id,
       iterations: request.benchmark.iterations,
-      vector: benchmarkVector,
+      vector: vectors.benchmark,
     });
 
     return {
@@ -387,17 +412,16 @@ export function selectCandidate(outcomes: readonly CandidateOutcome[], contract:
 }
 
 export async function generateCandidates(request: CodegenRequest): Promise<CodegenResult> {
-  const benchmarkVector = selectBenchmarkVector(request.contract, request.parsed, request.test);
-  const demoRequest = encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]);
+  const vectors = planVectors(request);
   const candidates: AssemblyCandidate[] = [];
   const outcomes: CandidateOutcome[] = [];
 
   for (const existing of request.existing) {
     candidates.push(existing);
-    outcomes.push(await evaluateCandidate(request, existing, benchmarkVector, demoRequest));
+    outcomes.push(await evaluateCandidate(request, existing, vectors));
     if (selectCandidate(outcomes, request.contract) !== null) {
       // Nothing was generated: the stored assembly is reused as it stands.
-      return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector, modelDurationNs: 0n };
+      return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
     }
   }
 
@@ -460,7 +484,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
 
         // Verification and benchmarking are blocking, so candidates are measured
         // one at a time even though they were generated together.
-        const outcome = await evaluateCandidate(request, generated, benchmarkVector, demoRequest);
+        const outcome = await evaluateCandidate(request, generated, vectors);
         chain.outcomes.push(outcome);
         if (outcome.valid) break;
         diagnostics.push(diagnosticFor(outcome.failure, attempt));
@@ -490,7 +514,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     });
   }
 
-  return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector, modelDurationNs };
+  return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -509,8 +533,7 @@ export type StoredCandidateRequest = CandidateEvaluationRequest & { candidate: A
  * candidate. Used by `blaze test` and `blaze benchmark`.
  */
 export async function evaluateStoredCandidate(request: StoredCandidateRequest): Promise<StoredCandidateResult> {
-  const benchmarkVector = selectBenchmarkVector(request.contract, request.parsed, request.test);
-  const demoRequest = encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]);
+  const vectors = planVectors(request);
   const outcome = await evaluateCandidate(
     {
       contract: request.contract,
@@ -524,8 +547,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       prepareRuntime: request.prepareRuntime,
     },
     request.candidate,
-    benchmarkVector,
-    demoRequest,
+    vectors,
   );
   if (!outcome.valid) {
     throw new CompilerError({

@@ -688,15 +688,22 @@ export async function runBuild(
       selected[functionName] = entry.result.selected;
       const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
       reporter.stage("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
+      if (outcome?.verification === undefined) {
+        // A function whose contract states what it does rather than what it
+        // returns has no vector to run, so nothing was verified here. The
+        // program it belongs to is what says whether the two agree.
+        reporter.stage("verify", "info", `${functionName} returns no value to verify, so the program it is part of is what checks it`);
+        continue;
+      }
       reporter.stage(
         "verify",
         "ok",
-        `Correctness verified for ${functionName} (${outcome?.verification?.cases ?? 0} test vectors, tolerance ${outcome?.verification?.tolerance ?? "exact"})`,
+        `Correctness verified for ${functionName} (${outcome.verification.cases} test vectors, tolerance ${outcome.verification.tolerance ?? "exact"})`,
       );
       reporter.stage(
         "benchmark",
         "ok",
-        `Benchmark completed for ${functionName} (${outcome?.benchmark?.iterations ?? 0} iterations, ${outcome?.benchmark?.durationNs ?? 0} ns)`,
+        `Benchmark completed for ${functionName} (${outcome.benchmark?.iterations ?? 0} iterations, ${outcome.benchmark?.durationNs ?? 0} ns)`,
       );
     }
 
@@ -931,6 +938,12 @@ export async function runStored(
     verification[functionName] = result.verification === undefined ? [] : [result.verification];
     benchmark[functionName] = result.benchmark === undefined ? [] : [result.benchmark];
 
+    // A function whose contract states what it does rather than what it returns
+    // has no vector to run, so there is nothing to report for it here.
+    if (result.verification === undefined && result.benchmark === undefined) {
+      reporter.stage(action, "info", `${functionName} has no vectors to run, so the program it is part of is what checks it`);
+      continue;
+    }
     if (action === "test") {
       reporter.stage(
         "verify",

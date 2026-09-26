@@ -304,7 +304,9 @@ export function inspectObject(objectPath: string, functionName: string, candidat
 
 /** Validates, assembles and inspects one candidate. */
 export async function assemble(request: AssembleRequest): Promise<AssembleResult> {
-  const functionName = request.contract.function.name;
+  // The symbol the candidate is asked to define is the one the contract names,
+  // which is not the function's name when a program entry carries its own.
+  const functionName = symbolOf(request.contract);
   validateAssembly(request.assembly, request.contract, request.candidate);
 
   const directive = archDirective(request.target);

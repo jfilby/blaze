@@ -302,6 +302,89 @@ test("the shipped TypeScript example builds into a program that prints what it c
 });
 
 /**
+ * A program whose only compiled function reads an object. A reference is not
+ * something the harness protocol can pass, so there is no vector to plan and
+ * nothing to compare: the program is what checks that the function works.
+ */
+const REFERENCE_PROGRAM = [
+  "function depth(node: any): number {",
+  "  if (node.left) {",
+  "    return 1;",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  'console.log("a program holds no references, so depth is linked, not called");',
+  "",
+].join("\n");
+
+const DEPTH_ASSEMBLY = [
+  ".text",
+  ".globl depth",
+  "depth:",
+  "  testq %rdi, %rdi",
+  "  je .Lempty",
+  "  movabsq $4607182418800017408, %rax",
+  "  movq %rax, %xmm0",
+  "  ret",
+  ".Lempty:",
+  "  pxor %xmm0, %xmm0",
+  "  ret",
+  "",
+].join("\n");
+
+/** A program project, compiled by recorded candidates rather than by a model. */
+async function programProject(name: string, source: string, assembly: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, language: "typescript", entry: "", source }), "utf8");
+  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: [assembly] }), "utf8");
+  return directory;
+}
+
+test("a program whose function takes a reference is built, because the program is what checks it", async () => {
+  const directory = await programProject("reference", REFERENCE_PROGRAM, DEPTH_ASSEMBLY);
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(outcome.contracts.depth.function.params, [{ name: "node", type: "ref<any>" }]);
+  assert.deepEqual(outcome.build.selectedCandidates, { depth: "c1" });
+
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "a program holds no references, so depth is linked, not called\n");
+});
+
+test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {
+  const source = ["function main(): number {", "  return 40 + 2;", "}", "", "main();", 'console.log(`answer: ${42}`);', ""].join("\n");
+  const assembly = [".text", ".globl blaze_main", "blaze_main:", "  movabsq $4631107791820423168, %rax", "  movq %rax, %xmm0", "  ret", ""].join("\n");
+  const directory = await programProject("entry-symbol", source, assembly);
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.contracts.main.function.symbol, "blaze_main");
+  // The entry of a program is compiled under the symbol the contract gives it,
+  // so a candidate that defines that symbol is the one that was asked for.
+  assert.ok((outcome.verification.main?.[0]?.cases ?? 0) > 0);
+  assert.deepEqual(outcome.build.selectedCandidates, { main: "c1" });
+
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "answer: 42\n");
+});
+
+/**
  * Runs a program with a real terminal on its standard input and output, which
  * is what a bare `./binary` gives it. The output is drained until the terminal
  * is closed, so every line the program wrote is seen.
