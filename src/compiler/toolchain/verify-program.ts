@@ -14,17 +14,13 @@
 
 import { formatCommand, run } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
-import type { Runner } from "../core/types.ts";
+import type { ProgramMismatch, Runner } from "../core/types.ts";
 
 /** The language a source is checked against. */
 const TOOLCHAIN: Record<string, string> = { typescript: "node", ts: "node" };
 
-/** One line of the first difference between two programs. */
-export interface ProgramDifference {
-  line: number;
-  expected: string;
-  actual: string;
-}
+/** One line of the first difference between two programs, with both outputs. */
+export type { ProgramMismatch };
 
 export interface ProgramVerification {
   passed: boolean;
@@ -32,7 +28,7 @@ export interface ProgramVerification {
   expected: string;
   /** What the delivered binary printed. */
   actual: string;
-  difference?: ProgramDifference;
+  difference?: ProgramMismatch;
 }
 
 export interface ProgramVerificationRequest {
@@ -47,14 +43,19 @@ export interface ProgramVerificationRequest {
   arguments?: readonly string[];
 }
 
-/** The first line where two outputs differ, or null when they are the same. */
-function firstDifference(expected: string, actual: string): ProgramDifference | null {
+/**
+ * Where two outputs first differ, with both of them: a repair is shown what
+ * the program said and what it should have said, not only the one line.
+ */
+function firstDifference(expected: string, actual: string): ProgramMismatch | null {
   const expectedLines = expected.split("\n");
   const actualLines = actual.split("\n");
   for (let index = 0; index < Math.max(expectedLines.length, actualLines.length); index += 1) {
     const left = expectedLines[index] ?? "";
     const right = actualLines[index] ?? "";
-    if (left !== right) return { line: index + 1, expected: left, actual: right };
+    if (left !== right) {
+      return { line: index + 1, expected: left, actual: right, expectedOutput: expected, actualOutput: actual };
+    }
   }
   return null;
 }

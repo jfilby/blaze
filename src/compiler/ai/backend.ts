@@ -191,7 +191,7 @@ export class VercelAiBackend implements AiBackend {
    * candidate one of its repair attempts.
    */
   async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
-    const system = buildSystemPrompt();
+    const system = buildSystemPrompt(request.output);
     const user = buildUserPrompt(request);
     this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();

@@ -112,6 +112,16 @@ export function sysvArgumentLocations(params: readonly FunctionParam[]): string 
   return locations.length === 0 ? "no arguments" : locations.join(", ");
 }
 
+/**
+ * System V AMD64 return location, so a model knows where to leave the result.
+ * The harness and the driver declare the function in C, so this is the
+ * convention the C compiler reads the return value by.
+ */
+export function sysvReturnLocation(type: TypeExpr): string {
+  if (type.kind === "void") return "nothing: the function returns no value";
+  return isFloatScalar(type) ? "xmm0" : "rax";
+}
+
 /* -------------------------------------------------------------------------- */
 /* Harness generation                                                         */
 /* -------------------------------------------------------------------------- */

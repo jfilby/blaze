@@ -100,6 +100,7 @@ test("the prompt tells the model which runtime entry points it may call", () => 
     output: "machine",
     candidate: 1,
     attempt: 1,
+    candidates: 1,
   };
 
   const hosted = buildUserPrompt({ ...request, runtime: "nim" });

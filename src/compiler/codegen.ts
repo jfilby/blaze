@@ -23,6 +23,7 @@ import { writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { AiBackend } from "./ai/backend.ts";
+import type { ProgramFailure } from "./ai/prompt.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
 import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
@@ -92,6 +93,19 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   workspace: CodegenWorkspace;
   /** Candidates from a previous build, tried before asking the model again. */
   existing: AssemblyCandidate[];
+  /**
+   * What the program printed where its source prints something else, with the
+   * implementation this function contributed to it. A contract that states
+   * what a function does has no vector of its own, so the program is the only
+   * oracle it has, and this is the only diagnostic such a function ever gets.
+   */
+  programFailure?: ProgramFailure;
+  /**
+   * Where this round's candidate numbering starts. A build that regenerates
+   * after a program mismatch passes what the round before it wrote, so the two
+   * rounds name different implementations on disk.
+   */
+  sequenceStart?: number;
   /**
    * Called just before a request goes out. A model can take minutes, so the
    * compiler says it is waiting rather than looking stuck.
@@ -431,9 +445,10 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
   const generationBackend = (): AiBackend => (backend ??= request.backend());
 
   const { maxAttempts, maxCandidates, concurrency } = request.generation;
-  // Candidate records are numbered from the stored ones, so a build that reuses
-  // assembly keeps naming the implementations it already wrote.
-  const firstSequence = request.existing.length;
+  // Candidate records are numbered from the stored ones and from whatever a
+  // previous round of this build already wrote, so a build that regenerates
+  // after a program mismatch never writes over the candidates it is replacing.
+  const firstSequence = request.existing.length + (request.sequenceStart ?? 0);
   let modelDurationNs = 0n;
 
   // Each candidate owns a contiguous block of records and collects its own, so
@@ -443,12 +458,14 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     outcomes: [] as CandidateOutcome[],
   }));
 
-  // Candidates are independent chains. One is generated from the contract alone
-  // and is then repaired in place for as long as the toolchain rejects it; a
-  // repair receives everything that candidate has collected so far, not just
-  // the last round, and nothing crosses into the next candidate. A candidate
-  // only ever waits on its own previous attempt, so chains overlap: a repair
-  // runs while the candidates that are still generating keep going.
+  // Candidates are independent chains. One is generated from the contract
+  // alone, or from the implementation a program rejected when the build is
+  // repairing a program, and is then repaired in place for as long as the
+  // toolchain rejects it; a repair receives everything that candidate has
+  // collected so far, not just the last round, and nothing crosses into the
+  // next candidate. A candidate only ever waits on its own previous attempt, so
+  // chains overlap: a repair runs while the candidates that are still
+  // generating keep going.
   let next = 0;
   const worker = async (): Promise<void> => {
     while (next < chains.length) {
@@ -457,10 +474,20 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
       const chain = chains[index];
       const candidate = index + 1;
       const diagnostics: string[] = [];
-      let rejected: AssemblyCandidate | undefined;
+      // A program that printed something other than what its source prints is
+      // the only diagnostic a contract of this shape ever earns, so a round
+      // generated after one repairs the implementation that produced it rather
+      // than starting blind from the contract.
+      let previous = request.programFailure?.previous;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        request.onGenerate?.({ candidate, candidates: maxCandidates, attempt, attempts: maxAttempts, repair: attempt > 1 });
+        request.onGenerate?.({
+          candidate,
+          candidates: maxCandidates,
+          attempt,
+          attempts: maxAttempts,
+          repair: previous !== undefined,
+        });
         const startedAt = process.hrtime.bigint();
         const generated = await generationBackend().generate(
           {
@@ -472,15 +499,17 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
             output: request.output,
             runtime: request.runtime,
             candidate,
+            candidates: maxCandidates,
             attempt,
-            ...(rejected === undefined ? {} : { previous: rejected.assembly }),
+            ...(previous === undefined ? {} : { previous }),
+            ...(request.programFailure === undefined ? {} : { programFailure: request.programFailure }),
             ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
           },
           firstSequence + index * maxAttempts + attempt,
         );
         modelDurationNs += process.hrtime.bigint() - startedAt;
         chain.candidates.push(generated);
-        rejected = generated;
+        previous = generated.assembly;
 
         // Verification and benchmarking are blocking, so candidates are measured
         // one at a time even though they were generated together.

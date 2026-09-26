@@ -21,10 +21,10 @@ import { createBackend, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import type { ProgramBody } from "./semantics/module.ts";
+import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { resolveProgram } from "./toolchain/program.ts";
-import { verifyProgram } from "./toolchain/verify-program.ts";
 import { assertAssemblerSupportsArch } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
@@ -39,6 +39,7 @@ import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel } from "./ai/model.ts";
 import { assertBuildableTarget, normalizeTarget } from "./core/target.ts";
 import {
+  type ProgramMismatch,
   DEFAULT_BENCHMARK,
   DEFAULT_GENERATION,
   DEFAULT_TEST,
@@ -62,6 +63,15 @@ import {
 
 export const COMPILER_VERSION = "0.1.0";
 export const STATE_DIRECTORY = ".blaze";
+
+/**
+ * How many times a build regenerates a program that did not print what its
+ * source prints. Every round costs a full generation of the functions the
+ * program is the only oracle for, so this is deliberately small: the loop is
+ * for a program that is one mistake away from agreeing, not for one that is
+ * not going to.
+ */
+const PROGRAM_REPAIR_ROUNDS = 2;
 
 export interface Reporter {
   stage(stage: string, status: "ok" | "fail" | "info", message: string): void;
@@ -588,55 +598,229 @@ export async function runBuild(
     });
     const generation = generationConfigFor(input, options);
 
-    const generated: UnitGeneration[] = [];
-    for (const unit of units) {
-      const functionName = unit.contract.function.name;
-      const workspace = { workDirectory: `${base}/${functionName}`, functionName };
-      await mkdir(workspace.workDirectory, { recursive: true });
-      const result = await generateCandidates({
-        contract: unit.contract,
-        unitFile: unit.file,
-        parsed: unit.parsed,
-        program,
-        sources: phase.modules,
-        target,
-        output: outputKind,
-        runtime: runtimeKind,
-        backend: () =>
-          createBackend(model ?? resolveModel(requested), {
-            timeoutMs: requestTimeoutMs(input),
-            retries: generation.maxRetries,
-            onRetry: ({ candidate, attempt, retry, retries, reason }) => {
-              reporter.stage(
-                "generate",
-                "info",
-                `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
-              );
-            },
-            ...(options.debug === true ? { onPrompt: printPrompt } : {}),
-          }),
-        generation,
-        test: testConfigFor(input, options),
-        benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
-        workspace,
-        prepareRuntime,
-        existing: stored[functionName] ?? [],
-        onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
-          reporter.stage(
-            "generate",
-            "info",
-            `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
-          );
-        },
+    // What a round of generation produced, by function. A repair round replaces
+    // only the units it regenerates, so a program is never half rebuilt.
+    const generatedByFunction = new Map<string, UnitGeneration>();
+    const unitsGenerated = (): UnitGeneration[] =>
+      units.flatMap((unit) => {
+        const entry = generatedByFunction.get(unit.contract.function.name);
+        return entry === undefined ? [] : [entry];
       });
-      generated.push({ unit, result });
+    /** How many candidates a unit has written, so a round names new ones. */
+    const written = new Map<string, number>();
+
+    /** The implementation a unit contributed to the program that mismatched. */
+    const implementationOf = (functionName: string): string | undefined => {
+      const entry = generatedByFunction.get(functionName);
+      const selected = entry?.result.selected;
+      if (entry === undefined || selected === null || selected === undefined) return undefined;
+      return entry.result.candidates.find((candidate) => candidate.id === selected)?.assembly;
+    };
+
+    /**
+     * One round of generation. Every unit, unless the round is repairing a
+     * program: then only the units the program is the sole oracle for, because
+     * a function that was verified against its own contract cannot be what made
+     * the program print the wrong thing.
+     */
+    const generateUnits = async (mismatch: ProgramMismatch | undefined): Promise<void> => {
+      for (const unit of units) {
+        const functionName = unit.contract.function.name;
+        const previous = mismatch === undefined ? undefined : implementationOf(functionName);
+        if (mismatch !== undefined && (unit.contract.definition === undefined || previous === undefined)) continue;
+        const workspace = { workDirectory: `${base}/${functionName}`, functionName };
+        await mkdir(workspace.workDirectory, { recursive: true });
+        const sequenceStart = written.get(functionName) ?? 0;
+        const result = await generateCandidates({
+          contract: unit.contract,
+          unitFile: unit.file,
+          parsed: unit.parsed,
+          program,
+          sources: phase.modules,
+          target,
+          output: outputKind,
+          runtime: runtimeKind,
+          backend: () =>
+            createBackend(model ?? resolveModel(requested), {
+              timeoutMs: requestTimeoutMs(input),
+              retries: generation.maxRetries,
+              onRetry: ({ candidate, attempt, retry, retries, reason }) => {
+                reporter.stage(
+                  "generate",
+                  "info",
+                  `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
+                );
+              },
+              ...(options.debug === true ? { onPrompt: printPrompt } : {}),
+            }),
+          generation,
+          test: testConfigFor(input, options),
+          benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
+          workspace,
+          prepareRuntime,
+          // A repair round asks the model again, so the stored candidates of a
+          // reused build are not what it starts from.
+          existing: mismatch === undefined ? (stored[functionName] ?? []) : [],
+          sequenceStart,
+          ...(mismatch === undefined || previous === undefined
+            ? {}
+            : { programFailure: { mismatch, previous } }),
+          onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
+            reporter.stage(
+              "generate",
+              "info",
+              `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
+            );
+          },
+        });
+        written.set(functionName, sequenceStart + result.candidates.length);
+        generatedByFunction.set(functionName, { unit, result });
+      }
+    };
+
+    /** What every unit generated so far, as the build records it. */
+    const record = async (): Promise<Record<string, string>> => {
+      const generated = unitsGenerated();
+      const candidates: Record<string, AssemblyCandidate[]> = {};
+      const verification: Record<string, VerificationResult[]> = {};
+      const benchmark: Record<string, BenchmarkResult[]> = {};
+      const outcomes: Record<string, CandidateOutcome[]> = {};
+      const selected: Record<string, string> = {};
+      for (const entry of generated) {
+        const functionName = entry.unit.contract.function.name;
+        candidates[functionName] = entry.result.candidates;
+        outcomes[functionName] = entry.result.outcomes;
+        verification[functionName] = entry.result.outcomes
+          .map((outcome) => outcome.verification)
+          .filter((outcome): outcome is VerificationResult => outcome !== undefined);
+        benchmark[functionName] = entry.result.outcomes
+          .map((outcome) => outcome.benchmark)
+          .filter((outcome): outcome is BenchmarkResult => outcome !== undefined);
+        const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
+        reporter.stage(
+          "generate",
+          valid > 0 ? "ok" : "fail",
+          `${implementationLabel(outputKind)} generated for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
+        );
+        // What ships is what the toolchain built and verified, so a function
+        // with no valid candidate stops the build before anything is delivered.
+        if (entry.result.selected === null) {
+          const detail = entry.result.outcomes
+            .map(
+              (outcome) =>
+                `${outcome.candidate}: ${outcome.failure?.category ?? ""} ${outcome.failure?.message ?? ""}\n${outcome.failure?.detail ?? ""}`,
+            )
+            .join("\n");
+          throw new CompilerError({
+            category: "AiGenerationError",
+            stage: "verify",
+            message: `no candidate for ${functionName} satisfied the contract`,
+            function: functionName,
+            detail: detail.trim(),
+          });
+        }
+        selected[functionName] = entry.result.selected;
+      }
+      await store.write(paths.candidates, candidates);
+      await store.write(paths.generation, {
+        model: build.model,
+        modelConfig: build.modelConfig,
+        compilerVersion: COMPILER_VERSION,
+        functions: Object.fromEntries(
+          generated.map((entry) => [
+            entry.unit.contract.function.name,
+            {
+              file: entry.unit.file,
+              selected: entry.result.selected,
+              benchmarkVector: entry.result.benchmarkVector,
+              outcomes: entry.result.outcomes,
+            },
+          ]),
+        ),
+        modelDurationNs: String(
+          generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n),
+        ),
+      });
+      await store.write(paths.verification, verification);
+      await store.write(paths.benchmark, benchmark);
+      return selected;
+    };
+
+    // A function whose contract states what it does is not checked on its own:
+    // the program it belongs to is the only oracle it has, and only a build has
+    // that program. So a build generates, links and runs, and generates again
+    // with what the program printed until the two agree or the rounds run out.
+    const programRounds =
+      phase.body === undefined || mode !== "build" || options.reuse ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
+    let checked: ProgramVerification | undefined;
+    let mismatch: ProgramMismatch | undefined;
+    let selected: Record<string, string> = {};
+    // Resolving a program and writing out the source the toolchain runs are
+    // the same for every round: only the objects it links change.
+    const driver = phase.body === undefined ? undefined : resolveProgram(phase.body, program);
+    const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
+    for (let round = 1; round <= programRounds; round += 1) {
+      await generateUnits(mismatch);
+      selected = await record();
+      if (driver === undefined || programFile === undefined || mode !== "build") break;
+      const runtime = await prepareRuntime();
+      const objectPaths = unitsGenerated().map(
+        (entry) => `${base}/${entry.unit.contract.function.name}/${entry.result.selected as string}.o`,
+      );
+      const runner =
+        runtimeKind === "none"
+          ? await buildProgramDriver({
+              program: driver,
+              workDirectory: base,
+              objectPaths,
+              ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
+              outputPath: `${base}/program.exe`,
+            })
+          : await buildProgramHost({
+              program: driver,
+              workDirectory: base,
+              objectPaths,
+              outputPath: `${base}/program.exe`,
+            });
+      checked = await verifyProgram({
+        language: input.language,
+        sourcePath: programFile.path,
+        directory: project.directory,
+        runner,
+        arguments: options.arguments,
+      });
+      if (checked.passed || checked.difference === undefined) break;
+      mismatch = checked.difference;
+      if (round < programRounds) {
+        reporter.stage(
+          "verify",
+          "info",
+          `the program does not print what the source prints: line ${mismatch.line}, the source prints ${JSON.stringify(mismatch.expected)}, the program prints ${JSON.stringify(mismatch.actual)}; generating the functions it is the only oracle for again`,
+        );
+      }
+    }
+    if (checked !== undefined && !checked.passed) {
+      const difference = checked.difference;
+      throw new CompilerError({
+        category: "VerificationError",
+        stage: "verify",
+        message: "the program does not print what the source prints",
+        detail: `line ${difference?.line}: the source prints ${JSON.stringify(difference?.expected)}, the program prints ${JSON.stringify(difference?.actual)}`,
+      });
+    }
+    if (checked !== undefined) {
+      reporter.stage(
+        "verify",
+        "ok",
+        `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
+      );
     }
 
+    const generated = unitsGenerated();
     const candidates: Record<string, AssemblyCandidate[]> = {};
     const verification: Record<string, VerificationResult[]> = {};
     const benchmark: Record<string, BenchmarkResult[]> = {};
     const outcomes: Record<string, CandidateOutcome[]> = {};
-    const selected: Record<string, string> = {};
     for (const entry of generated) {
       const functionName = entry.unit.contract.function.name;
       candidates[functionName] = entry.result.candidates;
@@ -647,57 +831,6 @@ export async function runBuild(
       benchmark[functionName] = entry.result.outcomes
         .map((outcome) => outcome.benchmark)
         .filter((outcome): outcome is BenchmarkResult => outcome !== undefined);
-      const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
-      reporter.stage(
-        "generate",
-        valid > 0 ? "ok" : "fail",
-        `${implementationLabel(outputKind)} generated for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
-      );
-    }
-
-    await store.write(paths.candidates, candidates);
-    await store.write(paths.generation, {
-      model: build.model,
-      modelConfig: build.modelConfig,
-      compilerVersion: COMPILER_VERSION,
-      functions: Object.fromEntries(
-        generated.map((entry) => [
-          entry.unit.contract.function.name,
-          {
-            file: entry.unit.file,
-            selected: entry.result.selected,
-            benchmarkVector: entry.result.benchmarkVector,
-            outcomes: entry.result.outcomes,
-          },
-        ]),
-      ),
-      modelDurationNs: String(
-        generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n),
-      ),
-    });
-    await store.write(paths.verification, verification);
-    await store.write(paths.benchmark, benchmark);
-
-    // What ships is what the toolchain built and verified, so a function with
-    // no valid candidate stops the build before anything is delivered.
-    for (const entry of generated) {
-      const functionName = entry.unit.contract.function.name;
-      if (entry.result.selected === null) {
-        const detail = entry.result.outcomes
-          .map(
-            (outcome) =>
-              `${outcome.candidate}: ${outcome.failure?.category ?? ""} ${outcome.failure?.message ?? ""}\n${outcome.failure?.detail ?? ""}`,
-          )
-          .join("\n");
-        throw new CompilerError({
-          category: "AiGenerationError",
-          stage: "verify",
-          message: `no candidate for ${functionName} satisfied the contract`,
-          function: functionName,
-          detail: detail.trim(),
-        });
-      }
-      selected[functionName] = entry.result.selected;
       const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
       reporter.stage("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
       if (outcome?.verification === undefined) {
@@ -728,47 +861,8 @@ export async function runBuild(
         delivered.push(store.resolve(to));
       };
       if (phase.body !== undefined) {
-        const driver = resolveProgram(phase.body, program);
-        const runtime = await prepareRuntime();
-        const objectPaths = generated.map(
-          (entry) => `${base}/${entry.unit.contract.function.name}/${entry.result.selected as string}.o`,
-        );
-        const runner =
-          runtimeKind === "none"
-            ? await buildProgramDriver({
-                program: driver,
-                workDirectory: base,
-                objectPaths,
-                ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
-                outputPath: `${base}/program.exe`,
-              })
-            : await buildProgramHost({
-                program: driver,
-                workDirectory: base,
-                objectPaths,
-                outputPath: `${base}/program.exe`,
-              });
-        const source = await programSource(base, id, project, phase.body);
-        const checked = await verifyProgram({
-          language: input.language,
-          sourcePath: source.path,
-          directory: project.directory,
-          runner,
-          arguments: options.arguments,
-        });
-        if (!checked.passed) {
-          throw new CompilerError({
-            category: "VerificationError",
-            stage: "verify",
-            message: "the program does not print what the source prints",
-            detail: `line ${checked.difference?.line}: the source prints ${JSON.stringify(checked.difference?.expected)}, the program prints ${JSON.stringify(checked.difference?.actual)}`,
-          });
-        }
-        reporter.stage(
-          "verify",
-          "ok",
-          `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
-        );
+        // The program was linked and run above, by the round that agreed with
+        // the source, so what is delivered is what was checked.
         await deliver("program.exe", paths.outputBinary);
         await deliver(runtimeKind === "none" ? "program.c" : "program_host.nim", paths.outputProgram);
         outputPath = store.resolve(paths.outputBinary);

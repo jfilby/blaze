@@ -7,15 +7,30 @@
  * the module being written, the contract of every other file, and the imports
  * between them, so a backend never has to infer a cross-file contract. It
  * never dictates an implementation strategy.
+ *
+ * Everything the toolchain rejects a candidate for is stated in the prompt
+ * rather than left for the candidate to find out: the symbol to define, the
+ * labels and the calls a candidate may write, the registers it has to preserve,
+ * and what a candidate is checked against. A rule the assembler enforces and
+ * the prompt does not state is an attempt the model spends to learn it.
  */
 
-import type { FunctionContract, OutputKind, ProgramContract, RuntimeKind, SourceModule, TargetSpec, TypeExpr } from "../core/types.ts";
+import type {
+  FunctionContract,
+  OutputKind,
+  ProgramContract,
+  ProgramMismatch,
+  RuntimeKind,
+  SourceModule,
+  TargetSpec,
+  TypeExpr,
+} from "../core/types.ts";
 import type { Expression, Statement, TextPart } from "../core/ir.ts";
-import { isBufferType, parseType, typeToString } from "../semantics/contract.ts";
+import { isBufferType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { cSignature, cSourceRules } from "../toolchain/csource.ts";
 import { wasmSignature } from "../toolchain/wasm.ts";
-import { cDeclarationType, sysvArgumentLocations } from "../toolchain/linker.ts";
-import { runtimePromptSection, runtimeRules } from "../runtime/abi.ts";
+import { cDeclarationType, sysvArgumentLocations, sysvReturnLocation } from "../toolchain/linker.ts";
+import { runtimePromptSection, type RuntimeNeeds } from "../runtime/abi.ts";
 
 export interface PromptRequest {
   /** The contract of the function this candidate implements. */
@@ -39,6 +54,8 @@ export interface PromptRequest {
   runtime: RuntimeKind;
   /** The candidate being produced (1-based). Candidates never share context. */
   candidate: number;
+  /** How many candidates this build generates for the function. */
+  candidates: number;
   /** The attempt within that candidate (1-based). The first generates. */
   attempt: number;
   /**
@@ -51,24 +68,46 @@ export interface PromptRequest {
    * the first attempt.
    */
   feedback?: string[];
+  /**
+   * What the program this function belongs to printed where its source prints
+   * something else. A contract that states what a function does has no vector
+   * of its own, so the program is the only oracle, and this is what it said.
+   */
+  programFailure?: ProgramFailure;
+}
+
+/** A program that did not print what its source prints, and the answer to fix. */
+export interface ProgramFailure {
+  /** Where the two outputs first disagree. */
+  readonly mismatch: ProgramMismatch;
+  /** The implementation of this function the failing program was built from. */
+  readonly previous: string;
 }
 
 const NATIVE_LANGUAGE = "GNU assembler (GAS) AT&T syntax for x86-64";
 
-const NATIVE_RULES = [
-  "Emit exactly one global symbol, named by the contract, and nothing else.",
-  "Do not emit .section, .arch, .cpu, .file, .include, .incbin, .macro or .rept; the compiler supplies the architecture prelude.",
-];
+/**
+ * The rules a machine candidate is held to. Every one of them is enforced by
+ * the assembler before the candidate is run, so a rule left out here is an
+ * attempt spent learning it from a rejection.
+ */
+function nativeRules(contract: FunctionContract): string[] {
+  const symbol = symbolOf(contract);
+  return [
+    `Declare it with ".global ${symbol}" and define it with the label "${symbol}:", and export nothing else.`,
+    'Every other label you define must start with a dot, as in ".Lloop:": a label that is neither the contracted symbol nor a local one is rejected.',
+    `The only symbols you may reference are "${symbol}" itself, for recursion, and the runtime ABI entry points above. Calling another function of this program is rejected, so what it does belongs in this function or behind a local label.`,
+    "It is entered and left as an ordinary System V call, so preserve rbx, rbp and r12 to r15, leave rsp where you found it, and return with ret.",
+    "rsp is 16-byte aligned on entry and must be 16-byte aligned at every call you make: allocate a multiple of 16, or realign before the call and restore it after.",
+    "The 128 bytes below rsp are yours to use without adjusting it only while you make no calls; a call may use that space for itself.",
+    "Do not emit .section, .arch, .cpu, .file, .include, .incbin, .macro or .rept; the compiler supplies the architecture prelude.",
+  ];
+}
 
+/** What a C or WebAssembly candidate is held to. The C compiler and the module checks enforce these. */
 const OUTPUT_LANGUAGE: Record<OutputKind, { language: string; rules: string[] }> = {
-  machine: {
-    language: NATIVE_LANGUAGE,
-    rules: NATIVE_RULES,
-  },
-  asm: {
-    language: NATIVE_LANGUAGE,
-    rules: NATIVE_RULES,
-  },
+  machine: { language: NATIVE_LANGUAGE, rules: [] },
+  asm: { language: NATIVE_LANGUAGE, rules: [] },
   c: {
     language: "C11",
     rules: [
@@ -79,7 +118,7 @@ const OUTPUT_LANGUAGE: Record<OutputKind, { language: string; rules: string[] }>
   wasm: {
     language: "WebAssembly text format (WAT)",
     rules: [
-      "Emit a single module that imports only its linear memory: (import \"env\" \"memory\" (memory 1)).",
+      'Emit a single module that imports only its linear memory: (import "env" "memory" (memory 1)).',
       "Export exactly the contracted function, with the signature below. Pointers are i32 byte offsets into the imported memory; the host places the buffers.",
       "Do not import functions, tables or globals, do not export memory or _start, and do not use a start section.",
       "Use only numeric instructions. The module must be self contained.",
@@ -87,21 +126,34 @@ const OUTPUT_LANGUAGE: Record<OutputKind, { language: string; rules: string[] }>
   },
 };
 
-const SYSTEM_PROMPT = `You are a native code generation backend.
-
-You generate correct, efficient implementations for one function. The contract
-is the authoritative specification of what the function must compute; you are
-not trusted to define correctness, and every candidate you produce is validated
-by the compiler, which assembles, links and executes it against the contract.
-
-Rules for the implementation you emit:
-- Write it in the output language named in the request, and follow the rules
-  listed there exactly.
-- The architecture prelude, the harness and the build are compiler code. Emit
-  only the contracted function.
-- Do not write a description of the algorithm outside the code. A short comment
-  inside the code is fine.
-- Return the code and nothing else.`;
+/**
+ * The system prompt, which the output kind decides: a WebAssembly module has
+ * no architecture prelude and no harness, so telling a model to leave them
+ * alone would be telling it about a build that does not exist.
+ */
+export function buildSystemPrompt(output: OutputKind): string {
+  return [
+    "You are a code generation backend.",
+    "",
+    "You generate correct, efficient implementations for one function. The contract",
+    "is the authoritative specification of what the function must compute; you are",
+    "not trusted to define correctness, and every candidate you produce is validated",
+    "by the compiler, which builds it and runs it against that specification.",
+    "",
+    "Rules for the implementation you emit:",
+    "- Write it in the output language named in the request, and follow the rules",
+    "  listed there exactly.",
+    ...(output === "wasm"
+      ? []
+      : [
+          "- The architecture prelude, the harness, the host and the build are compiler",
+          "  code. Emit only the contracted function.",
+        ]),
+    "- Do not write a description of the algorithm outside the code. A short comment",
+    "  inside the code is fine.",
+    "- Return the code and nothing else.",
+  ].join("\n");
+}
 
 function renderSignature(contract: FunctionContract): string {
   const parameters = contract.function.params.map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`);
@@ -120,11 +172,17 @@ function renderMemory(contract: FunctionContract): string {
   return lines.join("\n");
 }
 
+/**
+ * The parameters as the contract types them, next to what each one is on the
+ * wire. A buffer is a bare pointer to its first element: its length is not
+ * passed beside it, so it is one of the other parameters, which is why a
+ * contract states the length as a precondition.
+ */
 function renderTypes(contract: FunctionContract): string {
   const entries = contract.function.params.map((param) => {
     const type = parseType(param.type);
-    const role = isBufferType(type) ? `buffer of ${typeToString(type.of)}` : "scalar";
-    return `${param.name}: ${param.type} (${role})`;
+    if (!isBufferType(type)) return `${param.name}: ${param.type} (scalar)`;
+    return `${param.name}: ${param.type} (buffer of ${typeToString(type.of)}, passed as ${cDeclarationType(type)}, so a bare pointer to the first element; no length arrives with it)`;
   });
   entries.push(`result: ${contract.function.returns}`);
   return entries.join("\n");
@@ -308,9 +366,13 @@ function escapeText(text: string): string {
 
 /**
  * What a function does, for a contract that states no postcondition. The body
- * is the language-neutral IR the contract carries, and the objects are the
- * layouts it writes: a backend allocates them through the runtime and reads a
- * field at the offset the contract names.
+ * is the IR the contract carries, written back as the language it came from,
+ * and the objects are the layouts it writes: a backend allocates them through
+ * the runtime and reads a field at the offset the contract names.
+ *
+ * The section also says how such a function is checked, which is the one thing
+ * a contract of this shape cannot state: nothing runs it on its own, so the
+ * program it belongs to is the oracle and its output is the specification.
  */
 function renderDefinition(contract: FunctionContract): string {
   const definition = contract.definition;
@@ -347,18 +409,95 @@ function renderDefinition(contract: FunctionContract): string {
     lines.push("Read the arguments with blaze_rt_argv_count() and blaze_rt_argv(index); an argument that is missing is 0.");
   }
   lines.push("");
+  lines.push("HOW YOU ARE CHECKED");
+  lines.push(
+    "Nothing checks this function on its own. The compiler assembles it, links it with the other",
+  );
+  lines.push(
+    "functions of the program, runs that program, and compares what it prints with what the source",
+  );
+  lines.push(
+    "program prints when it is run on its own toolchain. The two must be the same text, line for line",
+  );
+  lines.push("and character for character.");
+  lines.push(
+    "Print every number with blaze_rt_print_number and never format one yourself: it already writes a",
+  );
+  lines.push(
+    "number the way the source language writes one, which is a whole number without a point (70, not",
+  );
+  lines.push(
+    "70.0), the shortest text that reads back as the same value, in full between 1e-6 and 1e21 and in",
+  );
+  lines.push(
+    "exponential form outside that, -0 for a negative zero, and Infinity, -Infinity or NaN for a value",
+  );
+  lines.push("that is not finite.");
+  lines.push("");
+  lines.push("NUMBERS");
+  lines.push(
+    "A number in the source is a double, as it is in the language it was written in, unless a use fixes",
+  );
+  lines.push(
+    "it to something else: passing it to a whole parameter, or storing it in a whole array, declares it",
+  );
+  lines.push(
+    "as one. A whole number the source counts with is whole: a length, a loop index, a shift count, so a",
+  );
+  lines.push("shift is an integer operation on the count and not a floating point one.");
+  lines.push(
+    "/ and ** are floating point, because 7 / 2 is 3.5 in the language the source was written in.",
+  );
+  lines.push(
+    "A logical operator is a value and not a condition: a || b is a when a is not 0, and b otherwise.",
+  );
+  lines.push("");
   lines.push("THE BODY, WRITTEN AS TYPESCRIPT");
   lines.push("This is the behaviour to implement, in the language it was written in:");
   lines.push("```");
   lines.push(renderStatements(definition.statements));
   lines.push("```");
-  lines.push("");
-  lines.push("THE BODY, AS THE STATEMENTS OF THE CONTRACT");
-  lines.push("The same body as the contract carries it:");
-  lines.push("```json");
-  lines.push(JSON.stringify(definition.statements, null, 2));
-  lines.push("```");
   return lines.join("\n");
+}
+
+/**
+ * The contract as the model reads it. The body is not in it: the body is
+ * rendered from the source above, and carrying the statement tree as well
+ * would state it three times over for no gain.
+ */
+function renderContract(contract: FunctionContract): string {
+  const { definition, ...rest } = contract;
+  if (definition === undefined) return JSON.stringify(rest, null, 2);
+  const { statements, ...whatItDoes } = definition;
+  return JSON.stringify({ ...rest, definition: whatItDoes }, null, 2);
+}
+
+/**
+ * The runtime services a candidate can reach, which is what the ABI section
+ * offers it.
+ *
+ * A candidate may not call another function of the program, so what it inlines
+ * has to be written into it: the needs of a definition are therefore the needs
+ * of every function of the file being written, not only of this one. A
+ * contract that states a postcondition says nothing about how the work is done,
+ * and a library implementation is free to take a working copy of what it is
+ * given, so memory is always in reach there.
+ */
+function runtimeNeeds(request: PromptRequest): RuntimeNeeds {
+  const { contract, unit, program } = request;
+  if (isBufferType(parseType(contract.function.returns))) return { memory: true };
+  const siblings = Object.values(program.files.find((file) => file.path === unit.file)?.functions ?? {});
+  const bodies = [contract, ...siblings];
+  if (bodies.every((body) => body.definition === undefined)) return { memory: true };
+  const needs: RuntimeNeeds = {};
+  for (const body of bodies) {
+    const definition = body.definition;
+    if (definition === undefined) continue;
+    if (definition.allocates) Object.assign(needs, { memory: true, object: true });
+    if (definition.prints) needs.output = true;
+    if (definition.readsArgv) needs.arguments = true;
+  }
+  return needs;
 }
 
 /** The whole program: the module being written, and the contract of every other. */
@@ -370,7 +509,16 @@ function renderProgram(request: PromptRequest): string {
   const written = [unit.file, ...(program.entry.file === unit.file ? [] : [program.entry.file])];
   const lines = [
     `language: ${program.language}`,
-    `entry: ${unit.function} in ${unit.file}`,
+    `function being written: ${unit.function} in ${unit.file}`,
+    // The entry is only worth naming when it is not the function in hand: a
+    // program compiles every function it exports, one at a time, and only one
+    // of them is the entry. A program has no entry function, only the module
+    // whose statements the driver runs.
+    ...(program.entry.function === null
+      ? []
+      : program.entry.file === unit.file && program.entry.function === unit.function
+        ? []
+        : [`program entry: ${program.entry.function} in ${program.entry.file}`]),
     ...written.flatMap((path) => {
       const source = request.sources.find((module) => module.path === path);
       return source === undefined ? [] : [`source of ${source.path}:`, "```", source.source.trimEnd(), "```"];
@@ -396,34 +544,127 @@ function renderProgram(request: PromptRequest): string {
   return ["PROGRAM", ...lines].join("\n");
 }
 
+/**
+ * The target, as the machine it has to run on. An empty cpu or feature list
+ * means the baseline of the architecture, and nothing says so to a model that
+ * would otherwise reach for the widest instruction it knows: one the machine
+ * does not implement assembles cleanly and faults the first time it runs.
+ */
+function renderTarget(target: TargetSpec): string {
+  const lines = [
+    `architecture: ${target.arch}, operating system: ${target.os}, ABI: ${target.abi}`,
+    `instruction set: ${target.features.length === 0 ? `the ${target.arch} baseline, and nothing wider` : target.features.join(", ")}`,
+    `cpu selector: ${target.cpu === "" ? "none: the compiler supplies the architecture prelude, so do not select one yourself" : target.cpu}`,
+  ];
+  return ["TARGET", ...lines].join("\n");
+}
+
 /** A diagnostic is a multi-line block; a bullet only covers its first line. */
 function asBullet(entry: string): string {
   const [head, ...rest] = entry.split("\n");
   return [`- ${head}`, ...rest.map((line) => `  ${line}`)].join("\n");
 }
 
+/** The symbol every output is delivered under, which is not always its name. */
+function renderSymbol(contract: FunctionContract, output: OutputKind): string[] {
+  const symbol = symbolOf(contract);
+  if (output === "c") return [`function to define: ${symbol}`];
+  if (output === "wasm") return [`function to export: ${symbol}`];
+  return [
+    `symbol to define: ${symbol}`,
+    `label: ${symbol}:`,
+    `directive: .global ${symbol}`,
+  ];
+}
+
+/**
+ * The section that repairs a candidate, which is either a rejection of the
+ * candidate against its own contract or the program it belongs to printing
+ * something other than what its source prints. The two are told apart, because
+ * what the compiler did to reach the verdict is not the same thing.
+ */
+function renderRepair(request: PromptRequest, language: string): string {
+  const { candidate, attempt, previous, feedback, programFailure } = request;
+  const failed = programFailure?.previous ?? previous ?? "";
+  const lines = [
+    programFailure === undefined
+      ? `CANDIDATE ${candidate} WAS REJECTED`
+      : `CANDIDATE ${candidate} WAS REJECTED BY THE PROGRAM IT BELONGS TO`,
+    programFailure === undefined
+      ? `This is repair attempt ${attempt}. The compiler assembled, linked and ran the output below`
+      : `This is repair round ${attempt}. The compiler assembled and linked the output below into the`,
+    programFailure === undefined
+      ? "against its contract, and rejected it because of the diagnostics listed after it."
+      : "program it belongs to, ran that program, and rejected it: the program did not print what the",
+    programFailure === undefined ? "" : "source program prints. Nothing runs this function on its own.",
+    "",
+    "THE OUTPUT BEING REPAIRED",
+    "```",
+    failed.trimEnd(),
+    "```",
+  ];
+  if (programFailure !== undefined) {
+    const { mismatch } = programFailure;
+    lines.push(
+      "",
+      "WHAT THE PROGRAM PRINTED",
+      "```",
+      mismatch.actualOutput.trimEnd(),
+      "```",
+      "",
+      "WHAT THE SOURCE PRINTS",
+      "```",
+      mismatch.expectedOutput.trimEnd(),
+      "```",
+      "",
+      `The outputs are the same until line ${mismatch.line}, where they differ:`,
+      `  the source prints ${JSON.stringify(mismatch.expected)}`,
+      `  the program prints ${JSON.stringify(mismatch.actual)}`,
+    );
+  }
+  lines.push(
+    "",
+    "DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST",
+    ...(feedback === undefined || feedback.length === 0
+      ? ["- none were reported for this candidate"]
+      : feedback.map(asBullet)),
+    "",
+    "A diagnostic listed more than once is one the last repair did not answer: change the approach,",
+    "not the line that already failed.",
+    "",
+    "Repair the whole function: return a complete replacement, not a diff and not an explanation.",
+    `Emit ${language} only.`,
+  );
+  return lines.join("\n");
+}
+
 export function buildUserPrompt(request: PromptRequest): string {
-  const { contract, target, output, runtime, candidate, attempt, previous, feedback } = request;
+  const { contract, target, output, runtime, candidate, candidates, previous, programFailure } = request;
 
   const language = OUTPUT_LANGUAGE[output];
   const native = output === "asm" || output === "machine";
-  const locations = sysvArgumentLocations(contract.function.params);
-  const rules = output === "wasm" ? language.rules : [...language.rules, ...runtimeRules()];
+  const rules = native ? nativeRules(contract) : language.rules;
 
   const sections: string[] = [];
-  sections.push(`CONTRACT\n${JSON.stringify(contract, null, 2)}`);
+  sections.push(`CONTRACT\n${renderContract(contract)}`);
   sections.push(renderProgram(request));
-  sections.push(`TARGET\n${JSON.stringify(target, null, 2)}`);
-  if (output !== "wasm") sections.push(`RUNTIME\n${runtimePromptSection(runtime)}`);
+  sections.push(renderTarget(target));
+  if (output !== "wasm") sections.push(`RUNTIME\n${runtimePromptSection(runtime, runtimeNeeds(request))}`);
   sections.push(["OUTPUT LANGUAGE", `Write ${language.language}.`, ...rules.map((rule) => `- ${rule}`)].join("\n"));
   sections.push(
     [
       "SIGNATURE",
+      ...renderSymbol(contract, output),
       `C prototype: ${renderSignature(contract)}`,
-      ...(native ? [`argument locations: ${locations}`] : []),
+      ...(native
+        ? [
+            `argument locations: ${sysvArgumentLocations(contract.function.params)}`,
+            `return value: ${sysvReturnLocation(parseType(contract.function.returns))}`,
+          ]
+        : []),
       ...(output === "c" ? [`C definition to write: ${cSignature(contract)}`] : []),
       ...(output === "wasm" ? [`WebAssembly signature to export: ${wasmSignature(contract)}`] : []),
-      `parameter types:`,
+      "parameter types:",
       renderTypes(contract),
     ].join("\n"),
   );
@@ -441,24 +682,34 @@ export function buildUserPrompt(request: PromptRequest): string {
         ].join("\n")
       : ["SEMANTIC REQUIREMENTS", renderDefinition(contract)].join("\n"),
   );
-  sections.push(["MEMORY REQUIREMENTS", renderMemory(contract)].join("\n"));
-  sections.push(
-    [
-      "NUMERICAL SEMANTICS",
-      `floating point: ${contract.numeric.floatingPoint}`,
-      `rounding: ${contract.numeric.rounding}`,
-      `fast math: ${contract.numeric.fastMath}`,
-      contract.numeric.fastMath === false
-        ? "Reassociation, contraction and value changes are not allowed; results must be bit-reproducible within the accumulated rounding error of a sequential sum."
-        : "Rounding changes are permitted, but the result must still satisfy the postconditions.",
-    ].join("\n"),
-  );
+  // A contract that states what a function does carries no memory ranges and
+  // no numeric policy, because a body is not summarized by either. Stating
+  // the empty ones would tell a model it reads nothing while its body reads a
+  // pointer, and that a summation order is fixed when the body chooses one.
+  if (contract.definition === undefined) {
+    sections.push(["MEMORY REQUIREMENTS", renderMemory(contract)].join("\n"));
+    sections.push(
+      [
+        "NUMERICAL SEMANTICS",
+        `floating point: ${contract.numeric.floatingPoint}`,
+        `rounding: ${contract.numeric.rounding}`,
+        `fast math: ${contract.numeric.fastMath}`,
+        contract.numeric.fastMath === false
+          ? "Reassociation, contraction and value changes are not allowed; results must be bit-reproducible within the accumulated rounding error of a sequential sum."
+          : "Rounding changes are permitted, but the result must still satisfy the postconditions.",
+      ].join("\n"),
+    );
+  }
   sections.push(
     [
       "EFFECTS",
-      contract.effects.length === 0
-        ? "none: the function is pure and must not perform any I/O or system call"
-        : contract.effects.join(", "),
+      ...(contract.effects.length === 0
+        ? ["none: the source function touches nothing outside its arguments, and neither may yours"]
+        : [
+            `the source function: ${contract.effects.join(", ")}`,
+            "these are reached through the runtime ABI above and never directly: the output entries",
+            "print, and the argument entries read the command line.",
+          ]),
     ].join("\n"),
   );
   sections.push(
@@ -469,28 +720,22 @@ export function buildUserPrompt(request: PromptRequest): string {
       "Optimize for the primary objective while still satisfying every requirement above.",
     ].join("\n"),
   );
-
-  if (previous !== undefined) {
+  // Candidates are generated independently and never see each other, so a
+  // second one is only worth its request if it takes a different route.
+  if (candidate > 1) {
     sections.push(
       [
-        `CANDIDATE ${candidate} WAS REJECTED`,
-        `This is repair attempt ${attempt}. The compiler assembled, linked and ran the output below and`,
-        "rejected it, because of the diagnostics listed after it.",
-        "",
-        "THE OUTPUT BEING REPAIRED",
-        "```",
-        previous.trimEnd(),
-        "```",
-
-        "DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST",
-        ...(feedback === undefined || feedback.length === 0
-          ? ["- none were reported for this candidate"]
-          : feedback.map(asBullet)),
-        "",
-        `Repair the whole program: return a complete replacement, not a diff and not an explanation.`,
-        `Emit ${language.language} only.`,
+        "CANDIDATE",
+        `This is candidate ${candidate} of ${candidates}. The candidates of a function are generated`,
+        "independently and never see each other, so this one is only worth its request if it takes a",
+        "different route: an obvious loop is worth writing once, and vectorising, strength reducing,",
+        "unrolling or keeping the working set somewhere else are not the same answer.",
       ].join("\n"),
     );
+  }
+
+  if (previous !== undefined || programFailure !== undefined) {
+    sections.push(renderRepair(request, language.language));
   }
 
   sections.push(`OUTPUT\n${language.language} only, starting at the first line.`);
@@ -518,6 +763,3 @@ export function buildRetryPrompt(user: string, reasons: readonly string[]): stri
   ].join("\n");
 }
 
-export function buildSystemPrompt(): string {
-  return SYSTEM_PROMPT;
-}

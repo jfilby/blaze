@@ -24,7 +24,14 @@ export const RUNTIME_TITLES: Record<RuntimeKind, string> = {
   nim: "the Nim host runtime",
 };
 
+/**
+ * What an entry point serves. A function reaches a few of the twenty, so the
+ * prompt offers the ones a contract can need and a tag is how it says which.
+ */
+export type RuntimeTag = "host" | "memory" | "object" | "output" | "arguments" | "lifetime" | "error";
+
 /** One entry point of the ABI. */
+
 export interface RuntimeEntry {
   symbol: string;
   returns: string;
@@ -35,6 +42,8 @@ export interface RuntimeEntry {
   ownership: string;
   /** True when the call never returns to its caller. */
   noreturn?: boolean;
+  /** What the entry point serves: a host calls it, or a function can. */
+  tags: readonly RuntimeTag[];
 }
 
 function entry(
@@ -43,7 +52,7 @@ function entry(
   params: readonly (readonly [string, string])[],
   summary: string,
   ownership: string,
-  extra: { noreturn?: boolean } = {},
+  extra: { noreturn?: boolean; tags: readonly RuntimeTag[] },
 ): RuntimeEntry {
   return { symbol, returns, params, summary, ownership, ...extra };
 }
@@ -54,13 +63,14 @@ function entry(
  * implementable by any host without knowing how the memory was obtained.
  */
 export const RUNTIME_ABI: readonly RuntimeEntry[] = [
-  entry("blaze_rt_initialize", "void", [], "Prepares the runtime.", "Call once before any other entry point."),
+  entry("blaze_rt_initialize", "void", [], "Prepares the runtime.", "Call once before any other entry point.", { tags: ["host"] }),
   entry(
     "blaze_rt_finalize",
     "void",
     [],
     "Releases what the runtime holds itself.",
     "Call once, after the last managed value has been released.",
+    { tags: ["host"] },
   ),
   entry(
     "blaze_rt_allocate",
@@ -68,6 +78,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["bytes", "size_t"]],
     "Allocates zeroed memory aligned to at least 16 bytes.",
     "Returns a managed pointer with one reference, owned by the caller.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_reallocate",
@@ -78,6 +89,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Resizes a managed block, keeping its contents and its reference.",
     "Returns the managed pointer; a null pointer allocates.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_retain",
@@ -85,6 +97,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["pointer", "void*"]],
     "Adds a reference to a managed value.",
     "Returns the same pointer; every retain needs a matching release.",
+    { tags: ["lifetime"] },
   ),
   entry(
     "blaze_rt_release",
@@ -92,6 +105,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["pointer", "void*"]],
     "Drops one reference, freeing the value when the last one goes.",
     "A null pointer is ignored; releasing memory the runtime never returned is an error.",
+    { tags: ["lifetime"] },
   ),
   entry(
     "blaze_rt_string_new",
@@ -102,6 +116,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Copies length bytes into a NUL terminated managed string.",
     "Returns a managed string the caller owns; the length excludes the terminator.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_string_length",
@@ -109,6 +124,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["text", "const char*"]],
     "The length of a managed string, without its terminator.",
     "Borrowed: the string stays owned by whoever created it.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_string_clone",
@@ -116,6 +132,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["text", "const char*"]],
     "Copies a managed string into a new one.",
     "Returns a managed string the caller owns.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_array_new",
@@ -126,6 +143,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Allocates a zeroed managed array of count elements.",
     "Returns a managed pointer the caller owns.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_array_resize",
@@ -137,6 +155,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Resizes a managed array to count elements.",
     "Returns the managed pointer; a null pointer allocates.",
+    { tags: ["memory"] },
   ),
   entry(
     "blaze_rt_object_new",
@@ -147,6 +166,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Allocates a zeroed managed object of bytes, aligned to alignment.",
     "Returns a managed pointer the caller owns; alignment is a power of two, 0 means 16.",
+    { tags: ["object", "memory"] },
   ),
   entry(
     "blaze_rt_object_size",
@@ -154,6 +174,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["pointer", "void*"]],
     "The usable size of a managed value, excluding its header.",
     "Borrowed.",
+    { tags: ["object"] },
   ),
   entry(
     "blaze_rt_arguments_set",
@@ -164,6 +185,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Gives the runtime the arguments the program was given, as numbers.",
     "The host calls this once, before the program runs. An argument that is not a number is 0.",
+    { tags: ["host"] },
   ),
   entry(
     "blaze_rt_argv_count",
@@ -171,6 +193,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [],
     "The length of process.argv: the program, the file it runs, and the arguments.",
     "Two more than the number of arguments the program was given.",
+    { tags: ["arguments"] },
   ),
   entry(
     "blaze_rt_argv",
@@ -178,6 +201,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["index", "size_t"]],
     "The argument at an index of process.argv, or 0 when there is no such argument.",
     "A number: index 0 and 1 are where the program runs and the file it runs, so index 2 is the first argument; an argument that is missing or is not a number is 0.",
+    { tags: ["arguments"] },
   ),
   entry(
     "blaze_rt_print_text",
@@ -185,6 +209,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["text", "const char*"]],
     "Writes text to the output, as it is given.",
     "A null pointer writes nothing.",
+    { tags: ["output"] },
   ),
   entry(
     "blaze_rt_print_number",
@@ -192,6 +217,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["value", "double"]],
     "Writes a number to the output as the shortest text that reads back as it.",
     "Writes no newline: the program decides where a line ends.",
+    { tags: ["output"] },
   ),
   entry(
     "blaze_rt_format_number",
@@ -203,6 +229,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     ],
     "Writes the text of a number into a buffer, NUL terminated.",
     "Writes into the caller's buffer and returns the length, which is never more than size - 1.",
+    { tags: ["output"] },
   ),
   entry(
     "blaze_rt_print_newline",
@@ -210,6 +237,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [],
     "Ends a line of output.",
     "Writes one newline.",
+    { tags: ["output"] },
   ),
   entry(
     "blaze_rt_raise",
@@ -217,7 +245,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["message", "const char*"]],
     "Reports a runtime error to the host and stops the function.",
     "Never returns. The message is kept for blaze_rt_last_error.",
-    { noreturn: true },
+    { noreturn: true, tags: ["error"] },
   ),
   entry(
     "blaze_rt_last_error",
@@ -225,6 +253,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [],
     "The message of the last blaze_rt_raise, or an empty string.",
     "Borrowed: valid until the next raise.",
+    { tags: ["error"] },
   ),
 ];
 
@@ -535,12 +564,44 @@ export function runtimeRules(): string[] {
   ];
 }
 
-/** The ABI section of the prompt: which runtime, the rules, then every entry point. */
-export function runtimePromptSection(runtime: RuntimeKind): string {
-  const entryPoints = RUNTIME_ABI.map((item) => {
+/** What a contract can reach of the runtime, by the service it needs. */
+export interface RuntimeNeeds {
+  /** The function allocates something the runtime has to own. */
+  memory?: boolean;
+  /** The function builds or measures the objects its source declares. */
+  object?: boolean;
+  /** The function writes to the output. */
+  output?: boolean;
+  /** The function reads the command line. */
+  arguments?: boolean;
+}
+
+/** The tags a need opens up, and the tag each need is named by. */
+const NEEDS: readonly (readonly [keyof RuntimeNeeds, RuntimeTag])[] = [
+  ["memory", "memory"],
+  ["object", "object"],
+  ["output", "output"],
+  ["arguments", "arguments"],
+];
+
+/**
+ * The ABI section of the prompt: which runtime, the rules, then the entry
+ * points the function being written can reach. Lifetime and errors are in
+ * reach of everything, and a host's own entry points are in reach of nothing
+ * the model writes: the host calls those, never the function.
+ */
+export function runtimePromptSection(runtime: RuntimeKind, needs: RuntimeNeeds = {}): string {
+  const reachable = new Set<RuntimeTag>(["lifetime", "error"]);
+  for (const [need, tag] of NEEDS) {
+    if (needs[need] === true) reachable.add(tag);
+  }
+  const entryPoints = RUNTIME_ABI.filter(
+    (item) => !item.tags.includes("host") && item.tags.some((tag) => reachable.has(tag)),
+  ).map((item) => {
     const parameters = item.params.map(([name, type]) => `${type} ${name}`).join(", ");
     const never = item.noreturn === true ? "  // never returns" : "";
     return `${item.returns} ${item.symbol}(${parameters || "void"})${never}\n    ${item.summary} ${item.ownership}`;
   });
-  return [`The runtime is ${RUNTIME_TITLES[runtime]}.`, ...runtimeRules(), "", ...entryPoints].join("\n");
+  const listing = entryPoints.length === 0 ? ["This function needs no runtime service."] : entryPoints;
+  return [`The runtime is ${RUNTIME_TITLES[runtime]}.`, ...runtimeRules(), "", ...listing].join("\n");
 }

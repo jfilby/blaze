@@ -407,6 +407,25 @@ export interface VerificationResult {
   durationNs: number;
 }
 
+/**
+ * Where a program stopped saying what its source says. A function whose
+ * contract states what it does rather than what it returns has no vector to
+ * verify it against, so the program it belongs to is the only oracle it has,
+ * and this is what that oracle reports.
+ */
+export interface ProgramMismatch {
+  /** The first line the two disagree on, counted from 1. */
+  line: number;
+  /** What the source prints on that line. */
+  expected: string;
+  /** What the program printed on that line instead. */
+  actual: string;
+  /** Everything the source printed, so a repair sees the output it must match. */
+  expectedOutput: string;
+  /** Everything the program printed. */
+  actualOutput: string;
+}
+
 export interface BenchmarkResult {
   candidate: string;
   iterations: number;

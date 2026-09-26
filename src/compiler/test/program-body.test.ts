@@ -17,6 +17,7 @@ import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { resolveProgram, type ResolvedValue } from "../toolchain/program.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
+import { chatEndpoint } from "./model-endpoint.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
@@ -406,7 +407,12 @@ test("a program that prints something else is reported against the line it diffe
     runner: { command: "node", args: ["-e", 'console.log("expected"); console.log("extra")'] },
   });
   assert.equal(different.passed, false);
-  assert.deepEqual(different.difference, { line: 2, expected: "", actual: "extra" });
+  // A repair is shown both outputs, so the mismatch carries them with the line.
+  assert.equal(different.difference?.line, 2);
+  assert.equal(different.difference?.expected, "");
+  assert.equal(different.difference?.actual, "extra");
+  assert.equal(different.difference?.expectedOutput, "expected\n");
+  assert.equal(different.difference?.actualOutput, "expected\nextra\n");
 });
 
 const languageProgram = (runtime?: "nim") => program(LANGUAGE, runtime);
@@ -617,4 +623,76 @@ test("a program in a language the compiler cannot run is refused", async () => {
       }),
     /a program in nim cannot be checked/,
   );
+});
+
+/**
+ * A function whose contract states what it does has no vector of its own, so
+ * the program it belongs to is the only thing that can say whether it is right.
+ * This is that loop: a program that prints something else is regenerated with
+ * the line it differs on, and the build ends on the candidate that agrees.
+ */
+const SUM = [
+  "function total(n: number): number {",
+  "  let out = 0;",
+  "  let i = 0;",
+  "  while (i < n) { out += i; i += 1; }",
+  "  return out;",
+  "}",
+  "console.log(total(4));",
+  "",
+].join("\n");
+
+/** `total` as the model writes it: n arrives in xmm0 as a double. */
+function totalAssembly(body: string[]): string {
+  return ["\t.globl\ttotal", "total:", "\txorps\t%xmm1, %xmm1", ...body, "\tret", ""].join("\n");
+}
+
+/** Adds 0..n-1 by counting down, which is what the source counts up to. */
+const TOTAL_RIGHT = totalAssembly([
+  "\tcvttsd2siq\t%xmm0, %rcx",
+  "\tdec\t%rcx",
+  "\tpxor\t%xmm2, %xmm2",
+  "\tpxor\t%xmm3, %xmm3",
+  ".Lloop:",
+  "\tcvtsi2sdq\t%rcx, %xmm2",
+  "\taddsd\t%xmm2, %xmm3",
+  "\tdec\t%rcx",
+  "\tjs\t.Ldone",
+  "\tjmp\t.Lloop",
+  ".Ldone:",
+  "\tmovapd\t%xmm3, %xmm0",
+]);
+
+/** Returns n instead of the sum, so the program prints 4 where the source prints 6. */
+const TOTAL_WRONG = totalAssembly(["\tmovq\t%xmm0, %rax"]);
+
+test("a program that prints something else is regenerated with the line it differs on", async (t) => {
+  const endpoint = await chatEndpoint(t, [TOTAL_WRONG, TOTAL_RIGHT]);
+  const directory = await mkdtemp(join(tmpdir(), "blaze-repair-"));
+  await writeFile(join(directory, "main.ts"), SUM, "utf8");
+  await writeFile(
+    join(directory, "blaze.json"),
+    JSON.stringify({
+      language: "typescript",
+      sourceFile: "main.ts",
+      model: { provider: "openai-compatible", model: "stub" },
+      output: "machine",
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+    }),
+    "utf8",
+  );
+
+  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
+
+  assert.equal(outcome.build.status, "success", "the repaired program is the one that is delivered");
+  assert.equal(endpoint.prompts.length, 2, "the program is generated once, then regenerated");
+  // The first answer returns n rather than the sum, so the program printed 4
+  // where the source prints 6. That difference is the second request.
+  const repair = endpoint.prompts[1];
+  assert.match(repair, /REJECTED BY THE PROGRAM IT BELONGS TO/);
+  assert.match(repair, /the program prints "4"/);
+  assert.match(repair, /the source prints "6"/);
+  assert.match(repair, /movq\t%xmm0, %rax/, "the repair is handed the implementation that printed the wrong thing");
+  assert.match(repair, /A diagnostic listed more than once/);
+  assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
 });
