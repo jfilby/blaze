@@ -21,7 +21,7 @@
 
 import type { ProgramStatement, ProgramText, ProgramValue } from "./module.ts";
 import type { Token } from "./typescript.ts";
-import { frontendError, tokenize } from "./typescript.ts";
+import { frontendError, tokenize, unknownTokenError } from "./typescript.ts";
 
 /** The array views a program can allocate. */
 const VIEWS: Record<string, string> = {
@@ -119,6 +119,7 @@ class ProgramParser {
   }
 
   private statement(): ProgramStatement {
+    if (this.peek().kind === "unknown") throw unknownTokenError(this.peek(), this.path);
     const line = this.peek().line;
     if (this.at("const") || this.at("let")) {
       this.next();
@@ -163,6 +164,7 @@ class ProgramParser {
       this.next();
       return { k: "text", parts: this.parts(token) };
     }
+    if (token.kind === "unknown") throw unknownTokenError(token, this.path);
     if (token.kind !== "ident") this.fail(`"${token.text}" is not a value`);
     if (token.text === "new") {
       this.next();

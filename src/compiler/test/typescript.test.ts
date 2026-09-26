@@ -183,6 +183,27 @@ test("impure and unsupported constructs are rejected with a reason", async () =>
   );
 });
 
+test("the first construct outside the subset is the one reported", () => {
+  // The lexer keeps the character it does not know, so the parser reaches the
+  // first construct it cannot read rather than a later one.
+  const branchFirst = `export function tree(depth: number): number {
+  if (depth > 0) {
+    return depth;
+  }
+  return depth > 0 ? 1 : 0;
+}
+`;
+  assert.throws(() => contractOf("typescript", branchFirst), /"if" is not supported \(line 2\)/);
+
+  let diagnostic = "";
+  try {
+    contractOf("typescript", `export function pick(x: number): number { return ~x; }\n`);
+  } catch (error) {
+    diagnostic = error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
+  }
+  assert.match(diagnostic, /unsupported token "~"\nline 1 of module\.ts/);
+});
+
 test("the language is selected by name", () => {
   assert.equal(frontendFor("typescript"), typescript);
   assert.equal(frontendFor("ts"), typescript);

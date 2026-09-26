@@ -77,7 +77,20 @@ function mapTypeScriptType(text: string, position: string): TypeExpr {
 /* Lexer                                                                      */
 /* -------------------------------------------------------------------------- */
 
-export type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "end";
+export type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "unknown" | "end";
+
+/**
+ * A character the subset does not have. The lexer keeps it as a token rather
+ * than failing, so the parser reports the first construct it cannot read,
+ * where it can say what the language is, instead of the lexer naming a
+ * punctuation mark in a file whose real problem lies elsewhere.
+ */
+export function unknownTokenError(token: Token, path: string): CompilerError {
+  return frontendError(
+    `unsupported token "${token.text}"`,
+    `line ${token.line} of ${path}: a function is declarations, counted loops, assignments and returns; a program is const declarations, calls, typed arrays and console.log`,
+  );
+}
 
 export interface Token {
   kind: TokenKind;
@@ -146,8 +159,12 @@ export function tokenize(source: string): Token[] {
       continue;
     }
     const punctuation = PUNCTUATION.find((candidate) => source.startsWith(candidate, index));
+    // An unknown character becomes a token: the parser reads on and reports
+    // the first construct outside the subset, which is the useful error.
     if (punctuation === undefined) {
-      throw frontendError(`unsupported token "${character}"`, `line ${line}`);
+      tokens.push({ kind: "unknown", text: character, line });
+      index += 1;
+      continue;
     }
     tokens.push({ kind: "punct", text: punctuation, line });
     index += punctuation.length;
@@ -188,12 +205,13 @@ interface TypeScriptFunction {
 
 class TypeScriptParser {
   private readonly tokens: Token[];
+  private readonly path: string;
   private position = 0;
 
-  constructor(tokens: Token[]) {
+  constructor(tokens: Token[], path: string) {
     this.tokens = tokens;
+    this.path = path;
   }
-
   private peek(offset = 0): Token {
     return this.tokens[Math.min(this.position + offset, this.tokens.length - 1)];
   }
@@ -320,7 +338,13 @@ class TypeScriptParser {
         break;
       }
     }
-    this.expect(":");
+    if (!this.at(":")) {
+      throw frontendError(
+        `every function declares what it returns`,
+        `line ${name.line} of ${this.path}: as in function ${name.text}(): number { ... }`,
+      );
+    }
+    this.next();
     const returns = this.next();
     if (returns.kind !== "ident") this.fail("expected a return type");
     const returnType = mapTypeScriptType(returns.text, `line ${returns.line}`);
@@ -346,6 +370,7 @@ class TypeScriptParser {
 
   private readStatement(): Statement {
     const token = this.peek();
+    if (token.kind === "unknown") throw unknownTokenError(token, this.path);
 
     if (this.at("let") || this.at("const")) {
       this.next();
@@ -495,6 +520,7 @@ class TypeScriptParser {
 
   private readPrimary(): Expression {
     const token = this.next();
+    if (token.kind === "unknown") throw unknownTokenError(token, this.path);
     if (token.kind === "number") return { k: "literal", text: token.text };
     if (token.kind === "string") {
       throw frontendError("string literals are not supported", `line ${token.line}: the contract types describe numbers, not text`);
@@ -723,7 +749,7 @@ export const typeScriptFrontend: Frontend = {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
-    return new TypeScriptParser(tokenize(source)).parseModule(path);
+    return new TypeScriptParser(tokenize(source), path).parseModule(path);
   },
 
   contractFor(analysis, declared, input) {
