@@ -27,7 +27,13 @@ import {
   type Reporter,
 } from "./compiler.ts";
 import { targetSummary } from "./core/target.ts";
-import { OUTPUT_KINDS, RUNTIME_KINDS, type OutputKind, type RuntimeKind } from "./core/types.ts";
+import {
+  OUTPUT_KINDS,
+  RUNTIME_KINDS,
+  type BuildStatus,
+  type OutputKind,
+  type RuntimeKind,
+} from "./core/types.ts";
 
 /** The file that describes a project, and the default input of `blaze build`. */
 const PROJECT_FILE = "blaze.json";
@@ -172,6 +178,14 @@ function reportError(error: SerializedCompilerError): void {
   }
 }
 
+/** The candidate each compiled function selected, in one column. */
+function selectedLabel(build: BuildStatus): string {
+  const selected = build.selectedCandidates ?? {};
+  const names = Object.keys(selected);
+  if (names.length === 0) return "-";
+  return names.map((name) => `${name}#${selected[name]}`).join(",");
+}
+
 async function main(argv: string[]): Promise<number> {
   const parsed = parseArgs({
     args: argv,
@@ -240,7 +254,7 @@ async function main(argv: string[]): Promise<number> {
         const state =
           build === undefined
             ? ""
-            : `  ${build.status}  ${build.selectedCandidate ?? "-"}  ${build.model}  ${targetSummary(build.target)}`;
+            : `  ${build.status}  ${selectedLabel(build)}  ${build.model}  ${targetSummary(build.target)}`;
         process.stdout.write(`${project}${state}\n`);
       }
       return 0;

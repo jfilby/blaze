@@ -18,7 +18,7 @@ import { run } from "../core/process.ts";
 import { isFloatType, parseType, typeToString } from "../semantics/contract.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import type { FunctionContract, FunctionParam, Runner, TypeExpr } from "../core/types.ts";
-import { RUNTIME_NAME } from "./abi.ts";
+import { RUNTIME_ANCHOR, RUNTIME_NAME } from "./abi.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Type mapping                                                               */
@@ -90,7 +90,7 @@ function elementSize(type: TypeExpr): number {
   return size;
 }
 
-function nimType(type: TypeExpr): string {
+export function nimType(type: TypeExpr): string {
   if (isBuffer(type)) return `ptr ${elementNimType(type.of)}`;
   return elementNimType(type);
 }
@@ -391,25 +391,7 @@ export function generateHostSource(contract: FunctionContract, demoRequest: stri
   const nimParameters = names.map((name, index) => `${name}: ${nimType(types[index]!)}`).join(", ");
   const declaration = `extern ${cDeclarationType(returns)} ${name}(${cParameters || "void"});`;
   const invocation = callExpression(contract, types, names);
-  const anchor = [
-    `${RUNTIME_NAME}_initialize`,
-    `${RUNTIME_NAME}_finalize`,
-    `${RUNTIME_NAME}_allocate`,
-    `${RUNTIME_NAME}_reallocate`,
-    `${RUNTIME_NAME}_retain`,
-    `${RUNTIME_NAME}_release`,
-    `${RUNTIME_NAME}_string_new`,
-    `${RUNTIME_NAME}_string_length`,
-    `${RUNTIME_NAME}_string_clone`,
-    `${RUNTIME_NAME}_array_new`,
-    `${RUNTIME_NAME}_array_resize`,
-    `${RUNTIME_NAME}_object_new`,
-    `${RUNTIME_NAME}_object_size`,
-    `${RUNTIME_NAME}_raise`,
-    `${RUNTIME_NAME}_last_error`,
-  ]
-    .map((symbol) => `  cast[pointer](${symbol}),`)
-    .join("\n");
+  const anchor = RUNTIME_ANCHOR.map((symbol) => `  cast[pointer](${symbol}),`).join("\n");
 
   return `${HOST_PRELUDE}
 {.emit: """

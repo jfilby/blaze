@@ -177,6 +177,13 @@ export const RUNTIME_SYMBOLS: Record<string, true> = Object.fromEntries(
   RUNTIME_ABI.map((item) => [item.symbol, true as const]),
 );
 
+/**
+ * Every entry point by name, in ABI order. A host that links a candidate
+ * object against a runtime names all of them, so the linker keeps the ones
+ * only the candidate calls.
+ */
+export const RUNTIME_ANCHOR: readonly string[] = RUNTIME_ABI.map((item) => item.symbol);
+
 /** True when generated code is allowed to reference a symbol. */
 export function isRuntimeSymbol(symbol: string): boolean {
   return RUNTIME_SYMBOLS[symbol] === true;

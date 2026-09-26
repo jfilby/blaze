@@ -15,13 +15,24 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, readdir } from "node:fs/promises";
+import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
-import { entryContract, INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
+import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
+import type { ProgramBody } from "./semantics/module.ts";
+import { buildProgramDriver } from "./toolchain/driver.ts";
+import { buildProgramHost } from "./runtime/nim-program.ts";
+import { resolveProgram } from "./toolchain/program.ts";
+import { verifyProgram } from "./toolchain/verify-program.ts";
 import { assertAssemblerSupportsArch } from "./toolchain/assembler.ts";
-import { evaluateStoredCandidate, generateCandidates, implementationLabel, runtimePreparer } from "./codegen.ts";
+import {
+  evaluateStoredCandidate,
+  generateCandidates,
+  implementationLabel,
+  runtimePreparer,
+  type CodegenResult,
+} from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, hashValue, type JsonStore } from "./core/json-store.ts";
 import { frontendFor } from "./semantics/frontend.ts";
@@ -33,6 +44,7 @@ import {
   DEFAULT_TEST,
   type AssemblyCandidate,
   type BenchmarkResult,
+  type CandidateOutcome,
   type RuntimeKind,
   RUNTIME_KINDS,
   type BuildStatus,
@@ -79,12 +91,15 @@ export interface BuildOptions {
 export interface BuildOutcome {
   project: string;
   build: BuildStatus;
-  contract: FunctionContract;
+  /** Every function the build compiled, by name. */
+  contracts: Record<string, FunctionContract>;
   /** The validated contract graph every file of the program took part in. */
   program: ProgramContract;
-  candidates: AssemblyCandidate[];
-  verification: VerificationResult[];
-  benchmark: BenchmarkResult[];
+  /** The statements the build delivered a program for, when it is one. */
+  body?: ProgramBody;
+  candidates: Record<string, AssemblyCandidate[]>;
+  verification: Record<string, VerificationResult[]>;
+  benchmark: Record<string, BenchmarkResult[]>;
   generation: Record<string, unknown>;
   outputKind: OutputKind;
   outputPath: string | null;
@@ -108,6 +123,7 @@ export interface ProjectPaths {
   outputSource: string;
   outputModule: string;
   outputWebAssemblyText: string;
+  outputProgram: string;
 }
 
 /** Normalizes the requested deliverable. */
@@ -182,6 +198,7 @@ function projectPaths(id: string): ProjectPaths {
     outputSource: `${root}/output/${id}.c`,
     outputModule: `${root}/output/${id}.wasm`,
     outputWebAssemblyText: `${root}/output/${id}.wat`,
+    outputProgram: `${root}/output/${id}.program`,
   };
 }
 
@@ -371,6 +388,103 @@ async function writeBuildRecord(store: JsonStore, paths: ProjectPaths, build: Bu
 /* build                                                                      */
 /* -------------------------------------------------------------------------- */
 
+/** One function a build compiles, with the file that declares it. */
+interface CompilationUnit {
+  file: string;
+  contract: FunctionContract;
+  parsed: ParsedContract;
+}
+
+/** What generation produced for one function of a build. */
+interface UnitGeneration {
+  unit: CompilationUnit;
+  result: CodegenResult;
+}
+
+/**
+ * The functions a build compiles. A program compiles every function the program
+ * exports, because every one of them is something the program may call; a
+ * library entry compiles the one function the project named.
+ */
+function compilationUnits(program: ProgramContract, isProgram: boolean): CompilationUnit[] {
+  const units: CompilationUnit[] = [];
+  for (const file of program.files) {
+    for (const [name, contract] of Object.entries(file.functions)) {
+      if (!isProgram && !(program.entry.file === file.path && program.entry.function === name)) continue;
+      units.push({ file: file.path, contract, parsed: parseContract(contract) });
+    }
+  }
+  return units;
+}
+
+/** A program is delivered as a binary, so a program build links one. */
+function assertProgramOutput(output: OutputKind): void {
+  if (output === "machine") return;
+  throw new CompilerError({
+    category: "InputError",
+    stage: "input",
+    message: `a program is delivered as a binary, not as ${output}`,
+    detail:
+      'build a program with "output": "machine" (the default), or make the entry module export the function to compile',
+  });
+}
+
+/** The stored candidates a build may reuse, per function. */
+async function reusableCandidates(
+  store: JsonStore,
+  paths: ProjectPaths,
+  options: BuildOptions,
+  id: string,
+  previousBuild: BuildStatus | undefined,
+  sourceHash: string,
+): Promise<Record<string, AssemblyCandidate[]>> {
+  if (!options.reuse) return {};
+  // A build that failed has no contract hash of its own, so it is reported as
+  // the failure it was instead of as a change of source.
+  if (previousBuild !== undefined && previousBuild.status !== "success") {
+    throw new CompilerError({
+      category: "StorageError",
+      stage: "reuse",
+      message: `the last build of ${id} failed`,
+      detail: previousBuild.error?.message ?? "run blaze build without --reuse to rebuild it",
+    });
+  }
+  if (previousBuild !== undefined && previousBuild.sourceHash !== sourceHash) {
+    throw new CompilerError({
+      category: "StorageError",
+      stage: "reuse",
+      message: `the source of ${id} changed since the stored build`,
+      detail: "run blaze build without --reuse to regenerate",
+    });
+  }
+  if (!(await store.exists(paths.candidates))) {
+    throw new CompilerError({
+      category: "StorageError",
+      stage: "reuse",
+      message: `no stored assembly to reuse for ${id}`,
+      detail: `expected ${paths.candidates}`,
+    });
+  }
+  return store.read<Record<string, AssemblyCandidate[]>>(paths.candidates);
+}
+
+/**
+ * The program as its own toolchain runs it: the entry module beside the project
+ * file, or the inline source written out so it can be run at all.
+ */
+async function programSource(
+  base: string,
+  id: string,
+  project: ProjectInput,
+  body: ProgramBody,
+): Promise<{ path: string }> {
+  if (body.file !== INLINE_MODULE) return { path: resolve(project.directory, body.file) };
+  const path = `${base}/${id}.program.ts`;
+  await writeFile(path, project.entry.source, "utf8");
+  return { path };
+}
+
+
 export async function runBuild(
   inputPath: string,
   options: BuildOptions,
@@ -437,8 +551,7 @@ export async function runBuild(
       read: moduleReader(project.directory),
     });
     const program = phase.program;
-    const contract = entryContract(program);
-    const parsed = parseContract(contract);
+    const units = compilationUnits(program, phase.body !== undefined);
     const sourceHash = hashValue(phase.modules.map((module) => [module.path, module.source]));
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
@@ -447,160 +560,220 @@ export async function runBuild(
     reporter.stage(
       "contract",
       "ok",
-      `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${contract.function.name} in ${program.entry.file}`,
+      phase.body === undefined
+        ? `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(program.entry.function)} in ${program.entry.file}`
+        : `Program contract: ${program.files.length} file(s), ${units.length} compiled function(s), program ${program.entry.file}`,
     );
 
     assertAssemblerSupportsArch(target);
+    if (phase.body !== undefined) assertProgramOutput(outputKind);
 
-    const existing: AssemblyCandidate[] = [];
-    if (options.reuse) {
-      // A build that failed has no contract hash of its own, so it is reported
-      // as the failure it was instead of as a change of source.
-      if (previousBuild !== undefined && previousBuild.status !== "success") {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "reuse",
-          message: `the last build of ${id} failed`,
-          detail: previousBuild.error?.message ?? "run blaze build without --reuse to rebuild it",
-        });
-      }
-      if (previousBuild !== undefined && previousBuild.sourceHash !== sourceHash) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "reuse",
-          message: `the source of ${id} changed since the stored build`,
-          detail: "run blaze build without --reuse to regenerate",
-        });
-      }
-      if (!(await store.exists(paths.candidates))) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "reuse",
-          message: `no stored assembly to reuse for ${id}`,
-          detail: `expected ${paths.candidates}`,
-        });
-      }
-      existing.push(...(await store.read<AssemblyCandidate[]>(paths.candidates)));
-    }
-
-    const workspace = { workDirectory: store.resolve(paths.work), functionName: contract.function.name };
-    const generation = generateCandidates({
-      contract,
-      parsed,
-      program,
-      sources: phase.modules,
-      target,
+    const stored = await reusableCandidates(store, paths, options, id, previousBuild, sourceHash);
+    const base = store.resolve(paths.work);
+    // One runtime for the whole build: every candidate of every function links
+    // the same one, and the driver that runs the program links it too.
+    const prepareRuntime = runtimePreparer({
       output: outputKind,
       runtime: runtimeKind,
-      backend: () =>
-        createBackend(model ?? resolveModel(requested), {
-          timeoutMs: requestTimeoutMs(input),
-          ...(options.debug === true ? { onPrompt: printPrompt } : {}),
-        }),
-      generation: generationConfigFor(input, options),
-      test: testConfigFor(input, options),
-      benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
-      workspace,
-      prepareRuntime: runtimePreparer({ output: outputKind, runtime: runtimeKind, workspace }),
-      existing,
-      onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
-        reporter.stage(
-          "generate",
-          "info",
-          `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
-        );
-      },
+      workspace: { workDirectory: base, functionName: program.entry.file },
     });
 
-    const result = await generation;
-    await store.write(paths.candidates, result.candidates);
+    const generated: UnitGeneration[] = [];
+    for (const unit of units) {
+      const functionName = unit.contract.function.name;
+      const workspace = { workDirectory: `${base}/${functionName}`, functionName };
+      await mkdir(workspace.workDirectory, { recursive: true });
+      const result = await generateCandidates({
+        contract: unit.contract,
+        unitFile: unit.file,
+        parsed: unit.parsed,
+        program,
+        sources: phase.modules,
+        target,
+        output: outputKind,
+        runtime: runtimeKind,
+        backend: () =>
+          createBackend(model ?? resolveModel(requested), {
+            timeoutMs: requestTimeoutMs(input),
+            ...(options.debug === true ? { onPrompt: printPrompt } : {}),
+          }),
+        generation: generationConfigFor(input, options),
+        test: testConfigFor(input, options),
+        benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
+        workspace,
+        prepareRuntime,
+        existing: stored[functionName] ?? [],
+        onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
+          reporter.stage(
+            "generate",
+            "info",
+            `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
+          );
+        },
+      });
+      generated.push({ unit, result });
+    }
+
+    const candidates: Record<string, AssemblyCandidate[]> = {};
+    const verification: Record<string, VerificationResult[]> = {};
+    const benchmark: Record<string, BenchmarkResult[]> = {};
+    const outcomes: Record<string, CandidateOutcome[]> = {};
+    const selected: Record<string, string> = {};
+    for (const entry of generated) {
+      const functionName = entry.unit.contract.function.name;
+      candidates[functionName] = entry.result.candidates;
+      outcomes[functionName] = entry.result.outcomes;
+      verification[functionName] = entry.result.outcomes
+        .map((outcome) => outcome.verification)
+        .filter((outcome): outcome is VerificationResult => outcome !== undefined);
+      benchmark[functionName] = entry.result.outcomes
+        .map((outcome) => outcome.benchmark)
+        .filter((outcome): outcome is BenchmarkResult => outcome !== undefined);
+      const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
+      reporter.stage(
+        "generate",
+        valid > 0 ? "ok" : "fail",
+        `${implementationLabel(outputKind)} generated for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
+      );
+    }
+
+    await store.write(paths.candidates, candidates);
     await store.write(paths.generation, {
       model: build.model,
       modelConfig: build.modelConfig,
       compilerVersion: COMPILER_VERSION,
-      selected: result.selected,
-      benchmarkVector: result.benchmarkVector,
-      outcomes: result.outcomes,
+      functions: Object.fromEntries(
+        generated.map((entry) => [
+          entry.unit.contract.function.name,
+          {
+            file: entry.unit.file,
+            selected: entry.result.selected,
+            benchmarkVector: entry.result.benchmarkVector,
+            outcomes: entry.result.outcomes,
+          },
+        ]),
+      ),
+      modelDurationNs: String(
+        generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n),
+      ),
     });
-    await store.write(
-      paths.verification,
-      result.outcomes.map((outcome) => outcome.verification).filter((entry) => entry !== undefined),
-    );
-    await store.write(
-      paths.benchmark,
-      result.outcomes.map((outcome) => outcome.benchmark).filter((entry) => entry !== undefined),
-    );
+    await store.write(paths.verification, verification);
+    await store.write(paths.benchmark, benchmark);
 
-    const generated = result.outcomes.filter((outcome) => outcome.valid).length;
-    const label = implementationLabel(outputKind);
-    reporter.stage(
-      "generate",
-      generated > 0 ? "ok" : "fail",
-      `${label} generated: ${result.candidates.length} candidate(s), ${generated} valid`,
-    );
-
-    if (result.selected === null) {
-      const detail = result.outcomes
-        .map((outcome) => `${outcome.candidate}: ${outcome.failure?.category ?? ""} ${outcome.failure?.message ?? ""}\n${outcome.failure?.detail ?? ""}`)
-        .join("\n");
-      throw new CompilerError({
-        category: "AiGenerationError",
-        stage: "verify",
-        message: `no candidate for ${contract.function.name} satisfied the contract`,
-        function: contract.function.name,
-        detail: detail.trim(),
-      });
+    // What ships is what the toolchain built and verified, so a function with
+    // no valid candidate stops the build before anything is delivered.
+    for (const entry of generated) {
+      const functionName = entry.unit.contract.function.name;
+      if (entry.result.selected === null) {
+        const detail = entry.result.outcomes
+          .map(
+            (outcome) =>
+              `${outcome.candidate}: ${outcome.failure?.category ?? ""} ${outcome.failure?.message ?? ""}\n${outcome.failure?.detail ?? ""}`,
+          )
+          .join("\n");
+        throw new CompilerError({
+          category: "AiGenerationError",
+          stage: "verify",
+          message: `no candidate for ${functionName} satisfied the contract`,
+          function: functionName,
+          detail: detail.trim(),
+        });
+      }
+      selected[functionName] = entry.result.selected;
+      const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
+      reporter.stage("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
+      reporter.stage(
+        "verify",
+        "ok",
+        `Correctness verified for ${functionName} (${outcome?.verification?.cases ?? 0} test vectors, tolerance ${outcome?.verification?.tolerance ?? "exact"})`,
+      );
+      reporter.stage(
+        "benchmark",
+        "ok",
+        `Benchmark completed for ${functionName} (${outcome?.benchmark?.iterations ?? 0} iterations, ${outcome?.benchmark?.durationNs ?? 0} ns)`,
+      );
     }
 
-    const selectedOutcome = result.outcomes.find((outcome) => outcome.candidate === result.selected);
-    reporter.stage("assemble", "ok", `${label} built into a testable implementation`);
-    reporter.stage(
-      "verify",
-      "ok",
-      `Correctness verified (${selectedOutcome?.verification?.cases ?? 0} test vectors, tolerance ${selectedOutcome?.verification?.tolerance ?? "exact"})`,
-    );
-    reporter.stage(
-      "benchmark",
-      "ok",
-      `Benchmark completed (${selectedOutcome?.benchmark?.iterations ?? 0} iterations, ${selectedOutcome?.benchmark?.durationNs ?? 0} ns)`,
-    );
-
-    // The delivered implementation is the one the toolchain actually built and
-    // verified, so what ships is what passed.
     let outputPath: string | null = null;
     let outputAssemblyPath: string | null = null;
     if (mode === "build") {
-      const work = store.resolve(paths.work);
-      const selected = result.selected;
       const delivered: string[] = [];
       const deliver = async (from: string, to: string) => {
-        await copyFile(join(work, from), store.resolve(to));
+        await copyFile(join(base, from), store.resolve(to));
         delivered.push(store.resolve(to));
       };
-      if (outputKind === "c") {
-        await deliver(`${selected}.c`, paths.outputSource);
-        outputPath = store.resolve(paths.outputSource);
-      } else if (outputKind === "wasm") {
-        await deliver(`${selected}.wat`, paths.outputWebAssemblyText);
-        await deliver(`${selected}.wasm`, paths.outputModule);
-        outputPath = store.resolve(paths.outputModule);
-        outputAssemblyPath = store.resolve(paths.outputWebAssemblyText);
+      if (phase.body !== undefined) {
+        const driver = resolveProgram(phase.body, program);
+        const runtime = await prepareRuntime();
+        const objectPaths = generated.map(
+          (entry) => `${base}/${entry.unit.contract.function.name}/${entry.result.selected as string}.o`,
+        );
+        const runner =
+          runtimeKind === "none"
+            ? await buildProgramDriver({
+                program: driver,
+                workDirectory: base,
+                objectPaths,
+                ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
+                outputPath: `${base}/program.exe`,
+              })
+            : await buildProgramHost({
+                program: driver,
+                workDirectory: base,
+                objectPaths,
+                outputPath: `${base}/program.exe`,
+              });
+        const source = await programSource(base, id, project, phase.body);
+        const checked = await verifyProgram({
+          language: input.language,
+          sourcePath: source.path,
+          directory: project.directory,
+          runner,
+        });
+        if (!checked.passed) {
+          throw new CompilerError({
+            category: "VerificationError",
+            stage: "verify",
+            message: "the program does not print what the source prints",
+            detail: `line ${checked.difference?.line}: the source prints ${JSON.stringify(checked.difference?.expected)}, the program prints ${JSON.stringify(checked.difference?.actual)}`,
+          });
+        }
+        reporter.stage(
+          "verify",
+          "ok",
+          `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
+        );
+        await deliver("program.exe", paths.outputBinary);
+        await deliver(runtimeKind === "none" ? "program.c" : "program_host.nim", paths.outputProgram);
+        outputPath = store.resolve(paths.outputBinary);
       } else {
-        // The delivered assembly is the assembled one, architecture prelude
-        // included, so it can be fed straight back to the assembler.
-        await deliver(`${selected}.s`, paths.outputAssembly);
-        outputAssemblyPath = store.resolve(paths.outputAssembly);
-        outputPath = store.resolve(paths.outputAssembly);
-        if (outputKind === "machine") {
-          await deliver(`${selected}.exe`, paths.outputBinary);
-          outputPath = store.resolve(paths.outputBinary);
+        const functionName = units[0].contract.function.name;
+        const winner = selected[functionName];
+        if (outputKind === "c") {
+          await deliver(`${functionName}/${winner}.c`, paths.outputSource);
+          outputPath = store.resolve(paths.outputSource);
+        } else if (outputKind === "wasm") {
+          await deliver(`${functionName}/${winner}.wat`, paths.outputWebAssemblyText);
+          await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
+          outputPath = store.resolve(paths.outputModule);
+          outputAssemblyPath = store.resolve(paths.outputWebAssemblyText);
+        } else {
+          // The delivered assembly is the assembled one, architecture prelude
+          // included, so it can be fed straight back to the assembler.
+          await deliver(`${functionName}/${winner}.s`, paths.outputAssembly);
+          outputAssemblyPath = store.resolve(paths.outputAssembly);
+          outputPath = store.resolve(paths.outputAssembly);
+          if (outputKind === "machine") {
+            await deliver(`${functionName}/${winner}.exe`, paths.outputBinary);
+            outputPath = store.resolve(paths.outputBinary);
+          }
         }
       }
       reporter.stage("output", "ok", `Output (${outputKind}):\n${delivered.map((path) => `  ${path}`).join("\n")}`);
     }
 
     build.status = "success";
-    build.selectedCandidate = result.selected;
+    build.selectedCandidates = selected;
     build.output = outputPath === null ? paths.outputAssembly : paths.outputBinary;
     build.updatedAt = new Date().toISOString();
     await writeBuildRecord(store, paths, build);
@@ -608,12 +781,17 @@ export async function runBuild(
     return {
       project: id,
       build,
-      contract,
+      contracts: Object.fromEntries(units.map((unit) => [unit.contract.function.name, unit.contract])),
       program,
-      candidates: result.candidates,
-      verification: result.outcomes.map((outcome) => outcome.verification).filter((entry) => entry !== undefined),
-      benchmark: result.outcomes.map((outcome) => outcome.benchmark).filter((entry) => entry !== undefined),
-      generation: { selected: result.selected, outcomes: result.outcomes, modelDurationNs: String(result.modelDurationNs) },
+      ...(phase.body === undefined ? {} : { body: phase.body }),
+      candidates,
+      verification,
+      benchmark,
+      generation: {
+        selected,
+        outcomes,
+        modelDurationNs: String(generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n)),
+      },
       outputKind,
       outputPath,
       outputAssemblyPath,
@@ -636,12 +814,14 @@ export async function runBuild(
 
 export interface StoredCommandOutcome {
   project: string;
-  candidate: string;
-  verification?: VerificationResult;
-  benchmark?: BenchmarkResult;
+  /** What was re-tested or re-measured, by function name. */
+  functions: Record<string, { candidate: string; verification?: VerificationResult; benchmark?: BenchmarkResult }>;
 }
 
-async function loadStored(store: JsonStore, project: string): Promise<{ paths: ProjectPaths; contract: FunctionContract; parsed: ParsedContract }> {
+async function loadStored(
+  store: JsonStore,
+  project: string,
+): Promise<{ paths: ProjectPaths; program: ProgramContract; units: CompilationUnit[] }> {
   const paths = projectPaths(project);
   if (!(await store.exists(paths.contract))) {
     throw new CompilerError({
@@ -652,8 +832,14 @@ async function loadStored(store: JsonStore, project: string): Promise<{ paths: P
     });
   }
   const program = await store.read<ProgramContract>(paths.contract);
-  const contract = entryContract(program);
-  return { paths, contract, parsed: parseContract(contract) };
+  // A stored program records which functions it compiled, so `blaze test` and
+  // `blaze benchmark` work on every one of them rather than on an entry the
+  // program does not have.
+  const build = (await store.exists(paths.build)) ? await store.read<BuildStatus>(paths.build) : undefined;
+  const compiled = build?.selectedCandidates === undefined ? {} : build.selectedCandidates;
+  const units = compilationUnits(program, program.entry.function === null)
+    .filter((unit) => Object.keys(compiled).length === 0 || compiled[unit.contract.function.name] !== undefined);
+  return { paths, program, units };
 }
 
 export async function runStored(
@@ -663,7 +849,15 @@ export async function runStored(
   action: "test" | "benchmark",
 ): Promise<StoredCommandOutcome> {
   const store = createJsonStore(join(options.cwd, STATE_DIRECTORY));
-  const { paths, contract, parsed } = await loadStored(store, project);
+  const { paths, program, units } = await loadStored(store, project);
+  if (units.length === 0) {
+    throw new CompilerError({
+      category: "StorageError",
+      stage: action,
+      message: `project "${project}" compiled no function`,
+      detail: "run blaze build first",
+    });
+  }
   if (!(await store.exists(paths.candidates))) {
     throw new CompilerError({
       category: "StorageError",
@@ -674,55 +868,79 @@ export async function runStored(
   }
   const input = await store.exists(paths.input) ? await store.read<SourceInput>(paths.input) : ({} as SourceInput);
   const build = await store.exists(paths.build) ? await store.read<BuildStatus>(paths.build) : undefined;
-  const candidates = await store.read<AssemblyCandidate[]>(paths.candidates);
-  const chosen = build?.selectedCandidate;
-  const candidate =
-    chosen === undefined ? candidates[candidates.length - 1] : candidates.find((entry) => entry.id === chosen);
-  if (candidate === undefined) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: action,
-      message: `project "${project}" has no candidate to ${action}`,
-    });
-  }
-  // The contract names no target, so the one the build ran for is what the
-  // stored candidate is tested and measured against.
-  const target = build?.target ?? normalizeTarget(input.target);
+  const stored = await store.read<Record<string, AssemblyCandidate[]>>(paths.candidates);
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
   const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
-  const workspace = { workDirectory: store.resolve(paths.work), functionName: contract.function.name };
-  const result = await evaluateStoredCandidate({
-    contract,
-    parsed,
-    target,
+  // The contract names no target, so the one the build ran for is what the
+  // stored candidate is tested and measured against.
+  const target = build?.target ?? normalizeTarget(input.target);
+  const base = store.resolve(paths.work);
+  const prepareRuntime = runtimePreparer({
     output,
     runtime,
-    candidate,
-    workspace,
-    prepareRuntime: runtimePreparer({ output, runtime, workspace }),
-    test: testConfigFor(input, options),
-    benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
+    workspace: { workDirectory: base, functionName: program.entry.file },
   });
 
-  await store.write(paths.verification, result.verification === undefined ? [] : [result.verification]);
-  await store.write(paths.benchmark, result.benchmark === undefined ? [] : [result.benchmark]);
+  const verification = (await store.exists(paths.verification))
+    ? await store.read<Record<string, VerificationResult[]>>(paths.verification)
+    : {};
+  const benchmark = (await store.exists(paths.benchmark))
+    ? await store.read<Record<string, BenchmarkResult[]>>(paths.benchmark)
+    : {};
+  const functions: StoredCommandOutcome["functions"] = {};
+  for (const unit of units) {
+    const functionName = unit.contract.function.name;
+    const candidates = stored[functionName] ?? [];
+    const chosen = build?.selectedCandidates?.[functionName];
+    const candidate =
+      chosen === undefined ? candidates[candidates.length - 1] : candidates.find((entry) => entry.id === chosen);
+    if (candidate === undefined) {
+      throw new CompilerError({
+        category: "StorageError",
+        stage: action,
+        message: `project "${project}" has no candidate to ${action} for ${functionName}`,
+      });
+    }
+    const workspace = { workDirectory: `${base}/${functionName}`, functionName };
+    const result = await evaluateStoredCandidate({
+      contract: unit.contract,
+      parsed: unit.parsed,
+      target,
+      output,
+      runtime,
+      candidate,
+      workspace,
+      prepareRuntime,
+      test: testConfigFor(input, options),
+      benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
+    });
+    functions[functionName] = {
+      candidate: candidate.id,
+      ...(result.verification === undefined ? {} : { verification: result.verification }),
+      ...(result.benchmark === undefined ? {} : { benchmark: result.benchmark }),
+    };
+    verification[functionName] = result.verification === undefined ? [] : [result.verification];
+    benchmark[functionName] = result.benchmark === undefined ? [] : [result.benchmark];
 
-  if (action === "test") {
-    reporter.stage(
-      "verify",
-      result.verification?.passed === true ? "ok" : "fail",
-      `Correctness verified (${result.verification?.cases ?? 0} test vectors)`,
-    );
-  } else {
-    reporter.stage(
-      "benchmark",
-      "ok",
-      `Benchmark completed (${result.benchmark?.iterations ?? 0} iterations, ${result.benchmark?.durationNs ?? 0} ns)`,
-    );
+    if (action === "test") {
+      reporter.stage(
+        "verify",
+        result.verification?.passed === true ? "ok" : "fail",
+        `Correctness verified for ${functionName} (${result.verification?.cases ?? 0} test vectors)`,
+      );
+    } else {
+      reporter.stage(
+        "benchmark",
+        "ok",
+        `Benchmark completed for ${functionName} (${result.benchmark?.iterations ?? 0} iterations, ${result.benchmark?.durationNs ?? 0} ns)`,
+      );
+    }
   }
-  return { project, candidate: candidate.id, verification: result.verification, benchmark: result.benchmark };
+  await store.write(paths.verification, verification);
+  await store.write(paths.benchmark, benchmark);
+  return { project, functions };
 }
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {

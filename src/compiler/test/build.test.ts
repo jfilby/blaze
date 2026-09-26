@@ -43,7 +43,7 @@ test("a build produces assembly, a native executable and a complete record", asy
 
   assert.equal(outcome.build.status, "success");
   assert.equal(outcome.build.outputKind, "machine");
-  assert.equal(outcome.build.selectedCandidate, "c1");
+  assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c1" });
   assert.equal(outcome.outputPath, join(directory, STATE_DIRECTORY, "projects/input/output/input"));
 
   const program = JSON.parse(
@@ -54,16 +54,16 @@ test("a build produces assembly, a native executable and a complete record", asy
 
   const verification = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/verification.json"), "utf8"),
-  ) as VerificationResult[];
-  assert.equal(verification.length, 1);
-  assert.equal(verification[0].passed, true);
-  assert.ok(verification[0].cases > 10);
+  ) as Record<string, VerificationResult[]>;
+  assert.equal(verification.dotProduct.length, 1);
+  assert.equal(verification.dotProduct[0].passed, true);
+  assert.ok(verification.dotProduct[0].cases > 10);
 
   const benchmark = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/benchmark.json"), "utf8"),
-  ) as { durationNs: number; iterations: number }[];
-  assert.equal(benchmark[0].iterations, 200);
-  assert.ok(benchmark[0].durationNs > 0);
+  ) as Record<string, { durationNs: number; iterations: number }[]>;
+  assert.equal(benchmark.dotProduct[0].iterations, 200);
+  assert.ok(benchmark.dotProduct[0].durationNs > 0);
 
   const build = await inspectProject("input", directory);
   assert.equal(build.status, "success");
@@ -93,8 +93,8 @@ test("the delivered assembly is the implementation that was verified", async () 
   const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
   const stored = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as { assembly: string }[];
-  assert.ok(delivered.endsWith(stored[0].assembly));
+  ) as Record<string, { assembly: string }[]>;
+  assert.ok(delivered.endsWith(stored.dotProduct[0].assembly));
   assert.ok(delivered.startsWith(".text"), "the architecture prelude is compiler controlled");
 });
 
@@ -138,11 +138,14 @@ test("a rejected candidate is replaced and its diagnostic is fed back", async ()
     "build",
   );
   assert.equal(outcome.build.status, "success");
-  assert.equal(outcome.build.selectedCandidate, "c2");
+  assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c2" });
 
-  const candidates = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as { id: string; candidate: number; round: number; feedback?: string[] }[];
+  const candidates = Object.values(
+    JSON.parse(await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8")) as Record<
+      string,
+      { id: string; candidate: number; round: number; feedback?: string[] }[]
+    >,
+  ).flat();
   // The repair is the second attempt of the first candidate, not a new one.
   assert.deepEqual(
     candidates.map((entry) => [entry.id, entry.candidate, entry.round]),
@@ -179,11 +182,14 @@ test("diagnostics accumulate across repairs and never reach the next candidate",
     "build",
   );
   assert.equal(outcome.build.status, "success");
-  assert.equal(outcome.build.selectedCandidate, "c4");
+  assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c4" });
 
-  const candidates = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as { id: string; candidate: number; round: number; feedback?: string[] }[];
+  const candidates = Object.values(
+    JSON.parse(await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8")) as Record<
+      string,
+      { id: string; candidate: number; round: number; feedback?: string[] }[]
+    >,
+  ).flat();
   assert.deepEqual(
     candidates.map((entry) => [entry.id, entry.candidate, entry.round]),
     [
@@ -238,7 +244,7 @@ test("reuse rebuilds from stored assembly without asking the model", async () =>
     "build",
   );
   assert.equal(reused.build.status, "success");
-  assert.equal(reused.build.selectedCandidate, "c1");
+  assert.deepEqual(reused.build.selectedCandidates, { dotProduct: "c1" });
   assert.deepEqual(reused.candidates, first.candidates);
 });
 
@@ -259,16 +265,16 @@ test("test and benchmark re-run against the selected candidate", async () => {
   const options = { cwd: directory, reuse: false, model: `replay:${REPLAY}` };
 
   const verified = await runStored("input", options, quiet, "test");
-  assert.equal(verified.candidate, "c1");
-  assert.equal(verified.verification?.passed, true);
-  assert.ok((verified.verification?.cases ?? 0) > 0);
+  assert.equal(verified.functions.dotProduct.candidate, "c1");
+  assert.equal(verified.functions.dotProduct.verification?.passed, true);
+  assert.ok((verified.functions.dotProduct.verification?.cases ?? 0) > 0);
 
   const measured = await runStored("input", options, quiet, "benchmark");
-  assert.ok((measured.benchmark?.durationNs ?? 0) > 0);
-  assert.equal(measured.benchmark?.iterations, 200);
+  assert.ok((measured.functions.dotProduct.benchmark?.durationNs ?? 0) > 0);
+  assert.equal(measured.functions.dotProduct.benchmark?.iterations, 200);
 });
 
-test("the shipped TypeScript example builds and computes what it claims", async () => {
+test("the shipped TypeScript example builds into a program that prints what it claims", async () => {
   const directory = await mkdtemp(join(tmpdir(), "blaze-example-"));
   const outcome = await runBuild(
     EXAMPLE,
@@ -279,18 +285,20 @@ test("the shipped TypeScript example builds and computes what it claims", async 
 
   assert.equal(outcome.project, "hello_world");
   assert.equal(outcome.build.status, "success");
-  assert.deepEqual(outcome.contract.function.params, [
+  assert.deepEqual(outcome.contracts.dotProduct.function.params, [
     { name: "a", type: "slice<f64>" },
     { name: "b", type: "slice<f64>" },
     { name: "n", type: "f64" },
   ]);
+  // The entry module is a program, so what it prints is what it is checked on,
+  // and the function it calls is the one the build compiles.
+  assert.equal(outcome.body?.file, "main.ts");
+  assert.deepEqual(Object.keys(outcome.build.selectedCandidates ?? {}), ["dotProduct"]);
 
   assert.ok(outcome.outputPath !== null);
-  const request = ["run", "3 3 3", "1.5 -2 3", "4 0.5 2", ""].join("\n");
-  const execution = run(outcome.outputPath, [], { input: request, timeoutMs: 60_000 });
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
   assert.equal(execution.code, 0, execution.stderr);
-  // 1.5*4 + (-2)*0.5 + 3*2
-  assert.equal(Number(execution.stdout.trim().split(" ")[1]), 11);
+  assert.equal(execution.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
 });
 
 /**
@@ -341,9 +349,7 @@ test("a delivered program started on a terminal runs and exits instead of hangin
   const execution = runOnTerminal(outcome.outputPath);
   // The binary must terminate on its own: a timeout here is the bug.
   assert.equal(execution.code, 0, execution.output);
-  const result = /^RESULT (.+)$/m.exec(execution.output);
-  assert.ok(result !== null, `expected a RESULT line, got: ${execution.output}`);
-  assert.equal(Number(result[1]), 140);
+  assert.match(execution.output, /^done: dot product = 70$/m);
 });
 
 test("a project names its provider and model, and the flag overrides it", async () => {
@@ -420,8 +426,8 @@ test("a source file given in place of a project file is named as one", async () 
   );
 });
 
-test("a module that runs code at the top level is rejected as not being a module", async () => {
-  const directory = await workspace("program-source");
+test("a program that names an entry function is refused, because a program is its statements", async () => {
+  const directory = await workspace("program-with-entry");
   await writeFile(join(directory, "module.ts"), 'import { f } from "./f.ts";\nconsole.log(f());\n');
   await writeFile(join(directory, "f.ts"), "export function f(): number {\n  return 1;\n}\n");
   await writeFile(
@@ -430,7 +436,28 @@ test("a module that runs code at the top level is rejected as not being a module
   );
   await assert.rejects(
     () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
-    /"console" is not a declaration in module.ts/,
+    /entry "f" names a function, but module.ts is a program/,
+  );
+});
+
+test("an imported module that runs code is refused, because nothing would run it", async () => {
+  const directory = await workspace("library-with-body");
+  await writeFile(
+    join(directory, "main.ts"),
+    'import { f } from "./f.ts";\nconsole.log(`${f()}`);\n',
+  );
+  await writeFile(
+    join(directory, "f.ts"),
+    'import { g } from "./g.ts";\nexport function f(): number {\n  return 1;\n}\nconsole.log(g());\n',
+  );
+  await writeFile(join(directory, "g.ts"), "export function g(): number {\n  return 2;\n}\n");
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({ ...INPUT, language: "typescript", sourceFile: "main.ts" }),
+  );
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /f.ts runs code at the top level/,
   );
 });
 

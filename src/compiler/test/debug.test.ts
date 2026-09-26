@@ -151,8 +151,8 @@ test("concurrency of one generates candidates one at a time", async (t) => {
   assert.equal(outcome.build.status, "success");
   assert.equal(peak(), 1, "a candidate must be answered before the next is asked for");
   // One record per candidate, whatever order they were produced in.
-  assert.deepEqual(outcome.candidates.map((entry) => entry.id), ["c1", "c2", "c3"]);
-  assert.deepEqual(outcome.candidates.map((entry) => entry.candidate), [1, 2, 3]);
+  assert.deepEqual(outcome.candidates.square.map((entry) => entry.id), ["c1", "c2", "c3"]);
+  assert.deepEqual(outcome.candidates.square.map((entry) => entry.candidate), [1, 2, 3]);
 });
 
 test("without --debug the prompts stay out of the way", async (t) => {
@@ -190,7 +190,7 @@ test("--debug prints the system and user prompt of every attempt", async (t) => 
 
   const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
   assert.equal(outcome.build.status, "success", "the repair should succeed");
-  assert.equal(outcome.build.selectedCandidate, "c2");
+  assert.equal(outcome.build.selectedCandidates?.square, "c2");
 
   const debug = written.join("");
   // One dump per attempt: the rejected one and its repair.

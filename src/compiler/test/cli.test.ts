@@ -38,10 +38,11 @@ test("build with no argument builds the blaze.json in the current directory", as
   assert.match(execution.stdout, /Output \(machine\)/);
 
   const delivered = join(directory, ".blaze/projects/hello_world/output/hello_world");
-  const result = run(delivered, [], { input: "run\n3 3 3\n1.5 -2 3\n4 0.5 2\n", timeoutMs: 60_000 });
+  // The example entry module is a program, so the delivered binary is that
+  // program: it prints what main.ts prints, whatever it is given on stdin.
+  const result = run(delivered, [], { input: "run\n3 3 3\n", timeoutMs: 60_000 });
   assert.equal(result.code, 0, result.stderr);
-  // 1.5*4 + (-2)*0.5 + 3*2
-  assert.equal(Number(result.stdout.trim().split(" ")[1]), 11);
+  assert.equal(result.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
 });
 
 test("generate with no argument uses the same default", async () => {

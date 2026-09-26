@@ -93,6 +93,7 @@ test("the prompt tells the model which runtime entry points it may call", () => 
   const program = programOf("nim", files, "module.nim");
   const request: Omit<PromptRequest, "runtime"> = {
     contract: entryContract(program),
+    unit: { file: "module.nim", function: "dotProduct" },
     program,
     sources: [{ path: "module.nim", source: files["module.nim"] }],
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
@@ -125,11 +126,11 @@ test("a standalone build links the compiler runtime and a candidate may allocate
   );
 
   assert.equal(outcome.build.runtime, "none");
-  assert.equal(outcome.verification[0]?.passed, true);
+  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
   assert.equal(outcome.build.status, "success");
 
   // The candidate calls the ABI, and the runtime object resolves it.
-  const undefinedSymbols = run("nm", ["--undefined-only", join(project(directory), "work/c1.o")], { timeoutMs: 30_000 });
+  const undefinedSymbols = run("nm", ["--undefined-only", join(project(directory), "work/dotProduct/c1.o")], { timeoutMs: 30_000 });
   assert.match(undefinedSymbols.stdout, /blaze_rt_allocate/);
   assert.match(undefinedSymbols.stdout, /blaze_rt_release/);
   const runtimeObject = run("nm", ["--defined-only", join(project(directory), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
@@ -152,7 +153,7 @@ test("a C candidate may call the runtime ABI", async () => {
   );
 
   assert.equal(outcome.build.runtime, "none");
-  assert.equal(outcome.verification[0]?.passed, true);
+  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
   const source = await readFile(outcome.outputPath!, "utf8");
   assert.match(source, /#include "blaze_rt\.h"/);
   assert.match(source, /blaze_rt_allocate/);
@@ -172,14 +173,14 @@ test("a hosted build runs the candidate inside a Nim host program", async (t) =>
   );
 
   assert.equal(outcome.build.runtime, "nim");
-  assert.equal(outcome.verification[0]?.passed, true);
+  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
   assert.equal(outcome.build.status, "success");
 
   // The host program and the adapter are compiler output, and the adapter
   // implements the whole ABI on Nim's allocator.
-  const adapter = await readFile(join(project(directory), `work/${RUNTIME_NAME}.nim`), "utf8");
+  const adapter = await readFile(join(project(directory), `work/dotProduct/${RUNTIME_NAME}.nim`), "utf8");
   assert.match(adapter, /proc blaze_rt_allocate\*/);
-  const host = await readFile(join(project(directory), "work/c1_host.nim"), "utf8");
+  const host = await readFile(join(project(directory), "work/dotProduct/c1_host.nim"), "utf8");
   assert.match(host, /import blaze_rt/);
   assert.match(host, /proc dotProduct\(/);
 
@@ -241,7 +242,7 @@ test("the shipped hosted example builds against the Nim runtime", async (t) => {
 
   assert.equal(outcome.project, "hosted_dot_product");
   assert.equal(outcome.build.runtime, "nim");
-  assert.equal(outcome.verification[0]?.passed, true);
+  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
 
   const execution = run(outcome.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
   assert.equal(execution.code, 0, execution.stderr);
@@ -287,5 +288,5 @@ test("a project file may name its runtime", async (t) => {
     "build",
   );
   assert.equal(outcome.build.runtime, "nim");
-  assert.equal(outcome.verification[0]?.passed, true);
+  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
 });

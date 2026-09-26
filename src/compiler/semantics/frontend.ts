@@ -669,7 +669,8 @@ export const nimFrontend: Frontend = {
     if (functions.length === 0) {
       throw frontendError(`no proc found in ${path}`, "a module declares pure procs");
     }
-    return { path, imports: parseImports(source), functions };
+    // A Nim module of this compiler is a library of procs: nothing in it runs.
+    return { path, imports: parseImports(source), functions, body: [] };
   },
 
   contractFor(analysis, declared, input) {

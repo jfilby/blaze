@@ -16,7 +16,8 @@
  *   }
  *
  *   - top level: `import { name } from "./other.ts";`, function declarations
- *     with or without `export`, and nothing that runs
+ *     with or without `export`, and the statements of a program (see
+ *     typescript-program.ts), which come after every declaration
  *   - statements: let/const with a literal initialiser, counted for loops,
  *     assignments, compound assignments, return
  *   - expressions: number and bigint literals, identifiers, indexing,
@@ -30,9 +31,10 @@ import { parseType, typeToString } from "./contract.ts";
 import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import { parseProgramBody } from "./typescript-program.ts";
 import type { TypeExpr } from "../core/types.ts";
 
-function frontendError(message: string, detail?: string): CompilerError {
+export function frontendError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
 }
 
@@ -75,17 +77,19 @@ function mapTypeScriptType(text: string, position: string): TypeExpr {
 /* Lexer                                                                      */
 /* -------------------------------------------------------------------------- */
 
-type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "end";
+export type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "end";
 
-interface Token {
+export interface Token {
   kind: TokenKind;
   text: string;
   line: number;
+  /** Set on a string written in backticks, whose `${...}` parts interpolate. */
+  template?: boolean;
 }
 
 const PUNCTUATION = ["=>", "===", "!==", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "{", "}", "(", ")", "[", "]", ";", ",", ":", "=", "<", ">", "+", "-", "*", "/", ".", "!"];
 
-function tokenize(source: string): Token[] {
+export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
   let line = 1;
@@ -118,7 +122,7 @@ function tokenize(source: string): Token[] {
       // decides where a string is allowed.
       const end = source.indexOf(character, index + 1);
       if (end < 0) throw frontendError("unterminated string", `line ${line}`);
-      tokens.push({ kind: "string", text: source.slice(index + 1, end), line });
+      tokens.push({ kind: "string", text: source.slice(index + 1, end), line, template: character === "`" });
       index = end + 1;
       continue;
     }
@@ -222,7 +226,11 @@ class TypeScriptParser {
     throw frontendError(message, `line ${token.line} near "${token.text}"`);
   }
 
-  /** Parses a module: the imports it binds and the functions it declares. */
+  /**
+   * Parses a module: the imports it binds, the functions it declares, and the
+   * statements it runs. A program is the last thing a module says, so the
+   * first statement ends the declarations.
+   */
   parseModule(path: string): ModuleAnalysis {
     const imports: ModuleImport[] = [];
     const functions: DeclaredFunction[] = [];
@@ -234,10 +242,9 @@ class TypeScriptParser {
       }
       const token = this.peek();
       if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
-        throw frontendError(
-          `"${token.text}" is not a declaration in ${path}`,
-          `line ${token.line}: a module declares functions and imports from other modules; it cannot execute code`,
-        );
+        // The body runs to the end of the file: a declaration after it belongs
+        // to a library, not to a program.
+        return { path, imports, functions, body: parseProgramBody(this.tokens.slice(this.position), path) };
       }
       const exported = this.accept("export");
       if (exported && this.at("default")) {
@@ -261,7 +268,7 @@ class TypeScriptParser {
         handle: parsed,
       });
     }
-    return { path, imports, functions };
+    return { path, imports, functions, body: [] };
   }
 
   /** `import { f, g } from "./other.ts";` is the only import form a module has. */

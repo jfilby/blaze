@@ -20,6 +20,12 @@ export interface PromptRequest {
   /** The contract of the function this candidate implements. */
   contract: FunctionContract;
   /**
+   * The function this candidate implements, and the file that declares it. A
+   * program compiles every function of its contract graph, one at a time, so
+   * the function being written is named here rather than taken from the entry.
+   */
+  unit: { file: string; function: string };
+  /**
    * The contract of every file of the program, not only the one being written.
    * A backend is handed the whole program so that no cross-file semantics are
    * left for it to infer, and it may not change any of it.
@@ -126,13 +132,19 @@ function renderTypes(contract: FunctionContract): string {
 /** The whole program: the module being written, and the contract of every other. */
 function renderProgram(request: PromptRequest): string {
   const program = request.program;
-  const source = request.sources.find((module) => module.path === program.entry.file);
+  const unit = request.unit;
+  // The source of the file being written comes first. A program's statements
+  // come second, because they are what calls it.
+  const written = [unit.file, ...(program.entry.file === unit.file ? [] : [program.entry.file])];
   const lines = [
     `language: ${program.language}`,
-    `entry: ${program.entry.function} in ${program.entry.file}`,
-    ...(source === undefined ? [] : [`source of ${source.path}:`, "```", source.source.trimEnd(), "```"]),
+    `entry: ${unit.function} in ${unit.file}`,
+    ...written.flatMap((path) => {
+      const source = request.sources.find((module) => module.path === path);
+      return source === undefined ? [] : [`source of ${source.path}:`, "```", source.source.trimEnd(), "```"];
+    }),
   ];
-  for (const file of program.files.filter((entry) => entry.path !== program.entry.file)) {
+  for (const file of program.files.filter((entry) => entry.path !== unit.file)) {
     lines.push(
       `${file.path} exports ${Object.keys(file.functions).join(", ") || "nothing"}${
         file.imports.length === 0 ? "" : `; imports ${file.imports.join(", ")}`

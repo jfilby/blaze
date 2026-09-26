@@ -1,5 +1,5 @@
 /**
- * Module analysis: what one source file declares and imports.
+ * Module analysis: what one source file declares, imports and runs.
  *
  * A frontend parses a source file into this shape and nothing more. The
  * contract phase (see program.ts) then decides which declarations become
@@ -34,12 +34,53 @@ export interface DeclaredFunction {
   handle: unknown;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Program body                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A value a running program names. A program is not contracted: it is the
+ * statements of the entry module, in the order they run, and every function
+ * it calls is contracted and compiled like any other.
+ */
+export type ProgramValue =
+  /** A number, exactly as the source wrote it. */
+  | { k: "number"; text: string }
+  /** A string, with the values a template string interpolates. */
+  | { k: "text"; parts: ProgramText[] }
+  /** A buffer written out element by element, as a typed array literal is. */
+  | { k: "buffer"; values: string[] }
+  | { k: "name"; name: string }
+  | { k: "length"; buffer: string }
+  | { k: "element"; buffer: string; index: ProgramValue }
+  | { k: "call"; function: string; args: ProgramValue[] };
+
+/** One piece of a string: text as written, or a value interpolated into it. */
+export type ProgramText = { k: "text"; value: string } | { k: "value"; value: ProgramValue };
+
+/** A statement a program runs. */
+export type ProgramStatement =
+  | { kind: "declare"; name: string; value: ProgramValue; line: number }
+  | { kind: "print"; value: ProgramValue; line: number };
+
+/** The statements of a module that run, with the file they were written in. */
+export interface ProgramBody {
+  file: string;
+  statements: ProgramStatement[];
+}
+
 /** Everything one source file says about itself. */
 export interface ModuleAnalysis {
   /** Project-relative path, so a diagnostic can name the file it came from. */
   path: string;
   imports: ModuleImport[];
   functions: DeclaredFunction[];
+  /**
+   * The statements the file runs, in order. Only the entry module of a program
+   * may have them: a file the program merely imports is a library of
+   * functions, and code in it would never run.
+   */
+  body: ProgramStatement[];
 }
 
 export interface Frontend {

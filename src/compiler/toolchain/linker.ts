@@ -369,6 +369,8 @@ int main(void) {
 export interface LinkRequest {
   harnessPath: string;
   objectPath: string;
+  /** Directories the generated source includes the runtime header from. */
+  includeDirectories?: string[];
   /** The compiler runtime object, when the build links one. */
   runtimeObjectPath?: string;
   outputPath: string;
@@ -378,7 +380,10 @@ export interface LinkRequest {
 export function link(request: LinkRequest): void {
   const inputs = [request.harnessPath, request.objectPath];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
-  const result = run("gcc", ["-O2", "-o", request.outputPath, ...inputs], { timeoutMs: 120_000 });
+  // The harness includes the runtime header by name, and a build keeps the
+  // runtime beside the work directory rather than beside every candidate.
+  const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
+  const result = run("gcc", ["-O2", ...includes, "-o", request.outputPath, ...inputs], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

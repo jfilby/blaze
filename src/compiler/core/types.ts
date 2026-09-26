@@ -173,7 +173,12 @@ export interface ContractEdge {
 export interface ProgramContract {
   version: "1";
   language: string;
-  entry: { file: string; function: string };
+  /**
+   * The entry module, and the function a build compiles when the entry module
+   * is a library. A program has no entry function: its statements run, and
+   * every function of the graph is compiled.
+   */
+  entry: { file: string; function: string | null };
   files: FileContract[];
   edges: ContractEdge[];
 }
@@ -269,7 +274,8 @@ export interface SourceInput {
   sourceFile?: string;
   /** Provider and model for this project, overriding AI_MODEL. */
   model?: string | ModelSelection;
-  entry: string;
+  /** Function of the entry module to compile. Absent when the entry is a program. */
+  entry?: string;
   output?: OutputKind;
   target?: Partial<TargetSpec>;
   runtime?: RuntimeKind;
@@ -364,7 +370,8 @@ export interface BuildStatus {
   outputKind: OutputKind;
   /** The runtime this build links against. */
   runtime: RuntimeKind;
-  selectedCandidate?: string;
+  /** The candidate selected for each compiled function, by function name. */
+  selectedCandidates?: Record<string, string>;
   output?: string;
   createdAt: string;
   updatedAt: string;

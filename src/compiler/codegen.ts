@@ -20,6 +20,7 @@ import { generateHarness, link } from "./toolchain/linker.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } from "./runtime/standalone.ts";
 import { writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
@@ -72,6 +73,8 @@ export interface GenerationProgress {
 export interface CodegenRequest extends CandidateEvaluationRequest {
   contract: FunctionContract;
   parsed: ParsedContract;
+  /** The file that declares the contract, which the prompt reads as the source. */
+  unitFile: string;
   /** The whole program, contracted: what a backend needs about every file. */
   program: ProgramContract;
   /** Every module of the program, with the source each contract came from. */
@@ -223,6 +226,7 @@ async function materialize(
           sourcePath: paths.implementation,
           objectPath: paths.object,
           candidate: candidate.id,
+          ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
         })
       : await assemble({
           assembly: candidate.assembly,
@@ -239,6 +243,7 @@ async function materialize(
       harnessPath: paths.harness,
       objectPath: paths.object,
       runtimeObjectPath: runtime.objectPath,
+      includeDirectories: [dirname(runtime.headerPath)],
       outputPath: paths.executable,
       functionName: request.contract.function.name,
     });
@@ -424,6 +429,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
         const generated = await generationBackend().generate(
           {
             contract: request.contract,
+            unit: { file: request.unitFile, function: request.contract.function.name },
             program: request.program,
             sources: request.sources,
             target: request.target,

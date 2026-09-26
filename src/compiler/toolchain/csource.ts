@@ -100,6 +100,8 @@ export interface CompileCRequest {
   sourcePath: string;
   objectPath: string;
   candidate?: string;
+  /** Directories the candidate includes the runtime header from. */
+  includeDirectories?: string[];
 }
 
 export interface CompileCResult {
@@ -115,9 +117,14 @@ export async function compileC(request: CompileCRequest): Promise<CompileCResult
   await writeFile(request.sourcePath, request.source, "utf8");
 
   const archFlag = request.target.cpu === "" ? [] : [`-march=${request.target.cpu}`];
-  const compiled = run("gcc", ["-std=c11", "-O2", "-fno-lto", "-c", ...archFlag, "-o", request.objectPath, request.sourcePath], {
-    timeoutMs: 120_000,
-  });
+  // A C candidate includes the runtime header by name, and a build keeps the
+  // runtime beside the work directory rather than beside every candidate.
+  const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
+  const compiled = run(
+    "gcc",
+    ["-std=c11", "-O2", "-fno-lto", "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
+    { timeoutMs: 120_000 },
+  );
   if (compiled.spawnError !== undefined) {
     throw new CompilerError({
       category: "TargetError",

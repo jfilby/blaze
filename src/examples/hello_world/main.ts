@@ -1,16 +1,22 @@
 /**
- * main: the plain Node side of the hello_world example.
+ * main: the program the compiler builds.
  *
- * `hello_world.ts` is compiler input, not a program: the frontend accepts pure
- * functions only, so a `main` with calls and printing cannot live there. This
- * file is the executable side — it prints, calls `dotProduct` from the example
- * and prints the result:
+ * A module of this compiler is either a library of pure functions or a
+ * program. `hello_world.ts` is the library: the frontend turns it into a
+ * function contract, the model writes an implementation, and the compiler
+ * assembles, links, runs and verifies it against the contract. This file is
+ * the program: it declares the data, calls `dotProduct` and prints what came
+ * back.
+ *
+ *   cd src/examples/hello_world
+ *   blaze build
+ *   .blaze/projects/hello_world/output/hello_world
+ *
+ * The build delivers a binary that prints exactly what this file prints when
+ * node runs it, which is how the compiler knows the program it built is this
+ * program. The statements here are also runnable as they are:
  *
  *   node src/examples/hello_world/main.ts
- *
- * To run the compiled `dotProduct` instead, run `blaze build` in
- * `src/examples/hello_world` and start the delivered binary from a terminal:
- * it runs one built-in example vector, prints RESULT, and exits.
  */
 
 import { dotProduct } from "./hello_world.ts";

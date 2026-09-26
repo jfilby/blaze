@@ -1,7 +1,6 @@
 {
   "language": "typescript",
-  "sourceFile": "hello_world.ts",
-  "entry": "dotProduct",
+  "sourceFile": "main.ts",
   "model": {
     "provider": "openrouter",
     "model": "stealth/space-bunny-alpha"

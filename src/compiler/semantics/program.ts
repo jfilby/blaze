@@ -10,6 +10,11 @@
  * valid does it leave this module, and nothing else in the compiler may
  * generate target code before that happens.
  *
+ * An entry module may also be a program: a body of statements that run. The
+ * statements are not contracted, so the phase hands them back as they were
+ * parsed, and the build compiles every exported function of the program and
+ * emits a driver that runs the body.
+ *
  * Contracts are target independent and frozen on the way out: a backend reads
  * the program contract, it cannot rewrite it.
  *
@@ -20,7 +25,7 @@
 import { posix } from "node:path";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "./contract.ts";
-import type { Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import type { ContractEdge, FileContract, FunctionContract, ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
 
 /** The path a source given inline to a project file is known by. */
@@ -40,6 +45,8 @@ export interface ContractPhase {
   program: ProgramContract;
   /** Every module of the program, entry first, in discovery order. */
   modules: SourceModule[];
+  /** The statements of the entry module, when it is a program rather than a library. */
+  body?: ProgramBody;
 }
 
 function contractPhaseError(message: string, detail?: string): CompilerError {
@@ -185,14 +192,30 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
   return edges;
 }
 
-/** The entry the build compiles: an export of the entry file, by name. */
-function resolveEntry(input: SourceInput, entryFile: FileContract): { file: string; function: string } {
+/** The entry a build compiles: a program body, or an export of the entry file. */
+function resolveEntry(
+  input: SourceInput,
+  entryFile: FileContract,
+  body: ProgramBody | undefined,
+): { file: string; function: string | null } {
   const available = Object.keys(entryFile.functions);
   const requested = input.entry;
+  if (body !== undefined) {
+    if (requested !== undefined && requested !== "") {
+      throw contractPhaseError(
+        `entry "${requested}" names a function, but ${entryFile.path} is a program`,
+        "a program is the statements of its entry module: drop \"entry\", and every function it calls is compiled",
+      );
+    }
+    return { file: entryFile.path, function: null };
+  }
   if (requested === undefined || requested === "") {
     const first = available[0];
     if (first === undefined) {
-      throw contractPhaseError(`${entryFile.path} exports no function`, "the entry module must export the function to compile");
+      throw contractPhaseError(
+        `${entryFile.path} exports no function`,
+        "the entry module must export the function to compile, or be a program that calls the functions it does export",
+      );
     }
     return { file: entryFile.path, function: first };
   }
@@ -205,6 +228,25 @@ function resolveEntry(input: SourceInput, entryFile: FileContract): { file: stri
   return { file: entryFile.path, function: requested };
 }
 
+/**
+ * The body of the program: the statements of the entry module. Only the entry
+ * module runs, so a body anywhere else is code that would never run.
+ */
+function resolveBody(records: ModuleRecord[], entryPath: string): ProgramBody | undefined {
+  let body: ProgramBody | undefined;
+  for (const record of records) {
+    if (record.analysis.body.length === 0) continue;
+    if (record.path !== entryPath) {
+      throw contractPhaseError(
+        `${record.path} runs code at the top level`,
+        `line ${record.analysis.body[0].line}: only the entry module ${entryPath} runs; a file the program imports is a library of functions`,
+      );
+    }
+    body = { file: record.path, statements: record.analysis.body };
+  }
+  return body;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Entry point                                                                */
 /* -------------------------------------------------------------------------- */
@@ -212,10 +254,11 @@ function resolveEntry(input: SourceInput, entryFile: FileContract): { file: stri
 export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const read = cachingReader(request.read);
   const records = discover(request, read);
+  const body = resolveBody(records, request.entry.path);
   const contracts = new Map<string, FileContract>();
   for (const record of records) {
     const file = contractFile(request, record);
-    if (Object.keys(file.functions).length === 0) {
+    if (Object.keys(file.functions).length === 0 && !(record.path === request.entry.path && body !== undefined)) {
       throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
     }
     contracts.set(record.path, file);
@@ -224,7 +267,7 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const program: ProgramContract = {
     version: "1",
     language: request.input.language,
-    entry: resolveEntry(request.input, contracts.get(request.entry.path) as FileContract),
+    entry: resolveEntry(request.input, contracts.get(request.entry.path) as FileContract, body),
     files: records.map((record) => contracts.get(record.path) as FileContract),
     edges,
   };
@@ -232,14 +275,21 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   return {
     program,
     modules: records.map((record) => ({ path: record.path, source: record.source })),
+    ...(body === undefined ? {} : { body }),
   };
 }
 
-/** The contract of the function a build compiles. */
+/** The contract of the function a build compiles. A program has no such function. */
 export function entryContract(program: ProgramContract): FunctionContract {
   const file = program.files.find((entry) => entry.path === program.entry.file);
   if (file === undefined) {
     throw contractPhaseError(`the program contract has no file ${program.entry.file}`);
+  }
+  if (program.entry.function === null) {
+    throw contractPhaseError(
+      `${program.entry.file} is a program, not a function`,
+      "a program compiles every function of the contract graph; ask the build for those, not for an entry",
+    );
   }
   const contract = file.functions[program.entry.function];
   if (contract === undefined) {
