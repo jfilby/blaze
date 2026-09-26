@@ -99,7 +99,7 @@ test("the prompt tells the model which runtime entry points it may call", () => 
     optimize: { primary: "throughput" },
   } as unknown as Parameters<typeof buildUserPrompt>[0]["contract"];
 
-  const hosted = buildUserPrompt({ contract, target: contract.target, output: "machine", runtime: "nim", attempt: 1 });
+  const hosted = buildUserPrompt({ contract, target: contract.target, output: "machine", runtime: "nim", candidate: 1, attempt: 1 });
   assert.match(hosted, /RUNTIME/);
   assert.match(hosted, /Nim host runtime/);
   assert.match(hosted, /void\* blaze_rt_allocate\(size_t bytes\)/);
@@ -109,7 +109,7 @@ test("the prompt tells the model which runtime entry points it may call", () => 
     "a hosted candidate may allocate, so the prompt must not tell the model the function is pure",
   );
 
-  const standalone = buildUserPrompt({ contract, target: contract.target, output: "machine", runtime: "none", attempt: 1 });
+  const standalone = buildUserPrompt({ contract, target: contract.target, output: "machine", runtime: "none", candidate: 1, attempt: 1 });
   assert.match(standalone, /compiler runtime/);
 });
 

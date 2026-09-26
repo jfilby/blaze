@@ -119,7 +119,7 @@ test("the compiler says which model it is waiting for", async (t) => {
 
   assert.ok(lines.includes("Model: openai-compatible/silent"), `no model line in: ${lines.join(" | ")}`);
   assert.ok(
-    lines.some((line) => line === "Generating assembly: attempt 1 of 1, waiting for openai-compatible/silent"),
+    lines.some((line) => line === "Generating assembly: candidate 1 of 1, attempt 1 of 1, waiting for openai-compatible/silent"),
     `no generating line in: ${lines.join(" | ")}`,
   );
 });

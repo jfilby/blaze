@@ -134,7 +134,13 @@ export interface FunctionContract {
 /* -------------------------------------------------------------------------- */
 
 export interface GenerationConfig {
+  /** Candidates to generate. Each one is generated from the contract alone. */
   maxCandidates: number;
+  /**
+   * Attempts allowed per candidate: the first generates, every later one
+   * repairs the output the previous attempt was rejected for. A candidate
+   * costs at most this many model requests.
+   */
   maxAttempts: number;
   /**
    * Optional wall clock budget for one model request, retries included. Unset
@@ -239,12 +245,13 @@ export interface AssemblyCandidate {
   id: string;
   assembly: string;
   model: string;
-  /** Provider/model configuration string, recorded for reproducibility. */
   modelConfig: string;
   generatedAt: string;
-  /** Generation round (1-based). */
+  /** Which candidate this belongs to (1-based). Candidates are independent. */
+  candidate: number;
+  /** Attempt within its candidate (1-based). The first generates, later ones repair. */
   round: number;
-  /** Diagnostics fed back to the model on retries. */
+  /** Every diagnostic this candidate collected before this attempt, oldest first. */
   feedback?: string[];
 }
 

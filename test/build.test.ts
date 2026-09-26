@@ -141,9 +141,69 @@ test("a rejected candidate is replaced and its diagnostic is fed back", async ()
 
   const candidates = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as { id: string; feedback?: string[] }[];
+  ) as { id: string; candidate: number; round: number; feedback?: string[] }[];
+  // The repair is the second attempt of the first candidate, not a new one.
+  assert.deepEqual(
+    candidates.map((entry) => [entry.id, entry.candidate, entry.round]),
+    [["c1", 1, 1], ["c2", 1, 2]],
+  );
   assert.equal(candidates[0].feedback, undefined);
   assert.match(candidates[1].feedback?.[0] ?? "", /syscall/);
+  assert.match(candidates[1].feedback?.[0] ?? "", /^\[attempt 1]/);
+});
+
+test("diagnostics accumulate across repairs and never reach the next candidate", async () => {
+  const directory = await workspace("accumulate");
+  const replay = join(directory, "candidates.json");
+  const reference = JSON.parse(await readFile(REPLAY, "utf8")) as { candidates: string[] };
+  // Three rejections in a row, then a working answer: the first candidate burns
+  // its attempts, and the second one is generated from a clean prompt.
+  await writeFile(
+    replay,
+    JSON.stringify({
+      candidates: [
+        "\t.globl dotProduct\ndotProduct:\n\tsyscall\n\tret\n",
+        "\t.globl dotProduct\ndotProduct:\n\tnotaninstruction\n\tret\n",
+        "\t.globl dotProduct\ndotProduct:\n\tmovssq\n\tret\n",
+        reference.candidates[0],
+      ],
+    }),
+    "utf8",
+  );
+
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 3, maxCandidates: 2 },
+    quiet,
+    "build",
+  );
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.selectedCandidate, "c4");
+
+  const candidates = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
+  ) as { id: string; candidate: number; round: number; feedback?: string[] }[];
+  assert.deepEqual(
+    candidates.map((entry) => [entry.id, entry.candidate, entry.round]),
+    [
+      ["c1", 1, 1],
+      ["c2", 1, 2],
+      ["c3", 1, 3],
+      ["c4", 2, 1],
+    ],
+  );
+
+  // Every repair sees what this candidate already collected, oldest first.
+  assert.equal(candidates[0].feedback, undefined);
+  assert.equal(candidates[1].feedback?.length, 1);
+  assert.match(candidates[1].feedback?.[0] ?? "", /^\[attempt 1] assemble failed:.*syscall/s);
+  assert.equal(candidates[2].feedback?.length, 2);
+  assert.match(candidates[2].feedback?.[0] ?? "", /^\[attempt 1]/);
+  assert.match(candidates[2].feedback?.[1] ?? "", /^\[attempt 2]/);
+  assert.match(candidates[2].feedback?.[1] ?? "", /notaninstruction/);
+
+  // The next candidate starts clean: candidate 1's diagnostics stay behind.
+  assert.equal(candidates[3].feedback, undefined);
 });
 
 test("a build where nothing is valid fails with a record that says why", async () => {

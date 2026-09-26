@@ -18,9 +18,20 @@ export interface PromptRequest {
   target: TargetSpec;
   output: OutputKind;
   runtime: RuntimeKind;
-  /** Diagnostics from the previous attempt for this candidate. */
-  feedback?: string[];
+  /** The candidate being produced (1-based). Candidates never share context. */
+  candidate: number;
+  /** The attempt within that candidate (1-based). The first generates. */
   attempt: number;
+  /**
+   * The rejected implementation this attempt repairs. Unset on the first
+   * attempt of a candidate, which generates from the contract alone.
+   */
+  previous?: string;
+  /**
+   * Every diagnostic this candidate collected so far, oldest first. Unset on
+   * the first attempt.
+   */
+  feedback?: string[];
 }
 
 const NATIVE_LANGUAGE = "GNU assembler (GAS) AT&T syntax for x86-64";
@@ -100,8 +111,15 @@ function renderTypes(contract: FunctionContract): string {
   return entries.join("\n");
 }
 
+/** A diagnostic is a multi-line block; a bullet only covers its first line. */
+function asBullet(entry: string): string {
+  const [head, ...rest] = entry.split("\n");
+  return [`- ${head}`, ...rest.map((line) => `  ${line}`)].join("\n");
+}
+
 export function buildUserPrompt(request: PromptRequest): string {
-  const { contract, target, output, runtime, feedback } = request;
+  const { contract, target, output, runtime, candidate, attempt, previous, feedback } = request;
+
   const language = OUTPUT_LANGUAGE[output];
   const native = output === "asm" || output === "machine";
   const locations = sysvArgumentLocations(contract.function.params);
@@ -164,13 +182,25 @@ export function buildUserPrompt(request: PromptRequest): string {
     ].join("\n"),
   );
 
-  if (feedback !== undefined && feedback.length > 0) {
+  if (previous !== undefined) {
     sections.push(
       [
-        "A PREVIOUS ATTEMPT WAS REJECTED",
-        "The compiler validated your previous output and rejected it:",
-        ...feedback.map((entry) => `- ${entry}`),
-        `Produce a corrected, complete replacement. Do not explain the fix, emit ${language.language} only`,
+        `CANDIDATE ${candidate} WAS REJECTED`,
+        `This is repair attempt ${attempt}. The compiler assembled, linked and ran the output below and`,
+        "rejected it, because of the diagnostics listed after it.",
+        "",
+        "THE OUTPUT BEING REPAIRED",
+        "```",
+        previous.trimEnd(),
+        "```",
+
+        "DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST",
+        ...(feedback === undefined || feedback.length === 0
+          ? ["- none were reported for this candidate"]
+          : feedback.map(asBullet)),
+        "",
+        `Repair the whole program: return a complete replacement, not a diff and not an explanation.`,
+        `Emit ${language.language} only.`,
       ].join("\n"),
     );
   }

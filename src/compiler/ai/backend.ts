@@ -27,7 +27,12 @@ import type { AssemblyCandidate } from "../core/types.ts";
 export interface AiBackend {
   /** Recorded in build records. */
   readonly id: string;
-  generate(request: PromptRequest, attempt: number): Promise<AssemblyCandidate>;
+  /**
+   * Asks for one implementation. `sequence` is the position this answer takes
+   * in the build's candidate record and names it; the request says which
+   * candidate and attempt it belongs to.
+   */
+  generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate>;
 }
 
 function generationError(message: string, detail?: string): CompilerError {
@@ -57,6 +62,7 @@ export function extractAssembly(text: string): string {
 
 /** Exactly what is sent to a model for one attempt. */
 export interface PromptDump {
+  candidate: number;
   attempt: number;
   system: string;
   user: string;
@@ -117,11 +123,10 @@ export class VercelAiBackend implements AiBackend {
     return this.model;
   }
 
-  async generate(request: PromptRequest, attempt: number): Promise<AssemblyCandidate> {
+  async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
     const system = buildSystemPrompt();
     const user = buildUserPrompt(request);
-    this.onPrompt?.({ attempt, system, user });
-
+    this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
     let text: string;
     try {
@@ -150,12 +155,13 @@ export class VercelAiBackend implements AiBackend {
     }
 
     return {
-      id: `c${attempt}`,
+      id: `c${sequence}`,
       assembly: extractAssembly(text),
       model: this.id,
       modelConfig: this.id,
       generatedAt: new Date().toISOString(),
-      round: attempt,
+      candidate: request.candidate,
+      round: request.attempt,
       ...(request.feedback === undefined ? {} : { feedback: request.feedback }),
     };
   }
@@ -221,17 +227,18 @@ export class ReplayBackend implements AiBackend {
     return this.entries;
   }
 
-  async generate(request: PromptRequest, attempt: number): Promise<AssemblyCandidate> {
+  async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
     const entries = await this.load();
     const entry = entries[Math.min(this.cursor, entries.length - 1)];
     this.cursor += 1;
     return {
-      id: `c${attempt}`,
+      id: `c${sequence}`,
       assembly: extractAssembly(entry),
       model: this.id,
       modelConfig: this.id,
       generatedAt: new Date().toISOString(),
-      round: attempt,
+      candidate: request.candidate,
+      round: request.attempt,
       ...(request.feedback === undefined ? {} : { feedback: request.feedback }),
     };
   }

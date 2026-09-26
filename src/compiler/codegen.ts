@@ -1,10 +1,12 @@
 /**
  * Code generation.
  *
- * The generate -> assemble -> link -> verify -> benchmark loop. Every
- * diagnostic that rejects a candidate is collected and handed to the model for
- * the next attempt, so assembler errors and failing test vectors lead to
- * corrected candidates instead of a dead end.
+ * A candidate is generated once and then repaired in place. Assembling,
+ * linking, running and verifying it happen in that order, and every diagnostic
+ * that rejects it is collected and handed back for the next attempt, so
+ * assembler errors and failing test vectors lead to corrected candidates
+ * instead of a dead end. Candidates are independent: a repair inherits the
+ * history of its own candidate and nothing else.
  *
  * The compiler decides which candidate is valid and which one is selected. The
  * model only proposes.
@@ -50,6 +52,20 @@ export interface CodegenWorkspace {
   functionName: string;
 }
 
+/** Where a build stands in the candidate/attempt loop, for progress reporting. */
+export interface GenerationProgress {
+  /** The candidate being produced, 1-based. */
+  candidate: number;
+  /** How many candidates the build will produce. */
+  candidates: number;
+  /** The attempt within that candidate, 1-based. The first generates. */
+  attempt: number;
+  /** How many attempts that candidate is allowed. */
+  attempts: number;
+  /** True when this attempt repairs a rejected candidate rather than generating one. */
+  repair: boolean;
+}
+
 export interface CodegenRequest extends CandidateEvaluationRequest {
   contract: FunctionContract;
   parsed: ParsedContract;
@@ -70,7 +86,7 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
    * Called just before a request goes out. A model can take minutes, so the
    * compiler says it is waiting rather than looking stuck.
    */
-  onGenerate?: (attempt: number, attempts: number) => void;
+  onGenerate?: (progress: GenerationProgress) => void;
 }
 
 export interface CodegenResult {
@@ -105,11 +121,15 @@ function pathsFor(workspace: CodegenWorkspace, candidate: string, output: Output
   };
 }
 
-/** Diagnostics handed back to the model after a rejected candidate. */
-function feedbackFor(failure: CandidateOutcome["failure"]): string[] {
-  if (failure === undefined) return [];
+/**
+ * One diagnostic, attributed to the attempt that earned it. Diagnostics
+ * accumulate within a candidate, so a repair sees everything that was already
+ * wrong as well as what this round reported.
+ */
+function diagnosticFor(failure: CandidateOutcome["failure"], attempt: number): string {
+  if (failure === undefined) return `[attempt ${attempt}] rejected: the candidate did not satisfy the contract`;
   const detail = failure.detail === undefined || failure.detail.trim() === "" ? "" : `\n${failure.detail.trim()}`;
-  return [`${failure.stage} failed: ${failure.message}${detail}`];
+  return `[attempt ${attempt}] ${failure.stage} failed: ${failure.message}${detail}`;
 }
 
 /** Everything evaluating one candidate needs, with or without a backend. */
@@ -337,37 +357,46 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
   let backend: AiBackend | null = null;
   const generationBackend = (): AiBackend => (backend ??= request.backend());
 
-  let feedback: string[] | undefined;
-  let attempt = request.existing.length;
-  let valid = 0;
+  const { maxAttempts, maxCandidates } = request.generation;
+  // Candidate records are numbered from the stored ones, so a build that reuses
+  // assembly keeps naming the implementations it already wrote.
+  let sequence = request.existing.length;
   let modelDurationNs = 0n;
 
-  while (attempt < request.generation.maxAttempts && valid < request.generation.maxCandidates) {
-    attempt += 1;
-    request.onGenerate?.(attempt, request.generation.maxAttempts);
-    const startedAt = process.hrtime.bigint();
-    const candidate = await generationBackend().generate(
-      {
-        contract: request.contract,
-        target: request.target,
-        output: request.output,
-        runtime: request.runtime,
-        feedback,
-        attempt,
-      },
-      attempt,
-    );
-    modelDurationNs += process.hrtime.bigint() - startedAt;
-    candidates.push(candidate);
+  // Candidates are independent. Each is generated from the contract alone and
+  // is then repaired in place for as long as the toolchain rejects it. A repair
+  // receives everything that candidate has collected so far, not just the last
+  // round, and nothing crosses into the next candidate.
+  for (let candidate = 1; candidate <= maxCandidates; candidate += 1) {
+    const diagnostics: string[] = [];
+    let rejected: AssemblyCandidate | undefined;
 
-    const outcome = await evaluateCandidate(request, candidate, benchmarkVector, demoRequest);
-    outcomes.push(outcome);
-    if (outcome.valid) {
-      valid += 1;
-      feedback = undefined;
-      continue;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      request.onGenerate?.({ candidate, candidates: maxCandidates, attempt, attempts: maxAttempts, repair: attempt > 1 });
+      const startedAt = process.hrtime.bigint();
+      sequence += 1;
+      const generated = await generationBackend().generate(
+        {
+          contract: request.contract,
+          target: request.target,
+          output: request.output,
+          runtime: request.runtime,
+          candidate,
+          attempt,
+          ...(rejected === undefined ? {} : { previous: rejected.assembly }),
+          ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
+        },
+        sequence,
+      );
+      modelDurationNs += process.hrtime.bigint() - startedAt;
+      candidates.push(generated);
+      rejected = generated;
+
+      const outcome = await evaluateCandidate(request, generated, benchmarkVector, demoRequest);
+      outcomes.push(outcome);
+      if (outcome.valid) break;
+      diagnostics.push(diagnosticFor(outcome.failure, attempt));
     }
-    feedback = feedbackFor(outcome.failure);
   }
 
   if (candidates.length === 0) {

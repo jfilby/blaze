@@ -309,8 +309,9 @@ function requestTimeoutMs(input: SourceInput): number | undefined {
 
 /** The prompts a build sends, for `--debug`. Diagnostics belong on stderr. */
 function printPrompt(dump: PromptDump): void {
+  const at = `${dump.candidate}.${dump.attempt}`;
   process.stderr.write(
-    `\n-- prompt ${dump.attempt}: system --\n${dump.system}\n-- prompt ${dump.attempt}: user --\n${dump.user}\n`,
+    `\n-- prompt ${at}: system --\n${dump.system}\n-- prompt ${at}: user --\n${dump.user}\n`,
   );
 }
 
@@ -440,11 +441,11 @@ export async function runBuild(
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
       workspace: { workDirectory: store.resolve(paths.work), functionName: contract.function.name },
       existing,
-      onGenerate: (attempt, attempts) => {
+      onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
         reporter.stage(
           "generate",
           "info",
-          `Generating ${implementationLabel(outputKind)}: attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
+          `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
         );
       },
     });

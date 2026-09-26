@@ -65,8 +65,10 @@ Options:
   --reuse                   reuse stored assembly instead of generating
   --output <kind>           deliverable: c, asm, machine or wasm (default machine)
   --runtime <name>           host runtime: none or nim (default none)
-  --max-candidates <n>      maximum number of valid candidates to produce
-  --max-attempts <n>        maximum number of generation attempts
+  --max-candidates <n>      number of candidates to generate, each generated
+                            from the contract alone
+  --max-attempts <n>        attempts per candidate: the first generates, the
+                            rest repair the output the last one was rejected for
   --debug                   print the prompt sent to the model for every attempt
   --random-cases <n>        randomized test cases per build
   --max-length <n>          maximum generated buffer length
