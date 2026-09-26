@@ -8,8 +8,9 @@
  *
  *   node src/examples/hello_world/main.ts
  *
- * To build the compiled version of `dotProduct` instead, run `blaze build` in
- * `src/examples/hello_world`; the generated harness prints RESULT and BENCH.
+ * To run the compiled `dotProduct` instead, run `blaze build` in
+ * `src/examples/hello_world` and start the delivered binary from a terminal:
+ * it runs one built-in example vector, prints RESULT, and exits.
  */
 
 import { dotProduct } from "./hello_world.ts";

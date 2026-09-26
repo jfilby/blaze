@@ -21,7 +21,7 @@ import { writeFile } from "node:fs/promises";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
-import { verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
+import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
   AssemblyCandidate,
   BenchmarkConfig,
@@ -141,6 +141,7 @@ async function materialize(
   request: CandidateEvaluationRequest,
   candidate: AssemblyCandidate,
   paths: CandidatePaths,
+  demoRequest: string,
 ): Promise<Materialized> {
   if (request.output === "wasm") {
     const module = await buildWasm({
@@ -181,7 +182,7 @@ async function materialize(
         });
 
   if (runtime !== undefined) {
-    await writeFile(paths.harness, generateHarness(request.contract), "utf8");
+    await writeFile(paths.harness, generateHarness(request.contract, demoRequest), "utf8");
     link({
       harnessPath: paths.harness,
       objectPath: paths.object,
@@ -204,6 +205,7 @@ async function materialize(
     workDirectory: request.workspace.workDirectory,
     candidate: candidate.id,
     objectPath: paths.object,
+    demoRequest,
   });
   return {
     runner: host.runner,
@@ -221,10 +223,11 @@ async function evaluateCandidate(
   request: CandidateEvaluationRequest,
   candidate: AssemblyCandidate,
   benchmarkVector: TestVector,
+  demoRequest: string,
 ): Promise<CandidateOutcome> {
   const paths = pathsFor(request.workspace, candidate.id, request.output);
   try {
-    const built = await materialize(request, candidate, paths);
+    const built = await materialize(request, candidate, paths, demoRequest);
 
     const verification = verifyCandidate({
       contract: request.contract,
@@ -316,12 +319,13 @@ export function selectCandidate(outcomes: readonly CandidateOutcome[], contract:
 
 export async function generateCandidates(request: CodegenRequest): Promise<CodegenResult> {
   const benchmarkVector = selectBenchmarkVector(request.contract, request.parsed, request.test);
+  const demoRequest = encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]);
   const candidates: AssemblyCandidate[] = [];
   const outcomes: CandidateOutcome[] = [];
 
   for (const existing of request.existing) {
     candidates.push(existing);
-    outcomes.push(await evaluateCandidate(request, existing, benchmarkVector));
+    outcomes.push(await evaluateCandidate(request, existing, benchmarkVector, demoRequest));
     if (selectCandidate(outcomes, request.contract) !== null) {
       // Nothing was generated: the stored assembly is reused as it stands.
       return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector, modelDurationNs: 0n };
@@ -356,7 +360,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     modelDurationNs += process.hrtime.bigint() - startedAt;
     candidates.push(candidate);
 
-    const outcome = await evaluateCandidate(request, candidate, benchmarkVector);
+    const outcome = await evaluateCandidate(request, candidate, benchmarkVector, demoRequest);
     outcomes.push(outcome);
     if (outcome.valid) {
       valid += 1;
@@ -395,6 +399,7 @@ export type StoredCandidateRequest = CandidateEvaluationRequest & { candidate: A
  */
 export async function evaluateStoredCandidate(request: StoredCandidateRequest): Promise<StoredCandidateResult> {
   const benchmarkVector = selectBenchmarkVector(request.contract, request.parsed, request.test);
+  const demoRequest = encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]);
   const outcome = await evaluateCandidate(
     {
       contract: request.contract,
@@ -408,6 +413,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
     },
     request.candidate,
     benchmarkVector,
+    demoRequest,
   );
   if (!outcome.valid) {
     throw new CompilerError({

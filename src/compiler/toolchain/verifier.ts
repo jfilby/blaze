@@ -242,6 +242,26 @@ export function planTestVectors(parsed: ParsedContract, config: TestConfig): Tes
   return vectors;
 }
 
+/**
+ * The vector a delivered program runs when a person starts it with no piped
+ * input. It is a fixed pattern rather than a random case, so the number the
+ * program prints is the same on every machine, and it is the first planned
+ * vector that satisfies the preconditions.
+ */
+export function selectDemoVector(parsed: ParsedContract, config: TestConfig): TestVector {
+  const random = mulberry32(config.seed);
+  const lengths = lengthParameters(parsed);
+  for (const builder of [
+    { id: "demo-8", kind: "fixed" as const, length: 8, pattern: "ramp" as const, random },
+    { id: "demo-4", kind: "fixed" as const, length: 4, pattern: "ramp" as const, random },
+    { id: "demo-1", kind: "fixed" as const, length: 1, pattern: "ones" as const, random },
+  ]) {
+    const vector = buildVector(parsed, builder, lengths);
+    if (preconditionFailures(parsed, vectorValues(parsed.contract, vector)).length === 0) return vector;
+  }
+  return planTestVectors(parsed, { ...config, randomCases: 0 })[0];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Protocol encoding and decoding                                             */
 /* -------------------------------------------------------------------------- */

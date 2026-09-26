@@ -642,6 +642,15 @@ export const typeScriptFrontend: Frontend = {
     if (typeof input.source !== "string" || input.source.trim() === "") {
       throw frontendError("input.source is empty");
     }
+    // A program with imports, printing or top-level statements is not what
+    // this frontend compiles. Saying that is more useful than failing on the
+    // first string it finds in an import path.
+    if (/^\s*(import|export\s+default)\b/m.test(input.source)) {
+      throw frontendError(
+        "the source is a program, not a pure function",
+        "the frontend compiles one exported function per file; point sourceFile at the module that exports it",
+      );
+    }
     const declarations = new TypeScriptParser(tokenize(input.source)).parseFunctions();
     if (declarations.length === 0) {
       throw frontendError("no function found in source", "the frontend accepts pure functions");

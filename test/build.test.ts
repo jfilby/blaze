@@ -232,6 +232,44 @@ test("the shipped TypeScript example builds and computes what it claims", async 
   assert.equal(Number(execution.stdout.trim().split(" ")[1]), 11);
 });
 
+/** Runs a program on a real terminal, which is what a bare `./binary` gives it. */
+function runOnTerminal(command: string, timeoutMs = 30_000): { code: number | null; output: string } {
+  const driver = `
+import os, pty, sys
+chunks = []
+def read(fd):
+    chunks.append(os.read(fd, 4096))
+    return b""
+status = pty.spawn([${JSON.stringify(command)}], read)
+sys.stdout.write(b"".join(chunks).decode("utf8", "replace"))
+sys.exit(os.waitstatus_to_exitcode(status))
+`;
+  const result = run("python3", ["-c", driver], { timeoutMs });
+  return { code: result.code, output: result.stdout };
+}
+
+test("a delivered program started on a terminal runs and exits instead of hanging", async (t) => {
+  if (run("python3", ["-c", "pass"]).spawnError !== undefined) {
+    t.skip("python3 is needed to give the program a terminal");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "blaze-tty-"));
+  const outcome = await runBuild(
+    EXAMPLE,
+    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+  assert.ok(outcome.outputPath !== null);
+
+  const execution = runOnTerminal(outcome.outputPath);
+  // The binary must terminate on its own: a timeout here is the bug.
+  assert.equal(execution.code, 0, execution.output);
+  const result = /^RESULT (.+)$/m.exec(execution.output);
+  assert.ok(result !== null, `expected a RESULT line, got: ${execution.output}`);
+  assert.equal(Number(result[1]), 140);
+});
+
 test("a project names its provider and model, and the flag overrides it", async () => {
   const directory = await workspace("models");
   await writeFile(
@@ -292,6 +330,30 @@ test("a credential in a project file is refused", async () => {
   await assert.rejects(
     () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
     /puts a credential in "model.apiKey"/,
+  );
+});
+
+test("a source file given in place of a project file is named as one", async () => {
+  const directory = await workspace("source-as-input");
+  await writeFile(join(directory, "module.ts"), "export function f(): number { return 1; }\n");
+  // The compiler builds a project file, so this must not be reported as a
+  // JSON parse error on the source the user meant to compile.
+  await assert.rejects(
+    () => runBuild("module.ts", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /is a source file, not a project file/,
+  );
+});
+
+test("a program with imports is reported as not being a pure function", async () => {
+  const directory = await workspace("program-source");
+  await writeFile(join(directory, "module.ts"), 'import { f } from "./f.ts";\nconsole.log(f());\n');
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({ ...INPUT, language: "typescript", sourceFile: "module.ts", entry: "f" }),
+  );
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /the source is a program, not a pure function/,
   );
 });
 

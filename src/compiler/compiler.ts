@@ -187,6 +187,16 @@ function readInput(path: string): SourceInput {
     });
   }
   let parsed: unknown;
+  // A source file is not a project file. Saying so beats reporting a JSON
+  // parse error on code the compiler was never meant to read directly.
+  if (!text.trimStart().startsWith("{")) {
+    throw new CompilerError({
+      category: "InputError",
+      stage: "input",
+      message: `${path} is a source file, not a project file`,
+      detail: "blaze builds the JSON project file, which names the source file to compile; run blaze build with the blaze.json beside it",
+    });
+  }
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
