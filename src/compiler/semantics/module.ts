@@ -61,7 +61,9 @@ export type ProgramText = { k: "text"; value: string } | { k: "value"; value: Pr
 /** A statement a program runs. */
 export type ProgramStatement =
   | { kind: "declare"; name: string; value: ProgramValue; line: number }
-  | { kind: "print"; value: ProgramValue; line: number };
+  | { kind: "print"; value: ProgramValue; line: number }
+  /** A call kept for what it does, as in `main();`. */
+  | { kind: "invoke"; function: string; args: ProgramValue[]; line: number };
 
 /** The statements of a module that run, with the file they were written in. */
 export interface ProgramBody {

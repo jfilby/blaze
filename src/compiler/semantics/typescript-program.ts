@@ -8,10 +8,12 @@
  *   const a = new Float64Array([1, 2, 3, 4]);
  *   const total = dotProduct(a, b, a.length);
  *   console.log(`done: ${total}`);
+ *   main();
  *
- *   - statements: const declarations and `console.log`
+ *   - statements: const declarations, `console.log` and a call kept for what
+ *     it does
  *   - values: number literals, string and template literals, typed array
- *     literals, names, `name.length`, `name[index]` and calls
+ *     literals, names, `name.length`, `name[index]`, `process.argv` and calls
  *   - a template string interpolates values; its text is taken as written, with
  *     the escapes in ESCAPES resolved and any other escape left as written
  *
@@ -20,8 +22,9 @@
  */
 
 import type { ProgramStatement, ProgramText, ProgramValue } from "./module.ts";
-import type { Token } from "./typescript.ts";
-import { frontendError, tokenize, unknownTokenError } from "./typescript.ts";
+import type { Diagnostics, Token } from "./typescript.ts";
+import { ARGV, ARGV_LENGTH, tokenize, unescape } from "./typescript.ts";
+import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 
 /** The array views a program can allocate. */
 const VIEWS: Record<string, string> = {
@@ -38,35 +41,20 @@ const VIEWS: Record<string, string> = {
   BigUint64Array: "u64",
 };
 
-const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "'": "'", '"': '"' };
-
 const VIEWS_LIST = Object.keys(VIEWS).join(", ");
 
-/** Resolves the escapes a string carries, and leaves any other as written. */
-function unescape(text: string, path: string, line: number): string {
-  let result = "";
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (character !== "\\") {
-      result += character;
-      continue;
-    }
-    const escape = text[index + 1];
-    if (escape === undefined) throw frontendError("a string ends in a backslash", `line ${line} of ${path}`);
-    result += ESCAPES[escape] ?? `\\${escape}`;
-    index += 1;
-  }
-  return result;
-}
+const MATH = MATH_NAMES.join(", ");
 
 class ProgramParser {
   private readonly tokens: Token[];
   private readonly path: string;
+  private readonly diagnostics: Diagnostics;
   private position = 0;
 
-  constructor(tokens: Token[], path: string) {
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics) {
     this.tokens = tokens;
     this.path = path;
+    this.diagnostics = diagnostics;
   }
 
   private peek(offset = 0): Token {
@@ -84,30 +72,45 @@ class ProgramParser {
 
   private accept(text: string): boolean {
     if (!this.at(text)) return false;
-    this.next();
+    this.position += 1;
     return true;
   }
 
   private expect(text: string): void {
     if (this.accept(text)) return;
     const token = this.peek();
-    throw frontendError(
-      `expected "${text}"`,
-      `line ${token.line} of ${this.path} near "${token.text}"; a program declares values with const and prints them with console.log`,
+    this.fail(`expected "${text}"`, token);
+  }
+
+  private fail(message: string, token: Token = this.peek()): void {
+    this.diagnostics.report(
+      message,
+      `near "${token.text}"; a program declares values with const, prints them with console.log, and calls what it runs`,
+      token.line,
     );
   }
 
-  private fail(message: string, token: Token = this.peek()): never {
-    throw frontendError(message, `line ${token.line} of ${this.path} near "${token.text}"`);
+  /** Reads on to the end of the statement, so the next one can be read. */
+  private synchronize(): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      if (token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
+      else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+      else if (token.text === ";" && depth <= 0) return;
+    }
   }
 
   private identifier(what: string): string {
     const token = this.peek();
-    if (token.kind !== "ident") this.fail(`expected ${what}`, token);
+    if (token.kind !== "ident") {
+      this.fail(`expected ${what}`, token);
+      return "";
+    }
     this.next();
     return token.text;
   }
-
   /** The statements of the body, to the end of the tokens it was given. */
   body(): ProgramStatement[] {
     const statements: ProgramStatement[] = [];
@@ -118,10 +121,15 @@ class ProgramParser {
     return statements;
   }
 
+  /** The value a statement the parser could not read stands for. */
+  private nothing(): ProgramValue {
+    return { k: "number", text: "0" };
+  }
+
   private statement(): ProgramStatement {
-    if (this.peek().kind === "unknown") throw unknownTokenError(this.peek(), this.path);
     const line = this.peek().line;
-    if (this.at("const") || this.at("let")) {
+    if (this.accept(";")) return { kind: "print", value: this.nothing(), line };
+    if (this.at("const") || this.at("let") || this.at("var")) {
       this.next();
       const name = this.identifier("the name of a declared value");
       this.expect("=");
@@ -130,24 +138,42 @@ class ProgramParser {
     if (this.at("console")) {
       this.next();
       this.expect(".");
-      const method = this.peek();
+      const method = this.next();
       if (method.text !== "log") {
-        throw frontendError(
-          `console.${method.text} is not part of a program`,
-          `line ${method.line} of ${this.path}: a program prints what it computed with console.log`,
-        );
+        this.fail(`console.${method.text} is not part of a program`, method);
+        this.synchronize();
+        return { kind: "print", value: this.nothing(), line };
       }
-      this.next();
       this.expect("(");
       const value = this.value();
       this.expect(")");
       return { kind: "print", value, line };
     }
+    if (this.at("for") || this.at("while") || this.at("if")) {
+      this.fail(
+        `"${this.peek().text}" is not a statement of a program`,
+        this.peek(),
+      );
+      this.synchronize();
+      return { kind: "print", value: this.nothing(), line };
+    }
+    // A call kept for what it does, as in `main();`.
+    if (this.peek().kind === "ident" && this.peek(1).text === "(") {
+      const name = this.identifier("the name of the function to call");
+      this.expect("(");
+      const args: ProgramValue[] = [];
+      if (!this.at(")")) {
+        do {
+          args.push(this.value());
+        } while (this.accept(","));
+      }
+      this.expect(")");
+      return { kind: "invoke", function: name, args, line };
+    }
     const token = this.peek();
-    throw frontendError(
-      `"${token.text}" is not a statement of a program`,
-      `line ${token.line} of ${this.path}: a program declares values with const and prints them with console.log`,
-    );
+    this.fail(`"${token.text}" is not a statement of a program`, token);
+    this.synchronize();
+    return { kind: "print", value: this.nothing(), line };
   }
 
   private value(): ProgramValue {
@@ -164,8 +190,10 @@ class ProgramParser {
       this.next();
       return { k: "text", parts: this.parts(token) };
     }
-    if (token.kind === "unknown") throw unknownTokenError(token, this.path);
-    if (token.kind !== "ident") this.fail(`"${token.text}" is not a value`);
+    if (token.kind !== "ident") {
+      this.fail(`"${token.text}" is not a value`, token);
+      return this.nothing();
+    }
     if (token.text === "new") {
       this.next();
       return this.bufferLiteral();
@@ -173,26 +201,38 @@ class ProgramParser {
     return this.nameOrCall();
   }
 
-  /** A name, a call, a length, or an element of a name. */
+  /** A name, a call, a length, an element of a name, or an argument. */
   private nameOrCall(): ProgramValue {
-    const name = this.identifier("a name");
-    if (this.accept("(")) {
-      const args: ProgramValue[] = [];
-      if (!this.at(")")) {
-        do {
-          args.push(this.value());
-        } while (this.accept(","));
-      }
-      this.expect(")");
-      return { k: "call", function: name, args };
+    const token = this.peek();
+    if (token.kind === "ident" && token.text === "process" && this.peek(1).text === "." && this.peek(2).text === "argv") {
+      this.next();
+      this.next();
+      this.next();
+      return this.argv();
     }
+    const name = this.identifier("a name");
+    if (name === "Math" && this.at(".") && !MATH_NAMES.includes(`Math.${this.peek(1).text}`)) {
+      this.fail(`Math.${this.peek(1).text} is not a function of a program; call one of ${MATH}`, this.peek(1));
+      this.synchronize();
+      return { k: "name", name };
+    }
+    if (name === "Math" && this.at(".") && MATH_NAMES.includes(`Math.${this.peek(1).text}`)) {
+      this.next();
+      const builtin = this.identifier("the function of Math");
+      this.expect("(");
+      const args = this.arguments();
+      const arity = BUILTINS[`Math.${builtin}`].arity;
+      if (args.length !== arity) {
+        this.fail(`Math.${builtin} takes ${arity} argument${arity === 1 ? "" : "s"}`);
+      }
+      return { k: "call", function: `Math.${builtin}`, args };
+    }
+    if (this.accept("(")) return { k: "call", function: name, args: this.arguments() };
     if (this.accept(".")) {
       const member = this.identifier("the property of a value");
       if (member !== "length") {
-        throw frontendError(
-          `${name}.${member} is not part of a program`,
-          `line ${this.peek().line} of ${this.path}: a program reads a buffer with .length and with an index`,
-        );
+        this.fail(`${name}.${member} is not part of a program`);
+        return { k: "name", name };
       }
       return { k: "length", buffer: name };
     }
@@ -204,17 +244,58 @@ class ProgramParser {
     return { k: "name", name };
   }
 
+  /** The arguments of a call, up to its closing parenthesis. */
+  private arguments(): ProgramValue[] {
+    const args: ProgramValue[] = [];
+    if (!this.at(")")) {
+      do {
+        args.push(this.value());
+      } while (this.accept(","));
+    }
+    this.expect(")");
+    return args;
+  }
+
+  /**
+   * `process.argv` as a program sees it: `argv[0]` is 0, and `argv[i]` for
+   * i >= 1 is the (i - 1)th argument the program was given. The path node runs
+   * the source with is not an argument of the program.
+   */
+  private argv(): ProgramValue {
+    if (this.accept("[")) {
+      const index = this.value();
+      this.expect("]");
+      if (index.k === "number" && Number(index.text) === 0) return { k: "number", text: "0" };
+      return { k: "call", function: ARGV, args: [index] };
+    }
+    if (this.accept(".")) {
+      const member = this.identifier("the property of a value");
+      if (member !== "length") {
+        this.fail(`process.argv.${member} is not part of a program`);
+        return { k: "number", text: "0" };
+      }
+      return { k: "call", function: ARGV_LENGTH, args: [] };
+    }
+    return { k: "call", function: ARGV_LENGTH, args: [] };
+  }
+
   /** `new Float64Array([1, 2, 3])`: the values are the elements of the buffer. */
   private bufferLiteral(): ProgramValue {
     const view = this.identifier("a typed array name");
-    if (!(view in VIEWS)) this.fail(`a program cannot allocate ${view}; supported: ${VIEWS_LIST}`);
+    if (!(view in VIEWS)) {
+      this.fail(`a program cannot allocate ${view}; supported: ${VIEWS_LIST}`);
+      return this.nothing();
+    }
     this.expect("(");
     this.expect("[");
     const values: string[] = [];
     if (!this.at("]")) {
       do {
         const element = this.peek();
-        if (element.kind !== "number") this.fail(`"${element.text}" is not a number`);
+        if (element.kind !== "number") {
+          this.fail(`"${element.text}" is not a number`, element);
+          return this.nothing();
+        }
         this.next();
         values.push(element.text);
       } while (this.accept(","));
@@ -226,18 +307,21 @@ class ProgramParser {
 
   /** The text of a string, split where a template string interpolates. */
   private parts(token: Token): ProgramText[] {
-    if (token.template !== true) return [{ k: "text", value: unescape(token.text, this.path, token.line) }];
+    if (token.template !== true) return [{ k: "text", value: unescape(token.text, token.line) }];
     const parts: ProgramText[] = [];
     let rest = token.text;
     while (rest.length > 0) {
       const open = rest.indexOf("${");
       if (open < 0) {
-        parts.push({ k: "text", value: unescape(rest, this.path, token.line) });
+        parts.push({ k: "text", value: unescape(rest, token.line) });
         break;
       }
-      if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), this.path, token.line) });
+      if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), token.line) });
       const close = rest.indexOf("}", open);
-      if (close < 0) this.fail("a template string interpolates nothing", token);
+      if (close < 0) {
+        this.fail("a template string interpolates nothing", token);
+        break;
+      }
       const inner = rest.slice(open + 2, close);
       rest = rest.slice(close + 1);
       parts.push({ k: "value", value: this.interpolated(inner) });
@@ -247,9 +331,9 @@ class ProgramParser {
 
   /** One expression, on its own: what a template string interpolates. */
   private interpolated(source: string): ProgramValue {
-    const parser = new ProgramParser(tokenize(source), this.path);
+    const parser = new ProgramParser(tokenize(source), this.path, this.diagnostics);
     const value = parser.value();
-    if (parser.peek().kind !== "end") parser.fail(`"${parser.peek().text}" follows a complete value`);
+    if (parser.peek().kind !== "end") parser.fail(`"${parser.peek().text}" follows a complete value`, parser.peek());
     return value;
   }
 }
@@ -259,6 +343,6 @@ class ProgramParser {
  * of the file. A program is the last thing a module says, so the caller checks
  * that no declaration follows.
  */
-export function parseProgramBody(tokens: Token[], path: string): ProgramStatement[] {
-  return new ProgramParser(tokens, path).body();
+export function parseProgramBody(tokens: Token[], path: string, diagnostics: Diagnostics): ProgramStatement[] {
+  return new ProgramParser(tokens, path, diagnostics).body();
 }

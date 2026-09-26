@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
 import { entryContract, INLINE_MODULE, runContractPhase } from "../semantics/program.ts";
 import type { ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
-import { programOf } from "./phase.ts";
+import { diagnostic, programOf } from "./phase.ts";
 
 const SCALE = "export function scale(x: number): number {\n  return x * 2;\n}\n";
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -112,8 +112,8 @@ test("one symbol cannot arrive from two files, or under another name", () => {
       ),
     /imports "shared" from both "\.\/a.ts" and "\.\/b.ts"/,
   );
-  assert.throws(
-    () =>
+  assert.match(
+    diagnostic(() =>
       contract(
         {
           "dot.ts": 'import { scale } from "./a.ts";\nimport { scale as fromB } from "./b.ts";\nexport function dot(): number {\n  return 0;\n}\n',
@@ -122,6 +122,7 @@ test("one symbol cannot arrive from two files, or under another name", () => {
         },
         "dot.ts",
       ),
+    ),
     /renaming an import is not supported/,
   );
 });

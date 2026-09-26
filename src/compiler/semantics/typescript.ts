@@ -2,8 +2,8 @@
  * Frontend: TypeScript module -> module analysis and function contracts.
  *
  * The contract is language neutral, so a second frontend is a parser and an
- * analysis, nothing more. This one accepts the pure subset of TypeScript that
- * a numeric kernel is written in:
+ * analysis, nothing more. This one accepts the subset of TypeScript a
+ * compiled function is written in:
  *
  *   import { dotProduct } from "./dot.ts";
  *
@@ -18,30 +18,123 @@
  *   - top level: `import { name } from "./other.ts";`, function declarations
  *     with or without `export`, and the statements of a program (see
  *     typescript-program.ts), which come after every declaration
- *   - statements: let/const with a literal initialiser, counted for loops,
- *     assignments, compound assignments, return
- *   - expressions: number and bigint literals, identifiers, indexing,
- *     `.length` of a typed array, + - * / and parentheses
- *   - types: number, bigint, boolean and the typed array views
- *   - pure functions only: writing into a view is rejected, so every accepted
- *     contract has effects: [] and writes: []
+ *   - statements: let/const/var with an initialiser, counted for loops in
+ *     either direction, if/else, assignments, compound assignments, `i++`,
+ *     calls, returns and console.log
+ *   - expressions: number and bigint literals, null, identifiers, indexing,
+ *     field reads, calls, object literals, `process.argv`, the comparison,
+ *     logical, shift and arithmetic operators, the conditional operator and
+ *     parentheses
+ *   - types: number, bigint, boolean, the typed array views, and `any` for a
+ *     value that is a reference to an object
+ *   - a function is compiled whatever it does: only the contracts that can
+ *     be written as one expression describe a result, so a body that
+ *     branches, recurses, allocates or prints is refused at the contract
+ *     phase rather than silently given a contract it does not meet
  */
 
 import { parseType, typeToString } from "./contract.ts";
+import { ARGV, ARGV_LENGTH } from "./builtins.ts";
+
+export { ARGV, ARGV_LENGTH };
 import { assembleContract, type AccessRange } from "./contract-build.ts";
-import { CompilerError } from "../core/errors.ts";
+import { normalizeNumeric, normalizeOptimize } from "./contract.ts";
+import { CompilerError, isCompilerError } from "../core/errors.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
-import type { TypeExpr } from "../core/types.ts";
+import type { Effect, FunctionContract, SourceInput, TypeExpr } from "../core/types.ts";
+import type {
+  AssignOperator,
+  BinaryOp,
+  Expression,
+  Statement,
+  TextPart,
+  UnaryOp,
+} from "../core/ir.ts";
+import { COMPOUND_OPERATORS } from "../core/ir.ts";
+
+export { COMPOUND_OPERATORS };
+export type { AssignOperator, BinaryOp, Expression, Statement, TextPart, UnaryOp };
 
 export function frontendError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
 }
 
 /* -------------------------------------------------------------------------- */
+/* Diagnostics                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** One construct the parser could not read, and where it was written. */
+export interface Diagnostic {
+  line: number;
+  message: string;
+  detail: string;
+}
+
+/** How many constructs one file may be reported to have before the list is cut. */
+const MAXIMUM_DIAGNOSTICS = 24;
+
+const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "'": "'", '"': '"' };
+
+/** Resolves the escapes a string carries, and leaves any other as written. */
+export function unescape(text: string, line: number): string {
+  let result = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character !== "\\") {
+      result += character;
+      continue;
+    }
+    const escape = text[index + 1];
+    if (escape === undefined) throw frontendError("a string ends in a backslash", `line ${line}`);
+    result += ESCAPES[escape] ?? `\\${escape}`;
+    index += 1;
+  }
+  return result;
+}
+
+/**
+ * Every construct of one file that is outside the subset, gathered as the
+ * parser reads on. A file is fixed in one pass, so a build says everything
+ * that is wrong with it at once rather than one construct per run.
+ */
+export class Diagnostics {
+  readonly entries: Diagnostic[] = [];
+  private dropped = 0;
+
+  report(message: string, detail: string, line: number): void {
+    if (this.entries.length < MAXIMUM_DIAGNOSTICS) {
+      this.entries.push({ line, message, detail });
+      return;
+    }
+    this.dropped += 1;
+  }
+
+  throwIfAny(path: string): void {
+    if (this.entries.length === 0) return;
+    const found = this.entries.map((entry) => `  line ${entry.line}: ${entry.message}\n    ${entry.detail}`);
+    if (this.dropped > 0) found.push(`  and ${this.dropped} more`);
+    throw frontendError(
+      `${this.entries.length + this.dropped} construct${this.entries.length + this.dropped === 1 ? "" : "s"} of ${path} ${this.entries.length + this.dropped === 1 ? "is" : "are"} outside the subset the compiler reads`,
+      found.join("\n"),
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Types                                                                      */
 /* -------------------------------------------------------------------------- */
 
+/** A value that is a reference to an object, before its fields are known. */
+const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
+
+
+/** Statements the parser reads to the end of the statement and reports. */
+const UNSUPPORTED_STATEMENTS = ["while", "do", "switch", "try", "throw", "break", "continue", "class", "interface", "type", "enum", "import"];
+
+/* -------------------------------------------------------------------------- */
+/* Type annotations                                                           */
+/* -------------------------------------------------------------------------- */
 const TYPED_ARRAYS: Record<string, string> = {
   Float32Array: "f32",
   Float64Array: "f64",
@@ -62,6 +155,9 @@ const PRIMITIVES: Record<string, string> = {
   boolean: "bool",
 };
 
+/** A function that returns nothing declares `void`. */
+const NOTHING: TypeExpr = { kind: "void" };
+
 /** Maps a TypeScript type annotation onto a contract type. */
 function mapTypeScriptType(text: string, position: string): TypeExpr {
   const source = text.trim();
@@ -79,28 +175,16 @@ function mapTypeScriptType(text: string, position: string): TypeExpr {
 
 export type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "unknown" | "end";
 
-/**
- * A character the subset does not have. The lexer keeps it as a token rather
- * than failing, so the parser reports the first construct it cannot read,
- * where it can say what the language is, instead of the lexer naming a
- * punctuation mark in a file whose real problem lies elsewhere.
- */
-export function unknownTokenError(token: Token, path: string): CompilerError {
-  return frontendError(
-    `unsupported token "${token.text}"`,
-    `line ${token.line} of ${path}: a function is declarations, counted loops, assignments and returns; a program is const declarations, calls, typed arrays and console.log`,
-  );
-}
-
 export interface Token {
   kind: TokenKind;
   text: string;
   line: number;
   /** Set on a string written in backticks, whose `${...}` parts interpolate. */
   template?: boolean;
+  /** The character the string was written with. */
+  quote?: string;
 }
-
-const PUNCTUATION = ["=>", "===", "!==", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "{", "}", "(", ")", "[", "]", ";", ",", ":", "=", "<", ">", "+", "-", "*", "/", ".", "!"];
+const PUNCTUATION = ["===", "!==", "==", "!=", "<=", ">=", "<<", ">>", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "&", "|", "^"];
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
@@ -131,11 +215,10 @@ export function tokenize(source: string): Token[] {
       continue;
     }
     if (character === '"' || character === "'" || character === "`") {
-      // Only an import may name a module, so the string is kept and the parser
-      // decides where a string is allowed.
+      // Only an import names a module and only a template string is printed, so
+      // the string is kept whole and the parser decides where one is allowed.
       const end = source.indexOf(character, index + 1);
-      if (end < 0) throw frontendError("unterminated string", `line ${line}`);
-      tokens.push({ kind: "string", text: source.slice(index + 1, end), line, template: character === "`" });
+      tokens.push({ kind: "string", text: source.slice(index + 1, end), line, quote: character, template: character === "`" });
       index = end + 1;
       continue;
     }
@@ -177,25 +260,7 @@ export function tokenize(source: string): Token[] {
 /* Syntax                                                                     */
 /* -------------------------------------------------------------------------- */
 
-type Expression =
-  | { k: "literal"; text: string }
-  | { k: "bigint"; text: string }
-  | { k: "ident"; name: string }
-  | { k: "length"; buffer: string }
-  | { k: "index"; base: Expression; index: Expression }
-  | { k: "binary"; op: "+" | "-" | "*" | "/"; left: Expression; right: Expression }
-  | { k: "negate"; operand: Expression };
-
-type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=";
-
-type Statement =
-  | { kind: "declare"; name: string; init: Expression; line: number }
-  | { kind: "loop"; variable: string; from: Expression; to: Expression; inclusive: boolean; body: Statement[]; line: number }
-  | { kind: "assign"; target: string; op: AssignOperator; value: Expression; line: number }
-  | { kind: "result"; value: Expression; line: number }
-  | { kind: "indexAssign"; buffer: string; index: Expression; value: Expression; line: number };
-
-interface TypeScriptFunction {
+export interface TypeScriptFunction {
   name: string;
   params: { name: string; type: TypeExpr }[];
   returns: TypeExpr;
@@ -206,11 +271,13 @@ interface TypeScriptFunction {
 class TypeScriptParser {
   private readonly tokens: Token[];
   private readonly path: string;
+  private readonly diagnostics: Diagnostics;
   private position = 0;
 
-  constructor(tokens: Token[], path: string) {
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics) {
     this.tokens = tokens;
     this.path = path;
+    this.diagnostics = diagnostics;
   }
   private peek(offset = 0): Token {
     return this.tokens[Math.min(this.position + offset, this.tokens.length - 1)];
@@ -231,17 +298,58 @@ class TypeScriptParser {
     return true;
   }
 
-  private expect(text: string): Token {
+  private expect(text: string): Token | null {
     if (!this.at(text)) {
       const token = this.peek();
-      throw frontendError(`expected "${text}"`, `line ${token.line} near "${token.text}"`);
+      this.report(`expected "${text}"`, `near "${token.text}"`, token);
+      return null;
     }
     return this.next();
   }
 
-  private fail(message: string): never {
-    const token = this.peek();
-    throw frontendError(message, `line ${token.line} near "${token.text}"`);
+  private report(message: string, detail: string, token: Token = this.peek()): void {
+    this.diagnostics.report(message, detail, token.line);
+  }
+
+  /** A value standing in for one the parser could not read. */
+  private hole(): Expression {
+    return { k: "literal", text: "0" };
+  }
+
+  private missing(message: string, token: Token = this.peek()): Expression {
+    this.report(message, `near "${token.text}"`, token);
+    return this.hole();
+  }
+
+  /** Reads on to the end of the statement, so the next one can be read. */
+  private synchronize(consumeTerminator = true): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      if (token.text === "{" || token.text === "(" || token.text === "[") depth += 1;
+      else if (token.text === "}" && depth === 0) {
+        this.position -= 1;
+        return;
+      } else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+      else if (token.text === ";" && depth <= 0) {
+        if (!consumeTerminator) this.position -= 1;
+        return;
+      }
+    }
+  }
+
+  /** Reads on past the body of a declaration the parser cannot finish. */
+  private skipBlock(): void {
+    while (this.peek().kind !== "end" && !this.at("{")) this.next();
+    if (!this.at("{")) return;
+    let depth = 0;
+    do {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      if (token.text === "{") depth += 1;
+      else if (token.text === "}") depth -= 1;
+    } while (depth > 0 && this.peek().kind !== "end");
   }
 
   /**
@@ -262,22 +370,28 @@ class TypeScriptParser {
       if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
         // The body runs to the end of the file: a declaration after it belongs
         // to a library, not to a program.
-        return { path, imports, functions, body: parseProgramBody(this.tokens.slice(this.position), path) };
+        return { path, imports, functions, body: parseProgramBody(this.tokens.slice(this.position), path, this.diagnostics) };
       }
       const exported = this.accept("export");
       if (exported && this.at("default")) {
-        throw frontendError("a default export is not supported", `line ${token.line} of ${path}: export the function by name`);
+        this.report("a default export is not supported", "export the function by name", token);
+        this.skipBlock();
+        continue;
       }
       if (exported && !this.at("function")) {
-        throw frontendError(
-          `only functions can be exported from ${path}`,
-          `line ${token.line}: a module offers functions, not ${this.peek().text}`,
-        );
+        this.report("only functions can be exported", `a module offers functions, not ${this.peek().text}`, token);
+        this.synchronize();
+        continue;
       }
       this.expect("function");
       const name = this.next();
-      if (name.kind !== "ident") this.fail("expected a function name");
+      if (name.kind !== "ident") {
+        this.report("expected a function name", `near "${name.text}"`, name);
+        this.synchronize();
+        continue;
+      }
       const parsed = this.parseFunction(name);
+      if (parsed === null) continue;
       functions.push({
         name: parsed.name,
         exported,
@@ -293,34 +407,44 @@ class TypeScriptParser {
   private readImport(): ModuleImport {
     const start = this.peek();
     if (!this.at("{")) {
-      throw frontendError(
-        `unsupported import form near "${start.text}"`,
-        `line ${start.line}: a module imports named exports, as in import { f } from "./other.ts"`,
+      this.report(
+        "unsupported import form",
+        'a module imports named exports, as in import { f } from "./other.ts"',
+        start,
       );
+      this.synchronize();
+      return { specifier: "", names: [], line: start.line };
     }
     this.next();
     const names: string[] = [];
-    while (!this.at("}")) {
+    while (!this.at("}") && this.peek().kind !== "end") {
       const name = this.next();
-      if (name.kind !== "ident") this.fail("expected an imported name");
-      if (this.at("as")) {
-        throw frontendError("renaming an import is not supported", `line ${name.line}`);
+      if (name.kind !== "ident") {
+        this.report("expected an imported name", `near "${name.text}"`, name);
+        continue;
       }
+      if (this.at("as")) this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
       names.push(name.text);
       if (!this.accept(",")) break;
     }
     this.expect("}");
     if (!this.at("from")) {
-      this.fail(`expected "from" after the imported names`);
+      this.report('expected "from" after the imported names', `near "${this.peek().text}"`);
+      this.synchronize();
+      return { specifier: "", names, line: start.line };
     }
     this.next();
     const specifier = this.next();
-    if (specifier.kind !== "string") this.fail("expected the imported module as a string");
+    if (specifier.kind !== "string") {
+      this.report("expected the imported module as a string", `near "${specifier.text}"`, specifier);
+      this.synchronize();
+      return { specifier: "", names, line: start.line };
+    }
     this.expect(";");
     return { specifier: specifier.text, names, line: start.line };
   }
 
-  private parseFunction(name: Token): TypeScriptFunction {
+  private parseFunction(name: Token): TypeScriptFunction | null {
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
     if (this.at(")")) {
@@ -328,89 +452,184 @@ class TypeScriptParser {
     } else {
       for (;;) {
         const parameter = this.next();
-        if (parameter.kind !== "ident") this.fail("expected a parameter name");
+        if (parameter.kind !== "ident") {
+          this.report("expected a parameter name", `near "${parameter.text}"`, parameter);
+          this.synchronize();
+          break;
+        }
         this.expect(":");
         const type = this.next();
-        if (type.kind !== "ident") this.fail("expected a parameter type");
-        params.push({ name: parameter.text, type: mapTypeScriptType(type.text, `line ${type.line}`) });
+        if (type.kind !== "ident") {
+          this.report("expected a parameter type", `near "${type.text}"`, type);
+          this.synchronize();
+          break;
+        }
+        params.push({ name: parameter.text, type: this.mapType(type) });
         if (this.accept(",")) continue;
         this.expect(")");
         break;
       }
     }
     if (!this.at(":")) {
-      throw frontendError(
-        `every function declares what it returns`,
-        `line ${name.line} of ${this.path}: as in function ${name.text}(): number { ... }`,
+      this.report(
+        "every function declares what it returns",
+        `as in function ${name.text}(): number { ... }`,
+        name,
       );
+      this.skipBlock();
+      return null;
     }
     this.next();
     const returns = this.next();
-    if (returns.kind !== "ident") this.fail("expected a return type");
-    const returnType = mapTypeScriptType(returns.text, `line ${returns.line}`);
+    if (returns.kind !== "ident") {
+      this.report("expected a return type", `near "${returns.text}"`, returns);
+      this.skipBlock();
+      return null;
+    }
+    const returnType = this.mapType(returns);
     if (this.accept("=")) {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
       const value = this.readExpression();
       this.accept(";");
-      return { name: name.text, params, returns: returnType, body: [{ kind: "result", value, line: name.line }], line: name.line };
+      return {
+        name: name.text,
+        params,
+        returns: returnType,
+        body: [{ kind: "result", value, line: name.line }],
+        line: name.line,
+      };
     }
     return { name: name.text, params, returns: returnType, body: this.readBlock(), line: name.line };
   }
 
+  /** A type annotation as the contract sees it; an unreadable one is `any`. */
+  private mapType(token: Token): TypeExpr {
+    if (token.text === "any" || token.text === "object" || token.text === "unknown") return ANY_TYPE;
+    if (token.text === "void") return NOTHING;
+    try {
+      return mapTypeScriptType(token.text, `line ${token.line} of ${this.path}`);
+    } catch (error) {
+      if (!isCompilerError(error)) throw error;
+      this.report(error.message, error.detail ?? "", token);
+      return ANY_TYPE;
+    }
+  }
+
   private readBlock(): Statement[] {
-    this.expect("{");
+    if (!this.accept("{")) {
+      this.report('expected "{"', "a function body is written in braces");
+      return [];
+    }
     const statements: Statement[] = [];
-    while (!this.at("}")) {
-      if (this.peek().kind === "end") this.fail("unterminated function body");
+    while (!this.at("}") && this.peek().kind !== "end") {
       statements.push(this.readStatement());
     }
     this.expect("}");
     return statements;
   }
 
-  private readStatement(): Statement {
-    const token = this.peek();
-    if (token.kind === "unknown") throw unknownTokenError(token, this.path);
+  /** A body that follows a keyword: a block, or the one statement written. */
+  private readBody(): Statement[] {
+    return this.at("{") ? this.readBlock() : [this.readStatement()];
+  }
 
-    if (this.at("let") || this.at("const")) {
+  readStatement(): Statement {
+    const token = this.peek();
+    if (this.accept(";")) return { kind: "expression", value: this.hole(), line: token.line };
+
+    if (this.at("let") || this.at("const") || this.at("var")) {
       this.next();
       const name = this.next();
-      if (name.kind !== "ident") this.fail("expected a variable name");
-      if (this.accept(":")) {
-        const type = this.next();
-        mapTypeScriptType(type.kind === "ident" ? type.text : "", `line ${type.line}`);
+      if (name.kind !== "ident") {
+        this.report("expected a variable name", `near "${name.text}"`, name);
+        this.synchronize();
+        return { kind: "expression", value: this.hole(), line: token.line };
       }
-      this.expect("=");
+      let type: TypeExpr | null = null;
+      if (this.accept(":")) {
+        const annotation = this.next();
+        type = annotation.kind === "ident" ? this.mapType(annotation) : null;
+      }
+      if (!this.accept("=")) {
+        this.report("a declaration needs an initialiser", `as in let ${name.text} = 0;`, name);
+        this.synchronize();
+        return { kind: "expression", value: this.hole(), line: name.line };
+      }
       const init = this.readExpression();
-      this.expect(";");
-      return { kind: "declare", name: name.text, init, line: name.line };
+      this.accept(";");
+      return { kind: "declare", name: name.text, type, init, line: name.line };
     }
 
     if (this.at("for")) return this.readLoop();
+    if (this.at("if")) return this.readIf();
     if (this.at("return")) {
       this.next();
+      if (this.at(";")) {
+        this.report("a return states what the function returns", "return must carry a value", token);
+        this.next();
+        return { kind: "result", value: this.hole(), line: token.line };
+      }
       const value = this.readExpression();
-      this.expect(";");
+      this.accept(";");
       return { kind: "result", value, line: token.line };
     }
-    if (this.at("if") || this.at("while") || this.at("switch") || this.at("try") || this.at("throw")) {
-      throw frontendError(
-        `"${token.text}" is not supported (line ${token.line})`,
-        "the frontend only accepts declarations, counted loops, assignments and returns",
+    if (this.at("console")) return this.readPrint();
+
+    if (UNSUPPORTED_STATEMENTS.includes(token.text)) {
+      this.report(
+        `"${token.text}" is not supported`,
+        "a function is declarations, counted loops, conditionals, calls, assignments, returns and console.log",
+        token,
       );
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: token.line };
+    }
+    if (this.at("{")) {
+      this.report("a block is not a statement of its own", "write the statements it holds", token);
+      this.readBlock();
+      return { kind: "expression", value: this.hole(), line: token.line };
+    }
+    if (this.at("function")) {
+      this.report("a function may not be declared inside a function", "declare it in the module", token);
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: token.line };
     }
 
-    const indexed = this.readIndexedAssignment();
-    if (indexed !== null) return indexed;
+    const assigned = this.readAssignment();
+    if (assigned !== null) return assigned;
+    return this.readEffect();
+  }
 
+  /** An assignment, an index write or a field write. */
+  private readAssignment(): Statement | null {
+    const start = this.position;
     const target = this.next();
-    if (target.kind !== "ident") this.fail("expected an assignment target");
-    const operator = this.next();
-    if (operator.kind !== "punct" || !["=", "+=", "-=", "*=", "/="].includes(operator.text)) {
-      this.fail(`unsupported assignment operator "${operator.text}"`);
+    if (target.kind !== "ident") {
+      this.position = start;
+      return null;
     }
+    if (this.at("[")) {
+      this.position = start;
+      return this.readIndexedAssignment();
+    }
+    if (this.at(".")) {
+      this.position = start;
+      return this.readMemberAssignment();
+    }
+    const operator = this.peek();
+    if (operator.kind !== "punct" || !(operator.text in COMPOUND_OPERATORS)) {
+      if (operator.text !== "=") {
+        this.position = start;
+        return null;
+      }
+      this.next();
+      const value = this.readExpression();
+      this.accept(";");
+      return { kind: "assign", target: target.text, op: "=", value, line: target.line };
+    }
+    this.next();
     const value = this.readExpression();
-    this.expect(";");
+    this.accept(";");
     return {
       kind: "assign",
       target: target.text,
@@ -430,131 +649,490 @@ class TypeScriptParser {
     this.next();
     const index = this.readExpression();
     this.expect("]");
-    if (!this.at("=")) {
+    if (!this.accept("=")) {
+      this.position = start;
+      return null;
+    }
+    const value = this.readExpression();
+    this.accept(";");
+    return { kind: "indexAssign", buffer: buffer.text, index, value, line: buffer.line };
+  }
+
+  private readMemberAssignment(): Statement | null {
+    const start = this.position;
+    const base = this.next();
+    if (base.kind !== "ident" || !this.at(".")) {
+      this.position = start;
+      return null;
+    }
+    this.next();
+    const field = this.next();
+    if (field.kind !== "ident" || !this.at("=")) {
       this.position = start;
       return null;
     }
     this.next();
     const value = this.readExpression();
-    this.expect(";");
-    return { kind: "indexAssign", buffer: buffer.text, index, value, line: buffer.line };
+    this.accept(";");
+    return { kind: "memberAssign", base: base.text, field: field.text, op: "=", value, line: base.line };
   }
 
-  /** `for (let i = from; i < to; i++)` and the `<=` form. */
+  /** A call or an `i++` written for what it does. */
+  private readEffect(): Statement {
+    const token = this.peek();
+    if (token.kind === "ident" && (this.peek(1).text === "++" || this.peek(1).text === "--")) {
+      this.next();
+      const op = this.next().text as "++" | "--";
+      this.accept(";");
+      return { kind: "update", name: token.text, op, prefix: false, line: token.line };
+    }
+    const value = this.readExpression();
+    this.accept(";");
+    return { kind: "expression", value, line: token.line };
+  }
+
+  private readPrint(): Statement {
+    const start = this.next();
+    this.expect(".");
+    const method = this.next();
+    if (method.text !== "log") {
+      this.report(`console.${method.text} is not supported`, "a program prints with console.log", method);
+      this.synchronize();
+      return { kind: "print", value: this.hole(), line: start.line };
+    }
+    this.expect("(");
+    const value = this.readExpression();
+    this.expect(")");
+    this.accept(";");
+    return { kind: "print", value, line: start.line };
+  }
+
+  /** `for (let i = from; i < to; i++)`, and the `<=`, `>` and `>=` forms. */
   private readLoop(): Statement {
-    const start = this.peek();
-    this.expect("for");
+    const start = this.next();
     this.expect("(");
     if (!this.at("let") && !this.at("const") && !this.at("var")) {
-      this.fail("a loop must declare its index, as in for (let i = 0; ...)");
+      this.report("a loop must declare its index", "as in for (let i = 0; ...)", start);
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
     }
     this.next();
     const variable = this.next();
-    if (variable.kind !== "ident") this.fail("expected a loop index name");
+    if (variable.kind !== "ident") {
+      this.report("expected a loop index name", `near "${variable.text}"`, variable);
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
     this.expect("=");
     const from = this.readExpression();
     this.expect(";");
 
     const condition = this.next();
     if (condition.kind !== "ident" || condition.text !== variable.text) {
-      this.fail(`the loop condition must test the index "${variable.text}"`);
+      this.report(`the loop condition must test the index "${variable.text}"`, `near "${condition.text}"`, condition);
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
     }
     const comparison = this.next();
-    if (comparison.kind !== "punct" || (comparison.text !== "<" && comparison.text !== "<=")) {
-      this.fail('the loop condition must be "i < bound" or "i <= bound"');
+    if (comparison.kind !== "punct" || !["<", "<=", ">", ">="].includes(comparison.text)) {
+      this.report(
+        "the loop condition must compare the index with a bound",
+        'as in "i < bound" or "i <= bound"',
+        comparison,
+      );
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
     }
     const to = this.readExpression();
     this.expect(";");
-
-    const step = this.next();
-    if (step.kind === "punct" && step.text === "--") {
-      throw frontendError("counting down is not supported", `line ${start.line}`);
-    }
-    if (step.kind !== "ident" || step.text !== variable.text) {
-      this.fail("a loop must advance its index by one, as in i++");
-    }
-    const operator = this.next();
-    if (operator.text === "++") {
-      // i++
-    } else if (operator.text === "+=") {
-      const amount = this.next();
-      if (amount.text !== "1") this.fail("a loop must advance its index by one");
-    } else {
-      this.fail("a loop must advance its index by one, as in i++");
-    }
+    const step = this.readStep(variable.text);
     this.expect(")");
 
-    const body = this.at("{") ? this.readBlock() : [this.readStatement()];
     return {
       kind: "loop",
       variable: variable.text,
       from,
       to,
-      inclusive: comparison.text === "<=",
-      body,
+      inclusive: comparison.text === "<=" || comparison.text === ">=",
+      step,
+      down: comparison.text === ">" || comparison.text === ">=",
+      body: this.readBody(),
       line: start.line,
     };
   }
 
+  /** `i++`, `i--`, `i += n` or `i -= n`: how the index moves. Null is one. */
+  private readStep(variable: string): Expression | null {
+    const name = this.next();
+    if (name.kind !== "ident" || name.text !== variable) {
+      this.report("a loop must advance its own index", `as in ${variable}++`, name);
+      this.synchronize();
+      return null;
+    }
+    const operator = this.next();
+    if (operator.text === "++" || operator.text === "--") return null;
+    if (operator.text === "+=" || operator.text === "-=") {
+      const amount = this.readExpression();
+      // `i += 1` is how a loop advances by one, whichever way it is written.
+      if (operator.text === "+=" && amount.k === "literal" && amount.text === "1") return null;
+      return { k: "unary", op: operator.text === "-=" ? "-" : "+", operand: amount };
+    }
+    this.report("a loop must advance its index", `as in ${variable}++ or ${variable} += 2`, operator);
+    this.synchronize();
+    return null;
+  }
+
+  private readIf(): Statement {
+    const start = this.next();
+    this.expect("(");
+    const condition = this.readExpression();
+    this.expect(")");
+    const then = this.readBody();
+    const otherwise: Statement[] = [];
+    if (this.accept("else")) {
+      if (this.at("if")) otherwise.push(this.readIf());
+      else otherwise.push(...this.readBody());
+    }
+    return { kind: "if", condition, then, otherwise, line: start.line };
+  }
+
   readExpression(): Expression {
-    let left = this.readTerm();
+    return this.readConditional();
+  }
+
+  /** `c ? a : b`, the loosest operator an expression has. */
+  private readConditional(): Expression {
+    const condition = this.readLogicalOr();
+    if (!this.at("?")) return condition;
+    this.next();
+    const then = this.readExpression();
+    this.expect(":");
+    const otherwise = this.readExpression();
+    return { k: "conditional", condition, then, otherwise };
+  }
+
+  private readBinaryLevel(operators: readonly string[], next: () => Expression): Expression {
+    let left = next();
     for (;;) {
       const token = this.peek();
-      if (token.kind !== "punct" || !["+", "-", "*", "/"].includes(token.text)) return left;
+      if (token.kind !== "punct" || !operators.includes(token.text)) return left;
       this.next();
-      left = { k: "binary", op: token.text as "+" | "-" | "*" | "/", left, right: this.readTerm() };
+      left = { k: "binary", op: token.text as BinaryOp, left, right: next() };
     }
   }
 
-  /** A primary followed by any number of `a[i]` indexings. */
-  private readTerm(): Expression {
-    let base = this.readPrimary();
-    while (this.at("[")) {
+  private readLogicalOr(): Expression {
+    return this.readBinaryLevel(["||"], () => this.readLogicalAnd());
+  }
+
+  private readLogicalAnd(): Expression {
+    return this.readBinaryLevel(["&&"], () => this.readEquality());
+  }
+
+  private readEquality(): Expression {
+    return this.readBinaryLevel(["===", "!==", "==", "!="], () => this.readComparison());
+  }
+
+  private readComparison(): Expression {
+    return this.readBinaryLevel(["<", "<=", ">", ">="], () => this.readShift());
+  }
+
+  private readShift(): Expression {
+    return this.readBinaryLevel(["<<", ">>"], () => this.readAdditive());
+  }
+
+  private readAdditive(): Expression {
+    return this.readBinaryLevel(["+", "-"], () => this.readMultiplicative());
+  }
+
+  private readMultiplicative(): Expression {
+    return this.readBinaryLevel(["*", "/", "%"], () => this.readUnary());
+  }
+
+  private readUnary(): Expression {
+    const token = this.peek();
+    if (token.kind === "punct" && (token.text === "!" || token.text === "-" || token.text === "+")) {
       this.next();
-      const index = this.readExpression();
-      this.expect("]");
-      base = { k: "index", base, index };
+      return { k: "unary", op: token.text as UnaryOp, operand: this.readUnary() };
     }
-    return base;
+    if (token.kind === "punct" && (token.text === "++" || token.text === "--")) {
+      this.next();
+      const operand = this.readUnary();
+      if (operand.k !== "ident") return this.missing(`"${token.text}" needs a name to change`, token);
+      return { k: "update", name: operand.name, op: token.text as "++" | "--", prefix: true };
+    }
+    return this.readPostfix();
+  }
+
+  /** A primary, then any number of indexings, field reads, calls and updates. */
+  private readPostfix(): Expression {
+    let base = this.readPrimary();
+    for (;;) {
+      if (this.at("[")) {
+        this.next();
+        const index = this.readExpression();
+        this.expect("]");
+        base = base.k === "argv" ? { k: "argv", index } : { k: "index", base, index };
+        continue;
+      }
+      if (this.at("(")) {
+        if (base.k === "member" && base.base.k === "ident" && base.base.name === "Math") {
+          base = { k: "ident", name: `Math.${base.field}` };
+        }
+        if (base.k !== "ident") return this.missing("only a named function is called", this.peek());
+        this.next();
+        const args: Expression[] = [];
+        if (!this.at(")")) {
+          do {
+            args.push(this.readExpression());
+          } while (this.accept(","));
+        }
+        this.expect(")");
+        base = { k: "call", name: base.name, args };
+        continue;
+      }
+      if (this.at("++") || this.at("--")) {
+        const op = this.next().text as "++" | "--";
+        if (base.k !== "ident") return this.missing(`"${op}" needs a name to change`, this.peek());
+        return { k: "update", name: base.name, op, prefix: false };
+      }
+      if (this.at(".")) {
+        this.next();
+        const field = this.next();
+        if (field.kind !== "ident") return this.missing("expected the property of a value", field);
+        if (field.text === "length" && base.k === "ident") {
+          base = { k: "length", buffer: base.name };
+          continue;
+        }
+        if (field.text === "length" && base.k === "argv") {
+          base = { k: "call", name: ARGV_LENGTH, args: [] };
+          continue;
+        }
+        base = { k: "member", base, field: field.text };
+        continue;
+      }
+      return base;
+    }
   }
 
   private readPrimary(): Expression {
     const token = this.next();
-    if (token.kind === "unknown") throw unknownTokenError(token, this.path);
-    if (token.kind === "number") return { k: "literal", text: token.text };
-    if (token.kind === "string") {
-      throw frontendError("string literals are not supported", `line ${token.line}: the contract types describe numbers, not text`);
+    if (token.kind === "unknown") {
+      this.report(`unsupported token "${token.text}"`, `line ${token.line} of ${this.path}`, token);
+      // The rest of the expression is read past, so one unknown character is
+      // reported as the one construct it is.
+      this.synchronize(false);
+      return this.hole();
     }
+    if (token.kind === "number") return { k: "literal", text: token.text };
     if (token.kind === "bigint") return { k: "bigint", text: token.text };
+    if (token.kind === "string") {
+      if (token.template !== true) {
+        this.report("a quoted string is not a value", "write text as a template string, as in `depth ${depth}`", token);
+        return { k: "literal", text: "0" };
+      }
+      return { k: "text", parts: this.text(token) };
+    }
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
-      if (this.at(".")) {
+      if (token.text === "null" || token.text === "undefined") return { k: "null" };
+      if (token.text === "process" && this.at(".") && this.peek(1).text === "argv") {
         this.next();
-        const member = this.next();
-        if (member.text !== "length") {
-          throw frontendError(`.${member.text} is not supported`, `line ${member.line}; only .length of a typed array`);
-        }
-        return { k: "length", buffer: token.text };
+        this.next();
+        return { k: "argv", index: null };
       }
       return { k: "ident", name: token.text };
     }
-    if (token.kind === "punct") {
-      if (token.text === "(") {
-        const inner = this.readExpression();
-        this.expect(")");
-        return inner;
-      }
-      if (token.text === "-") return { k: "negate", operand: this.readTerm() };
-      if (token.text === "+") return this.readTerm();
+    if (token.kind === "punct" && token.text === "(") {
+      const inner = this.readExpression();
+      this.expect(")");
+      return inner;
     }
-    this.fail(`unexpected "${token.text}" in an expression`);
+    if (token.kind === "punct" && token.text === "{") return this.readObject();
+    return this.missing(`unexpected "${token.text}" in an expression`, token);
   }
+
+  /** `{ left: a, right: b }`: an object allocated where it is written. */
+  private readObject(): Expression {
+    const fields: { name: string; value: Expression }[] = [];
+    while (!this.at("}") && this.peek().kind !== "end") {
+      const key = this.next();
+      const name = key.kind === "ident" || key.kind === "string" ? key.text : null;
+      if (name === null) {
+        this.report("an object field is named", `near "${key.text}"`, key);
+      } else {
+        this.expect(":");
+        fields.push({ name, value: this.readExpression() });
+      }
+      if (!this.accept(",")) break;
+    }
+    this.expect("}");
+    return { k: "object", fields };
+  }
+
+  /** The text of a template string, split where it interpolates a value. */
+  private text(token: Token): TextPart[] {
+    const parts: TextPart[] = [];
+    let rest = token.text;
+    while (rest.length > 0) {
+      const open = rest.indexOf("${");
+      if (open < 0) {
+        parts.push({ k: "text", value: unescape(rest, token.line) });
+        break;
+      }
+      if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), token.line) });
+      const close = rest.indexOf("}", open);
+      if (close < 0) {
+        this.report("a template string interpolates nothing", `near "${rest.slice(open)}"`, token);
+        break;
+      }
+      const inner = rest.slice(open + 2, close);
+      rest = rest.slice(close + 1);
+      const parser = new TypeScriptParser(tokenize(inner), this.path, this.diagnostics);
+      const value = parser.readExpression();
+      if (parser.peek().kind !== "end") {
+        this.report(`"${parser.peek().text}" follows a complete value`, `in the text of line ${token.line}`, parser.peek());
+      }
+      parts.push({ k: "value", value });
+    }
+    return parts;
+  }
+}
+
+/**
+ * A body the contract cannot state as one expression. It is not an error: the
+ * contract of such a function carries what the function does instead.
+ */
+class Uncontractable extends Error {
+  readonly detail: string;
+
+  constructor(message: string, detail: string) {
+    super(message);
+    this.name = "Uncontractable";
+    this.detail = detail;
+  }
+}
+
+/** What a body does, as the contract states it when no expression can. */
+function usageOf(body: readonly Statement[]): { allocates: boolean; prints: boolean; readsArgv: boolean } {
+  let allocates = false;
+  let prints = false;
+  let readsArgv = false;
+  const expression = (value: Expression): void => {
+    switch (value.k) {
+      case "object":
+        allocates = true;
+        for (const field of value.fields) expression(field.value);
+        return;
+      case "argv":
+        readsArgv = true;
+        return;
+      case "call":
+        for (const argument of value.args) expression(argument);
+        return;
+      case "text":
+        for (const part of value.parts) {
+          if (part.k === "value") expression(part.value);
+        }
+        return;
+      case "binary":
+        expression(value.left);
+        expression(value.right);
+        return;
+      case "unary":
+        expression(value.operand);
+        return;
+      case "conditional":
+        expression(value.condition);
+        expression(value.then);
+        expression(value.otherwise);
+        return;
+      case "index":
+        expression(value.base);
+        expression(value.index);
+        return;
+      case "member":
+        expression(value.base);
+        return;
+      case "literal":
+      case "bigint":
+      case "ident":
+      case "null":
+      case "length":
+      case "update":
+        return;
+    }
+  };
+  const statement = (one: Statement): void => {
+    switch (one.kind) {
+      case "declare":
+        expression(one.init);
+        return;
+      case "print":
+        prints = true;
+        expression(one.value);
+        return;
+      case "assign":
+      case "result":
+      case "expression":
+      case "memberAssign":
+        expression(one.value);
+        return;
+      case "indexAssign":
+        expression(one.index);
+        expression(one.value);
+        return;
+      case "if":
+        expression(one.condition);
+        one.then.forEach(statement);
+        one.otherwise.forEach(statement);
+        return;
+      case "loop":
+        expression(one.from);
+        expression(one.to);
+        one.body.forEach(statement);
+        return;
+      case "update":
+        return;
+    }
+  };
+  body.forEach(statement);
+  return { allocates, prints, readsArgv };
+}
+
+/**
+ * The contract of a function whose result is not one expression. It states the
+ * signature, what the function does to the world, and the statements it runs:
+ * the program contract, the target and the module source are what a backend
+ * writes from, and the compiler checks the result by running the program.
+ */
+function definitionContract(declaration: TypeScriptFunction, input: SourceInput): FunctionContract {
+  const usage = usageOf(declaration.body);
+  const effects: Effect[] = [];
+  if (usage.allocates) effects.push("memory");
+  if (usage.prints) effects.push("io");
+  if (usage.readsArgv) effects.push("syscall");
+  return {
+    version: "1",
+    function: {
+      name: declaration.name,
+      symbol: declaration.name === "main" ? "blaze_main" : declaration.name,
+      params: declaration.params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
+      returns: typeToString(declaration.returns),
+    },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects,
+    numeric: normalizeNumeric(input.numeric),
+    optimize: normalizeOptimize(input.optimize),
+    definition: { statements: declaration.body, objects: {}, ...usage },
+  };
 }
 
 /* -------------------------------------------------------------------------- */
 /* Body analysis                                                              */
 /* -------------------------------------------------------------------------- */
-
 interface LoopContext {
   variable: string;
   lo: string;
@@ -572,12 +1150,37 @@ class BodyAnalysis {
     for (const param of declaration.params) this.bindings.set(param.name, param.name);
   }
 
-  run(): { result: string; accesses: AccessRange[] } {
-    for (const statement of this.declaration.body) this.execute(statement, null);
+  /**
+   * The expression the result must equal, or null when the body has none: a
+   * function that branches, recurses, allocates, calls or prints is contracted
+   * by what it does, which `definitionContract` carries.
+   */
+  run(): { result: string | null; accesses: AccessRange[] } {
+    try {
+      for (const statement of this.declaration.body) this.execute(statement, null);
+    } catch (error) {
+      if (!(error instanceof Uncontractable)) throw error;
+      return { result: null, accesses: this.accesses };
+    }
     if (this.result === null) {
-      throw frontendError(`${this.declaration.name} never returns a value`, "the contract needs an expression the result must equal");
+      throw frontendError(
+        `${this.declaration.name} never returns a value`,
+        "the contract needs an expression the result must equal",
+      );
     }
     return { result: this.result, accesses: this.accesses };
+  }
+
+  /**
+   * A contract states what a function returns as one expression. A body that
+   * branches, calls, allocates or prints has no such expression, so it is
+   * named here rather than given a contract it cannot meet.
+   */
+  private uncontractable(construct: string, line: number, remedy: string): never {
+    throw new Uncontractable(
+      `${this.declaration.name} cannot be contracted: it ${construct} (line ${line})`,
+      remedy,
+    );
   }
 
   private execute(statement: Statement, loop: LoopContext | null): void {
@@ -603,36 +1206,77 @@ class BodyAnalysis {
       case "loop":
         this.executeLoop(statement);
         return;
+      case "if":
+        this.uncontractable(
+          "branches",
+          statement.line,
+          "a contract is one expression the result must equal, so a contracted function is straight-line",
+        );
+      case "update":
+        this.uncontractable(
+          `changes "${statement.name}" outside a counted loop`,
+          statement.line,
+          "accumulate with `x = x + 1` or a counted loop instead",
+        );
+      case "print":
+        this.uncontractable("prints", statement.line, "a contracted function returns a value and prints nothing");
+      case "expression":
+        this.uncontractable(
+          `calls ${describe(statement.value)}`,
+          statement.line,
+          "a contracted function is computed from its parameters alone",
+        );
+      case "memberAssign":
+        this.uncontractable(
+          `writes the field "${statement.base}.${statement.field}"`,
+          statement.line,
+          "the frontend accepts functions that read what they are given",
+        );
       case "indexAssign":
-        throw frontendError(
-          `writing into "${statement.buffer}" is not supported (line ${statement.line})`,
-          "the frontend accepts pure functions; the contract would have to describe the write",
+        this.uncontractable(
+          `writes into "${statement.buffer}"`,
+          statement.line,
+          "the frontend accepts functions that read what they are given",
         );
     }
   }
 
   private executeLoop(statement: Statement & { kind: "loop" }): void {
+    if (statement.step !== null || statement.down) {
+      this.uncontractable(
+        "counts by something other than one",
+        statement.line,
+        "a reduction describes the range it sums over, so the index moves by one",
+      );
+    }
     if (statement.body.length !== 1) {
-      throw frontendError(
-        `loop body at line ${statement.line} must contain exactly one statement`,
-        "version 0.1 supports accumulator loops; branches and early returns are rejected",
+      this.uncontractable(
+        "has a loop body of more than one statement",
+        statement.line,
+        "a reduction describes a loop that accumulates into one variable",
       );
     }
     const inner = statement.body[0];
     if (inner.kind === "indexAssign") {
-      throw frontendError(
-        `writing into "${inner.buffer}" is not supported (line ${inner.line})`,
-        "the frontend accepts pure functions",
+      this.uncontractable(
+        `writes into "${inner.buffer}"`,
+        inner.line,
+        "a reduction reads what it is given, so a contracted function writes nothing",
       );
     }
     if (inner.kind !== "assign") {
-      throw frontendError(
-        `loop body at line ${statement.line} must accumulate into a variable`,
-        "expected `total += ...`",
+      this.uncontractable(
+        "has a loop body that does not accumulate",
+        statement.line,
+        "a reduction describes a loop that accumulates into one variable, as in `total += a[i]`",
       );
     }
     if (inner.op === "-=" || inner.op === "/=") {
-      throw frontendError(`"${inner.op}" inside a loop is not supported (line ${inner.line})`);
+      this.uncontractable(
+        `accumulates with "${inner.op}"`,
+        inner.line,
+        "a reduction is a sum or a product, so a loop accumulates with `+=` or `*=`",
+      );
     }
 
     const from = this.serialize(statement.from, null, statement.line);
@@ -675,6 +1319,8 @@ class BodyAnalysis {
       case "literal":
       case "bigint":
         return expression.text;
+      case "null":
+        return "null";
       case "length": {
         const param = this.declaration.params.find((entry) => entry.name === expression.buffer);
         if (param === undefined) {
@@ -690,8 +1336,8 @@ class BodyAnalysis {
         }
         return bound;
       }
-      case "negate":
-        return `(-${this.serialize(expression.operand, loop, line)})`;
+      case "unary":
+        return `(${expression.op}${this.serialize(expression.operand, loop, line)})`;
       case "binary":
         return `(${this.serialize(expression.left, loop, line)} ${expression.op} ${this.serialize(expression.right, loop, line)})`;
       case "index": {
@@ -717,6 +1363,32 @@ class BodyAnalysis {
         }
         return `${param.name}[${index}]`;
       }
+      case "argv":
+        this.uncontractable("reads the command line", line, "a contracted function is computed from its parameters alone");
+      case "member":
+        this.uncontractable(
+          `reads the field "${describe(expression.base)}.${expression.field}"`,
+          line,
+          "a contracted function computes its result from the parameters it is given",
+        );
+      case "call":
+        this.uncontractable(
+          `calls ${describe(expression)}`,
+          line,
+          "a contracted function is computed from its parameters alone",
+        );
+      case "object":
+        this.uncontractable("allocates an object", line, "a contracted function allocates nothing");
+      case "text":
+        this.uncontractable("prints text", line, "a contracted function returns a number and prints nothing");
+      case "conditional":
+        this.uncontractable("chooses between two values", line, "a contracted function is straight-line");
+      case "update":
+        this.uncontractable(
+          `changes "${expression.name}"`,
+          line,
+          'accumulate with `x = x + 1` or a counted loop instead',
+        );
     }
   }
 }
@@ -729,14 +1401,67 @@ function dependsOn(expression: Expression, name: string): boolean {
       return expression.name === name;
     case "literal":
     case "bigint":
+    case "null":
+    case "argv":
     case "length":
       return false;
-    case "negate":
+    case "unary":
       return dependsOn(expression.operand, name);
     case "binary":
       return dependsOn(expression.left, name) || dependsOn(expression.right, name);
     case "index":
       return dependsOn(expression.base, name) || dependsOn(expression.index, name);
+    case "member":
+      return dependsOn(expression.base, name);
+    case "call":
+      return expression.args.some((argument) => dependsOn(argument, name));
+    case "object":
+      return expression.fields.some((field) => dependsOn(field.value, name));
+    case "text":
+      return expression.parts.some((part) => part.k === "value" && dependsOn(part.value, name));
+    case "conditional":
+      return (
+        dependsOn(expression.condition, name) ||
+        dependsOn(expression.then, name) ||
+        dependsOn(expression.otherwise, name)
+      );
+    case "update":
+      return expression.name === name;
+  }
+}
+
+/** How an expression is named in an error: the call, or the value itself. */
+function describe(expression: Expression): string {
+  switch (expression.k) {
+    case "call":
+      return expression.name;
+    case "ident":
+      return `"${expression.name}"`;
+    case "length":
+      return `${expression.buffer}.length`;
+    case "index":
+      return `${describe(expression.base)}[]`;
+    case "member":
+      return `${describe(expression.base)}.${expression.field}`;
+    case "argv":
+      return "process.argv";
+    case "object":
+      return "an object";
+    case "update":
+      return `${expression.name}${expression.op}`;
+    case "text":
+      return "a string";
+    case "literal":
+    case "bigint":
+      return `the value ${expression.text}`;
+    case "binary":
+      return `${describe(expression.left)} ${expression.op} ${describe(expression.right)}`;
+    case "unary":
+      return `${expression.op}${describe(expression.operand)}`;
+    case "conditional":
+      return "a conditional";
+    case "null":
+      return "null";
   }
 }
 
@@ -749,12 +1474,20 @@ export const typeScriptFrontend: Frontend = {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
-    return new TypeScriptParser(tokenize(source), path).parseModule(path);
+    const diagnostics = new Diagnostics();
+    const analysis = new TypeScriptParser(tokenize(source), path, diagnostics).parseModule(path);
+    // A file is read to the end whatever it holds, so a build names every
+    // construct outside the subset instead of the first one.
+    diagnostics.throwIfAny(path);
+    return analysis;
   },
 
   contractFor(analysis, declared, input) {
     const declaration = declared.handle as TypeScriptFunction;
     const body = new BodyAnalysis(declaration).run();
+    // A result that is one expression is the contract: it states the semantics
+    // a backend has to meet, and the compiler is the oracle that decides it.
+    if (body.result === null) return definitionContract(declaration, input);
     // A buffer length is a property of the value, not of the pointer the callee
     // receives: the implementation cannot observe it, so the result may not
     // depend on it. Preconditions may, because the caller checks them.

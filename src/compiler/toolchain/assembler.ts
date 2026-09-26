@@ -18,6 +18,7 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol } from "../runtime/abi.ts";
+import { symbolOf } from "../semantics/contract.ts";
 
 const ALLOWED_DIRECTIVES = new Set([
   ".text",
@@ -142,7 +143,7 @@ export function readAssemblyStructure(assembly: string): AssemblyStructure {
  * suitable for feeding back to the model.
  */
 export function validateAssembly(assembly: string, contract: FunctionContract, candidate?: string): void {
-  const functionName = contract.function.name;
+  const functionName = symbolOf(contract);
   const problems: string[] = [];
 
   if (assembly.trim() === "") {

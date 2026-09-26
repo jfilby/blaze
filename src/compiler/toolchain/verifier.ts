@@ -17,6 +17,7 @@ import {
   isFloatType,
   isIntegerType,
   parseType,
+  bufferElement,
   preconditionFailures,
   referenceResult,
   valuesMatch,
@@ -173,7 +174,7 @@ function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParam
       continue;
     }
     if (type.kind !== "primitive") {
-      const element = type.of;
+      const element = bufferElement(type);
       const size = type.kind === "array" && type.length !== null ? type.length : builder.length;
       args[param.name] = Array.from({ length: size }, (_, index) => formatScalar(element, scalarFor(builder, element, index)));
       continue;
@@ -276,7 +277,7 @@ export function vectorValues(contract: FunctionContract, vector: TestVector): Ma
         values.set(param.name, null);
         continue;
       }
-      values.set(param.name, { type, values: argument.map((text) => parseScalar(type.of, text)) } satisfies BufferValue);
+      values.set(param.name, { type, values: argument.map((text) => parseScalar(bufferElement(type), text)) } satisfies BufferValue);
       continue;
     }
     values.set(param.name, argument === undefined ? 0 : parseScalar(type, argument as string));

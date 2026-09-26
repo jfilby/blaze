@@ -286,6 +286,18 @@ async function evaluateCandidate(
   try {
     const built = await materialize(request, candidate, paths, demoRequest);
 
+    // A contract that states what a function does rather than what it returns
+    // has no vector to run: the candidate is built, and the program it belongs
+    // to says whether the two print the same thing.
+    if (request.parsed.resultDefinition === null) {
+      return {
+        candidate: candidate.id,
+        valid: true,
+        textSizeBytes: built.textSizeBytes,
+        objectSizeBytes: built.sizeBytes,
+      };
+    }
+
     const verification = verifyCandidate({
       contract: request.contract,
       parsed: request.parsed,

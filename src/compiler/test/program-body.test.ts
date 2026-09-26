@@ -17,7 +17,7 @@ import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { resolveProgram, type ResolvedValue } from "../toolchain/program.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
-import { phaseOf } from "./phase.ts";
+import { diagnostic, phaseOf } from "./phase.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const quiet = { stage: () => {} };
@@ -96,13 +96,13 @@ test("a number the source negated is read as written", () => {
 });
 
 test("a statement a program cannot run is refused", () => {
-  assert.throws(() => bodyOf("console.error(1);\n"), /console\.error is not part of a program/);
-  assert.throws(() => bodyOf("for (let i = 0; i < 4; i++) {}\n"), /"for" is not a statement of a program/);
+  assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
+  assert.match(diagnostic(() => bodyOf("for (let i = 0; i < 4; i++) {}\n")), /"for" is not a statement of a program/);
 });
 
 test("a declaration after the program is refused, because a program runs last", () => {
-  assert.throws(
-    () => bodyOf(["console.log(1);", "export function f(): number {", "  return 1;", "}"].join("\n")),
+  assert.match(
+    diagnostic(() => bodyOf(["console.log(1);", "export function f(): number {", "  return 1;", "}"].join("\n"))),
     /"export" is not a statement of a program/,
   );
 });
@@ -121,7 +121,10 @@ test("a value takes the type of the call it is passed to", () => {
 
   // The array is f64 because the parameter is, and the length stays a length:
   // the driver reads it as one and converts it where the call wants a number.
-  const call = callOf(program.statements[1].value);
+  const declared = program.statements[1];
+  assert.equal(declared.kind, "declare");
+  if (declared.kind !== "declare") throw new Error("expected a declaration");
+  const call = callOf(declared.value);
   assert.equal(call.name, "dot");
   assert.deepEqual(call.args[0], {
     k: "reference",

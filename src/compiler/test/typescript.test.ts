@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { frontendFor } from "../semantics/frontend.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf } from "./phase.ts";
+import { contractOf, diagnostic } from "./phase.ts";
 
 const typescript = frontendFor("typescript");
 
@@ -16,6 +16,7 @@ test("the shipped example compiles to the expected contract", async () => {
 
   assert.deepEqual(contract.function, {
     name: "dotProduct",
+    symbol: "dotProduct",
     params: [
       { name: "a", type: "slice<f64>" },
       { name: "b", type: "slice<f64>" },
@@ -144,64 +145,99 @@ test("a derived bound becomes a precondition the caller checks", async () => {
   assert.deepEqual(contract.memory.reads, ["values[0:1]"]);
 });
 
-test("impure and unsupported constructs are rejected with a reason", async () => {
-  assert.throws(() => contractOf("typescript", `export function write(values: Float64Array, n: number): number {
-  for (let i = 0; i < n; i++) values[i] = 0;
-  return 0;
-}
-`),
-    /writing into "values" is not supported/,
-  );
-
-  assert.throws(() => contractOf("typescript", `export function branch(x: number): number {
+test("a body whose result is not one expression is contracted by what it does", async () => {
+  // Nothing here can be written as `result == ...`, so the contract states the
+  // signature, the effects and the body instead of refusing the function.
+  const branch = contractOf("typescript", `export function pick(x: number): number {
   if (x > 0) return x;
   return 0;
 }
-`),
-    /"if" is not supported/,
+`);
+  assert.deepEqual(branch.ensures, []);
+  assert.deepEqual(branch.effects, []);
+  assert.deepEqual(branch.definition?.statements.map((statement) => statement.kind), ["if", "result"]);
+
+  const program = contractOf("typescript", `export function report(depth: number): void {
+  let nodes = 0;
+  for (let i = 0; i <= depth; i++) {
+    console.log(\`depth \${i}\`);
+    nodes += 1;
+  }
+  if (nodes > 0) console.log(\`\${nodes}\`);
+}
+`);
+  assert.deepEqual(program.effects, ["io"]);
+  assert.equal(program.definition?.prints, true);
+  assert.equal(program.definition?.allocates, false);
+  assert.equal(program.definition?.readsArgv, false);
+
+  const allocating = contractOf("typescript", `export function make(): any {
+  return { left: null, right: null };
+}
+`);
+  assert.deepEqual(allocating.effects, ["memory"]);
+  assert.equal(allocating.definition?.allocates, true);
+
+  const counting = contractOf("typescript", `export function everyOther(n: number): number {
+  let total = 0;
+  for (let d = 4; d <= n; d += 2) total += d;
+  return total;
+}
+`);
+  assert.deepEqual(counting.ensures, []);
+  assert.deepEqual(
+    counting.definition?.statements.map((statement) => statement.kind),
+    ["declare", "loop", "result"],
+  );
+});
+
+test("a type or a name the compiler cannot read is still refused", async () => {
+  assert.match(
+    diagnostic(() => contractOf("typescript", `export function text(): string { return "hi"; }\n`)),
+    /unsupported TypeScript type "string"/,
   );
 
-  assert.throws(() => contractOf("typescript", `export function text(): string { return "hi"; }\n`),
-    /string literals are not supported|unsupported TypeScript type/,
-  );
-
-  assert.throws(() => contractOf("typescript", `export function odd(x: Date): number { return 0; }\n`),
+  assert.match(
+    diagnostic(() => contractOf("typescript", `export function odd(x: Date): number { return 0; }\n`)),
     /unsupported TypeScript type "Date"/,
   );
 
-  assert.throws(() => contractOf("typescript", `export function down(values: Float64Array, n: number): number {
-  let total = 0;
-  for (let i = n; i > 0; i--) total += values[i];
-  return total;
-}
-`),
-    /loop condition|counting down/,
-  );
-
-  assert.throws(() => contractOf("typescript", `export function unknown(x: number): number { return y + x; }\n`),
+  assert.match(
+    diagnostic(() => contractOf("typescript", `export function unknown(x: number): number { return y + x; }\n`)),
     /unknown identifier "y"/,
   );
 });
 
-test("the first construct outside the subset is the one reported", () => {
-  // The lexer keeps the character it does not know, so the parser reaches the
-  // first construct it cannot read rather than a later one.
-  const branchFirst = `export function tree(depth: number): number {
-  if (depth > 0) {
-    return depth;
-  }
-  return depth > 0 ? 1 : 0;
-}
-`;
-  assert.throws(() => contractOf("typescript", branchFirst), /"if" is not supported \(line 2\)/);
+test("every construct outside the subset is reported at once", () => {
+  // A file is fixed in one pass: the build says everything wrong with it, with
+  // the line each construct was written on, rather than one construct per run.
+  const message = diagnostic(() =>
+    contractOf(
+      "typescript",
+      [
+        "function noReturn() {",
+        "  return 1;",
+        "}",
+        "export function spin(x: number): number {",
+        "  while (x > 0) return 1;",
+        "  return 0;",
+        "}",
+        "export function odd(x: Date): number {",
+        "  return 0;",
+        "}",
+        "export function pick(x: number): number {",
+        "  return ~x;",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+  );
 
-  let diagnostic = "";
-  try {
-    contractOf("typescript", `export function pick(x: number): number { return ~x; }\n`);
-  } catch (error) {
-    diagnostic = error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
-  }
-  assert.match(diagnostic, /unsupported token "~"\nline 1 of module\.ts/);
+  assert.match(message, /4 constructs of module\.ts are outside the subset the compiler reads/);
+  assert.match(message, /line 1: every function declares what it returns/);
+  assert.match(message, /line 5: "while" is not supported/);
+  assert.match(message, /line 8: unsupported TypeScript type "Date"/);
+  assert.match(message, /line 12: unsupported token "~"/);
 });
 
 test("the language is selected by name", () => {

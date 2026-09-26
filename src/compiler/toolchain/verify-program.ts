@@ -43,6 +43,8 @@ export interface ProgramVerificationRequest {
   directory: string;
   /** The delivered binary. */
   runner: Runner;
+  /** The arguments the program is given, as they are given on the command line. */
+  arguments?: readonly string[];
 }
 
 /** The first line where two outputs differ, or null when they are the same. */
@@ -73,7 +75,9 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
     });
   }
 
-  const source = run(toolchain, [request.sourcePath], { cwd: request.directory, timeoutMs: 120_000 });
+  // A program reads the arguments it is given, so both runs get the same ones.
+  const arguments_ = [...(request.arguments ?? [])];
+  const source = run(toolchain, [request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({
       category: "VerificationError",
@@ -87,17 +91,17 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
       category: "VerificationError",
       stage: "verify",
       message: "the program source does not run",
-      detail: `${formatCommand(toolchain, [request.sourcePath])}\n${source.stderr.trim()}`,
+      detail: `${formatCommand(toolchain, [request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`,
     });
   }
 
-  const binary = run(request.runner.command, request.runner.args, { cwd: request.directory, timeoutMs: 120_000 });
+  const binary = run(request.runner.command, [...request.runner.args, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (binary.code !== 0) {
     throw new CompilerError({
       category: "VerificationError",
       stage: "verify",
       message: "the delivered program did not finish",
-      detail: `${formatCommand(request.runner.command, request.runner.args)}\n${binary.stderr.trim()}`,
+      detail: `${formatCommand(request.runner.command, [...request.runner.args, ...arguments_])}\n${binary.stderr.trim()}`,
     });
   }
 

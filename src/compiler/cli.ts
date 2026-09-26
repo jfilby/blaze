@@ -41,7 +41,7 @@ const PROJECT_FILE = "blaze.json";
 const USAGE = `blaze - AI native compiler
 
 Usage:
-  blaze build [input.json] [options]     build a function into native output
+  blaze build [input.json] [arguments...] build a function, or a program
   blaze generate [input.json] [options]  generate and validate assembly candidates
   blaze test <project> [options]         re-verify the selected candidate
   blaze benchmark <project> [options]    re-benchmark the selected candidate
@@ -129,7 +129,7 @@ function optionNumber(value: string | undefined, name: string): number | undefin
   return parsed;
 }
 
-function buildOptions(values: Record<string, unknown>): BuildOptions {
+function buildOptions(values: Record<string, unknown>, arguments_: readonly string[] = []): BuildOptions {
   const output = values.output;
   if (output !== undefined && !OUTPUT_KINDS.includes(output as OutputKind)) {
     throw new Error(`--output must be one of ${OUTPUT_KINDS.join(", ")}, got "${String(output)}"`);
@@ -141,6 +141,9 @@ function buildOptions(values: Record<string, unknown>): BuildOptions {
   return {
     cwd: process.cwd(),
     reuse: values.reuse === true,
+    // What is left on the command line after the command and the project is
+    // what the program is given: `blaze build 12` checks it the way it runs.
+    arguments: [...arguments_],
     ...(values.debug === true ? { debug: true } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(output === undefined ? {} : { output: output as OutputKind }),
@@ -205,14 +208,14 @@ async function main(argv: string[]): Promise<number> {
     },
   });
   const values = parsed.values as Record<string, unknown>;
-  const [command, argument] = parsed.positionals;
+  const [command, argument, ...rest] = parsed.positionals;
 
   if (values.help === true || command === undefined) {
     process.stdout.write(USAGE);
     return command === undefined && values.help !== true ? 1 : 0;
   }
 
-  const options = buildOptions(values);
+  const options = buildOptions(values, rest);
 
   switch (command) {
     case "build":

@@ -129,6 +129,54 @@ function renderTypes(contract: FunctionContract): string {
   return entries.join("\n");
 }
 
+/**
+ * What a function does, for a contract that states no postcondition. The body
+ * is the language-neutral IR the contract carries, and the objects are the
+ * layouts it writes: a backend allocates them through the runtime and reads a
+ * field at the offset the contract names.
+ */
+function renderDefinition(contract: FunctionContract): string {
+  const definition = contract.definition;
+  if (definition === undefined) return "";
+  const lines: string[] = [];
+  lines.push("This contract states what the function does, not what it returns:");
+  lines.push("there is no postcondition, because the result is not one expression. Implement the body.");
+  lines.push("");
+  lines.push("WHAT IT DOES");
+  lines.push(`allocates objects: ${definition.allocates ? "yes" : "no"}`);
+  lines.push(`prints: ${definition.prints ? "yes" : "no"}`);
+  lines.push(`reads the command line: ${definition.readsArgv ? "yes" : "no"}`);
+  if (definition.objects && Object.keys(definition.objects).length > 0) {
+    lines.push("");
+    lines.push("OBJECT LAYOUTS");
+    for (const object of Object.values(definition.objects)) {
+      lines.push(`${object.name}: ${object.size} bytes, align ${object.align}`);
+      for (const field of object.fields) {
+        lines.push(`  ${field.name}: ${field.type} at offset ${field.offset}`);
+      }
+    }
+    lines.push("");
+    lines.push(
+      "Allocate an object with blaze_rt_object_new(bytes, alignment), fill the fields at these offsets, and return the pointer.",
+    );
+    lines.push("A null reference is written as a null pointer; every reference is one pointer wide.");
+  }
+  if (definition.prints) {
+    lines.push("");
+    lines.push("Print with blaze_rt_print_text for text, blaze_rt_print_number for a number, and blaze_rt_print_newline to end a line.");
+  }
+  if (definition.readsArgv) {
+    lines.push("");
+    lines.push("Read the arguments with blaze_rt_argv_count() and blaze_rt_argv(index); an argument that is missing is 0.");
+  }
+  lines.push("");
+  lines.push("THE BODY");
+  lines.push("```json");
+  lines.push(JSON.stringify(definition.statements, null, 2));
+  lines.push("```");
+  return lines.join("\n");
+}
+
 /** The whole program: the module being written, and the contract of every other. */
 function renderProgram(request: PromptRequest): string {
   const program = request.program;
@@ -196,16 +244,18 @@ export function buildUserPrompt(request: PromptRequest): string {
     ].join("\n"),
   );
   sections.push(
-    [
-      "SEMANTIC REQUIREMENTS",
-      "The function must satisfy these preconditions on entry:",
-      ...contract.requires.map((requirement) => `- ${requirement}`),
-      "and must satisfy these postconditions on return:",
-      ...contract.ensures.map((condition) => `- ${condition}`),
-      "",
-      "The postcondition defines the result mathematically. It does not prescribe an algorithm:",
-      "summation order, vector width, unrolling and register allocation are yours to choose.",
-    ].join("\n"),
+    contract.definition === undefined
+      ? [
+          "SEMANTIC REQUIREMENTS",
+          "The function must satisfy these preconditions on entry:",
+          ...contract.requires.map((requirement) => `- ${requirement}`),
+          "and must satisfy these postconditions on return:",
+          ...contract.ensures.map((condition) => `- ${condition}`),
+          "",
+          "The postcondition defines the result mathematically. It does not prescribe an algorithm:",
+          "summation order, vector width, unrolling and register allocation are yours to choose.",
+        ].join("\n")
+      : ["SEMANTIC REQUIREMENTS", renderDefinition(contract)].join("\n"),
   );
   sections.push(["MEMORY REQUIREMENTS", renderMemory(contract)].join("\n"));
   sections.push(

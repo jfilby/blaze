@@ -26,6 +26,7 @@ import { posix } from "node:path";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "./contract.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
+import { resolveObjects } from "./objects.ts";
 import type { ContractEdge, FileContract, FunctionContract, ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
 
 /** The path a source given inline to a project file is known by. */
@@ -132,13 +133,17 @@ function modulePath(candidate: string, from: string): string {
 /* Contract generation                                                         */
 /* -------------------------------------------------------------------------- */
 
-/** One contract per exported function of one file. */
-function contractFile(request: ContractPhaseRequest, record: ModuleRecord): FileContract {
+/**
+ * The contracts of one file. A file offers what it exports, and the entry
+ * module of a program offers every function it declares, because the program
+ * runs them whether or not it exports them.
+ */
+function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isProgram: boolean): FileContract {
   const functions: Record<string, FunctionContract> = {};
   for (const declared of record.analysis.functions) {
-    if (!declared.exported) continue;
+    if (!declared.exported && !isProgram) continue;
     if (functions[declared.name] !== undefined) {
-      throw contractPhaseError(`${record.path} exports "${declared.name}" more than once`);
+      throw contractPhaseError(`${record.path} declares "${declared.name}" more than once`);
     }
     // A malformed contract fails here, before a backend is ever asked for code.
     const contract = request.frontend.contractFor(record.analysis, declared, request.input);
@@ -219,10 +224,17 @@ function resolveEntry(
     }
     return { file: entryFile.path, function: first };
   }
-  if (entryFile.functions[requested] === undefined) {
+  const chosen = entryFile.functions[requested];
+  if (chosen === undefined) {
     throw contractPhaseError(
       `entry "${requested}" is not an export of ${entryFile.path}`,
       `exports: ${available.join(", ")}`,
+    );
+  }
+  if (chosen.definition !== undefined) {
+    throw contractPhaseError(
+      `${requested} is a function whose contract states what it does rather than what it returns`,
+      "nothing can check such a function on its own: build the module as a program, and the program is compared against its own toolchain",
     );
   }
   return { file: entryFile.path, function: requested };
@@ -257,18 +269,22 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const body = resolveBody(records, request.entry.path);
   const contracts = new Map<string, FileContract>();
   for (const record of records) {
-    const file = contractFile(request, record);
+    const file = contractFile(request, record, record.path === request.entry.path && body !== undefined);
     if (Object.keys(file.functions).length === 0 && !(record.path === request.entry.path && body !== undefined)) {
       throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
     }
     contracts.set(record.path, file);
   }
   const edges = validateImports(records, contracts);
+  const files = records.map((record) => contracts.get(record.path) as FileContract);
+  // The objects a program allocates are named once for the whole program,
+  // because a field is often what another function returns.
+  resolveObjects(files);
   const program: ProgramContract = {
     version: "1",
     language: request.input.language,
     entry: resolveEntry(request.input, contracts.get(request.entry.path) as FileContract, body),
-    files: records.map((record) => contracts.get(record.path) as FileContract),
+    files,
     edges,
   };
   freeze(program);

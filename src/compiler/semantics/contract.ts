@@ -92,6 +92,7 @@ export function parsePrimitiveName(name: string): PrimitiveTypeName {
 
 export function parseType(text: string): TypeExpr {
   const source = text.trim();
+  if (source === "void") return { kind: "void" };
   const composite = /^([A-Za-z_][A-Za-z0-9_]*)\s*<(.+)>$/.exec(source);
   if (composite === null) {
     return { kind: "primitive", name: parsePrimitiveName(source) };
@@ -100,6 +101,14 @@ export function parseType(text: string): TypeExpr {
   const [, head, argument] = composite;
   if (head === "ptr" || head === "slice") {
     return { kind: head, of: parseType(argument) };
+  }
+  if (head === "ref") {
+    // `ref<any>` is a reference the source left unshaped, and `ref<Object1>`
+    // names the object it points at, which is a layout rather than a type.
+    const inner = argument.trim();
+    if (inner === "any") return { kind: "ref", of: null };
+    if (/^[A-Z][A-Za-z0-9_]*$/.test(inner)) return { kind: "ref", of: null, name: inner };
+    return { kind: "ref", of: parseType(inner) };
   }
   if (head === "array") {
     const parts = argument.split(",");
@@ -132,6 +141,11 @@ export function typeToString(type: TypeExpr): string {
       return `${type.kind}<${typeToString(type.of)}>`;
     case "array":
       return type.length === null ? `array<${typeToString(type.of)}>` : `array<${typeToString(type.of)},${type.length}>`;
+    case "ref":
+      if (type.name !== undefined) return `ref<${type.name}>`;
+      return type.of === null ? "ref<any>" : `ref<${typeToString(type.of)}>`;
+    case "void":
+      return "void";
   }
 }
 
@@ -141,9 +155,15 @@ export function isBufferType(type: TypeExpr): type is BufferType {
   return type.kind === "ptr" || type.kind === "slice" || type.kind === "array";
 }
 
-/** Element type of a buffer type, or null for scalars. */
+/** Element type of a buffer type, or null for anything else. */
 export function elementType(type: TypeExpr): TypeExpr | null {
-  return type.kind === "primitive" ? null : type.of;
+  return isBufferType(type) ? type.of : null;
+}
+
+/** The element type of a buffer type, refusing a type that is not one. */
+export function bufferElement(type: TypeExpr): TypeExpr {
+  if (isBufferType(type)) return type.of;
+  throw contractError(`${typeToString(type)} is not a buffer`);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -456,6 +476,11 @@ export function formatValue(value: Value): string {
 
 export type TypeEnv = ReadonlyMap<string, TypeExpr>;
 
+/** The name a contract's object exports, which is its name unless it is renamed. */
+export function symbolOf(contract: FunctionContract): string {
+  return contract.function.symbol ?? contract.function.name;
+}
+
 export function signatureTypeEnv(contract: FunctionContract): TypeEnv {
   const env = new Map<string, TypeExpr>();
   for (const param of contract.function.params) {
@@ -524,7 +549,7 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
     case "index": {
       const base = typeOf(expression.base, env);
       const index = typeOf(expression.index, env);
-      if (base.kind === "null" || base.kind === "primitive") {
+      if (base.kind !== "ptr" && base.kind !== "slice" && base.kind !== "array") {
         throw contractError(`cannot index ${describeType(base)}`);
       }
       if (index.kind !== "primitive" || !isIntegerType(index.name)) {
@@ -923,7 +948,12 @@ export interface ParsedContract {
   env: TypeEnv;
   requires: Expr[];
   ensures: Expr[];
-  resultDefinition: Expr;
+  /**
+   * The expression the result must equal, or null for a contract that carries
+   * a definition instead: a function whose result is not one expression is
+   * checked by the program it is part of, not by a postcondition.
+   */
+  resultDefinition: Expr | null;
 }
 
 /**
@@ -966,10 +996,16 @@ export function parseContract(contract: FunctionContract): ParsedContract {
     .map((expression, index) => ({ index, right: isResultDefinition(expression) ? expression.right : null }))
     .filter((entry) => entry.right !== null);
   if (definitions.length === 0) {
-    throw contractError(
-      "contract has no result definition",
-      'at least one ensures entry must define the return value, e.g. "result == ..."',
-    );
+    // A contract that states what a function does rather than what it returns
+    // is complete on its own: it carries the body and the layout it writes.
+    if (contract.definition === undefined) {
+      throw contractError(
+        "contract has no result definition",
+        'at least one ensures entry must define the return value, e.g. "result == ..."',
+      );
+    }
+    validateDefinition(contract);
+    return { contract, env, requires, ensures, resultDefinition: null };
   }
   const distinct = new Set(definitions.map((entry) => contract.ensures[entry.index]));
   if (distinct.size > 1) {
@@ -977,6 +1013,60 @@ export function parseContract(contract: FunctionContract): ParsedContract {
   }
 
   return { contract, env, requires, ensures, resultDefinition: definitions[0].right as Expr };
+}
+
+/** What a definition may not leave out: a body, and a layout that fits itself. */
+function validateDefinition(contract: FunctionContract): void {
+  const definition = contract.definition as NonNullable<FunctionContract["definition"]>;
+  if (definition.statements.length === 0) {
+    throw contractError(`the definition of ${contract.function.name} is empty`, "a function body states what it does");
+  }
+  for (const [name, object] of Object.entries(definition.objects)) {
+    if (object.name !== name) {
+      throw contractError(`object ${name} is named "${object.name}"`, "the layout and the field that names it must agree");
+    }
+    if (object.size <= 0 || object.align <= 0) {
+      throw contractError(`object ${name} has no size`, `size ${object.size}, align ${object.align}`);
+    }
+    let expected = 0;
+    for (const field of object.fields) {
+      const type = parseType(field.type);
+      if (field.offset < expected) {
+        throw contractError(
+          `field ${name}.${field.name} overlaps the field before it`,
+          `offset ${field.offset} comes after ${expected}`,
+        );
+      }
+      expected = field.offset + sizeOfType(type);
+      parseType(field.type);
+    }
+    if (expected > object.size) {
+      throw contractError(
+        `a field of ${name} lies outside the object`,
+        `the last field ends at ${expected}, the object is ${object.size} bytes`,
+      );
+    }
+  }
+}
+
+/** The bytes one value of a type takes in an object. */
+function sizeOfType(type: TypeExpr): number {
+  if (type.kind !== "primitive") return 8;
+  switch (type.name) {
+    case "bool":
+    case "i8":
+    case "u8":
+      return 1;
+    case "i16":
+    case "u16":
+      return 2;
+    case "i32":
+    case "u32":
+    case "f32":
+      return 4;
+    default:
+      return 8;
+  }
 }
 
 function checkBoolean(text: string, label: string, env: TypeEnv): Expr {
@@ -1045,8 +1135,18 @@ export function preconditionFailures(parsed: ParsedContract, values: ReadonlyMap
   return failures;
 }
 
-/** The reference return value, derived from the contract's result definition. */
+/**
+ * The reference return value, derived from the contract's result definition. A
+ * contract that carries a definition has none, and has no reference value: it
+ * is the program it belongs to that says what it returns.
+ */
 export function referenceResult(parsed: ParsedContract, values: ReadonlyMap<string, Value>): Value {
+  if (parsed.resultDefinition === null) {
+    throw contractError(
+      `${parsed.contract.function.name} states what it does, not what it returns`,
+      "a contract with a definition is checked by the program it is part of",
+    );
+  }
   return evaluate(parsed.resultDefinition, { env: parsed.env, values });
 }
 

@@ -23,6 +23,8 @@ export interface AccessRange {
 export interface ContractAssembly {
   /** Name of the function in the source language. */
   name: string;
+  /** The name the object exports, when the host has taken the source name. */
+  symbol?: string;
   params: { name: string; type: TypeExpr }[];
   returns: TypeExpr;
   /** The expression the result must equal, on the right of `result ==`. */
@@ -66,7 +68,7 @@ export function assembleContract(assembly: ContractAssembly): FunctionContract {
 
   return {
     version: "1",
-    function: { name, params: parameters, returns: typeToString(returns) },
+    function: { name, symbol: assembly.symbol ?? name, params: parameters, returns: typeToString(returns) },
     requires,
     ensures: [`result == ${assembly.result}`],
     memory: { reads, writes: [], aliasing: [] },

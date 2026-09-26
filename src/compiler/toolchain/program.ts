@@ -33,7 +33,8 @@
 import { parseType, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { ProgramBody, ProgramStatement, ProgramText, ProgramValue } from "../semantics/module.ts";
-import type { FunctionSignature, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
+import type { FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
+import { BUILTINS } from "../semantics/builtins.ts";
 
 /**
  * What a declared name holds. The same object is shared with the statement
@@ -43,14 +44,19 @@ import type { FunctionSignature, PrimitiveTypeName, ProgramContract, TypeExpr } 
 export type Binding =
   | { kind: "buffer"; element: PrimitiveTypeName | null; length: number; values: string[] }
   | { kind: "scalar"; type: PrimitiveTypeName | null; text: string }
+  /** A reference to an object one of the compiled functions returned. */
+  | { kind: "reference"; type: TypeExpr }
   | { kind: "string"; value: string };
 
 /** A call to a function the program compiled, with every argument placed. */
 export interface ResolvedCall {
+  /** The symbol the object exports, or the builtin the driver implements. */
   name: string;
   signature: FunctionSignature;
   args: ResolvedValue[];
   returns: TypeExpr;
+  /** A builtin is written by the driver, not by a compiled function. */
+  builtin?: boolean;
 }
 
 /** A value the driver can write down. */
@@ -74,8 +80,8 @@ export type ResolvedTextPart = { k: "text"; value: string } | { k: "value"; valu
 
 export type ResolvedStatement =
   | { kind: "declare"; name: string; value: ResolvedValue; line: number }
-  | { kind: "print"; value: ResolvedValue; line: number };
-
+  | { kind: "print"; value: ResolvedValue; line: number }
+  | { kind: "invoke"; call: ResolvedCall; line: number };
 /** A program with every name and type resolved, ready to be written down. */
 export interface ResolvedProgram {
   /** The entry module the statements were written in. */
@@ -83,6 +89,8 @@ export interface ResolvedProgram {
   statements: ResolvedStatement[];
   /** Every function of the program: what the driver declares and links. */
   functions: FunctionSignature[];
+  /** The objects the program lays out, so the driver declares them once. */
+  objects: Record<string, ObjectLayout>;
 }
 
 const NUMERIC: readonly PrimitiveTypeName[] = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "usize", "isize"];
@@ -120,6 +128,7 @@ export function typeOfValue(value: ResolvedValue): TypeExpr | null {
       if (value.binding.kind === "buffer") {
         return { kind: "slice", of: { kind: "primitive", name: value.binding.element ?? "f64" } };
       }
+      if (value.binding.kind === "reference") return value.binding.type;
       return { kind: "primitive", name: value.binding.type ?? "f64" };
     case "text":
       return null;
@@ -145,10 +154,12 @@ class ProgramResolver {
   private readonly bindings = new Map<string, Binding>();
   private readonly body: ProgramBody;
   private readonly signatures: Map<string, FunctionSignature>;
+  private readonly objects: Record<string, ObjectLayout>;
 
-  constructor(body: ProgramBody, signatures: Map<string, FunctionSignature>) {
+  constructor(body: ProgramBody, signatures: Map<string, FunctionSignature>, objects: Record<string, ObjectLayout>) {
     this.body = body;
     this.signatures = signatures;
+    this.objects = objects;
   }
 
   resolve(): ResolvedProgram {
@@ -159,10 +170,19 @@ class ProgramResolver {
       if (binding.kind === "buffer") binding.element ??= "f64";
       if (binding.kind === "scalar") binding.type ??= "f64";
     }
-    return { file: this.body.file, statements, functions: [...this.signatures.values()] };
+    return {
+      file: this.body.file,
+      statements,
+      functions: [...this.signatures.values()],
+      objects: this.objects,
+    };
   }
 
   private statement(statement: ProgramStatement): ResolvedStatement {
+    if (statement.kind === "invoke") {
+      const call = this.call({ k: "call", function: statement.function, args: statement.args }, statement.line);
+      return { kind: "invoke", call, line: statement.line };
+    }
     if (statement.kind === "print") {
       const value = this.value(statement.value, null, statement.line);
       this.assertPrintable(value, statement.line);
@@ -188,16 +208,22 @@ class ProgramResolver {
       }
       this.bindings.set(statement.name, { kind: "string", value: value.parts.map((part) => part.value).join("") });
     } else if (value.k === "call") {
-      const returns = primitive(value.call.returns);
-      if (returns === null) {
-        throw programError(
-          `${value.call.name} returns ${typeToString(value.call.returns)}`,
-          this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: a program holds numbers, not buffers`,
-        );
+      const returns = value.call.returns;
+      const scalar = primitive(returns);
+      if (scalar === null) {
+        if (returns.kind === "ref") {
+          this.bindings.set(statement.name, { kind: "reference", type: returns });
+        } else {
+          throw programError(
+            `${value.call.name} returns ${typeToString(returns)}`,
+            this.body,
+            statement.line,
+            `line ${statement.line} of ${this.body.file}: a program holds numbers and references, not buffers`,
+          );
+        }
+      } else {
+        this.bindings.set(statement.name, { kind: "scalar", type: scalar, text: "" });
       }
-      this.bindings.set(statement.name, { kind: "scalar", type: returns, text: "" });
     } else {
       // A name, a length or an element: the declaration holds what that holds.
       if (value.k === "reference") {
@@ -269,6 +295,28 @@ class ProgramResolver {
   }
 
   private call(value: ProgramValue & { k: "call" }, line: number): ResolvedCall {
+    const builtin = BUILTINS[value.function];
+    if (builtin !== undefined) {
+      if (value.args.length !== builtin.params.length) {
+        throw programError(
+          `${value.function} takes ${builtin.params.length} argument(s), not ${value.args.length}`,
+          this.body,
+          line,
+        );
+      }
+      return {
+        name: value.function,
+        signature: {
+          name: value.function,
+          symbol: value.function,
+          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) })),
+          returns: typeToString(builtin.returns),
+        },
+        args: value.args.map((argument, position) => this.value(argument, builtin.params[position], line)),
+        returns: builtin.returns,
+        builtin: true,
+      };
+    }
     const signature = this.signatures.get(value.function);
     if (signature === undefined) {
       const compiled = [...this.signatures.keys()];
@@ -289,7 +337,7 @@ class ProgramResolver {
       );
     }
     return {
-      name: value.function,
+      name: signature.symbol,
       signature,
       args: value.args.map((arg, position) => this.value(arg, parseType(signature.params[position].type), line)),
       returns: parseType(signature.returns),
@@ -407,5 +455,11 @@ class ProgramResolver {
  * signature it writes down is fixed here.
  */
 export function resolveProgram(body: ProgramBody, program: ProgramContract): ResolvedProgram {
-  return new ProgramResolver(body, signaturesOf(program)).resolve();
+  const objects: Record<string, ObjectLayout> = {};
+  for (const file of program.files) {
+    for (const contract of Object.values(file.functions)) {
+      Object.assign(objects, contract.definition?.objects ?? {});
+    }
+  }
+  return new ProgramResolver(body, signaturesOf(program), objects).resolve();
 }

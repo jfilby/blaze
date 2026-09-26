@@ -86,6 +86,12 @@ export interface BuildOptions {
   runtime?: RuntimeKind;
   /** Print the prompt sent to the model for every attempt. */
   debug?: boolean;
+  /**
+   * The arguments a program is checked with: the source and the delivered
+   * binary are both run with them, so a program that reads the command line is
+   * checked against the source reading the same one.
+   */
+  arguments?: readonly string[];
 }
 
 export interface BuildOutcome {
@@ -729,6 +735,7 @@ export async function runBuild(
           sourcePath: source.path,
           directory: project.directory,
           runner,
+          arguments: options.arguments,
         });
         if (!checked.passed) {
           throw new CompilerError({

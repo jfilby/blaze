@@ -11,15 +11,20 @@
 import { stat, writeFile } from "node:fs/promises";
 import { inspectObject } from "./assembler.ts";
 import { cDeclarationType } from "./linker.ts";
-import { parseType } from "../semantics/contract.ts";
+import { parseType, symbolOf } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
 
 /** Told to the model verbatim, so the rules live in one place. */
-export const cSourceRules =
-  `The only preprocessor lines allowed are #include <stddef.h>, #include <stdint.h> and #include "${RUNTIME_NAME}.h"; every other directive is rejected.`;
+export const cSourceRules = [
+  `The only preprocessor lines allowed are #include <stddef.h>, #include <stdint.h> and #include "${RUNTIME_NAME}.h"; every other directive is rejected.`,
+  // C reads `a || b` as a condition, where the source language reads it as a
+  // value: the same expression written in C has to choose the same value.
+  "A logical operator in the body is a value, not a condition: write `a || b` as `(a != 0 ? a : b)` and `a && b` as `(a != 0 ? b : a)`, and a comparison as the 1 or 0 it is.",
+  "A conditional expression in the body is written as the C conditional it is, and `!x` as `(x == 0)`.",
+].join("\n");
 
 /** The only preprocessor input a candidate may use. */
 const ALLOWED_INCLUDES = [
@@ -55,12 +60,12 @@ export function cSignature(contract: FunctionContract): string {
   const parameters = contract.function.params
     .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
     .join(", ");
-  return `${cDeclarationType(parseType(contract.function.returns))} ${contract.function.name}(${parameters})`;
+  return `${cDeclarationType(parseType(contract.function.returns))} ${symbolOf(contract)}(${parameters})`;
 }
 
 /** Rejects anything outside the pure subset before the compiler is invoked. */
 export function validateCSource(source: string, contract: FunctionContract, candidate?: string): void {
-  const functionName = contract.function.name;
+  const functionName = symbolOf(contract);
   if (source.trim() === "") {
     throw cError("the candidate contains no C source", undefined, functionName, candidate);
   }
@@ -112,7 +117,7 @@ export interface CompileCResult {
 }
 
 export async function compileC(request: CompileCRequest): Promise<CompileCResult> {
-  const functionName = request.contract.function.name;
+  const functionName = symbolOf(request.contract);
   validateCSource(request.source, request.contract, request.candidate);
   await writeFile(request.sourcePath, request.source, "utf8");
 

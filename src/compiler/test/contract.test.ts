@@ -20,6 +20,7 @@ function dotProductContract(): FunctionContract {
     version: "1",
     function: {
       name: "dotProduct",
+      symbol: "dotProduct",
       params: [
         { name: "a", type: "ptr<f32>" },
         { name: "b", type: "ptr<f32>" },

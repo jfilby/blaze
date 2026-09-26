@@ -10,6 +10,8 @@
  * by the build and reaches a backend beside the contract, never inside it.
  */
 
+import type { Statement } from "./ir.ts";
+
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
 /* -------------------------------------------------------------------------- */
@@ -50,7 +52,14 @@ export type TypeExpr =
   | { kind: "primitive"; name: PrimitiveTypeName }
   | { kind: "ptr"; of: TypeExpr }
   | { kind: "slice"; of: TypeExpr }
-  | { kind: "array"; of: TypeExpr; length: number | null };
+  | { kind: "array"; of: TypeExpr; length: number | null }
+  /**
+   * A reference to an object on the heap. `of` is null until the object is
+   * inferred, and `name` is the object it points at once the layouts are known.
+   */
+  | { kind: "ref"; of: TypeExpr | null; name?: string }
+  /** A function that returns nothing. */
+  | { kind: "void" };
 
 /* -------------------------------------------------------------------------- */
 /* Target                                                                     */
@@ -81,6 +90,13 @@ export interface FunctionParam {
 
 export interface FunctionSignature {
   name: string;
+  /**
+   * The name the object exports, which is the name of the function in the
+   * source unless that name is taken by the host: a program of a TypeScript
+   * module has an entry function called `main`, and the executable the driver
+   * links already has one.
+   */
+  symbol: string;
   params: FunctionParam[];
   returns: string;
 }
@@ -130,6 +146,37 @@ export interface FunctionContract {
   effects: Effect[];
   numeric: NumericContract;
   optimize: OptimizeSpec;
+  /** What the function is, for a result no expression can state. */
+  definition?: FunctionDefinition;
+}
+
+/**
+ * An object a function allocates: the fields it holds, where each one sits and
+ * what the whole object takes. A pointer field is a reference, so an object of
+ * references is the tree a recursive function builds.
+ */
+export interface ObjectLayout {
+  name: string;
+  size: number;
+  align: number;
+  fields: { name: string; type: string; offset: number }[];
+}
+
+/**
+ * The body of a function, for a contract that states no postcondition. A
+ * function that branches, recurses, allocates, calls or prints has no result
+ * that can be written as one expression, so the contract carries what the
+ * function is instead: the statements it runs and the objects it lays out.
+ */
+export interface FunctionDefinition {
+  statements: Statement[];
+  objects: Record<string, ObjectLayout>;
+  /** The function allocates an object. */
+  allocates: boolean;
+  /** The function prints. */
+  prints: boolean;
+  /** The function reads the arguments the program was given. */
+  readsArgv: boolean;
 }
 
 /* -------------------------------------------------------------------------- */

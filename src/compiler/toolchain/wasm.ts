@@ -13,7 +13,7 @@
  */
 
 import { stat, writeFile } from "node:fs/promises";
-import { parseType, typeToString } from "../semantics/contract.ts";
+import { bufferElement, parseType, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, Runner, TypeExpr } from "../core/types.ts";
@@ -206,14 +206,14 @@ export function generateWasmHost(contract: FunctionContract): string {
     .map((param) => {
       const type = parseType(param.type);
       if (type.kind === "primitive") return "";
-      const size = elementSize(type.of);
+      const size = elementSize(bufferElement(type));
       return `  if (count_${param.name} !== 0) {
     const elements = nextTokens();
     if (elements === null || elements.length < count_${param.name}) fail("truncated data for ${param.name}");
     storage_${param.name} = allocate(count_${param.name} * ${size});
     ${param.name} = storage_${param.name};
     for (let element = 0; element < count_${param.name}; element += 1) {
-      ${scalarStore(type.of, `elements[element]`, `storage_${param.name} + element * ${size}`)}
+      ${scalarStore(bufferElement(type), `elements[element]`, `storage_${param.name} + element * ${size}`)}
     }
   }`;
     })

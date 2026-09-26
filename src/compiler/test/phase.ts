@@ -4,7 +4,9 @@
  * the tests exercise are then the same path.
  */
 
+import assert from "node:assert/strict";
 import { frontendFor } from "../semantics/frontend.ts";
+import { CompilerError } from "../core/errors.ts";
 import { entryContract, runContractPhase, type ContractPhase } from "../semantics/program.ts";
 import type { FunctionContract, ProgramContract, SourceInput } from "../core/types.ts";
 
@@ -43,4 +45,19 @@ export function programOf(
 export function contractOf(language: string, source: string, overrides: Partial<SourceInput> = {}): FunctionContract {
   const path = ENTRY_PATH[language];
   return entryContract(programOf(language, { [path]: source }, path, overrides));
+}
+
+/**
+ * The message and the detail of the error a compiler error carries, so a test
+ * can match the whole of what a build says about a source file. The frontend
+ * gathers every construct outside the subset, and the detail is where it lists
+ * them.
+ */
+export function diagnostic(run: () => unknown): string {
+  try {
+    run();
+  } catch (error) {
+    return error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
+  }
+  throw new assert.AssertionError({ message: "expected a compiler error" });
 }
