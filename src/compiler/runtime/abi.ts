@@ -1,0 +1,362 @@
+/**
+ * The blaze runtime ABI.
+ *
+ * Blaze owns computation; a runtime owns runtime services. Generated code
+ * never talks to a host implementation directly: it calls the entry points
+ * below, and whichever runtime is linked provides them. `none` gets the C
+ * runtime the compiler emits itself, `nim` gets the Nim adapter, and the code
+ * the model writes is identical either way.
+ *
+ * This module is the single description of that boundary. The C header, the
+ * standalone C runtime, the symbol allowlist, the prompt section the model
+ * reads and the Nim adapter are all generated from RUNTIME_ABI, so the ABI
+ * cannot drift between the sides that implement it.
+ */
+
+import type { RuntimeKind } from "../core/types.ts";
+
+/** The name of the C header, the Nim adapter module and the object file. */
+export const RUNTIME_NAME = "blaze_rt";
+
+/** Every runtime the compiler knows about, by the kind that selects it. */
+export const RUNTIME_TITLES: Record<RuntimeKind, string> = {
+  none: "the compiler runtime",
+  nim: "the Nim host runtime",
+};
+
+/** One entry point of the ABI. */
+export interface RuntimeEntry {
+  symbol: string;
+  returns: string;
+  params: readonly (readonly [name: string, type: string])[];
+  /** What the entry point does, in one line, for the model and for a host. */
+  summary: string;
+  /** Who owns what the call returns, or what it frees. */
+  ownership: string;
+  /** True when the call never returns to its caller. */
+  noreturn?: boolean;
+}
+
+function entry(
+  symbol: string,
+  returns: string,
+  params: readonly (readonly [string, string])[],
+  summary: string,
+  ownership: string,
+  extra: { noreturn?: boolean } = {},
+): RuntimeEntry {
+  return { symbol, returns, params, summary, ownership, ...extra };
+}
+
+/**
+ * The ABI, in call order. Managed memory is described by a 48 byte header that
+ * every runtime writes in front of the payload, so `release` and `retain` are
+ * implementable by any host without knowing how the memory was obtained.
+ */
+export const RUNTIME_ABI: readonly RuntimeEntry[] = [
+  entry("blaze_rt_initialize", "void", [], "Prepares the runtime.", "Call once before any other entry point."),
+  entry(
+    "blaze_rt_finalize",
+    "void",
+    [],
+    "Releases what the runtime holds itself.",
+    "Call once, after the last managed value has been released.",
+  ),
+  entry(
+    "blaze_rt_allocate",
+    "void*",
+    [["bytes", "size_t"]],
+    "Allocates zeroed memory aligned to at least 16 bytes.",
+    "Returns a managed pointer with one reference, owned by the caller.",
+  ),
+  entry(
+    "blaze_rt_reallocate",
+    "void*",
+    [
+      ["pointer", "void*"],
+      ["bytes", "size_t"],
+    ],
+    "Resizes a managed block, keeping its contents and its reference.",
+    "Returns the managed pointer; a null pointer allocates.",
+  ),
+  entry(
+    "blaze_rt_retain",
+    "void*",
+    [["pointer", "void*"]],
+    "Adds a reference to a managed value.",
+    "Returns the same pointer; every retain needs a matching release.",
+  ),
+  entry(
+    "blaze_rt_release",
+    "void",
+    [["pointer", "void*"]],
+    "Drops one reference, freeing the value when the last one goes.",
+    "A null pointer is ignored; releasing memory the runtime never returned is an error.",
+  ),
+  entry(
+    "blaze_rt_string_new",
+    "const char*",
+    [
+      ["bytes", "const unsigned char*"],
+      ["length", "size_t"],
+    ],
+    "Copies length bytes into a NUL terminated managed string.",
+    "Returns a managed string the caller owns; the length excludes the terminator.",
+  ),
+  entry(
+    "blaze_rt_string_length",
+    "size_t",
+    [["text", "const char*"]],
+    "The length of a managed string, without its terminator.",
+    "Borrowed: the string stays owned by whoever created it.",
+  ),
+  entry(
+    "blaze_rt_string_clone",
+    "const char*",
+    [["text", "const char*"]],
+    "Copies a managed string into a new one.",
+    "Returns a managed string the caller owns.",
+  ),
+  entry(
+    "blaze_rt_array_new",
+    "void*",
+    [
+      ["count", "size_t"],
+      ["elementSize", "size_t"],
+    ],
+    "Allocates a zeroed managed array of count elements.",
+    "Returns a managed pointer the caller owns.",
+  ),
+  entry(
+    "blaze_rt_array_resize",
+    "void*",
+    [
+      ["pointer", "void*"],
+      ["count", "size_t"],
+      ["elementSize", "size_t"],
+    ],
+    "Resizes a managed array to count elements.",
+    "Returns the managed pointer; a null pointer allocates.",
+  ),
+  entry(
+    "blaze_rt_object_new",
+    "void*",
+    [
+      ["bytes", "size_t"],
+      ["alignment", "size_t"],
+    ],
+    "Allocates a zeroed managed object of bytes, aligned to alignment.",
+    "Returns a managed pointer the caller owns; alignment is a power of two, 0 means 16.",
+  ),
+  entry(
+    "blaze_rt_object_size",
+    "size_t",
+    [["pointer", "void*"]],
+    "The usable size of a managed value, excluding its header.",
+    "Borrowed.",
+  ),
+  entry(
+    "blaze_rt_raise",
+    "void",
+    [["message", "const char*"]],
+    "Reports a runtime error to the host and stops the function.",
+    "Never returns. The message is kept for blaze_rt_last_error.",
+    { noreturn: true },
+  ),
+  entry(
+    "blaze_rt_last_error",
+    "const char*",
+    [],
+    "The message of the last blaze_rt_raise, or an empty string.",
+    "Borrowed: valid until the next raise.",
+  ),
+];
+
+/** Symbols generated code may reference. Nothing else resolves at link time. */
+export const RUNTIME_SYMBOLS: Record<string, true> = Object.fromEntries(
+  RUNTIME_ABI.map((item) => [item.symbol, true as const]),
+);
+
+/** True when generated code is allowed to reference a symbol. */
+export function isRuntimeSymbol(symbol: string): boolean {
+  return RUNTIME_SYMBOLS[symbol] === true;
+}
+
+const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H
+#define BLAZE_RT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * The managed object representation. Every value the runtime returns starts
+ * with this header, so a host can retain, release and measure a value it did
+ * not allocate. The payload starts ${48} bytes later and keeps the alignment
+ * the allocation asked for.
+ */
+typedef struct blaze_rt_header {
+  uint64_t magic;       /* BLAZE_RT_MAGIC while the value is live */
+  void* base;           /* the address the host allocator returned */
+  uint64_t length;      /* usable payload bytes */
+  uint64_t alignment;   /* payload alignment, a power of two */
+  uint64_t references;  /* live references, at least one */
+  uint64_t reserved;    /* zero */
+} blaze_rt_header;
+
+#define BLAZE_RT_MAGIC 0x424C415A45525400ULL
+#define BLAZE_RT_HEADER_SIZE 48u
+#define BLAZE_RT_DEFAULT_ALIGNMENT 16u
+`;
+
+const HEADER_EPILOGUE = `
+#endif
+`;
+
+/** The C header a C candidate includes and the harness compiles against. */
+export function runtimeHeaderSource(): string {
+  const declarations = RUNTIME_ABI.map((item) => {
+    const suffix = item.noreturn === true ? " /* never returns */" : "";
+    return `${item.returns === "void" ? "void" : item.returns} ${item.symbol}(${
+      item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
+    })${suffix};`;
+  }).join("\n");
+  return `${HEADER_PREAMBLE}\n${declarations}\n${HEADER_EPILOGUE}`;
+}
+
+/** The runtime the compiler emits for `runtime: none`, on top of libc. */
+export function runtimeSourceSource(): string {
+  return `/* Generated by the blaze compiler. Do not edit. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "${RUNTIME_NAME}.h"
+
+static const char* blaze_rt_last_message = "";
+
+static blaze_rt_header* blaze_rt_header_of(void* pointer) {
+  blaze_rt_header* header = (blaze_rt_header*)((char*)pointer - BLAZE_RT_HEADER_SIZE);
+  if (header->magic != BLAZE_RT_MAGIC) {
+    fprintf(stderr, "blaze: not a live runtime pointer\\n");
+    exit(2);
+  }
+  return header;
+}
+
+static void* blaze_rt_block(size_t bytes, size_t alignment) {
+  if (alignment == 0) alignment = BLAZE_RT_DEFAULT_ALIGNMENT;
+  const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
+  char* base = (char*)calloc(1, total);
+  if (base == NULL) {
+    fprintf(stderr, "blaze: out of memory\\n");
+    exit(2);
+  }
+  const uintptr_t start = (uintptr_t)(base + BLAZE_RT_HEADER_SIZE);
+  const uintptr_t aligned = (start + alignment - 1) & ~(uintptr_t)(alignment - 1);
+  blaze_rt_header* header = (blaze_rt_header*)(aligned - BLAZE_RT_HEADER_SIZE);
+  header->magic = BLAZE_RT_MAGIC;
+  header->base = base;
+  header->length = bytes;
+  header->alignment = alignment;
+  header->references = 1;
+  header->reserved = 0;
+  return (void*)aligned;
+}
+
+void blaze_rt_initialize(void) {}
+
+void blaze_rt_finalize(void) {}
+
+void* blaze_rt_allocate(size_t bytes) {
+  return blaze_rt_block(bytes, BLAZE_RT_DEFAULT_ALIGNMENT);
+}
+
+void* blaze_rt_reallocate(void* pointer, size_t bytes) {
+  if (pointer == NULL) return blaze_rt_allocate(bytes);
+  blaze_rt_header* header = blaze_rt_header_of(pointer);
+  void* grown = blaze_rt_block(bytes, header->alignment);
+  memcpy(grown, pointer, header->length < bytes ? header->length : bytes);
+  blaze_rt_release(pointer);
+  return grown;
+}
+
+void* blaze_rt_retain(void* pointer) {
+  if (pointer == NULL) return NULL;
+  blaze_rt_header_of(pointer)->references += 1;
+  return pointer;
+}
+
+void blaze_rt_release(void* pointer) {
+  if (pointer == NULL) return;
+  blaze_rt_header* header = blaze_rt_header_of(pointer);
+  if (header->references > 1) {
+    header->references -= 1;
+    return;
+  }
+  header->magic = 0;
+  free(header->base);
+}
+
+const char* blaze_rt_string_new(const unsigned char* bytes, size_t length) {
+  char* text = (char*)blaze_rt_allocate(length + 1);
+  if (length > 0) memcpy(text, bytes, length);
+  text[length] = '\\0';
+  return text;
+}
+
+size_t blaze_rt_string_length(const char* text) {
+  if (text == NULL) return 0;
+  return blaze_rt_header_of((void*)text)->length - 1;
+}
+
+const char* blaze_rt_string_clone(const char* text) {
+  return blaze_rt_string_new((const unsigned char*)text, blaze_rt_string_length(text));
+}
+
+void* blaze_rt_array_new(size_t count, size_t elementSize) {
+  return blaze_rt_allocate(count * elementSize);
+}
+
+void* blaze_rt_array_resize(void* pointer, size_t count, size_t elementSize) {
+  return blaze_rt_reallocate(pointer, count * elementSize);
+}
+
+void* blaze_rt_object_new(size_t bytes, size_t alignment) {
+  return blaze_rt_block(bytes, alignment);
+}
+
+size_t blaze_rt_object_size(void* pointer) {
+  if (pointer == NULL) return 0;
+  return blaze_rt_header_of(pointer)->length;
+}
+
+void blaze_rt_raise(const char* message) {
+  blaze_rt_last_message = message == NULL ? "" : message;
+  fprintf(stderr, "blaze: %s\\n", blaze_rt_last_message);
+  exit(2);
+}
+
+const char* blaze_rt_last_error(void) {
+  return blaze_rt_last_message;
+}
+`;
+}
+
+/** The rules the model is told about the boundary, whichever runtime is linked. */
+export function runtimeRules(): string[] {
+  return [
+    "Runtime services are reached through the blaze runtime ABI, and through nothing else: no library calls, no syscalls, no inline instructions.",
+    "Every value the runtime returns is managed: release it with blaze_rt_release when the caller owns it, and hold it with blaze_rt_retain while something else may free it.",
+    "A call to an ABI entry point follows the System V AMD64 convention: arguments in the registers the signature lists, the result in rax or xmm0, and rsp 16-byte aligned at the call itself.",
+  ];
+}
+
+/** The ABI section of the prompt: which runtime, the rules, then every entry point. */
+export function runtimePromptSection(runtime: RuntimeKind): string {
+  const entryPoints = RUNTIME_ABI.map((item) => {
+    const parameters = item.params.map(([name, type]) => `${type} ${name}`).join(", ");
+    const never = item.noreturn === true ? "  // never returns" : "";
+    return `${item.returns} ${item.symbol}(${parameters || "void"})${never}\n    ${item.summary} ${item.ownership}`;
+  });
+  return [`The runtime is ${RUNTIME_TITLES[runtime]}.`, ...runtimeRules(), "", ...entryPoints].join("\n");
+}

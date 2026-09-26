@@ -1,0 +1,5 @@
+{
+  "candidates": [
+    "\t.text\n\t.globl\tdotProduct\n\t.type\tdotProduct, @function\ndotProduct:\n\tpush\t%rbx\n\tpush\t%r12\n\tmov\t%rdi, %rbx\n\tmov\t%rsi, %r12\n\tmov\t%rdx, %r13\n\tmov\t%r13, %rdi\n\tshl\t$2, %rdi\n\tsub\t$8, %rsp\n\tcall\tblaze_rt_allocate\n\tadd\t$8, %rsp\n\tmov\t%rax, %r14\n\tmov\t%rbx, %rsi\n\tmov\t%r13, %rcx\n\txorps\t%xmm2, %xmm2\n1:\ttest\t%rcx, %rcx\n\tje\t2f\n\tmovss\t(%rsi), %xmm3\n\tmovss\t%xmm3, (%rax)\n\tadd\t$4, %rsi\n\tadd\t$4, %rax\n\tsub\t$1, %rcx\n\tjmp\t1b\n2:\tmov\t%r14, %rsi\n\tmov\t%r12, %rdi\n\tmov\t%r13, %rcx\n\txorps\t%xmm2, %xmm2\n3:\ttest\t%rcx, %rcx\n\tje\t4f\n\tmovss\t(%rsi), %xmm3\n\tmulss\t(%rdi), %xmm3\n\taddss\t%xmm2, %xmm3\n\tmovaps\t%xmm3, %xmm2\n\tadd\t$4, %rsi\n\tadd\t$4, %rdi\n\tsub\t$1, %rcx\n\tjmp\t3b\n4:\tmov\t%r14, %rdi\n\tsub\t$8, %rsp\n\tcall\tblaze_rt_release\n\tadd\t$8, %rsp\n\tmovaps\t%xmm2, %xmm0\n\tpop\t%r12\n\tpop\t%rbx\n\tret\n\t.size\tdotProduct, .-dotProduct\n"
+  ]
+}

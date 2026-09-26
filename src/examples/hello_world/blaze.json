@@ -1,0 +1,23 @@
+{
+  "language": "typescript",
+  "sourceFile": "hello_world.ts",
+  "entry": "dotProduct",
+  "model": {
+    "provider": "openrouter",
+    "model": "stealth/space-bunny-alpha"
+  },
+  "output": "machine",
+  "target": {
+    "arch": "x86_64",
+    "os": "linux",
+    "abi": "sysv"
+  },
+  "optimize": {
+    "primary": "throughput",
+    "secondary": "size"
+  },
+  "generation": {
+    "maxCandidates": 2,
+    "maxAttempts": 3
+  }
+}

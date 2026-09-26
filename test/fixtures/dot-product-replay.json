@@ -1,0 +1,6 @@
+{
+  "candidates": [
+    "\t.globl\tdotProduct\n\t.type\tdotProduct, @function\ndotProduct:\n\tmovq\t%rdi, %r8\n\tmovq\t%rsi, %r9\n\tvxorps\t%xmm0, %xmm0, %xmm0\n\tmovq\t%rdx, %rax\n\tshrq\t$2, %rax\n\tje\t.Ltail\n.Lloop4:\n\tvmovups\t(%r8), %ymm2\n\tvmovups\t(%r9), %ymm3\n\tvmulps\t%ymm3, %ymm2, %ymm2\n\tvaddps\t%xmm2, %xmm0, %xmm0\n\taddq\t$16, %r8\n\taddq\t$16, %r9\n\tsubq\t$1, %rax\n\tjne\t.Lloop4\n.Ltail:\n\tmovq\t%rdx, %rcx\n\tandq\t$3, %rcx\n\tje\t.Lreduce\n.Ltailloop:\n\tvmovss\t(%r8), %xmm2\n\tvmulss\t(%r9), %xmm2, %xmm2\n\tvaddss\t%xmm2, %xmm0, %xmm0\n\taddq\t$4, %r8\n\taddq\t$4, %r9\n\tsubq\t$1, %rcx\n\tjne\t.Ltailloop\n.Lreduce:\n\tvmovaps\t%xmm0, %xmm1\n\tvpermilps\t$0xb1, %xmm0, %xmm1\n\tvaddps\t%xmm1, %xmm0, %xmm0\n\tvpermilps\t$0x4e, %xmm0, %xmm1\n\tvaddss\t%xmm1, %xmm0, %xmm0\n\t.size\tdotProduct, .-dotProduct\n\tret\n",
+    "\t.globl\tdotProduct\n\t.type\tdotProduct, @function\ndotProduct:\n\tvxorps\t%xmm0, %xmm0, %xmm0\n\ttest\t%rdx, %rdx\n\tje\t1f\n\tmovq\t%rdx, %rcx\n2:\tvmovss\t(%rdi), %xmm1\n\tvmulss\t(%rsi), %xmm1, %xmm1\n\tvaddss\t%xmm1, %xmm0, %xmm0\n\taddq\t$4, %rdi\n\taddq\t$4, %rsi\n\tsubq\t$1, %rcx\n\tjne\t2b\n1:\tret\n"
+  ]
+}

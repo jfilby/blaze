@@ -1,0 +1,313 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../src/compiler/compiler.ts";
+import { run } from "../src/compiler/core/process.ts";
+import { CompilerError } from "../src/compiler/core/errors.ts";
+import type { BuildStatus, SourceInput, VerificationResult } from "../src/compiler/core/types.ts";
+
+const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
+const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
+const EXAMPLE = new URL("../src/examples/hello_world/blaze.json", import.meta.url).pathname;
+
+const INPUT: SourceInput = {
+  language: "nim",
+  source: [
+    "proc dotProduct(a: ptr float32, b: ptr float32, n: usize): float32 =",
+    "  var acc: float32 = 0.0",
+    "  for i in 0 ..< n:",
+    "    acc += a[i] * b[i]",
+    "  result = acc",
+    "",
+  ].join("\n"),
+  entry: "dotProduct",
+  target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+  generation: { maxCandidates: 1, maxAttempts: 2 },
+  test: { randomCases: 6, maxLength: 64, seed: 7 },
+  benchmark: { iterations: 200 },
+};
+
+async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  await writeFile(join(directory, "input.json"), JSON.stringify(input, null, 2), "utf8");
+  return directory;
+}
+
+const quiet = { stage: () => {} };
+
+test("a build produces assembly, a native executable and a complete record", async () => {
+  const directory = await workspace("build");
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.outputKind, "machine");
+  assert.equal(outcome.build.selectedCandidate, "c1");
+  assert.equal(outcome.outputPath, join(directory, STATE_DIRECTORY, "projects/input/output/input"));
+
+  const contract = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/contract.json"), "utf8"),
+  ) as { ensures: string[] };
+  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
+
+  const verification = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/verification.json"), "utf8"),
+  ) as VerificationResult[];
+  assert.equal(verification.length, 1);
+  assert.equal(verification[0].passed, true);
+  assert.ok(verification[0].cases > 10);
+
+  const benchmark = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/benchmark.json"), "utf8"),
+  ) as { durationNs: number; iterations: number }[];
+  assert.equal(benchmark[0].iterations, 200);
+  assert.ok(benchmark[0].durationNs > 0);
+
+  const build = await inspectProject("input", directory);
+  assert.equal(build.status, "success");
+  assert.match(build.sourceHash, /^[0-9a-f]{64}$/);
+  assert.match(build.contractHash, /^[0-9a-f]{64}$/);
+});
+
+test("the delivered executable computes the contracted function", async () => {
+  const directory = await workspace("run");
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.ok(outcome.outputPath !== null);
+
+  const request = ["run", "5 5 5", "1 2 3 4 5", "1 1 1 1 1", "3 3 3", "2 2 2", "2 2 2", ""].join("\n");
+  const execution = run(outcome.outputPath, [], { input: request, timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.deepEqual(
+    execution.stdout.trim().split("\n").map((line) => Number(line.split(" ")[1])),
+    [15, 12],
+  );
+});
+
+test("the delivered assembly is the implementation that was verified", async () => {
+  const directory = await workspace("asm");
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.ok(outcome.outputAssemblyPath !== null);
+
+  const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
+  const stored = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
+  ) as { assembly: string }[];
+  assert.ok(delivered.endsWith(stored[0].assembly));
+  assert.ok(delivered.startsWith(".text"), "the architecture prelude is compiler controlled");
+});
+
+test("a C build delivers the C source the compiler verified", async () => {
+  const directory = await workspace("c", { ...INPUT, output: "c" });
+  const replay = join(directory, "candidates.json");
+  await writeFile(
+    replay,
+    JSON.stringify({
+      candidates: [
+        "#include <stddef.h>\nfloat dotProduct(const float* a, const float* b, size_t n) {\n  float total = 0.0f;\n  for (size_t i = 0; i < n; i++) total += a[i] * b[i];\n  return total;\n}\n",
+      ],
+    }),
+    "utf8",
+  );
+
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  assert.equal(outcome.build.outputKind, "c");
+  assert.ok(outcome.outputPath?.endsWith("output/input.c"));
+
+  const source = await readFile(outcome.outputPath as string, "utf8");
+  assert.match(source, /float dotProduct\(const float\* a, const float\* b, size_t n\)/);
+});
+
+test("a rejected candidate is replaced and its diagnostic is fed back", async () => {
+  const directory = await workspace("retry");
+  const replay = join(directory, "candidates.json");
+  const reference = JSON.parse(await readFile(REPLAY, "utf8")) as { candidates: string[] };
+  await writeFile(
+    replay,
+    JSON.stringify({
+      candidates: ["\t.globl dotProduct\ndotProduct:\n\tsyscall\n\tret\n", reference.candidates[0]],
+    }),
+    "utf8",
+  );
+
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 2 },
+    quiet,
+    "build",
+  );
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.selectedCandidate, "c2");
+
+  const candidates = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
+  ) as { id: string; feedback?: string[] }[];
+  assert.equal(candidates[0].feedback, undefined);
+  assert.match(candidates[1].feedback?.[0] ?? "", /syscall/);
+});
+
+test("a build where nothing is valid fails with a record that says why", async () => {
+  const directory = await workspace("fail");
+  const replay = join(directory, "candidates.json");
+  await writeFile(replay, JSON.stringify({ candidates: ["\t.globl dotProduct\ndotProduct:\n\tret\n"] }), "utf8");
+
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
+    (error: unknown) => error instanceof CompilerError && /no candidate for dotProduct/.test(error.message),
+  );
+
+  const build = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/build.json"), "utf8"),
+  ) as BuildStatus;
+  assert.equal(build.status, "failed");
+  assert.equal(build.error?.category, "AiGenerationError");
+});
+
+test("reuse rebuilds from stored assembly without asking the model", async () => {
+  const directory = await workspace("reuse");
+  const options = { cwd: directory, reuse: false, model: `replay:${REPLAY}` };
+  const first = await runBuild("input.json", options, quiet, "build");
+  assert.equal(first.build.status, "success");
+
+  // A model that cannot be resolved would fail if it were consulted at all.
+  const reused = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: true, model: "openai/this-model-does-not-exist" },
+    quiet,
+    "build",
+  );
+  assert.equal(reused.build.status, "success");
+  assert.equal(reused.build.selectedCandidate, "c1");
+  assert.deepEqual(reused.candidates, first.candidates);
+});
+
+test("reuse refuses to build a project whose source changed", async () => {
+  const directory = await workspace("changed");
+  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: `${INPUT.source}# changed\n` }), "utf8");
+
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: true, model: `replay:${REPLAY}` }, quiet, "build"),
+    /source of input changed/,
+  );
+});
+
+test("test and benchmark re-run against the selected candidate", async () => {
+  const directory = await workspace("stored");
+  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  const options = { cwd: directory, reuse: false, model: `replay:${REPLAY}` };
+
+  const verified = await runStored("input", options, quiet, "test");
+  assert.equal(verified.candidate, "c1");
+  assert.equal(verified.verification?.passed, true);
+  assert.ok((verified.verification?.cases ?? 0) > 0);
+
+  const measured = await runStored("input", options, quiet, "benchmark");
+  assert.ok((measured.benchmark?.durationNs ?? 0) > 0);
+  assert.equal(measured.benchmark?.iterations, 200);
+});
+
+test("the shipped TypeScript example builds and computes what it claims", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-example-"));
+  const outcome = await runBuild(
+    EXAMPLE,
+    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.project, "hello_world");
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(outcome.contract.function.params, [
+    { name: "a", type: "slice<f64>" },
+    { name: "b", type: "slice<f64>" },
+    { name: "n", type: "f64" },
+  ]);
+
+  assert.ok(outcome.outputPath !== null);
+  const request = ["run", "3 3 3", "1.5 -2 3", "4 0.5 2", ""].join("\n");
+  const execution = run(outcome.outputPath, [], { input: request, timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  // 1.5*4 + (-2)*0.5 + 3*2
+  assert.equal(Number(execution.stdout.trim().split(" ")[1]), 11);
+});
+
+test("a project names its provider and model, and the flag overrides it", async () => {
+  const directory = await workspace("models");
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({ ...INPUT, model: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" } }),
+  );
+  // The project names OpenRouter; only the flag lets this build run offline.
+  const fromFile = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  assert.equal(fromFile.build.status, "success");
+  assert.equal(fromFile.build.model, `replay:${REPLAY}`);
+});
+
+test("the model in a project file is what a build uses", async () => {
+  const directory = await workspace("file-model");
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({ ...INPUT, model: { provider: "replay", file: REPLAY } }),
+  );
+  // No --model and no AI_MODEL: the project file is the only source.
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.model, `replay:${REPLAY}`);
+  assert.equal(outcome.build.modelConfig, `replay:${REPLAY}`);
+});
+
+test("a project file may use the provider/model shorthand", async () => {
+  const directory = await workspace("shorthand");
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, model: `replay:${REPLAY}` }));
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+});
+
+test("an incomplete model selection is reported before any work happens", async () => {
+  const directory = await workspace("incomplete");
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, model: { provider: "openai" } }));
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    /must name both a provider and a model/,
+  );
+
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, model: { provider: "replay" } }));
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    /replay provider without a "file"/,
+  );
+});
+
+test("a credential in a project file is refused", async () => {
+  const directory = await workspace("credential");
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({ ...INPUT, model: { provider: "openrouter", model: "openai/gpt-5", apiKey: "sk-or-leaked" } }),
+  );
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /puts a credential in "model.apiKey"/,
+  );
+});
+
+test("an unknown project is reported, not guessed", async () => {
+  const directory = await workspace("unknown");
+  await assert.rejects(() => inspectProject("missing", directory), /unknown project "missing"/);
+  await assert.rejects(
+    () => runStored("missing", { cwd: directory, reuse: false }, quiet, "test"),
+    /unknown project "missing"/,
+  );
+});
+
+test("generate stops at candidate selection and delivers nothing", async () => {
+  const directory = await workspace("generate");
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "generate");
+  assert.equal(outcome.outputPath, null);
+  assert.equal(outcome.build.status, "success");
+  await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/output/input"), "utf8"));
+});

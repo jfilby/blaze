@@ -1,0 +1,5 @@
+{
+  "candidates": [
+    "\t.globl\tdotProduct\n\t.type\tdotProduct, @function\ndotProduct:\n\tvcvttsd2si\t%xmm0, %rax\n\tvxorpd\t%xmm2, %xmm2, %xmm2\n\ttest\t%rax, %rax\n\tje\t2f\n1:\tvmovsd\t(%rdi), %xmm3\n\tmulsd\t(%rsi), %xmm3\n\taddsd\t%xmm3, %xmm2\n\taddq\t$8, %rdi\n\taddq\t$8, %rsi\n\tsubq\t$1, %rax\n\tjne\t1b\n2:\tvmovapd\t%xmm2, %xmm0\n\t.size\tdotProduct, .-dotProduct\n\tret\n"
+  ]
+}

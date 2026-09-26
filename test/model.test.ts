@@ -1,0 +1,98 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { resolveModel, OPENROUTER_BASE_URL } from "../src/compiler/ai/model.ts";
+import { CompilerError } from "../src/compiler/core/errors.ts";
+import { createBackend, extractAssembly, VercelAiBackend } from "../src/compiler/ai/backend.ts";
+
+function diagnostic(run: () => unknown): string {
+  try {
+    run();
+  } catch (error) {
+    return error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
+  }
+  return "";
+}
+
+test("OPENROUTER_API_KEY configures the openrouter provider", () => {
+  const configuration = resolveModel("openrouter/anthropic/claude-sonnet-4.5", { OPENROUTER_API_KEY: "sk-or-test" });
+  assert.equal(configuration.provider, "openrouter");
+  assert.equal(configuration.id, "openrouter/anthropic/claude-sonnet-4.5");
+  assert.equal(configuration.model, "anthropic/claude-sonnet-4.5", "a vendor prefix stays part of the model id");
+  assert.equal(configuration.apiKey, "sk-or-test");
+  assert.equal(configuration.baseUrl, OPENROUTER_BASE_URL);
+});
+
+test("AI_MODEL selects openrouter without a --model flag", () => {
+  const configuration = resolveModel(undefined, {
+    AI_MODEL: "openrouter/qwen/qwen3-coder",
+    OPENROUTER_API_KEY: "sk-or-test",
+  });
+  assert.equal(configuration.id, "openrouter/qwen/qwen3-coder");
+});
+
+test("openrouter falls back to the generic credential", () => {
+  const configuration = resolveModel("openrouter/openai/gpt-5", { AI_API_KEY: "sk-generic" });
+  assert.equal(configuration.apiKey, "sk-generic");
+});
+
+test("openrouter without a key fails with the names to set", () => {
+  const message = diagnostic(() => resolveModel("openrouter/openai/gpt-5", {}));
+  assert.match(message, /missing API key for provider "openrouter"/);
+  assert.match(message, /OPENROUTER_API_KEY/);
+});
+
+test("OpenRouter attribution headers are sent when configured", () => {
+  const configuration = resolveModel("openrouter/openai/gpt-5", {
+    OPENROUTER_API_KEY: "sk-or-test",
+    OPENROUTER_SITE_URL: "https://example.test",
+    OPENROUTER_APP_NAME: "blaze",
+  });
+  assert.deepEqual(configuration.headers, { "HTTP-Referer": "https://example.test", "X-Title": "blaze" });
+});
+
+test("no attribution is invented when none is configured", () => {
+  const configuration = resolveModel("openrouter/openai/gpt-5", { OPENROUTER_API_KEY: "sk-or-test" });
+  assert.equal(configuration.headers, undefined);
+});
+
+test("every provider is selected by its prefix and validated", () => {
+  assert.equal(resolveModel("openai/gpt-5", { OPENAI_API_KEY: "k" }).provider, "openai");
+  assert.equal(resolveModel("anthropic/claude-sonnet-4-5", { ANTHROPIC_API_KEY: "k" }).provider, "anthropic");
+  assert.equal(resolveModel("google/gemini-2.5-pro", { GOOGLE_GENERATIVE_AI_API_KEY: "k" }).provider, "google");
+  assert.equal(
+    resolveModel("openai-compatible/local-model", { AI_API_KEY: "k", AI_BASE_URL: "http://localhost:1234/v1" }).baseUrl,
+    "http://localhost:1234/v1",
+  );
+  assert.match(diagnostic(() => resolveModel("", {})), /no model configured/);
+  assert.match(diagnostic(() => resolveModel("gpt-5", { AI_API_KEY: "k" })), /invalid model/);
+  assert.match(diagnostic(() => resolveModel("cohere/command-r", { AI_API_KEY: "k" })), /unknown provider "cohere"/);
+  assert.match(
+    diagnostic(() => resolveModel("openai-compatible/local", { AI_API_KEY: "k" })),
+    /openai-compatible needs AI_BASE_URL/,
+  );
+});
+
+test("openrouter and replay build backends of the right kind", () => {
+  const openrouter = resolveModel("openrouter/openai/gpt-5", { OPENROUTER_API_KEY: "sk-or-test" });
+  assert.ok(createBackend(openrouter) instanceof VercelAiBackend);
+  const replay = resolveModel("replay:./candidate.json", {});
+  assert.equal(createBackend(replay).id, "replay:./candidate.json");
+});
+
+test("an openrouter model object is constructible without contacting it", () => {
+  // The endpoint is only reached on a request, so this proves the provider
+  // package accepts the configuration the resolver produced.
+  const configuration = resolveModel("openrouter/anthropic/claude-sonnet-4.5", { OPENROUTER_API_KEY: "sk-or-test" });
+  const backend = createBackend(configuration);
+  assert.equal(backend.id, configuration.id);
+});
+
+test("assembly is recovered from a fenced or bare response", () => {
+  // Surrounding blank space and fence markers are removed; the instructions
+  // themselves are passed through untouched.
+  const fenced = extractAssembly("Here you go:\n```asm\n\t.globl f\nf:\n\tret\n```\n");
+  assert.equal(fenced, ".globl f\nf:\n\tret\n");
+  assert.equal(extractAssembly("  \t.globl f\n  "), ".globl f\n");
+  assert.match(diagnostic(() => extractAssembly("   ")), /empty response/);
+  assert.match(diagnostic(() => extractAssembly("# just a comment\n")), /only comments/);
+});
