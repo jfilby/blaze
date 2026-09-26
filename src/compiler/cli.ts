@@ -75,6 +75,9 @@ Options:
                             from the contract alone
   --max-attempts <n>        attempts per candidate: the first generates, the
                             rest repair the output the last one was rejected for
+  --max-retries <n>         extra model requests one attempt spends on an answer
+                            that carries no implementation; they cost no repair
+                            attempt
   --concurrency <n>          candidates to generate at the same time (default 4);
                             verification and benchmarking stay serial
   --debug                   print the prompt sent to the model for every attempt
@@ -154,6 +157,9 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") === undefined
       ? {}
       : { maxAttempts: optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") }),
+    ...(optionNumber(values["max-retries"] as string | undefined, "--max-retries") === undefined
+      ? {}
+      : { maxRetries: optionNumber(values["max-retries"] as string | undefined, "--max-retries") }),
     ...(optionNumber(values["concurrency"] as string | undefined, "--concurrency") === undefined
       ? {}
       : { concurrency: optionNumber(values["concurrency"] as string | undefined, "--concurrency") }),
@@ -201,6 +207,7 @@ async function main(argv: string[]): Promise<number> {
       debug: { type: "boolean" },
       "max-candidates": { type: "string" },
       "max-attempts": { type: "string" },
+      "max-retries": { type: "string" },
       concurrency: { type: "string" },
       "random-cases": { type: "string" },
       "max-length": { type: "string" },

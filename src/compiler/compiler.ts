@@ -76,6 +76,8 @@ export interface BuildOptions {
   reuse: boolean;
   maxCandidates?: number;
   maxAttempts?: number;
+  /** Extra model requests one attempt may spend on an answer with no implementation. */
+  maxRetries?: number;
   /** Candidates generated at the same time; 1 generates them one at a time. */
   concurrency?: number;
   randomCases?: number;
@@ -381,6 +383,7 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
   return {
     maxCandidates: options.maxCandidates ?? input.generation?.maxCandidates ?? DEFAULT_GENERATION.maxCandidates,
     maxAttempts: options.maxAttempts ?? input.generation?.maxAttempts ?? DEFAULT_GENERATION.maxAttempts,
+    maxRetries: options.maxRetries ?? input.generation?.maxRetries ?? DEFAULT_GENERATION.maxRetries,
     concurrency: options.concurrency ?? input.generation?.concurrency ?? DEFAULT_GENERATION.concurrency,
     timeoutSeconds: input.generation?.timeoutSeconds ?? DEFAULT_GENERATION.timeoutSeconds,
   };
@@ -583,6 +586,7 @@ export async function runBuild(
       runtime: runtimeKind,
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
+    const generation = generationConfigFor(input, options);
 
     const generated: UnitGeneration[] = [];
     for (const unit of units) {
@@ -601,9 +605,17 @@ export async function runBuild(
         backend: () =>
           createBackend(model ?? resolveModel(requested), {
             timeoutMs: requestTimeoutMs(input),
+            retries: generation.maxRetries,
+            onRetry: ({ candidate, attempt, retry, retries, reason }) => {
+              reporter.stage(
+                "generate",
+                "info",
+                `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
+              );
+            },
             ...(options.debug === true ? { onPrompt: printPrompt } : {}),
           }),
-        generation: generationConfigFor(input, options),
+        generation,
         test: testConfigFor(input, options),
         benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
         workspace,

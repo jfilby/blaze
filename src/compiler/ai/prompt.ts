@@ -497,6 +497,27 @@ export function buildUserPrompt(request: PromptRequest): string {
   return sections.join("\n\n");
 }
 
+/**
+ * The request that follows an answer the compiler could not use.
+ *
+ * The answer itself is not quoted: there is nothing in it to quote, or the
+ * compiler would not be asking again. What is quoted is why it was set aside,
+ * so the model answers for that reason rather than repeating itself.
+ */
+export function buildRetryPrompt(user: string, reasons: readonly string[]): string {
+  return [
+    user,
+    "",
+    "THE PREVIOUS ANSWER COULD NOT BE USED",
+    "The compiler asked the request above and received answers it could not use:",
+    ...reasons.map(asBullet),
+    "Nothing was assembled, linked or run, so no diagnostic points at a line of any of them.",
+    "",
+    "Answer the request above from the beginning: emit the complete implementation as the only",
+    "content of the reply, starting at the first line.",
+  ].join("\n");
+}
+
 export function buildSystemPrompt(): string {
   return SYSTEM_PROMPT;
 }

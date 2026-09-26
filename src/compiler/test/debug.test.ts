@@ -1,87 +1,11 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { createServer } from "node:http";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import type { SourceInput } from "../core/types.ts";
-
-/**
- * A stand-in for a chat completions endpoint. It answers with whatever the
- * caller queued, so a test can drive the real backend, prompt and all, without
- * a credential.
- */
-async function chatEndpoint(
-  t: TestContext,
-  answers: string[],
-  options: { until?: number } = {},
-): Promise<{ url: string; prompts: string[]; peak: () => number }> {
-  const prompts: string[] = [];
-  let served = 0;
-  // Requests are held until `until` of them have arrived, so a test can tell a
-  // fan-out from a queue: a serial client never gets the second one in flight.
-  let inFlight = 0;
-  let peak = 0;
-  let arrived = 0;
-  let release: (() => void) | undefined;
-  const gate = options.until === undefined ? undefined : new Promise<void>((resolve) => (release = resolve));
-  const openGate = setTimeout(() => release?.(), 5_000);
-  openGate.unref();
-  const server = createServer((request, response) => {
-    const chunks: Buffer[] = [];
-    request.on("data", (chunk: Buffer) => chunks.push(chunk));
-    request.on("end", () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-        messages: { role: string; content: string }[];
-      };
-      prompts.push(body.messages.map((message) => message.content).join("\n\n"));
-      const content = answers[Math.min(served, answers.length - 1)];
-      served += 1;
-      inFlight += 1;
-      peak = Math.max(peak, inFlight);
-      arrived += 1;
-      if (options.until !== undefined && arrived >= options.until) release?.();
-      const answer = () => {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(
-          JSON.stringify({
-            id: "stub",
-            object: "chat.completion",
-            created: 0,
-            model: "stub",
-            choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }],
-            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-          }),
-        );
-        inFlight -= 1;
-      };
-      if (gate === undefined) answer();
-      else void gate.then(answer);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  const port = typeof address === "object" && address !== null ? address.port : 0;
-
-  const previous = { baseUrl: process.env.AI_BASE_URL, apiKey: process.env.AI_API_KEY };
-  process.env.AI_BASE_URL = `http://127.0.0.1:${port}/v1`;
-  process.env.AI_API_KEY = "test-key";
-  t.after(() => {
-    clearTimeout(openGate);
-    server.closeAllConnections();
-    server.close();
-    for (const [name, value] of [
-      ["AI_BASE_URL", previous.baseUrl],
-      ["AI_API_KEY", previous.apiKey],
-    ] as const) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  });
-
-  return { url: `http://127.0.0.1:${port}/v1`, prompts, peak: () => peak };
-}
+import { chatEndpoint } from "./model-endpoint.ts";
 
 const SQUARE: SourceInput = {
   language: "typescript",

@@ -19,10 +19,32 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateText, type LanguageModel } from "ai";
 import { readFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { CompilerError } from "../core/errors.ts";
 import type { ModelConfiguration } from "./model.ts";
-import { buildSystemPrompt, buildUserPrompt, type PromptRequest } from "./prompt.ts";
-import type { AssemblyCandidate } from "../core/types.ts";
+import { buildRetryPrompt, buildSystemPrompt, buildUserPrompt, type PromptRequest } from "./prompt.ts";
+import { DEFAULT_GENERATION, type AssemblyCandidate } from "../core/types.ts";
+
+/**
+ * A model call that did not produce an implementation: the provider request
+ * failed, or the reply carried no assembly. It is not a candidate and not a
+ * rejection of one, so the attempt is asked for again in place.
+ */
+class UnusableAnswer extends Error {
+  /** Why the answer could not be used, told to the model on the re-request. */
+  readonly reason: string;
+  /** Whether asking again can change the outcome. */
+  readonly retryable: boolean;
+  /** What fails the build once the re-requests are spent. */
+  readonly failure: CompilerError;
+
+  constructor(reason: string, retryable: boolean, failure: CompilerError) {
+    super(reason);
+    this.reason = reason;
+    this.retryable = retryable;
+    this.failure = failure;
+  }
+}
 
 export interface AiBackend {
   /** Recorded in build records. */
@@ -68,6 +90,29 @@ export interface PromptDump {
   user: string;
 }
 
+/**
+ * Why an answer is asked for again, reported so a build says what it is
+ * waiting for rather than going quiet on a model that keeps answering with
+ * nothing.
+ */
+export interface ResponseRetry {
+  candidate: number;
+  attempt: number;
+  /** The re-request being made, 1-based. */
+  retry: number;
+  /** Re-requests this attempt is allowed in total. */
+  retries: number;
+  /** Why the answer before it could not be used. */
+  reason: string;
+}
+
+/**
+ * How long the first re-request waits, doubling for each one after it: a
+ * provider answering with nothing is usually busy, and an answer asked for
+ * while it still is comes back the same.
+ */
+const RETRY_BACKOFF_MS = 500;
+
 export interface BackendOptions {
   /**
    * Wall clock budget for one model request. Unset by default: a model that
@@ -75,6 +120,13 @@ export interface BackendOptions {
    * it is waiting on. Set it when a build must fail rather than wait.
    */
   timeoutMs?: number;
+  /**
+   * Extra requests one attempt may spend on an answer that carries no
+   * implementation. Defaults to `DEFAULT_GENERATION.maxRetries`.
+   */
+  retries?: number;
+  /** Called before an answer is asked for again, with the reason for it. */
+  onRetry?: (retry: ResponseRetry) => void;
   /** Called with the prompt before it is sent, for --debug. */
   onPrompt?: (dump: PromptDump) => void;
 }
@@ -83,12 +135,16 @@ export class VercelAiBackend implements AiBackend {
   readonly id: string;
   private readonly configuration: ModelConfiguration;
   private readonly timeoutMs: number | undefined;
+  private readonly retries: number;
+  private readonly onRetry: ((retry: ResponseRetry) => void) | undefined;
   private readonly onPrompt: ((dump: PromptDump) => void) | undefined;
   private model: LanguageModel | null = null;
 
   constructor(configuration: ModelConfiguration, options: BackendOptions = {}) {
     this.configuration = configuration;
     this.timeoutMs = options.timeoutMs;
+    this.retries = options.retries ?? DEFAULT_GENERATION.maxRetries;
+    this.onRetry = options.onRetry;
     this.onPrompt = options.onPrompt;
     this.id = configuration.id;
   }
@@ -123,17 +179,76 @@ export class VercelAiBackend implements AiBackend {
     return this.model;
   }
 
+  /**
+   * Asks the model until it answers with an implementation or the re-request
+   * budget is spent.
+   *
+   * A model that fails to answer, or answers with nothing, has not proposed
+   * anything: there is nothing to assemble, verify, reject or repair, and the
+   * next attempt of the candidate would be a repair of an output that does not
+   * exist. Such an answer is asked for again in place instead, each time told
+   * what was wrong with the one before it, and none of them costs the
+   * candidate one of its repair attempts.
+   */
   async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
     const system = buildSystemPrompt();
     const user = buildUserPrompt(request);
     this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
+    const reasons: string[] = [];
+    let assembly: string;
+
+    for (let retry = 0; ; retry += 1) {
+      try {
+        assembly = await this.ask(model, system, reasons.length === 0 ? user : buildRetryPrompt(user, reasons));
+        break;
+      } catch (cause) {
+        if (!(cause instanceof UnusableAnswer)) throw cause;
+        if (!cause.retryable) throw cause.failure;
+        reasons.push(cause.reason);
+        if (retry === this.retries) {
+          throw new CompilerError({
+            category: "AiGenerationError",
+            stage: "generate",
+            message: cause.failure.message,
+            detail: [
+              `asked ${this.retries + 1} times, and no answer carried an implementation:`,
+              ...reasons.map((reason) => `- ${reason}`),
+              ...(cause.failure.detail === undefined ? [] : [cause.failure.detail]),
+            ].join("\n"),
+          });
+        }
+        this.onRetry?.({
+          candidate: request.candidate,
+          attempt: request.attempt,
+          retry: retry + 1,
+          retries: this.retries,
+          reason: cause.reason,
+        });
+        await sleep(RETRY_BACKOFF_MS * 2 ** retry);
+      }
+    }
+
+    return {
+      id: `c${sequence}`,
+      assembly,
+      model: this.id,
+      modelConfig: this.id,
+      generatedAt: new Date().toISOString(),
+      candidate: request.candidate,
+      round: request.attempt,
+      ...(request.feedback === undefined ? {} : { feedback: request.feedback }),
+    };
+  }
+
+  /** One model call, answered in terms of the compiler: assembly, or none. */
+  private async ask(model: LanguageModel, system: string, user: string): Promise<string> {
     let text: string;
     try {
       // The system text goes in `instructions`, not a system message: that is
       // the portable form, and providers such as OpenRouter reject a system
-      // message outright. A budget, when the project sets one, bounds the whole
-      // call including retries.
+      // message outright. A budget, when the project sets one, bounds this one
+      // call; a re-request is asked for again, not run inside what is left.
       const result = await generateText({
         model,
         instructions: system,
@@ -143,27 +258,33 @@ export class VercelAiBackend implements AiBackend {
       text = result.text;
     } catch (cause) {
       if (isTimeout(cause) && this.timeoutMs !== undefined) {
-        throw generationError(
-          `the model did not answer within ${Math.round(this.timeoutMs / 1000)}s`,
-          "remove generation.timeoutSeconds to wait as long as the model needs",
+        // Overrunning the budget is a decision about the clock rather than a
+        // flaky answer, so it is not asked for again: the project said how
+        // long to wait, and waiting longer is the only answer to that.
+        throw new UnusableAnswer(
+          "it did not answer within the request budget",
+          false,
+          generationError(
+            `the model did not answer within ${Math.round(this.timeoutMs / 1000)}s`,
+            "remove generation.timeoutSeconds to wait as long as the model needs",
+          ),
         );
       }
-      throw generationError(
-        "the model provider request failed",
-        cause instanceof Error ? cause.message : String(cause),
+      throw new UnusableAnswer(
+        "the provider request failed",
+        true,
+        generationError("the model provider request failed", cause instanceof Error ? cause.message : String(cause)),
       );
     }
 
-    return {
-      id: `c${sequence}`,
-      assembly: extractAssembly(text),
-      model: this.id,
-      modelConfig: this.id,
-      generatedAt: new Date().toISOString(),
-      candidate: request.candidate,
-      round: request.attempt,
-      ...(request.feedback === undefined ? {} : { feedback: request.feedback }),
-    };
+    try {
+      return extractAssembly(text);
+    } catch (cause) {
+      // A reply with no implementation in it is the model not answering, not a
+      // wrong answer: the toolchain never saw anything to judge.
+      const failure = cause instanceof CompilerError ? cause : generationError("the model returned no implementation");
+      throw new UnusableAnswer(failure.message, true, failure);
+    }
   }
 }
 

@@ -1,0 +1,115 @@
+/**
+ * A stand-in for a chat completions endpoint, so a test can drive the real
+ * backend, prompt and all, without a credential.
+ *
+ * The endpoint and the key come from the environment: a project names its
+ * provider, never where it points or how it authenticates.
+ */
+
+import { createServer } from "node:http";
+import type { TestContext } from "node:test";
+
+export interface ChatEndpoint {
+  url: string;
+  /** The prompts the endpoint was asked, in arrival order. */
+  prompts: string[];
+  /** The most requests that were in flight at the same time. */
+  peak: () => number;
+  /** Resolves once a request has arrived, however it was answered. */
+  received: Promise<void>;
+}
+
+export interface ChatEndpointOptions {
+  /**
+   * Hold every request until this many have arrived, so a test can tell a
+   * fan-out from a queue: a serial client never gets the second one in flight.
+   */
+  until?: number;
+  /** Accept the request and never answer it, which is what a model that is still thinking looks like from the outside. */
+  silent?: boolean;
+  /**
+   * Refuse this many requests before answering any of them, with an error the
+   * provider SDK does not retry itself, so what the compiler does with a
+   * failed request is what the test observes.
+   */
+  failFirst?: number;
+}
+
+export async function chatEndpoint(
+  t: TestContext,
+  answers: readonly string[],
+  options: ChatEndpointOptions = {},
+): Promise<ChatEndpoint> {
+  const prompts: string[] = [];
+  const arrived = Promise.withResolvers<void>();
+  let served = 0;
+  let inFlight = 0;
+  let peak = 0;
+  let waiting = 0;
+  let release: (() => void) | undefined;
+  const gate = options.until === undefined ? undefined : new Promise<void>((resolve) => (release = resolve));
+  // A fan-out that never arrives is a deadlock; the gate opens on its own so a
+  // serial client fails the test instead of hanging the suite.
+  const openGate = setTimeout(() => release?.(), 5_000);
+  openGate.unref();
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        messages: { role: string; content: string }[];
+      };
+      prompts.push(body.messages.map((message) => message.content).join("\n\n"));
+      const content = answers[Math.min(served, answers.length - 1)];
+      served += 1;
+      waiting += 1;
+      arrived.resolve();
+      if (options.until !== undefined && waiting >= options.until) release?.();
+      if (options.silent === true) return;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      const answer = () => {
+        if (options.failFirst !== undefined && served <= options.failFirst) {
+          response.writeHead(400, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "the provider rejected the request", type: "invalid_request" } }));
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            id: "stub",
+            object: "chat.completion",
+            created: 0,
+            model: "stub",
+            choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+        );
+        inFlight -= 1;
+      };
+      if (gate === undefined) answer();
+      else void gate.then(answer);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+
+  const previous = { baseUrl: process.env.AI_BASE_URL, apiKey: process.env.AI_API_KEY };
+  process.env.AI_BASE_URL = `http://127.0.0.1:${port}/v1`;
+  process.env.AI_API_KEY = "test-key";
+  t.after(() => {
+    clearTimeout(openGate);
+    server.closeAllConnections();
+    server.close();
+    for (const [name, value] of [
+      ["AI_BASE_URL", previous.baseUrl],
+      ["AI_API_KEY", previous.apiKey],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  return { url: `http://127.0.0.1:${port}/v1`, prompts, peak: () => peak, received: arrived.promise };
+}

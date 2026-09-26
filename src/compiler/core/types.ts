@@ -244,6 +244,13 @@ export interface GenerationConfig {
    */
   maxAttempts: number;
   /**
+   * Extra model requests one attempt is allowed to spend on an answer that
+   * carries no implementation: a request the provider failed, or a reply that
+   * was empty. Such an answer never becomes a candidate, so it is asked for
+   * again in place rather than spent on one of the repair attempts above.
+   */
+  maxRetries: number;
+  /**
    * Candidates generated at the same time. Candidates never wait on each
    * other, only on their own previous attempt, so this is how much of the
    * model latency a build overlaps. 1 generates one candidate at a time.
@@ -336,6 +343,7 @@ export interface SourceInput {
 export const DEFAULT_GENERATION: GenerationConfig = {
   maxCandidates: 5,
   maxAttempts: 3,
+  maxRetries: 3,
   concurrency: 4,
 };
 

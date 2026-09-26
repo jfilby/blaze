@@ -1,49 +1,25 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { createServer } from "node:http";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild, inspectProject } from "../compiler.ts";
 import type { SourceInput } from "../core/types.ts";
+import { CompilerError } from "../core/errors.ts";
+import { chatEndpoint, type ChatEndpoint, type ChatEndpointOptions } from "./model-endpoint.ts";
 
 const quiet = { stage: () => {} };
 const SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
 
-interface SilentModel {
-  directory: string;
-  /** Resolves once a request has arrived and gone unanswered. */
-  received: Promise<void>;
-}
-
 /**
- * A project pointed at a model that accepts the request and never answers,
- * which is what a model that is still thinking looks like from the outside.
- *
- * The endpoint and the key come from the environment: a project names its
- * provider, never where it points or how it authenticates.
+ * A project pointed at a model that never answers, which is what a model
+ * that is still thinking looks like from the outside.
  */
-async function projectWaitingOn(t: TestContext, generation: SourceInput["generation"]): Promise<SilentModel> {
-  const requestArrived = Promise.withResolvers<void>();
-  const server = createServer(() => requestArrived.resolve());
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  const port = typeof address === "object" && address !== null ? address.port : 0;
-
-  const previous = { baseUrl: process.env.AI_BASE_URL, apiKey: process.env.AI_API_KEY };
-  process.env.AI_BASE_URL = `http://127.0.0.1:${port}/v1`;
-  process.env.AI_API_KEY = "test-key";
-  t.after(() => {
-    server.closeAllConnections();
-    server.close();
-    for (const [name, value] of [
-      ["AI_BASE_URL", previous.baseUrl],
-      ["AI_API_KEY", previous.apiKey],
-    ] as const) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  });
+async function projectWaitingOn(
+  t: TestContext,
+  generation: SourceInput["generation"],
+): Promise<{ directory: string; received: Promise<void> }> {
+  const endpoint = await chatEndpoint(t, [], { silent: true });
 
   const directory = await mkdtemp(join(tmpdir(), "blaze-model-"));
   const input: SourceInput = {
@@ -54,8 +30,34 @@ async function projectWaitingOn(t: TestContext, generation: SourceInput["generat
     generation,
   };
   await writeFile(join(directory, "input.json"), JSON.stringify(input), "utf8");
-  return { directory, received: requestArrived.promise };
+  return { directory, received: endpoint.received };
 }
+
+/**
+ * A project pointed at a model that answers whatever the test queued, one
+ * answer per request, the last one repeated once the queue runs out.
+ */
+async function projectAnswering(
+  t: TestContext,
+  answers: readonly string[],
+  generation: SourceInput["generation"],
+  endpoint: ChatEndpointOptions = {},
+): Promise<{ directory: string; chat: ChatEndpoint }> {
+  const chat = await chatEndpoint(t, answers, endpoint);
+  const directory = await mkdtemp(join(tmpdir(), "blaze-model-"));
+  const input: SourceInput = {
+    language: "typescript",
+    source: SOURCE,
+    entry: "square",
+    model: { provider: "openai-compatible", model: "stub" },
+    generation,
+  };
+  await writeFile(join(directory, "input.json"), JSON.stringify(input), "utf8");
+  return { directory, chat };
+}
+
+/** x arrives in xmm0 as a double; the contract asks for x * x. */
+const SQUARE_ASSEMBLY = ["\t.globl\tsquare", "square:", "\tmulsd\t%xmm0, %xmm0", "\tret", ""].join("\n");
 
 test("a model that has not answered is waited for, not given up on", async (t) => {
   const { directory, received } = await projectWaitingOn(t, { maxCandidates: 1, maxAttempts: 1 });
@@ -122,4 +124,66 @@ test("the compiler says which model it is waiting for", async (t) => {
     lines.some((line) => line === "Generating assembly: square, candidate 1 of 1, attempt 1 of 1, waiting for openai-compatible/silent"),
     `no generating line in: ${lines.join(" | ")}`,
   );
+});
+
+test("an answer with no implementation is asked for again, and costs no repair attempt", async (t) => {
+  const { directory, chat } = await projectAnswering(
+    t,
+    ["", "   ", SQUARE_ASSEMBLY],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 2 },
+  );
+  const lines: string[] = [];
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false },
+    { stage: (_stage, _status, message) => lines.push(message) },
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  // Three answers, all of them for one attempt: an answer with no
+  // implementation in it never became a candidate, so the candidate kept the
+  // only attempt the project gave it.
+  assert.equal(chat.prompts.length, 3);
+  assert.deepEqual(outcome.candidates.square.map((entry) => entry.round), [1]);
+  // The re-request says what was wrong with the answer before it.
+  assert.match(chat.prompts[2], /THE PREVIOUS ANSWER COULD NOT BE USED/);
+  assert.match(chat.prompts[2], /the model returned an empty response/);
+  assert.ok(
+    lines.includes(
+      "Asking again: square, candidate 1, attempt 1, the model returned an empty response; request 1 of 2, waiting for openai-compatible/stub",
+    ),
+    `no retry line in: ${lines.join(" | ")}`,
+  );
+});
+
+test("a model that never answers with an implementation fails with every reason it gave", async (t) => {
+  const { directory, chat } = await projectAnswering(t, [""], {
+    maxCandidates: 1,
+    maxAttempts: 2,
+    maxRetries: 1,
+  });
+
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) =>
+      error instanceof CompilerError &&
+      error.message === "the model returned an empty response" &&
+      /asked 2 times/.test(error.detail ?? ""),
+  );
+  assert.equal(chat.prompts.length, 2, "the re-request is the only request beyond the first");
+});
+
+test("a request the provider failed is asked for again", async (t) => {
+  const { directory, chat } = await projectAnswering(
+    t,
+    [SQUARE_ASSEMBLY],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
+    { failFirst: 1 },
+  );
+
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(chat.prompts.length, 2);
+  assert.match(chat.prompts[1], /the provider request failed/);
 });
