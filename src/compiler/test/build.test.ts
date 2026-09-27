@@ -396,6 +396,79 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   assert.equal(run(second.outputPath, [], { input: "run\n5 5 5\n1 2 3 4 5\n1 1 1 1 1\n3 3 3\n2 2 2\n2 2 2\n", timeoutMs: 60_000 }).code, 0);
 });
 
+/**
+ * Divides by its argument, which the contract states nothing about, so the zero
+ * an input built from the contract carries is a legal one and the candidate
+ * faults on it. Nothing about it is visible to a static check: the calls are
+ * aligned, the registers are preserved, and the assembly is well formed. This is
+ * the class of defect the program round is the only oracle for, and the one
+ * faulting a single call is there to catch early.
+ */
+const DIVIDING_COUNT_ASSEMBLY = [
+  ".text",
+  ".globl down",
+  "down:",
+  "  cvttsd2siq %xmm0, %rax",
+  "  movq %rax, %rcx",
+  "  movq $7, %rax",
+  "  cqto",
+  "  idivq %rcx",
+  "  ret",
+  "",
+].join("\n");
+
+/** A program project built from recorded candidates, with the generation limits the test needs. */
+async function countedProject(name: string, assemblies: string[], maxCandidates: number): Promise<string> {
+  const directory = await programProject(name, COUNTING_PROGRAM, assemblies[0]);
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify({ ...INPUT, language: "typescript", entry: "", source: COUNTING_PROGRAM, generation: { maxCandidates, maxAttempts: 1 } }),
+    "utf8",
+  );
+  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: assemblies }), "utf8");
+  return directory;
+}
+
+test("a definition candidate that faults on the call is rejected before it is selected", async () => {
+  const directory = await countedProject("faulting", [DIVIDING_COUNT_ASSEMBLY], 1);
+  // The fault is attributed to the function and to the candidate that caused
+  // it, which is what lets a repair round regenerate one function rather than
+  // every definition in the program.
+  const failure = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
+    quiet,
+    "build",
+  ).then(
+    () => { throw new Error("a candidate that faults must not be selected"); },
+    (error: CompilerError) => error,
+  );
+  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /c1: VerificationError candidate c1: down liveness check failed: the candidate was killed by SIGFPE/);
+  // The diagnostic says the call was made and the result not read, so a model
+  // reading it is not told the probe judged what the function computes.
+  assert.match(failure.detail ?? "", /the result was not read, so this says nothing about what it computes/);
+});
+
+test("a candidate that faults is not selected over one that runs", async () => {
+  const directory = await countedProject("one-good", [DIVIDING_COUNT_ASSEMBLY, COUNT_ASSEMBLY], 2);
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(outcome.build.selectedCandidates, { down: "c2" });
+
+  const generation = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/generation.json"), "utf8"),
+  ) as { functions: Record<string, { outcomes: { candidate: string; valid: boolean; failure?: { message: string } }[] }> };
+  const [first] = generation.functions.down.outcomes;
+  assert.equal(first.valid, false);
+  assert.match(first.failure?.message ?? "", /candidate c1: down liveness check failed/);
+});
+
 test("a function the program never agreed with is not reused", async () => {
   const directory = await programProject("unproved", COUNTING_PROGRAM, WRONG_COUNT_ASSEMBLY);
   const replay = join(directory, "candidates.json");

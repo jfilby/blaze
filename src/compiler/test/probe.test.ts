@@ -1,0 +1,139 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { parseContract } from "../semantics/contract.ts";
+import { planProbe } from "../toolchain/probe.ts";
+import { generateProbeHarness } from "../toolchain/linker.ts";
+import type { FunctionContract, FunctionParam, ObjectLayout } from "../core/types.ts";
+
+const NODE: ObjectLayout = {
+  name: "Object1",
+  size: 16,
+  align: 8,
+  fields: [
+    { name: "left", type: "ref<any>", offset: 0 },
+    { name: "right", type: "ref<any>", offset: 8 },
+  ],
+};
+
+/** Parameters written the way a source signature reads, as the other tests here write them. */
+function paramList(text: string): FunctionParam[] {
+  if (text === "") return [];
+  return text.split(",").map((entry) => {
+    const [name, type] = entry.split(":").map((part) => part.trim());
+    return { name, type };
+  });
+}
+
+/** A contract that states what a function does rather than what it returns. */
+function definition(overrides: Partial<FunctionContract> = {}, params = "n: f64"): FunctionContract {
+  return {
+    version: "1",
+    function: { name: "measure", symbol: "measure", params: paramList(params), returns: "f64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "throughput" },
+    definition: {
+      statements: [{ kind: "result", value: { k: "binary", op: "+", left: { k: "ident", name: "n" }, right: { k: "literal", text: "0" } }, line: 1 }],
+      objects: {},
+      allocates: false,
+      prints: false,
+      readsArgv: false,
+    },
+    ...overrides,
+  };
+}
+
+test("a contract that states a result is verified against its own vectors, not probed", () => {
+  const contract = definition({ ensures: ["result == n * 2.0"] });
+  delete contract.definition;
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "skip");
+  assert.match(plan.kind === "skip" ? plan.reason : "", /states what the function returns/);
+});
+
+test("an input the contract's own preconditions reject is never run", () => {
+  const contract = definition({ requires: ["n > 100.0"] });
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "skip");
+  // The zero the probe would pass is not inside the domain the contract states,
+  // so a candidate is not turned away for whatever it does with it.
+  assert.match(plan.kind === "skip" ? plan.reason : "", /outside the domain it states: n > 100.0/);
+});
+
+test("a reference the contract does not lay out is not passed as null", () => {
+  // An `any` the front end never narrowed has no shape, and a null one would be
+  // the compiler asserting that null is a legal argument. A candidate that
+  // reads through it is then faulted for believing the compiler.
+  const contract = definition({}, "node: ref<any>");
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "skip");
+  assert.match(
+    plan.kind === "skip" ? plan.reason : "",
+    /"node" is a reference to an object the contract does not lay out/,
+  );
+});
+
+test("a reference the contract lays out is built, and the call is made once", () => {
+  const contract = definition({}, "node: ref<Object1>");
+  contract.definition = { ...contract.definition!, objects: { Object1: NODE } };
+  const plan = planProbe(contract, parseContract(contract));
+
+  assert.equal(plan.kind, "call");
+  if (plan.kind !== "call") return;
+  assert.deepEqual(plan.callArguments, ["node_probe"]);
+  // The object goes through the runtime, so the payload lands where the
+  // contract says its fields are, and its fields default to null.
+  const built = plan.statements.join("\n");
+  assert.match(built, /blaze_rt_object_new\(16, 8\)/);
+  assert.match(built, /node_probe->left = \(void\*\)\(NULL\);/);
+  assert.match(built, /node_probe->right = \(void\*\)\(NULL\);/);
+
+  const harness = generateProbeHarness(contract, plan);
+  assert.match(harness, /extern double measure\(struct Object1\* node\);/);
+  assert.match(harness, /volatile double probe_result = measure\(node_probe\);/);
+  // The result is held and dropped. Nothing is printed and nothing is compared,
+  // so a candidate that returns the wrong answer passes this.
+  assert.doesNotMatch(harness, /RESULT/);
+});
+
+test("a layout that reaches itself is built to a fixed depth", () => {
+  const contract = definition({}, "node: ref<Object1>");
+  contract.definition = {
+    ...contract.definition!,
+    objects: {
+      Object1: { ...NODE, fields: [{ name: "next", type: "ref<Object2>", offset: 0 }, { name: "pad", type: "f64", offset: 8 }] },
+      Object2: { name: "Object2", size: 8, align: 8, fields: [{ name: "next", type: "ref<Object2>", offset: 0 }] },
+    },
+  };
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "call");
+  // The chain stops at a null rather than following Object2 back into itself.
+  const built = plan.kind === "call" ? plan.statements.join("\n") : "";
+  assert.match(built, /node_next_next_next_probe->next = \(struct Object2\*\)\(NULL\);/);
+  assert.doesNotMatch(built, /node_next_next_next_next/);
+});
+
+test("a function of no parameters that returns nothing is called, and holds nothing", () => {
+  const contract = definition({ function: { name: "report", symbol: "report", params: [], returns: "void" } }, "");
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "call");
+  if (plan.kind !== "call") return;
+  assert.deepEqual(plan.callArguments, []);
+  // A function that returns nothing has nothing to hold, and a variable of type
+  // void is not C.
+  const harness = generateProbeHarness(contract, plan);
+  assert.match(harness, /extern void report\(void\);/);
+  assert.match(harness, /\n {2}report\(\);\n/);
+  assert.doesNotMatch(harness, /probe_result/);
+});
+
+test("a number is zero and a flag is false", () => {
+  const contract = definition({}, "n: f64, ok: bool, count: usize");
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "call");
+  if (plan.kind !== "call") return;
+  assert.deepEqual(plan.callArguments, ["0", "false", "0"]);
+});

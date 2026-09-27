@@ -16,12 +16,14 @@ import { assemble } from "./toolchain/assembler.ts";
 import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
 import { buildWasm } from "./toolchain/wasm.ts";
 import { compileC } from "./toolchain/csource.ts";
-import { generateHarness, link } from "./toolchain/linker.ts";
+import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
+import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } from "./runtime/standalone.ts";
 import { writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
+import { run, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import type { ProgramFailure } from "./ai/prompt.ts";
@@ -131,6 +133,9 @@ interface CandidatePaths {
   implementation: string;
   object: string;
   harness: string;
+  /** The harness that calls a definition-contract candidate once, and its binary. */
+  probeHarness: string;
+  probeExecutable: string;
   executable: string;
   module: string;
   host: string;
@@ -148,6 +153,8 @@ function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: 
     implementation: `${base}.${extension}`,
     object: `${base}.o`,
     harness: `${base}.harness.c`,
+    probeHarness: `${base}.probe.c`,
+    probeExecutable: `${base}.probe${EXECUTABLE_SUFFIX}`,
     executable: `${base}${EXECUTABLE_SUFFIX}`,
     module: `${base}.wasm`,
     host: `${base}.host.mjs`,
@@ -421,16 +428,40 @@ async function measureCandidate(
     const built = await materialize(request, candidate, paths, vectors);
 
     // A contract that states what a function does rather than what it returns
-    // has no vector to run: the candidate is built, and the program it belongs
-    // to says whether the two print the same thing.
+    // has no vector to verify against, so the candidate is called once on an
+    // input built from the contract instead. That settles whether it can be
+    // executed at all; the program it belongs to is what says whether the two
+    // agree, and it keeps that job.
     if (vectors === null) {
+      const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed));
+      if (probe.reason !== null && probe.called) {
+        return {
+          candidate: candidate.id,
+          valid: false,
+          failure: {
+            category: "VerificationError",
+            stage: "verify",
+            message: `candidate ${candidate.id}: ${request.contract.function.name} liveness check failed: ${probe.reason}`,
+            detail: [
+              "The candidate was called once on an input built from its contract and the result was not read, so this says nothing about what it computes.",
+              `The program ${request.contract.function.name} belongs to is what says whether the two agree.`,
+              ...(probe.stderr.trim() === "" ? [] : [`the candidate wrote to standard error:\n${probe.stderr.trim()}`]),
+            ].join("\n"),
+          },
+          probe: { called: probe.called, reason: probe.reason },
+          textSizeBytes: built.textSizeBytes,
+          objectSizeBytes: built.sizeBytes,
+        };
+      }
       return {
         candidate: candidate.id,
         valid: true,
+        probe: { called: probe.called, reason: probe.reason },
         textSizeBytes: built.textSizeBytes,
         objectSizeBytes: built.sizeBytes,
       };
     }
+
 
     const verification = verifyCandidate({
       contract: request.contract,
@@ -491,6 +522,69 @@ async function measureCandidate(
       },
     };
   }
+}
+
+/**
+ * A candidate called once on an input built from its own contract, and whether
+ * the call came back.
+ */
+interface ProbeOutcome {
+  /** Whether the call was made at all. */
+  readonly called: boolean;
+  /** What stopped it, or why it was not made. Null when it came back. */
+  readonly reason: string | null;
+  readonly stderr: string;
+}
+
+/** How long a call on a defaulted input may take before it is a fault. */
+const PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Calls a definition-contract candidate once and reports whether it came back.
+ *
+ * The result is discarded and nothing is compared with the source, so a
+ * candidate that returns the wrong answer passes this. What is settled here is
+ * the one defect the program cannot report cheaply: finding out there costs a
+ * round of the program and a regeneration of every function in it, rather than
+ * of the one that is wrong.
+ */
+async function probeCandidate(
+  request: CandidateEvaluationRequest,
+  paths: CandidatePaths,
+  plan: ProbePlan,
+): Promise<ProbeOutcome> {
+  if (plan.kind === "skip") return { called: false, reason: plan.reason, stderr: "" };
+  // The probe links the candidate the way the C toolchain links it, so a
+  // backend that does not use that toolchain has no way to make the call.
+  if (request.output !== "machine" && request.output !== "c") {
+    return { called: false, reason: `a ${request.output} candidate is not run by the native probe`, stderr: "" };
+  }
+  const runtime = await request.prepareRuntime();
+  if (runtime === undefined) {
+    return { called: false, reason: "the build links no runtime for the probe to call into", stderr: "" };
+  }
+
+  await writeFile(paths.probeHarness, generateProbeHarness(request.contract, plan), "utf8");
+  link({
+    harnessPath: paths.probeHarness,
+    objectPath: paths.object,
+    runtimeObjectPath: runtime.objectPath,
+    includeDirectories: [dirname(runtime.headerPath)],
+    outputPath: paths.probeExecutable,
+    functionName: request.contract.function.name,
+  });
+
+  const result = await run(paths.probeExecutable, [], { timeoutMs: PROBE_TIMEOUT_MS });
+  return { called: true, reason: probeFault(result), stderr: result.stderr };
+}
+
+/** How a run that did not come back is described, or null when it did. */
+function probeFault(result: RunResult): string | null {
+  if (result.spawnError !== undefined) return `the probe did not start: ${result.spawnError}`;
+  if (result.timedOut) return `the candidate did not return within ${PROBE_TIMEOUT_MS / 1000} seconds`;
+  if (result.signal !== null) return `the candidate was killed by ${result.signal}`;
+  if (result.code !== 0) return `the candidate exited with status ${result.code}`;
+  return null;
 }
 
 /**

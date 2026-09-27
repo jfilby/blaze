@@ -722,8 +722,27 @@ test("a program that prints something else is regenerated with the line it diffe
   assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
 });
 
-/** Fails the instruction the program runs, so the program it is in is killed. */
-const TOTAL_CRASHES = totalAssembly(["\tud2"]);
+/**
+ * Fails the instruction the program runs, so the program it is in is killed.
+ *
+ * Only once it is given something other than the zero an input built from the
+ * contract carries: a candidate is called once before it is selected, and a
+ * crash there is settled there rather than by a round of the program. This one
+ * survives that call and dies on the argument the program actually passes it,
+ * which is the case the program round is the oracle for.
+ */
+const TOTAL_CRASHES = [
+  "\t.globl\ttotal",
+  "total:",
+  "\txorps\t%xmm1, %xmm1",
+  "\tucomisd\t%xmm1, %xmm0",
+  "\tje\t.Lzero",
+  "\tud2",
+  ".Lzero:",
+  "\tpxor\t%xmm0, %xmm0",
+  "\tret",
+  "",
+].join("\n");
 
 test("a program that is killed is regenerated with why it stopped", async (t) => {
   const endpoint = await chatEndpoint(t, [TOTAL_CRASHES, TOTAL_RIGHT]);

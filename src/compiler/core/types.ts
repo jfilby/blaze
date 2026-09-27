@@ -403,6 +403,13 @@ export interface CandidateOutcome {
   textSizeBytes?: number;
   verification?: VerificationResult;
   benchmark?: BenchmarkResult;
+  /**
+   * The liveness check on a definition-contract candidate: whether it was called
+   * once on an input built from its own contract, and what stopped it. Absent
+   * for a candidate verified against its own vectors, which is a stronger check
+   * than this one, and for one that failed before it could be called.
+   */
+  probe?: { readonly called: boolean; readonly reason: string | null };
 }
 
 export interface TestFailure {
