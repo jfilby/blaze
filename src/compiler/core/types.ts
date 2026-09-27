@@ -455,6 +455,12 @@ export interface BuildStatus {
   runtime: RuntimeKind;
   /** The candidate selected for each compiled function, by function name. */
   selectedCandidates?: Record<string, string>;
+  /**
+   * The candidate this build reused for each function it did not rebuild,
+   * by function name. A function named here was taken as it stands from the
+   * build that verified it, because nothing it was compiled from had changed.
+   */
+  reused?: Record<string, string>;
   output?: string;
   createdAt: string;
   updatedAt: string;

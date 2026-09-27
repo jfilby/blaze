@@ -263,15 +263,158 @@ test("reuse rebuilds from stored assembly without asking the model", async () =>
   assert.deepEqual(reused.candidates, first.candidates);
 });
 
-test("reuse refuses to build a project whose source changed", async () => {
+/** The same contract, stated as a sum: the object that satisfies it is another. */
+const SUM_SOURCE = INPUT.source.replace("acc += a[i] * b[i]", "acc += a[i] + b[i]");
+
+const SUM_ASSEMBLY = [
+  "\t.globl\tdotProduct",
+  "dotProduct:",
+  "\tvxorps\t%xmm0, %xmm0, %xmm0",
+  "\ttest\t%rdx, %rdx",
+  "\tje\t1f",
+  "\tmovq\t%rdx, %rcx",
+  "2:\tvmovss\t(%rdi), %xmm1",
+  "\tvaddss\t(%rsi), %xmm1, %xmm1",
+  "\tvaddss\t%xmm1, %xmm0, %xmm0",
+  "\taddq\t$4, %rdi",
+  "\taddq\t$4, %rsi",
+  "\tsubq\t$1, %rcx",
+  "\tjne\t2b",
+  "1:\tret",
+  "",
+].join("\n");
+
+/** A replay file of its own, so a test can leave the model unable to answer. */
+async function writableReplay(directory: string, fixture: string): Promise<string> {
+  const replay = join(directory, "candidates.json");
+  await writeFile(replay, await readFile(fixture, "utf8"));
+  return replay;
+}
+
+/**
+ * A program whose only function recurses, which no postcondition can state, so
+ * the program it is part of is the only oracle that has anything to say about
+ * it.
+ */
+const COUNTING_PROGRAM = [
+  "function down(n: number): number {",
+  "  if (n <= 0) {",
+  "    return 0;",
+  "  }",
+  "  return down(n - 1) + 1;",
+  "}",
+  "",
+  "console.log(down(3));",
+  "",
+].join("\n");
+
+/** Returns its argument, which is what counting down to zero comes to. */
+const COUNT_ASSEMBLY = [".text", "\t.globl\tdown", "down:", "\tret", ""].join("\n");
+
+/** Answers zero whatever it is given, so the program prints 0 where it prints 3. */
+const WRONG_COUNT_ASSEMBLY = [".text", "\t.globl\tdown", "down:", "\tpxor\t%xmm0, %xmm0", "\tret", ""].join("\n");
+
+test("reuse refuses to rebuild a function whose contract changed", async () => {
   const directory = await workspace("changed");
   await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: `${INPUT.source}# changed\n` }), "utf8");
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: SUM_SOURCE }), "utf8");
 
   await assert.rejects(
     () => runBuild("input.json", { cwd: directory, reuse: true, model: `replay:${REPLAY}` }, quiet, "build"),
-    /source of input changed/,
+    /the stored implementation of dotProduct was built from different inputs/,
   );
+});
+
+test("a function whose contract changed is generated again", async () => {
+  const directory = await workspace("incremental-changed");
+  const replay = await writableReplay(directory, REPLAY);
+  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  // The contract now states a sum rather than a product, so the object that
+  // satisfied the old one cannot satisfy this one, and the model is asked.
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: SUM_SOURCE }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: [SUM_ASSEMBLY] }), "utf8");
+  const second = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  assert.equal(second.build.status, "success");
+  assert.deepEqual(second.build.reused, {});
+  assert.ok((second.verification.dotProduct?.[0]?.cases ?? 0) > 0);
+});
+
+test("a build reuses a function it already proved, and asks no model for it", async () => {
+  const directory = await workspace("incremental");
+  const replay = await writableReplay(directory, REPLAY);
+  const first = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  assert.equal(first.build.status, "success");
+
+  // The model is left able to answer nothing at all: a build that reuses every
+  // function it needs never reaches it.
+  await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
+  const second = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  assert.equal(second.build.status, "success");
+  assert.deepEqual(second.build.reused, { dotProduct: "c1" });
+  assert.deepEqual(second.build.selectedCandidates, first.build.selectedCandidates);
+});
+
+test("a change that leaves a contract alone does not rebuild the function", async () => {
+  const directory = await workspace("incremental-comment");
+  const replay = await writableReplay(directory, REPLAY);
+  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  // A comment is not part of what the function is contracted to do, so the
+  // object that was verified is still the object this build links.
+  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: `${INPUT.source}# a comment\n` }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
+  const second = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  assert.equal(second.build.status, "success");
+  assert.deepEqual(second.build.reused, { dotProduct: "c1" });
+});
+
+test("a stored implementation whose files are gone is rebuilt from it, without a model", async () => {
+  const directory = await workspace("incremental-partial");
+  const replay = await writableReplay(directory, REPLAY);
+  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
+  await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
+  const log: string[] = [];
+  const second = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${replay}` },
+    { stage: (_stage, _status, message) => log.push(message) },
+    "build",
+  );
+
+  // The object is gone, so the stored implementation is assembled and verified
+  // again, which is what it takes to deliver it: the model is still not asked.
+  assert.equal(second.build.status, "success");
+  assert.deepEqual(second.build.reused, {});
+  assert.ok(log.some((message) => /is rebuilt from its stored implementation/.test(message)), log.join("\n"));
+  assert.ok(second.outputPath !== null);
+  assert.equal(run(second.outputPath, [], { input: "run\n5 5 5\n1 2 3 4 5\n1 1 1 1 1\n3 3 3\n2 2 2\n2 2 2\n", timeoutMs: 60_000 }).code, 0);
+});
+
+test("a function the program never agreed with is not reused", async () => {
+  const directory = await programProject("unproved", COUNTING_PROGRAM, WRONG_COUNT_ASSEMBLY);
+  const replay = join(directory, "candidates.json");
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
+    /the program does not print what the source prints|the program stopped/,
+  );
+
+  // The program is what proves a function it is the only oracle for, so an
+  // implementation the program rejected is regenerated rather than reused.
+  await writeFile(replay, JSON.stringify({ candidates: [COUNT_ASSEMBLY] }), "utf8");
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(outcome.build.reused, {});
 });
 
 test("test and benchmark re-run against the selected candidate", async () => {

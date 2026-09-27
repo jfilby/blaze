@@ -66,9 +66,16 @@ The compiler waits for the model for as long as it takes and says which model
 it is waiting on. Set generation.timeoutSeconds to make a model request give up
 instead, for example in a build that must not hang.
 
+A build is incremental. A function whose contract, the functions it is linked
+against, the target, the options and the model are all unchanged keeps the
+object an earlier build verified, and the model is only asked for what changed.
+Editing a comment changes nothing a build is keyed on, so it rebuilds nothing.
+
+
 Options:
   --model <provider/model>  model configuration, overrides AI_MODEL
-  --reuse                   reuse stored assembly instead of generating
+  --reuse                   build only from what an earlier build verified, and
+                            fail rather than ask a model for anything
   --output <kind>           deliverable: c, asm, machine or wasm (default machine)
   --runtime <name>           host runtime: none or nim (default none)
   --max-candidates <n>      number of candidates to generate, each generated

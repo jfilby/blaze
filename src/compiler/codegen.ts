@@ -43,6 +43,7 @@ import type {
   TestConfig,
   VerificationResult,
 } from "./core/types.ts";
+import type { IncrementalEntry } from "./incremental.ts";
 
 /** How each output kind is named in stage messages. */
 const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
@@ -135,7 +136,12 @@ interface CandidatePaths {
   host: string;
 }
 
-function pathsFor(workspace: CodegenWorkspace, candidate: string, output: OutputKind): CandidatePaths {
+/**
+ * Where a candidate's files are, by name. One place decides them, so what a
+ * build delivers and what it looks for on disk to reuse a candidate cannot
+ * drift apart.
+ */
+function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: OutputKind): CandidatePaths {
   const base = `${workspace.workDirectory}/${candidate}`;
   const extension = output === "c" ? "c" : output === "wasm" ? "wat" : "s";
   return {
@@ -145,6 +151,42 @@ function pathsFor(workspace: CodegenWorkspace, candidate: string, output: Output
     executable: `${base}${EXECUTABLE_SUFFIX}`,
     module: `${base}.wasm`,
     host: `${base}.host.mjs`,
+  };
+}
+
+/**
+ * Every file a build consumes from a candidate it did not rebuild: what it
+ * delivers, and the object it links when the deliverable is a program. A
+ * candidate whose files are not all here is rebuilt from its stored
+ * implementation rather than reused, so nothing is delivered that is missing.
+ */
+export function reusableFiles(
+  workspace: CodegenWorkspace,
+  candidate: string,
+  output: OutputKind,
+  linksObjects: boolean,
+): string[] {
+  const paths = candidateFiles(workspace, candidate, output);
+  if (output === "machine") {
+    return [paths.implementation, paths.executable, ...(linksObjects ? [paths.object] : [])];
+  }
+  if (output === "wasm") return [paths.implementation, paths.module];
+  return [paths.implementation];
+}
+
+/**
+ * A result that is not the result of this build: the candidates and outcomes
+ * an earlier build stored, and the candidate it selected among them. Nothing
+ * was assembled, linked, verified or measured, and no model was asked, so the
+ * time spent waiting for one is nothing.
+ */
+export function reusedResult(entry: IncrementalEntry): CodegenResult {
+  return {
+    candidates: entry.candidates,
+    outcomes: entry.outcomes,
+    selected: entry.selected,
+    benchmarkVector: entry.benchmarkVector,
+    modelDurationNs: 0n,
   };
 }
 
@@ -322,7 +364,7 @@ async function evaluateCandidate(
   candidate: AssemblyCandidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
-  const paths = pathsFor(request.workspace, candidate.id, request.output);
+  const paths = candidateFiles(request.workspace, candidate.id, request.output);
   try {
     const built = await materialize(request, candidate, paths, vectors);
 

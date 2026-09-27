@@ -30,13 +30,25 @@ import {
   evaluateStoredCandidate,
   generateCandidates,
   implementationLabel,
+  reusableFiles,
+  reusedResult,
   runtimePreparer,
   type CodegenResult,
+  type CodegenWorkspace,
 } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, hashValue, type JsonStore } from "./core/json-store.ts";
 import { frontendFor } from "./semantics/frontend.ts";
-import { resolveModel } from "./ai/model.ts";
+import { resolveModel, type ModelConfiguration } from "./ai/model.ts";
+import {
+  readIncremental,
+  reusable,
+  unitKey,
+  writeIncremental,
+  type IncrementalEntry,
+  type IncrementalRecord,
+  type ReuseLevel,
+} from "./incremental.ts";
 import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget } from "./core/target.ts";
 import {
   type ProgramMismatch,
@@ -131,6 +143,8 @@ export interface ProjectPaths {
   contract: string;
   candidates: string;
   generation: string;
+  /** What an earlier build proved per function, and what a build may reuse. */
+  incremental: string;
   verification: string;
   benchmark: string;
   build: string;
@@ -205,6 +219,7 @@ function projectPaths(id: string): ProjectPaths {
     input: `${root}/input.json`,
     contract: `${root}/contract.json`,
     candidates: `${root}/candidates.json`,
+    incremental: `${root}/incremental.json`,
     generation: `${root}/generation.json`,
     verification: `${root}/verification.json`,
     benchmark: `${root}/benchmark.json`,
@@ -448,44 +463,55 @@ function assertProgramOutput(output: OutputKind): void {
   });
 }
 
-/** The stored candidates a build may reuse, per function. */
-async function reusableCandidates(
-  store: JsonStore,
-  paths: ProjectPaths,
-  options: BuildOptions,
-  id: string,
-  previousBuild: BuildStatus | undefined,
-  sourceHash: string,
-): Promise<Record<string, AssemblyCandidate[]>> {
-  if (!options.reuse) return {};
-  // A build that failed has no contract hash of its own, so it is reported as
-  // the failure it was instead of as a change of source.
-  if (previousBuild !== undefined && previousBuild.status !== "success") {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: "reuse",
-      message: `the last build of ${id} failed`,
-      detail: previousBuild.error?.message ?? "run blaze build without --reuse to rebuild it",
-    });
-  }
-  if (previousBuild !== undefined && previousBuild.sourceHash !== sourceHash) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: "reuse",
-      message: `the source of ${id} changed since the stored build`,
-      detail: "run blaze build without --reuse to regenerate",
-    });
-  }
-  if (!(await store.exists(paths.candidates))) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: "reuse",
-      message: `no stored assembly to reuse for ${id}`,
-      detail: `expected ${paths.candidates}`,
-    });
-  }
-  return store.read<Record<string, AssemblyCandidate[]>>(paths.candidates);
+/** What a build may reuse of one function: how much, and what is missing. */
+interface UnitReuse {
+  level: ReuseLevel | null;
+  entry: IncrementalEntry | undefined;
+  /** The stored files the build would have to deliver but cannot find. */
+  missing: string[];
 }
+
+interface UnitReuseRequest {
+  entry: IncrementalEntry | undefined;
+  key: string;
+  workspace: CodegenWorkspace;
+  functionName: string;
+  output: OutputKind;
+  linksObjects: boolean;
+  /** `--reuse` asks a model for nothing, so what it cannot reuse is an error. */
+  required: boolean;
+  id: string;
+}
+
+/**
+ * How much of what an earlier build stored for a function this build may
+ * reuse. That flag is the whole difference between the two: without it a
+ * function that cannot be reused is generated, with it the build fails rather
+ * than ask a model for anything.
+ */
+function unitReuse(request: UnitReuseRequest): UnitReuse {
+  const { entry, key, required } = request;
+  if (entry === undefined || entry.key !== key) {
+    if (!required) return { level: null, entry: undefined, missing: [] };
+    throw new CompilerError({
+      category: "StorageError",
+      stage: "reuse",
+      message:
+        entry === undefined
+          ? `no stored implementation to reuse for ${request.functionName}`
+          : `the stored implementation of ${request.functionName} was built from different inputs`,
+      detail:
+        entry === undefined
+          ? `nothing is stored for ${request.id}; run blaze build without --reuse to generate it`
+          : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to regenerate it",
+    });
+  }
+  const missing = reusableFiles(request.workspace, entry.selected, request.output, request.linksObjects).filter(
+    (file) => !existsSync(file),
+  );
+  return { level: reusable(entry, key, missing.length === 0), entry, missing };
+}
+
 
 /**
  * The program as its own toolchain runs it: the entry module beside the project
@@ -546,8 +572,6 @@ export async function runBuild(
   // before anything can fail, including a model that cannot be reached.
   reporter.stage("model", "info", `Model: ${modelName ?? "(unset)"}`);
 
-  const model = options.reuse ? undefined : resolveModel(requested);
-
   await store.mkdirp(paths.root);
   await store.mkdirp(paths.work);
   await store.mkdirp(paths.output);
@@ -566,11 +590,28 @@ export async function runBuild(
     updatedAt: createdAt,
     sourceHash: "",
     contractHash: "",
-    model: model?.id ?? modelName ?? "unset",
-    modelConfig: model?.id ?? previousBuild?.modelConfig ?? "reused",
+    model: modelName ?? "unset",
+    modelConfig: modelName ?? previousBuild?.modelConfig ?? "unset",
     compilerVersion: COMPILER_VERSION,
   };
   await writeBuildRecord(store, paths, build);
+
+  /**
+   * The model is resolved on first use rather than up front: a build that
+   * reuses every function it needs asks no model anything, so it must not
+   * require a model to be configured, or even reachable. Resolving it names it
+   * in the build record, which is written again at the end of the build.
+   */
+  let resolvedModel: ModelConfiguration | undefined;
+  const requireModel = (): ModelConfiguration => {
+    if (resolvedModel === undefined) {
+      resolvedModel = resolveModel(requested);
+      build.model = resolvedModel.id;
+      build.modelConfig = resolvedModel.id;
+    }
+    return resolvedModel;
+  };
+
 
   try {
     // The contract phase comes first and asks no model: every file of the
@@ -599,8 +640,39 @@ export async function runBuild(
     assertAssemblerSupportsArch(target);
     if (phase.body !== undefined) assertProgramOutput(outputKind);
 
-    const stored = await reusableCandidates(store, paths, options, id, previousBuild, sourceHash);
+    // What an earlier build proved per function. It is read before this build
+    // writes to it, and it is written as each function is proved, so a build
+    // that fails on a later function still leaves the earlier ones reusable.
+    const incremental = await readIncremental(store, paths.incremental);
     const base = store.resolve(paths.work);
+    // What every function of this build was compiled against, so nothing is
+    // reused across a change of contract, target, options or model.
+    const test = testConfigFor(input, options);
+    const benchmarkConfig = { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations };
+    // A program links the object of every function it calls, and running it is
+    // what proves the functions it is the only oracle for. A build that stops
+    // at candidate selection has no program to link or to run, and so has no
+    // proof to record for those functions either.
+    const checksProgram = phase.body !== undefined && mode === "build";
+    // Which model an implementation came from is part of what it is, so asking
+    // for a different one rebuilds. A build that names no model reuses what the
+    // last build used rather than invalidating everything for want of a name.
+    const modelKey = options.reuse
+      ? (previousBuild?.model ?? "unset")
+      : (requested ?? process.env.AI_MODEL ?? previousBuild?.model ?? "unset");
+    const keyOf = (unit: CompilationUnit): string =>
+      unitKey({
+        contract: unit.contract,
+        file: unit.file,
+        program,
+        target,
+        output: outputKind,
+        runtime: runtimeKind,
+        test,
+        benchmark: benchmarkConfig,
+        model: modelKey,
+        compilerVersion: COMPILER_VERSION,
+      });
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too.
     const prepareRuntime = runtimePreparer({
@@ -609,6 +681,30 @@ export async function runBuild(
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
     const generation = generationConfigFor(input, options);
+    /** The functions this build took from an earlier one, by function name. */
+    const reusedByFunction = new Map<string, string>();
+    /**
+     * What the program is the only oracle for, and so cannot be recorded as
+     * proved until the program has run: a function whose contract states what
+     * it does rather than what it returns.
+     */
+    const awaitingProgram = new Map<string, IncrementalEntry>();
+
+    /**
+     * Records what this build proved: every function it verified against its
+     * own vectors, and the ones the program it just ran is the only oracle
+     * for. The record is rewritten whole, so it never keeps a function this
+     * program no longer compiles.
+     */
+    const prove = async (): Promise<void> => {
+      const proved: IncrementalRecord = {};
+      for (const unit of units) {
+        const functionName = unit.contract.function.name;
+        const entry = awaitingProgram.get(functionName) ?? incremental[functionName];
+        if (entry !== undefined) proved[functionName] = entry;
+      }
+      await store.write(paths.incremental, proved);
+    };
 
     // What a round of generation produced, by function. A repair round replaces
     // only the units it regenerates, so a program is never half rebuilt.
@@ -633,7 +729,9 @@ export async function runBuild(
      * One round of generation. Every unit, unless the round is repairing a
      * program: then only the units the program is the sole oracle for, because
      * a function that was verified against its own contract cannot be what made
-     * the program print the wrong thing.
+     * the program print the wrong thing. A repair round also reuses nothing:
+     * the program has just said the implementation is wrong, so it is asked
+     * for again.
      */
     const generateUnits = async (mismatch: ProgramMismatch | undefined): Promise<void> => {
       for (const unit of units) {
@@ -642,7 +740,37 @@ export async function runBuild(
         if (mismatch !== undefined && (unit.contract.definition === undefined || previous === undefined)) continue;
         const workspace = { workDirectory: `${base}/${functionName}`, functionName };
         await mkdir(workspace.workDirectory, { recursive: true });
+        const key = keyOf(unit);
+        const reuse = unitReuse({
+          entry: incremental[functionName],
+          key,
+          workspace,
+          functionName,
+          output: outputKind,
+          linksObjects: checksProgram,
+          required: options.reuse,
+          id,
+        });
         const sequenceStart = written.get(functionName) ?? 0;
+
+        if (mismatch === undefined && reuse.level === "object" && reuse.entry !== undefined) {
+          const result = reusedResult(reuse.entry);
+          // A repair round generates after the stored candidates, so it never
+          // writes over the object this build is about to link.
+          written.set(functionName, sequenceStart + result.candidates.length);
+          reusedByFunction.set(functionName, reuse.entry.selected);
+          generatedByFunction.set(functionName, { unit, result });
+          continue;
+        }
+
+        if (reuse.level === "assembly" && reuse.missing.length > 0) {
+          reporter.stage(
+            "reuse",
+            "info",
+            `${functionName} is rebuilt from its stored implementation: ${reuse.missing.map((file) => basename(file)).join(", ")} ${reuse.missing.length === 1 ? "is" : "are"} gone`,
+          );
+        }
+
         const result = await generateCandidates({
           contract: unit.contract,
           unitFile: unit.file,
@@ -652,8 +780,16 @@ export async function runBuild(
           target,
           output: outputKind,
           runtime: runtimeKind,
-          backend: () =>
-            createBackend(model ?? resolveModel(requested), {
+          backend: () => {
+            if (options.reuse) {
+              throw new CompilerError({
+                category: "StorageError",
+                stage: "reuse",
+                message: `the stored implementation of ${functionName} no longer satisfies its contract`,
+                detail: "run blaze build without --reuse to generate a new one",
+              });
+            }
+            return createBackend(requireModel(), {
               timeoutMs: requestTimeoutMs(input),
               retries: generation.maxRetries,
               onRetry: ({ candidate, attempt, retry, retries, reason }) => {
@@ -664,15 +800,18 @@ export async function runBuild(
                 );
               },
               ...(options.debug === true ? { onPrompt: printPrompt } : {}),
-            }),
+            });
+          },
           generation,
-          test: testConfigFor(input, options),
-          benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
+          test,
+          benchmark: benchmarkConfig,
           workspace,
           prepareRuntime,
-          // A repair round asks the model again, so the stored candidates of a
-          // reused build are not what it starts from.
-          existing: mismatch === undefined ? (stored[functionName] ?? []) : [],
+          // A repair round asks the model again, so what an earlier build
+          // stored is not what it starts from. Otherwise the stored
+          // implementation is tried first, and the model is only asked when it
+          // no longer satisfies the contract.
+          existing: mismatch === undefined && reuse.level !== null ? (reuse.entry?.candidates ?? []) : [],
           sequenceStart,
           ...(mismatch === undefined || previous === undefined
             ? {}
@@ -686,7 +825,30 @@ export async function runBuild(
           },
         });
         written.set(functionName, sequenceStart + result.candidates.length);
+        reusedByFunction.delete(functionName);
         generatedByFunction.set(functionName, { unit, result });
+
+        // A function is proved by its own vectors, or by the program it is
+        // part of, so an entry is only written once something has said so.
+        const selected = result.selected;
+        if (selected === null) continue;
+        const entry: IncrementalEntry = {
+          key,
+          file: unit.file,
+          selected,
+          candidates: result.candidates,
+          outcomes: result.outcomes,
+          benchmarkVector: result.benchmarkVector,
+        };
+        // A function is proved by its own vectors, or by the program it is
+        // part of, so an entry is only recorded once something has said so.
+        const verified = result.outcomes.find((outcome) => outcome.candidate === selected)?.verification !== undefined;
+        if (verified) {
+          incremental[functionName] = entry;
+          await writeIncremental(store, paths.incremental, functionName, entry);
+        } else if (checksProgram) {
+          awaitingProgram.set(functionName, entry);
+        }
       }
     };
 
@@ -712,7 +874,7 @@ export async function runBuild(
         reporter.stage(
           "generate",
           valid > 0 ? "ok" : "fail",
-          `${implementationLabel(outputKind)} generated for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
+          `${implementationLabel(outputKind)} for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
         );
         // What ships is what the toolchain built and verified, so a function
         // with no valid candidate stops the build before anything is delivered.
@@ -833,6 +995,10 @@ export async function runBuild(
         `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
       );
     }
+    // The program has agreed with its source, so the functions it is the only
+    // oracle for are proved now, and the record of what this build proved is
+    // written whole.
+    if (checked !== undefined) await prove();
 
     const generated = unitsGenerated();
     const candidates: Record<string, AssemblyCandidate[]> = {};
@@ -850,6 +1016,16 @@ export async function runBuild(
         .map((outcome) => outcome.benchmark)
         .filter((outcome): outcome is BenchmarkResult => outcome !== undefined);
       const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
+      if (reusedByFunction.has(functionName)) {
+        // Nothing was assembled or run for this function: what it delivered is
+        // what an earlier build built, linked and verified for these inputs.
+        reporter.stage(
+          "assemble",
+          "ok",
+          `${implementationLabel(outputKind)} for ${functionName} was not rebuilt: candidate ${outcome?.candidate ?? entry.result.selected} is reused from the build that verified it`,
+        );
+        continue;
+      }
       reporter.stage("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
       if (outcome?.verification === undefined) {
         // A function whose contract states what it does rather than what it
@@ -914,9 +1090,12 @@ export async function runBuild(
       }
       reporter.stage("output", "ok", `Output (${outputKind}):\n${delivered.map((path) => `  ${path}`).join("\n")}`);
     }
-
+    // A build with no program to check has proved everything its functions
+    // could prove on their own, so the record of that is written now.
+    if (checked === undefined) await prove();
     build.status = "success";
     build.selectedCandidates = selected;
+    build.reused = Object.fromEntries(reusedByFunction);
     build.output = outputPath === null ? paths.outputAssembly : paths.outputBinary;
     build.updatedAt = new Date().toISOString();
     await writeBuildRecord(store, paths, build);
