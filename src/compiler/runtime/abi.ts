@@ -432,7 +432,10 @@ void blaze_rt_arguments_set(const double* values, size_t count) {
 }
 
 size_t blaze_rt_argv_count(void) {
-  return blaze_rt_argument_count;
+  /* The length process.argv has: the program, the file it runs, and the
+     arguments it was given. blaze_rt_argv counts from the same place, so the
+     two have to agree on where the first argument is. */
+  return blaze_rt_argument_count + 2;
 }
 
 double blaze_rt_argv(size_t index) {

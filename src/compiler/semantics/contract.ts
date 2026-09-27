@@ -652,12 +652,12 @@ function productType(body: TypeExpr): TypeExpr {
   if (body.kind !== "primitive" || !isNumericType(body.name)) {
     throw contractError(`product() body must be numeric, got ${describeType(body)}`);
   }
+  // A product of whole numbers is held wider for the same reason a sum is:
+  // multiplying 4 bytes of 5 is 625, not 113, and wrapping at the element
+  // width made a correct implementation read as a wrong one.
+  if (isIntegerType(body.name)) return { kind: "primitive", name: isSignedType(body.name) ? "i64" : "u64" };
   return body;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Evaluation                                                                 */
-/* -------------------------------------------------------------------------- */
 
 export interface EvalContext {
   readonly env: TypeEnv;
@@ -686,7 +686,11 @@ function compareValues(left: Value, right: Value): number {
     return left < right ? -1 : left > right ? 1 : 0;
   }
   if (typeof left === "number" && typeof right === "number") {
-    if (Number.isNaN(left) || Number.isNaN(right)) return 1;
+    // Nothing is ordered against not-a-number. Answering that nothing is
+    // greater made every `>` and `>=` on a NaN true, so a result of NaN
+    // satisfied a postcondition it broke, and a comparison that should fail
+    // let an unchecked input through.
+    if (Number.isNaN(left) || Number.isNaN(right)) return Number.NaN;
     return left < right ? -1 : left > right ? 1 : 0;
   }
   if (typeof left === "bigint" && typeof right === "number") return compareIntegerToFloat(left, right);
@@ -700,11 +704,19 @@ function compareValues(left: Value, right: Value): number {
  * exact integers before comparing.
  */
 function compareIntegerToFloat(integer: bigint, float: number): number {
-  if (Number.isNaN(float)) return 1;
+  if (Number.isNaN(float)) return Number.NaN;
   if (float === Number.POSITIVE_INFINITY) return -1;
   if (float === Number.NEGATIVE_INFINITY) return 1;
-  const exact = Number.isInteger(float) ? BigInt(float) : BigInt(Math.floor(float));
-  return exact < integer ? -1 : exact > integer ? 1 : 0;
+  if (!Number.isInteger(float)) {
+    // A whole number is never equal to a fraction, and it is below one when
+    // it is at or below its floor. Comparing against the floor made 2 >= 2.5
+    // and 1 == 1.5 true, and rounded the bound in the program's favour.
+    return integer <= BigInt(Math.floor(float)) ? -1 : 1;
+  }
+  // The order is the integer against the float. Reading it the other way
+  // round reported 1 >= 2.0 as true, because 2 is the greater of the two.
+  const exact = BigInt(float);
+  return integer < exact ? -1 : integer > exact ? 1 : 0;
 }
 
 function valuesEqual(left: Value, right: Value): boolean {

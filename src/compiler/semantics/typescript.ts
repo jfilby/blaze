@@ -75,7 +75,9 @@ export interface Diagnostic {
 /** How many constructs one file may be reported to have before the list is cut. */
 const MAXIMUM_DIAGNOSTICS = 24;
 
-const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "'": "'", '"': '"' };
+// `$` is here so that `\${` writes the literal `${` a template needs to show,
+// rather than the backslash and the pair.
+const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "'": "'", '"': '"', $: "$" };
 
 /** Resolves the escapes a string carries, and leaves any other as written. */
 export function unescape(text: string, line: number): string {
@@ -92,6 +94,50 @@ export function unescape(text: string, line: number): string {
     index += 1;
   }
   return result;
+}
+
+/**
+ * Where the `}` that closes an interpolation opened at `${` sits, or -1. The
+ * braces nest and a string inside the interpolation carries its own, so the
+ * first `}` is not the one that closes it: an object literal, or a `"}"`
+ * argument, ended the interpolation early and everything after it was read as
+ * text that was never there.
+ */
+export function closingBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"' || character === "'" || character === "`") {
+      let end = index + 1;
+      for (;;) {
+        end = text.indexOf(character, end);
+        if (end < 0) return -1;
+        const backslashes = /\\*$/.exec(text.slice(index + 1, end))?.[0].length ?? 0;
+        if (backslashes % 2 === 0) break;
+        end += 1;
+      }
+      index = end;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Where the next interpolation of a template begins, or -1. `\${` writes a
+ * literal `${` and interpolates nothing, so it is text and not a boundary.
+ */
+export function nextInterpolation(text: string): number {
+  for (let open = text.indexOf("${"); open >= 0; open = text.indexOf("${", open + 2)) {
+    const backslashes = /\\*$/.exec(text.slice(0, open))?.[0].length ?? 0;
+    if (backslashes % 2 === 0) return open;
+  }
+  return -1;
 }
 
 /**
@@ -241,8 +287,22 @@ export function tokenize(source: string): Token[] {
     if (character === '"' || character === "'" || character === "`") {
       // Only an import names a module and only a template string is printed, so
       // the string is kept whole and the parser decides where one is allowed.
-      const end = source.indexOf(character, index + 1);
-      tokens.push({ kind: "string", text: source.slice(index + 1, end), line, quote: character, template: character === "`" });
+      // A quote an escape covers does not end the string, and a string that
+      // spans lines moves the line every construct after it is reported on.
+      const startLine = line;
+      let end = index + 1;
+      for (;;) {
+        end = source.indexOf(character, end);
+        // A string that is never closed is a truncated file, and treating the
+        // missing quote as the end sent the scan back to the start of the
+        // source, where it read the same string again and for ever.
+        if (end < 0) throw frontendError("unterminated string", `line ${startLine}`);
+        const backslashes = /\\*$/.exec(source.slice(index + 1, end))?.[0].length ?? 0;
+        if (backslashes % 2 === 0) break;
+        end += 1;
+      }
+      line += (source.slice(index, end).match(/\n/g) ?? []).length;
+      tokens.push({ kind: "string", text: source.slice(index + 1, end), line: startLine, quote: character, template: character === "`" });
       index = end + 1;
       continue;
     }
@@ -1134,13 +1194,13 @@ class TypeScriptParser {
     const parts: TextPart[] = [];
     let rest = token.text;
     while (rest.length > 0) {
-      const open = rest.indexOf("${");
+      const open = nextInterpolation(rest);
       if (open < 0) {
         parts.push({ k: "text", value: unescape(rest, token.line) });
         break;
       }
       if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), token.line) });
-      const close = rest.indexOf("}", open);
+      const close = closingBrace(rest, open);
       if (close < 0) {
         this.report("a template string interpolates nothing", `near "${rest.slice(open)}"`, token);
         break;
@@ -1249,6 +1309,10 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
       case "loop":
         expression(one.from);
         expression(one.to);
+        // The step is a whole expression, so it allocates and reads the
+        // arguments like any other, and leaving it out let a contract claim
+        // the source touches nothing outside them.
+        if (one.step !== null) expression(one.step);
         one.body.forEach(statement);
         return;
       case "while":
@@ -1487,22 +1551,20 @@ class BodyAnalysis {
     if (current === undefined) {
       throw frontendError(`loop accumulates into undeclared "${inner.target}"`, `line ${inner.line}`);
     }
-    this.bindings.set(inner.target, this.withInitial(current, reduce, reduceOperator, inner.line));
+    this.bindings.set(inner.target, this.withInitial(current, reduce, reduceOperator));
   }
 
-  /** Drops a neutral initialiser so the contract stays readable. */
-  private withInitial(initial: string | null, reduce: string, operator: ReduceOperator, line: number): string {
+  /**
+   * Folds an accumulator's initial value into its reduction. A neutral
+   * initialiser is dropped so the contract stays readable; anything else is
+   * composed, which is what makes a second loop over the same accumulator
+   * expressible at all.
+   */
+  private withInitial(initial: string | null, reduce: string, operator: ReduceOperator): string {
     if (initial === null) return reduce;
     const neutral = operator === "sum" ? ["0", "0.0"] : ["1", "1.0"];
     if (neutral.includes(initial)) return reduce;
-    const symbol = operator === "sum" ? "+" : "*";
-    if (/[ (]/.test(initial)) {
-      throw frontendError(
-        `cannot prove the initial value on line ${line} is the identity of "${symbol}"`,
-        `initial = ${initial}`,
-      );
-    }
-    return `(${initial} ${symbol} ${reduce})`;
+    return `(${initial} ${(operator === "sum" ? "+" : "*")} ${reduce})`;
   }
 
   private serialize(expression: Expression, loop: LoopContext | null, line: number): string {

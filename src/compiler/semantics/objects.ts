@@ -234,10 +234,18 @@ class BodyTypes {
       }
       case "unary":
         return expression.op === "!" ? { kind: "type", type: BOOL } : this.expression(expression.operand);
-      case "conditional":
+      case "conditional": {
         this.expression(expression.condition);
-        this.expression(expression.then);
-        return this.expression(expression.otherwise);
+        // Both branches are walked so both objects are laid out, but a choice
+        // returns whichever branch it takes: the two name the same thing or
+        // the function returns no one object. Reading the type off the branch
+        // the source wrote last narrowed the return to an object the other
+        // branch never returns, and the code reading it went past the end of
+        // a smaller one.
+        const first = this.expression(expression.then);
+        const second = this.expression(expression.otherwise);
+        return describe(first) === describe(second) ? first : { kind: "type", type: ANY_REF };
+      }
       case "update":
         return this.environment.get(expression.name) ?? { kind: "type", type: F64 };
     }

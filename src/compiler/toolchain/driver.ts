@@ -332,8 +332,10 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `if (${condition}) {`;
   }
 
+  // The walk closes the arm's body before it asks for the else header, so
+  // this opens the else body rather than closing the arm a second time.
   openElse(): string {
-    return "} else {";
+    return "else {";
   }
 
   openWhile(condition: string): string {
@@ -424,9 +426,9 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
       case ARGV_LENGTH:
-        // `process.argv.length` is node's: where node runs, the file it runs,
-        // and the arguments the program was given.
-        return `(${RUNTIME_NAME}_argv_count() + 2)`;
+        // The runtime already counts where the program runs and the file it
+        // runs, so this is the length of process.argv as node reports it.
+        return `${RUNTIME_NAME}_argv_count()`;
       case ARGV:
         return `${RUNTIME_NAME}_argv((size_t)(${argument(0)}))`;
       default:

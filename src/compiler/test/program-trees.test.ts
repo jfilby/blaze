@@ -127,3 +127,58 @@ test("both runs of a check are given the same arguments", async () => {
   assert.equal(second.passed, true, JSON.stringify(second.difference ?? {}));
   assert.equal(second.actual, "depth 12\n");
 });
+
+test("the C driver closes a branch before it opens the else, so a choice compiles", async () => {
+  const source = [
+    "function pick(n: number): number {",
+    "  return n * 2;",
+    "}",
+    "let n = 3;",
+    "if (n > 2) {",
+    '  console.log("big");',
+    "} else {",
+    '  console.log("small");',
+    "}",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+
+  // The arm is closed before the else opens: a header that closed the arm as
+  // well left a stray brace and the driver could not be compiled at all.
+  assert.match(driver, /\}\n {2}else \{\n/);
+  assert.doesNotMatch(driver, /\} \} else \{/);
+});
+
+test("a fallback keeps its arm when the left is a reference that may be null", async () => {
+  const source = [
+    "function createTree(depth: number): any {",
+    "  return depth-- > 0",
+    "    ? { left: createTree(depth), right: createTree(depth) }",
+    "    : { left: null, right: null };",
+    "}",
+    "",
+    "const root = createTree(2);",
+    "const fallback = createTree(0);",
+    "if ((root ?? fallback) !== null) {",
+    '  console.log("reachable");',
+    "}",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+
+  // A reference is as nullable as a string: reading it as a number compiled the
+  // fallback away and answered the comparison with the left side alone.
+  assert.match(driver, /\(root\) == NULL\)\) \? \(fallback\) : \(root\)/);
+});

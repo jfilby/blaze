@@ -56,7 +56,10 @@ export function sanitizeTitlePart(value: string): string {
     .replace(/\s+/g, " ")
     .trim();
   if (printable.length <= MAX_LABEL) return printable;
-  return `${printable.slice(0, MAX_LABEL - 1)}…`;
+  // Truncating by code unit can cut a surrogate pair in half, and an unpaired
+  // half reaches the terminal as a replacement box rather than the character.
+  const cut = [...printable].slice(0, MAX_LABEL - 1).join("");
+  return `${cut}…`;
 }
 
 /** The tab title while a build works: brand, spinner, project. */

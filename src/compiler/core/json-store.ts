@@ -7,8 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { CompilerError } from "./errors.ts";
 
@@ -114,8 +113,12 @@ export function createJsonStore(root: string): JsonStore {
     },
 
     async exists(relativePath: string): Promise<boolean> {
+      // The escape guard is outside the try: a path that leaves the store is
+      // an error, not the absence of a file, and swallowing it would report
+      // an invalid path as "no previous build".
+      const file = resolveInStore(relativePath);
       try {
-        const info = await stat(resolveInStore(relativePath));
+        const info = await stat(file);
         return info.isFile();
       } catch {
         return false;
@@ -147,7 +150,16 @@ export function createJsonStore(root: string): JsonStore {
     },
 
     async mkdirp(relativePath: string): Promise<void> {
-      mkdirSync(resolveInStore(relativePath), { recursive: true });
+      try {
+        await mkdir(resolveInStore(relativePath), { recursive: true });
+      } catch (cause) {
+        throw new CompilerError({
+          category: "StorageError",
+          stage: "storage",
+          message: `cannot create ${relativePath}`,
+          detail: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
     },
   };
 

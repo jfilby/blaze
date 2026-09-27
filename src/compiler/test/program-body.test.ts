@@ -755,3 +755,34 @@ test("a program that is killed is regenerated with why it stopped", async (t) =>
   assert.match(repair, /ud2/, "the repair is handed the implementation that killed the program");
   assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
 });
+
+test("a stepped loop runs the values the source runs, in both drivers", async (t) => {
+  const source = [
+    "for (let i = 0; i <= 6; i += 2) console.log(i);",
+    "for (let i = 0; i < 6; i += 2) console.log(i);",
+    "for (let i = 6; i >= 0; i -= 2) console.log(i);",
+    "for (let i = 6; i > 0; i -= 2) console.log(i);",
+    "for (let i = 0; i <= 3; i += 1) console.log(i);",
+    "",
+  ].join("\n");
+  const reference = run("node", ["main.ts"], { cwd: (await program(source)).directory, timeoutMs: 60_000 });
+
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.stdout, reference.stdout);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const hosted = await program(source, "nim");
+  const hostedOutput = run(hosted.binary, [], { timeoutMs: 60_000 });
+  assert.equal(hostedOutput.code, 0, hostedOutput.stderr);
+  // An inclusive bound ends on its own value and an exclusive one a step
+  // short of it, in either direction: reading the bound as always exclusive
+  // dropped the last value, and reading it as always inclusive ran one too far.
+  assert.equal(hostedOutput.stdout, sourceRun.stdout);
+});

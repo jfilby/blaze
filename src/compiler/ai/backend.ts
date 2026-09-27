@@ -37,12 +37,23 @@ class UnusableAnswer extends Error {
   readonly retryable: boolean;
   /** What fails the build once the re-requests are spent. */
   readonly failure: CompilerError;
+  /**
+   * Why the provider stopped generating, kept for a reply that carried no
+   * implementation: an answer cut off by the output limit or taken by a
+   * content filter is a different failure from one the model finished on its
+   * own, and only the provider knows which it was. Kept out of the reason,
+   * which the re-request prompt carries, because a finish reason is a fact
+   * about the request the model cannot change by being asked again. Absent
+   * for a request that never came back with a reply at all.
+   */
+  readonly finishReason: string | undefined;
 
-  constructor(reason: string, retryable: boolean, failure: CompilerError) {
+  constructor(reason: string, retryable: boolean, failure: CompilerError, finishReason?: string) {
     super(reason);
     this.reason = reason;
     this.retryable = retryable;
     this.failure = failure;
+    this.finishReason = finishReason;
   }
 }
 
@@ -104,6 +115,8 @@ export interface ResponseRetry {
   retries: number;
   /** Why the answer before it could not be used. */
   reason: string;
+  /** Why the provider stopped generating, when the answer it stopped at had nothing in it. */
+  finishReason?: string;
 }
 
 /**
@@ -195,17 +208,17 @@ export class VercelAiBackend implements AiBackend {
     const user = buildUserPrompt(request);
     this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
-    const reasons: string[] = [];
+    const answers: { reason: string; finishReason: string | undefined }[] = [];
     let assembly: string;
 
     for (let retry = 0; ; retry += 1) {
       try {
-        assembly = await this.ask(model, system, reasons.length === 0 ? user : buildRetryPrompt(user, reasons));
+        assembly = await this.ask(model, system, answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)));
         break;
       } catch (cause) {
         if (!(cause instanceof UnusableAnswer)) throw cause;
         if (!cause.retryable) throw cause.failure;
-        reasons.push(cause.reason);
+        answers.push({ reason: cause.reason, finishReason: cause.finishReason });
         if (retry === this.retries) {
           throw new CompilerError({
             category: "AiGenerationError",
@@ -213,7 +226,7 @@ export class VercelAiBackend implements AiBackend {
             message: cause.failure.message,
             detail: [
               `asked ${this.retries + 1} times, and no answer carried an implementation:`,
-              ...reasons.map((reason) => `- ${reason}`),
+              ...answers.map((entry) => `- ${entry.reason}${entry.finishReason === undefined ? "" : ` (finish reason: ${entry.finishReason})`}`),
               ...(cause.failure.detail === undefined ? [] : [cause.failure.detail]),
             ].join("\n"),
           });
@@ -224,6 +237,7 @@ export class VercelAiBackend implements AiBackend {
           retry: retry + 1,
           retries: this.retries,
           reason: cause.reason,
+          ...(cause.finishReason === undefined ? {} : { finishReason: cause.finishReason }),
         });
         await sleep(RETRY_BACKOFF_MS * 2 ** retry);
       }
@@ -244,6 +258,7 @@ export class VercelAiBackend implements AiBackend {
   /** One model call, answered in terms of the compiler: assembly, or none. */
   private async ask(model: LanguageModel, system: string, user: string): Promise<string> {
     let text: string;
+    let finishReason: string | undefined;
     try {
       // The system text goes in `instructions`, not a system message: that is
       // the portable form, and providers such as OpenRouter reject a system
@@ -256,6 +271,10 @@ export class VercelAiBackend implements AiBackend {
         ...(this.timeoutMs === undefined ? {} : { abortSignal: AbortSignal.timeout(this.timeoutMs) }),
       });
       text = result.text;
+      // What the provider says stopped the generation, kept for a reply that
+      // turns out to carry no implementation: a request that never came back
+      // with one has no finish reason to report.
+      finishReason = result.finishReason;
     } catch (cause) {
       if (isTimeout(cause) && this.timeoutMs !== undefined) {
         // Overrunning the budget is a decision about the clock rather than a
@@ -281,9 +300,11 @@ export class VercelAiBackend implements AiBackend {
       return extractAssembly(text);
     } catch (cause) {
       // A reply with no implementation in it is the model not answering, not a
-      // wrong answer: the toolchain never saw anything to judge.
+      // wrong answer: the toolchain never saw anything to judge. The provider
+      // stopped for its own reasons, and saying which is the only account of
+      // why there is nothing here to reject.
       const failure = cause instanceof CompilerError ? cause : generationError("the model returned no implementation");
-      throw new UnusableAnswer(failure.message, true, failure);
+      throw new UnusableAnswer(failure.message, true, failure, finishReason);
     }
   }
 }

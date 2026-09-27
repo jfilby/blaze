@@ -544,8 +544,12 @@ class ProgramEmitter {
       const left = hasCall(value.left) ? this.temporary(value.left, type) : this.expression(value.left);
       const right = this.expression(value.right, value.type);
       if (op === "??") {
-        // Only a reference or a string can be nothing: a number never is.
-        if (value.left.k === "null" || isStringValue(value.left)) {
+        // Only a reference or a string can be nothing: a number never is. A
+        // name resolves to a reference whatever it holds, so this asks what
+        // the value carries: reading a number as a reference compiles the
+        // fallback arm away and leaves a comparison that does not compile.
+        const nullable = kindOf(value.left);
+        if (nullable === "null" || nullable === "text" || nullable === "reference") {
           return this.target.conditional(this.target.isNull(left, false), right, left);
         }
         return left;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf } from "./phase.ts";
+import { contractOf, programOf } from "./phase.ts";
 
 const DOT_PRODUCT = `proc dotProduct(a: ptr float32, b: ptr float32, n: usize): float32 =
   var acc: float32 = 0.0
@@ -132,5 +132,48 @@ test("a float32 literal carries the value it denotes, not a rounded decimal", as
   const literal = Number(contract.ensures[0].split("== ")[1]);
   assert.equal(literal, Math.fround(0.1));
   assert.notEqual(literal, 0.1);
+  parseContract(contract);
+});
+
+test("a block-bodied proc ends where it dedents, so the next proc keeps its own body", async () => {
+  // A proc body is the run of lines that stays indented, not every later line
+  // that is: collecting across the dedent welded the second proc's body onto
+  // the first and left the second proc undeclared.
+  const source = `proc first(x: float32): float32 =
+  return x + 1.0
+proc second(x: float32): float32 =
+  return x * 2.0
+`;
+  const contracts = programOf("nim", { "module.nim": source }, "module.nim").files.find(
+    (file) => file.path === "module.nim",
+  )?.functions ?? {};
+  assert.deepEqual(Object.keys(contracts), ["first", "second"]);
+  assert.deepEqual(contracts.first?.ensures, ["result == (x + 1.0)"]);
+  assert.deepEqual(contracts.second?.ensures, ["result == (x * 2.0)"]);
+});
+
+test("a loop body ends where it dedents, so a second loop is a second statement", async () => {
+  const contract = contractOf("nim", `proc total(x: openArray[float64], n: int): float64 =
+  var acc = 0.0
+  for i in 0 ..< n:
+    acc += x[i]
+  for j in 0 ..< n:
+    acc += x[j]
+  result = acc
+`);
+  assert.deepEqual(contract.ensures, ["result == (sum(i = 0..<n, x[i]) + sum(j = 0..<n, x[j]))"]);
+  parseContract(contract);
+});
+
+test("an accumulator seeded with a compound value folds the seed into the reduction", async () => {
+  // A parenthesised seed is not the identity, and the fold is how a second
+  // loop over the same accumulator is written at all.
+  const contract = contractOf("nim", `proc seeded(x: openArray[float64], n: int, k: float64): float64 =
+  var acc = 0.0 + k
+  for i in 0 ..< n:
+    acc += x[i]
+  return acc
+`);
+  assert.deepEqual(contract.ensures, ["result == ((0.0 + k) + sum(i = 0..<n, x[i]))"]);
   parseContract(contract);
 });

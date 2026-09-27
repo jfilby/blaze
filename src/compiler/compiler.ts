@@ -70,6 +70,7 @@ import {
   type SourceInput,
   type SourceModule,
   type TestConfig,
+  type TargetSpec,
   type VerificationResult,
 } from "./core/types.ts";
 
@@ -336,18 +337,30 @@ function moduleReader(directory: string): (path: string) => string | null {
 const CREDENTIAL_KEYS = ["apiKey", "api_key", "apikey", "token", "secret", "password"];
 
 function rejectCredentials(path: string, input: Record<string, unknown>): void {
-  for (const [key, value] of Object.entries(input)) {
-    if (typeof value !== "object" || value === null) continue;
-    for (const field of Object.keys(value as Record<string, unknown>)) {
-      if (!CREDENTIAL_KEYS.includes(field.toLowerCase())) continue;
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: `${path} puts a credential in "${key}.${field}"`,
-        detail: "a project names its provider and model; the API key comes from the environment",
-      });
+  // The key itself is what leaks, wherever it sits: a project file is copied
+  // into the store whole, so a credential named at the top level is stored
+  // just as much as one nested under a provider.
+  const scan = (fields: Record<string, unknown>, where: string): void => {
+    for (const [key, value] of Object.entries(fields)) {
+      const at = where === "" ? key : `${where}.${key}`;
+      if (CREDENTIAL_KEYS.includes(key.toLowerCase())) {
+        throw new CompilerError({
+          category: "InputError",
+          stage: "input",
+          message: `${path} puts a credential in "${at}"`,
+          detail: "a project names its provider and model; the API key comes from the environment",
+        });
+      }
+      if (typeof value === "object" && value !== null) {
+        scan(value as Record<string, unknown>, at);
+      } else if (Array.isArray(value)) {
+        value.forEach((entry, index) => {
+          if (typeof entry === "object" && entry !== null) scan(entry as Record<string, unknown>, `${at}[${index}]`);
+        });
+      }
     }
-  }
+  };
+  scan(input, "");
 }
 
 /** Turns the project's model selection into the spec the resolver understands. */
@@ -421,6 +434,42 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
 
 async function writeBuildRecord(store: JsonStore, paths: ProjectPaths, build: BuildStatus): Promise<void> {
   await store.write(paths.build, build);
+}
+
+/**
+ * Records that a project was rejected before any build could start. The
+ * record carries what the last build named, because that is the build this
+ * one failed to be, and it is marked failed so nothing reads it as the
+ * project's last success.
+ */
+async function recordRejected(
+  store: JsonStore,
+  paths: ProjectPaths,
+  id: string,
+  previous: BuildStatus | undefined,
+  cause: unknown,
+): Promise<CompilerError> {
+  const failure = toCompilerError(cause, { category: "InputError", stage: "input" });
+  const error = new CompilerError({ ...failure.toJSON(), project: id });
+  const stamp = new Date().toISOString();
+  await writeBuildRecord(store, paths, {
+    id,
+    input: paths.input,
+    contract: paths.contract,
+    target: previous?.target ?? normalizeTarget(undefined),
+    status: "failed",
+    outputKind: previous?.outputKind ?? "machine",
+    runtime: previous?.runtime ?? "none",
+    createdAt: previous?.createdAt ?? stamp,
+    updatedAt: stamp,
+    sourceHash: previous?.sourceHash ?? "",
+    contractHash: previous?.contractHash ?? "",
+    model: previous?.model ?? "unset",
+    modelConfig: previous?.modelConfig ?? "unset",
+    compilerVersion: COMPILER_VERSION,
+    error: error.toJSON(),
+  });
+  return error;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -558,16 +607,26 @@ export async function runBuild(
   const id = projectIdFor(absoluteInput);
   const paths = projectPaths(id);
 
-  const project = readInput(absoluteInput);
-  const input = project.input;
-  const target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
-  const outputKind = resolveOutputKind(options.output ?? input.output);
-  const runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
-
-  // A build that reuses stored assembly never calls a model, so it must not
-  // require model configuration. The previous record is read before this build
-  // overwrites it, which is what makes the source change check meaningful.
+  // These read the project and reject it before there is a build record to
+  // reject it in, so a project that no longer names a build that can run used
+  // to fail with the last successful build still on record: every reader of
+  // the project was told the last thing it did succeeded.
   const previousBuild = (await store.exists(paths.build)) ? await store.read<BuildStatus>(paths.build) : undefined;
+  let project: ProjectInput;
+  let target: TargetSpec;
+  let outputKind: OutputKind;
+  let runtimeKind: RuntimeKind;
+  try {
+    project = readInput(absoluteInput);
+    const input = project.input;
+    target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
+    outputKind = resolveOutputKind(options.output ?? input.output);
+    runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
+  } catch (cause) {
+    throw await recordRejected(store, paths, id, previousBuild, cause);
+  }
+  const input = project.input;
+
   // --model wins over the project file, which wins over AI_MODEL.
   const requested = options.model ?? modelSpec(input.model, absoluteInput);
   // A reused build is answered by the model that generated the stored assembly,
@@ -801,11 +860,16 @@ export async function runBuild(
           return createBackend(requireModel(), {
             timeoutMs: requestTimeoutMs(input),
             retries: generation.maxRetries,
-            onRetry: ({ candidate, attempt, retry, retries, reason }) => {
+            onRetry: ({ candidate, attempt, retry, retries, reason, finishReason }) => {
+              // An answer with nothing in it is also told why the provider
+              // stopped: one cut short by the output limit, one a content
+              // filter took and one the model finished on its own are not the
+              // same failure to wait out.
+              const finish = finishReason === undefined ? "" : `, finish reason: ${finishReason}`;
               reporter.stage(
                 "generate",
                 "info",
-                `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
+                `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
               );
             },
             ...(options.debug === true ? { onPrompt: printPrompt } : {}),
@@ -985,15 +1049,15 @@ export async function runBuild(
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
     const programBinary = `program${EXECUTABLE_SUFFIX}`;
-    const programPath = `${base}/${programBinary}`;
+    const programPath = join(base, programBinary);
     const deliveredProgram = join(project.directory, `${id}${EXECUTABLE_SUFFIX}`);
     for (let round = 1; round <= programRounds; round += 1) {
       await generateUnits(mismatch);
       selected = await record();
       if (driver === undefined || programFile === undefined || mode !== "build") break;
       const runtime = await prepareRuntime();
-      const objectPaths = unitsGenerated().map(
-        (entry) => `${base}/${entry.unit.contract.function.name}/${entry.result.selected as string}.o`,
+      const objectPaths = unitsGenerated().map((entry) =>
+        join(base, entry.unit.contract.function.name, `${entry.result.selected as string}.o`),
       );
       const runner =
         runtimeKind === "none"
@@ -1145,7 +1209,10 @@ export async function runBuild(
     build.status = "success";
     build.selectedCandidates = selected;
     build.reused = Object.fromEntries(reusedByFunction);
-    build.output = outputPath === null ? paths.outputAssembly : paths.outputBinary;
+    // The deliverable this build actually produced. A build that only
+    // generated candidates delivered nothing, and saying it delivered the
+    // assembly pointed automation at a file that was never written.
+    if (outputPath !== null) build.output = relative(store.root, outputPath);
     build.updatedAt = new Date().toISOString();
     await writeBuildRecord(store, paths, build);
 

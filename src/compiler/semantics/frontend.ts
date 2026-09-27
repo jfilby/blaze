@@ -265,6 +265,26 @@ function toSourceLines(source: string): SourceLine[] {
     .filter((line): line is SourceLine => line !== null);
 }
 
+/**
+ * The block starting at `start`: the run of lines indented at least as far as
+ * the first, stopping where the source dedents out of it. Selecting every
+ * later line that is indented enough instead reaches across a dedent and welds
+ * the next construct's body onto this one, so a second block-bodied proc is
+ * swallowed into the first and never declared at all.
+ */
+function blockAt(lines: SourceLine[], start: number): SourceLine[] {
+  const first = lines[start];
+  if (first === undefined) return [];
+  const block: SourceLine[] = [];
+  for (let index = start; index < lines.length; index += 1) {
+    const entry = lines[index];
+    if (entry.indent < first.indent) break;
+    block.push(entry);
+  }
+  return block;
+}
+
+
 function parseStatement(line: SourceLine, following: SourceLine[]): Stmt {
   const context = `line ${line.number}`;
   const declaration = /^(var|let)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.+))?$/.exec(line.text);
@@ -287,7 +307,7 @@ function parseStatement(line: SourceLine, following: SourceLine[]): Stmt {
     if (bodyIndent === undefined || bodyIndent <= line.indent) {
       throw frontendError(`empty loop body at line ${line.number}`, "a for loop must contain at least one statement");
     }
-    const body = following.filter((entry) => entry.indent >= bodyIndent);
+    const body = blockAt(following, 0);
     return {
       kind: "loop",
       variable,
@@ -400,13 +420,10 @@ function parseProcedures(source: string): NimProc[] {
     }
     // Nim allows an expression body on the header line: `proc f(x: T): T = expr`.
     const expressionBody = header.slice(equals + 1).trim();
-    const bodyIndent = lines[index + 1]?.indent;
     const body: SourceLine[] =
       expressionBody !== ""
         ? [{ number: line.number, indent: line.indent + 2, text: expressionBody }]
-        : bodyIndent === undefined
-          ? []
-          : lines.slice(index + 1).filter((entry) => entry.indent >= bodyIndent);
+        : blockAt(lines, index + 1);
     procedures.push({
       name: nameMatch[1],
       params,
@@ -555,24 +572,26 @@ class BodyAnalysis {
     const reduce = `${reduceOperator}(${statement.variable} = ${from}${rangeOperator}${to}, ${body})`;
 
     if (inner.target === "result") {
-      this.result = this.withInitial(this.result, reduce, inner.op === "*=" ? "*" : "+", statement.line);
+      this.result = this.withInitial(this.result, reduce, inner.op === "*=" ? "*" : "+");
       return;
     }
     if (!this.bindings.has(inner.target)) {
       throw frontendError(`loop accumulates into undeclared "${inner.target}" (line ${inner.line})`);
     }
     const current = this.bindings.get(inner.target) as string;
-    this.bindings.set(inner.target, this.withInitial(current, reduce, inner.op === "*=" ? "*" : "+", inner.line));
+    this.bindings.set(inner.target, this.withInitial(current, reduce, inner.op === "*=" ? "*" : "+"));
   }
 
-  /** Drops a neutral accumulator initialiser so the contract stays readable. */
-  private withInitial(initial: string | null, reduce: string, operator: "+" | "*", line: number): string {
+  /**
+   * Folds an accumulator's initial value into its reduction. A neutral
+   * initialiser is dropped so the contract stays readable; anything else is
+   * composed, which is what makes a second loop over the same accumulator
+   * expressible at all.
+   */
+  private withInitial(initial: string | null, reduce: string, operator: "+" | "*"): string {
     if (initial === null) return reduce;
-    const neutral = operator === "+" ? ["0", "0.0", "0.0'f32"] : ["1", "1.0", "1.0'f32"];
+    const neutral = operator === "+" ? ["0", "0.0"] : ["1", "1.0"];
     if (neutral.includes(initial)) return reduce;
-    if (initial.includes("(") || initial.includes(" ")) {
-      throw frontendError(`cannot prove the initial value on line ${line} is the identity of "${operator}"`, `initial = ${initial}`);
-    }
     return `(${initial} ${operator} ${reduce})`;
   }
 

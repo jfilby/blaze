@@ -13,6 +13,7 @@ import {
   type BufferValue,
   type Value,
 } from "../semantics/contract.ts";
+import { contractOf } from "./phase.ts";
 import type { FunctionContract } from "../core/types.ts";
 
 function dotProductContract(): FunctionContract {
@@ -172,4 +173,75 @@ test("values render readably in diagnostics", () => {
   assert.equal(formatValue(Number.POSITIVE_INFINITY), "inf");
   assert.equal(formatValue(null), "null");
   assert.equal(formatValue(buffer([1, 2])), "[1, 2]");
+});
+
+function requiresContract(name: string, params: { name: string; type: string }[], requires: string[]): FunctionContract {
+  return {
+    version: "1",
+    function: { name, symbol: name, params, returns: "f64" },
+    requires,
+    ensures: ["result == 0.0"],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "throughput", secondary: "size" },
+  } as FunctionContract;
+}
+
+test("nothing is ordered against not-a-number, so a NaN fails every ordering bound", () => {
+  // Answering that a NaN is greater than everything made `>` and `>=` true,
+  // which passed inputs and results the language says are unordered.
+  for (const bound of ["x > 0.0", "x >= 0.0", "x < 1.0", "x <= 1.0"]) {
+    const parsed = parseContract(requiresContract("nan", [{ name: "x", type: "f64" }], [bound]));
+    assert.deepEqual(
+      preconditionFailures(parsed, new Map<string, Value>([["x", Number.NaN]])),
+      [bound],
+      `${bound} must not hold for a NaN`,
+    );
+  }
+  // A NaN is also not equal to anything, which is what the equality test asks.
+  const equal = parseContract(requiresContract("nanEq", [{ name: "x", type: "f64" }], ["x == 0.0"]));
+  assert.deepEqual(preconditionFailures(equal, new Map<string, Value>([["x", Number.NaN]])), ["x == 0.0"]);
+  const different = parseContract(requiresContract("nanNe", [{ name: "x", type: "f64" }], ["x != 0.0"]));
+  assert.deepEqual(preconditionFailures(different, new Map<string, Value>([["x", Number.NaN]])), []);
+});
+
+test("a whole number is never equal to a fraction, and is below one only up to its floor", () => {
+  // Comparing against the fraction's floor made a length of 1 satisfy a bound
+  // of 1.5, so the vectors a build checked were not the ones it promised.
+  const atLeast = parseContract(requiresContract("len", [{ name: "n", type: "usize" }], ["n >= 1.5"]));
+  assert.deepEqual(preconditionFailures(atLeast, new Map<string, Value>([["n", 1n]])), ["n >= 1.5"]);
+  assert.deepEqual(preconditionFailures(atLeast, new Map<string, Value>([["n", 2n]])), []);
+
+  const equal = parseContract(requiresContract("lenEq", [{ name: "n", type: "usize" }], ["n == 1.5"]));
+  assert.deepEqual(preconditionFailures(equal, new Map<string, Value>([["n", 1n]])), ["n == 1.5"]);
+
+  const below = parseContract(requiresContract("neg", [{ name: "n", type: "i64" }], ["n < -1.5"]));
+  assert.deepEqual(preconditionFailures(below, new Map<string, Value>([["n", -1n]])), ["n < -1.5"]);
+  assert.deepEqual(preconditionFailures(below, new Map<string, Value>([["n", -2n]])), []);
+
+  // A bound that is a whole number still compares exactly.
+  const whole = parseContract(requiresContract("whole", [{ name: "n", type: "usize" }], ["n >= 2.0"]));
+  assert.deepEqual(preconditionFailures(whole, new Map<string, Value>([["n", 2n]])), []);
+  assert.deepEqual(preconditionFailures(whole, new Map<string, Value>([["n", 1n]])), ["n >= 2.0"]);
+});
+
+test("a product of whole numbers is held wider than its elements, as a sum is", () => {
+  // Four bytes of 5 multiply to 625. Held at the element width they wrapped to
+  // 113, and a correct implementation was then read as a wrong one.
+  const contract = contractOf("typescript", [
+    "export function prod(x: Uint8Array, n: number): number {",
+    "  let acc = 1;",
+    "  for (let i = 0; i < n; i++) acc *= x[i];",
+    "  return acc;",
+    "}",
+    "",
+  ].join("\n"), { entry: "prod" });
+  assert.deepEqual(contract.ensures, ["result == product(i = 0..<n, x[i])"]);
+  const parsed = parseContract(contract);
+  const values = new Map<string, Value>([
+    ["x", { type: parseType("slice<u8>"), values: [5n, 5n, 5n, 5n] }],
+    ["n", 4n],
+  ]);
+  assert.equal(referenceResult(parsed, values), 625n);
 });

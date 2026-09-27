@@ -164,32 +164,21 @@ proc blaze_rt_object_new*(bytes, alignment: csize_t): pointer {.exportc, cdecl.}
   let align = if alignment == 0: BlazeDefaultAlignment else: alignment.uint64
   if (align and (align - 1)) != 0:
     raise newException(ValueError, "blaze_rt_object_new: alignment must be a power of two")
-  let total = alignUp(bytes.uint64, align) + BlazeHeaderSize
+  # The payload starts at the first aligned address past the header, so the
+  # block has to cover the gap that alignment leaves as well as the bytes it
+  # holds: sizing it by the bytes alone returns a pointer past the end of the
+  # allocation. The header follows the payload, so it is written there too.
+  let total = bytes.uint64 + align + BlazeHeaderSize
   if total > BlazeMaxAllocation:
     raise newException(ValueError, "blaze_rt_object_new: request too large")
   let base = allocShared0(int(total))
   if base == nil:
     raise newException(OutOfMemDefect, "blaze_rt_object_new: out of memory")
+  let payload = alignUp(cast[uint](base) + BlazeHeaderSize, align)
   var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes.uint64,
                            alignment: align, refs: 1)
-  cast[ptr BlazeHeader](base)[] = header
-  result = cast[pointer](alignUp(cast[uint](base) + BlazeHeaderSize, align))
-
-proc blaze_rt_reallocate*(pointer: pointer, bytes: csize_t): pointer {.exportc, cdecl.} =
-  if pointer == nil:
-    return blaze_rt_allocate(bytes)
-  let header = check(pointer, "blaze_rt_reallocate")
-  let total = header[].length + bytes.uint64 + BlazeHeaderSize
-  if total > BlazeMaxAllocation:
-    raise newException(ValueError, "blaze_rt_reallocate: request too large")
-  let grown = reallocShared(header[].base, int(total))
-  if grown == nil:
-    raise newException(OutOfMemDefect, "blaze_rt_reallocate: out of memory")
-  var updated = header[]
-  updated.base = grown
-  updated.length = bytes.uint64
-  cast[ptr BlazeHeader](grown)[] = updated
-  result = cast[pointer](alignUp(cast[uint](grown) + BlazeHeaderSize, updated.alignment))
+  cast[ptr BlazeHeader](payload - BlazeHeaderSize)[] = header
+  result = cast[pointer](payload)
 
 proc blaze_rt_retain*(pointer: pointer): pointer {.exportc, cdecl.} =
   if pointer == nil:
@@ -207,6 +196,30 @@ proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
   let base = header[].base
   header[].magic = BlazeFreed
   deallocShared(base)
+
+proc blaze_rt_reallocate*(pointer: pointer, bytes: csize_t): pointer {.exportc, cdecl.} =
+  if pointer == nil:
+    return blaze_rt_allocate(bytes)
+  let header = check(pointer, "blaze_rt_reallocate")
+  let previous = header[]
+  let total = bytes.uint64 + previous.alignment + BlazeHeaderSize
+  if total > BlazeMaxAllocation:
+    raise newException(ValueError, "blaze_rt_reallocate: request too large")
+  let grown = allocShared0(int(total))
+  if grown == nil:
+    raise newException(OutOfMemDefect, "blaze_rt_reallocate: out of memory")
+  let payload = alignUp(cast[uint](grown) + BlazeHeaderSize, previous.alignment)
+  # A fresh block can align its payload differently, so the bytes travel to
+  # where the new header says they are rather than staying where they were.
+  let kept = if previous.length < bytes.uint64: previous.length else: bytes.uint64
+  if kept > 0:
+    copyMem(cast[pointer](payload), pointer, int(kept))
+  var updated = previous
+  updated.base = grown
+  updated.length = bytes.uint64
+  cast[ptr BlazeHeader](payload - BlazeHeaderSize)[] = updated
+  blaze_rt_release(pointer)
+  result = cast[pointer](payload)
 
 proc blaze_rt_string_new*(bytes: pointer, length: csize_t): cstring {.exportc, cdecl.} =
   let storage = blaze_rt_allocate(length.csize_t + 1)
@@ -245,7 +258,9 @@ proc blaze_rt_arguments_set*(values: ptr UncheckedArray[float64], count: csize_t
     blazeArguments[index] = values[index]
 
 proc blaze_rt_argv_count*(): csize_t {.exportc, cdecl.} =
-  csize_t(blazeArguments.len)
+  ## The length process.argv has, counting where the program runs and the file
+  ## it runs before the arguments it was given.
+  csize_t(blazeArguments.len + 2)
 
 proc blaze_rt_argv*(index: csize_t): float64 {.exportc, cdecl.} =
   ## The index is the one process.argv uses, which counts where node runs
@@ -351,6 +366,13 @@ proc nextLine(tokens: var seq[string]): bool =
   tokens = line.splitWhitespace()
   result = true
 
+proc nextLineAllowingBlank(tokens: var seq[string]): bool =
+  var line: string
+  if not readLineOrEof(line):
+    return false
+  tokens = line.splitWhitespace()
+  result = true
+
 proc nowNs(): int64 =
   getMonoTime().ticks.int64
 `;
@@ -394,9 +416,13 @@ function parameterStorage(type: TypeExpr, name: string): string[] {
 
 /** Reads the header line of the next vector into the parameters. */
 function headerReader(types: readonly TypeExpr[], names: readonly string[]): string {
+  // A vector of a function that takes nothing is an empty line, so a blank one
+  // is only a line to skip where there are arguments on it to read.
   const body: string[] = [
     "  var tokens: seq[string]",
-    "  if not nextLine(tokens): return false",
+    types.length > 0
+      ? "  if not nextLine(tokens): return false"
+      : "  if not nextLineAllowingBlank(tokens): return false",
   ];
   types.forEach((type, index) => {
     const name = names[index];

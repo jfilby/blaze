@@ -40,6 +40,12 @@ export interface ChatEndpointOptions {
    * asked for.
    */
   answer?: (prompt: string) => string;
+  /**
+   * The reason the provider reports for stopping, which says whether an
+   * answer with nothing in it was cut short, taken or simply never had
+   * anything in it. Defaults to the reason providers end a reply with.
+   */
+  finishReason?: string;
 }
 
 export async function chatEndpoint(
@@ -89,7 +95,7 @@ export async function chatEndpoint(
             object: "chat.completion",
             created: 0,
             model: "stub",
-            choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }],
+            choices: [{ index: 0, finish_reason: options.finishReason ?? "stop", message: { role: "assistant", content } }],
             usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
           }),
         );

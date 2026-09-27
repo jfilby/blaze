@@ -63,7 +63,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { Diagnostics, Token } from "./typescript.ts";
-import { ARGV, ARGV_LENGTH, tokenize, unescape } from "./typescript.ts";
+import { ARGV, ARGV_LENGTH, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
 import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 
 /** The array views a program can allocate. */
@@ -853,13 +853,13 @@ class ProgramParser {
     const parts: ProgramText[] = [];
     let rest = token.text;
     while (rest.length > 0) {
-      const open = rest.indexOf("${");
+      const open = nextInterpolation(rest);
       if (open < 0) {
         parts.push({ k: "text", value: unescape(rest, token.line) });
         break;
       }
       if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), token.line) });
-      const close = rest.indexOf("}", open);
+      const close = closingBrace(rest, open);
       if (close < 0) {
         this.fail("a template string interpolates nothing", token);
         break;

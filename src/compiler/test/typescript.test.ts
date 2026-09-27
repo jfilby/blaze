@@ -4,7 +4,21 @@ import { readFile } from "node:fs/promises";
 import { frontendFor } from "../semantics/frontend.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf, diagnostic } from "./phase.ts";
+import { contractOf, diagnostic, phaseOf } from "./phase.ts";
+import type { FunctionContract } from "../core/types.ts";
+
+/**
+ * The contract of one named export of a module that also runs. A function
+ * whose contract states what it does cannot be a build's entry on its own:
+ * nothing can check it until there is a program, so it is reached the way a
+ * build reaches it, as an export of a module that runs.
+ */
+function contractOfExport(source: string, name: string): FunctionContract {
+  const phase = phaseOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts");
+  const contract = phase.program.files.find((file) => file.path === "main.ts")?.functions[name];
+  assert.ok(contract !== undefined, `${name} must be an export of the module`);
+  return contract;
+}
 
 const typescript = frontendFor("typescript");
 
@@ -148,16 +162,16 @@ test("a derived bound becomes a precondition the caller checks", async () => {
 test("a body whose result is not one expression is contracted by what it does", async () => {
   // Nothing here can be written as `result == ...`, so the contract states the
   // signature, the effects and the body instead of refusing the function.
-  const branch = contractOf("typescript", `export function pick(x: number): number {
+  const branch = contractOfExport(`export function pick(x: number): number {
   if (x > 0) return x;
   return 0;
 }
-`);
+`, "pick");
   assert.deepEqual(branch.ensures, []);
   assert.deepEqual(branch.effects, []);
   assert.deepEqual(branch.definition?.statements.map((statement) => statement.kind), ["if", "result"]);
 
-  const program = contractOf("typescript", `export function report(depth: number): void {
+  const program = contractOfExport(`export function report(depth: number): void {
   let nodes = 0;
   for (let i = 0; i <= depth; i++) {
     console.log(\`depth \${i}\`);
@@ -165,25 +179,25 @@ test("a body whose result is not one expression is contracted by what it does", 
   }
   if (nodes > 0) console.log(\`\${nodes}\`);
 }
-`);
+`, "report");
   assert.deepEqual(program.effects, ["io"]);
   assert.equal(program.definition?.prints, true);
   assert.equal(program.definition?.allocates, false);
   assert.equal(program.definition?.readsArgv, false);
 
-  const allocating = contractOf("typescript", `export function make(): any {
+  const allocating = contractOfExport(`export function make(): any {
   return { left: null, right: null };
 }
-`);
+`, "make");
   assert.deepEqual(allocating.effects, ["memory"]);
   assert.equal(allocating.definition?.allocates, true);
 
-  const counting = contractOf("typescript", `export function everyOther(n: number): number {
+  const counting = contractOfExport(`export function everyOther(n: number): number {
   let total = 0;
   for (let d = 4; d <= n; d += 2) total += d;
   return total;
 }
-`);
+`, "everyOther");
   assert.deepEqual(counting.ensures, []);
   assert.deepEqual(
     counting.definition?.statements.map((statement) => statement.kind),
@@ -244,7 +258,7 @@ test("every construct outside the subset is reported at once", () => {
 test("a loop a reduction cannot state is contracted as a definition", () => {
   // while, do-while and for-of have no range a contract can name, so the
   // statements themselves are what the contract carries.
-  const contract = contractOf("typescript", `export function report(values: Float64Array, limit: number): number {
+  const contract = contractOfExport(`export function report(values: Float64Array, limit: number): number {
   let total = 0;
   for (const value of values) {
     if (value > limit) break;
@@ -261,7 +275,7 @@ test("a loop a reduction cannot state is contracted as a definition", () => {
   } while (total > 0);
   return total;
 }
-`);
+`, "report");
   assert.deepEqual(contract.ensures, []);
   assert.deepEqual(contract.effects, ["io"]);
   assert.equal(contract.definition?.prints, true);
@@ -283,4 +297,64 @@ test("the language is selected by name", () => {
     diagnostic = error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
   }
   assert.match(diagnostic, /supported languages: nim, typescript/);
+});
+
+test("a string that is never closed is reported instead of read again and again", () => {
+  // Treating the missing quote as the end of the string put the scan back at
+  // the start of the source, where it read the same unterminated string over
+  // and over: a file truncated mid-edit never came back at all.
+  assert.match(
+    diagnostic(() => typescript.analyze('export function f(a: number): number {\n  return a;\n}\nconst s = "oops\n', "main.ts")),
+    /unterminated string/,
+  );
+  assert.match(diagnostic(() => typescript.analyze("const c = ';\n", "main.ts")), /unterminated string/);
+  assert.match(diagnostic(() => typescript.analyze("const t = `;\n", "main.ts")), /unterminated string/);
+});
+
+test("a quote an escape covers does not end the string", () => {
+  // The escape has to be read before the string is closed, or the token ends
+  // at the escaped quote and everything after it is read as a new statement.
+  const message = diagnostic(() =>
+    typescript.analyze('export function f(x: number): number {\n  const s = "a\\"b";\n  return x;\n}\n', "main.ts"),
+  );
+  assert.match(message, /line 2: a quoted string is not a value/);
+  assert.doesNotMatch(message, /line 3/);
+});
+
+test("a string that spans lines moves the line every later diagnostic names", () => {
+  // The block comment beside it counts its newlines; a template literal
+  // spanning three more lines used to leave every construct after it reported
+  // three lines short of where the user wrote it.
+  const message = diagnostic(() =>
+    typescript.analyze(
+      "export function g(x: number): number {\n  console.log(`\nreport\nhere\n`);\n  switch (x) {}\n  return x;\n}\n",
+      "main.ts",
+    ),
+  );
+  assert.match(message, /line 6: "switch" is not supported/);
+});
+
+test("an interpolation ends at the brace that closes it, not the first one", () => {
+  // An object literal or a `"}"` argument inside `${}` carries its own brace,
+  // Nothing here is outside the subset, so the module is read: before, the
+  // first `}` closed the interpolation and the rest was reported malformed.
+  const analysis = typescript.analyze(
+    "export function f(x: number): number {\n  console.log(`${x > 0 ? { a: 1 }.a : 0}`);\n  return x;\n}\n",
+    "main.ts",
+  );
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["f"],
+  );
+});
+
+test("an escaped `\\${` is the text it writes, not an interpolation", () => {
+  // It is how a template prints a literal `${`. Reading it as the start of an
+  // interpolation left the backslash alone and aborted the whole build with a
+  // backslash that had nothing after it.
+  const body = typescript.analyze("const n = 5;\nconsole.log(`\\${n}`);\n", "main.ts").body;
+  assert.deepEqual(body, [
+    { kind: "declare", name: "n", mutable: false, type: null, value: { k: "number", text: "5" }, line: 1 },
+    { kind: "print", values: [{ k: "text", parts: [{ k: "text", value: "${n}" }] }], line: 2 },
+  ]);
 });

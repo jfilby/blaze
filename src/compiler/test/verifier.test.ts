@@ -9,6 +9,7 @@ import {
 } from "../toolchain/verifier.ts";
 import { parseContract, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
 import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
+import { run } from "../core/process.ts";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -197,6 +198,11 @@ test("the store keeps every path inside its root", async () => {
   await assert.rejects(() => store.read("../escape.json"), /escapes root/);
   await assert.rejects(() => store.read("/etc/passwd"), /must be relative/);
   await assert.rejects(() => store.write("projects/../../escape.json", {}), /escapes root/);
+  // Asking whether a path is there is not a reason to allow one that leaves
+  // the root: reported as merely absent, an escaping path reads as a build
+  // that was never made.
+  await assert.rejects(() => store.exists("/etc/passwd"), /must be relative/);
+  await assert.rejects(() => store.exists("../../escape.json"), /escapes root/);
 });
 
 test("the store round trips values and leaves no temporary files", async () => {
@@ -220,4 +226,35 @@ test("hashes identify content", () => {
   assert.equal(hashText("abc"), hashText("abc"));
   assert.notEqual(hashText("abc"), hashText("abd"));
   assert.match(hashText("abc"), /^[0-9a-f]{64}$/);
+});
+
+test("a run that never started is told apart from a run that finished", () => {
+  // A missing command cannot be spawned at all, which leaves no exit status
+  // and no signal: a consumer that reads that as a clean exit decides a
+  // program it never ran was correct.
+  const missing = run("blaze-no-such-command", [], { timeoutMs: 10_000 });
+  assert.equal(missing.spawnError !== undefined, true);
+  assert.equal(missing.code, null);
+  assert.equal(missing.signal, null);
+  assert.equal(missing.timedOut, false);
+
+  // Dying by a signal from outside is not a timeout: a process stopped by
+  // something else was blamed for exceeding a limit it never had.
+  const stopped = run("sh", ["-c", "kill -TERM $$"], { timeoutMs: 10_000 });
+  assert.equal(stopped.signal, "SIGTERM");
+  assert.equal(stopped.timedOut, false);
+  assert.equal(stopped.spawnError, undefined);
+
+  // Our own timeout is a timeout, and it is the error that says so.
+  const slow = run("sleep", ["10"], { timeoutMs: 300 });
+  assert.equal(slow.timedOut, true);
+
+  // Output past the buffer is a failure to run, not a run that printed little.
+  const flooded = run("sh", ["-c", "head -c 100000 /dev/zero | tr '\\0' a"], { maxBufferBytes: 1024 });
+  assert.equal(flooded.spawnError !== undefined, true);
+
+  const clean = run("sh", ["-c", "exit 0"], { timeoutMs: 10_000 });
+  assert.equal(clean.code, 0);
+  assert.equal(clean.spawnError, undefined);
+  assert.equal(clean.timedOut, false);
 });

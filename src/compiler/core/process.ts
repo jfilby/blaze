@@ -46,7 +46,7 @@ export function run(command: string, args: readonly string[], options: RunOption
     maxBuffer: options.maxBufferBytes ?? DEFAULT_MAX_BUFFER,
   });
   const durationNs = process.hrtime.bigint() - started;
-  const spawnError = result.error as NodeJS.ErrnoException | undefined;
+  const spawnFailure = result.error as NodeJS.ErrnoException | undefined;
 
   return {
     command: formatCommand(command, args),
@@ -55,7 +55,20 @@ export function run(command: string, args: readonly string[], options: RunOption
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
     durationNs,
-    timedOut: result.signal === "SIGTERM" || spawnError?.code === "ETIMEDOUT",
-    spawnError: spawnError?.code === "ENOENT" ? `${command}: not found` : undefined,
+    // An expired timeout surfaces as an ETIMEDOUT error and the child is then
+    // killed with killSignal, so a death by SIGTERM alone does not mean we
+    // stopped it: something outside this process did, and reporting that as a
+    // timeout blames the program for a timeout it never had.
+    timedOut: spawnFailure?.code === "ETIMEDOUT",
+    // Every spawn failure leaves status and signal null, which reads as a
+    // clean exit to a consumer that only tests code. Report all of them, not
+    // just a missing binary, so a process that never ran is never mistaken
+    // for one that ran correctly.
+    spawnError:
+      spawnFailure === undefined
+        ? undefined
+        : spawnFailure.code === "ENOENT"
+          ? `${command}: not found`
+          : spawnFailure.message,
   };
 }

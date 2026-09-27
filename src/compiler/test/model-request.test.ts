@@ -151,7 +151,7 @@ test("an answer with no implementation is asked for again, and costs no repair a
   assert.match(chat.prompts[2], /the model returned an empty response/);
   assert.ok(
     lines.includes(
-      "Asking again: square, candidate 1, attempt 1, the model returned an empty response; request 1 of 2, waiting for openai-compatible/stub",
+      "Asking again: square, candidate 1, attempt 1, the model returned an empty response, finish reason: stop; request 1 of 2, waiting for openai-compatible/stub",
     ),
     `no retry line in: ${lines.join(" | ")}`,
   );
@@ -172,6 +172,41 @@ test("a model that never answers with an implementation fails with every reason 
       /asked 2 times/.test(error.detail ?? ""),
   );
   assert.equal(chat.prompts.length, 2, "the re-request is the only request beyond the first");
+});
+
+test("an answer the provider stopped short of says why it stopped", async (t) => {
+  const { directory, chat } = await projectAnswering(
+    t,
+    [""],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
+    { finishReason: "length" },
+  );
+  const lines: string[] = [];
+
+  await assert.rejects(
+    () =>
+      runBuild(
+        "input.json",
+        { cwd: directory, reuse: false },
+        { stage: (_stage, _status, message) => lines.push(message) },
+        "build",
+      ),
+    (error: unknown) =>
+      error instanceof CompilerError &&
+      /asked 2 times/.test(error.detail ?? "") &&
+      /the model returned an empty response \(finish reason: length\)/.test(error.detail ?? ""),
+  );
+  // The build is told the same thing while it is still waiting on the model.
+  assert.ok(
+    lines.some((line) => line.includes("the model returned an empty response, finish reason: length; request 1 of 1")),
+    `no retry line in: ${lines.join(" | ")}`,
+  );
+  // The re-request carries what was wrong with the answer, not how the
+  // provider stopped: a finish reason is a fact about the request the model
+  // cannot change by being asked again.
+  assert.equal(chat.prompts.length, 2);
+  assert.match(chat.prompts[1], /the model returned an empty response/);
+  assert.doesNotMatch(chat.prompts[1], /finish reason/);
 });
 
 test("a request the provider failed is asked for again", async (t) => {

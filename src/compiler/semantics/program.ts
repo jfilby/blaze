@@ -165,7 +165,7 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
   const edges: ContractEdge[] = [];
   for (const record of records) {
     const declaredHere = new Set(record.analysis.functions.filter((entry) => entry.exported).map((entry) => entry.name));
-    const bound = new Map<string, string>();
+    const bound = new Map<string, { specifier: string; to: string }>();
     for (const [index, entry] of record.analysis.imports.entries()) {
       const to = record.resolved[index];
       const target = contracts.get(to) as FileContract;
@@ -183,15 +183,21 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
       }
       for (const name of names) {
         const first = bound.get(name);
-        if (first !== undefined) {
-          throw contractPhaseError(`${record.path} imports "${name}" from both "${first}" and "${entry.specifier}"`);
+        // The same module reached twice binds the same name to the same thing,
+        // so it is not a collision. Reporting one refused a file that names
+        // its imports in more than one statement, or imports a module and
+        // includes it.
+        if (first !== undefined && first.to !== to) {
+          throw contractPhaseError(`${record.path} imports "${name}" from both "${first.specifier}" and "${entry.specifier}"`);
         }
         if (declaredHere.has(name)) {
           throw contractPhaseError(`${record.path} imports "${name}" and declares it itself`);
         }
-        bound.set(name, entry.specifier);
+        bound.set(name, { specifier: entry.specifier, to });
       }
-      edges.push({ from: record.path, to, symbols: names });
+      if (!edges.some((edge) => edge.from === record.path && edge.to === to)) {
+        edges.push({ from: record.path, to, symbols: names });
+      }
     }
   }
   return edges;
@@ -214,30 +220,32 @@ function resolveEntry(
     }
     return { file: entryFile.path, function: null };
   }
-  if (requested === undefined || requested === "") {
-    const first = available[0];
-    if (first === undefined) {
-      throw contractPhaseError(
-        `${entryFile.path} exports no function`,
-        "the entry module must export the function to compile, or be a program that calls the functions it does export",
-      );
-    }
-    return { file: entryFile.path, function: first };
+  // The entry is resolved the same way whether it was named or taken as the
+  // first export. A function that only states what it does was refused when
+  // it was named, and letting the default path past the check delivered an
+  // implementation nothing had verified, because in a library build there is
+  // no program to check it.
+  const name = requested === undefined || requested === "" ? available[0] : requested;
+  if (name === undefined) {
+    throw contractPhaseError(
+      `${entryFile.path} exports no function`,
+      "the entry module must export the function to compile, or be a program that calls the functions it does export",
+    );
   }
-  const chosen = entryFile.functions[requested];
+  const chosen = entryFile.functions[name];
   if (chosen === undefined) {
     throw contractPhaseError(
-      `entry "${requested}" is not an export of ${entryFile.path}`,
+      `entry "${name}" is not an export of ${entryFile.path}`,
       `exports: ${available.join(", ")}`,
     );
   }
   if (chosen.definition !== undefined) {
     throw contractPhaseError(
-      `${requested} is a function whose contract states what it does rather than what it returns`,
+      `${name} is a function whose contract states what it does rather than what it returns`,
       "nothing can check such a function on its own: build the module as a program, and the program is compared against its own toolchain",
     );
   }
-  return { file: entryFile.path, function: requested };
+  return { file: entryFile.path, function: name };
 }
 
 /**

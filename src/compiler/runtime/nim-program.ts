@@ -456,11 +456,14 @@ ${anchor}
       ];
     }
     if (step !== null) {
-      return [
-        down
-          ? `for ${variable} in countdown((${from}), (${to}) + 1, -(${step})):`
-          : `for ${variable} in countup((${from}), (${to}) - 1, (${step})):`,
-      ];
+      // countup and countdown both include the value they end on, so an
+      // exclusive bound has to end a whole step short of its own: backing off
+      // by one stopped an inclusive stepped loop short of its last value and
+      // ran an exclusive one a step too far. Both take the size of the step
+      // rather than its sign, and the step that arrives is signed.
+      const end = inclusive ? `(${to})` : `(${to}) - (${step})`;
+      const size = `Positive(${down ? `-(${step})` : `(${step})`})`;
+      return [`for ${variable} in ${down ? "countdown" : "countup"}((${from}), ${end}, ${size}):`];
     }
     if (down) {
       return [`for ${variable} in countdown((${from}), (${to}) ${inclusive ? "" : "+ 1"}):`];
@@ -527,7 +530,7 @@ ${anchor}
       case "Math.trunc":
         return `trunc(${argument(0)})`;
       case ARGV_LENGTH:
-        return `(${RUNTIME_NAME}_argv_count() + 2).csize_t`;
+        return `${RUNTIME_NAME}_argv_count().csize_t`;
       case ARGV:
         return `${RUNTIME_NAME}_argv(csize_t(${argument(0)}))`;
       default:

@@ -295,3 +295,66 @@ test("a project file may name its runtime", async (t) => {
   assert.equal(outcome.build.runtime, "nim");
   assert.equal(outcome.verification.dotProduct[0]?.passed, true);
 });
+
+test("argv_count counts the program and the file it runs, as process.argv does", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "blaze-argv-count-"));
+  const probe = [
+    "var args: array[3, float64] = [5, 7, 9]",
+    `${RUNTIME_NAME}_arguments_set(cast[ptr UncheckedArray[float64]](addr args[0]), csize_t(3))`,
+    `echo ${RUNTIME_NAME}_argv_count()`,
+    `echo ${RUNTIME_NAME}_argv(0)`,
+    `echo ${RUNTIME_NAME}_argv(2)`,
+    `echo ${RUNTIME_NAME}_argv(4)`,
+    `echo ${RUNTIME_NAME}_argv(5)`,
+  ].join("\n");
+  const source = join(directory, "probe.nim");
+  await writeFile(source, `${generateRuntimeAdapterSource()}\n${probe}\n`, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("nim", ["c", "--hints:off", "--warnings:off", "-d:release", `--nimcache:${join(directory, "cache")}`, `-o:${binary}`, source], { timeoutMs: 300_000 });
+  assert.equal(built.code, 0, built.stderr);
+  const out = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(out.code, 0, out.stderr);
+
+  // Three arguments are five entries of process.argv, and the first argument
+  // sits at index 2: a count of three would send a program that walked
+  // process.argv past its end, and one that returned the raw count.
+  assert.deepEqual(out.stdout.trim().split("\n"), ["5", "0.0", "5.0", "9.0", "0.0"]);
+});
+
+test("an over-aligned object is writable across its whole length in the Nim adapter", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "blaze-align-"));
+  const probe = [
+    "for align in [16'u64, 32, 64, 128]:",
+    "  let n = 20",
+    "  let p = blaze_rt_object_new(csize_t(n), csize_t(align))",
+    "  for i in 0 ..< n:",
+    "    cast[ptr UncheckedArray[uint8]](p)[i] = uint8(i + 1)",
+    "  for i in 0 ..< n:",
+    "    if cast[ptr UncheckedArray[uint8]](p)[i] != uint8(i + 1):",
+    "      echo \"MISMATCH \", align",
+    `  if cast[uint](p) mod align != 0: echo "MISALIGNED ", align`,
+    "  if blaze_rt_object_size(p) != csize_t(n): echo \"WRONGSIZE \", align",
+    "  blaze_rt_release(p)",
+    "echo \"done\"",
+  ].join("\n");
+  const source = join(directory, "align.nim");
+  await writeFile(source, `${generateRuntimeAdapterSource()}\n${probe}\n`, "utf8");
+  const binary = join(directory, "align");
+  const built = run("nim", ["c", "--hints:off", "--warnings:off", "-d:release", `--nimcache:${join(directory, "cache")}`, `-o:${binary}`, source], { timeoutMs: 300_000 });
+  assert.equal(built.code, 0, built.stderr);
+  const out = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(out.code, 0, out.stderr);
+
+  // The block covers the gap the alignment leaves as well as the bytes, and
+  // the header follows the payload: sizing it by the bytes alone returned a
+  // pointer past the end and a header nothing could read.
+  assert.equal(out.stdout.trim(), "done");
+});

@@ -7,7 +7,7 @@
  */
 
 import { CompilerError } from "../core/errors.ts";
-import { run } from "../core/process.ts";
+import { run, type RunResult } from "../core/process.ts";
 import { encodeBenchRequest, planTestVectors, vectorValues, type TestVector } from "./verifier.ts";
 import { preconditionFailures, type ParsedContract } from "../semantics/contract.ts";
 import type { BenchmarkResult, FunctionContract, Runner, TestConfig } from "../core/types.ts";
@@ -48,6 +48,19 @@ export interface BenchmarkRequest {
   vector: TestVector;
 }
 
+
+/**
+ * How a benchmark run ended when it did not end cleanly. A run killed by a
+ * signal or stopped at its time limit has no exit status, and reporting the
+ * missing one as a status would describe a stop as a code the program chose.
+ */
+function benchmarkStop(execution: RunResult): string | null {
+  if (execution.timedOut) return "did not finish";
+  if (execution.signal !== null) return `was terminated by ${execution.signal}`;
+  if (execution.code === null) return "did not report an exit status";
+  if (execution.code !== 0) return `exited with status ${execution.code}`;
+  return null;
+}
 export function benchmarkCandidate(request: BenchmarkRequest): BenchmarkResult {
   const input = encodeBenchRequest(request.contract, request.vector, request.iterations);
   const durations: number[] = [];
@@ -64,11 +77,13 @@ export function benchmarkCandidate(request: BenchmarkRequest): BenchmarkResult {
         detail: execution.spawnError,
       });
     }
-    if (execution.code !== 0) {
+
+    const stopped = benchmarkStop(execution);
+    if (stopped !== null) {
       throw new CompilerError({
         category: "BenchmarkError",
         stage: "benchmark",
-        message: `the benchmark run for ${request.contract.function.name} exited with status ${execution.code}`,
+        message: `the benchmark run for ${request.contract.function.name} ${stopped}`,
         function: request.contract.function.name,
         candidate: request.candidate,
         detail: execution.stderr.trim().slice(0, 2000),

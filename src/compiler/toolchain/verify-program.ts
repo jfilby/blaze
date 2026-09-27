@@ -73,9 +73,16 @@ function firstDifference(expected: string, actual: string): ProgramMismatch | nu
  * than the end of it.
  */
 function stopFailure(binary: RunResult): string | null {
+  // A program that never ran printed nothing, and nothing it was supposed to
+  // print can be missing from that. Reporting it as a run that produced the
+  // wrong output would hand a program that never executed to the model as a
+  // verified implementation, and reporting it as a clean exit would say it
+  // verified against itself.
+  if (binary.spawnError !== undefined) return `the delivered program did not run: ${binary.spawnError}`;
   if (binary.timedOut) return "the delivered program did not finish";
   if (binary.signal !== null) return `the delivered program was terminated by ${binary.signal}`;
-  if (binary.code !== null && binary.code !== 0) return `the delivered program exited with status ${binary.code}`;
+  if (binary.code === null) return "the delivered program did not report an exit status";
+  if (binary.code !== 0) return `the delivered program exited with status ${binary.code}`;
   return null;
 }
 
