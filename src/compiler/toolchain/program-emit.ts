@@ -358,11 +358,11 @@ class ProgramEmitter {
         return;
       }
       case "break":
-        for (const line of this.releases(true)) this.write(line);
+        for (const line of this.releases()) this.write(line);
         this.write(this.target.breakLine());
         return;
       case "continue":
-        for (const line of this.releases(false)) this.write(line);
+        for (const line of this.releases()) this.write(line);
         this.write(this.target.continueLine());
         return;
       case "block":
@@ -591,19 +591,20 @@ class ProgramEmitter {
   }
 
   /**
-   * What a `break` or a `continue` must free before it leaves: every block it
-   * leaves, and a `break` leaves the loop as well. Without this, an allocation
-   * made in a loop is never freed on the path that jumps out of it.
+   * What a `break` or a `continue` must free before it leaves: the blocks it
+   * leaves, which are the ones inside the innermost loop and the loop body
+   * itself. Neither one stays behind them, so the walk stops at the loop frame
+   * and the blocks the loop sits in keep what they own. Without this, an
+   * allocation made in a loop is never freed on the path that jumps out of it,
+   * and a `break` frees the blocks it never left.
    */
-  private releases(leavesTheLoop: boolean): string[] {
+  private releases(): string[] {
     const lines: string[] = [];
     for (let index = this.frames.length - 1; index >= 0; index -= 1) {
       const frame = this.frames[index];
       for (const line of [...frame.releases].reverse()) lines.push(line);
       frame.releases.length = 0;
-      // A continue stays in the loop it is written in, so it leaves every
-      // block but the loop; a break leaves the loop as well.
-      if (frame.loop && !leavesTheLoop) break;
+      if (frame.loop) break;
     }
     return lines;
   }

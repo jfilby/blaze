@@ -7,9 +7,10 @@ import {
   planTestVectors,
   vectorValues,
 } from "../toolchain/verifier.ts";
-import { parseContract, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
+import { parseContract, preconditionFailures, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
 import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
+import { probeFault } from "../codegen.ts";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,9 +26,9 @@ const PYTHON = "python3";
 function grower(mib: number): string {
   return [
     "import sys",
-    `blocks = [bytearray(${mib} * 1024 * 1024) for _ in range(1)]`,
-    "for block in blocks:",
-    "    block[::4096] = b'\\x01' * len(block[::4096])",
+    `block = bytearray(${mib} * 1024 * 1024)`,
+    "for offset in range(0, len(block), 4096):",
+    "    block[offset] = 1",
     'sys.stdout.write("grown\\n")',
   ].join("\n");
 }
@@ -77,7 +78,7 @@ test("every planned vector satisfies the contract preconditions", () => {
   for (const vector of planTestVectors(parsed, CONFIG)) {
     const values = vectorValues(CONTRACT, vector);
     assert.equal(values.get("n"), BigInt(bufferLength(values)));
-    assert.equal(referenceResult(parsed, values) === referenceResult(parsed, values), true);
+    assert.deepEqual(preconditionFailures(parsed, values), []);
   }
 });
 
@@ -262,9 +263,17 @@ test("a run that never started is told apart from a run that finished", () => {
   assert.equal(stopped.timedOut, false);
   assert.equal(stopped.spawnError, undefined);
 
-  // Our own timeout is a timeout, and it is the error that says so.
+  // Our own timeout is a timeout, and it is the clock that says so rather
+  // than a failure to launch: the process did start.
   const slow = run("sleep", ["10"], { timeoutMs: 300 });
   assert.equal(slow.timedOut, true);
+  assert.equal(slow.spawnError, undefined);
+  assert.equal(slow.code, null);
+
+  // Which is what the probe reports it as, rather than as a probe that never
+  // started: the first thing a caller reads is the fault.
+  assert.match(probeFault(slow) ?? "", /did not return within \d+ seconds/);
+  assert.equal(probeFault(run("blaze-no-such-command", [], { timeoutMs: 10_000 })), "the probe did not start: blaze-no-such-command");
 
   // Output past the buffer is a failure to run, not a run that printed little.
   const flooded = run("sh", ["-c", "head -c 100000 /dev/zero | tr '\\0' a"], { maxBufferBytes: 1024 });
@@ -274,6 +283,26 @@ test("a run that never started is told apart from a run that finished", () => {
   assert.equal(clean.code, 0);
   assert.equal(clean.spawnError, undefined);
   assert.equal(clean.timedOut, false);
+});
+
+test("a deadline stops a program that refuses to be stopped", () => {
+  // The signal a deadline sends is a request, and this program answers it by
+  // doing nothing. A bound that can be refused is not a bound: without a
+  // signal that cannot be trapped, this run lasts the full thirty seconds
+  // rather than the two it was given, and everything that waits on the bound
+  // waits with it.
+  const started = process.hrtime.bigint();
+  const stubborn = run("sh", ["-c", "trap '' TERM; sleep 30"], { timeoutMs: 2_000 });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(elapsedMs < 10_000, `the deadline was not enforced: ${elapsedMs.toFixed(0)}ms`);
+
+  assert.equal(stubborn.timedOut, true);
+  // A run that never exited has no exit status, and certainly not a
+  // successful one: a consumer that reads the status alone would take a
+  // program that was killed for running too long for one that finished.
+  assert.equal(stubborn.code, null);
+  assert.equal(stubborn.spawnError, undefined);
+  assert.equal(probeFault(stubborn)?.includes("did not return within"), true);
 });
 
 test("a program that grows more heap than it is given is refused, not killed", async (t) => {

@@ -15,7 +15,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -333,8 +333,24 @@ function moduleReader(directory: string): (path: string) => string | null {
   };
 }
 
-/** A key in a project file is a leak waiting to happen; the environment holds them. */
-const CREDENTIAL_KEYS = ["apiKey", "api_key", "apikey", "token", "secret", "password"];
+/**
+ * A key in a project file is a leak waiting to happen; the environment holds
+ * credentials. The words are what name one however the key spells it, and a
+ * key is matched on the shape of its name rather than on a list of the exact
+ * ones: a six word list passes `x-api-key` and `apiKey2` straight through,
+ * and both are written to the store whole.
+ */
+const CREDENTIAL_WORDS: readonly string[] = [
+  "apikey",
+  "auth",
+  "bearer",
+  "credential",
+  "key",
+  "passwd",
+  "password",
+  "secret",
+  "token",
+];
 
 function rejectCredentials(path: string, input: Record<string, unknown>): void {
   // The key itself is what leaks, wherever it sits: a project file is copied
@@ -343,7 +359,10 @@ function rejectCredentials(path: string, input: Record<string, unknown>): void {
   const scan = (fields: Record<string, unknown>, where: string): void => {
     for (const [key, value] of Object.entries(fields)) {
       const at = where === "" ? key : `${where}.${key}`;
-      if (CREDENTIAL_KEYS.includes(key.toLowerCase())) {
+      // The name is matched with its punctuation and its case taken out, so
+      // that `x-api-key`, `api_key` and `apiKey2` are one shape of a key.
+      const name = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (CREDENTIAL_WORDS.some((word) => name.includes(word))) {
         throw new CompilerError({
           category: "InputError",
           stage: "input",
@@ -351,13 +370,9 @@ function rejectCredentials(path: string, input: Record<string, unknown>): void {
           detail: "a project names its provider and model; the API key comes from the environment",
         });
       }
-      if (typeof value === "object" && value !== null) {
-        scan(value as Record<string, unknown>, at);
-      } else if (Array.isArray(value)) {
-        value.forEach((entry, index) => {
-          if (typeof entry === "object" && entry !== null) scan(entry as Record<string, unknown>, `${at}[${index}]`);
-        });
-      }
+      // An array is an object here, so the branch above already walks into
+      // it, by index. There is no second kind of container to look for.
+      if (typeof value === "object" && value !== null) scan(value as Record<string, unknown>, at);
     }
   };
   scan(input, "");
@@ -397,6 +412,42 @@ export function modelSpec(selection: SourceInput["model"], path: string): string
   return `${provider}/${model}`;
 }
 
+/**
+ * The most re-requests one attempt may be asked to spend. The wait between
+ * them backs off and then stops growing, so a project cannot buy a build
+ * that sits silent for days: past this many, asking again is not a retry
+ * strategy, it is a build with no answer coming.
+ */
+const MAX_RETRIES = 16;
+
+/**
+ * The generation settings a project file gets wrong, refused before any work
+ * starts. A value the compiler cannot honour is a typo in a file rather than
+ * a provider failure, and it is checked here so it is reported as the input
+ * error it is instead of being multiplied by every candidate of every
+ * function and then reported as a request that failed.
+ */
+function assertGenerationInput(path: string, input: SourceInput): void {
+  const generation = input.generation;
+  if (generation === undefined) return;
+  const refuse = (setting: string, value: number, why: string): void => {
+    throw new CompilerError({
+      category: "InputError",
+      stage: "input",
+      message: `${path} sets "generation.${setting}" to ${value}`,
+      detail: `"generation.${setting}" must be ${why}`,
+    });
+  };
+  const timeoutSeconds = generation.timeoutSeconds;
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)) {
+    refuse("timeoutSeconds", timeoutSeconds, "a positive number of seconds");
+  }
+  const maxRetries = generation.maxRetries;
+  if (maxRetries !== undefined && (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > MAX_RETRIES)) {
+    refuse("maxRetries", maxRetries, `a whole number of re-requests from 0 to ${MAX_RETRIES}`);
+  }
+}
+
 /** A model request is only bounded when the project asks for a budget. */
 function requestTimeoutMs(input: SourceInput): number | undefined {
   const seconds = input.generation?.timeoutSeconds;
@@ -434,6 +485,24 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
 
 async function writeBuildRecord(store: JsonStore, paths: ProjectPaths, build: BuildStatus): Promise<void> {
   await store.write(paths.build, build);
+}
+
+/**
+ * Puts a file on the disk rather than in the page cache, and its directory
+ * entry with it. A copy that is written and then claimed by a record is on
+ * disk only once both are synced: the file's bytes without the name it is
+ * reached by, or the name without the bytes, are both a record pointing at
+ * nothing.
+ */
+async function flushToDisk(path: string): Promise<void> {
+  for (const target of [path, dirname(path)]) {
+    const handle = await open(target, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
 }
 
 /**
@@ -532,6 +601,8 @@ interface UnitReuseRequest {
   functionName: string;
   output: OutputKind;
   linksObjects: boolean;
+  /** The functions of this build a stored candidate may call. */
+  callable: ReadonlySet<string>;
   /** `--reuse` asks a model for nothing, so what it cannot reuse is an error. */
   required: boolean;
   id: string;
@@ -560,9 +631,19 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
           : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to regenerate it",
     });
   }
-  const missing = reusableFiles(request.workspace, entry.selected, request.output, request.linksObjects).filter(
-    (file) => !existsSync(file),
-  );
+  // The stored candidate's own assembly decides which files it produced: one
+  // that calls a function of the program is never linked on its own, so its
+  // executable is a file no build ever writes and demanding it would make
+  // every such function a cache miss for the life of the project.
+  const stored = entry.candidates.find((candidate) => candidate.id === entry.selected);
+  const missing = reusableFiles(
+    request.workspace,
+    entry.selected,
+    request.output,
+    request.linksObjects,
+    stored?.assembly ?? "",
+    request.callable,
+  ).filter((file) => !existsSync(file));
   return { level: reusable(entry, key, missing.length === 0), entry, missing };
 }
 
@@ -611,7 +692,11 @@ export async function runBuild(
   // reject it in, so a project that no longer names a build that can run used
   // to fail with the last successful build still on record: every reader of
   // the project was told the last thing it did succeeded.
-  const previousBuild = (await store.exists(paths.build)) ? await store.read<BuildStatus>(paths.build) : undefined;
+  // A build record that cannot be read is no record at all, exactly as the
+  // incremental cache is not: a build that cannot read what the last one
+  // said goes on to build, and a project that failed on a corrupt record had
+  // no way back short of deleting the file by hand.
+  const previousBuild = await store.readIfValid<BuildStatus>(paths.build);
   let project: ProjectInput;
   let target: TargetSpec;
   let outputKind: OutputKind;
@@ -619,6 +704,7 @@ export async function runBuild(
   try {
     project = readInput(absoluteInput);
     const input = project.input;
+    assertGenerationInput(absoluteInput, input);
     target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
     outputKind = resolveOutputKind(options.output ?? input.output);
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
@@ -823,6 +909,7 @@ export async function runBuild(
         functionName,
         output: outputKind,
         linksObjects: checksProgram,
+        callable: callableSymbols(callees),
         required: options.reuse,
         id,
       });
@@ -1211,6 +1298,11 @@ export async function runBuild(
           }
         }
       }
+      // The build record is written next and names these files as what the
+      // build produced, so they are on the disk before it says so: a copy
+      // still in the page cache when the machine loses power leaves a
+      // successful build record pointing at nothing.
+      for (const path of delivered) await flushToDisk(path);
       reporter.stage("output", "ok", `Output (${outputKind}):\n${delivered.map((path) => `  ${path}`).join("\n")}`);
     }
     // A build with no program to check has proved everything its functions
@@ -1315,7 +1407,22 @@ export async function runStored(
     });
   }
   const input = await store.exists(paths.input) ? await store.read<SourceInput>(paths.input) : ({} as SourceInput);
-  const build = await store.exists(paths.build) ? await store.read<BuildStatus>(paths.build) : undefined;
+  const build = await store.readIfValid<BuildStatus>(paths.build);
+  // A build that failed selected nothing, so there is no candidate here that
+  // is the project's. Falling back to the last one stored would re-measure an
+  // implementation that was never delivered and write that measurement into
+  // the record as the project's own.
+  if (build !== undefined && build.status !== "success") {
+    throw new CompilerError({
+      category: "StorageError",
+      stage: action,
+      message: `project "${project}" has no successful build to ${action}`,
+      detail: [
+        `the last build of this project ${build.status === "building" ? "never finished" : "failed"}: ${build.error?.message ?? "no diagnostic is recorded"}`,
+        `run ${STATE_DIRECTORY} > projects > ${project} > build.json for the whole of it, then build again`,
+      ].join("\n"),
+    });
+  }
   const stored = await store.read<Record<string, AssemblyCandidate[]>>(paths.candidates);
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
@@ -1349,8 +1456,7 @@ export async function runStored(
     const functionName = unit.contract.function.name;
     const candidates = stored[functionName] ?? [];
     const chosen = build?.selectedCandidates?.[functionName];
-    const candidate =
-      chosen === undefined ? candidates[candidates.length - 1] : candidates.find((entry) => entry.id === chosen);
+    const candidate = candidates.find((entry) => entry.id === chosen);
     if (candidate === undefined) {
       throw new CompilerError({
         category: "StorageError",

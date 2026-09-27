@@ -22,6 +22,13 @@ export interface JsonStore {
   writeText(relativePath: string, contents: string): Promise<void>;
   remove(relativePath: string): Promise<void>;
   mkdirp(relativePath: string): Promise<void>;
+  /**
+   * The contents of a record that a build can do without: a missing file and
+   * a file that is not JSON are both no record at all. It is for the records
+   * a build regenerates when it cannot read them, never for one it has to be
+   * able to read.
+   */
+  readIfValid<T>(relativePath: string): Promise<T | undefined>;
 }
 
 export function serializeJson(value: unknown): string {
@@ -36,10 +43,16 @@ export function hashValue(value: unknown): string {
   return hashText(JSON.stringify(value));
 }
 
+/**
+ * Distinguishes the temporary files of writes that overlap. It counts every
+ * write in this process rather than every write of one store: two stores
+ * under different roots each start a per store counter at zero, and the
+ * second would then name its temporary file exactly as the first did.
+ */
+let temporaryWrites = 0;
+
 export function createJsonStore(root: string): JsonStore {
   const absoluteRoot = resolve(root);
-  /** Distinguishes the temporary files of writes that overlap. */
-  let written = 0;
 
   const resolveInStore = (relativePath: string): string => {
     if (isAbsolute(relativePath)) {
@@ -90,6 +103,11 @@ export function createJsonStore(root: string): JsonStore {
       }
     },
 
+    async readIfValid<T>(relativePath: string): Promise<T | undefined> {
+      if (!(await store.exists(relativePath))) return undefined;
+      return store.read<T>(relativePath).catch(() => undefined);
+    },
+
     async write<T>(relativePath: string, value: T): Promise<void> {
       const file = resolveInStore(relativePath);
       await store.mkdirp(dirname(relative(absoluteRoot, file)));
@@ -97,7 +115,7 @@ export function createJsonStore(root: string): JsonStore {
       // path would otherwise share this name: one would rename the other's
       // temporary away and the loser would fail on a file that no longer
       // exists.
-      const temporary = `${file}.${process.pid}.${written++}.tmp`;
+      const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
       try {
         await writeFile(temporary, serializeJson(value), "utf8");
         await rename(temporary, file);

@@ -150,6 +150,8 @@ class ProgramParser {
   private position = 0;
   /** Set when the construct read was reported, so it is not reported twice. */
   private refused = false;
+  /** Set while the value being read is the operand of a unary operator. */
+  private unaryOperand = false;
 
   constructor(tokens: Token[], path: string, diagnostics: Diagnostics) {
     this.tokens = tokens;
@@ -456,7 +458,7 @@ class ProgramParser {
       this.fail("a loop is written for (let i = from; i < to; i++)", this.peek());
       return this.skipLoop();
     }
-    const step = this.step(variable, down);
+    const step = this.step(variable, down, comparison.text);
     if (step.refused) return this.skipLoop();
     this.expect(")");
     return {
@@ -491,7 +493,7 @@ class ProgramParser {
    * the index already travels is no step at all, and `i -= n` is the value n
    * counted backwards, which a program writes as it wrote it.
    */
-  private step(variable: string, down: boolean): LoopStep {
+  private step(variable: string, down: boolean, comparison: string): LoopStep {
     const token = this.peek();
     if (token.kind !== "ident" || token.text !== variable) {
       this.fail("a loop advances its index", token);
@@ -501,9 +503,17 @@ class ProgramParser {
     const move = this.peek();
     if (move.text === "++" || move.text === "--") {
       this.next();
+      // A step that runs against the comparison is not a loop this compiler
+      // can describe: node counts `i < 3` with `i--` for ever, so the two
+      // readings are not two spellings of one loop. It is refused rather than
+      // turned round, which would run a body the source did not write.
+      if ((move.text === "--") !== down) {
+        this.fail(`the loop counts on "${comparison}" but its index moves with "${move.text}"`, move);
+        return { value: null, refused: true };
+      }
       // The loop already counts in the direction it travels, so a step of one
       // the way it travels is the step the driver would write anyway.
-      return { value: (move.text === "--") !== down ? { k: "number", text: "1" } : null, refused: false };
+      return { value: { k: "number", text: "1" }, refused: false };
     }
     const op = this.assignOperator();
     if (op !== "+=" && op !== "-=") {
@@ -635,14 +645,19 @@ class ProgramParser {
 
   /**
    * A sign, a `!`, a `~`, and the `++` and `--` that are not a value. The
-   * powers read a unary on their right, so `2 ** -1` is a value and `-2 ** 2`
-   * is the negation of the power, as it is in JavaScript.
+   * powers read a unary on their right, so `2 ** -1` is a value, and a unary
+   * has no power on its right, because JavaScript makes `-2 ** 2` an error
+   * rather than a number: write `-(2 ** 2)`.
    */
   private unary(): ProgramValue {
     const token = this.peek();
     if (token.kind === "punct" && (UNARY_OPS as readonly string[]).includes(token.text)) {
       this.next();
-      return { k: "unary", op: token.text as ProgramUnaryOp, operand: this.unary() };
+      const enclosing = this.unaryOperand;
+      this.unaryOperand = true;
+      const operand = this.unary();
+      this.unaryOperand = enclosing;
+      return { k: "unary", op: token.text as ProgramUnaryOp, operand };
     }
     if (token.text === "++" || token.text === "--") {
       const name = this.peek(1);
@@ -658,6 +673,11 @@ class ProgramParser {
   private power(): ProgramValue {
     const left = this.postfix();
     if (!this.at("**")) return left;
+    if (this.unaryOperand) {
+      this.fail("`**` may not follow a unary operator", this.peek());
+      this.next();
+      return { k: "binary", op: "**", left, right: this.unary() };
+    }
     this.next();
     return { k: "binary", op: "**", left, right: this.unary() };
   }
@@ -748,8 +768,13 @@ class ProgramParser {
       return { k: "name", name: token.text };
     }
     if (this.accept("(")) {
+      // Brackets end the operand of a unary operator: `-(2 ** 2)` is the
+      // negation of a power, and JavaScript reads it as one.
+      const enclosing = this.unaryOperand;
+      this.unaryOperand = false;
       const value = this.value();
       this.expect(")");
+      this.unaryOperand = enclosing;
       return value;
     }
     this.fail(`"${token.text}" is not a value a program can read`, token);

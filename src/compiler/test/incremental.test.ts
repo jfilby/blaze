@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
+import { readIncremental, reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
 import type { AssemblyCandidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
+import { createJsonStore } from "../core/json-store.ts";
+import { mkdtemp, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function contractOf(name: string, returns: string, objects: Record<string, ObjectLayout> = {}): FunctionContract {
   return {
@@ -119,4 +123,32 @@ test("only what a build proved, and only from the same inputs, may be reused", (
   const rejected = entry({ outcomes: [{ candidate: "c1", valid: false, failure: { category: "AssemblyError", stage: "assemble", message: "no" } }] });
   assert.equal(reusable(rejected, "k", true), null);
   assert.equal(reusable(entry({ selected: "c2" }), "k", true), null);
+});
+
+test("a record that is not JSON is no record, not a build that cannot start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blaze-incremental-"));
+  const store = createJsonStore(join(root, ".blaze"));
+  await store.writeText("projects/p/incremental.json", "{ not json");
+
+  // A cache the compiler cannot read is one it rebuilds. Failing here instead
+  // leaves a project with no way back short of deleting the file by hand.
+  assert.deepEqual(await readIncremental(store, "projects/p/incremental.json"), {});
+  assert.deepEqual(await readIncremental(store, "projects/absent.json"), {});
+});
+
+test("two stores writing the same path do not share a temporary name", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blaze-store-"));
+  const first = createJsonStore(join(root, ".blaze"));
+  const second = createJsonStore(join(root, ".blaze"));
+
+  // Both name their temporary by the file, the process and a counter. A
+  // counter per store restarts at zero for each of them, so two writes that
+  // overlap here would write the same temporary and one would rename the
+  // other's away.
+  await Promise.all([first.write("projects/p/build.json", { from: "first" }), second.write("projects/p/build.json", { from: "second" })]);
+
+  const written = await first.read<{ from: string }>("projects/p/build.json");
+  assert.ok(["first", "second"].includes(written.from), `unexpected record: ${JSON.stringify(written)}`);
+  const left = (await readdir(join(root, ".blaze/projects/p"))).filter((name) => name.endsWith(".tmp"));
+  assert.deepEqual(left, [], "a temporary file was left behind");
 });

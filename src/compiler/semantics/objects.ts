@@ -76,7 +76,7 @@ function alignUp(offset: number, align: number): number {
  * parameters as declared, and its own declarations as inferred.
  */
 class BodyTypes {
-  private readonly environment = new Map<string, Inferred>();
+  private environment = new Map<string, Inferred>();
   private readonly results: Inferred[] = [];
   private readonly path: string;
   private readonly functionName: string;
@@ -115,12 +115,20 @@ class BodyTypes {
       }
       case "assign": {
         const value = this.expression(statement.value);
-        if (!this.environment.has(statement.target)) this.environment.set(statement.target, value);
+        // A plain assignment changes what the name holds, and the layout is
+        // built from what the body stores. A compound one adds to what was
+        // there, so the type it had still holds.
+        if (statement.op === "=" || !this.environment.has(statement.target)) {
+          this.environment.set(statement.target, value);
+        }
         return;
       }
-      case "memberAssign":
-        this.expression(statement.value);
+      case "memberAssign": {
+        const value = this.expression(statement.value);
+        const base = this.environment.get(statement.base);
+        if (base !== undefined && base.kind === "object") this.write(base.key, statement.field, value);
         return;
+      }
       case "indexAssign":
         this.expression(statement.index);
         this.expression(statement.value);
@@ -143,8 +151,8 @@ class BodyTypes {
         return;
       case "if":
         this.expression(statement.condition);
-        this.statements(statement.then);
-        this.statements(statement.otherwise);
+        this.branch(statement.then);
+        this.branch(statement.otherwise);
         return;
       case "while":
       case "doWhile":
@@ -159,6 +167,21 @@ class BodyTypes {
       case "break":
       case "continue":
         return;
+    }
+  }
+
+  /**
+   * A branch sees what came before it and declares nothing for what follows.
+   * One flat environment let a name declared in one arm be read in the other
+   * and after the statement, so a body the source would not compile passed.
+   */
+  private branch(body: readonly Statement[]): void {
+    const outer = this.environment;
+    this.environment = new Map(outer);
+    try {
+      this.statements(body);
+    } finally {
+      this.environment = outer;
     }
   }
 
@@ -190,12 +213,7 @@ class BodyTypes {
       }
       case "member": {
         const base = this.expression(expression.base);
-        if (base.kind === "object") {
-          const field = this.field(base.key, expression.field);
-          this.environment.set(`${this.functionName}.${expression.field}`, field);
-          return field;
-        }
-        this.environment.set(`${this.functionName}.${expression.field}`, { kind: "type", type: ANY_REF });
+        if (base.kind === "object") return this.field(base.key, expression.field);
         return { kind: "type", type: ANY_REF };
       }
       case "call": {
@@ -230,10 +248,18 @@ class BodyTypes {
         const left = this.expression(expression.left);
         const right = this.expression(expression.right);
         if (COMPARISONS[expression.op] === true || LOGICAL[expression.op] === true) return { kind: "type", type: BOOL };
+        // `??` is neither a comparison nor a short circuit: it hands back one
+        // of its operands, so a reference stays a reference instead of
+        // becoming the double every other operator is.
+        if (expression.op === "??") return coalesce(left, right);
         return { kind: "type", type: numeric(left, right) };
       }
-      case "unary":
-        return expression.op === "!" ? { kind: "type", type: BOOL } : this.expression(expression.operand);
+      case "unary": {
+        // The operand is walked even for `!`, so a name it uses and an object
+        // it allocates are found the way any other operand's are.
+        const operand = this.expression(expression.operand);
+        return expression.op === "!" ? { kind: "type", type: BOOL } : operand;
+      }
       case "conditional": {
         this.expression(expression.condition);
         // Both branches are walked so both objects are laid out, but a choice
@@ -259,8 +285,12 @@ class BodyTypes {
   /** Registers the object a literal writes, and returns its key. */
   private object(fields: readonly { name: string; value: Expression }[]): string {
     const typed = fields.map((field) => ({ name: field.name, value: this.expression(field.value) }));
-    const key = typed.map((field) => `${field.name}:${describe(field.value)}`).join(",");
-    this.registered.set(key, { key, fields: typed });
+    // The key is a function of the shape alone, and the shape is written as
+    // JSON so that a field name cannot read like the key of another shape:
+    // `{ a: 1, b: 2 }` and `{ "a:f64,b": 2 }` hold different fields, and
+    // joining the names and their types with a separator gave both one.
+    const key = JSON.stringify(typed.map((field) => [field.name, describe(field.value)]));
+    if (!this.registered.has(key)) this.registered.set(key, { key, fields: typed });
     return key;
   }
 
@@ -269,6 +299,20 @@ class BodyTypes {
     const shape = this.registered.get(key);
     const field = shape?.fields.find((entry) => entry.name === name);
     return field?.value ?? { kind: "type", type: ANY_REF };
+  }
+
+  /**
+   * What a field holds once the body has written it. A layout is what the
+   * body stores, so a field written as `null` and then as a number is a
+   * number, and a field the body writes but the literal never held is a
+   * field of the object.
+   */
+  private write(key: string, name: string, value: Inferred): void {
+    const shape = this.registered.get(key);
+    if (shape === undefined) return;
+    const field = shape.fields.find((entry) => entry.name === name);
+    if (field === undefined) shape.fields.push({ name, value });
+    else field.value = value;
   }
 
   /** Every object this function wrote, for the program to name. */
@@ -292,6 +336,17 @@ function numeric(left: Inferred, right: Inferred): TypeExpr {
   if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64") return I64;
   if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64") return I64;
   return F64;
+}
+
+/**
+ * What `a ?? b` holds: its left operand, which is a reference where the value
+ * being chosen is one. Only an unshaped reference — the null a literal gives,
+ * and the `any` the source declared — says nothing, and takes the right.
+ */
+function coalesce(left: Inferred, right: Inferred): Inferred {
+  if (left.kind === "object") return left;
+  if (left.type.kind === "ref" && left.type.of === null && left.type.name === undefined) return right;
+  return left;
 }
 
 /**

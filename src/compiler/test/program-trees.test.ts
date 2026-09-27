@@ -182,3 +182,73 @@ test("a fallback keeps its arm when the left is a reference that may be null", a
   // fallback away and answered the comparison with the left side alone.
   assert.match(driver, /\(root\) == NULL\)\) \? \(fallback\) : \(root\)/);
 });
+
+test("a break frees the blocks it leaves and no block it stays inside", async () => {
+  const source = [
+    "let round = 0;",
+    "while (round < 3) {",
+    "  const inner = new Float64Array([round + 1]);",
+    "  let go = true;",
+    "  while (go) { break; }",
+    "  console.log(inner[0]);",
+    "  round += 1;",
+    "}",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+
+  // The break leaves the inner loop, not the block the buffer belongs to, so
+  // `inner` is still live where it is read. Releasing it there freed the
+  // allocation the read was about to name.
+  const read = driver.indexOf("inner[0]");
+  const release = driver.indexOf("blaze_rt_release(inner)");
+  assert.ok(read >= 0, "the buffer is read by the program");
+  assert.ok(release >= 0, "the buffer is released when its block ends");
+  assert.ok(release > read, "the buffer is released after its last read, not before it");
+  assert.equal(driver.split("blaze_rt_release(inner)").length - 1, 1, "the buffer is released exactly once");
+});
+
+test("one name may belong to one function across the whole program", () => {
+  const files: Record<string, string> = {
+    "main.ts": [
+      'import { helper } from "./a.ts";',
+      "export function shared(x: number): number {",
+      "  return x + 1;",
+      "}",
+      "helper(1);",
+      "",
+    ].join("\n"),
+    "a.ts": [
+      "export function helper(x: number): number {",
+      "  return x;",
+      "}",
+      "export function shared(x: number): number {",
+      "  return x + 2;",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const source = files["main.ts"] as string;
+
+  // Every function of a program is compiled on its own and linked beside the
+  // others by its name, and the object layouts are resolved by name too. Two
+  // files exporting one name used to overwrite each other on the way through:
+  // the loser kept a contract with no layouts at all, both were written to the
+  // same work directory, and the link failed with a duplicate symbol.
+  assert.throws(
+    () =>
+      runContractPhase({
+        frontend: frontendFor("typescript"),
+        input: { language: "typescript", source, entry: "" },
+        entry: { path: "main.ts", source },
+        read: (path) => files[path] ?? null,
+      }),
+    /"shared" is declared by both main\.ts and a\.ts/,
+  );
+});

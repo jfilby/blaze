@@ -273,8 +273,15 @@ export interface GenerationConfig {
    */
   functionConcurrency: number;
   /**
-   * Optional wall clock budget for one model request, retries included. Unset
-   * means wait as long as the model takes.
+   * Wall clock budget for ONE model request. Unset means wait as long as the
+   * model takes. Set it when a build must fail rather than wait.
+   *
+   * The budget is per request, not a budget shared across retries: every
+   * request is given the whole of it, and a request that exceeds it is not
+   * retried. The backend recognises that by the name the abort carries, and
+   * only a `TimeoutError` is a timeout: an `AbortError`, which is how a
+   * dropped connection arrives, is an ordinary provider failure and is asked
+   * for again.
    */
   timeoutSeconds?: number;
 }

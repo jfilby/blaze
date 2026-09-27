@@ -130,9 +130,8 @@ export function reusable(entry: IncrementalEntry | undefined, key: string, objec
  * build that fails.
  */
 export async function readIncremental(store: JsonStore, path: string): Promise<IncrementalRecord> {
-  if (!(await store.exists(path))) return {};
-  const value = await store.read<unknown>(path);
-  if (typeof value !== "object" || value === null) return {};
+  const value = await store.readIfValid<unknown>(path);
+  if (value === undefined || typeof value !== "object" || value === null) return {};
   const record: IncrementalRecord = {};
   for (const [functionName, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry !== "object" || entry === null) continue;

@@ -74,8 +74,10 @@ The credential comes from the environment. --model overrides the project, and
 the project overrides AI_MODEL.
 
 The compiler waits for the model for as long as it takes and says which model
-it is waiting on. Set generation.timeoutSeconds to make a model request give up
-instead, for example in a build that must not hang.
+it is waiting on. Set generation.timeoutSeconds to bound one model request
+instead, for example in a build that must not hang: every request is given the
+whole of that budget, and one that overruns it fails the build at once rather
+than being asked for again.
 
 A build is incremental. A function whose contract, the functions it is linked
 against, the target, the options and the model are all unchanged keeps the
@@ -149,11 +151,12 @@ function defaultProjectFile(): string {
 
 function optionNumber(value: string | undefined, name: string): number | undefined {
   if (value === undefined) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  // Strictly: `parseInt` reads "4x" as 4 and the flag then asks for something
+  // the user did not type, which is the one reading a number must not allow.
+  if (!/^[1-9]\d*$/.test(value)) {
     throw new Error(`${name} must be a positive integer, got "${value}"`);
   }
-  return parsed;
+  return Number(value);
 }
 
 function buildOptions(values: Record<string, unknown>, arguments_: readonly string[] = []): BuildOptions {

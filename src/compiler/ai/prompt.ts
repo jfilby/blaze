@@ -526,7 +526,11 @@ function runtimeNeeds(request: PromptRequest): RuntimeNeeds {
     const definition = body.definition;
     if (definition === undefined) continue;
     if (definition.allocates) Object.assign(needs, { memory: true, object: true });
-    if (definition.prints) needs.output = true;
+    // A function that prints text has to have text to print, and the only way
+    // to come by it is a string the runtime builds. Without the memory tag the
+    // constructor is filtered out of the ABI section and the prompt is left
+    // telling the model to print text it has no way to make.
+    if (definition.prints) Object.assign(needs, { output: true, memory: true });
     if (definition.readsArgv) needs.arguments = true;
   }
   return needs;

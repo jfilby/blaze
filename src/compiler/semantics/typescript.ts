@@ -38,7 +38,7 @@ import { parseType, typeToString } from "./contract.ts";
 import { ARGV, ARGV_LENGTH } from "./builtins.ts";
 
 export { ARGV, ARGV_LENGTH };
-import { assembleContract, type AccessRange } from "./contract-build.ts";
+import { assembleContract, bufferContract, type AccessRange } from "./contract-build.ts";
 import { normalizeNumeric, normalizeOptimize } from "./contract.ts";
 import { CompilerError, isCompilerError } from "../core/errors.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
@@ -195,6 +195,9 @@ const CONTRACT_OPERATORS: readonly BinaryOp[] = [
   "&&",
   "||",
 ];
+
+/** The operators a value an index is built from may use, as a contract states it. */
+const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/", "%"];
 
 const UNSUPPORTED_STATEMENTS = ["switch", "try", "throw", "class", "interface", "type", "enum", "import"];
 
@@ -1115,6 +1118,22 @@ class TypeScriptParser {
         if (base.k !== "ident") return this.missing(`"${op}" needs a name to change`, this.peek());
         return { k: "update", name: base.name, op, prefix: false };
       }
+      // These follow a value, so they are read here rather than as the name of
+      // the next expression statement: `n as number` and `n!` are not
+      // identifiers, and reading them as names reported the use of a name the
+      // source never wrote instead of the construct it wrote.
+      if (this.at("as") || this.at("satisfies") || this.at("!")) {
+        const operator = this.next();
+        this.report(
+          `"${operator.text}" is not supported`,
+          operator.text === "!"
+            ? "a compiled function takes the value a name holds, as it is"
+            : "a compiled function states the type a value already has, as its signature does",
+          operator,
+        );
+        if (operator.text !== "!") this.next();
+        continue;
+      }
       if (this.at(".")) {
         this.next();
         const field = this.next();
@@ -1232,11 +1251,59 @@ class Uncontractable extends Error {
   }
 }
 
-/** What a body does, as the contract states it when no expression can. */
-function usageOf(body: readonly Statement[]): { allocates: boolean; prints: boolean; readsArgv: boolean } {
+/**
+ * What a body does, as the contract states it when no expression can: whether
+ * it allocates, prints or reads the command line, and the buffer ranges it
+ * reads. The ranges are the ones the contracted path collects too, so a
+ * definition says which buffers it reads and how long they must be, exactly
+ * as a reduction does.
+ */
+function usageOf(declaration: TypeScriptFunction): {
+  allocates: boolean;
+  prints: boolean;
+  readsArgv: boolean;
+  accesses: AccessRange[];
+} {
+  const parameters = new Set(declaration.params.map((param) => param.name));
+  const accesses: AccessRange[] = [];
+  /** The range a loop index stands for, which its body reads through. */
+  const loops = new Map<string, { lo: string; hi: string }>();
   let allocates = false;
   let prints = false;
   let readsArgv = false;
+
+  /** The contract text of a value, or null when a contract cannot state it. */
+  const text = (value: Expression): string | null => {
+    switch (value.k) {
+      case "literal":
+      case "bigint":
+        return value.text;
+      case "ident":
+        return parameters.has(value.name) ? value.name : null;
+      case "length":
+        return parameters.has(value.buffer) ? `len(${value.buffer})` : null;
+      case "unary": {
+        if (value.op !== "-" && value.op !== "+") return null;
+        const operand = text(value.operand);
+        return operand === null ? null : `(${value.op}${operand})`;
+      }
+      case "binary": {
+        if (!ARITHMETIC_OPERATORS.includes(value.op)) return null;
+        const left = text(value.left);
+        const right = text(value.right);
+        return left === null || right === null ? null : `(${left} ${value.op} ${right})`;
+      }
+      default:
+        return null;
+    }
+  };
+
+  /** One access, stated once however many times the body reads it. */
+  const access = (parameter: string, lo: string, hi: string): void => {
+    const seen = accesses.some((entry) => entry.parameter === parameter && entry.lo === lo && entry.hi === hi);
+    if (!seen) accesses.push({ parameter, lo, hi });
+  };
+
   const expression = (value: Expression): void => {
     switch (value.k) {
       case "object":
@@ -1266,10 +1333,24 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
         expression(value.then);
         expression(value.otherwise);
         return;
-      case "index":
+      case "index": {
+        // A buffer the body indexes is a buffer it reads, at a position the
+        // contract states as a number. An index the contract language cannot
+        // name — one that reads a local, or a call — is left out rather than
+        // guessed at.
+        const base = value.base;
+        if (base.k === "ident" && parameters.has(base.name)) {
+          const loop = value.index.k === "ident" ? loops.get(value.index.name) : undefined;
+          if (loop !== undefined) access(base.name, loop.lo, loop.hi);
+          else {
+            const at = text(value.index);
+            if (at !== null) access(base.name, at, `(${at} + 1)`);
+          }
+        }
         expression(value.base);
         expression(value.index);
         return;
+      }
       case "member":
         expression(value.base);
         return;
@@ -1313,7 +1394,16 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
         // arguments like any other, and leaving it out let a contract claim
         // the source touches nothing outside them.
         if (one.step !== null) expression(one.step);
+        // The index of a counted loop stands for the whole range the loop
+        // walks, so a buffer its body reads is read over that range and not
+        // over the single turn that reads it.
+        const from = text(one.from);
+        const to = text(one.to);
+        const outer = loops.get(one.variable);
+        if (from !== null && to !== null) loops.set(one.variable, { lo: from, hi: one.inclusive ? `(${to} + 1)` : to });
         one.body.forEach(statement);
+        if (outer === undefined) loops.delete(one.variable);
+        else loops.set(one.variable, outer);
         return;
       case "while":
       case "doWhile":
@@ -1330,8 +1420,8 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
         return;
     }
   };
-  body.forEach(statement);
-  return { allocates, prints, readsArgv };
+  declaration.body.forEach(statement);
+  return { allocates, prints, readsArgv, accesses };
 }
 
 /**
@@ -1339,13 +1429,16 @@ function usageOf(body: readonly Statement[]): { allocates: boolean; prints: bool
  * signature, what the function does to the world, and the statements it runs:
  * the program contract, the target and the module source are what a backend
  * writes from, and the compiler checks the result by running the program.
+ * What the body reads is stated the same way a reduction states it, so a
+ * caller is still refused the buffers the body would read out of bounds.
  */
 /** The symbol a program entry named `main` is compiled under: a program is
  *  hosted by one that has a `main` of its own, so the two cannot share it. */
 const PROGRAM_ENTRY_SYMBOL = "blaze_main";
 
 function definitionContract(declaration: TypeScriptFunction, input: SourceInput): FunctionContract {
-  const usage = usageOf(declaration.body);
+  const usage = usageOf(declaration);
+  const buffers = bufferContract(declaration.params, usage.accesses);
   const effects: Effect[] = [];
   if (usage.allocates) effects.push("memory");
   if (usage.prints) effects.push("io");
@@ -1358,9 +1451,9 @@ function definitionContract(declaration: TypeScriptFunction, input: SourceInput)
       params: declaration.params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
       returns: typeToString(declaration.returns),
     },
-    requires: [],
+    requires: buffers.requires,
     ensures: [],
-    memory: { reads: [], writes: [], aliasing: [] },
+    memory: { reads: buffers.reads, writes: [], aliasing: [] },
     effects,
     numeric: normalizeNumeric(input.numeric),
     optimize: normalizeOptimize(input.optimize),
@@ -1531,6 +1624,16 @@ class BodyAnalysis {
         `accumulates with "${inner.op}"`,
         inner.line,
         "a reduction is a sum or a product, so a loop accumulates with `+=` or `*=`",
+      );
+    }
+    // A counted loop reads its bound again on every turn, so a body that
+    // writes it walks a range no contract can name: the one the reduction
+    // states is the bound as it stood before the first turn.
+    for (const bound of [statement.from, statement.to]) {
+      if (bound.k !== "ident" || bound.name !== inner.target) continue;
+      throw frontendError(
+        `the loop body writes "${inner.target}", the loop's own bound (line ${inner.line})`,
+        "a counted loop re-reads its bound on every turn, which a contract cannot state; loop to a bound the body does not write",
       );
     }
 

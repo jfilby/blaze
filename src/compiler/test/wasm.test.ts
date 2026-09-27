@@ -3,8 +3,9 @@ import { test } from "node:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateWasmHost, wasmSignature, wasmValueType } from "../toolchain/wasm.ts";
+import { buildWasm, generateWasmHost, wasmSignature, wasmValueType } from "../toolchain/wasm.ts";
 import { parseType } from "../semantics/contract.ts";
+import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
@@ -43,27 +44,28 @@ const CONTRACT: FunctionContract = {
 };
 
 /**
- * A hand assembled module that imports the host's memory and returns a
- * constant. It exercises the whole host path: module validation, buffer
- * placement, the wasm call and result formatting, without a WAT assembler.
+ * A hand assembled module that imports the host's memory, exports one name
+ * and returns a constant. It exercises the whole host path: module
+ * validation, buffer placement, the wasm call and result formatting, without
+ * a WAT assembler.
  */
-function constantModuleBytes(): Uint8Array {
+function constantModuleBytes(exportName: string, parameters: readonly number[] = [0x7f, 0x7f, 0x7f], result = 0x7d): Uint8Array {
   const utf8 = (text: string): number[] => [...text].map((character) => character.charCodeAt(0));
   /** A length prefixed vector of bytes, as used for names. */
   const bytes = (items: number[]): number[] => [items.length, ...items];
   /** A section: id, byte size, body. */
   const section = (id: number, body: number[]): number[] => [id, body.length, ...body];
 
-  // Type section: one function type, (i32, i32, i32) -> f32.
-  const types = section(1, [1, 0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7d]);
+  // Type section: one function type, parameters -> result.
+  const types = section(1, [1, 0x60, parameters.length, ...parameters, 0x01, result]);
   // Import section: one memory import named env.memory with four pages.
   const imports = section(2, [1, ...bytes(utf8("env")), ...bytes(utf8("memory")), 0x02, 0x00, 0x04]);
   // Function section: the one defined function uses type 0.
   const functions = section(3, [1, 0x00]);
-  // Export section: "dotProduct" is function 0, the only import is a memory.
-  const exports = section(7, [1, ...bytes(utf8("dotProduct")), 0x00, 0x00]);
-  // Code section: no locals, f32.const 42, end.
-  const body = [0x00, 0x43, 0x00, 0x00, 0x28, 0x42, 0x0b];
+  // Export section: the given name is function 0, the only import is a memory.
+  const exports = section(7, [1, ...bytes(utf8(exportName)), 0x00, 0x00]);
+  // Code section: no locals, the constant 42 in the result type, end.
+  const body = result === 0x7d ? [0x00, 0x43, 0x00, 0x00, 0x28, 0x42, 0x0b] : [0x00, 0x41, 0x2a, 0x0b];
   const code = section(10, [1, body.length, ...body]);
 
   return new Uint8Array([
@@ -83,6 +85,21 @@ function constantModuleBytes(): Uint8Array {
   ]);
 }
 
+/** A contract whose entry the frontend renames, as a TypeScript program is. */
+const RENAMED: FunctionContract = {
+  ...CONTRACT,
+  function: { ...CONTRACT.function, name: "main", symbol: "blaze_main" },
+};
+
+/** A host and a module written to a directory of their own, ready to run. */
+async function hostIn(directory: string, contract: FunctionContract, module: Uint8Array): Promise<[string, string]> {
+  const hostPath = join(directory, "host.mjs");
+  const modulePath = join(directory, "candidate.wasm");
+  await writeFile(hostPath, generateWasmHost(contract), "utf8");
+  await writeFile(modulePath, module);
+  return [hostPath, modulePath];
+}
+
 test("contract types map onto WebAssembly value types", () => {
   assert.equal(wasmValueType(parseType("usize")), "i32");
   assert.equal(wasmValueType(parseType("f32")), "f32");
@@ -93,7 +110,7 @@ test("contract types map onto WebAssembly value types", () => {
 });
 
 test("the hand assembled module satisfies the host import and export contract", () => {
-  const module = new WebAssembly.Module(constantModuleBytes());
+  const module = new WebAssembly.Module(constantModuleBytes("dotProduct"));
   const imports = WebAssembly.Module.imports(module);
   assert.deepEqual(
     imports.map((entry) => `${entry.module}.${entry.name}:${entry.kind}`),
@@ -107,10 +124,7 @@ test("the hand assembled module satisfies the host import and export contract", 
 
 test("the host calls the module, places buffers in its memory and prints results", async () => {
   const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
-  const hostPath = join(directory, "host.mjs");
-  const modulePath = join(directory, "candidate.wasm");
-  await writeFile(hostPath, generateWasmHost(CONTRACT), "utf8");
-  await writeFile(modulePath, constantModuleBytes());
+  const [hostPath, modulePath] = await hostIn(directory, CONTRACT, constantModuleBytes("dotProduct"));
 
   const vector: TestVector = {
     id: "two-elements",
@@ -128,13 +142,77 @@ test("the host calls the module, places buffers in its memory and prints results
 
 test("the host reports a module that does not export the contracted function", async () => {
   const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
-  const hostPath = join(directory, "host.mjs");
-  const modulePath = join(directory, "candidate.wasm");
-  const renamed = { ...CONTRACT, function: { ...CONTRACT.function, name: "otherName" } };
-  await writeFile(hostPath, generateWasmHost(renamed), "utf8");
-  await writeFile(modulePath, constantModuleBytes());
+  const [hostPath, modulePath] = await hostIn(directory, CONTRACT, constantModuleBytes("otherName"));
 
   const execution = run(process.execPath, [hostPath, modulePath], { input: "run\n0 0 0\n", timeoutMs: 60_000 });
   assert.notEqual(execution.code, 0);
-  assert.match(execution.stderr, /does not export otherName/);
+  assert.match(execution.stderr, /does not export dotProduct/);
 });
+
+test("the host calls the export the contract renames its entry to", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  // A candidate that follows the prompt exports the symbol, and the host has
+  // to be looking for the same name the module boundary is checked against.
+  const [hostPath, modulePath] = await hostIn(directory, RENAMED, constantModuleBytes("blaze_main"));
+
+  const execution = run(process.execPath, [hostPath, modulePath], { input: "run\n0 0 0\n", timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout.trim(), "RESULT 42");
+});
+
+test("a module that exports the unrenamed name is not the contracted function", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const [hostPath, modulePath] = await hostIn(directory, RENAMED, constantModuleBytes("main"));
+
+  const execution = run(process.execPath, [hostPath, modulePath], { input: "run\n0 0 0\n", timeoutMs: 60_000 });
+  assert.notEqual(execution.code, 0);
+  assert.match(execution.stderr, /does not export blaze_main/);
+});
+
+test("the module boundary is checked against the symbol the contract renames to", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  // Every rejection a wasm build raises names the function it is about, and
+  // the one the module is checked against.
+  await assert.rejects(
+    buildWasm({
+      text: "   \n",
+      contract: RENAMED,
+      textPath: join(directory, "candidate.wat"),
+      modulePath: join(directory, "candidate.wasm"),
+      hostPath: join(directory, "host.mjs"),
+      candidate: "c1",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CompilerError);
+      assert.equal(error.functionName, "blaze_main");
+      return true;
+    },
+  );
+});
+
+test("the host runs a contract that takes nothing, whose vectors are blank lines", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const contract: FunctionContract = {
+    ...CONTRACT,
+    function: { name: "answer", symbol: "blaze_answer", params: [], returns: "i32" },
+    requires: [],
+    ensures: ["result == 42"],
+    memory: { reads: [], writes: [], aliasing: [] },
+  };
+  const [hostPath, modulePath] = await hostIn(directory, contract, constantModuleBytes("blaze_answer", [], 0x7f));
+  const vectors: TestVector[] = [
+    { id: "first", kind: "fixed", args: {} },
+    { id: "second", kind: "random", args: {} },
+  ];
+
+  // A vector of a function with no parameters is an empty line, and the host
+  // has to read one per vector rather than skip past them.
+  assert.equal(encodeRunRequest(contract, vectors), "run\n\n\n");
+  const execution = run(process.execPath, [hostPath, modulePath], {
+    input: encodeRunRequest(contract, vectors),
+    timeoutMs: 60_000,
+  });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "RESULT 42\nRESULT 42\n");
+});
+

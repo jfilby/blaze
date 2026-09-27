@@ -37,15 +37,31 @@ export interface RunOptions {
 
 export interface RunResult {
   command: string;
+  /** The exit status, or null when the run did not exit on its own terms. */
   code: number | null;
   signal: string | null;
   stdout: string;
   stderr: string;
   durationNs: bigint;
+  /** True when the run was stopped at its deadline rather than finishing. */
   timedOut: boolean;
-  /** Set when the process could not be spawned at all (e.g. missing tool). */
+  /**
+   * Set when the process could not be spawned at all (e.g. missing tool).
+   * Never set for a run that started and was then stopped at its deadline:
+   * that run did start, and a consumer that reads the two as one thing blames
+   * the program for a timeout it was given.
+   */
   spawnError?: string;
 }
+
+/**
+ * The signal a run past its deadline is killed with. A run is stopped by the
+ * compiler rather than asked to stop, so the signal may not be one a program
+ * can trap or ignore: SIGTERM is a request, and a program that traps it has
+ * answered by doing nothing, which leaves the deadline unenforced for exactly
+ * as long as the program wanted.
+ */
+const KILL_SIGNAL = "SIGKILL";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
@@ -107,6 +123,7 @@ export function run(command: string, args: readonly string[], options: RunOption
     input: options.input,
     encoding: "utf8",
     timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    killSignal: KILL_SIGNAL,
     maxBuffer: options.maxBufferBytes ?? DEFAULT_MAX_BUFFER,
   });
   const durationNs = process.hrtime.bigint() - started;
@@ -116,19 +133,22 @@ export function run(command: string, args: readonly string[], options: RunOption
   // not there is the shell's exit status rather than a failure to spawn. It
   // is still a program that never ran, and it is reported as one.
   const missing = stderr.startsWith(MISSING) ? stderr.slice(MISSING.length).trim() : undefined;
+  // An expired deadline surfaces as an ETIMEDOUT error and the child is then
+  // killed, so that error is the clock rather than a failure to launch: the
+  // process ran, and only the deadline says otherwise.
+  const timedOut = missing === undefined && spawnFailure?.code === "ETIMEDOUT";
 
   return {
     command: formatCommand(command, args),
-    code: missing === undefined ? result.status : null,
+    // A run stopped at its deadline never exited, so it has no exit status to
+    // report: a consumer that reads the status alone would take a timeout for
+    // a program that finished successfully.
+    code: missing === undefined && !timedOut ? result.status : null,
     signal: missing === undefined ? result.signal : null,
     stdout: result.stdout ?? "",
     stderr: missing === undefined ? stderr : "",
     durationNs,
-    // An expired timeout surfaces as an ETIMEDOUT error and the child is then
-    // killed with killSignal, so a death by SIGTERM alone does not mean we
-    // stopped it: something outside this process did, and reporting that as a
-    // timeout blames the program for a timeout it never had.
-    timedOut: missing === undefined && spawnFailure?.code === "ETIMEDOUT",
+    timedOut,
     // Every spawn failure leaves status and signal null, which reads as a
     // clean exit to a consumer that only tests code. Report all of them, not
     // just a missing binary, so a process that never ran is never mistaken
@@ -136,10 +156,10 @@ export function run(command: string, args: readonly string[], options: RunOption
     spawnError:
       missing !== undefined
         ? missing
-        : spawnFailure === undefined
+        : timedOut || spawnFailure === undefined
           ? undefined
           : spawnFailure.code === "ENOENT"
-            ? `${command}: not found`
+            ? command
             : spawnFailure.message,
   };
 }

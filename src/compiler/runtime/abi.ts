@@ -228,7 +228,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
       ["size", "size_t"],
     ],
     "Writes the text of a number into a buffer, NUL terminated.",
-    "Writes into the caller's buffer and returns the length, which is never more than size - 1.",
+    "Writes into the caller's buffer and returns the number of bytes written, which is never more than size - 1, and 0 when size is 0.",
     { tags: ["output"] },
   ),
   entry(
@@ -298,6 +298,9 @@ typedef struct blaze_rt_header {
 #define BLAZE_RT_MAGIC 0x424C415A45525400ULL
 #define BLAZE_RT_HEADER_SIZE 48u
 #define BLAZE_RT_DEFAULT_ALIGNMENT 16u
+/* The largest a request may be, so a product of a count and an element size
+   that would wrap is refused rather than answered with a smaller block. */
+#define BLAZE_RT_MAX_ALLOCATION (1ULL << 40)
 `;
 
 const HEADER_EPILOGUE = `
@@ -327,23 +330,42 @@ export function runtimeSourceSource(): string {
 
 static const char* blaze_rt_last_message = "";
 
+static void blaze_rt_refuse(const char* what) {
+  fprintf(stderr, "blaze: %s\\n", what);
+  exit(2);
+}
+
 static blaze_rt_header* blaze_rt_header_of(void* pointer) {
   blaze_rt_header* header = (blaze_rt_header*)((char*)pointer - BLAZE_RT_HEADER_SIZE);
-  if (header->magic != BLAZE_RT_MAGIC) {
-    fprintf(stderr, "blaze: not a live runtime pointer\\n");
-    exit(2);
+  if (header->magic != BLAZE_RT_MAGIC) blaze_rt_refuse("not a live runtime pointer");
+  if (header->alignment == 0 || (header->alignment & (header->alignment - 1)) != 0) {
+    blaze_rt_refuse("corrupt runtime header");
   }
   return header;
 }
 
-static void* blaze_rt_block(size_t bytes, size_t alignment) {
-  if (alignment == 0) alignment = BLAZE_RT_DEFAULT_ALIGNMENT;
-  const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
-  char* base = (char*)calloc(1, total);
-  if (base == NULL) {
-    fprintf(stderr, "blaze: out of memory\\n");
+/* The size of count elements, refused when the product would leave the range
+   the runtime hands out: a wrapped size allocates a block far smaller than
+   the array the caller is about to write into, so the first element ends up
+   corrupting the heap. */
+static size_t blaze_rt_array_bytes(size_t count, size_t elementSize, const char* who) {
+  if (elementSize != 0 && count > BLAZE_RT_MAX_ALLOCATION / elementSize) {
+    fprintf(stderr, "blaze: %s: request too large\\n", who);
     exit(2);
   }
+  return count * elementSize;
+}
+
+static void* blaze_rt_block(size_t bytes, size_t alignment) {
+  if (alignment == 0) alignment = BLAZE_RT_DEFAULT_ALIGNMENT;
+  /* The payload is placed with a mask, which only places it for a power of
+     two, and an alignment past the cap names no block the runtime can give. */
+  if ((alignment & (alignment - 1)) != 0) blaze_rt_refuse("object alignment must be a power of two");
+  if (alignment > BLAZE_RT_MAX_ALLOCATION) blaze_rt_refuse("object alignment is too large");
+  if (bytes > BLAZE_RT_MAX_ALLOCATION - alignment - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("request too large");
+  const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
+  char* base = (char*)calloc(1, total);
+  if (base == NULL) blaze_rt_refuse("out of memory");
   const uintptr_t start = (uintptr_t)(base + BLAZE_RT_HEADER_SIZE);
   const uintptr_t aligned = (start + alignment - 1) & ~(uintptr_t)(alignment - 1);
   blaze_rt_header* header = (blaze_rt_header*)(aligned - BLAZE_RT_HEADER_SIZE);
@@ -407,11 +429,11 @@ const char* blaze_rt_string_clone(const char* text) {
 }
 
 void* blaze_rt_array_new(size_t count, size_t elementSize) {
-  return blaze_rt_allocate(count * elementSize);
+  return blaze_rt_allocate(blaze_rt_array_bytes(count, elementSize, "blaze_rt_array_new"));
 }
 
 void* blaze_rt_array_resize(void* pointer, size_t count, size_t elementSize) {
-  return blaze_rt_reallocate(pointer, count * elementSize);
+  return blaze_rt_reallocate(pointer, blaze_rt_array_bytes(count, elementSize, "blaze_rt_array_resize"));
 }
 
 void* blaze_rt_object_new(size_t bytes, size_t alignment) {
@@ -452,6 +474,18 @@ void blaze_rt_print_text(const char* text) {
   fputs(text, stdout);
 }
 
+/* Copies the bytes of a number that fit, NUL terminated, and reports how many
+   were written. The length the ABI promises is the number of bytes written,
+   so a caller that sizes or walks its buffer by it never steps past the end
+   of the buffer it was given. */
+static size_t blaze_rt_write_number(const char* text, size_t length, unsigned char* buffer, size_t size) {
+  if (size == 0) return 0;
+  const size_t written = length < size - 1 ? length : size - 1;
+  memcpy(buffer, text, written);
+  buffer[written] = '\\0';
+  return written;
+}
+
 size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) {
   /* The shortest decimal that reads back as this value, placed the way the
      source language places it: in full from 1e-6 up to 1e21, and in exponential
@@ -465,12 +499,7 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
   else if (isinf(value)) fixed = signbit(value) ? "-Infinity" : "Infinity";
   else if (value == 0.0) fixed = signbit(value) ? "-0" : "0";
   if (fixed != NULL) {
-    const size_t length = strlen(fixed);
-    if (size > 0) {
-      memcpy(buffer, fixed, length < size - 1 ? length : size - 1);
-      buffer[length < size ? length : size - 1] = '\\0';
-    }
-    return length;
+    return blaze_rt_write_number(fixed, strlen(fixed), buffer, size);
   }
 
   const int negative = signbit(value);
@@ -528,12 +557,7 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
     used += snprintf(written + used, sizeof written - (size_t)used, "e%c%d", point - 1 < 0 ? '-' : '+', point - 1 < 0 ? 1 - point : point - 1);
   }
 
-  const size_t length = (size_t)used;
-  if (size > 0) {
-    memcpy(buffer, written, length < size - 1 ? length : size - 1);
-    buffer[length < size ? length : size - 1] = '\\0';
-  }
-  return length;
+  return blaze_rt_write_number(written, (size_t)used, buffer, size);
 }
 
 void blaze_rt_print_number(double value) {

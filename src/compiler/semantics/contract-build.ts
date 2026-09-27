@@ -39,10 +39,21 @@ function isTautology(bound: string, parameter: string): boolean {
   return bound === `len(${parameter})`;
 }
 
-export function assembleContract(assembly: ContractAssembly): FunctionContract {
-  const { name, params, returns, accesses, input } = assembly;
+/** What the buffer ranges of a body state about what a caller must provide. */
+export interface BufferContract {
+  requires: string[];
+  reads: string[];
+}
 
-  const parameters: FunctionParam[] = params.map((param) => ({ name: param.name, type: typeToString(param.type) }));
+/**
+ * The preconditions and the reads the ranges a body reads state. Every
+ * frontend that says what a body reads says it this way, whether the body
+ * states its result as one expression or is contracted as a definition.
+ */
+export function bufferContract(
+  params: readonly { name: string; type: TypeExpr }[],
+  accesses: readonly AccessRange[],
+): BufferContract {
   const reads: string[] = [];
   const seenRanges = new Set<string>();
   for (const access of accesses) {
@@ -65,13 +76,20 @@ export function assembleContract(assembly: ContractAssembly): FunctionContract {
       requires.push(`len(${param.name}) >= ${access.hi}`);
     }
   }
+  return { requires, reads };
+}
+
+export function assembleContract(assembly: ContractAssembly): FunctionContract {
+  const { name, params, returns, accesses, input } = assembly;
+  const buffers = bufferContract(params, accesses);
+  const parameters: FunctionParam[] = params.map((param) => ({ name: param.name, type: typeToString(param.type) }));
 
   return {
     version: "1",
     function: { name, symbol: assembly.symbol ?? name, params: parameters, returns: typeToString(returns) },
-    requires,
+    requires: buffers.requires,
     ensures: [`result == ${assembly.result}`],
-    memory: { reads, writes: [], aliasing: [] },
+    memory: { reads: buffers.reads, writes: [], aliasing: [] },
     effects: [],
     numeric: normalizeNumeric(input.numeric),
     optimize: normalizeOptimize(input.optimize),

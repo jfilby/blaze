@@ -13,7 +13,7 @@
  */
 
 import { stat, writeFile } from "node:fs/promises";
-import { bufferElement, parseType, typeToString } from "../semantics/contract.ts";
+import { bufferElement, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, Runner, TypeExpr } from "../core/types.ts";
@@ -89,7 +89,10 @@ export interface WasmBuildResult {
  * reach a system interface.
  */
 export async function buildWasm(request: WasmBuildRequest): Promise<WasmBuildResult> {
-  const functionName = request.contract.function.name;
+  // The prompt names the export as the symbol, so the module boundary is
+  // checked against the symbol: a candidate that follows the prompt is the
+  // one that gets through.
+  const functionName = symbolOf(request.contract);
   if (request.text.trim() === "") {
     throw wasmError("the candidate contains no WebAssembly", undefined, functionName, request.candidate);
   }
@@ -177,7 +180,7 @@ function elementSize(type: TypeExpr): number {
  * format as the native harness.
  */
 export function generateWasmHost(contract: FunctionContract): string {
-  const functionName = contract.function.name;
+  const functionName = symbolOf(contract);
   const returns = parseType(contract.function.returns);
   if (returns.kind !== "primitive") {
     throw wasmError(`return type ${typeToString(returns)} is not supported for wasm`, undefined, functionName);
@@ -261,6 +264,9 @@ function view() {
 }
 
 const lines = readFileSync(0, "utf8").split("\\n");
+// A line is what the native harness reads with getline: the text before a
+// newline, so the empty text after the last one is not a line of its own.
+if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 let cursor = 0;
 function nextTokens() {
   while (cursor < lines.length) {
@@ -268,6 +274,15 @@ function nextTokens() {
     if (line !== "") return line.split(/\\s+/);
   }
   return null;
+}
+
+/* The header of the next vector, blank line and all: a vector of a function
+   that takes nothing is an empty line, and skipping it would eat the vectors
+   after it. Only a line with arguments on it to read is one to skip. */
+function nextHeader() {
+  if (cursor >= lines.length) return null;
+  const line = lines[cursor++].trim();
+  return line === "" ? [] : line.split(/\\s+/);
 }
 
 const first = nextTokens();
@@ -283,7 +298,7 @@ if (mode === "bench") {
 
 let calls = 0;
 for (;;) {
-  const header = nextTokens();
+  const header = ${contract.function.params.length === 0 ? "nextHeader()" : "nextTokens()"};
   if (header === null) break;
   if (header.length < ${contract.function.params.length}) fail("truncated test vector header");
 
@@ -292,7 +307,7 @@ ${dataReads}
 
   if (mode === "run") {
     const value = entry(${callArguments});
-    process.stdout.write("RESULT " + ${resultFormat} + "\\n");
+    process.stdout.write("RESULT " + (${resultFormat}) + "\\n");
     calls += 1;
     continue;
   }

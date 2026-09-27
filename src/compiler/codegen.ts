@@ -20,7 +20,7 @@ import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } from "./runtime/standalone.ts";
-import { writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
@@ -172,16 +172,29 @@ function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: 
  * delivers, and the object it links when the deliverable is a program. A
  * candidate whose files are not all here is rebuilt from its stored
  * implementation rather than reused, so nothing is delivered that is missing.
+ *
+ * A candidate that calls another function of the program has no executable of
+ * its own, because the program is the only thing that can link it. The
+ * assembly is what says so, and requiring the executable anyway would report
+ * a file that was never written as one that went missing, and rebuild the
+ * candidate on every build for the life of the project.
  */
 export function reusableFiles(
   workspace: CodegenWorkspace,
   candidate: string,
   output: OutputKind,
   linksObjects: boolean,
+  assembly: string,
+  callable: ReadonlySet<string>,
 ): string[] {
   const paths = candidateFiles(workspace, candidate, output);
   if (output === "machine") {
-    return [paths.implementation, paths.executable, ...(linksObjects ? [paths.object] : [])];
+    const standalone = programCalls(assembly, callable).length === 0;
+    return [
+      paths.implementation,
+      ...(standalone ? [paths.executable] : []),
+      ...(linksObjects ? [paths.object] : []),
+    ];
   }
   if (output === "wasm") return [paths.implementation, paths.module];
   return [paths.implementation];
@@ -361,7 +374,15 @@ async function materialize(
       hostPath: paths.host,
       candidate: candidate.id,
     });
-    return { runner: module.runner, sizeBytes: module.moduleSizeBytes, textSizeBytes: 0, implementationPath: paths.implementation };
+    // The module's own size is what the module weighs, but a size objective
+    // compares implementations, and the text is the implementation: reported
+    // as zero, every wasm candidate ties and the first one evaluated wins.
+    return {
+      runner: module.runner,
+      sizeBytes: module.moduleSizeBytes,
+      textSizeBytes: (await stat(paths.implementation)).size,
+      implementationPath: paths.implementation,
+    };
   }
   // The ABI header exists before the candidate is compiled: a C candidate may
   // include it, and the harness always does. It is written and compiled once
@@ -648,10 +669,14 @@ async function probeCandidate(
   return { called: true, reason: probeFault(result), stderr: result.stderr };
 }
 
-/** How a run that did not come back is described, or null when it did. */
-function probeFault(result: RunResult): string | null {
-  if (result.spawnError !== undefined) return `the probe did not start: ${result.spawnError}`;
+/**
+ * How a run that did not come back is described, or null when it did. A run
+ * stopped at the deadline is reported as that first: it started, so it is
+ * neither a probe that failed to launch nor a candidate that ran and failed.
+ */
+export function probeFault(result: RunResult): string | null {
   if (result.timedOut) return `the candidate did not return within ${PROBE_TIMEOUT_MS / 1000} seconds`;
+  if (result.spawnError !== undefined) return `the probe did not start: ${result.spawnError}`;
   if (result.signal !== null) return `the candidate was killed by ${result.signal}`;
   if (result.code !== 0) return `the candidate exited with status ${result.code}`;
   return null;

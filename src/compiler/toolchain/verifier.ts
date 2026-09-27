@@ -122,6 +122,33 @@ function isSignedName(name: string | undefined): boolean {
   return name === "isize" || (name !== undefined && name.startsWith("i"));
 }
 
+/** The smallest and the largest value each whole type holds. */
+const INTEGER_RANGE: Record<string, readonly [bigint, bigint]> = {
+  i8: [-128n, 127n],
+  i16: [-32768n, 32767n],
+  i32: [-2147483648n, 2147483647n],
+  i64: [-9223372036854775808n, 9223372036854775807n],
+  isize: [-9223372036854775808n, 9223372036854775807n],
+  u8: [0n, 255n],
+  u16: [0n, 65535n],
+  u32: [0n, 4294967295n],
+  u64: [0n, 18446744073709551615n],
+  usize: [0n, 18446744073709551615n],
+};
+
+/**
+ * A whole number drawn across the whole range of its type. A draw below 2^53
+ * is taken directly; a wider range is covered by 64 random bits, so the top of
+ * a 64 bit type is as reachable as the bottom.
+ */
+function randomWhole(random: () => number, low: bigint, high: bigint): bigint {
+  const span = high - low + 1n;
+  if (span <= BigInt(Number.MAX_SAFE_INTEGER)) return low + BigInt(Math.floor(random() * Number(span)));
+  const half = 0x1_0000_0000n;
+  const bits = BigInt.asUintN(64, (BigInt(Math.floor(random() * Number(half))) << 32n) | BigInt(Math.floor(random() * Number(half))));
+  return low + (bits % span);
+}
+
 function randomScalar(random: () => number, type: ScalarType): ScalarValue {
   if (type.name === "bool") return random() < 0.5;
   if (isFloatType(type.name as never)) {
@@ -130,12 +157,20 @@ function randomScalar(random: () => number, type: ScalarType): ScalarValue {
     return random() < 0.2 ? 0 : value;
   }
   if (type.kind === "primitive" && isIntegerType(type.name as never)) {
+    const [low, high] = INTEGER_RANGE[type.name as string];
     const choice = random();
-    if (choice < 0.15) return 0n;
-    if (choice < 0.3) return BigInt(1 + Math.floor(random() * 4));
-    if (choice < 0.8) return BigInt(Math.floor(random() * (2 + Math.floor(random() * 64))));
-    if (!isSignedName(type.name)) return BigInt(1 + Math.floor(random() * 256));
-    return BigInt(-Math.floor(random() * 16));
+    if (choice < 0.1) return 0n;
+    if (choice < 0.2) return BigInt(1 + Math.floor(random() * 4));
+    // The everyday values stay everyday, so a plan is still readable, but
+    // they are not the only ones: a candidate whose arithmetic does not wrap
+    // at the width of the type agrees with the contract over every other
+    // value and disagrees on these.
+    if (choice < 0.45) return BigInt(Math.floor(random() * 66)) - 32n;
+    if (choice < 0.6) {
+      const edges = [low, high, low + 1n, high - 1n, low + 2n, high - 2n];
+      return edges[Math.floor(random() * edges.length)];
+    }
+    return randomWhole(random, low, high);
   }
   throw new CompilerError({
     category: "VerificationError",

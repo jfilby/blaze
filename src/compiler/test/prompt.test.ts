@@ -263,6 +263,64 @@ test("the runtime section offers the entry points a candidate can reach", () => 
   assert.doesNotMatch(dot, /blaze_rt_print_number/);
 });
 
+/**
+ * A function that prints and allocates nothing: the shape the compiler
+ * contracts for a `void` function whose body is a console.log. It is the
+ * smallest program there is, and the one the runtime section has to be right
+ * about.
+ */
+const SAYING = {
+  "main.ts": 'import { say } from "./say.ts";\nsay();\n',
+  "say.ts": "export function say(): void {\n  console.log(`hello`);\n}\n",
+};
+
+/**
+ * A definition contract that reaches for nothing at all. Neither frontend
+ * contracts a body this silent today, and the rule the runtime section follows
+ * is stated over exactly this shape: a function that neither prints, nor
+ * allocates, nor reads the command line is offered no runtime service, and in
+ * particular no allocator to build a string with.
+ */
+const SILENT: FunctionContract = {
+  version: "1",
+  function: { name: "hold", symbol: "hold", params: [], returns: "void" },
+  requires: [],
+  ensures: [],
+  memory: { reads: [], writes: [], aliasing: [] },
+  effects: [],
+  numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+  optimize: { primary: "throughput" },
+  definition: { allocates: false, prints: false, readsArgv: false, objects: {}, statements: [] },
+};
+
+test("a function that prints text is told how to make the text", () => {
+  const program = programOf("typescript", SAYING, "main.ts");
+  const sources = Object.entries(SAYING).map(([path, source]) => ({ path, source }));
+  const prompt = buildUserPrompt(
+    request({
+      contract: program.files.find((file) => file.path === "say.ts")!.functions.say,
+      unit: { file: "say.ts", function: "say" },
+      program,
+      sources,
+    }),
+  );
+
+  // The prompt tells this candidate to print with blaze_rt_print_text, and
+  // the ABI allows nothing but the runtime to build the string it prints:
+  // offering the printer without the constructor is an instruction the model
+  // cannot follow.
+  assert.match(prompt, /blaze_rt_print_text/);
+  assert.match(prompt, /blaze_rt_string_new/);
+
+  // A function that prints nothing needs no string, and is offered none.
+  const trees = programOf("typescript", TREES, "1.ts");
+  const silent = buildUserPrompt(
+    request({ contract: SILENT, unit: { file: "hold.ts", function: "hold" }, program: trees, sources: [] }),
+  );
+  assert.doesNotMatch(silent, /blaze_rt_string_new/);
+  assert.doesNotMatch(silent, /blaze_rt_print_text/);
+});
+
 test("the system prompt describes the build the model is in", () => {
   const native = buildSystemPrompt("machine");
   assert.match(native, /architecture prelude, the harness, the host and the build are compiler/);

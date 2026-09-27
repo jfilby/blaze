@@ -189,14 +189,24 @@ export interface ResponseRetry {
  * How long the first re-request waits, doubling for each one after it: a
  * provider answering with nothing is usually busy, and an answer asked for
  * while it still is comes back the same.
+ *
+ * The doubling stops at the cap. A project that asks for a few thousand
+ * re-requests would otherwise leave the last of them waiting for a length of
+ * time no build outlives, with nothing said about it, and the cap costs
+ * nothing: a wait this long is a wait the provider has answered within.
  */
 const RETRY_BACKOFF_MS = 500;
+const RETRY_BACKOFF_MAX_MS = 8_000;
 
 export interface BackendOptions {
   /**
-   * Wall clock budget for one model request. Unset by default: a model that
-   * thinks for a long time is not a failure, and the compiler says which model
-   * it is waiting on. Set it when a build must fail rather than wait.
+   * Wall clock budget for ONE model request. Unset by default: a model that
+   * thinks for a long time is not a failure, and the compiler says which
+   * model it is waiting on. Set it when a build must fail rather than wait.
+   *
+   * The budget is per request, not per build: every request is given the
+   * whole of it, and one that overruns it fails the build at once rather than
+   * spending a re-request on it.
    */
   timeoutMs?: number;
   /**
@@ -305,7 +315,7 @@ export class VercelAiBackend implements AiBackend {
           reason: cause.reason,
           ...(cause.stop === undefined ? {} : { stop: cause.stop }),
         });
-        await sleep(RETRY_BACKOFF_MS * 2 ** retry);
+        await sleep(Math.min(RETRY_BACKOFF_MS * 2 ** retry, RETRY_BACKOFF_MAX_MS));
       }
     }
 
@@ -329,7 +339,8 @@ export class VercelAiBackend implements AiBackend {
       // The system text goes in `instructions`, not a system message: that is
       // the portable form, and providers such as OpenRouter reject a system
       // message outright. A budget, when the project sets one, bounds this one
-      // call; a re-request is asked for again, not run inside what is left.
+      // call: each request is given the whole of it, and a re-request is not
+      // run inside what this one left.
       const result = await generateText({
         model,
         instructions: system,
@@ -360,6 +371,10 @@ export class VercelAiBackend implements AiBackend {
           ),
         );
       }
+      // Everything else the provider does to a request is transient, and is
+      // asked for again: a connection that dropped mid-reply is not a model
+      // that will not answer, and spending a re-request on it is what a
+      // re-request is for.
       throw new UnusableAnswer(
         "the provider request failed",
         true,
@@ -404,13 +419,17 @@ export class VercelAiBackend implements AiBackend {
   }
 }
 
-/** The AI SDK wraps the abort; the name survives the wrapping. */
+/**
+ * A request that ran out of time, and nothing else. The name is what tells
+ * them apart: a `TimeoutError` is the deadline this compiler set expiring,
+ * and only that is a decision about the clock. An `AbortError` is how a
+ * dropped connection or a cancelled request surfaces, and reading it as a
+ * timeout fails a build over a network that blinked.
+ */
 function isTimeout(cause: unknown): boolean {
   if (cause instanceof Error) {
-    if (cause.name === "TimeoutError" || cause.name === "AbortError") return true;
-    if (cause.cause instanceof Error && (cause.cause.name === "TimeoutError" || cause.cause.name === "AbortError")) {
-      return true;
-    }
+    if (cause.name === "TimeoutError") return true;
+    if (cause.cause instanceof Error && cause.cause.name === "TimeoutError") return true;
   }
   return false;
 }
@@ -420,7 +439,9 @@ function isTimeout(cause: unknown): boolean {
 /* -------------------------------------------------------------------------- */
 
 interface ReplayFile {
-  candidates?: string[];
+  /** Unvalidated: a replay file is written by hand, and what it holds is
+   *  checked where it is read rather than taken on the shape of this. */
+  candidates?: unknown;
 }
 
 export class ReplayBackend implements AiBackend {
@@ -453,10 +474,22 @@ export class ReplayBackend implements AiBackend {
       } catch (cause) {
         throw generationError(`replay file ${file} is not valid JSON`, cause instanceof Error ? cause.message : String(cause));
       }
-      if (!Array.isArray(parsed.candidates) || parsed.candidates.length === 0) {
+      const recorded: unknown = parsed.candidates;
+      if (!Array.isArray(recorded) || recorded.length === 0) {
         throw generationError(`replay file ${file} must contain a non-empty "candidates" array`);
       }
-      this.entries = parsed.candidates;
+      // Every entry is what one answer of an offline build is made of, so an
+      // entry that is not text is a broken replay file and not a request that
+      // failed: casting it here would carry a number into the assembly
+      // extractor and report the crash as if the model had answered badly.
+      const entries: string[] = [];
+      for (const [index, entry] of recorded.entries()) {
+        if (typeof entry !== "string") {
+          throw generationError(`replay file ${file} has a "candidates" entry ${index} that is not text`);
+        }
+        entries.push(entry);
+      }
+      this.entries = entries;
       return this.entries;
     }
     this.entries = [trimmed];
@@ -465,6 +498,12 @@ export class ReplayBackend implements AiBackend {
 
   async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
     const entries = await this.load();
+    // A position before the first entry is not a position: a build names its
+    // candidates from one, so one below that is a caller that lost count, and
+    // serving it an answer from the end of the file would hide that.
+    if (!Number.isInteger(sequence) || sequence < 1) {
+      throw generationError(`the replay backend was asked for candidate ${sequence}, which is not a candidate`);
+    }
     // Answers are served by record position, not by a shared cursor: candidates
     // are generated at the same time, and a cursor would hand them out in
     // whatever order they happened to reach the backend.

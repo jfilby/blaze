@@ -74,7 +74,11 @@ function mapNimType(text: string, position: string): TypeExpr {
   if (array !== null) {
     const [, lengthText, elementText] = array;
     const range = /^(\d+)\s*\.\.\s*(\d+)$/.exec(lengthText.trim());
-    const length = range === null ? Number.parseInt(lengthText.trim(), 10) : Number(range[2]) + 1;
+    // `array[lo..hi, T]` holds every element from lo to hi, so its length is
+    // the two bounds and not the upper one alone: `array[1..3, T]` is three
+    // elements, and the buffer, the preconditions and every index the body
+    // reads are all wrong when it is four.
+    const length = range === null ? Number.parseInt(lengthText.trim(), 10) : Number(range[2]) - Number(range[1]) + 1;
     if (!Number.isInteger(length) || length <= 0) {
       throw frontendError(`unsupported array length "${lengthText}"`, `at ${position}`);
     }
@@ -554,6 +558,17 @@ class BodyAnalysis {
     }
     if (inner.op === "-=") {
       throw frontendError(`"-=" inside a loop is not supported (line ${inner.line})`);
+    }
+
+    // A counted loop reads its bound again on every turn, so a body that
+    // writes it walks a range no contract can name: the one the reduction
+    // states is the bound as it stood before the first turn.
+    for (const bound of [statement.from, statement.to]) {
+      if (bound.k !== "ident" || bound.name !== inner.target) continue;
+      throw frontendError(
+        `the loop body writes "${inner.target}", the loop's own bound (line ${inner.line})`,
+        "a counted loop re-reads its bound on every turn, which a contract cannot state; loop to a bound the body does not write",
+      );
     }
 
     const from = this.serialize(statement.from, null, statement.line);

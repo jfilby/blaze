@@ -18,7 +18,7 @@ import { run } from "../core/process.ts";
 import { EXECUTABLE_SUFFIX } from "../core/target.ts";
 import { isFloatType, parseType, typeToString } from "../semantics/contract.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
-import type { FunctionContract, FunctionParam, Runner, TypeExpr } from "../core/types.ts";
+import type { FunctionContract, FunctionParam, ObjectLayout, Runner, TypeExpr } from "../core/types.ts";
 import { RUNTIME_ANCHOR, RUNTIME_NAME } from "./abi.ts";
 import { symbolOf } from "../semantics/contract.ts";
 
@@ -101,6 +101,110 @@ export function nimType(type: TypeExpr): string {
   return elementNimType(type);
 }
 
+/** The names Nim reserves, and the names the generated Nim hosts hold. */
+const NIM_RESERVED: Record<string, true> = {
+  addr: true,
+  and: true,
+  as: true,
+  asm: true,
+  bind: true,
+  block: true,
+  break: true,
+  case: true,
+  cast: true,
+  concept: true,
+  const: true,
+  continue: true,
+  converter: true,
+  defer: true,
+  discard: true,
+  distinct: true,
+  div: true,
+  do: true,
+  elif: true,
+  else: true,
+  end: true,
+  enum: true,
+  except: true,
+  export: true,
+  finally: true,
+  for: true,
+  from: true,
+  func: true,
+  if: true,
+  import: true,
+  in: true,
+  include: true,
+  interface: true,
+  is: true,
+  isnot: true,
+  iterator: true,
+  let: true,
+  macro: true,
+  method: true,
+  mixin: true,
+  mod: true,
+  nil: true,
+  not: true,
+  object: true,
+  of: true,
+  or: true,
+  out: true,
+  proc: true,
+  ptr: true,
+  raise: true,
+  ref: true,
+  return: true,
+  shl: true,
+  shr: true,
+  static: true,
+  template: true,
+  try: true,
+  tuple: true,
+  type: true,
+  using: true,
+  var: true,
+  when: true,
+  while: true,
+  xor: true,
+  yield: true,
+  result: true,
+  stdout: true,
+  programArguments: true,
+  runtimeAbi: true,
+};
+
+/**
+ * A source name Nim can hold. One that is not an identifier is prefixed and
+ * one that is a Nim keyword, or a name a generated host holds, takes a
+ * suffix: neither spelling parses, so the whole program would fail to build.
+ */
+export function nimName(name: string): string {
+  const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `field_${name}`;
+  return NIM_RESERVED[identifier] === true ? `${identifier}_` : identifier;
+}
+
+/** The Nim object types a contract lays out, in the order the contract names them. */
+export function nimObjectDeclarations(objects: Record<string, ObjectLayout>): string {
+  return Object.values(objects)
+    .map((object) => {
+      const fields = object.fields
+        .map((field) => `    ${nimName(field.name)}*: ${nimType(parseType(field.type))}`)
+        .join("\n");
+      return `type\n  ${object.name}* = ref object of RootObj\n${fields}`;
+    })
+    .join("\n");
+}
+
+/**
+ * The text of a data string as a Nim literal holds it. A triple quoted Nim
+ * string ends at the first `"""` in it, so the request the build embedded has
+ * to keep its own quotes from spelling the end of the literal.
+ */
+export function nimRawString(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 /* -------------------------------------------------------------------------- */
 /* The adapter                                                                */
 /* -------------------------------------------------------------------------- */
@@ -133,14 +237,36 @@ proc alignUp(value, alignment: uint64): uint64 =
 proc headerOf(pointer: pointer): ptr BlazeHeader =
   cast[ptr BlazeHeader](cast[uint](pointer) - BlazeHeaderSize)
 
+## The message of the last blaze_rt_raise, borrowed by blaze_rt_last_error.
+var blazeLastError = ""
+
+## Stops the process where the C runtime would. A candidate is an assembler
+## object with no Nim exception handler, so a raise here finds nothing to
+## unwind: control returns to the instruction after the candidate's call and
+## the function carries on with whatever was wrong. Exit is the only way to
+## stop there, and it is what the C runtime does.
+proc blazeStop(message: string) {.noreturn.} =
+  stderr.write("blaze: " & message & "\\n")
+  stderr.flushFile()
+  quit(2)
+
 proc check(pointer: pointer, who: string): ptr BlazeHeader =
   if pointer == nil:
-    raise newException(ValueError, who & ": null pointer")
+    blazeStop(who & ": null pointer")
   result = headerOf(pointer)
   if result[].magic != BlazeMagic:
-    raise newException(ValueError, who & ": not a live blaze pointer")
+    blazeStop(who & ": not a live blaze pointer")
   if result[].alignment == 0 or (result[].alignment and (result[].alignment - 1)) != 0:
-    raise newException(ValueError, who & ": corrupt blaze header")
+    blazeStop(who & ": corrupt blaze header")
+
+## The size of count elements, refused when the product would leave the range
+## the runtime hands out: a wrapped size allocates a block far smaller than the
+## array the caller is about to write into, so the first element ends up
+## corrupting the heap.
+proc arrayBytes(count, elementSize: csize_t, who: string): csize_t =
+  if elementSize != 0 and count.uint64 > BlazeMaxAllocation div elementSize.uint64:
+    blazeStop(who & ": request too large")
+  result = (count.uint64 * elementSize.uint64).csize_t
 
 proc blaze_rt_initialize*() {.exportc, cdecl.} =
   discard
@@ -151,10 +277,10 @@ proc blaze_rt_finalize*() {.exportc, cdecl.} =
 proc blaze_rt_allocate*(bytes: csize_t): pointer {.exportc, cdecl.} =
   let total = bytes.uint64 + BlazeHeaderSize
   if total > BlazeMaxAllocation:
-    raise newException(ValueError, "blaze_rt_allocate: request too large")
+    blazeStop("blaze_rt_allocate: request too large")
   let base = allocShared0(int(total))
   if base == nil:
-    raise newException(OutOfMemDefect, "blaze_rt_allocate: out of memory")
+    blazeStop("blaze_rt_allocate: out of memory")
   var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes.uint64,
                            alignment: BlazeDefaultAlignment, refs: 1)
   cast[ptr BlazeHeader](base)[] = header
@@ -163,17 +289,17 @@ proc blaze_rt_allocate*(bytes: csize_t): pointer {.exportc, cdecl.} =
 proc blaze_rt_object_new*(bytes, alignment: csize_t): pointer {.exportc, cdecl.} =
   let align = if alignment == 0: BlazeDefaultAlignment else: alignment.uint64
   if (align and (align - 1)) != 0:
-    raise newException(ValueError, "blaze_rt_object_new: alignment must be a power of two")
+    blazeStop("blaze_rt_object_new: alignment must be a power of two")
   # The payload starts at the first aligned address past the header, so the
   # block has to cover the gap that alignment leaves as well as the bytes it
   # holds: sizing it by the bytes alone returns a pointer past the end of the
   # allocation. The header follows the payload, so it is written there too.
   let total = bytes.uint64 + align + BlazeHeaderSize
   if total > BlazeMaxAllocation:
-    raise newException(ValueError, "blaze_rt_object_new: request too large")
+    blazeStop("blaze_rt_object_new: request too large")
   let base = allocShared0(int(total))
   if base == nil:
-    raise newException(OutOfMemDefect, "blaze_rt_object_new: out of memory")
+    blazeStop("blaze_rt_object_new: out of memory")
   let payload = alignUp(cast[uint](base) + BlazeHeaderSize, align)
   var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes.uint64,
                            alignment: align, refs: 1)
@@ -204,10 +330,10 @@ proc blaze_rt_reallocate*(pointer: pointer, bytes: csize_t): pointer {.exportc, 
   let previous = header[]
   let total = bytes.uint64 + previous.alignment + BlazeHeaderSize
   if total > BlazeMaxAllocation:
-    raise newException(ValueError, "blaze_rt_reallocate: request too large")
+    blazeStop("blaze_rt_reallocate: request too large")
   let grown = allocShared0(int(total))
   if grown == nil:
-    raise newException(OutOfMemDefect, "blaze_rt_reallocate: out of memory")
+    blazeStop("blaze_rt_reallocate: out of memory")
   let payload = alignUp(cast[uint](grown) + BlazeHeaderSize, previous.alignment)
   # A fresh block can align its payload differently, so the bytes travel to
   # where the new header says they are rather than staying where they were.
@@ -237,10 +363,10 @@ proc blaze_rt_string_clone*(text: cstring): cstring {.exportc, cdecl.} =
   blaze_rt_string_new(cast[pointer](text), blaze_rt_string_length(text))
 
 proc blaze_rt_array_new*(count, elementSize: csize_t): pointer {.exportc, cdecl.} =
-  blaze_rt_allocate(count * elementSize)
+  blaze_rt_allocate(arrayBytes(count, elementSize, "blaze_rt_array_new"))
 
 proc blaze_rt_array_resize*(pointer: pointer, count, elementSize: csize_t): pointer {.exportc, cdecl.} =
-  blaze_rt_reallocate(pointer, count * elementSize)
+  blaze_rt_reallocate(pointer, arrayBytes(count, elementSize, "blaze_rt_array_resize"))
 
 proc blaze_rt_object_size*(pointer: pointer): csize_t {.exportc, cdecl.} =
   if pointer == nil:
@@ -248,7 +374,7 @@ proc blaze_rt_object_size*(pointer: pointer): csize_t {.exportc, cdecl.} =
   check(pointer, "blaze_rt_object_size")[].length
 
 proc blaze_rt_last_error*(): cstring {.exportc, cdecl.} =
-  ""
+  blazeLastError.cstring
 
 var blazeArguments: seq[float64] = @[]
 
@@ -317,17 +443,21 @@ proc blaze_rt_print_number*(value: float64) {.exportc, cdecl.} =
 
 proc blaze_rt_format_number*(value: float64, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =
   let text = blazeShortest(value)
-  if size > 0:
-    let written = min(csize_t(text.len), size - 1)
-    if written > 0: copyMem(buffer, unsafeAddr text[0], int(written))
-    cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
-  csize_t(text.len)
+  if size == 0:
+    return 0
+  # The length the ABI promises is the number of bytes written, so a caller
+  # that sizes or walks a buffer by it never steps past the end of its own.
+  let written = min(csize_t(text.len), size - 1)
+  if written > 0: copyMem(buffer, unsafeAddr text[0], int(written))
+  cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
+  written
 
 proc blaze_rt_print_newline*() {.exportc, cdecl.} =
   stdout.write("\\n")
 
 proc blaze_rt_raise*(message: cstring) {.exportc, cdecl, noreturn.} =
-  raise newException(ValueError, if message == nil: "" else: $message)
+  blazeLastError = if message == nil: "" else: $message
+  blazeStop(blazeLastError)
 `;
 }
 
@@ -440,6 +570,10 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
     body.push(
       `  ${name}_count = (if declared_${name} < 0: 0'u64 else: declared_${name}.uint64).csize_t`,
     );
+    // The previous vector's block is released before the next one overwrites
+    // the pointer: a reader that runs once per vector would otherwise keep
+    // every block but the last, up to the cap below each time.
+    body.push(`  ${RUNTIME_NAME}_release(cast[pointer](${name}_storage))`);
     body.push(`  ${name}_storage = nil`);
     body.push(`  if declared_${name} >= 0:`);
     body.push(`    if ${name}_count > (1'u64 shl 28).csize_t: fail("buffer too large")`);
@@ -448,7 +582,6 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
       `      ${name}_storage = cast[ptr UncheckedArray[${elementNimType(type.of)}]](\n` +
         `        ${RUNTIME_NAME}_allocate(${name}_count * ${elementSize(type.of)}))`,
     );
-    body.push(`      if ${name}_storage == nil: fail("out of memory")`);
   });
   return body.join("\n");
 }
@@ -499,11 +632,16 @@ export function generateHostSource(contract: FunctionContract, demoRequest: stri
   const declaration = `extern ${cDeclarationType(returns)} ${name}(${cParameters || "void"});`;
   const invocation = callExpression(contract, types, names);
   const anchor = RUNTIME_ANCHOR.map((symbol) => `  cast[pointer](${symbol}),`).join("\n");
+  // A `ref` parameter is named after the object it points at, so the types the
+  // contract lays out are declared before the signature that spells them.
+  const objects = nimObjectDeclarations(contract.definition?.objects ?? {});
 
   return `${HOST_PRELUDE}
 {.emit: """
 ${declaration}
 """.}
+
+${objects}
 
 proc ${name}(${nimParameters}): ${nimType(returns)} {.importc: "${name}", nodecl.}
 
@@ -517,7 +655,7 @@ proc readData() =
 ${dataReader(types, names)}
 
 const demoRequestText = """
-${demoRequest}"""
+${nimRawString(demoRequest)}"""
 
 
 proc main() =

@@ -19,11 +19,21 @@ import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
 import { generateProgramSource, type PrintKind, type ProgramTarget, type ValueKind } from "./program-emit.ts";
 import type { ResolvedCall, ResolvedProgram } from "./program.ts";
 import type { FunctionSignature, Runner, TypeExpr } from "../core/types.ts";
-import { RUNTIME_NAME } from "../runtime/abi.ts";
+import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { ARGV, ARGV_LENGTH } from "../semantics/builtins.ts";
 
-/** The names C reserves, and the names the driver itself holds. */
-const RESERVED: Record<string, true> = {
+/** The keywords C reserves, complete: a driver that writes a source name down needs one. */
+const KEYWORDS: Record<string, true> = {
+  _Alignas: true,
+  _Alignof: true,
+  _Atomic: true,
+  _Bool: true,
+  _Complex: true,
+  _Generic: true,
+  _Imaginary: true,
+  _Noreturn: true,
+  _Static_assert: true,
+  _Thread_local: true,
   auto: true,
   break: true,
   case: true,
@@ -58,8 +68,64 @@ const RESERVED: Record<string, true> = {
   void: true,
   volatile: true,
   while: true,
-  arguments: true,
 };
+
+/** The bit widths the <stdint.h> limit and type macros are named after. */
+const STDINT_WIDTHS: readonly number[] = [8, 16, 32, 64];
+
+/**
+ * The identifiers the standard headers the driver includes define. A program
+ * that declares one of them writes down a C name the header has already taken:
+ * `bool` is the `_Bool` of <stdbool.h> and `size_t` is a typedef, and either
+ * one is a diagnostic the C compiler raises on source that runs.
+ */
+function headerNames(): Record<string, true> {
+  const names: Record<string, true> = {};
+  const take = (...taken: string[]): void => {
+    for (const name of taken) names[name] = true;
+  };
+  // <stdbool.h>, and the typedefs of <stddef.h> and <stdint.h>.
+  take("bool", "true", "false", "__bool_true_false_are_defined");
+  take("size_t", "ssize_t", "ptrdiff_t", "wchar_t", "max_align_t", "nullptr_t");
+  take("intmax_t", "uintmax_t", "intptr_t", "uintptr_t");
+  // <stdio.h>, <stdlib.h> and <string.h>.
+  take("NULL", "EOF", "stdin", "stdout", "stderr");
+  take("BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "TMP_MAX", "L_tmpnam");
+  take("SEEK_SET", "SEEK_CUR", "SEEK_END", "_IOFBF", "_IOLBF", "_IONBF");
+  take("EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX");
+  // <math.h>.
+  take("M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI", "M_PI_2", "M_PI_4");
+  take("M_1_PI", "M_2_PI", "M_2_SQRTPI", "M_SQRT2", "M_SQRT1_2");
+  take("INFINITY", "NAN", "HUGE_VAL", "HUGE_VALF", "HUGE_VALL");
+  take("FP_NAN", "FP_INFINITE", "FP_ZERO", "FP_SUBNORMAL", "FP_NORMAL", "MATH_ERRNO", "MATH_ERREXCEPT");
+  // <stdint.h>: the limits that do not follow the width, and the families
+  // that are named after it.
+  take("SIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "INTPTR_MIN", "INTPTR_MAX", "UINTPTR_MAX");
+  take("INTMAX_MIN", "INTMAX_MAX", "UINTMAX_MAX", "SIG_ATOMIC_MIN", "SIG_ATOMIC_MAX");
+  take("WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX");
+  for (const width of STDINT_WIDTHS) {
+    take(
+      `int${width}_t`,
+      `uint${width}_t`,
+      `int_least${width}_t`,
+      `uint_least${width}_t`,
+      `int_fast${width}_t`,
+      `uint_fast${width}_t`,
+      `INT${width}_MIN`,
+      `INT${width}_MAX`,
+      `UINT${width}_MAX`,
+      `INT${width}_C`,
+      `UINT${width}_C`,
+      `INT_LEAST${width}_MIN`,
+      `INT_LEAST${width}_MAX`,
+      `UINT_LEAST${width}_MAX`,
+      `INT_FAST${width}_MIN`,
+      `INT_FAST${width}_MAX`,
+      `UINT_FAST${width}_MAX`,
+    );
+  }
+  return names;
+}
 
 /** The operator C spells for the one the source used. */
 const C_OPERATORS: Record<string, string> = {
@@ -172,6 +238,28 @@ static void program_fail(const char* message) {
 }
 
 ${DRIVER_HELPERS}`;
+
+/**
+ * The names C reserves, the names the headers the driver includes define, and
+ * the names the driver itself holds. The driver declares a source name under
+ * a C name of its own, and one that has already been taken is a diagnostic
+ * the C compiler raises. The helper names are taken from the driver as it is
+ * written, so adding one cannot leave the list behind.
+ */
+const RESERVED: Record<string, true> = {
+  ...KEYWORDS,
+  ...headerNames(),
+  // The entry point the driver is, and the names in its scope.
+  main: true,
+  argc: true,
+  argv: true,
+  arguments: true,
+  ...Object.fromEntries(
+    [...`${DRIVER_PRELUDE}`.matchAll(/program_[a-z0-9_]+/g)].map((match) => [match[0], true as const]),
+  ),
+  // Every entry point of the runtime the driver links against.
+  ...RUNTIME_SYMBOLS,
+};
 
 function driverError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "LinkError", stage: "link", message, detail });
@@ -460,6 +548,12 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
   numberText(value: string, type: TypeExpr | null): string {
+    // A reference to nothing has no number of its own, and the word for it is
+    // what the language prints: casting it to a number hands out the zero the
+    // source never printed.
+    if (type !== null && type.kind === "ref" && type.of === null) {
+      return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;
+    }
     if (type !== null && type.kind === "primitive" && type.name === "bool") {
       return `(${value} ? "true" : "false")`;
     }

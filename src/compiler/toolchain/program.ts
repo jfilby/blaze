@@ -254,10 +254,11 @@ function isWholeLiteral(text: string): boolean {
 }
 
 /**
- * The type an operation on two numbers has. A number written in the source is a
- * double, as it is in the language it was written in, and adopts the type of
- * the other side when the other side is whole. A floating operation is always
- * floating: `7 / 2` is `3.5` in TypeScript, and the driver has to agree.
+ * The type an operation on two whole numbers has: the one they have in
+ * common. A number written in the source is a double, as it is in the
+ * language it was written in, and a side with no type makes the operation a
+ * double. A floating operation is always floating: `7 / 2` is `3.5` in
+ * TypeScript, and the driver has to agree.
  */
 function numericResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | null, floating: boolean): PrimitiveTypeName {
   if (floating) return "f64";
@@ -365,6 +366,8 @@ export const COMPARISON_OPERATORS: readonly ProgramBinaryOp[] = ["<", "<=", ">",
 
 /** The operators only whole numbers have. */
 const WHOLE_OPERATORS: readonly ProgramBinaryOp[] = ["%", "<<", ">>", "&", "|", "^"];
+/** The compound assignments only whole numbers have. */
+const WHOLE_ASSIGNMENTS: readonly ProgramAssignOp[] = ["%="];
 const EQUALITY: readonly ProgramBinaryOp[] = ["===", "!==", "==", "!="];
 
 const LOGICAL: readonly ProgramBinaryOp[] = ["&&", "||", "??"];
@@ -686,7 +689,20 @@ class ProgramResolver {
       const value = isStringValue(written) ? written : { k: "text" as const, parts: [{ k: "value" as const, value: written }] };
       return { kind: "assign", name: binding.name, op: statement.op, value, type: null, line: statement.line };
     }
-    const type = numeric(binding.type ?? "f64");
+    const name = binding.type ?? "f64";
+    // A compound assignment writes its operator down on the C type of the
+    // name, so `%=` on a double is C no compiler accepts. The operator
+    // decides what the name may be, as it does in a binary expression, where
+    // a whole operator needs whole numbers.
+    if (WHOLE_ASSIGNMENTS.includes(statement.op) && !isWhole(name)) {
+      throw programError(
+        `"${statement.op.slice(0, -1)}" needs whole numbers`,
+        this.body,
+        statement.line,
+        `line ${statement.line} of ${this.body.file}: "${statement.name}" is a ${name}, and "${statement.op}" rounds it to a whole number`,
+      );
+    }
+    const type = numeric(name);
     return {
       kind: "assign",
       name: binding.name,
@@ -735,7 +751,11 @@ class ProgramResolver {
     // An index that moves by fractions counts in fractions, whatever the bound
     // is: a whole index would add a half to nothing and stand still.
     const whole = isWhole(boundType) && stepIsWhole;
-    const counted = whole ? numericResult(boundType, null, false) : stepIsWhole ? "i64" : "f64";
+    // The index takes the width of the bound it counts to, which is what
+    // `wholeOf` settles between two whole numbers. It is not arithmetic on a
+    // number in the source, which is a double, so the rule that makes
+    // `length - 10` a double does not reach it.
+    const counted = whole ? wholeOf(boundType, boundType) : stepIsWhole ? "i64" : "f64";
     const type = numeric(statement.down && counted.startsWith("u") ? "i64" : counted);
     const from = this.value(statement.from, type, statement.line);
     const to = this.value(statement.to, type, statement.line);
@@ -1206,15 +1226,20 @@ class ProgramResolver {
     }
     const wanted = elementOf(expect);
     if (wanted !== null) {
-      if (binding.element !== null && binding.element !== wanted) {
+      // An alias names the same array, so the driver writes one array down.
+      // Every name for it takes the element type, or the call would read the
+      // same bytes as a type the array was never written at.
+      const group = this.aliased(binding);
+      const fixed = group.find((member) => member.element !== null && member.element !== wanted);
+      if (fixed !== undefined) {
         throw programError(
-          `an array of ${binding.element} is used where ${wanted} is expected`,
+          `an array of ${fixed.element} is used where ${wanted} is expected`,
           this.body,
           line,
-          `line ${line} of ${this.body.file}: allocate the array with the element type the parameter takes`,
+          `line ${line} of this.body.file: allocate the array with the element type the parameter takes`,
         );
       }
-      binding.element = wanted;
+      for (const member of group) member.element = wanted;
     }
     if (expect.kind === "array" && expect.length !== null && expect.length !== binding.length) {
       throw programError(
@@ -1224,6 +1249,28 @@ class ProgramResolver {
         `line ${line} of ${this.body.file}: a parameter with a fixed length takes an array of exactly that length`,
       );
     }
+  }
+
+  /**
+   * The buffers that are one array: the binding itself, every name given for
+   * it and every array those names are the same as.
+   */
+  private aliased(binding: BufferBinding): BufferBinding[] {
+    const group = new Set<BufferBinding>([binding]);
+    for (let grown = true; grown; ) {
+      grown = false;
+      for (const [alias, source] of this.aliases) {
+        if (group.has(source) && !group.has(alias)) {
+          group.add(alias);
+          grown = true;
+        }
+        if (group.has(alias) && !group.has(source)) {
+          group.add(source);
+          grown = true;
+        }
+      }
+    }
+    return [...group];
   }
 
   /** A literal index the array does not have is refused where it is written. */

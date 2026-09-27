@@ -508,16 +508,32 @@ function describeType(type: StaticType): string {
 }
 
 function numericType(left: StaticType, right: StaticType): TypeExpr {
-  if (left.kind !== "primitive" || right.kind !== "primitive") {
+  if (left.kind !== "primitive" || !isNumericType(left.name) || right.kind !== "primitive" || !isNumericType(right.name)) {
     throw contractError(`arithmetic requires numeric operands, got ${describeType(left)} and ${describeType(right)}`);
   }
   if (isFloatType(left.name) || isFloatType(right.name)) {
     return { kind: "primitive", name: isFloatType(left.name) ? left.name : (right.name as "f32" | "f64") };
   }
-  if (!isIntegerType(left.name) || !isIntegerType(right.name)) {
-    throw contractError(`arithmetic requires numeric operands, got ${describeType(left)} and ${describeType(right)}`);
-  }
   return { kind: "primitive", name: widerInteger(left.name, right.name) };
+}
+
+/**
+ * What `==` and `!=` may compare: two numbers, two booleans, two nulls, or a
+ * null and something that can be one. The operands are checked because the
+ * values are compared by their own kinds later, where a contract that reached
+ * the evaluator said nothing useful about what it meant.
+ */
+function comparable(op: string, left: StaticType, right: StaticType): void {
+  if (left.kind === "primitive" && right.kind === "primitive") {
+    if (isNumericType(left.name) && isNumericType(right.name)) return;
+    if (left.name === "bool" && right.name === "bool") return;
+  } else if (left.kind === "null" && right.kind === "null") {
+    return;
+  } else if (left.kind === "null" || right.kind === "null") {
+    const other = left.kind === "null" ? right : left;
+    if (other.kind === "ptr" || other.kind === "slice" || other.kind === "array" || other.kind === "ref") return;
+  }
+  throw contractError(`${op} requires comparable operands, got ${describeType(left)} and ${describeType(right)}`);
 }
 
 function widerInteger(left: PrimitiveTypeName, right: PrimitiveTypeName): PrimitiveTypeName {
@@ -616,6 +632,7 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
       switch (expression.op) {
         case "==":
         case "!=":
+          comparable(expression.op, left, right);
           return { kind: "primitive", name: "bool" };
         case "<":
         case "<=":
@@ -1050,6 +1067,12 @@ function validateDefinition(contract: FunctionContract): void {
     let expected = 0;
     for (const field of object.fields) {
       const type = parseType(field.type);
+      // A field name is written into the C and Nim declarations and into the
+      // prompt, verbatim, so a name that is not an identifier is refused here
+      // rather than emitted as code that cannot compile.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.name)) {
+        throw contractError(`invalid field name "${field.name}"`, `in ${name}`);
+      }
       if (field.offset < expected) {
         throw contractError(
           `field ${name}.${field.name} overlaps the field before it`,
