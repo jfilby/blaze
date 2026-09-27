@@ -91,9 +91,11 @@ export interface ProgramFailure {
 const NATIVE_LANGUAGE = "GNU assembler (GAS) AT&T syntax for x86-64";
 
 /**
- * The rules a machine candidate is held to. Every one of them is enforced by
- * the assembler before the candidate is run, so a rule left out here is an
- * attempt spent learning it from a rejection.
+ * The rules a machine candidate is held to. What can be read off the text of
+ * the candidate is enforced by the assembler before it is run, so a rule left
+ * out of that check is an attempt spent learning it from a rejection. The one
+ * that is not is register preservation, which only shows up once the candidate
+ * is linked and run.
  */
 function nativeRules(contract: FunctionContract): string[] {
   const symbol = symbolOf(contract);
@@ -102,7 +104,7 @@ function nativeRules(contract: FunctionContract): string[] {
     'Every other label you define must start with a dot, as in ".Lloop:": a label that is neither the contracted symbol nor a local one is rejected.',
     `The only symbols you may reference are "${symbol}" itself, for recursion, and the runtime ABI entry points above. Calling another function of this program is rejected, so what it does belongs in this function or behind a local label.`,
     "It is entered and left as an ordinary System V call, so preserve rbx, rbp and r12 to r15, leave rsp where you found it, and return with ret.",
-    "rsp is 16-byte aligned on entry and must be 16-byte aligned at every call you make: allocate a multiple of 16, or realign before the call and restore it after.",
+    "You arrive with the return address still on the stack, so rsp is 8 past a 16-byte boundary, and it has to be back on a 16-byte boundary at every call you make: an allocation that is a multiple of 16 leaves it 8 out, and the runtime you call uses aligned moves on its own frame. Subtract a multiple of 16 plus 8, or realign with \"andq $-16, %rsp\" before the call and put it back after.",
     "The 128 bytes below rsp are yours to use without adjusting it only while you make no calls; a call may use that space for itself.",
     "Do not emit .section, .arch, .cpu, .file, .include, .incbin, .macro or .rept; the compiler supplies the architecture prelude.",
   ];

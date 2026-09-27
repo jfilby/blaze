@@ -19,6 +19,8 @@ import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol } from "../runtime/abi.ts";
 import { symbolOf } from "../semantics/contract.ts";
+import { stackAlignmentProblems } from "./stack-frame.ts";
+import { readAssemblyLines } from "./asm-text.ts";
 
 const ALLOWED_DIRECTIVES = new Set([
   ".text",
@@ -67,22 +69,6 @@ function assemblyError(message: string, detail: string | undefined, functionName
   });
 }
 
-function stripComments(line: string): string {
-  let result = "";
-  let index = 0;
-  while (index < line.length) {
-    if (line.startsWith("/*", index)) {
-      const end = line.indexOf("*/", index + 2);
-      index = end < 0 ? line.length : end + 2;
-      result += " ";
-      continue;
-    }
-    if (line[index] === "#" || line.startsWith("//", index)) break;
-    result += line[index];
-    index += 1;
-  }
-  return result;
-}
 
 interface AssemblyStructure {
   definedLabels: Set<string>;
@@ -98,31 +84,15 @@ export function readAssemblyStructure(assembly: string): AssemblyStructure {
   const directives: AssemblyStructure["directives"] = [];
   const instructions: AssemblyStructure["instructions"] = [];
 
-  assembly.split(/\r?\n/).forEach((raw, offset) => {
-    const lineNumber = offset + 1;
-    let line = stripComments(raw).trim();
-    if (line === "") return;
-
-    // A label may share its line with the instruction it introduces.
-    const label = /^([A-Za-z_.$][A-Za-z0-9_.$]*|\d+):\s*(.*)$/.exec(line);
-    if (label !== null) {
-      definedLabels.add(label[1]);
-      line = label[2].trim();
-      if (line === "") return;
+  for (const line of readAssemblyLines(assembly)) {
+    if (line.label !== null) definedLabels.add(line.label);
+    if (line.kind === "label") continue;
+    if (line.kind === "directive") {
+      directives.push({ name: line.name, arguments: line.arguments, line: line.line });
+      continue;
     }
-
-    if (line.startsWith(".")) {
-      const [name, ...rest] = line.split(/\s+/);
-      directives.push({ name, arguments: rest.join(" "), line: lineNumber });
-      return;
-    }
-    const [mnemonic, ...rest] = line.split(/\s+/);
-    instructions.push({ mnemonic: mnemonic.toLowerCase(), operands: rest.join(" "), line: lineNumber });
-  });
-
-  for (const instruction of instructions) {
-    for (const operand of instruction.operands.split(",")) {
-      const token = operand.trim();
+    instructions.push({ mnemonic: line.mnemonic, operands: line.operands.join(" "), line: line.line });
+    for (const token of line.operands) {
       // A leading %, $, * or @ marks a register, an immediate or an indirect
       // operand; a leading digit is a displacement. Neither is a symbol.
       if (token === "" || /^[%*$@\d]/.test(token)) continue;
@@ -210,6 +180,11 @@ export function validateAssembly(assembly: string, contract: FunctionContract, c
   } else if (!definedLabels.has(functionName)) {
     problems.push(`"${functionName}" is declared global but never defined; the candidate needs a "${functionName}:" label`);
   }
+
+  // What the runtime it links against was built to expect. A candidate that
+  // calls with the stack off a boundary does not print the wrong thing, it dies
+  // on the first aligned move inside the call, so it is turned away here.
+  problems.push(...stackAlignmentProblems(assembly, functionName));
 
   if (problems.length > 0) {
     throw assemblyError(

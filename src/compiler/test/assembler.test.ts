@@ -115,6 +115,123 @@ test("a candidate may not define or export anything else", () => {
   rejection("\t.globl dotProduct\ndotProduct:\n\tret\nhelper:\n\tret\n", /"helper" is defined but the contract only allows/);
 });
 
+
+test("a candidate that calls with the stack off a boundary is rejected", () => {
+  // A candidate arrives with the return address on the stack, so it is 8 past
+  // a 16-byte boundary already. Allocating a multiple of 16 leaves it there,
+  // and the first movaps inside the C runtime it calls faults on it, so the
+  // delivered program dies before it prints anything. The candidate that
+  // shipped for binarytrees main was exactly this.
+  rejection(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$128, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$128, %rsp\n\tret\n",
+    /line 4: "call blaze_rt_print_newline" is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+  // The same shape with the frame it takes the eight bytes back.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$136, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$136, %rsp\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // A frame a push built is the other way of getting back onto a boundary.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tpushq\t%rbp\n\tcall\tblaze_rt_print_newline\n\tpopq\t%rbp\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // Realigning outright is the third, and it says so.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tandq\t$-16, %rsp\n\tcall\tblaze_rt_print_newline\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // A call made from the frame it is in needs the eight bytes put back first.
+  rejection(
+    "\t.globl dotProduct\ndotProduct:\n\tcall\tblaze_rt_print_newline\n\tret\n",
+    /line 3: "call blaze_rt_print_newline" is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+  // One turn of a loop is not the whole of a loop: a frame the second turn
+  // round moves is a frame the call in it was made from too, whichever order
+  // the two turns are walked in.
+  rejection(
+    [
+      "\t.globl dotProduct",
+      "dotProduct:",
+      "\tsubq\t$136, %rsp",
+      ".Lloop:",
+      "\tcall\tblaze_rt_print_newline",
+      "\taddq\t$8, %rsp",
+      "\tdecq\t%rax",
+      "\tjne\t.Lloop",
+      "\tret",
+      "",
+    ].join("\n"),
+    /line 5: "call blaze_rt_print_newline" is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+  // The same holds for two branches that build their frame differently, where
+  // only one of the two gets it right.
+  rejection(
+    [
+      "\t.globl dotProduct",
+      "dotProduct:",
+      "\ttest\t%rdi, %rdi",
+      "\tje\t.Lodd",
+      "\tsubq\t$136, %rsp",
+      "\tjmp\t.Lcall",
+      ".Lodd:",
+      "\tsubq\t$144, %rsp",
+      ".Lcall:",
+      "\tcall\tblaze_rt_print_newline",
+      "\tleave",
+      "\tret",
+      "",
+    ].join("\n"),
+    /line 10: "call blaze_rt_print_newline" is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+});
+
+test("a candidate the walk cannot follow is not turned away over its alignment", () => {
+  // rsp moved by something the walk does not read leaves nothing to judge.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t%rdi, %rsp\n\tcall\tblaze_rt_print_newline\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // Nor is one whose frame is put back from a register, or recomputed from a
+  // frame pointer, because neither is an offset the walk can read.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tmovq\t%rbp, %rsp\n\tcall\tblaze_rt_print_newline\n\tret\n",
+    contract(),
+    "c1",
+  );
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tleaq\t-8(%rbp), %rsp\n\tcall\tblaze_rt_print_newline\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // A loop the walk loses the stack in on the first turn is lost in on the
+  // second as well, so it is not a fault it can point at.
+  validateAssembly(
+    [
+      "\t.globl dotProduct",
+      "dotProduct:",
+      ".Lloop:",
+      "\tmovq\t%rbp, %rsp",
+      "\tcall\tblaze_rt_print_newline",
+      "\tdecq\t%rax",
+      "\tjne\t.Lloop",
+      "\tret",
+      "",
+    ].join("\n"),
+    contract(),
+    "c1",
+  );
+  // A frame the candidate never calls out of is its own business.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$128, %rsp\n\tmovq\t%rax, 8(%rsp)\n\taddq\t$128, %rsp\n\tret\n",
+    contract(),
+    "c1",
+  );
+});
 test("the contracted function must be global and present", () => {
   rejection("dotProduct:\n\tret\n", /must declare "dotProduct" global/);
   rejection("\t.globl dotProduct\n\tret\n", /never defined/);

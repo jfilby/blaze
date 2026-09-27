@@ -76,7 +76,11 @@ test("the prompt states what the function owes the convention it is called under
 
   assert.match(prompt, /preserve rbx, rbp and r12 to r15/);
   assert.match(prompt, /return with ret/);
-  assert.match(prompt, /rsp is 16-byte aligned/);
+  // The return address is still on the stack, so the boundary a candidate has
+  // to keep is not the one it arrives on. Stating it as if it were is what let
+  // a candidate allocate a multiple of 16 and fault every call it made.
+  assert.match(prompt, /rsp is 8 past a 16-byte boundary/);
+  assert.match(prompt, /a multiple of 16 plus 8/);
   // The harness declares the function in C, so the result is read back by the
   // C convention: xmm0 for a floating point return, rax for anything else.
   assert.match(prompt, /return value: xmm0/);
@@ -98,8 +102,19 @@ test("the program the model writes is the one the assembler is given", () => {
   assert.match(rejected(["\t.globl\tmain", "main:", "\tret", ""].join("\n"), treeMain), /only "blaze_main" may be exported/);
   assert.match(rejected(["\t.globl\tchecksum", "checksum:", "loop:", "\tret", ""].join("\n"), treeChecksum), /the contract only allows "checksum"/);
   assert.match(rejected(["\t.globl\tblaze_main", "blaze_main:", "\tcall\tchecksum", "\tret", ""].join("\n"), treeMain), /may only call the runtime ABI/);
-  // Recursion into its own symbol is the one call a candidate may make.
-  assert.doesNotThrow(() => validateAssembly(["\t.globl\tchecksum", "checksum:", "\tcall\tchecksum", "\tret", ""].join("\n"), treeChecksum));
+  // Recursion into its own symbol is the one call a candidate may make. It is
+  // made from a frame the call itself put on the stack, which is what puts rsp
+  // back on a boundary for the runtime it calls.
+  assert.doesNotThrow(() =>
+    validateAssembly(
+      ["\t.globl\tchecksum", "checksum:", "\tpushq\t%rbp", "\tcall\tchecksum", "\tpopq\t%rbp", "\tret", ""].join("\n"),
+      treeChecksum,
+    ),
+  );
+  assert.match(
+    rejected(["\t.globl\tchecksum", "checksum:", "\tsubq\t$16, %rsp", "\tcall\tchecksum", "\taddq\t$16, %rsp", "\tret", ""].join("\n"), treeChecksum),
+    /is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
 });
 
 test("a function that states what it does is told how it is checked", () => {
