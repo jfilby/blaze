@@ -47,6 +47,12 @@ export interface ChatEndpointOptions {
    */
   finishReason?: string;
   /**
+   * The reason the provider reports for stopping, one per request in arrival
+   * order and the last one repeated once they run out, for a test whose first
+   * answer ends differently from the second. Falls back to `finishReason`.
+   */
+  finishReasons?: readonly string[];
+  /**
    * The tokens to report for each request, or null to report none at all,
    * which is what a gateway standing between the compiler and the model does.
    * Defaults to a request that cost a token in and a token out.
@@ -81,6 +87,10 @@ export async function chatEndpoint(
       prompts.push(body.messages.map((message) => message.content).join("\n\n"));
       const prompt = prompts[prompts.length - 1];
       const content = options.answer?.(prompt) ?? answers[Math.min(served, answers.length - 1)];
+      const reason =
+        options.finishReasons?.[Math.min(served, options.finishReasons.length - 1)] ??
+        options.finishReason ??
+        "stop";
       served += 1;
       waiting += 1;
       arrived.resolve();
@@ -102,7 +112,7 @@ export async function chatEndpoint(
             object: "chat.completion",
             created: 0,
             model: "stub",
-            choices: [{ index: 0, finish_reason: options.finishReason ?? "stop", message: { role: "assistant", content } }],
+            choices: [{ index: 0, finish_reason: reason, message: { role: "assistant", content } }],
             ...(usage === null
               ? {}
               : { usage: { prompt_tokens: usage.prompt, completion_tokens: usage.completion, total_tokens: usage.total } }),

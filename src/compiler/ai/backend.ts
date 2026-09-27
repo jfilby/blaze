@@ -367,8 +367,9 @@ export class VercelAiBackend implements AiBackend {
       );
     }
 
+    let assembly: string;
     try {
-      return extractAssembly(text);
+      assembly = extractAssembly(text);
     } catch (cause) {
       // A reply with no implementation in it is the model not answering, not a
       // wrong answer: the toolchain never saw anything to judge. The provider
@@ -377,6 +378,29 @@ export class VercelAiBackend implements AiBackend {
       const failure = cause instanceof CompilerError ? cause : generationError("the model returned no implementation");
       throw new UnusableAnswer(failure.message, true, failure, stop);
     }
+
+    // A reply the provider cut off at the token limit is the first part of an
+    // implementation, not a smaller one: what came back ends wherever the
+    // limit fell, which is usually mid-instruction, and an implementation that
+    // stops there is a function the model never finished writing. It is asked
+    // for again, which costs the candidate nothing but another request the
+    // same as an answer with nothing in it, and the model can write less and
+    // land inside the limit. This is the one reply that carried something and
+    // is still not one, so it is caught here, where the text would otherwise
+    // become a candidate. Every provider the compiler talks to maps its own
+    // word for a cutoff to `length`.
+    if (stop?.finishReason === "length") {
+      throw new UnusableAnswer(
+        "the answer was cut off at the token limit before it was finished",
+        true,
+        generationError(
+          "the model wrote more than it was allowed to answer",
+          "the reply was cut off before the implementation was finished, so none of it was tried",
+        ),
+        stop,
+      );
+    }
+    return assembly;
   }
 }
 

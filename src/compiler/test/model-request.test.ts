@@ -249,6 +249,74 @@ test("a provider that reports no tokens is not said to have spent none", async (
   );
 });
 
+/**
+ * A reply that closes its fence and then stops: everything `extractAssembly`
+ * asks for, and an implementation that ends mid-instruction. This is the
+ * shape a token limit produces, and the reason the stop is checked before the
+ * text rather than after it.
+ */
+const CUT_OFF_ASSEMBLY = ["```asm", "\t.globl\tsquare", "square:", "\tmulsd\t%xmm0, %xmm0", "\taddsd", "```"].join("\n");
+
+test("a reply cut off at the token limit is not an implementation", async (t) => {
+  const { directory, chat } = await projectAnswering(
+    t,
+    [CUT_OFF_ASSEMBLY, SQUARE_ASSEMBLY],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
+    { finishReasons: ["length", "stop"] },
+  );
+  const lines: string[] = [];
+
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false },
+    { stage: (_stage, _status, message) => lines.push(message) },
+    "build",
+  );
+
+  // The half-written function is never assembled: what the candidate holds is
+  // the whole answer the re-request came back with, and none of the
+  // instruction the limit cut through.
+  assert.equal(outcome.candidates.square.length, 1);
+  assert.match(outcome.candidates.square[0].assembly, /mulsd/);
+  assert.doesNotMatch(outcome.candidates.square[0].assembly, /addsd/);
+  assert.equal(outcome.build.status, "success");
+  // It cost a request, not an attempt: a reply that never became an
+  // implementation never became a candidate to repair.
+  assert.equal(chat.prompts.length, 2);
+  assert.deepEqual(outcome.candidates.square.map((entry) => entry.round), [1]);
+  assert.ok(
+    lines.some((line) =>
+      line.includes("the answer was cut off at the token limit before it was finished, finish reason: length"),
+    ),
+    `no retry line in: ${lines.join(" | ")}`,
+  );
+  // The re-request says the answer was cut off, which the model can act on by
+  // writing less, and not how the provider stopped, which it cannot.
+  assert.match(chat.prompts[1], /cut off at the token limit/);
+  assert.doesNotMatch(chat.prompts[1], /finish reason/);
+});
+
+test("a model that keeps writing past the limit fails saying what it cost", async (t) => {
+  const { directory, chat } = await projectAnswering(
+    t,
+    [CUT_OFF_ASSEMBLY],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
+    { finishReason: "length", usage: { prompt: 900, completion: 4096, total: 4996 } },
+  );
+
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) =>
+      error instanceof CompilerError &&
+      error.message === "the model wrote more than it was allowed to answer" &&
+      /asked 2 times/.test(error.detail ?? "") &&
+      /the answer was cut off at the token limit before it was finished \(finish reason: length, usage: 900 in, 4096 out\)/.test(
+        error.detail ?? "",
+      ),
+  );
+  assert.equal(chat.prompts.length, 2);
+});
+
 test("a request the provider failed is asked for again", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
