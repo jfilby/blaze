@@ -8,11 +8,17 @@
  * and compares the two: the program the compiler produced must say exactly what
  * the program in the repository says.
  *
+ * A binary that never finishes, is killed, or fails is as wrong as one that
+ * prints the wrong thing, and is reported the same way: against the first line
+ * of the source it never printed, with the reason it stopped. Only a source
+ * that cannot be run at all ends the build here, because that is not the
+ * compiler's program to repair.
+ *
  * The toolchain of a program is its language: a TypeScript program is checked
  * against `node`, which runs TypeScript directly.
  */
 
-import { formatCommand, run } from "../core/process.ts";
+import { formatCommand, run, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
 
@@ -60,9 +66,36 @@ function firstDifference(expected: string, actual: string): ProgramMismatch | nu
   return null;
 }
 
-/** What a program printed before it failed, so a report says where it stopped. */
-function describeOutput(printed: string): string {
-  return printed === "" ? "" : `it printed:\n${printed.slice(0, 400)}\n`;
+/**
+ * How a delivered program stopped before it printed what its source prints. A
+ * program that stops is as wrong as one that prints the wrong thing, and the
+ * build repairs it the same way, so the reason is part of the verdict rather
+ * than the end of it.
+ */
+function stopFailure(binary: RunResult): string | null {
+  if (binary.timedOut) return "the delivered program did not finish";
+  if (binary.signal !== null) return `the delivered program was terminated by ${binary.signal}`;
+  if (binary.code !== null && binary.code !== 0) return `the delivered program exited with status ${binary.code}`;
+  return null;
+}
+
+/**
+ * What the program a candidate belongs to printed, what the source prints
+ * instead, and where the two part: on a line, or at the line a program that
+ * stopped never got to. A stopped program has no line it disagrees on, so the
+ * verdict points at the first line of the source it never printed.
+ */
+function stoppedMismatch(failure: string, expectedOutput: string, actualOutput: string, errorOutput: string): ProgramMismatch {
+  const line = actualOutput === "" ? 1 : actualOutput.split("\n").length + 1;
+  return {
+    line,
+    expected: expectedOutput.split("\n")[line - 1] ?? "",
+    actual: actualOutput.split("\n")[line - 1] ?? "",
+    expectedOutput,
+    actualOutput,
+    failure,
+    ...(errorOutput === "" ? {} : { failureOutput: errorOutput }),
+  };
 }
 
 /**
@@ -103,20 +136,17 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
 
   const binary = run(request.runner.command, [...request.runner.args, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   const printed = binary.stdout.trim();
-  const failed = binary.timedOut
-    ? "the delivered program did not finish"
-    : binary.signal !== null
-      ? `the delivered program was terminated by ${binary.signal}`
-      : binary.code !== 0
-        ? `the delivered program exited with status ${binary.code}`
-        : null;
-  if (failed !== null) {
-    throw new CompilerError({
-      category: "VerificationError",
-      stage: "verify",
-      message: failed,
-      detail: `${formatCommand(request.runner.command, [...request.runner.args, ...arguments_])}\n${describeOutput(printed)}${binary.stderr.trim()}`,
-    });
+  const stopped = stopFailure(binary);
+  if (stopped !== null) {
+    // A program that stopped is a verdict, not the end of the build: the
+    // functions the program is the only oracle for are regenerated with why it
+    // stopped and with what it managed to print before it did.
+    return {
+      passed: false,
+      expected: source.stdout,
+      actual: printed,
+      difference: stoppedMismatch(stopped, source.stdout, printed, binary.stderr.trim()),
+    };
   }
 
   const difference = firstDifference(source.stdout, binary.stdout);

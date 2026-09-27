@@ -424,6 +424,15 @@ export interface ProgramMismatch {
   expectedOutput: string;
   /** Everything the program printed. */
   actualOutput: string;
+  /**
+   * How the program stopped before it printed the rest, when it stopped rather
+   * than disagreeing: it never finished, a signal took it, or it failed. A
+   * program that stops has no line to disagree with, so this is what a repair
+   * round is given instead.
+   */
+  failure?: string;
+  /** What the program wrote to standard error on its way down. */
+  failureOutput?: string;
 }
 
 export interface BenchmarkResult {

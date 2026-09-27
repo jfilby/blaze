@@ -76,11 +76,15 @@ export interface PromptRequest {
   programFailure?: ProgramFailure;
 }
 
-/** A program that did not print what its source prints, and the answer to fix. */
+/**
+ * A program that did not print what its source prints, and the answer to fix.
+ * A program that printed the wrong line and a program that stopped printing
+ * altogether are the same kind of verdict: both are what the function it is
+ * the only oracle for has to be regenerated from.
+ */
 export interface ProgramFailure {
-  /** Where the two outputs first disagree. */
+  /** Where the two outputs part: on a line, or at the line the program stopped on. */
   readonly mismatch: ProgramMismatch;
-  /** The implementation of this function the failing program was built from. */
   readonly previous: string;
 }
 
@@ -586,6 +590,9 @@ function renderSymbol(contract: FunctionContract, output: OutputKind): string[] 
 function renderRepair(request: PromptRequest, language: string): string {
   const { candidate, attempt, previous, feedback, programFailure } = request;
   const failed = programFailure?.previous ?? previous ?? "";
+  // A program that stopped is rejected for stopping: the verdict says so, so
+  // the repair does not read a line that agrees as a line that disagrees.
+  const stopped = programFailure?.mismatch.failure;
   const lines = [
     programFailure === undefined
       ? `CANDIDATE ${candidate} WAS REJECTED`
@@ -595,8 +602,8 @@ function renderRepair(request: PromptRequest, language: string): string {
       : `This is repair round ${attempt}. The compiler assembled and linked the output below into the`,
     programFailure === undefined
       ? "against its contract, and rejected it because of the diagnostics listed after it."
-      : "program it belongs to, ran that program, and rejected it: the program did not print what the",
-    programFailure === undefined ? "" : "source program prints. Nothing runs this function on its own.",
+      : `program it belongs to, ran that program, and rejected it: ${stopped ?? "the program did not print what the source program prints"}.`,
+    programFailure === undefined ? "" : "Nothing runs this function on its own.",
     "",
     "THE OUTPUT BEING REPAIRED",
     "```",
@@ -611,17 +618,23 @@ function renderRepair(request: PromptRequest, language: string): string {
       "```",
       mismatch.actualOutput.trimEnd(),
       "```",
+      ...(mismatch.failureOutput === undefined
+        ? []
+        : ["", "WHAT THE PROGRAM WROTE TO STANDARD ERROR", "```", mismatch.failureOutput.trimEnd(), "```"]),
       "",
       "WHAT THE SOURCE PRINTS",
       "```",
       mismatch.expectedOutput.trimEnd(),
       "```",
       "",
-      `The outputs are the same until line ${mismatch.line}, where they differ:`,
+      mismatch.failure === undefined
+        ? `The outputs are the same until line ${mismatch.line}, where they differ:`
+        : `The program stopped before it printed line ${mismatch.line}, so nothing says what it would have printed there:`,
       `  the source prints ${JSON.stringify(mismatch.expected)}`,
-      `  the program prints ${JSON.stringify(mismatch.actual)}`,
+      `  the program ${stopped === undefined ? "prints" : "printed"} ${JSON.stringify(mismatch.actual)}`,
     );
   }
+
   lines.push(
     "",
     "DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST",

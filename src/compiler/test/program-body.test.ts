@@ -415,6 +415,31 @@ test("a program that prints something else is reported against the line it diffe
   assert.equal(different.difference?.actualOutput, "expected\nextra\n");
 });
 
+test("a program that stops is reported against the line it never printed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-stopped-"));
+  await writeFile(join(directory, "main.ts"), 'console.log("expected");\nconsole.log("wanted");\n', "utf8");
+
+  // A program that prints a line and is then killed has no line to disagree
+  // with, so the verdict points at the line the source prints that it never
+  // reached, and carries the reason it stopped.
+  const stopped = await verifyProgram({
+    language: "typescript",
+    sourcePath: join(directory, "main.ts"),
+    directory,
+    runner: {
+      command: "node",
+      args: ["-e", 'require("fs").writeSync(1, "expected\\n"); process.kill(process.pid, "SIGSEGV")'],
+    },
+  });
+  assert.equal(stopped.passed, false);
+  assert.equal(stopped.difference?.failure, "the delivered program was terminated by SIGSEGV");
+  assert.equal(stopped.difference?.line, 2);
+  assert.equal(stopped.difference?.expected, "wanted");
+  assert.equal(stopped.difference?.actual, "");
+  assert.equal(stopped.difference?.expectedOutput, "expected\nwanted\n");
+  assert.equal(stopped.difference?.actualOutput, "expected");
+});
+
 const languageProgram = (runtime?: "nim") => program(LANGUAGE, runtime);
 
 test("a program runs its own statements, and the two drivers run them alike", async (t) => {
@@ -694,5 +719,39 @@ test("a program that prints something else is regenerated with the line it diffe
   assert.match(repair, /the source prints "6"/);
   assert.match(repair, /movq\t%xmm0, %rax/, "the repair is handed the implementation that printed the wrong thing");
   assert.match(repair, /A diagnostic listed more than once/);
+  assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
+});
+
+/** Fails the instruction the program runs, so the program it is in is killed. */
+const TOTAL_CRASHES = totalAssembly(["\tud2"]);
+
+test("a program that is killed is regenerated with why it stopped", async (t) => {
+  const endpoint = await chatEndpoint(t, [TOTAL_CRASHES, TOTAL_RIGHT]);
+  const directory = await mkdtemp(join(tmpdir(), "blaze-stopped-repair-"));
+  await writeFile(join(directory, "main.ts"), SUM, "utf8");
+  await writeFile(
+    join(directory, "blaze.json"),
+    JSON.stringify({
+      language: "typescript",
+      sourceFile: "main.ts",
+      model: { provider: "openai-compatible", model: "stub" },
+      output: "machine",
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+    }),
+    "utf8",
+  );
+
+  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
+
+  // A program that never finishes, is killed or fails is a verdict like any
+  // other: the build spends its repair rounds on it instead of stopping at the
+  // first one that does not run.
+  assert.equal(outcome.build.status, "success", "the repaired program is the one that is delivered");
+  assert.equal(endpoint.prompts.length, 2, "the program is generated once, then regenerated");
+  const repair = endpoint.prompts[1];
+  assert.match(repair, /REJECTED BY THE PROGRAM IT BELONGS TO/);
+  assert.match(repair, /the delivered program was terminated by SIGILL/);
+  assert.match(repair, /The program stopped before it printed line 1/);
+  assert.match(repair, /ud2/, "the repair is handed the implementation that killed the program");
   assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
 });

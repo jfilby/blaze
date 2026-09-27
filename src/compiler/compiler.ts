@@ -503,6 +503,18 @@ async function programSource(
   return { path };
 }
 
+/**
+ * What a round of the program loop found, in the words the build log uses: the
+ * line the two outputs part on, or how the program stopped before they could.
+ */
+function describeProgramFailure(mismatch: ProgramMismatch | undefined): string {
+  if (mismatch?.failure !== undefined) {
+    const printed =
+      mismatch.actualOutput === "" ? "printed nothing" : `printed ${mismatch.actualOutput.split("\n").length} line(s) and then stopped`;
+    return `${mismatch.failure}: it ${printed}, where the source prints ${JSON.stringify(mismatch.expected)} on line ${mismatch.line}`;
+  }
+  return `the program does not print what the source prints: line ${mismatch?.line}, the source prints ${JSON.stringify(mismatch?.expected)}, the program prints ${JSON.stringify(mismatch?.actual)}`;
+}
 
 export async function runBuild(
   inputPath: string,
@@ -789,14 +801,12 @@ export async function runBuild(
         runner,
         arguments: options.arguments,
       });
-      if (checked.passed || checked.difference === undefined) break;
+      // A program that stopped is as repairable as one that printed the wrong
+      // thing, so the rounds are spent on it rather than on ending the build.
+      if (checked.passed) break;
       mismatch = checked.difference;
       if (round < programRounds) {
-        reporter.stage(
-          "verify",
-          "info",
-          `the program does not print what the source prints: line ${mismatch.line}, the source prints ${JSON.stringify(mismatch.expected)}, the program prints ${JSON.stringify(mismatch.actual)}; generating the functions it is the only oracle for again`,
-        );
+        reporter.stage("verify", "info", `${describeProgramFailure(mismatch)}; generating the functions it is the only oracle for again`);
       }
     }
     if (checked !== undefined && !checked.passed) {
@@ -804,8 +814,11 @@ export async function runBuild(
       throw new CompilerError({
         category: "VerificationError",
         stage: "verify",
-        message: "the program does not print what the source prints",
-        detail: `line ${difference?.line}: the source prints ${JSON.stringify(difference?.expected)}, the program prints ${JSON.stringify(difference?.actual)}`,
+        message: difference?.failure ?? "the program does not print what the source prints",
+        detail: [
+          `line ${difference?.line}: the source prints ${JSON.stringify(difference?.expected)}, the program prints ${JSON.stringify(difference?.actual)}`,
+          ...(difference?.failureOutput === undefined ? [] : [`the program wrote to standard error:\n${difference.failureOutput}`]),
+        ].join("\n"),
       });
     }
     if (checked !== undefined) {
