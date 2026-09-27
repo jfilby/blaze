@@ -43,13 +43,21 @@ const CONTRACT: FunctionContract = {
   optimize: { primary: "throughput" },
 };
 
+/** The bytes of a WebAssembly value type, as the type section spells them. */
+const VALUE_TYPE_BYTES: Record<string, number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+
+/** The parameter types of a contract, as the module boundary spells them. */
+function parameterTypeBytes(contract: FunctionContract): number[] {
+  return contract.function.params.map((param) => VALUE_TYPE_BYTES[wasmValueType(parseType(param.type))]);
+}
+
 /**
  * A hand assembled module that imports the host's memory, exports one name
  * and returns a constant. It exercises the whole host path: module
  * validation, buffer placement, the wasm call and result formatting, without
  * a WAT assembler.
  */
-function constantModuleBytes(exportName: string, parameters: readonly number[] = [0x7f, 0x7f, 0x7f], result = 0x7d): Uint8Array {
+function constantModuleBytes(exportName: string, parameters: readonly number[] = parameterTypeBytes(CONTRACT), result = 0x7d): Uint8Array {
   const utf8 = (text: string): number[] => [...text].map((character) => character.charCodeAt(0));
   /** A length prefixed vector of bytes, as used for names. */
   const bytes = (items: number[]): number[] => [items.length, ...items];
@@ -92,6 +100,98 @@ function constantModuleBytes(exportName: string, parameters: readonly number[] =
   ]);
 }
 
+/**
+ * A module that reads the last element of the buffer it is given and returns
+ * it: `p + n - 1` loaded at the width of the element. The last element is the
+ * one that tells the two layouts apart: at a four byte stride the bytes of a
+ * narrower buffer are followed by three zero bytes each, so the last element
+ * of a three element `u8` buffer lands where the module reads a zero.
+ */
+function lastElementModuleBytes(exportName: string, scale: number, load: readonly number[]): Uint8Array {
+  const utf8 = (text: string): number[] => [...text].map((character) => character.charCodeAt(0));
+  const bytes = (items: number[]): number[] => [items.length, ...items];
+  const section = (id: number, body: number[]): number[] => [id, body.length, ...body];
+
+  const types = section(1, [1, 0x60, 0x02, 0x7f, 0x7e, 0x01, 0x7f]);
+  const imports = section(2, [1, ...bytes(utf8("env")), ...bytes(utf8("memory")), 0x02, 0x00, 0x04]);
+  const functions = section(3, [1, 0x00]);
+  const exports = section(7, [1, ...bytes(utf8(exportName)), 0x00, 0x00]);
+  // No locals: local.get 0, then the last index at the width of the element,
+  // then the load, end. The module scales the index itself: a pointer is a
+  // byte offset, so how far apart the elements sit is the module's business.
+  const body = [
+    0x00,
+    0x20,
+    0x00,
+    0x20,
+    0x01,
+    0xa7,
+    0x41,
+    0x01,
+    0x6b,
+    0x41,
+    scale,
+    0x6c,
+    0x6a,
+    ...load,
+    0x0b,
+  ];
+  const code = section(10, [1, body.length, ...body]);
+
+  return new Uint8Array([
+    0x00,
+    0x61,
+    0x73,
+    0x6d,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    ...types,
+    ...imports,
+    ...functions,
+    ...exports,
+    ...code,
+  ]);
+}
+
+test("a buffer of a narrow element is laid out one element to its own width", async () => {
+  const cases: { type: string; returns: string; scale: number; load: number[]; values: string[] }[] = [
+    { type: "ptr<u8>", returns: "u8", scale: 1, load: [0x2d, 0x00, 0x00], values: ["1", "2", "250"] },
+    { type: "ptr<u16>", returns: "u16", scale: 2, load: [0x2f, 0x01, 0x00], values: ["1", "2", "60000"] },
+  ];
+
+  for (const one of cases) {
+    const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+    const contract: FunctionContract = {
+      ...CONTRACT,
+      function: {
+        name: "last",
+        symbol: "last",
+        params: [
+          { name: "a", type: one.type },
+          { name: "n", type: "usize" },
+        ],
+        returns: one.returns,
+      },
+      requires: ["a != null"],
+      ensures: [],
+      memory: { reads: ["a[0:n]"], writes: [], aliasing: [] },
+    };
+    const [hostPath, modulePath] = await hostIn(directory, contract, lastElementModuleBytes("last", one.scale, one.load));
+    const vectors: TestVector[] = [
+      { id: "only", kind: "fixed", args: { a: one.values, n: String(one.values.length) } },
+    ];
+
+    const execution = run(process.execPath, [hostPath, modulePath], {
+      input: encodeRunRequest(contract, vectors),
+      timeoutMs: 60_000,
+    });
+    assert.equal(execution.code, 0, `${one.type}: ${execution.stderr}`);
+    assert.equal(execution.stdout.trim(), `RESULT ${one.values[2]}`, one.type);
+  }
+});
+
 /** A contract whose entry the frontend renames, as a TypeScript program is. */
 const RENAMED: FunctionContract = {
   ...CONTRACT,
@@ -108,12 +208,14 @@ async function hostIn(directory: string, contract: FunctionContract, module: Uin
 }
 
 test("contract types map onto WebAssembly value types", () => {
-  assert.equal(wasmValueType(parseType("usize")), "i32");
+  assert.equal(wasmValueType(parseType("usize")), "i64");
   assert.equal(wasmValueType(parseType("f32")), "f32");
   assert.equal(wasmValueType(parseType("f64")), "f64");
   assert.equal(wasmValueType(parseType("u64")), "i64");
   assert.equal(wasmValueType(parseType("ptr<f32>")), "i32");
-  assert.equal(wasmSignature(CONTRACT), "(func (param i32 i32 i32) (result f32))");
+  // `usize` is 64 bits wide, so it cannot be the i32 a pointer is: a module
+  // that took one could not be handed a length the contract promises.
+  assert.equal(wasmSignature(CONTRACT), "(func (param i32 i32 i64) (result f32))");
 });
 
 test("the hand assembled module satisfies the host import and export contract", () => {

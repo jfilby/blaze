@@ -67,13 +67,19 @@ export function programCalls(assembly: string, callable: ReadonlySet<string>): s
   ];
 }
 
-/** Instructions that would let a candidate leave the sandboxed contract. */
+/**
+ * Instructions that would let a candidate leave the sandboxed contract. The
+ * families that have several spellings are matched by their opening letters
+ * instead, by `isForbidden` below: a set of names only refuses the spellings
+ * it happens to list, and `as` accepts `int1`, `inb` and `outsb` as readily
+ * as it accepts the names that were listed.
+ */
+const FORBIDDEN_MNEMONIC_PREFIXES = ["int", "in", "out"];
+
 const FORBIDDEN_MNEMONICS = new Set([
   "syscall",
   "sysenter",
   "sysexit",
-  "int",
-  "int3",
   "iret",
   "iretq",
   "cli",
@@ -86,6 +92,14 @@ const FORBIDDEN_MNEMONICS = new Set([
   "vmmcall",
   "xsetbv",
 ]);
+
+/** Whether an instruction would take a candidate outside the contract. */
+function isForbidden(mnemonic: string): boolean {
+  return (
+    FORBIDDEN_MNEMONIC_PREFIXES.some((prefix) => mnemonic.startsWith(prefix)) ||
+    FORBIDDEN_MNEMONICS.has(mnemonic)
+  );
+}
 
 const SYMBOL = /^[A-Za-z_.$][A-Za-z0-9_.$]*$/;
 
@@ -196,7 +210,7 @@ export function validateAssembly(
     problems.push("the candidate contains no instructions");
   }
   for (const instruction of instructions) {
-    if (FORBIDDEN_MNEMONICS.has(instruction.mnemonic)) {
+    if (isForbidden(instruction.mnemonic)) {
       problems.push(`line ${instruction.line}: "${instruction.mnemonic}" is not allowed, the function must be pure`);
     }
   }

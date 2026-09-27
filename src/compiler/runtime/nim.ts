@@ -180,7 +180,10 @@ const NIM_RESERVED: Record<string, true> = {
  * suffix: neither spelling parses, so the whole program would fail to build.
  */
 export function nimName(name: string): string {
-  const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `field_${name}`;
+  // A character that cannot be in an identifier is replaced rather than only
+  // prefixed: `field_my-field` is not an identifier either, and the program
+  // failed to build on the name that was meant to stand in for it.
+  const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `field_${name.replace(/[^A-Za-z0-9_]/g, "_")}`;
   return NIM_RESERVED[identifier] === true ? `${identifier}_` : identifier;
 }
 
@@ -198,11 +201,16 @@ export function nimObjectDeclarations(objects: Record<string, ObjectLayout>): st
 
 /**
  * The text of a data string as a Nim literal holds it. A triple quoted Nim
- * string ends at the first `"""` in it, so the request the build embedded has
- * to keep its own quotes from spelling the end of the literal.
+ * string is raw, so a backslash and a quote in it stand for themselves:
+ * escaping them wrote two characters where the data had one. Nothing is
+ * escaped, and a `"""` cannot be written in a raw string at all, so text that
+ * carries one is refused rather than cut short at the first of them.
  */
 export function nimRawString(text: string): string {
-  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  if (text.includes('"""')) {
+    throw hostError("the example run cannot be held in a Nim string literal", 'the text carries a triple quote');
+  }
+  return text;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -568,7 +576,7 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
       body.push(`  if declared_${name} != ${fixed}: fail("${name} must have length ${fixed}")`);
     }
     body.push(
-      `  ${name}_count = (if declared_${name} < 0: 0'u64 else: declared_${name}.uint64).csize_t`,
+      `  ${name}_count = (if declared_${name} < 0: 0 else: csize_t(declared_${name}))`,
     );
     // The previous vector's block is released before the next one overwrites
     // the pointer: a reader that runs once per vector would otherwise keep
@@ -626,8 +634,14 @@ export function generateHostSource(contract: FunctionContract, demoRequest: stri
   const returns = parseType(contract.function.returns);
   if (isBuffer(returns)) throw hostError("a pointer return type cannot be called from the host", undefined, name);
   const types = contract.function.params.map((param: FunctionParam) => parseType(param.type));
-  const names = contract.function.params.map((param) => param.name);
-  const cParameters = types.map((type, index) => `${cDeclarationType(type)} ${names[index]}`).join(", ");
+  // The C declaration spells the names the contract gives, because that is
+  // the ABI. The Nim side is free of them: a parameter is a local name in Nim
+  // however the C one is spelled, so it goes through `nimName`. A parameter
+  // the source called `type` or `result` named a Nim keyword, and the whole
+  // host failed to build.
+  const cNames = contract.function.params.map((param) => param.name);
+  const names = cNames.map(nimName);
+  const cParameters = types.map((type, index) => `${cDeclarationType(type)} ${cNames[index]}`).join(", ");
   const nimParameters = names.map((name, index) => `${name}: ${nimType(types[index]!)}`).join(", ");
   const declaration = `extern ${cDeclarationType(returns)} ${name}(${cParameters || "void"});`;
   const invocation = callExpression(contract, types, names);

@@ -205,22 +205,27 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
 
 /**
  * Every function of a program is compiled on its own and linked beside the
- * others by its name, and the object layouts are resolved by name as well, so
- * one name may belong to one function. A name two files export is refused here
- * rather than left to collide in a work directory, a link step or a layout.
+ * others by its symbol, and the object layouts are resolved by name as well,
+ * so one symbol may belong to one function. The symbol is what is checked and
+ * not the name it came from: a program entry named `main` is compiled as
+ * `blaze_main`, so a program that also declares `blaze_main` has two functions
+ * of one symbol, and the two collided in a work directory or a link step
+ * rather than being refused. A name two files export is refused here for the
+ * same reason.
  */
 function validateFunctionNames(files: readonly FileContract[]): void {
   const owner = new Map<string, string>();
   for (const file of files) {
-    for (const name of Object.keys(file.functions)) {
-      const previous = owner.get(name);
+    for (const contract of Object.values(file.functions)) {
+      const symbol = contract.function.symbol;
+      const previous = owner.get(symbol);
       if (previous !== undefined) {
         throw contractPhaseError(
-          `"${name}" is declared by both ${previous} and ${file.path}`,
-          "every function of a program is compiled on its own and linked by its name, so one name may belong to one function; rename one of them, or import one of them under another name",
+          `"${symbol}" is declared by both ${previous} and ${file.path}`,
+          "every function of a program is compiled on its own and linked by its symbol, so one symbol may belong to one function; rename one of them, or import one of them under another name",
         );
       }
-      owner.set(name, file.path);
+      owner.set(symbol, file.path);
     }
   }
 }

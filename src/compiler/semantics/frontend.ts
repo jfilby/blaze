@@ -556,8 +556,11 @@ class BodyAnalysis {
     if (inner.kind !== "assign") {
       throw frontendError(`loop body at line ${statement.line} must accumulate into a variable`, "expected `acc += ...`");
     }
-    if (inner.op === "-=") {
-      throw frontendError(`"-=" inside a loop is not supported (line ${inner.line})`);
+    // Only `+=` and `*=` are reductions. An allowlist and not a denylist: `=`
+    // is an assignment that happens to be written in a loop, and reading it as
+    // a sum states a contract the body does not implement.
+    if (inner.op !== "+=" && inner.op !== "*=") {
+      throw frontendError(`"${inner.op}" inside a loop is not supported (line ${inner.line})`);
     }
 
     // A counted loop reads its bound again on every turn, so a body that

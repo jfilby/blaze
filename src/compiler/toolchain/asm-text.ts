@@ -35,30 +35,53 @@ export interface AssemblyInstruction {
 
 export type AssemblyLine = AssemblyLabel | AssemblyDirective | AssemblyInstruction;
 
-/** A line with its comments removed and its surrounding space taken off. */
-export function stripComments(line: string): string {
-  let result = "";
-  let index = 0;
-  while (index < line.length) {
-    if (line.startsWith("/*", index)) {
-      const end = line.indexOf("*/", index + 2);
-      index = end < 0 ? line.length : end + 2;
-      result += " ";
-      continue;
+/**
+ * A stripper for the comments of a candidate, made once per candidate.
+ *
+ * A block comment runs over as many lines as it takes, so one line cannot be
+ * stripped without knowing whether the lines before it left a block open. The
+ * stripper is that knowledge: it is fed the candidate a line at a time and
+ * answers with the line as code, and everything a block covers is gone by the
+ * time the block ends rather than by the time its first line is read.
+ */
+export function createCommentStripper(): (line: string) => string {
+  let inBlock = false;
+  return (line: string): string => {
+    let result = "";
+    let index = 0;
+    while (index < line.length) {
+      if (inBlock) {
+        const end = line.indexOf("*/", index);
+        // The block carries on past the end of this line, so nothing that is
+        // left of it is code.
+        if (end < 0) return result;
+        inBlock = false;
+        index = end + 2;
+        result += " ";
+        continue;
+      }
+      if (line.startsWith("/*", index)) {
+        inBlock = true;
+        index += 2;
+        result += " ";
+        continue;
+      }
+      if (line[index] === "#" || line.startsWith("//", index)) break;
+      result += line[index];
+      index += 1;
     }
-    if (line[index] === "#" || line.startsWith("//", index)) break;
-    result += line[index];
-    index += 1;
-  }
-  return result;
+    return result;
+  };
 }
+
 
 /** Splits a candidate into one entry per line that carries a label, a directive or an instruction. */
 export function readAssemblyLines(assembly: string): AssemblyLine[] {
   const lines: AssemblyLine[] = [];
+  const strip = createCommentStripper();
   assembly.split(/\r?\n/).forEach((raw, offset) => {
     const lineNumber = offset + 1;
-    let text = stripComments(raw).trim();
+    let text = strip(raw).trim();
     if (text === "") return;
 
     // A label may share its line with the directive or instruction it introduces.

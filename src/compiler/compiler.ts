@@ -418,7 +418,7 @@ export function modelSpec(selection: SourceInput["model"], path: string): string
  * that sits silent for days: past this many, asking again is not a retry
  * strategy, it is a build with no answer coming.
  */
-const MAX_RETRIES = 16;
+export const MAX_RETRIES = 16;
 
 /**
  * The generation settings a project file gets wrong, refused before any work
@@ -445,6 +445,15 @@ function assertGenerationInput(path: string, input: SourceInput): void {
   const maxRetries = generation.maxRetries;
   if (maxRetries !== undefined && (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > MAX_RETRIES)) {
     refuse("maxRetries", maxRetries, `a whole number of re-requests from 0 to ${MAX_RETRIES}`);
+  }
+  // Both of these count the work a build does, so a zero of either asks for
+  // none: it is a typo, and reporting it later as a model that produced no
+  // candidate sent looking for a provider problem where there was none.
+  for (const setting of ["maxCandidates", "maxAttempts"] as const) {
+    const value = generation[setting];
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      refuse(setting, value, "a whole number of at least 1");
+    }
   }
 }
 

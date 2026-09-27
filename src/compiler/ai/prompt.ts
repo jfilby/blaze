@@ -197,7 +197,10 @@ function renderMemory(contract: FunctionContract): string {
   const lines: string[] = [];
   lines.push(`reads: ${contract.memory.reads.length === 0 ? "nothing" : contract.memory.reads.join(", ")}`);
   lines.push(`writes: ${contract.memory.writes.length === 0 ? "nothing" : contract.memory.writes.join(", ")}`);
-  lines.push(`aliasing: ${contract.memory.aliasing.length === 0 ? "not constrained (the function writes nothing)" : contract.memory.aliasing.join(", ")}`);
+  const aliasing = contract.memory.aliasing;
+  const unconstrained =
+    contract.memory.writes.length === 0 ? "not constrained (the function writes nothing)" : "not constrained";
+  lines.push(`aliasing: ${aliasing.length === 0 ? unconstrained : aliasing.join(", ")}`);
   if (contract.memory.alignment !== undefined) {
     lines.push(`alignment: ${JSON.stringify(contract.memory.alignment)}`);
   }
@@ -427,9 +430,18 @@ function renderDefinition(contract: FunctionContract): string {
       }
     }
     lines.push("");
-    lines.push(
-      "Allocate an object with blaze_rt_object_new(bytes, alignment), fill the fields at these offsets, and return the pointer.",
-    );
+    // The layouts are the program's objects, and every function is told all
+    // of them: one that reads a field needs the offset even though it never
+    // builds the object. Only the function that builds one is told how.
+    if (definition.allocates) {
+      lines.push(
+        "Allocate an object with blaze_rt_object_new(bytes, alignment), fill the fields at these offsets, and return the pointer.",
+      );
+    } else {
+      lines.push(
+        "This function allocates no object: the layouts above are the ones the program has, and a reference to one is a pointer the program has already given you.",
+      );
+    }
     lines.push("A null reference is written as a null pointer; every reference is one pointer wide.");
   }
   if (definition.prints) {

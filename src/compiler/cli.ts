@@ -18,6 +18,7 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
+  MAX_RETRIES,
   STATE_DIRECTORY,
   inspectProject,
   listProjects,
@@ -149,14 +150,23 @@ function defaultProjectFile(): string {
   return candidate;
 }
 
-function optionNumber(value: string | undefined, name: string): number | undefined {
+function optionNumber(value: string | undefined, name: string, minimum = 1, maximum?: number): number | undefined {
   if (value === undefined) return undefined;
   // Strictly: `parseInt` reads "4x" as 4 and the flag then asks for something
   // the user did not type, which is the one reading a number must not allow.
-  if (!/^[1-9]\d*$/.test(value)) {
-    throw new Error(`${name} must be a positive integer, got "${value}"`);
+  // A zero is refused for a count that cannot be zero and allowed for the two
+  // the compiler takes one of: no re-requests, and no random cases.
+  const whole = minimum === 0 ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/;
+  if (!whole.test(value)) {
+    throw new Error(`${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer, got "${value}"`);
   }
-  return Number(value);
+  const parsed = Number(value);
+  // The cap on re-requests is the compiler's, not the command line's: without
+  // it here a build sits in its backoff loop for as long as the user asked.
+  if (maximum !== undefined && parsed > maximum) {
+    throw new Error(`${name} must be at most ${maximum}, got "${value}"`);
+  }
+  return parsed;
 }
 
 function buildOptions(values: Record<string, unknown>, arguments_: readonly string[] = []): BuildOptions {
@@ -184,18 +194,18 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") === undefined
       ? {}
       : { maxAttempts: optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") }),
-    ...(optionNumber(values["max-retries"] as string | undefined, "--max-retries") === undefined
+    ...(optionNumber(values["max-retries"] as string | undefined, "--max-retries", 0, MAX_RETRIES) === undefined
       ? {}
-      : { maxRetries: optionNumber(values["max-retries"] as string | undefined, "--max-retries") }),
+      : { maxRetries: optionNumber(values["max-retries"] as string | undefined, "--max-retries", 0, MAX_RETRIES) }),
     ...(optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency") === undefined
       ? {}
       : { candidateConcurrency: optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency") }),
     ...(optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency") === undefined
       ? {}
       : { functionConcurrency: optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency") }),
-    ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases") === undefined
+    ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0) === undefined
       ? {}
-      : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases") }),
+      : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0) }),
     ...(optionNumber(values["max-length"] as string | undefined, "--max-length") === undefined
       ? {}
       : { maxLength: optionNumber(values["max-length"] as string | undefined, "--max-length") }),

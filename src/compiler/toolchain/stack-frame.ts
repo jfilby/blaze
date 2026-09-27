@@ -33,10 +33,32 @@ const ENTRY_ALIGNMENT = 8;
 
 const ANY = 16;
 
-/** The operand of a branch that names a label, or null when it names something else. */
-function branchTarget(operand: string | undefined): string | null {
+/** The whole register set is 32 bytes, not the one cell a push moves. */
+const WHOLE_SET = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]);
+
+/**
+ * Where a branch goes, as the line it names, or null when it names something
+ * the walk cannot follow. A name is a label; the numeric local labels of GNU
+ * as are numbered from the branch rather than from the file, so `1b` is the
+ * nearest `1:` above it and `1f` the nearest below, and each is resolved
+ * against the line the branch is on. A walk that cannot read `1b` stopped at
+ * the first one, and every call after it went unchecked.
+ */
+function branchLine(
+  operand: string | undefined,
+  index: number,
+  byLabel: Map<string, number[]>,
+): number | null {
   if (operand === undefined) return null;
-  return /^(?:[A-Za-z_.$][A-Za-z0-9_.$]*|\d+)$/.test(operand) ? operand : null;
+  const local = /^(\d+)([bf])$/.exec(operand);
+  if (local !== null) {
+    const at = byLabel.get(local[1]) ?? [];
+    return local[2] === "b"
+      ? (at.filter((line) => line < index).at(-1) ?? null)
+      : (at.find((line) => line > index) ?? null);
+  }
+  if (!/^(?:[A-Za-z_.$][A-Za-z0-9_.$]*|\d+)$/.test(operand)) return null;
+  return byLabel.get(operand)?.[0] ?? null;
 }
 
 /** What an instruction leaves the offset at, given what it started at. */
@@ -44,10 +66,16 @@ function transfer(mnemonic: string, operands: string[], alignment: Alignment): A
   if (mnemonic.startsWith("push") || mnemonic.startsWith("pop")) {
     // A push and a pop both move rsp by one cell, and one cell is half a
     // boundary, so either one leaves an aligned offset where it found a
-    // misaligned one and the other way about.
-    return alignment === null ? null : (alignment + 8) % ANY;
+    // misaligned one and the other way about. Pushing the whole register set
+    // moves eight cells, which is a whole number of boundaries and so leaves
+    // the offset where it was.
+    const cell = WHOLE_SET.has(mnemonic) ? 32 : 8;
+    return alignment === null ? null : (alignment + cell) % ANY;
   }
-  if (mnemonic === "leave") return null;
+  // `leave` restores rsp from a frame the walk never read, and `enter` builds
+  // one whose size is the immediate and whose nesting is the second one: both
+  // leave an offset nobody here knows.
+  if (mnemonic === "leave" || mnemonic === "enter") return null;
   if (operands.at(-1) !== "%rsp") return alignment;
   if (alignment === null) return null;
 
@@ -74,12 +102,15 @@ function transfer(mnemonic: string, operands: string[], alignment: Alignment): A
  */
 export function stackAlignmentProblems(assembly: string, entry: string): string[] {
   const lines = readAssemblyLines(assembly);
-  const positions = new Map<string, number>();
+  const byLabel = new Map<string, number[]>();
   lines.forEach((line, index) => {
-    if (line.label !== null && !positions.has(line.label)) positions.set(line.label, index);
+    if (line.label === null) return;
+    const at = byLabel.get(line.label) ?? [];
+    at.push(index);
+    byLabel.set(line.label, at);
   });
 
-  const start = positions.get(entry);
+  const start = byLabel.get(entry)?.[0];
   if (start === undefined) return [];
 
   // What the walk has worked out about where each line is reached: the
@@ -115,7 +146,7 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
     }
     const { mnemonic, operands } = line;
     const next = transfer(mnemonic, operands, alignment);
-    const target = branchTarget(operands[0]);
+    const target = branchLine(operands[0], index, byLabel);
 
     if (mnemonic.startsWith("call")) {
       // A call leaves the stack it was given, so what follows is where it was.
@@ -124,13 +155,13 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
     }
     if (mnemonic.startsWith("ret")) continue;
     if (mnemonic.startsWith("jmp")) {
-      if (target !== null && positions.has(target)) reach(positions.get(target) as number, next);
+      if (target !== null) reach(target, next);
       continue;
     }
     reach(index + 1, next);
     // Every other jump is conditional, so both ways out of the line are taken.
-    if ((mnemonic.startsWith("j") || mnemonic.startsWith("loop")) && target !== null && positions.has(target)) {
-      reach(positions.get(target) as number, next);
+    if ((mnemonic.startsWith("j") || mnemonic.startsWith("loop")) && target !== null) {
+      reach(target, next);
     }
   }
 

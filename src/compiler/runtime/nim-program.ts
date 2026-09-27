@@ -171,11 +171,13 @@ function literal(text: string, element: string): string {
   const value = integerLiteral(text);
   // Nim refuses a literal its type cannot hold, while the C driver writes one
   // and keeps the bits the cast leaves. A value the type holds is written as
-  // the literal it is; one it does not is cast from the unsigned value it
-  // wraps, so both drivers end up with the same number.
+  // the literal it is; one it does not is cast from its own bits in 64 bits.
+  // The bits are the value, not its magnitude: `cast` reads them as they are,
+  // so the magnitude of a negative value would leave the sign behind and a
+  // `uint8` the source wrote as -1 came out as 1.
   if (value === null || (value >= integer.low && value <= integer.high)) return `${text}${integer.suffix}`;
-  const wrapped = value < 0n ? `${-value}'u64` : `${value}'u64`;
-  return `cast[${integer.type}](${wrapped})`;
+  const bits = value < 0n ? (1n << 64n) + value : value;
+  return `cast[${integer.type}](${bits}'u64)`;
 }
 
 /** The operator Nim spells for the one the source used: `&` concatenates. */

@@ -321,7 +321,11 @@ export function tokenize(source: string): Token[] {
       index += match[0].length;
       continue;
     }
-    if (source.startsWith("n", index) && /[0-9.]/.test(source[index - 1] ?? "")) {
+    // The `n` of a bigint literal follows the number it is attached to, and
+    // the token before it has to be that number: reading the character before
+    // the `n` alone takes the dot of `x.name` for the end of a number and
+    // retypes it, which eats the `n` and leaves the field one letter short.
+    if (source.startsWith("n", index) && tokens[tokens.length - 1]?.kind === "number") {
       tokens[tokens.length - 1].kind = "bigint";
       index += 1;
       continue;
@@ -359,6 +363,9 @@ export interface TypeScriptFunction {
   body: Statement[];
   line: number;
 }
+
+/** The operators that stand in front of a value, as opposed to between two. */
+const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
 class TypeScriptParser {
   private readonly tokens: Token[];
@@ -637,6 +644,11 @@ class TypeScriptParser {
     }
     const statements: Statement[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
+      // An empty statement is not one the body does. A lone `;` read as a
+      // call is a call the body never makes, which cost a function its
+      // postcondition and left the build reporting a function it could not
+      // check.
+      if (this.accept(";")) continue;
       statements.push(this.readStatement());
     }
     this.expect("}");
@@ -1063,8 +1075,19 @@ class TypeScriptParser {
 
   /** `a ** b`: right associative, and tighter than a sign on its left. */
   private readPower(): Expression {
+    const start = this.position;
     const base = this.readUnary();
     if (!this.at("**")) return base;
+    // A sign binds looser than `**` in JavaScript, so `-x ** 2` is a syntax
+    // error there and not the power of a negative number. Only an operator
+    // written straight in front of the base counts: `(-x) ** 2` is the power
+    // of a parenthesised negative number, and is a power.
+    if (UNARY_OPERATORS.includes(this.tokens[start]?.text ?? "")) {
+      this.report("`**` may not follow a unary operator", "as in `(-x) ** 2`");
+      this.next();
+      this.readPower();
+      return base;
+    }
     this.next();
     // A sign belongs to the exponent: `2 ** -1` is a power, not a subtraction.
     const exponent = this.at("-") || this.at("+") ? this.readSigned() : this.readPower();
@@ -1078,7 +1101,7 @@ class TypeScriptParser {
 
   private readUnary(): Expression {
     const token = this.peek();
-    if (token.kind === "punct" && (token.text === "!" || token.text === "-" || token.text === "+" || token.text === "~")) {
+    if (token.kind === "punct" && UNARY_OPERATORS.includes(token.text)) {
       this.next();
       return { k: "unary", op: token.text as UnaryOp, operand: this.readUnary() };
     }
@@ -1391,10 +1414,25 @@ function usageOf(declaration: TypeScriptFunction): {
       case "memberAssign":
         expression(one.value);
         return;
-      case "indexAssign":
+      case "indexAssign": {
+        // A buffer the body writes is a buffer it writes, and the range it
+        // writes over is the range a caller is held to. Leaving it out stated
+        // no precondition at all, and a driver that believed the contract
+        // handed the body a buffer shorter than the body walks.
+        const base = one.buffer;
+        if (parameters.has(base)) {
+          const loop = one.index.k === "ident" ? loops.get(one.index.name) : undefined;
+          if (loop !== undefined) access(base, loop.lo, loop.hi);
+          else {
+            const at = text(one.index);
+            if (at !== null) access(base, at, `(${at} + 1)`);
+            else access(base, "0", `len(${base})`);
+          }
+        }
         expression(one.index);
         expression(one.value);
         return;
+      }
       case "if":
         expression(one.condition);
         one.then.forEach(statement);
@@ -1409,11 +1447,19 @@ function usageOf(declaration: TypeScriptFunction): {
         if (one.step !== null) expression(one.step);
         // The index of a counted loop stands for the whole range the loop
         // walks, so a buffer its body reads is read over that range and not
-        // over the single turn that reads it.
+        // over the single turn that reads it. A loop that counts down walks
+        // the same range the other way round, and stating it as it is written
+        // would give a range with its ends the wrong way about: the length a
+        // caller is held to is then built from the loop's terminal bound, and
+        // the body reads past the end of the buffer it was given.
         const from = text(one.from);
         const to = text(one.to);
         const outer = loops.get(one.variable);
-        if (from !== null && to !== null) loops.set(one.variable, { lo: from, hi: one.inclusive ? `(${to} + 1)` : to });
+        if (from !== null && to !== null) {
+          loops.set(one.variable, one.down
+            ? { lo: one.inclusive ? to : `(${to} + 1)`, hi: `(${from} + 1)` }
+            : { lo: from, hi: one.inclusive ? `(${to} + 1)` : to });
+        }
         one.body.forEach(statement);
         if (outer === undefined) loops.delete(one.variable);
         else loops.set(one.variable, outer);
@@ -1636,7 +1682,10 @@ class BodyAnalysis {
         "a reduction describes a loop that accumulates into one variable, as in `total += a[i]`",
       );
     }
-    if (inner.op === "-=" || inner.op === "/=") {
+    // Only `+=` and `*=` are reductions. An allowlist and not a denylist:
+    // `=` and `%=` are assignments that happen to be written in a loop, and
+    // reading them as a sum states a contract the body does not implement.
+    if (inner.op !== "+=" && inner.op !== "*=") {
       this.uncontractable(
         `accumulates with "${inner.op}"`,
         inner.line,

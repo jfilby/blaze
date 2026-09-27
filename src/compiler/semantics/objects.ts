@@ -78,8 +78,8 @@ function alignUp(offset: number, align: number): number {
 class BodyTypes {
   private environment = new Map<string, Inferred>();
   private readonly results: Inferred[] = [];
-  private readonly path: string;
-  private readonly functionName: string;
+  readonly path: string;
+  readonly functionName: string;
   private readonly callees: Map<string, TypeExpr>;
 
   constructor(
@@ -110,7 +110,13 @@ class BodyTypes {
     switch (statement.kind) {
       case "declare": {
         const value = this.expression(statement.init);
-        this.environment.set(statement.name, statement.type === null ? value : { kind: "type", type: statement.type });
+        // An object literal is what the body stores, and an annotation does
+        // not narrow that. Binding the name as the annotated type left
+        // `o.field = ...` with nowhere to record what it wrote, so the field
+        // was missing from the layout and the body wrote past the end of the
+        // object it had allocated.
+        const annotated: Inferred = statement.type === null ? value : { kind: "type", type: statement.type };
+        this.environment.set(statement.name, value.kind === "object" ? value : annotated);
         return;
       }
       case "assign": {
@@ -350,12 +356,46 @@ function coalesce(left: Inferred, right: Inferred): Inferred {
 }
 
 /**
+ * What every function that writes an object of one key has to say about it.
+ *
+ * The key is the shape of the literal, so an object two functions build the
+ * same way is one object to the program, and the layout has to hold every
+ * field either of them writes. Keeping the shape of whichever function was
+ * walked last gave the others a layout shorter than their own bodies, and a
+ * field they write landed past the end of the allocation. A field two
+ * functions give different types is not a layout this can state at all.
+ */
+function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, body: BodyTypes): void {
+  for (const [key, shape] of body.registered) {
+    const existing = shapes.get(key);
+    if (existing === undefined) {
+      shapes.set(key, { key, fields: shape.fields.map((field) => ({ ...field })) });
+      owners.set(key, body.functionName);
+      continue;
+    }
+    for (const field of shape.fields) {
+      const known = existing.fields.find((entry) => entry.name === field.name);
+      if (known === undefined) {
+        existing.fields.push({ name: field.name, value: field.value });
+        continue;
+      }
+      if (describe(known.value) === describe(field.value)) continue;
+      throw objectsError(
+        `${body.path}: ${body.functionName} writes "${field.name}" as ${describe(field.value)}, which ${owners.get(key)} has it as ${describe(known.value)}`,
+        "an object is one object to the program, so one field holds one type; write the field in the literal so the two objects have different shapes",
+      );
+    }
+  }
+}
+
+/**
  * Lays every object of the program out, and writes the layout into the
  * definition of every function that has one. A signature the source left as
  * `any` is narrowed to the object its body actually returns.
  */
 export function resolveObjects(files: readonly FileContract[]): void {
   const shapes = new Map<string, Shape>();
+  const owners = new Map<string, string>();
   const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
   // Every function the program compiles is callable, whether its contract
   // states what it returns or what it does: a body that calls one needs the
@@ -385,7 +425,7 @@ export function resolveObjects(files: readonly FileContract[]): void {
     );
     body.statements(definition.statements);
     bodies.set(caller.name, body);
-    for (const [key, shape] of body.registered) shapes.set(key, shape);
+    mergeShape(shapes, owners, body);
   }
 
   const names = new Map<string, string>();
