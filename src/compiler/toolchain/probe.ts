@@ -117,9 +117,24 @@ function buildValue(
   }
   if (type.kind === "ref") return type.name === undefined ? "NULL" : `(struct ${type.name}*)NULL`;
   if (type.kind === "primitive") return defaultScalar(type);
-  // A buffer of no elements is a null pointer, and a pointer to one is a value
-  // the harness protocol already carries.
-  return "NULL";
+  if (type.kind === "void") return "NULL";
+  // A buffer is built as a real one, of the length the contract states, and
+  // not as a null pointer. The preconditions are read against a buffer that
+  // is there — `probeValue` reports an empty buffer as a buffer, not as a null
+  // pointer — so passing NULL to a call the compiler had just accepted
+  // `a != null` for killed a candidate that was doing exactly what it was
+  // written to do, and a whole function's candidates were rejected for it. The
+  // count is the one the contract states, so a precondition that needs
+  // elements to be there refuses the call before it is made.
+  const element = cType(type.of);
+  // A pointer of any type is the size of a pointer, which is written the way
+  // C spells it rather than through a type that is a GNU extension.
+  const elementSize = element.endsWith("*") ? "sizeof(void*)" : `sizeof(${element})`;
+  const count = type.kind === "array" ? (type.length ?? 0) : 0;
+  const pointer = `${name}_probe_buffer`;
+  statements.push(`void* ${pointer} = ${RUNTIME_NAME}_array_new(${count}, ${elementSize});`);
+  statements.push(`if (${pointer} == NULL) { fprintf(stderr, "probe: out of memory\\n"); exit(2); }`);
+  return `(${element}*)${pointer}`;
 }
 
 /** The contract-level value a default argument has, for reading preconditions. */

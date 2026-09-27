@@ -287,6 +287,26 @@ test("a loop a reduction cannot state is contracted as a definition", () => {
   assert.deepEqual(walk?.kind === "forOf" ? walk.body.map((one) => one.kind) : null, ["if", "assign"]);
 });
 
+test("arithmetic a contract cannot state is a definition, not a refused build", () => {
+  // `%`, `<<` and `>>` have no operator in the contract language. Naming them
+  // as operators a contract states a result with wrote `a[i] % 2` into the
+  // postcondition, and the parser then refused the whole build with
+  // `unexpected character "%"` — for source that runs.
+  for (const written of ["a[i] % 2", "a[i] >> 1", "a[i] << 1"]) {
+    const contract = contractOfExport(
+      `export function report(a: Int32Array, n: number): number {
+  let c = 0;
+  for (let i = 0; i < n; i++) { c += ${written}; }
+  return c;
+}
+`,
+      "report",
+    );
+    assert.deepEqual(contract.ensures, [], written);
+    assert.notEqual(contract.definition, undefined, written);
+  }
+});
+
 test("the language is selected by name", () => {
   assert.equal(frontendFor("typescript"), typescript);
   assert.equal(frontendFor("ts"), typescript);

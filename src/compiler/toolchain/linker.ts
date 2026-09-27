@@ -25,7 +25,7 @@
  *   BENCH <nanoseconds> <sink>
  */
 
-import { bufferElement, isFloatType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
+import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, FunctionParam, ObjectLayout, TypeExpr } from "../core/types.ts";
@@ -66,7 +66,7 @@ function isBuffer(type: TypeExpr): type is BufferType {
 }
 
 function isSignedScalar(type: TypeExpr): boolean {
-  return type.kind === "primitive" && (type.name === "isize" || type.name.startsWith("i"));
+  return type.kind === "primitive" && isSignedIntegerType(type.name);
 }
 
 /** C type used in the harness declaration for a contract type. */

@@ -64,8 +64,15 @@ function constantModuleBytes(exportName: string, parameters: readonly number[] =
   const functions = section(3, [1, 0x00]);
   // Export section: the given name is function 0, the only import is a memory.
   const exports = section(7, [1, ...bytes(utf8(exportName)), 0x00, 0x00]);
-  // Code section: no locals, the constant 42 in the result type, end.
-  const body = result === 0x7d ? [0x00, 0x43, 0x00, 0x00, 0x28, 0x42, 0x0b] : [0x00, 0x41, 0x2a, 0x0b];
+  // Code section: no locals, the constant 42 in the result type, end. An i64
+  // result carries -1, which reads unsigned as 2^64 - 1: a value a wasm module
+  // can express that a JavaScript BigInt prints as a negative number.
+  const body =
+    result === 0x7d
+      ? [0x00, 0x43, 0x00, 0x00, 0x28, 0x42, 0x0b]
+      : result === 0x7e
+        ? [0x00, 0x42, 0x7f, 0x0b]
+        : [0x00, 0x41, 0x2a, 0x0b];
   const code = section(10, [1, body.length, ...body]);
 
   return new Uint8Array([
@@ -216,3 +223,25 @@ test("the host runs a contract that takes nothing, whose vectors are blank lines
   assert.equal(execution.stdout, "RESULT 42\nRESULT 42\n");
 });
 
+test("an unsigned 64 bit result is printed as the unsigned number it is", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const contract: FunctionContract = {
+    ...CONTRACT,
+    function: { name: "big", symbol: "blaze_big", params: [], returns: "u64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+  };
+  // A wasm i64 arrives as a JavaScript BigInt, which prints signed. A value
+  // from 2^63 up therefore came back as a negative number for a candidate
+  // that returned exactly what the contract promised, while the native
+  // harness printed the same result unsigned.
+  const [hostPath, modulePath] = await hostIn(directory, contract, constantModuleBytes("blaze_big", [], 0x7e));
+  const vectors: TestVector[] = [{ id: "only", kind: "fixed", args: {} }];
+  const execution = run(process.execPath, [hostPath, modulePath], {
+    input: encodeRunRequest(contract, vectors),
+    timeoutMs: 60_000,
+  });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "RESULT 18446744073709551615\n");
+});

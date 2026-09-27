@@ -826,6 +826,13 @@ test("a stepped loop runs the values the source runs, in both drivers", async (t
     "for (let i = 6; i >= 0; i -= 2) console.log(i);",
     "for (let i = 6; i > 0; i -= 2) console.log(i);",
     "for (let i = 0; i <= 3; i += 1) console.log(i);",
+    // `i--` is a step of minus one exactly as `i -= 1` is. It was read as a
+    // step of plus one, which sent the index the other way and ran a
+    // descending loop for ever instead of stopping on its bound.
+    "for (let i = 3; i > 0; i--) console.log(i);",
+    "for (let i = 5; i >= 1; i--) console.log(i);",
+    "for (let i = 0; i < 3; i++) console.log(i);",
+    "for (let i = 4; i > 0; i--) { if (i % 2 === 0) continue; console.log(i); }",
     "",
   ].join("\n");
   const reference = run("node", ["main.ts"], { cwd: (await program(source)).directory, timeoutMs: 60_000 });

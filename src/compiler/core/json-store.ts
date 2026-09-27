@@ -160,7 +160,24 @@ export function createJsonStore(root: string): JsonStore {
     async writeText(relativePath: string, contents: string): Promise<void> {
       const file = resolveInStore(relativePath);
       await store.mkdirp(dirname(relative(absoluteRoot, file)));
-      await writeFile(file, contents, "utf8");
+      // A write in place is the half-written file this store promises never to
+      // expose: a reader that arrives between the truncate and the last write
+      // sees a file that is neither the old contents nor the new. It goes
+      // through a temporary of its own, as `write` does, so a build record is
+      // only ever observed whole.
+      const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
+      try {
+        await writeFile(temporary, contents, "utf8");
+        await rename(temporary, file);
+      } catch (cause) {
+        await rm(temporary, { force: true });
+        throw new CompilerError({
+          category: "StorageError",
+          stage: "storage",
+          message: `cannot write ${relativePath}`,
+          detail: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
     },
 
     async remove(relativePath: string): Promise<void> {

@@ -141,9 +141,12 @@ test("a field name that reads like another shape's key does not give two objects
     },
     "1.ts",
   );
+  // The layouts themselves are the invariant, not which functions carry them:
+  // every function states the program's objects, because a function reads an
+  // object another wrote and the driver declares one set. What must differ
+  // here is the two layouts, and the two return types.
   const two = contracts.two.definition?.objects ?? {};
   const one = contracts.one.definition?.objects ?? {};
-  assert.notDeepEqual(two, one);
   assert.equal(contracts.two.function.returns, "ref<Object1>");
   assert.equal(contracts.one.function.returns, "ref<Object2>");
   assert.deepEqual(two.Object1.fields, [

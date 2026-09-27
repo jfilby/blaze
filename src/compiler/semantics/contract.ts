@@ -56,6 +56,17 @@ export function isNumericType(name: PrimitiveTypeName): boolean {
   return INTEGER_NAMES[name] === true || FLOAT_NAMES[name] === true;
 }
 
+/**
+ * Whether a result of this type is read as a signed value. Both hosts have to
+ * agree on it: the native harness prints one with `%lld` and the WebAssembly
+ * host reads a BigInt, and a `u64` above 2^63 printed signed comes back as a
+ * negative number for a candidate that returned exactly what the contract
+ * promised.
+ */
+export function isSignedIntegerType(name: PrimitiveTypeName): boolean {
+  return name === "isize" || (isIntegerType(name) && name.startsWith("i"));
+}
+
 export function integerBits(name: PrimitiveTypeName): number {
   switch (name) {
     case "i8":

@@ -99,6 +99,30 @@ test("a reference the contract lays out is built, and the call is made once", ()
   assert.doesNotMatch(harness, /RESULT/);
 });
 
+test("a buffer argument is a buffer the call may use, not a null pointer", () => {
+  // The preconditions are read against a buffer that is there, so the call
+  // has to be given one: `a != null` was just accepted and then a null
+  // pointer was handed over, which faults a candidate for the fault rather
+  // than for the arithmetic. The count is the one the contract states, so a
+  // precondition that needs elements to be there still refuses the call.
+  const contract = definition({ requires: ["values != null"] }, "values: slice<f64>, n: f64");
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "call");
+  if (plan.kind !== "call") return;
+  assert.match(plan.statements.join("\n"), /blaze_rt_array_new\(0, sizeof\(double\)\)/);
+  assert.match(plan.callArguments[0] ?? "", /\(double\*\)values_probe_buffer/);
+});
+
+test("a contract that needs elements of a buffer has no input the probe can build", () => {
+  // The probe is only run on an input the contract says is inside its domain.
+  // An empty buffer is outside a domain that asks for two elements, so nothing
+  // is run rather than a buffer short of what the contract promised.
+  const contract = definition({ requires: ["values != null", "len(values) >= 2"] }, "values: slice<f64>, n: f64");
+  const plan = planProbe(contract, parseContract(contract));
+  assert.equal(plan.kind, "skip");
+  assert.match(plan.kind === "skip" ? plan.reason : "", /outside the domain it states: len\(values\) >= 2/);
+});
+
 test("a layout that reaches itself is built to a fixed depth", () => {
   const contract = definition({}, "node: ref<Object1>");
   contract.definition = {

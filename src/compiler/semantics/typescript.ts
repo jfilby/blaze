@@ -177,15 +177,20 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
 
 
 /** Statements the parser reads to the end of the statement and reports. */
-/** The operators the contract expression language states a result with. */
+/**
+ * The operators the contract expression language states a result with. It is
+ * `contract.ts`'s own grammar that decides, and an operator named here that it
+ * cannot parse is written into the postcondition and then refused by the
+ * parser: `c += a[i] % 2` failed the build with "unexpected character" rather
+ * than being contracted as the definition it cannot be stated as. `%`, `<<`
+ * and `>>` are the ones the language has no operator for, so a body using one
+ * falls back the way `~` and a branch do.
+ */
 const CONTRACT_OPERATORS: readonly BinaryOp[] = [
   "+",
   "-",
   "*",
   "/",
-  "%",
-  "<<",
-  ">>",
   "<",
   "<=",
   ">",
@@ -197,7 +202,7 @@ const CONTRACT_OPERATORS: readonly BinaryOp[] = [
 ];
 
 /** The operators a value an index is built from may use, as a contract states it. */
-const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/", "%"];
+const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
 
 const UNSUPPORTED_STATEMENTS = ["switch", "try", "throw", "class", "interface", "type", "enum", "import"];
 
@@ -1336,15 +1341,23 @@ function usageOf(declaration: TypeScriptFunction): {
       case "index": {
         // A buffer the body indexes is a buffer it reads, at a position the
         // contract states as a number. An index the contract language cannot
-        // name — one that reads a local, or a call — is left out rather than
-        // guessed at.
+        // name is not left out: the read is still a read, and what the
+        // contract states about it is that the buffer is there.
         const base = value.base;
         if (base.k === "ident" && parameters.has(base.name)) {
           const loop = value.index.k === "ident" ? loops.get(value.index.name) : undefined;
           if (loop !== undefined) access(base.name, loop.lo, loop.hi);
           else {
             const at = text(value.index);
+            // An index the contract language cannot name — one a `while`
+            // counter holds, or one a `for..of` iterator carries — leaves the
+            // position unknown, and a position that is unknown is not a
+            // position the body skips. The buffer is read, so the contract
+            // says it is read: the only requirement the compiler can state
+            // honestly is that it is there, and `len(a)` for the upper bound
+            // states exactly that and no length it cannot justify.
             if (at !== null) access(base.name, at, `(${at} + 1)`);
+            else access(base.name, "0", `len(${base.name})`);
           }
         }
         expression(value.base);
@@ -1411,6 +1424,10 @@ function usageOf(declaration: TypeScriptFunction): {
         one.body.forEach(statement);
         return;
       case "forOf":
+        // Walking a buffer reads all of it, so the contract says so. The
+        // iteration is bounded by the array's own length, so no length is
+        // required of the caller: what it states is that the buffer is there.
+        if (parameters.has(one.of)) access(one.of, "0", `len(${one.of})`);
         one.body.forEach(statement);
         return;
       case "break":

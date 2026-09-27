@@ -100,7 +100,8 @@ test("a program that counts to a length prints what the source prints", async ()
   const { binary, original } = await deliver(source);
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
-  assert.equal(delivered.stdout, "3\n");
+  // The even indices are 0 and 2, so the total is a[0] + a[2] = 1 + 3.
+  assert.equal(delivered.stdout, "4\n");
   assert.equal(delivered.stdout, original);
 });
 
@@ -118,7 +119,10 @@ test("a name the driver's own headers define is declared under another one", asy
   const source = ["let bool = true;", "let ok = false;", "let size_t = 7;", "console.log(bool, ok, size_t);", ""].join("\n");
   const written = driver(source);
   assert.match(written, /\bbool bool_ = true;/);
-  assert.match(written, /\bsize_t size_t_ = 7;/);
+  // The declaration is written at the type the source infers, and a number in
+  // a program is a double, so only the name is pinned here: what matters is
+  // that it is not the `size_t` <stdlib.h> already defines.
+  assert.match(written, /\bsize_t_ = 7\b/);
   const { binary, original } = await deliver(source);
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
@@ -136,9 +140,9 @@ test("a name the driver declares for itself is not given to a program name", () 
       "",
     ].join("\n"),
   );
-  assert.match(written, /program_string_ = 1;/);
-  assert.match(written, /blaze_rt_allocate_ = 2;/);
-  assert.match(written, /main_ = 3;/);
+  assert.match(written, /\bprogram_string_ = 1\b/);
+  assert.match(written, /\bblaze_rt_allocate_ = 2\b/);
+  assert.match(written, /\bmain_ = 3\b/);
 });
 
 test("an alias of an array is the array, at the element type the call reads it at", () => {
@@ -159,7 +163,9 @@ test("an alias of an array is the array, at the element type the call reads it a
   // pointer is never read back silently as another type.
   assert.match(written, /int32_t\* a = /);
   assert.match(written, /int32_t\* b = a;/);
-  assert.equal((written.match(/blaze_rt_allocate/g) ?? []).length, 1);
+  // The count is over the program body: the driver prelude allocates in
+  // `program_concat`, which is in every driver and says nothing about `a`.
+  assert.equal((written.slice(written.indexOf("int main(")).match(/blaze_rt_allocate/g) ?? []).length, 1);
 });
 
 test("an array read at two element types is refused, alias or not", () => {

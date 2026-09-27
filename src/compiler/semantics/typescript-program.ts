@@ -511,9 +511,11 @@ class ProgramParser {
         this.fail(`the loop counts on "${comparison}" but its index moves with "${move.text}"`, move);
         return { value: null, refused: true };
       }
-      // The loop already counts in the direction it travels, so a step of one
-      // the way it travels is the step the driver would write anyway.
-      return { value: { k: "number", text: "1" }, refused: false };
+      // The step is how far and which way the index moves, signed as the
+      // source writes it, because a driver adds it: `i--` is a step of minus
+      // one exactly as `i -= 1` is, and a step of plus one here moved the
+      // index the wrong way and ran a descending loop for ever.
+      return { value: { k: "number", text: move.text === "--" ? "-1" : "1" }, refused: false };
     }
     const op = this.assignOperator();
     if (op !== "+=" && op !== "-=") {

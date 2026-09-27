@@ -658,6 +658,9 @@ const TWICE_ASSEMBLY = [
 ].join("\n");
 
 /** The caller: prints what the callee returns, rather than computing it again. */
+// The entry returns: a candidate that runs off its own end falls into
+// whatever the linker put after it, so the program is killed by SIGSEGV and
+// the build reports that rather than the arithmetic it was written for.
 const MAIN_CALLS_TWICE_ASSEMBLY = [
   ".text",
   "\t.globl\tblaze_main",
@@ -670,6 +673,7 @@ const MAIN_CALLS_TWICE_ASSEMBLY = [
   "\tcall\tblaze_rt_print_number",
   "\tcall\tblaze_rt_print_newline",
   "\taddq\t$24, %rsp",
+  "\tret",
   "",
 ].join("\n");
 

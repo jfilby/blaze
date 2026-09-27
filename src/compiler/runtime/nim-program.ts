@@ -66,7 +66,7 @@ iterator programValues[T: SomeNumber](first, last, stride: T, inclusive, down: b
   while (if down: (if inclusive: value >= last else: value > last)
          else: (if inclusive: value <= last else: value < last)):
     yield value
-    (if down: value -= stride else: value += stride)
+    (value += stride)
 
 `;
 
