@@ -302,12 +302,16 @@ function numeric(left: Inferred, right: Inferred): TypeExpr {
 export function resolveObjects(files: readonly FileContract[]): void {
   const shapes = new Map<string, Shape>();
   const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
+  // Every function the program compiles is callable, whether its contract
+  // states what it returns or what it does: a body that calls one needs the
+  // other's return type either way, and a function contracted by a
+  // postcondition is a function the program still links beside it.
   const callees = new Map<string, TypeExpr>();
   for (const file of files) {
     for (const [name, contract] of Object.entries(file.functions)) {
+      callees.set(name, parseType(contract.function.returns));
       if (contract.definition === undefined) continue;
       callers.set(name, { file, name, contract });
-      callees.set(name, parseType(contract.function.returns));
     }
   }
   if (callers.size === 0) return;

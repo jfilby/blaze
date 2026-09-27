@@ -110,6 +110,24 @@ test("a candidate that reaches outside the contract is rejected", () => {
   rejection("\t.globl dotProduct\ndotProduct:\n\tjmp memcpy\n\tret\n", /"memcpy" is referenced but not defined/);
 });
 
+test("a candidate may call the other functions the build compiles", () => {
+  // A program is compiled one function at a time and linked together, so a
+  // call to a sibling is a call to an object that exists rather than a symbol
+  // the candidate invented and has to define behind a local label.
+  const assembly = "\t.globl dotProduct\ndotProduct:\n\tsubq $8, %rsp\n\tcall\tsum\n\taddq $8, %rsp\n\tret\n";
+  let detail: string | undefined;
+  try {
+    validateAssembly(assembly, contract(), "c1", new Set(["sum"]));
+  } catch (error) {
+    detail = error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
+  }
+  assert.equal(detail, undefined, `expected the call to be allowed:\n${detail ?? ""}`);
+
+  // The same call in a build that does not compile `sum` is still turned away:
+  // being callable is a property of this build, not of the name.
+  rejection(assembly, /"sum" is referenced but not defined/);
+});
+
 test("a candidate may not define or export anything else", () => {
   rejection("\t.globl dotProduct\n\t.globl helper\ndotProduct:\n\tret\nhelper:\n\tret\n", /only "dotProduct" may be exported/);
   rejection("\t.globl dotProduct\ndotProduct:\n\tret\nhelper:\n\tret\n", /"helper" is defined but the contract only allows/);

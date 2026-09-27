@@ -49,6 +49,12 @@ export interface PromptRequest {
   program: ProgramContract;
   /** The source each contract was derived from, in program order. */
   sources: readonly SourceModule[];
+  /**
+   * The contracts of the other functions this build compiles, which the
+   * candidate may call. A program is compiled one function at a time and linked
+   * together, so a call is a call rather than a reimplementation.
+   */
+  callees?: readonly FunctionContract[];
   target: TargetSpec;
   output: OutputKind;
   runtime: RuntimeKind;
@@ -97,16 +103,36 @@ const NATIVE_LANGUAGE = "GNU assembler (GAS) AT&T syntax for x86-64";
  * that is not is register preservation, which only shows up once the candidate
  * is linked and run.
  */
-function nativeRules(contract: FunctionContract): string[] {
+function nativeRules(contract: FunctionContract, callable: readonly FunctionContract[]): string[] {
   const symbol = symbolOf(contract);
+  const others = callable.filter((other) => symbolOf(other) !== symbol);
   return [
     `Declare it with ".global ${symbol}" and define it with the label "${symbol}:", and export nothing else.`,
     'Every other label you define must start with a dot, as in ".Lloop:": a label that is neither the contracted symbol nor a local one is rejected.',
-    `The only symbols you may reference are "${symbol}" itself, for recursion, and the runtime ABI entry points above. Calling another function of this program is rejected, so what it does belongs in this function or behind a local label.`,
+    others.length === 0
+      ? `The only symbols you may reference are "${symbol}" itself, for recursion, and the runtime ABI entry points above.`
+      : `The only symbols you may reference are "${symbol}" itself, for recursion, the runtime ABI entry points above, and ${others.map((other) => `"${symbolOf(other)}"`).join(", ")}.`,
+    others.length === 0
+      ? "This function is the only one this build compiles, so what it calls it has to write out itself."
+      : "The other functions of this program are compiled on their own and linked beside yours, so call them by the symbol above rather than writing out what they do. Calling one is ordinary: preserve the registers across the call, and note that the program is the only thing that runs this candidate, so nothing here checks it on its own.",
     "It is entered and left as an ordinary System V call, so preserve rbx, rbp and r12 to r15, leave rsp where you found it, and return with ret.",
     "You arrive with the return address still on the stack, so rsp is 8 past a 16-byte boundary, and it has to be back on a 16-byte boundary at every call you make: an allocation that is a multiple of 16 leaves it 8 out, and the runtime you call uses aligned moves on its own frame. Subtract a multiple of 16 plus 8, or realign with \"andq $-16, %rsp\" before the call and put it back after.",
     "The 128 bytes below rsp are yours to use without adjusting it only while you make no calls; a call may use that space for itself.",
     "Do not emit .section, .arch, .cpu, .file, .include, .incbin, .macro or .rept; the compiler supplies the architecture prelude.",
+  ];
+}
+
+/**
+ * The functions of the program a candidate may call, each with the calling
+ * convention it is called under, so a call is written from the contract rather
+ * than guessed from the source.
+ */
+function renderCallable(callee: FunctionContract): string[] {
+  return [
+    `${symbolOf(callee)}(${callee.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${callee.function.returns}`,
+    `  C prototype: ${renderSignature(callee)}`,
+    `  argument locations: ${sysvArgumentLocations(callee.function.params)}`,
+    `  return value: ${sysvReturnLocation(parseType(callee.function.returns))}`,
   ];
 }
 
@@ -658,7 +684,8 @@ export function buildUserPrompt(request: PromptRequest): string {
 
   const language = OUTPUT_LANGUAGE[output];
   const native = output === "asm" || output === "machine";
-  const rules = native ? nativeRules(contract) : language.rules;
+  const callees = (request.callees ?? []).filter((other) => symbolOf(other) !== symbolOf(contract));
+  const rules = native ? nativeRules(contract, request.callees ?? []) : language.rules;
 
   const sections: string[] = [];
   sections.push(`CONTRACT\n${renderContract(contract)}`);
@@ -683,6 +710,18 @@ export function buildUserPrompt(request: PromptRequest): string {
       renderTypes(contract),
     ].join("\n"),
   );
+  if (native && callees.length > 0) {
+    sections.push(
+      [
+        "FUNCTIONS YOU MAY CALL",
+        "Each of these is compiled on its own and linked beside yours, so call it instead of writing out",
+        "what it does. They are ordinary System V calls, at the locations given:",
+        ...callees.flatMap((callee) => renderCallable(callee)),
+        "The program you are part of is the only thing that runs this candidate: nothing verifies it here,",
+        "so a call that is wrong shows up as the whole program printing something else.",
+      ].join("\n"),
+    );
+  }
   sections.push(
     contract.definition === undefined
       ? [

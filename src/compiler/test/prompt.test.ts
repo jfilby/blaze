@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { buildSystemPrompt, buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
+import { CompilerError } from "../core/errors.ts";
 import { validateAssembly } from "../toolchain/assembler.ts";
 import { programOf } from "./phase.ts";
 import type { FunctionContract } from "../core/types.ts";
@@ -66,7 +67,35 @@ test("the prompt states the labels and the calls a candidate may write", () => {
   // from a program whose source calls its own functions.
   assert.match(prompt, /Every other label you define must start with a dot/);
   assert.match(prompt, /for recursion/);
-  assert.match(prompt, /Calling another function of this program is rejected/);
+  // Without the sibling contracts there is nothing to call, so the prompt says
+  // what it may reference rather than naming functions it was not handed.
+  assert.match(prompt, /The only symbols you may reference are "blaze_main" itself, for recursion, and the runtime ABI/);
+  assert.match(prompt, /This function is the only one this build compiles/);
+});
+
+test("a candidate is told the functions of the program it may call, and how", () => {
+  const prompt = buildUserPrompt(
+    request({
+      contract: treeMain,
+      unit: { file: "1.ts", function: "main" },
+      program: treeProgram,
+      sources: [{ path: "1.ts", source: TREES["1.ts"] }],
+      callees: [treeChecksum, treeProgram.files[0].functions.createTree],
+    }),
+  );
+
+  // The model is told the call, the symbol to make it on, and where the
+  // arguments and the result go, because those are what a call is written from
+  // and none of them can be read off the TypeScript it was given.
+  assert.match(prompt, /FUNCTIONS YOU MAY CALL/);
+  assert.match(prompt, /"checksum", "createTree"/);
+  assert.match(prompt, /C prototype: double checksum\(void\* node\)/);
+  assert.match(prompt, /argument locations: node -> rdi/);
+  assert.match(prompt, /return value: xmm0/);
+  assert.match(prompt, /call it instead of writing out/);
+  // The entry is excluded: a candidate is already the implementation of it.
+  assert.doesNotMatch(prompt, /C prototype: void blaze_main/);
+  assert.doesNotMatch(prompt, /Calling another function of this program is rejected/);
 });
 
 test("the prompt states what the function owes the convention it is called under", () => {
@@ -90,18 +119,29 @@ test("the program the model writes is the one the assembler is given", () => {
   // The rules the prompt states have to be the ones the validator enforces, or
   // they are decoration: this is the shape each of them rejects, and what it
   // says about it.
-  const rejected = (assembly: string, contract: FunctionContract): string => {
+  const rejected = (assembly: string, contract: FunctionContract, callable?: ReadonlySet<string>): string => {
     try {
-      validateAssembly(assembly, contract);
+      validateAssembly(assembly, contract, undefined, callable);
     } catch (error) {
-      return (error as { detail?: string }).detail ?? String(error);
+      if (!(error instanceof CompilerError)) return String(error);
+      return error.detail ?? error.message;
     }
     return "";
   };
 
   assert.match(rejected(["\t.globl\tmain", "main:", "\tret", ""].join("\n"), treeMain), /only "blaze_main" may be exported/);
   assert.match(rejected(["\t.globl\tchecksum", "checksum:", "loop:", "\tret", ""].join("\n"), treeChecksum), /the contract only allows "checksum"/);
-  assert.match(rejected(["\t.globl\tblaze_main", "blaze_main:", "\tcall\tchecksum", "\tret", ""].join("\n"), treeMain), /may only call the runtime ABI/);
+  // A symbol that is neither the runtime, nor this function, nor another
+  // function of the build is still turned away: the program is what a
+  // candidate may reach outside itself for.
+  assert.match(rejected(["\t.globl\tblaze_main", "blaze_main:", "\tcall\thelper", "\tret", ""].join("\n"), treeMain), /may only call the runtime ABI and the other functions of this program/);
+  // A function of the same program is a call the build links, not a rejection.
+  // The frame it is made from is still a legal one: the rule about alignment is
+  // about the call, not about who is being called.
+  assert.equal(rejected(["\t.globl\tblaze_main", "blaze_main:", "\tsubq\t$24, %rsp", "\tcall\tchecksum", "\taddq\t$24, %rsp", "\tret", ""].join("\n"), treeMain, new Set(["checksum"])), "");
+  // And it is only a call because the build compiles it: the same symbol in a
+  // build that does not compile checksum is not one.
+  assert.match(rejected(["\t.globl\tblaze_main", "blaze_main:", "\tsubq\t$24, %rsp", "\tcall\tchecksum", "\taddq\t$24, %rsp", "\tret", ""].join("\n"), treeMain), /"checksum" is referenced but not defined/);
   // Recursion into its own symbol is the one call a candidate may make. It is
   // made from a frame the call itself put on the stack, which is what puts rsp
   // back on a boundary for the runtime it calls.

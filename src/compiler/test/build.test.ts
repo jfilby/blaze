@@ -7,6 +7,7 @@ import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../compile
 import { run } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
+import { chatEndpoint } from "./model-endpoint.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
@@ -624,6 +625,140 @@ test("a program whose function takes a reference is built, because the program i
   const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
   assert.equal(execution.code, 0, execution.stderr);
   assert.equal(execution.stdout, "a program holds no references, so depth is linked, not called\n");
+});
+
+/**
+ * A program of two functions, one of which the other calls. The caller cannot
+ * be verified on its own: the object it needs is the callee's, and which
+ * candidate of the callee it is has not been settled when the caller is built.
+ * So the call is linked by the program, and the program is what says whether
+ * the two agree.
+ */
+const CALLING_PROGRAM = [
+  "function twice(n: number): number {",
+  "  return n * 2;",
+  "}",
+  "",
+  "function main(): void {",
+  "  console.log(twice(21));",
+  "}",
+  "",
+  "main();",
+  "",
+].join("\n");
+
+/** The callee: returns its argument doubled, as the source says. */
+const TWICE_ASSEMBLY = [
+  ".text",
+  "\t.globl\ttwice",
+  "twice:",
+  "\taddsd\t%xmm0, %xmm0",
+  "\tret",
+  "",
+].join("\n");
+
+/** The caller: prints what the callee returns, rather than computing it again. */
+const MAIN_CALLS_TWICE_ASSEMBLY = [
+  ".text",
+  "\t.globl\tblaze_main",
+  "blaze_main:",
+  "\tsubq\t$24, %rsp",
+  "\tmovabsq\t$4626604192193052672, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tcall\ttwice",
+  "\tmovq\t%xmm0, %rdi",
+  "\tcall\tblaze_rt_print_number",
+  "\tcall\tblaze_rt_print_newline",
+  "\taddq\t$24, %rsp",
+  "",
+].join("\n");
+
+/**
+ * A two-function program project, answered per function rather than per
+ * request: the two are generated at the same time, so which answer a request
+ * gets is decided by the function the prompt is for.
+ */
+async function callingProject(
+  name: string,
+  caller: string,
+): Promise<{ directory: string; answer: (prompt: string) => string }> {
+  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  await writeFile(join(directory, "main.ts"), CALLING_PROGRAM, "utf8");
+  await writeFile(
+    join(directory, "blaze.json"),
+    JSON.stringify({
+      language: "typescript",
+      sourceFile: "main.ts",
+      model: { provider: "openai-compatible", model: "stub" },
+      output: "machine",
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+    }),
+    "utf8",
+  );
+  return { directory, answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : TWICE_ASSEMBLY) };
+}
+
+test("a function that calls another function of the program is built and checked by it", async (t) => {
+  const { directory, answer } = await callingProject("calls-sibling", MAIN_CALLS_TWICE_ASSEMBLY);
+  await chatEndpoint(t, [], { answer });
+
+  const outcome = await runBuild(
+    "blaze.json",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "twice"]);
+
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "42\n");
+
+  // The caller is not probed and carries no vector: the object it calls is the
+  // callee's, so the program is the only thing that can run it. What proved it
+  // is that the program printed what the source prints.
+  const generation = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+  ) as {
+    functions: Record<
+      string,
+      { outcomes: { probe?: { called: boolean; reason: string | null }; verification?: unknown }[] }
+    >;
+  };
+  const [mainOutcome] = generation.functions.main.outcomes;
+  assert.equal(mainOutcome.probe?.called, false);
+  assert.match(mainOutcome.probe?.reason ?? "", /it calls twice, so the program it belongs to is what runs it/);
+  // The callee is a function of its own contract, so it is still verified and
+  // measured on its own vectors: being called does not cost it that.
+  const [twiceOutcome] = generation.functions.twice.outcomes;
+  assert.equal(twiceOutcome.probe, undefined);
+  assert.notEqual(twiceOutcome.verification, undefined);
+});
+
+test("a function that calls another function wrongly is rejected by the program", async (t) => {
+  // The caller doubles what the callee already doubled, so the program prints
+  // 84 where the source prints 42. Nothing is wrong with the candidate on its
+  // own, and the program is the only thing that can see it.
+  const wrong = MAIN_CALLS_TWICE_ASSEMBLY.replace(
+    "\tmovq\t%xmm0, %rdi",
+    "\taddsd\t%xmm0, %xmm0\n\tmovq\t%xmm0, %rdi",
+  );
+  const { directory, answer } = await callingProject("wrong-call", wrong);
+  await chatEndpoint(t, [], { answer });
+
+  const failure = await runBuild(
+    "blaze.json",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  ).then(
+    () => { throw new Error("a program that prints the wrong thing must not be delivered"); },
+    (error: CompilerError) => error,
+  );
+  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /the program prints "84"/);
 });
 
 test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {

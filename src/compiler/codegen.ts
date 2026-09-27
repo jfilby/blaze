@@ -12,7 +12,7 @@
  * model only proposes.
  */
 
-import { assemble } from "./toolchain/assembler.ts";
+import { assemble, programCalls } from "./toolchain/assembler.ts";
 import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
 import { buildWasm } from "./toolchain/wasm.ts";
 import { compileC } from "./toolchain/csource.ts";
@@ -84,6 +84,12 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   program: ProgramContract;
   /** Every module of the program, with the source each contract came from. */
   sources: readonly SourceModule[];
+  /**
+   * The contracts of the other functions this build compiles, which the prompt
+   * states as callable. The symbols a candidate may reference are the same set,
+   * and are carried on the request as `callable`.
+   */
+  callees: readonly FunctionContract[];
   target: TargetSpec;
   output: OutputKind;
   /**
@@ -240,8 +246,14 @@ export function exclusive(): Exclusive {
   };
 }
 
-/** Everything evaluating one candidate needs, with or without a backend. */
 export interface CandidateEvaluationRequest {
+  /**
+   * The other functions this build compiles, by symbol. A candidate may call
+   * them: the build links the objects together, so a call is a call rather than
+   * a reimplementation. A candidate that makes one cannot be linked on its own,
+   * so the program it belongs to is what runs it.
+   */
+  callable: ReadonlySet<string>;
   contract: FunctionContract;
   parsed: ParsedContract;
   target: TargetSpec;
@@ -287,9 +299,13 @@ export function runtimePreparer(request: {
   };
 }
 
-/** A candidate built far enough to be executed. */
+/**
+ * A candidate built far enough to be executed. `runner` is null for a candidate
+ * that calls another function of the program: it is assembled, but the program
+ * it belongs to is the only thing that can link and run it.
+ */
 export interface Materialized {
-  runner: Runner;
+  runner: Runner | null;
   sizeBytes: number;
   textSizeBytes: number;
   implementationPath: string;
@@ -329,6 +345,12 @@ async function materialize(
   candidate: AssemblyCandidate,
   paths: CandidatePaths,
   vectors: PlannedVectors | null,
+  /**
+   * Whether the candidate can be linked on its own. One that calls another
+   * function of the program cannot: the object it needs is another
+   * candidate's, and which one is not settled until every candidate has been.
+   */
+  standalone: boolean,
 ): Promise<Materialized> {
   if (request.output === "wasm") {
     const module = await buildWasm({
@@ -364,7 +386,19 @@ async function materialize(
           contract: request.contract,
           target: request.target,
           candidate: candidate.id,
+          callable: request.callable,
         });
+
+  if (!standalone) {
+    // Assembled, but not linked: the program this candidate is part of is the
+    // one that has to run it, and it is linked once every candidate is chosen.
+    return {
+      runner: null,
+      sizeBytes: object.objectSizeBytes,
+      textSizeBytes: object.textSizeBytes,
+      implementationPath: paths.implementation,
+    };
+  }
 
   if (runtime !== undefined) {
     await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? ""), "utf8");
@@ -424,8 +458,29 @@ async function measureCandidate(
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
+  // A candidate may call the other functions of the program, and one that does
+  // is linked only into the program, so nothing about it can be run on its own.
+  // The program is the oracle for it, which is where a definition contract
+  // already sends its candidate.
+  const calls =
+    request.output === "machine" || request.output === "asm"
+      ? programCalls(candidate.assembly, request.callable)
+      : [];
   try {
-    const built = await materialize(request, candidate, paths, vectors);
+    const built = await materialize(request, candidate, paths, vectors, calls.length === 0);
+
+    // A candidate that calls another function of the program is judged by that
+    // program and by nothing else: there is no standalone binary to probe and
+    // no vector to run it against, so it is carried to the program round.
+    if (calls.length > 0) {
+      return {
+        candidate: candidate.id,
+        valid: true,
+        probe: { called: false, reason: `it calls ${calls.join(", ")}, so the program it belongs to is what runs it` },
+        textSizeBytes: built.textSizeBytes,
+        objectSizeBytes: built.sizeBytes,
+      };
+    }
 
     // A contract that states what a function does rather than what it returns
     // has no vector to verify against, so the candidate is called once on an
@@ -460,6 +515,18 @@ async function measureCandidate(
         textSizeBytes: built.textSizeBytes,
         objectSizeBytes: built.sizeBytes,
       };
+    }
+
+    // Reached only when the candidate is standalone, which is what leaves it
+    // with a binary to run its vectors against.
+    if (built.runner === null) {
+      throw new CompilerError({
+        category: "LinkError",
+        stage: "link",
+        message: `candidate ${candidate.id} produced no binary to verify`,
+        function: request.contract.function.name,
+        candidate: candidate.id,
+      });
     }
 
 
@@ -684,6 +751,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
             unit: { file: request.unitFile, function: request.contract.function.name },
             program: request.program,
             sources: request.sources,
+            callees: request.callees,
             target: request.target,
             output: request.output,
             runtime: request.runtime,
@@ -763,6 +831,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       test: request.test,
       benchmark: request.benchmark,
       prepareRuntime: request.prepareRuntime,
+      callable: request.callable,
       exclusive: request.exclusive,
     },
     request.candidate,

@@ -2,14 +2,15 @@
  * Assembly validation and machine code generation.
  *
  * Model output is untrusted. Before it reaches the assembler it is checked
- * structurally: only the contracted function may be defined, no other symbol
- * may be referenced, no directive may change the architecture or pull in
- * another file, and no system interface may be used. The architecture prelude
- * is compiler-controlled, so a candidate cannot silently target a different
- * machine than the contract asks for.
+ * structurally: only the contracted function may be defined, no symbol outside
+ * the contract, the program and the runtime may be referenced, no directive may
+ * change the architecture or pull in another file, and no system interface may
+ * be used. The architecture prelude is compiler-controlled, so a candidate
+ * cannot silently target a different machine than the contract asks for.
  *
  * After assembling, the object is checked again: it must define exactly the
- * contracted symbol and leave nothing undefined.
+ * contracted symbol and leave nothing undefined but the runtime and the other
+ * functions of the program, which the build links beside it.
  */
 
 import { stat, writeFile } from "node:fs/promises";
@@ -35,6 +36,36 @@ const ALLOWED_DIRECTIVES = new Set([
   ".section",
   ".ident",
 ]);
+
+/**
+ * The symbols a candidate may call: the runtime ABI, and the other functions
+ * the same build compiles. A program is compiled one function at a time and
+ * linked together afterwards, so a function that calls a sibling is calling an
+ * object that exists rather than one it has to reimplement. The set is what
+ * makes the difference between a call and a rejected symbol.
+ */
+export function callableSymbols(contracts: Iterable<FunctionContract>): Set<string> {
+  return new Set([...contracts].map(symbolOf));
+}
+
+/** Whether a symbol is one a candidate is allowed to call. */
+export function isCallableSymbol(symbol: string, callable: ReadonlySet<string>): boolean {
+  return isRuntimeSymbol(symbol) || callable.has(symbol);
+}
+
+/**
+ * The program functions a candidate references. A candidate that calls one
+ * cannot be linked on its own, because the object it needs is another
+ * candidate's, so the program it belongs to is what has to run it.
+ */
+export function programCalls(assembly: string, callable: ReadonlySet<string>): string[] {
+  const { definedLabels, referencedSymbols } = readAssemblyStructure(assembly);
+  return [
+    ...new Set(
+      referencedSymbols.filter((symbol) => callable.has(symbol) && !definedLabels.has(symbol)),
+    ),
+  ];
+}
 
 /** Instructions that would let a candidate leave the sandboxed contract. */
 const FORBIDDEN_MNEMONICS = new Set([
@@ -112,7 +143,12 @@ export function readAssemblyStructure(assembly: string): AssemblyStructure {
  * Rejects anything the contract does not allow. The returned diagnostics are
  * suitable for feeding back to the model.
  */
-export function validateAssembly(assembly: string, contract: FunctionContract, candidate?: string): void {
+export function validateAssembly(
+  assembly: string,
+  contract: FunctionContract,
+  candidate?: string,
+  callable: ReadonlySet<string> = new Set(),
+): void {
   const functionName = symbolOf(contract);
   const problems: string[] = [];
 
@@ -169,9 +205,9 @@ export function validateAssembly(assembly: string, contract: FunctionContract, c
     if (definedLabels.has(symbol)) continue;
     if (symbol === functionName) continue;
     if (/^\d+[fb]$/.test(symbol)) continue;
-    if (isRuntimeSymbol(symbol)) continue;
+    if (isCallableSymbol(symbol, callable)) continue;
     problems.push(
-      `"${symbol}" is referenced but not defined; the candidate may only call the runtime ABI`,
+      `"${symbol}" is referenced but not defined; the candidate may only call the runtime ABI and the other functions of this program`,
     );
   }
 
@@ -197,6 +233,8 @@ export function validateAssembly(assembly: string, contract: FunctionContract, c
 }
 
 export interface AssembleRequest {
+  /** The other functions of the build, whose symbols this candidate may call. */
+  callable?: ReadonlySet<string>;
   assembly: string;
   assemblyPath: string;
   objectPath: string;
@@ -282,7 +320,7 @@ export async function assemble(request: AssembleRequest): Promise<AssembleResult
   // The symbol the candidate is asked to define is the one the contract names,
   // which is not the function's name when a program entry carries its own.
   const functionName = symbolOf(request.contract);
-  validateAssembly(request.assembly, request.contract, request.candidate);
+  validateAssembly(request.assembly, request.contract, request.candidate, request.callable);
 
   const directive = archDirective(request.target);
   const prelude = `${directive === null ? "" : `${directive}\n`}.text\n`;
@@ -315,10 +353,11 @@ export async function assemble(request: AssembleRequest): Promise<AssembleResult
       request.candidate,
     );
   }
-  const unresolved = info.undefined.filter((symbol) => !isRuntimeSymbol(symbol));
+  const callable = request.callable ?? new Set<string>();
+  const unresolved = info.undefined.filter((symbol) => !isCallableSymbol(symbol, callable));
   if (unresolved.length > 0) {
     throw assemblyError(
-      `the object references symbols outside the runtime ABI: ${unresolved.join(", ")}`,
+      `the object references symbols outside the runtime ABI and this program: ${unresolved.join(", ")}`,
       undefined,
       functionName,
       request.candidate,

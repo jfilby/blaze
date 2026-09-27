@@ -25,7 +25,7 @@ import { verifyProgram, type ProgramVerification } from "./toolchain/verify-prog
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { resolveProgram } from "./toolchain/program.ts";
-import { assertAssemblerSupportsArch } from "./toolchain/assembler.ts";
+import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
   generateCandidates,
@@ -758,6 +758,13 @@ export async function runBuild(
      * it does rather than what it returns.
      */
     const awaitingProgram = new Map<string, IncrementalEntry>();
+    /**
+     * The other functions of this build, by contract. A program is compiled one
+     * function at a time and linked together, so a candidate that calls one of
+     * these is calling an object the build is going to produce rather than
+     * reimplementing it behind a local label.
+     */
+    const callees = units.map((entry) => entry.contract);
 
     /**
      * Records what this build proved: every function it verified against its
@@ -879,8 +886,10 @@ export async function runBuild(
         generation,
         test,
         benchmark: benchmarkConfig,
-        workspace,
         prepareRuntime,
+        workspace,
+        callable: callableSymbols(callees),
+        callees,
         exclusive: machine,
         // A repair round asks the model again, so what an earlier build
         // stored is not what it starts from. Otherwise the stored
@@ -1321,6 +1330,10 @@ export async function runStored(
     runtime,
     workspace: { workDirectory: base, functionName: program.entry.file },
   });
+  // A stored candidate that calls another function of the program is only
+  // linked by the program, so `blaze test` and `blaze benchmark` are given the
+  // same callable set the build that stored it was given.
+  const callable = callableSymbols(units.map((unit) => unit.contract));
   // `blaze test` measures one stored candidate at a time, but it measures them
   // the way a build does, so it goes through the same lock.
   const machine = exclusive();
@@ -1354,6 +1367,7 @@ export async function runStored(
       runtime,
       candidate,
       workspace,
+      callable,
       prepareRuntime,
       exclusive: machine,
       test: testConfigFor(input, options),
