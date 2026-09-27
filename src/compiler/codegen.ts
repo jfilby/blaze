@@ -23,7 +23,7 @@ import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } fr
 import { writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
-import { run, type RunResult } from "./core/process.ts";
+import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import type { ProgramFailure } from "./ai/prompt.ts";
@@ -641,7 +641,10 @@ async function probeCandidate(
     functionName: request.contract.function.name,
   });
 
-  const result = await run(paths.probeExecutable, [], { timeoutMs: PROBE_TIMEOUT_MS });
+  const result = await run(paths.probeExecutable, [], {
+    timeoutMs: PROBE_TIMEOUT_MS,
+    heapBytes: GENERATED_HEAP_BYTES,
+  });
   return { called: true, reason: probeFault(result), stderr: result.stderr };
 }
 

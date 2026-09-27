@@ -18,7 +18,7 @@
  * against `node`, which runs TypeScript directly.
  */
 
-import { formatCommand, run, type RunResult } from "../core/process.ts";
+import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
 
@@ -141,7 +141,15 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
     });
   }
 
-  const binary = run(request.runner.command, [...request.runner.args, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
+  // The delivered program is given a heap of its own: one that allocates
+  // without bound is then refused by its allocator, which says what it was
+  // doing, rather than killed by a system that has run out of memory and takes
+  // the build with it.
+  const binary = run(request.runner.command, [...request.runner.args, ...arguments_], {
+    cwd: request.directory,
+    timeoutMs: 120_000,
+    heapBytes: GENERATED_HEAP_BYTES,
+  });
   const printed = binary.stdout.trim();
   const stopped = stopFailure(binary);
   if (stopped !== null) {

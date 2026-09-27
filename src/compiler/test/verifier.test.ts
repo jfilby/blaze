@@ -9,11 +9,28 @@ import {
 } from "../toolchain/verifier.ts";
 import { parseContract, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
 import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
-import { run } from "../core/process.ts";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FunctionContract, TestConfig } from "../core/types.ts";
+
+const PYTHON = "python3";
+
+/**
+ * A program that grows its heap to a fixed size and then reports that it did.
+ * The pages are written, so the memory is real: what is refused under a limit
+ * is a heap that cannot grow, not an address space that was merely reserved.
+ */
+function grower(mib: number): string {
+  return [
+    "import sys",
+    `blocks = [bytearray(${mib} * 1024 * 1024) for _ in range(1)]`,
+    "for block in blocks:",
+    "    block[::4096] = b'\\x01' * len(block[::4096])",
+    'sys.stdout.write("grown\\n")',
+  ].join("\n");
+}
 
 const CONTRACT: FunctionContract = {
   version: "1",
@@ -257,4 +274,52 @@ test("a run that never started is told apart from a run that finished", () => {
   assert.equal(clean.code, 0);
   assert.equal(clean.spawnError, undefined);
   assert.equal(clean.timedOut, false);
+});
+
+test("a program that grows more heap than it is given is refused, not killed", async (t) => {
+  if (run(PYTHON, ["-c", "pass"], { timeoutMs: 30_000 }).spawnError !== undefined) {
+    t.skip(`${PYTHON} is needed to grow a heap`);
+    return;
+  }
+  const unbounded = run(PYTHON, ["-c", grower(64)], { timeoutMs: 30_000 });
+  assert.equal(unbounded.code, 0, unbounded.stderr);
+
+  // Under a limit the same program is refused by the allocator, which it
+  // reports as the error it is. A build that runs generated code without one
+  // gets a process killed from outside instead, which says nothing about what
+  // the program was doing when it died.
+  const bounded = run(PYTHON, ["-c", grower(64)], {
+    timeoutMs: 30_000,
+    heapBytes: 32 * 1024 * 1024,
+  });
+  assert.notEqual(bounded.code, 0);
+  assert.match(bounded.stderr, /MemoryError|Cannot allocate memory/);
+
+  // A runtime that reserves address space for itself is not a program that
+  // allocated too much: V8 claims tens of gigabytes before it allocates a
+  // byte, so a limit that counted reservations would refuse it outright. The
+  // limit is on the heap, and a node run that loads TypeScript still works.
+  const probe = join(await mkdtemp(join(tmpdir(), "blaze-heap-")), "probe.ts");
+  await writeFile(probe, "const value: number = 1;\nconsole.log(value);\n", "utf8");
+  const hosted = run("node", [probe], { timeoutMs: 60_000, heapBytes: GENERATED_HEAP_BYTES });
+  assert.equal(hosted.code, 0, hosted.stderr);
+
+  // What a bounded run reports is the program, not the shell that bounded it.
+  const stopped = run("sh", ["-c", "kill -TERM $$"], {
+    timeoutMs: 30_000,
+    heapBytes: GENERATED_HEAP_BYTES,
+  });
+  assert.equal(stopped.signal, "SIGTERM");
+  assert.equal(stopped.spawnError, undefined);
+  assert.equal(stopped.timedOut, false);
+
+  // A program that is not there is a program that never ran, which a shell
+  // would otherwise report as an exit status a program is free to choose.
+  const missing = run("blaze-no-such-command", [], {
+    timeoutMs: 30_000,
+    heapBytes: GENERATED_HEAP_BYTES,
+  });
+  assert.equal(missing.spawnError, "blaze-no-such-command");
+  assert.equal(missing.code, null);
+  assert.equal(missing.signal, null);
 });

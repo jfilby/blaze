@@ -27,7 +27,7 @@ import {
   type Value,
 } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
-import { run } from "../core/process.ts";
+import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
 import type { FunctionContract, Runner, TestConfig, TestFailure, VerificationResult } from "../core/types.ts";
 
 const BOUNDARY_LENGTHS = [0, 1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 255, 256, 257, 1023, 1024];
@@ -398,9 +398,13 @@ export function verifyCandidate(request: VerifyRequest): VerificationResult {
     return { vector, values, result: referenceResult(request.parsed, values) };
   });
 
+  // A candidate that allocates without bound is refused by its own allocator
+  // under this limit, and says so, rather than being killed by a system that
+  // has run out of memory and takes the build with it.
   const execution = run(request.runner.command, request.runner.args, {
     input: encodeRunRequest(request.contract, vectors),
     timeoutMs: 120_000,
+    heapBytes: GENERATED_HEAP_BYTES,
   });
   if (execution.spawnError !== undefined) {
     throw verificationError(

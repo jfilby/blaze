@@ -7,7 +7,7 @@
  */
 
 import { CompilerError } from "../core/errors.ts";
-import { run, type RunResult } from "../core/process.ts";
+import { run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { encodeBenchRequest, planTestVectors, vectorValues, type TestVector } from "./verifier.ts";
 import { preconditionFailures, type ParsedContract } from "../semantics/contract.ts";
 import type { BenchmarkResult, FunctionContract, Runner, TestConfig } from "../core/types.ts";
@@ -66,7 +66,11 @@ export function benchmarkCandidate(request: BenchmarkRequest): BenchmarkResult {
   const durations: number[] = [];
 
   for (let repeat = 0; repeat < REPEATS; repeat += 1) {
-    const execution = run(request.runner.command, request.runner.args, { input, timeoutMs: 300_000 });
+    const execution = run(request.runner.command, request.runner.args, {
+      input,
+      timeoutMs: 300_000,
+      heapBytes: GENERATED_HEAP_BYTES,
+    });
     if (execution.spawnError !== undefined) {
       throw new CompilerError({
         category: "BenchmarkError",

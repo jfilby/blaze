@@ -440,6 +440,50 @@ test("a program that stops is reported against the line it never printed", async
   assert.equal(stopped.difference?.actualOutput, "expected");
 });
 
+test("a delivered program that runs out of memory is a verdict, not a dead build", async (t) => {
+  if (run("python3", ["-c", "pass"], { timeoutMs: 30_000 }).spawnError !== undefined) {
+    t.skip("python3 is needed to grow more heap than a program is given");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "blaze-oom-"));
+  await writeFile(join(directory, "main.ts"), 'console.log("expected");\n', "utf8");
+
+  // The program prints the line the source prints and then grows more heap
+  // than it was given. An unbounded build is killed by the system for
+  // exhausting memory, which takes the build with it and reports nothing about
+  // the program; bounded, the program is refused and says so, and the run comes
+  // back to be judged.
+  const hog = [
+    "import sys",
+    'sys.stdout.write("expected\\n"); sys.stdout.flush()',
+    "try:",
+    "    blocks = []",
+    "    for _ in range(4096):",
+    "        block = bytearray(1024 * 1024)",
+    "        block[0] = 1",
+    "        blocks.append(block)",
+    "except (OSError, MemoryError):",
+    '    sys.stderr.write("blaze: out of memory\\n")',
+    "    sys.exit(2)",
+  ].join("\n");
+  const checked = await verifyProgram({
+    language: "typescript",
+    sourcePath: join(directory, "main.ts"),
+    directory,
+    runner: { command: "python3", args: ["-c", hog] },
+  });
+
+  // The line it did print is kept: what it managed to print before it stopped
+  // is what a repair is told, and an out of memory stop is a fault to repair
+  // rather than the end of the build.
+  assert.equal(checked.passed, false);
+  assert.equal(checked.difference?.failure, "the delivered program exited with status 2");
+  assert.equal(checked.difference?.failureOutput, "blaze: out of memory");
+  assert.equal(checked.difference?.actualOutput, "expected");
+  assert.equal(checked.difference?.line, 2);
+  assert.equal(checked.difference?.expected, "");
+});
+
 const languageProgram = (runtime?: "nim") => program(LANGUAGE, runtime);
 
 test("a program runs its own statements, and the two drivers run them alike", async (t) => {
