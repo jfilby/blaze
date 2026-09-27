@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild, STATE_DIRECTORY } from "../compiler.ts";
@@ -20,7 +20,7 @@ import type { SourceInput } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
 const C_REPLAY = new URL("./fixtures/runtime-dot-product-c-replay.json", import.meta.url).pathname;
-const EXAMPLE = new URL("../../examples/hosted_dot_product/blaze.json", import.meta.url).pathname;
+const EXAMPLE = new URL("../../examples/hosted_dot_product", import.meta.url).pathname;
 const EXAMPLE_CANDIDATES = new URL("../../examples/hosted_dot_product/candidates.json", import.meta.url).pathname;
 
 const INPUT: SourceInput = {
@@ -233,9 +233,13 @@ test("the shipped hosted example builds against the Nim runtime", async (t) => {
     t.skip("the Nim compiler is not installed");
     return;
   }
-  const directory = await mkdtemp(join(tmpdir(), "blaze-hosted-example-"));
+  // The build delivers its program beside the project file, so the example is
+  // built as a copy: the repository is not the test's scratch directory.
+  const root = await mkdtemp(join(tmpdir(), "blaze-hosted-example-"));
+  const directory = join(root, "hosted_dot_product");
+  await cp(EXAMPLE, directory, { recursive: true });
   const outcome = await runBuild(
-    EXAMPLE,
+    join(directory, "blaze.json"),
     { cwd: directory, reuse: false, model: `replay:${EXAMPLE_CANDIDATES}`, maxAttempts: 1 },
     quiet,
     "build",

@@ -15,6 +15,7 @@
 import { writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
+import { EXECUTABLE_SUFFIX } from "../core/target.ts";
 import { isFloatType, parseType, typeToString } from "../semantics/contract.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import type { FunctionContract, FunctionParam, Runner, TypeExpr } from "../core/types.ts";
@@ -582,7 +583,7 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
   const hostPath = `${base}_host.nim`;
   // A hosted build delivers the host program, so it takes the executable path a
   // standalone build gives its harness.
-  const executable = `${base}.exe`;
+  const executable = `${base}${EXECUTABLE_SUFFIX}`;
 
   await writeFile(adapterPath, generateRuntimeAdapterSource(), "utf8");
   await writeFile(hostPath, generateHostSource(request.contract, request.demoRequest), "utf8");

@@ -111,6 +111,14 @@ export function assertBuildableTarget(target: TargetSpec, functionName?: string)
   return target;
 }
 
+/**
+ * The suffix an executable carries on the machine that writes it. Windows
+ * appends `.exe`; every other platform names a binary after the program, so
+ * the host is asked rather than assumed. The host is what matters here: the
+ * `gcc` and `nim` that write these files are the host's.
+ */
+export const EXECUTABLE_SUFFIX = process.platform === "win32" ? ".exe" : "";
+
 /** The `.arch` prelude line for a target, or null when the toolchain default applies. */
 export function archDirective(target: TargetSpec): string | null {
   return target.cpu === "" ? null : `.arch ${target.cpu}`;

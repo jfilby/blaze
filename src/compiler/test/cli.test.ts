@@ -53,8 +53,11 @@ test("generate with no argument uses the same default", async () => {
 });
 
 test("an explicit path still builds, and the state lands in the current directory", async () => {
-  const directory = await projectDirectory();
-  const execution = blaze(directory, "build", join(EXAMPLE, "blaze.json"));
+  // The project is named by an explicit path, the state by the directory the
+  // build runs in: the two are different directories here, which is the point.
+  const project = await projectDirectory();
+  const directory = await mkdtemp(join(tmpdir(), "blaze-cli-elsewhere-"));
+  const execution = blaze(directory, "build", join(project, "blaze.json"));
   assert.equal(execution.code, 0, execution.stderr);
   assert.match(execution.stdout, /projects\/hello_world\/output\/hello_world/);
 });

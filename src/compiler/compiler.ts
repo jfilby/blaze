@@ -37,7 +37,7 @@ import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, hashValue, type JsonStore } from "./core/json-store.ts";
 import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel } from "./ai/model.ts";
-import { assertBuildableTarget, normalizeTarget } from "./core/target.ts";
+import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget } from "./core/target.ts";
 import {
   type ProgramMismatch,
   DEFAULT_BENCHMARK,
@@ -771,6 +771,11 @@ export async function runBuild(
     // the same for every round: only the objects it links change.
     const driver = phase.body === undefined ? undefined : resolveProgram(phase.body, program);
     const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
+    // The linked program is named for the platform it was written for, and the
+    // delivered program is the project's own name beside its sources.
+    const programBinary = `program${EXECUTABLE_SUFFIX}`;
+    const programPath = `${base}/${programBinary}`;
+    const deliveredProgram = join(project.directory, `${id}${EXECUTABLE_SUFFIX}`);
     for (let round = 1; round <= programRounds; round += 1) {
       await generateUnits(mismatch);
       selected = await record();
@@ -786,13 +791,13 @@ export async function runBuild(
               workDirectory: base,
               objectPaths,
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
-              outputPath: `${base}/program.exe`,
+              outputPath: programPath,
             })
           : await buildProgramHost({
               program: driver,
               workDirectory: base,
               objectPaths,
-              outputPath: `${base}/program.exe`,
+              outputPath: programPath,
             });
       checked = await verifyProgram({
         language: input.language,
@@ -876,8 +881,13 @@ export async function runBuild(
       if (phase.body !== undefined) {
         // The program was linked and run above, by the round that agreed with
         // the source, so what is delivered is what was checked.
-        await deliver("program.exe", paths.outputBinary);
+        await deliver(programBinary, paths.outputBinary);
         await deliver(runtimeKind === "none" ? "program.c" : "program_host.nim", paths.outputProgram);
+        // The build belongs to the project beside its sources, so the program
+        // it produced is named after the project and lands there. The store
+        // keeps its own copy, which is what a later `blaze test` runs.
+        await copyFile(programPath, deliveredProgram);
+        delivered.push(deliveredProgram);
         outputPath = store.resolve(paths.outputBinary);
       } else {
         const functionName = units[0].contract.function.name;
@@ -897,7 +907,7 @@ export async function runBuild(
           outputAssemblyPath = store.resolve(paths.outputAssembly);
           outputPath = store.resolve(paths.outputAssembly);
           if (outputKind === "machine") {
-            await deliver(`${functionName}/${winner}.exe`, paths.outputBinary);
+            await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = store.resolve(paths.outputBinary);
           }
         }

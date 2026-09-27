@@ -22,6 +22,7 @@ import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } fr
 import { writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
+import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import type { ProgramFailure } from "./ai/prompt.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
@@ -141,7 +142,7 @@ function pathsFor(workspace: CodegenWorkspace, candidate: string, output: Output
     implementation: `${base}.${extension}`,
     object: `${base}.o`,
     harness: `${base}.harness.c`,
-    executable: `${base}.exe`,
+    executable: `${base}${EXECUTABLE_SUFFIX}`,
     module: `${base}.wasm`,
     host: `${base}.host.mjs`,
   };

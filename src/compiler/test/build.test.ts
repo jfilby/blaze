@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../compiler.ts";
@@ -10,7 +10,7 @@ import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } fr
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
-const EXAMPLE = new URL("../../examples/hello_world/blaze.json", import.meta.url).pathname;
+const EXAMPLE_DIRECTORY = new URL("../../examples/hello_world", import.meta.url).pathname;
 
 const INPUT: SourceInput = {
   language: "nim",
@@ -32,6 +32,21 @@ const INPUT: SourceInput = {
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeFile(join(directory, "input.json"), JSON.stringify(input, null, 2), "utf8");
+  return directory;
+}
+
+/**
+ * The shipped example, copied into a workspace. A build delivers the program it
+ * links beside the project file, so a test that builds the example builds a
+ * copy: the repository is not the test's scratch directory.
+ */
+async function exampleWorkspace(name: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = join(root, "hello_world");
+  await cp(EXAMPLE_DIRECTORY, directory, { recursive: true });
+  // The example ships with the state of an earlier build, and what these tests
+  // read is what their own build writes.
+  await rm(join(directory, STATE_DIRECTORY), { recursive: true, force: true });
   return directory;
 }
 
@@ -275,9 +290,9 @@ test("test and benchmark re-run against the selected candidate", async () => {
 });
 
 test("the shipped TypeScript example builds into a program that prints what it claims", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-example-"));
+  const directory = await exampleWorkspace("example");
   const outcome = await runBuild(
-    EXAMPLE,
+    join(directory, "blaze.json"),
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -299,6 +314,41 @@ test("the shipped TypeScript example builds into a program that prints what it c
   const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
   assert.equal(execution.code, 0, execution.stderr);
   assert.equal(execution.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
+});
+
+/**
+ * A program is delivered twice: the store keeps the copy the build record
+ * names, and the project directory gets the binary beside the sources, named
+ * after the project. Both are named the way the platform names an executable,
+ * so a build on Linux writes no `.exe` at all.
+ */
+test("a program is delivered to the project directory under the platform's name", async () => {
+  const directory = await exampleWorkspace("deliver");
+
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const outcome = await runBuild(
+    join(directory, "blaze.json"),
+    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+    quiet,
+    "build",
+  );
+
+  // The store keeps its own copy, which is what `blaze test` re-runs.
+  assert.equal(outcome.outputPath, join(directory, STATE_DIRECTORY, "projects/hello_world/output/hello_world"));
+  const delivered = join(directory, `hello_world${suffix}`);
+  const execution = run(delivered, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
+
+  const work = join(directory, STATE_DIRECTORY, "projects/hello_world/work");
+  const written = await readdir(work);
+  assert.ok(written.includes(`program${suffix}`), "the linked program is named for the platform");
+  const foreign = suffix === "" ? ".exe" : "";
+  assert.deepEqual(
+    written.filter((name) => name.endsWith(foreign)),
+    [],
+    "no artifact carries another platform's executable suffix",
+  );
 });
 
 /**
@@ -420,9 +470,9 @@ test("a delivered program started on a terminal runs and exits instead of hangin
     t.skip("python3 is needed to give the program a terminal");
     return;
   }
-  const directory = await mkdtemp(join(tmpdir(), "blaze-tty-"));
+  const directory = await exampleWorkspace("tty");
   const outcome = await runBuild(
-    EXAMPLE,
+    join(directory, "blaze.json"),
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
     quiet,
     "build",
