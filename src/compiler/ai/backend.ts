@@ -17,7 +17,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, type LanguageModel } from "ai";
+import { generateText, type LanguageModel, type LanguageModelUsage } from "ai";
 import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { CompilerError } from "../core/errors.ts";
@@ -38,22 +38,23 @@ class UnusableAnswer extends Error {
   /** What fails the build once the re-requests are spent. */
   readonly failure: CompilerError;
   /**
-   * Why the provider stopped generating, kept for a reply that carried no
-   * implementation: an answer cut off by the output limit or taken by a
-   * content filter is a different failure from one the model finished on its
-   * own, and only the provider knows which it was. Kept out of the reason,
-   * which the re-request prompt carries, because a finish reason is a fact
-   * about the request the model cannot change by being asked again. Absent
-   * for a request that never came back with a reply at all.
+   * How the request that produced this answer ended, kept for a reply that
+   * carried no implementation: an answer cut off by the output limit, one a
+   * content filter took and one the model finished on its own are a different
+   * failure from each other, and only the provider knows which it was, for
+   * what it cost. Kept out of the reason, which the re-request prompt carries,
+   * because a stop is a fact about the request the model cannot change by
+   * being asked again. Absent for a request that never came back at all,
+   * which is the one answer the provider has no account of.
    */
-  readonly finishReason: string | undefined;
+  readonly stop: ProviderStop | undefined;
 
-  constructor(reason: string, retryable: boolean, failure: CompilerError, finishReason?: string) {
+  constructor(reason: string, retryable: boolean, failure: CompilerError, stop?: ProviderStop) {
     super(reason);
     this.reason = reason;
     this.retryable = retryable;
     this.failure = failure;
-    this.finishReason = finishReason;
+    this.stop = stop;
   }
 }
 
@@ -89,6 +90,71 @@ export function extractAssembly(text: string): string {
   return `${assembly}\n`;
 }
 
+/**
+ * Tokens a provider charged one request for. A provider may report none of
+ * them, and a gateway in between may report none at all.
+ */
+export interface ResponseUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+/**
+ * How a request that came back ended: the reason the provider gives, the name
+ * it gives that reason, and what the request cost. All three are the
+ * provider's account of a request rather than anything the compiler decided,
+ * and a build that fails on an answer with nothing in it is the one place
+ * they can still be read.
+ */
+export interface ProviderStop {
+  /** Why the provider stopped generating, unified across providers. */
+  finishReason: string;
+  /** The provider's own name for the same reason, when it has one. */
+  rawFinishReason?: string;
+  /** What the request cost, as far as the provider reported it. */
+  usage?: ResponseUsage;
+}
+
+/**
+ * Says a stop out loud for a build that reports one. The provider's own name
+ * is only worth printing where it says something the unified reason does not:
+ * a provider that reports both usually reports the same word twice. The total
+ * is left out when the input and output already add up to it, and stands in
+ * for them when a provider reports the sum and nothing else.
+ */
+export function describeProviderStop(stop: ProviderStop): string {
+  const parts = [`finish reason: ${stop.finishReason}`];
+  if (stop.rawFinishReason !== undefined && stop.rawFinishReason !== stop.finishReason) {
+    parts.push(`raw: ${stop.rawFinishReason}`);
+  }
+  if (stop.usage !== undefined) {
+    const counted =
+      stop.usage.inputTokens !== undefined && stop.usage.outputTokens !== undefined
+        ? stop.usage.inputTokens + stop.usage.outputTokens
+        : undefined;
+    const tokens = [
+      ...(stop.usage.inputTokens === undefined ? [] : [`${stop.usage.inputTokens} in`]),
+      ...(stop.usage.outputTokens === undefined ? [] : [`${stop.usage.outputTokens} out`]),
+      ...(stop.usage.totalTokens === undefined || stop.usage.totalTokens === counted
+        ? []
+        : [`${stop.usage.totalTokens} total`]),
+    ];
+    if (tokens.length > 0) parts.push(`usage: ${tokens.join(", ")}`);
+  }
+  return parts.join(", ");
+}
+
+/** The tokens a provider reported, or nothing when it reported none. */
+function usageOf(usage: LanguageModelUsage): ResponseUsage | undefined {
+  const reported: ResponseUsage = {
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.totalTokens === undefined ? {} : { totalTokens: usage.totalTokens }),
+  };
+  return Object.keys(reported).length === 0 ? undefined : reported;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Vercel AI SDK backend                                                      */
 /* -------------------------------------------------------------------------- */
@@ -115,8 +181,8 @@ export interface ResponseRetry {
   retries: number;
   /** Why the answer before it could not be used. */
   reason: string;
-  /** Why the provider stopped generating, when the answer it stopped at had nothing in it. */
-  finishReason?: string;
+  /** How the request behind it ended, when there was a request to end. */
+  stop?: ProviderStop;
 }
 
 /**
@@ -208,7 +274,7 @@ export class VercelAiBackend implements AiBackend {
     const user = buildUserPrompt(request);
     this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
-    const answers: { reason: string; finishReason: string | undefined }[] = [];
+    const answers: { reason: string; stop: ProviderStop | undefined }[] = [];
     let assembly: string;
 
     for (let retry = 0; ; retry += 1) {
@@ -218,7 +284,7 @@ export class VercelAiBackend implements AiBackend {
       } catch (cause) {
         if (!(cause instanceof UnusableAnswer)) throw cause;
         if (!cause.retryable) throw cause.failure;
-        answers.push({ reason: cause.reason, finishReason: cause.finishReason });
+        answers.push({ reason: cause.reason, stop: cause.stop });
         if (retry === this.retries) {
           throw new CompilerError({
             category: "AiGenerationError",
@@ -226,7 +292,7 @@ export class VercelAiBackend implements AiBackend {
             message: cause.failure.message,
             detail: [
               `asked ${this.retries + 1} times, and no answer carried an implementation:`,
-              ...answers.map((entry) => `- ${entry.reason}${entry.finishReason === undefined ? "" : ` (finish reason: ${entry.finishReason})`}`),
+              ...answers.map((entry) => `- ${entry.reason}${entry.stop === undefined ? "" : ` (${describeProviderStop(entry.stop)})`}`),
               ...(cause.failure.detail === undefined ? [] : [cause.failure.detail]),
             ].join("\n"),
           });
@@ -237,7 +303,7 @@ export class VercelAiBackend implements AiBackend {
           retry: retry + 1,
           retries: this.retries,
           reason: cause.reason,
-          ...(cause.finishReason === undefined ? {} : { finishReason: cause.finishReason }),
+          ...(cause.stop === undefined ? {} : { stop: cause.stop }),
         });
         await sleep(RETRY_BACKOFF_MS * 2 ** retry);
       }
@@ -258,7 +324,7 @@ export class VercelAiBackend implements AiBackend {
   /** One model call, answered in terms of the compiler: assembly, or none. */
   private async ask(model: LanguageModel, system: string, user: string): Promise<string> {
     let text: string;
-    let finishReason: string | undefined;
+    let stop: ProviderStop | undefined;
     try {
       // The system text goes in `instructions`, not a system message: that is
       // the portable form, and providers such as OpenRouter reject a system
@@ -271,10 +337,15 @@ export class VercelAiBackend implements AiBackend {
         ...(this.timeoutMs === undefined ? {} : { abortSignal: AbortSignal.timeout(this.timeoutMs) }),
       });
       text = result.text;
-      // What the provider says stopped the generation, kept for a reply that
-      // turns out to carry no implementation: a request that never came back
-      // with one has no finish reason to report.
-      finishReason = result.finishReason;
+      // How the request ended and what it cost, kept for a reply that turns
+      // out to carry no implementation: a request that never came back with
+      // one has neither to report.
+      const usage = usageOf(result.usage);
+      stop = {
+        finishReason: result.finishReason,
+        ...(result.rawFinishReason === undefined ? {} : { rawFinishReason: result.rawFinishReason }),
+        ...(usage === undefined ? {} : { usage }),
+      };
     } catch (cause) {
       if (isTimeout(cause) && this.timeoutMs !== undefined) {
         // Overrunning the budget is a decision about the clock rather than a
@@ -304,7 +375,7 @@ export class VercelAiBackend implements AiBackend {
       // stopped for its own reasons, and saying which is the only account of
       // why there is nothing here to reject.
       const failure = cause instanceof CompilerError ? cause : generationError("the model returned no implementation");
-      throw new UnusableAnswer(failure.message, true, failure, finishReason);
+      throw new UnusableAnswer(failure.message, true, failure, stop);
     }
   }
 }

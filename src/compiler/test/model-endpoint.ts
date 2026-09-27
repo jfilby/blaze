@@ -46,6 +46,12 @@ export interface ChatEndpointOptions {
    * anything in it. Defaults to the reason providers end a reply with.
    */
   finishReason?: string;
+  /**
+   * The tokens to report for each request, or null to report none at all,
+   * which is what a gateway standing between the compiler and the model does.
+   * Defaults to a request that cost a token in and a token out.
+   */
+  usage?: { prompt: number; completion: number; total: number } | null;
 }
 
 export async function chatEndpoint(
@@ -88,6 +94,7 @@ export async function chatEndpoint(
           response.end(JSON.stringify({ error: { message: "the provider rejected the request", type: "invalid_request" } }));
           return;
         }
+        const usage = options.usage === undefined ? { prompt: 1, completion: 1, total: 2 } : options.usage;
         response.writeHead(200, { "content-type": "application/json" });
         response.end(
           JSON.stringify({
@@ -96,7 +103,9 @@ export async function chatEndpoint(
             created: 0,
             model: "stub",
             choices: [{ index: 0, finish_reason: options.finishReason ?? "stop", message: { role: "assistant", content } }],
-            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            ...(usage === null
+              ? {}
+              : { usage: { prompt_tokens: usage.prompt, completion_tokens: usage.completion, total_tokens: usage.total } }),
           }),
         );
         inFlight -= 1;

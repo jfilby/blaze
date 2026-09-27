@@ -17,7 +17,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
-import { createBackend, type PromptDump } from "./ai/backend.ts";
+import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import type { ProgramBody } from "./semantics/module.ts";
@@ -860,12 +860,13 @@ export async function runBuild(
           return createBackend(requireModel(), {
             timeoutMs: requestTimeoutMs(input),
             retries: generation.maxRetries,
-            onRetry: ({ candidate, attempt, retry, retries, reason, finishReason }) => {
-              // An answer with nothing in it is also told why the provider
-              // stopped: one cut short by the output limit, one a content
-              // filter took and one the model finished on its own are not the
-              // same failure to wait out.
-              const finish = finishReason === undefined ? "" : `, finish reason: ${finishReason}`;
+            onRetry: ({ candidate, attempt, retry, retries, reason, stop }) => {
+              // An answer with nothing in it is also told how its request
+              // ended and what the request cost: one cut short by the output
+              // limit, one a content filter took and one the model finished on
+              // its own are not the same failure to wait out, and a gateway
+              // that reports the tokens is the only place they are counted.
+              const finish = stop === undefined ? "" : `, ${describeProviderStop(stop)}`;
               reporter.stage(
                 "generate",
                 "info",

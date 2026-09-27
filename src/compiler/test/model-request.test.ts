@@ -151,7 +151,7 @@ test("an answer with no implementation is asked for again, and costs no repair a
   assert.match(chat.prompts[2], /the model returned an empty response/);
   assert.ok(
     lines.includes(
-      "Asking again: square, candidate 1, attempt 1, the model returned an empty response, finish reason: stop; request 1 of 2, waiting for openai-compatible/stub",
+      "Asking again: square, candidate 1, attempt 1, the model returned an empty response, finish reason: stop, usage: 1 in, 1 out; request 1 of 2, waiting for openai-compatible/stub",
     ),
     `no retry line in: ${lines.join(" | ")}`,
   );
@@ -194,19 +194,59 @@ test("an answer the provider stopped short of says why it stopped", async (t) =>
     (error: unknown) =>
       error instanceof CompilerError &&
       /asked 2 times/.test(error.detail ?? "") &&
-      /the model returned an empty response \(finish reason: length\)/.test(error.detail ?? ""),
+      /the model returned an empty response \(finish reason: length, usage: 1 in, 1 out\)/.test(error.detail ?? ""),
   );
   // The build is told the same thing while it is still waiting on the model.
   assert.ok(
-    lines.some((line) => line.includes("the model returned an empty response, finish reason: length; request 1 of 1")),
+    lines.some((line) =>
+      line.includes("the model returned an empty response, finish reason: length, usage: 1 in, 1 out; request 1 of 1"),
+    ),
     `no retry line in: ${lines.join(" | ")}`,
   );
   // The re-request carries what was wrong with the answer, not how the
-  // provider stopped: a finish reason is a fact about the request the model
-  // cannot change by being asked again.
+  // provider stopped or what it cost: a stop is a fact about the request the
+  // model cannot change by being asked again.
   assert.equal(chat.prompts.length, 2);
   assert.match(chat.prompts[1], /the model returned an empty response/);
   assert.doesNotMatch(chat.prompts[1], /finish reason/);
+});
+
+test("a stop the provider names differently says both names", async (t) => {
+  // A content filter is the one stop whose provider name is worth having: the
+  // unified reason says what happened, the provider's own says what it calls
+  // it, and only the first of the two is the same across providers.
+  const { directory } = await projectAnswering(
+    t,
+    [""],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
+    { finishReason: "content_filter" },
+  );
+
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) =>
+      error instanceof CompilerError &&
+      /finish reason: content-filter, raw: content_filter/.test(error.detail ?? ""),
+  );
+});
+
+test("a provider that reports no tokens is not said to have spent none", async (t) => {
+  // A gateway that does not account for usage is not a request that cost
+  // nothing, and a line reading "usage: 0 in" would say it was.
+  const { directory } = await projectAnswering(
+    t,
+    [""],
+    { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
+    { finishReason: "length", usage: null },
+  );
+
+  await assert.rejects(
+    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) =>
+      error instanceof CompilerError &&
+      /the model returned an empty response \(finish reason: length\)/.test(error.detail ?? "") &&
+      !/usage/.test(error.detail ?? ""),
+  );
 });
 
 test("a request the provider failed is asked for again", async (t) => {
