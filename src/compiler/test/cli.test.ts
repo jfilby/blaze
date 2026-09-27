@@ -116,3 +116,13 @@ test("help lists every command", async () => {
     assert.match(execution.stdout, new RegExp(`blaze ${command}`));
   }
 });
+
+test("a build that is not on a terminal leaves the title alone", async () => {
+  // The tests run blaze with a pipe, not a terminal, which is the case that
+  // must stay silent: an OSC escape in a log file is corruption.
+  const directory = await projectDirectory();
+  const execution = blaze(directory, "build");
+
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.doesNotMatch(execution.stdout, /\u001b]0;/);
+});

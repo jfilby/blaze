@@ -204,7 +204,7 @@ function resolveRuntimeKind(requested: RuntimeKind | undefined, output: OutputKi
  * holds one: a directory with a blaze.json in it is the project. Any other
  * input file names its own project, so examples can stay flat.
  */
-function projectIdFor(inputPath: string): string {
+export function projectIdFor(inputPath: string): string {
   const name = basename(inputPath, extname(inputPath));
   if (name === "blaze") {
     const directory = basename(dirname(inputPath));

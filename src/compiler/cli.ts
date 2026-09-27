@@ -21,6 +21,7 @@ import {
   STATE_DIRECTORY,
   inspectProject,
   listProjects,
+  projectIdFor,
   runBuild,
   runStored,
   type BuildOptions,
@@ -34,6 +35,16 @@ import {
   type OutputKind,
   type RuntimeKind,
 } from "./core/types.ts";
+import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./core/terminal-title.ts";
+
+/**
+ * The tab title of a command that is working. A command that answers at once
+ * never owns the tab: it would replace the shell's own title for a blink.
+ */
+function titleAnimation(label: string): TitleAnimation {
+  if (!process.stdout.isTTY) return NO_TITLE_ANIMATION;
+  return startBuildTitle(label);
+}
 
 /** The file that describes a project, and the default input of `blaze build`. */
 const PROJECT_FILE = "blaze.json";
@@ -71,6 +82,10 @@ against, the target, the options and the model are all unchanged keeps the
 object an earlier build verified, and the model is only asked for what changed.
 Editing a comment changes nothing a build is keyed on, so it rebuilds nothing.
 
+On a terminal, a command that works animates the tab title as the blaze brand
+next to a spinner, and settles it on the outcome: a check mark for a build that
+produced an object, a cross for one that did not. A command whose output is a
+pipe or a file never writes a title, so a log holds nothing but the build.
 
 Options:
   --model <provider/model>  model configuration, overrides AI_MODEL
@@ -242,10 +257,17 @@ async function main(argv: string[]): Promise<number> {
     case "generate": {
       // With no argument, build the project described by ./blaze.json.
       const input = argument ?? defaultProjectFile();
-      const outcome = await runBuild(input, options, consoleReporter(), command);
-      if (command === "generate") {
-        process.stdout.write(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
+      const title = titleAnimation(projectIdFor(resolve(input)));
+      try {
+        const outcome = await runBuild(input, options, consoleReporter(), command);
+        if (command === "generate") {
+          process.stdout.write(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
+        }
+      } catch (cause) {
+        title.stop("fail");
+        throw cause;
       }
+      title.stop("ok");
       return 0;
     }
     case "test":
@@ -254,7 +276,14 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write(`blaze ${command} needs a project name\n\n${USAGE}`);
         return 1;
       }
-      await runStored(argument, options, consoleReporter(), command);
+      const title = titleAnimation(argument);
+      try {
+        await runStored(argument, options, consoleReporter(), command);
+      } catch (cause) {
+        title.stop("fail");
+        throw cause;
+      }
+      title.stop("ok");
       return 0;
     }
     case "inspect": {
