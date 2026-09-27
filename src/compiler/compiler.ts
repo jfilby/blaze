@@ -29,6 +29,7 @@ import { assertAssemblerSupportsArch } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
   generateCandidates,
+  exclusive,
   implementationLabel,
   reusableFiles,
   reusedResult,
@@ -44,7 +45,6 @@ import {
   readIncremental,
   reusable,
   unitKey,
-  writeIncremental,
   type IncrementalEntry,
   type IncrementalRecord,
   type ReuseLevel,
@@ -101,7 +101,9 @@ export interface BuildOptions {
   /** Extra model requests one attempt may spend on an answer with no implementation. */
   maxRetries?: number;
   /** Candidates generated at the same time; 1 generates them one at a time. */
-  concurrency?: number;
+  candidateConcurrency?: number;
+  /** Functions generated at the same time; 1 generates them one at a time. */
+  functionConcurrency?: number;
   randomCases?: number;
   maxLength?: number;
   /** What the build delivers; overrides the input file. */
@@ -409,7 +411,10 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
     maxCandidates: options.maxCandidates ?? input.generation?.maxCandidates ?? DEFAULT_GENERATION.maxCandidates,
     maxAttempts: options.maxAttempts ?? input.generation?.maxAttempts ?? DEFAULT_GENERATION.maxAttempts,
     maxRetries: options.maxRetries ?? input.generation?.maxRetries ?? DEFAULT_GENERATION.maxRetries,
-    concurrency: options.concurrency ?? input.generation?.concurrency ?? DEFAULT_GENERATION.concurrency,
+    candidateConcurrency:
+      options.candidateConcurrency ?? input.generation?.candidateConcurrency ?? DEFAULT_GENERATION.candidateConcurrency,
+    functionConcurrency:
+      options.functionConcurrency ?? input.generation?.functionConcurrency ?? DEFAULT_GENERATION.functionConcurrency,
     timeoutSeconds: input.generation?.timeoutSeconds ?? DEFAULT_GENERATION.timeoutSeconds,
   };
 }
@@ -680,6 +685,11 @@ export async function runBuild(
       runtime: runtimeKind,
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
+    // The machine, one candidate at a time however many functions are being
+    // generated, and the incremental record, one writer at a time. Both are
+    // shared by everything a build does, so both live here.
+    const machine = exclusive();
+    const records = exclusive();
     const generation = generationConfigFor(input, options);
     /** The functions this build took from an earlier one, by function name. */
     const reusedByFunction = new Map<string, string>();
@@ -733,123 +743,162 @@ export async function runBuild(
      * the program has just said the implementation is wrong, so it is asked
      * for again.
      */
-    const generateUnits = async (mismatch: ProgramMismatch | undefined): Promise<void> => {
-      for (const unit of units) {
-        const functionName = unit.contract.function.name;
-        const previous = mismatch === undefined ? undefined : implementationOf(functionName);
-        if (mismatch !== undefined && (unit.contract.definition === undefined || previous === undefined)) continue;
-        const workspace = { workDirectory: `${base}/${functionName}`, functionName };
-        await mkdir(workspace.workDirectory, { recursive: true });
-        const key = keyOf(unit);
-        const reuse = unitReuse({
-          entry: incremental[functionName],
-          key,
-          workspace,
-          functionName,
-          output: outputKind,
-          linksObjects: checksProgram,
-          required: options.reuse,
-          id,
-        });
-        const sequenceStart = written.get(functionName) ?? 0;
+    const generateUnit = async (unit: CompilationUnit, mismatch: ProgramMismatch | undefined): Promise<void> => {
+      const functionName = unit.contract.function.name;
+      const previous = mismatch === undefined ? undefined : implementationOf(functionName);
+      if (mismatch !== undefined && (unit.contract.definition === undefined || previous === undefined)) return;
+      const workspace = { workDirectory: `${base}/${functionName}`, functionName };
+      await mkdir(workspace.workDirectory, { recursive: true });
+      const key = keyOf(unit);
+      const reuse = unitReuse({
+        entry: incremental[functionName],
+        key,
+        workspace,
+        functionName,
+        output: outputKind,
+        linksObjects: checksProgram,
+        required: options.reuse,
+        id,
+      });
+      const sequenceStart = written.get(functionName) ?? 0;
 
-        if (mismatch === undefined && reuse.level === "object" && reuse.entry !== undefined) {
-          const result = reusedResult(reuse.entry);
-          // A repair round generates after the stored candidates, so it never
-          // writes over the object this build is about to link.
-          written.set(functionName, sequenceStart + result.candidates.length);
-          reusedByFunction.set(functionName, reuse.entry.selected);
-          generatedByFunction.set(functionName, { unit, result });
-          continue;
-        }
-
-        if (reuse.level === "assembly" && reuse.missing.length > 0) {
-          reporter.stage(
-            "reuse",
-            "info",
-            `${functionName} is rebuilt from its stored implementation: ${reuse.missing.map((file) => basename(file)).join(", ")} ${reuse.missing.length === 1 ? "is" : "are"} gone`,
-          );
-        }
-
-        const result = await generateCandidates({
-          contract: unit.contract,
-          unitFile: unit.file,
-          parsed: unit.parsed,
-          program,
-          sources: phase.modules,
-          target,
-          output: outputKind,
-          runtime: runtimeKind,
-          backend: () => {
-            if (options.reuse) {
-              throw new CompilerError({
-                category: "StorageError",
-                stage: "reuse",
-                message: `the stored implementation of ${functionName} no longer satisfies its contract`,
-                detail: "run blaze build without --reuse to generate a new one",
-              });
-            }
-            return createBackend(requireModel(), {
-              timeoutMs: requestTimeoutMs(input),
-              retries: generation.maxRetries,
-              onRetry: ({ candidate, attempt, retry, retries, reason }) => {
-                reporter.stage(
-                  "generate",
-                  "info",
-                  `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
-                );
-              },
-              ...(options.debug === true ? { onPrompt: printPrompt } : {}),
-            });
-          },
-          generation,
-          test,
-          benchmark: benchmarkConfig,
-          workspace,
-          prepareRuntime,
-          // A repair round asks the model again, so what an earlier build
-          // stored is not what it starts from. Otherwise the stored
-          // implementation is tried first, and the model is only asked when it
-          // no longer satisfies the contract.
-          existing: mismatch === undefined && reuse.level !== null ? (reuse.entry?.candidates ?? []) : [],
-          sequenceStart,
-          ...(mismatch === undefined || previous === undefined
-            ? {}
-            : { programFailure: { mismatch, previous } }),
-          onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
-            reporter.stage(
-              "generate",
-              "info",
-              `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
-            );
-          },
-        });
+      if (mismatch === undefined && reuse.level === "object" && reuse.entry !== undefined) {
+        const result = reusedResult(reuse.entry);
+        // A repair round generates after the stored candidates, so it never
+        // writes over the object this build is about to link.
         written.set(functionName, sequenceStart + result.candidates.length);
-        reusedByFunction.delete(functionName);
+        reusedByFunction.set(functionName, reuse.entry.selected);
         generatedByFunction.set(functionName, { unit, result });
-
-        // A function is proved by its own vectors, or by the program it is
-        // part of, so an entry is only written once something has said so.
-        const selected = result.selected;
-        if (selected === null) continue;
-        const entry: IncrementalEntry = {
-          key,
-          file: unit.file,
-          selected,
-          candidates: result.candidates,
-          outcomes: result.outcomes,
-          benchmarkVector: result.benchmarkVector,
-        };
-        // A function is proved by its own vectors, or by the program it is
-        // part of, so an entry is only recorded once something has said so.
-        const verified = result.outcomes.find((outcome) => outcome.candidate === selected)?.verification !== undefined;
-        if (verified) {
-          incremental[functionName] = entry;
-          await writeIncremental(store, paths.incremental, functionName, entry);
-        } else if (checksProgram) {
-          awaitingProgram.set(functionName, entry);
-        }
+        return;
       }
+
+      if (reuse.level === "assembly" && reuse.missing.length > 0) {
+        reporter.stage(
+          "reuse",
+          "info",
+          `${functionName} is rebuilt from its stored implementation: ${reuse.missing.map((file) => basename(file)).join(", ")} ${reuse.missing.length === 1 ? "is" : "are"} gone`,
+        );
+      }
+
+      const result = await generateCandidates({
+        contract: unit.contract,
+        unitFile: unit.file,
+        parsed: unit.parsed,
+        program,
+        sources: phase.modules,
+        target,
+        output: outputKind,
+        runtime: runtimeKind,
+        backend: () => {
+          if (options.reuse) {
+            throw new CompilerError({
+              category: "StorageError",
+              stage: "reuse",
+              message: `the stored implementation of ${functionName} no longer satisfies its contract`,
+              detail: "run blaze build without --reuse to generate a new one",
+            });
+          }
+          return createBackend(requireModel(), {
+            timeoutMs: requestTimeoutMs(input),
+            retries: generation.maxRetries,
+            onRetry: ({ candidate, attempt, retry, retries, reason }) => {
+              reporter.stage(
+                "generate",
+                "info",
+                `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
+              );
+            },
+            ...(options.debug === true ? { onPrompt: printPrompt } : {}),
+          });
+        },
+        generation,
+        test,
+        benchmark: benchmarkConfig,
+        workspace,
+        prepareRuntime,
+        exclusive: machine,
+        // A repair round asks the model again, so what an earlier build
+        // stored is not what it starts from. Otherwise the stored
+        // implementation is tried first, and the model is only asked when it
+        // does not satisfy the contract.
+        existing: mismatch === undefined && reuse.level !== null ? (reuse.entry?.candidates ?? []) : [],
+        sequenceStart,
+        ...(mismatch === undefined || previous === undefined
+          ? {}
+          : { programFailure: { mismatch, previous } }),
+        onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
+          reporter.stage(
+            "generate",
+            "info",
+            `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
+          );
+        },
+      });
+      written.set(functionName, sequenceStart + result.candidates.length);
+      reusedByFunction.delete(functionName);
+      generatedByFunction.set(functionName, { unit, result });
+
+      // A function is proved by its own vectors, or by the program it is
+      // part of, so an entry is only written once something has said so.
+      const selected = result.selected;
+      if (selected === null) return;
+      const entry: IncrementalEntry = {
+        key,
+        file: unit.file,
+        selected,
+        candidates: result.candidates,
+        outcomes: result.outcomes,
+        benchmarkVector: result.benchmarkVector,
+      };
+      const verified = result.outcomes.find((outcome) => outcome.candidate === selected)?.verification !== undefined;
+      if (verified) {
+        incremental[functionName] = entry;
+        // The record is a whole file that every function adds itself to, so
+        // two functions finishing together would each read the record before
+        // the other wrote it, and one entry would be lost. One writer at a
+        // time costs nothing: this is a write of a few kilobytes, and the
+        // functions it is waiting for are still waiting on a model.
+        await records.run(() => store.write(paths.incremental, { ...incremental }));
+      } else if (checksProgram) {
+        awaitingProgram.set(functionName, entry);
+      }
+    };
+
+    /**
+     * One round of generation. Every unit, unless the round is repairing a
+     * program: then only the units the program is the sole oracle for, because
+     * a function that was verified against its own contract cannot be what made
+     * the program print the wrong thing. A repair round also reuses nothing:
+     * the program has just said the implementation is wrong, so it is asked
+     * for again.
+     *
+     * Functions are as independent of each other as candidates are, so several
+     * are generated at once. What they share is the machine, and that is
+     * serialized: `machine` hands it to one candidate at a time, so nothing is
+     * ever assembled, verified or timed beside something else doing the same.
+     * What overlaps between functions is the waiting, which is where the time
+     * a build spends goes.
+     */
+    const generateUnits = async (mismatch: ProgramMismatch | undefined): Promise<void> => {
+      // Units are handed out in contract order, and every result is filed
+      // under its function name, so a build reads the same way whatever order
+      // the functions finish in.
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        while (next < units.length) {
+          const index = next;
+          next += 1;
+          await generateUnit(units[index], mismatch);
+        }
+      };
+      const workers = Math.max(1, Math.min(generation.functionConcurrency, units.length));
+      // A function that fails outright fails the build, so every worker is
+      // allowed to settle before the first failure is reported: a function
+      // still being generated must not go on writing work files after the
+      // build has given up on it.
+      const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()));
+      const failure = settled.find((entry) => entry.status === "rejected");
+      if (failure !== undefined && failure.status === "rejected") throw failure.reason;
     };
 
     /** What every unit generated so far, as the build records it. */
@@ -1204,6 +1253,9 @@ export async function runStored(
     runtime,
     workspace: { workDirectory: base, functionName: program.entry.file },
   });
+  // `blaze test` measures one stored candidate at a time, but it measures them
+  // the way a build does, so it goes through the same lock.
+  const machine = exclusive();
 
   const verification = (await store.exists(paths.verification))
     ? await store.read<Record<string, VerificationResult[]>>(paths.verification)
@@ -1235,6 +1287,7 @@ export async function runStored(
       candidate,
       workspace,
       prepareRuntime,
+      exclusive: machine,
       test: testConfigFor(input, options),
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
     });

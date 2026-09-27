@@ -17,10 +17,13 @@
  * change to either does invalidate the caller, which is the one change that
  * can break an object that is not rebuilt.
  *
- * The record is written per function as soon as that function is verified, so
- * a build that fails on a later function still leaves the earlier ones
- * reusable. Reuse is therefore per function and survives failure, which is the
- * whole point: a build that has to redo one function should not redo the rest.
+ * The record is one file that a build adds each function to as soon as that
+ * function is verified, so a build that fails on a later function still leaves
+ * the earlier ones reusable. Reuse is therefore per function and survives
+ * failure, which is the whole point: a build that has to redo one function
+ * should not redo the rest. A build that generates several functions at a time
+ * writes it through one lock, so two functions finishing together cannot each
+ * read the record before the other wrote it and lose an entry between them.
  */
 
 import { hashValue, type JsonStore } from "./core/json-store.ts";
@@ -153,16 +156,4 @@ export async function readIncremental(store: JsonStore, path: string): Promise<I
     };
   }
   return record;
-}
-
-/** Records one function, leaving every other function of the project alone. */
-export async function writeIncremental(
-  store: JsonStore,
-  path: string,
-  functionName: string,
-  entry: IncrementalEntry,
-): Promise<void> {
-  const record = await readIncremental(store, path);
-  record[functionName] = entry;
-  await store.write(path, record);
 }

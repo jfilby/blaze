@@ -201,6 +201,38 @@ function diagnosticFor(failure: CandidateOutcome["failure"], attempt: number): s
   return `[attempt ${attempt}] ${failure.stage} failed: ${failure.message}${detail}`;
 }
 
+/**
+ * Runs one task at a time, in the order the tasks arrive.
+ *
+ * Candidates are compared on measured speed, and a measurement only means
+ * something when nothing else is competing for the machine. So assembly,
+ * linking, verification and benchmarking never overlap: not between the
+ * candidates of one function, and not between the functions a build generates
+ * at the same time. What overlaps is the waiting, which is where the time goes.
+ */
+export interface Exclusive {
+  run<T>(task: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * A lock the tasks queue on. A task that fails releases it for the next one: a
+ * function that could not be built must not strand every function queued
+ * behind it.
+ */
+export function exclusive(): Exclusive {
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    run<T>(task: () => Promise<T>): Promise<T> {
+      const result = tail.then(task, task);
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+  };
+}
+
 /** Everything evaluating one candidate needs, with or without a backend. */
 export interface CandidateEvaluationRequest {
   contract: FunctionContract;
@@ -218,6 +250,13 @@ export interface CandidateEvaluationRequest {
    * race. Returns undefined for a WebAssembly build, which links no runtime.
    */
   prepareRuntime: () => Promise<StandaloneRuntime | undefined>;
+  /**
+   * The machine, one user at a time. Every candidate of every function of a
+   * build is measured through this one, so a build may generate as many
+   * functions at a time as it likes without two candidates being timed against
+   * each other.
+   */
+  exclusive: Exclusive;
 }
 
 /**
@@ -359,7 +398,20 @@ export function implementationLabel(output: OutputKind): string {
   return IMPLEMENTATION_LABEL[output];
 }
 
+/**
+ * A candidate built, verified and measured, with the machine to itself. Every
+ * path that measures a candidate comes through here, so no candidate is ever
+ * timed while another one is being measured.
+ */
 async function evaluateCandidate(
+  request: CandidateEvaluationRequest,
+  candidate: AssemblyCandidate,
+  vectors: PlannedVectors | null,
+): Promise<CandidateOutcome> {
+  return request.exclusive.run(() => measureCandidate(request, candidate, vectors));
+}
+
+async function measureCandidate(
   request: CandidateEvaluationRequest,
   candidate: AssemblyCandidate,
   vectors: PlannedVectors | null,
@@ -487,7 +539,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
   let backend: AiBackend | null = null;
   const generationBackend = (): AiBackend => (backend ??= request.backend());
 
-  const { maxAttempts, maxCandidates, concurrency } = request.generation;
+  const { maxAttempts, maxCandidates, candidateConcurrency } = request.generation;
   // Candidate records are numbered from the stored ones and from whatever a
   // previous round of this build already wrote, so a build that regenerates
   // after a program mismatch never writes over the candidates it is replacing.
@@ -564,7 +616,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     }
   };
 
-  const workers = Math.max(1, Math.min(concurrency, maxCandidates));
+  const workers = Math.max(1, Math.min(candidateConcurrency, maxCandidates));
   // A request that fails outright fails the build, so every chain is allowed to
   // settle before the first failure is reported: a chain that is still running
   // must not go on writing work files after the build has given up on it.
@@ -617,6 +669,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       test: request.test,
       benchmark: request.benchmark,
       prepareRuntime: request.prepareRuntime,
+      exclusive: request.exclusive,
     },
     request.candidate,
     vectors,

@@ -85,8 +85,10 @@ Options:
   --max-retries <n>         extra model requests one attempt spends on an answer
                             that carries no implementation; they cost no repair
                             attempt
-  --concurrency <n>          candidates to generate at the same time (default 4);
+  --candidate-concurrency <n> candidates to generate at the same time (default 4);
                             verification and benchmarking stay serial
+  --function-concurrency <n> functions to generate at the same time (default 3);
+                            assembles, verification and benchmarking stay serial
   --debug                   print the prompt sent to the model for every attempt
   --random-cases <n>        randomized test cases per build
   --max-length <n>          maximum generated buffer length
@@ -167,9 +169,12 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(optionNumber(values["max-retries"] as string | undefined, "--max-retries") === undefined
       ? {}
       : { maxRetries: optionNumber(values["max-retries"] as string | undefined, "--max-retries") }),
-    ...(optionNumber(values["concurrency"] as string | undefined, "--concurrency") === undefined
+    ...(optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency") === undefined
       ? {}
-      : { concurrency: optionNumber(values["concurrency"] as string | undefined, "--concurrency") }),
+      : { candidateConcurrency: optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency") }),
+    ...(optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency") === undefined
+      ? {}
+      : { functionConcurrency: optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency") }),
     ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases") === undefined
       ? {}
       : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases") }),
@@ -215,7 +220,8 @@ async function main(argv: string[]): Promise<number> {
       "max-candidates": { type: "string" },
       "max-attempts": { type: "string" },
       "max-retries": { type: "string" },
-      concurrency: { type: "string" },
+      "candidate-concurrency": { type: "string" },
+      "function-concurrency": { type: "string" },
       "random-cases": { type: "string" },
       "max-length": { type: "string" },
       help: { type: "boolean", short: "h" },

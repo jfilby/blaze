@@ -39,6 +39,8 @@ export function hashValue(value: unknown): string {
 
 export function createJsonStore(root: string): JsonStore {
   const absoluteRoot = resolve(root);
+  /** Distinguishes the temporary files of writes that overlap. */
+  let written = 0;
 
   const resolveInStore = (relativePath: string): string => {
     if (isAbsolute(relativePath)) {
@@ -92,7 +94,11 @@ export function createJsonStore(root: string): JsonStore {
     async write<T>(relativePath: string, value: T): Promise<void> {
       const file = resolveInStore(relativePath);
       await store.mkdirp(dirname(relative(absoluteRoot, file)));
-      const temporary = `${file}.${process.pid}.tmp`;
+      // A build writes from several places at once, and two writes to the same
+      // path would otherwise share this name: one would rename the other's
+      // temporary away and the loser would fail on a file that no longer
+      // exists.
+      const temporary = `${file}.${process.pid}.${written++}.tmp`;
       try {
         await writeFile(temporary, serializeJson(value), "utf8");
         await rename(temporary, file);

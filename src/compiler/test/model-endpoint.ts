@@ -33,6 +33,13 @@ export interface ChatEndpointOptions {
    * failed request is what the test observes.
    */
   failFirst?: number;
+  /**
+   * Answers each prompt from the prompt itself rather than by arrival order.
+   * A build that generates several functions at once cannot say which function
+   * a given request arrived for, so a test of that has to answer by what was
+   * asked for.
+   */
+  answer?: (prompt: string) => string;
 }
 
 export async function chatEndpoint(
@@ -60,7 +67,8 @@ export async function chatEndpoint(
         messages: { role: string; content: string }[];
       };
       prompts.push(body.messages.map((message) => message.content).join("\n\n"));
-      const content = answers[Math.min(served, answers.length - 1)];
+      const prompt = prompts[prompts.length - 1];
+      const content = options.answer?.(prompt) ?? answers[Math.min(served, answers.length - 1)];
       served += 1;
       waiting += 1;
       arrived.resolve();

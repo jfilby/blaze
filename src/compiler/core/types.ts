@@ -258,7 +258,20 @@ export interface GenerationConfig {
    * compared on measured speed, and that comparison is only meaningful when
    * nothing else is competing for the machine.
    */
-  concurrency: number;
+  candidateConcurrency: number;
+  /**
+   * Functions generated at the same time. Functions are independent of each
+   * other in the same way candidates are, so this is how much of a multi
+   * function program's model latency a build overlaps. 1 generates one
+   * function at a time.
+   *
+   * It multiplies with `candidateConcurrency`: three functions of four
+   * candidates each are up to twelve requests in flight. Assembly, linking,
+   * verification and benchmarking stay serial whatever this is, because
+   * candidates are compared on measured speed and that comparison is only
+   * meaningful when nothing else is competing for the machine.
+   */
+  functionConcurrency: number;
   /**
    * Optional wall clock budget for one model request, retries included. Unset
    * means wait as long as the model takes.
@@ -344,7 +357,8 @@ export const DEFAULT_GENERATION: GenerationConfig = {
   maxCandidates: 5,
   maxAttempts: 3,
   maxRetries: 3,
-  concurrency: 4,
+  candidateConcurrency: 4,
+  functionConcurrency: 3,
 };
 
 export const DEFAULT_TEST: TestConfig = {
