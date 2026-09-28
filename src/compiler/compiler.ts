@@ -15,7 +15,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, mkdir, open, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -38,7 +38,7 @@ import {
   type CodegenWorkspace,
 } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
-import { createJsonStore, hashValue, type JsonStore } from "./core/json-store.ts";
+import { createJsonStore, flushToDisk, hashValue, type JsonStore } from "./core/json-store.ts";
 import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel, type ModelConfiguration } from "./ai/model.ts";
@@ -51,6 +51,7 @@ import {
   type ReuseLevel,
 } from "./incremental.ts";
 import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget } from "./core/target.ts";
+import { COMPILER_VERSION, toolchainFingerprint } from "./core/version.ts";
 import {
   type ProgramMismatch,
   DEFAULT_BENCHMARK,
@@ -75,7 +76,6 @@ import {
   type VerificationResult,
 } from "./core/types.ts";
 
-export const COMPILER_VERSION = "0.1.0";
 export const STATE_DIRECTORY = ".blaze";
 
 /**
@@ -498,24 +498,6 @@ async function writeBuildRecord(store: JsonStore, paths: ProjectPaths, build: Bu
 }
 
 /**
- * Puts a file on the disk rather than in the page cache, and its directory
- * entry with it. A copy that is written and then claimed by a record is on
- * disk only once both are synced: the file's bytes without the name it is
- * reached by, or the name without the bytes, are both a record pointing at
- * nothing.
- */
-async function flushToDisk(path: string): Promise<void> {
-  for (const target of [path, dirname(path)]) {
-    const handle = await open(target, "r");
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  }
-}
-
-/**
  * Records that a project was rejected before any build could start. The
  * record carries what the last build named, because that is the build this
  * one failed to be, and it is marked failed so nothing reads it as the
@@ -702,10 +684,11 @@ export async function runBuild(
   // reject it in, so a project that no longer names a build that can run used
   // to fail with the last successful build still on record: every reader of
   // the project was told the last thing it did succeeded.
-  // A build record that cannot be read is no record at all, exactly as the
-  // incremental cache is not: a build that cannot read what the last one
-  // said goes on to build, and a project that failed on a corrupt record had
-  // no way back short of deleting the file by hand.
+  // A record that is not JSON is no record at all, exactly as the incremental
+  // cache is not: a build that cannot parse what the last one said goes on to
+  // build, and a project that failed on a corrupt record had no way back short
+  // of deleting the file by hand. A record that cannot be read is a different
+  // thing, and is a fault: going on to build would overwrite it.
   const previousBuild = await store.readIfValid<BuildStatus>(paths.build);
   let project: ProjectInput;
   let target: TargetSpec;
@@ -820,6 +803,12 @@ export async function runBuild(
     const modelKey = options.reuse
       ? (previousBuild?.model ?? "unset")
       : (requested ?? process.env.AI_MODEL ?? previousBuild?.model ?? "unset");
+    // What the compiler itself is decides what an implementation is and how it
+    // is proved, and it is in the key so that editing the prompt, the runtime
+    // or the assembler rules rebuilds rather than reuses an object that the
+    // build would then be reporting as freshly proved by rules that no longer
+    // exist.
+    const toolchain = await toolchainFingerprint();
     const keyOf = (unit: CompilationUnit): string =>
       unitKey({
         contract: unit.contract,
@@ -832,6 +821,7 @@ export async function runBuild(
         benchmark: benchmarkConfig,
         model: modelKey,
         compilerVersion: COMPILER_VERSION,
+        toolchain,
       });
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too.

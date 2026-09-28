@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { readIncremental, reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
 import type { AssemblyCandidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { fingerprintSources, toolchainFingerprint } from "../core/version.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,6 +48,7 @@ const INPUT: UnitKeyInput = {
   benchmark: { iterations: 2000 },
   model: "openai/gpt-5",
   compilerVersion: "0.1.0",
+  toolchain: "fingerprint-of-the-sources",
 };
 
 function keyOf(overrides: Partial<UnitKeyInput>): string {
@@ -65,6 +67,10 @@ test("a key is the same for the same inputs and different for anything else", ()
     { benchmark: { iterations: 10 } },
     { model: "anthropic/claude-sonnet-4-5" },
     { compilerVersion: "0.2.0" },
+    // The compiler's own sources decide the prompt, the runtime and the
+    // assembler rules, none of which a contract or a target names, so an edit
+    // to any of them has to reach every key.
+    { toolchain: "a-fingerprint-of-different-sources" },
   ]) {
     assert.notEqual(keyOf(change), keyOf({}), JSON.stringify(change));
   }
@@ -169,4 +175,42 @@ test("a function the source named __proto__ is a stored implementation like any 
   assert.deepEqual(Object.keys(record).sort(), ["__proto__", "good"]);
   assert.equal(record.good?.key, "k1");
   assert.equal(Object.prototype.hasOwnProperty.call(record, "__proto__"), true);
+});
+
+test("an edit to any compiler source moves the fingerprint every key is built from", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blaze-fingerprint-"));
+  await mkdir(join(root, "toolchain"), { recursive: true });
+  await mkdir(join(root, "test"), { recursive: true });
+  await writeFile(join(root, "codegen.ts"), "export const one = 1;\n", "utf8");
+  await writeFile(join(root, "toolchain/assembler.ts"), "export const as = 'as';\n", "utf8");
+  // Neither of these is compiled into a build, so neither may reach the key.
+  await writeFile(join(root, "test/cases.test.ts"), "export const noise = 1;\n", "utf8");
+  await writeFile(join(root, "README.md"), "one = 1\n", "utf8");
+
+  const before = await fingerprintSources(root);
+  assert.equal(before, await fingerprintSources(root), "the same tree fingerprinted twice");
+  assert.match(before, /^[0-9a-f]{64}$/);
+
+  // The parts of the compiler that decide what an implementation is, without
+  // one of which a key would keep matching across the edit.
+  for (const file of ["codegen.ts", join("toolchain", "assembler.ts")]) {
+    const original = await readFile(join(root, file), "utf8");
+    await writeFile(join(root, file), `${original}export const extra = 2;\n`, "utf8");
+    const edited = await fingerprintSources(root);
+    assert.notEqual(edited, before, `an edit to ${file} left the fingerprint alone`);
+    await writeFile(join(root, file), original, "utf8");
+  }
+  assert.equal(await fingerprintSources(root), before, "an edit that was undone still moved the fingerprint");
+
+  // What is not compiled into a build cannot change what is compiled into it.
+  await writeFile(join(root, "test/cases.test.ts"), "export const noise = 2;\n", "utf8");
+  await writeFile(join(root, "README.md"), "one = 2\n", "utf8");
+  assert.equal(await fingerprintSources(root), before, "a test or a readme reached the fingerprint");
+
+  // The path is part of what is hashed, so moving a file is an edit.
+  await rename(join(root, "toolchain/assembler.ts"), join(root, "toolchain/linker.ts"));
+  assert.notEqual(await fingerprintSources(root), before, "a renamed file left the fingerprint alone");
+
+  // The compiler this process is running from fingerprints to something.
+  assert.match(await toolchainFingerprint(), /^[0-9a-f]{64}$/);
 });

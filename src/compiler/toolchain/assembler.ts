@@ -312,7 +312,10 @@ export function inspectObject(objectPath: string, functionName: string, candidat
     .split("\n")
     .map((line) => line.trim().split(/\s+/).pop() ?? "")
     .filter((symbol) => symbol !== "");
-  const undefined = undefinedResult.stdout
+  // Named for what it holds rather than for the keyword it shadows: a local
+  // `undefined` makes every `x === undefined` below read as a comparison
+  // against a list of symbols, and stops narrowing anything.
+  const undefinedSymbols = undefinedResult.stdout
     .split("\n")
     .map((line) => line.trim().split(/\s+/).pop() ?? "")
     .filter((symbol) => symbol !== "");
@@ -345,7 +348,15 @@ export function inspectObject(objectPath: string, functionName: string, candidat
     );
   }
   const textSizeBytes = Number.parseInt(dataLine.split(/\s+/)[0], 10);
-  return { defined, undefined, textSizeBytes: Number.isFinite(textSizeBytes) ? textSizeBytes : 0, objectSizeBytes: 0 };
+  if (!Number.isFinite(textSizeBytes)) {
+    throw assemblyError(
+      `cannot measure the object file for ${functionName}`,
+      `size reported an unreadable size:\n${dataLine}`,
+      functionName,
+      candidate,
+    );
+  }
+  return { defined, undefined: undefinedSymbols, textSizeBytes, objectSizeBytes: 0 };
 }
 
 /** Validates, assembles and inspects one candidate. */

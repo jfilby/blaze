@@ -9,9 +9,10 @@ import {
 } from "../toolchain/verifier.ts";
 import { parseContract, preconditionFailures, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
 import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
+import { readIncremental } from "../incremental.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
 import { probeFault } from "../codegen.ts";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FunctionContract, TestConfig } from "../core/types.ts";
@@ -238,6 +239,34 @@ test("the store round trips values and leaves no temporary files", async () => {
 
   await store.remove("projects/dot-project");
   assert.equal(await store.exists("projects/dot-product/build.json"), true);
+});
+
+test("a record that is present but unreadable is a fault, not a record that is not there", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blaze-store-"));
+  const store = createJsonStore(root);
+  const path = "projects/p/build.json";
+  await store.mkdirp("projects/p");
+  await writeFile(store.resolve(path), '{"selected":"c1"}\n', "utf8");
+  await chmod(store.resolve(path), 0o000);
+  if (await readFile(store.resolve(path), "utf8").then(() => true, () => false)) {
+    t.skip("this user can read a file with no permissions, so there is nothing to refuse");
+    return;
+  }
+
+  // Told the record is absent, the next write replaces the only copy of it
+  // with a build that never read what was there. The file is present and the
+  // contents are perfectly good JSON, so nothing about it is a cache to throw
+  // away: the fault is ours, and the caller has to be told which.
+  await assert.rejects(() => store.readIfValid(path), /cannot read projects\/p\/build\.json/);
+  await assert.rejects(() => readIncremental(store, path), /cannot read projects\/p\/build\.json/);
+
+  // What it does tolerate is a record it can do without: one that is not
+  // there, and one that is not JSON.
+  await chmod(store.resolve(path), 0o644);
+  await writeFile(store.resolve(path), "{ not json", "utf8");
+  assert.equal(await store.readIfValid(path), undefined);
+  assert.deepEqual(await readIncremental(store, path), {});
+  assert.equal(await store.readIfValid("projects/p/absent.json"), undefined);
 });
 
 test("hashes identify content", () => {

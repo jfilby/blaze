@@ -81,9 +81,11 @@ whole of that budget, and one that overruns it fails the build at once rather
 than being asked for again.
 
 A build is incremental. A function whose contract, the functions it is linked
-against, the target, the options and the model are all unchanged keeps the
-object an earlier build verified, and the model is only asked for what changed.
-Editing a comment changes nothing a build is keyed on, so it rebuilds nothing.
+against, the target, the options, the model and the compiler's own sources are
+all unchanged keeps the object an earlier build verified, and the model is only
+asked for what changed. Editing a comment in the project changes nothing a
+build is keyed on, so it rebuilds nothing; editing the compiler itself rebuilds
+everything, because the stored objects were built by rules that have moved.
 
 On a terminal, a command that works animates the tab title as the blaze brand
 next to a spinner, and settles it on the outcome: a check mark for a build that

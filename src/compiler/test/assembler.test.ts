@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readAssemblyStructure, validateAssembly } from "../toolchain/assembler.ts";
+import { inspectObject, readAssemblyStructure, validateAssembly } from "../toolchain/assembler.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
+import { run } from "../core/process.ts";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { FunctionContract } from "../core/types.ts";
 
 const REFERENCE = `	.globl	dotProduct
@@ -314,4 +318,51 @@ test("the stack walk reads a push or a pop by its mnemonic, and a write to esp a
     "\t.globl dotProduct\ndotProduct:\n\tpushq\t%rbp\n\tsubl\t$8, %esp\n\tcall\tblaze_rt_print_newline\n\taddl\t$8, %esp\n\tpopq\t%rbp\n\tret\n",
     /line 5: "call blaze_rt_print_newline" is made with rsp 8 byte\(s\) off a 16-byte boundary/,
   );
+});
+
+test("an object whose size cannot be measured is refused, not measured as nothing", async (t) => {
+  if (run("as", ["--version"], { timeoutMs: 30_000 }).spawnError !== undefined) {
+    t.skip("the GNU assembler is needed to make an object to measure");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "blaze-size-"));
+  const assemblyPath = join(directory, "candidate.s");
+  const objectPath = join(directory, "candidate.o");
+  const text = "\t.globl dotProduct\ndotProduct:\n\tret\n";
+  await writeFile(assemblyPath, `.text\n${text}`, "utf8");
+  const assembled = run("as", ["--64", "-o", objectPath, assemblyPath], { timeoutMs: 30_000 });
+  assert.equal(assembled.code, 0, assembled.stderr);
+
+  // A size read from the tool, not a default: this is the number the
+  // size-optimised selection sorts candidates by.
+  const info = inspectObject(objectPath, "dotProduct");
+  assert.deepEqual(info.defined, ["dotProduct"]);
+  assert.ok(info.textSizeBytes > 0, `the object measured as ${info.textSizeBytes} bytes`);
+
+  // `size` that fails, and `size` that prints nothing a size can be read from,
+  // both used to leave the size at zero. Zero is the smallest size there is,
+  // so every candidate tied at it and the first one evaluated was reported as
+  // the smallest: a choice made by nothing at all.
+  const failing = join(directory, "failing");
+  const silent = join(directory, "silent");
+  await mkdir(failing, { recursive: true });
+  await mkdir(silent, { recursive: true });
+  await writeFile(join(failing, "size"), "#!/bin/sh\necho 'size: cannot read' >&2\nexit 1\n", "utf8");
+  await writeFile(join(silent, "size"), "#!/bin/sh\nexit 0\n", "utf8");
+  await chmod(join(failing, "size"), 0o755);
+  await chmod(join(silent, "size"), 0o755);
+
+  const real = process.env.PATH ?? "";
+  try {
+    // `nm` still resolves from the real path, so this is `size` alone failing.
+    process.env.PATH = `${failing}:${real}`;
+    assert.throws(() => inspectObject(objectPath, "dotProduct"), /cannot measure the object file for dotProduct/);
+    process.env.PATH = `${silent}:${real}`;
+    assert.throws(
+      () => inspectObject(objectPath, "dotProduct"),
+      (error: unknown) => error instanceof CompilerError && /size reported no size line/.test(error.detail ?? ""),
+    );
+  } finally {
+    process.env.PATH = real;
+  }
 });

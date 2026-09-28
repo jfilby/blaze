@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { frontendFor } from "../semantics/frontend.ts";
 import { runContractPhase } from "../semantics/program.ts";
+import { CompilerError } from "../core/errors.ts";
 import { resolveProgram } from "../toolchain/program.ts";
 import { generateProgramDriver } from "../toolchain/driver.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
@@ -283,4 +284,30 @@ test("one name may belong to one function across the whole program", () => {
       }),
     /"shared" is declared by both main\.ts and a\.ts/,
   );
+});
+
+test("the diagnostic for an array used at two element types names the file it is in", () => {
+  const total = [
+    "function total(xs: Float32Array, n: number): number {",
+    "  let sum = 0;",
+    "  for (let i = 0; i < n; i++) { sum += xs[i]; }",
+    "  return sum;",
+    "}",
+  ];
+  const source = [...total, "const a: Float64Array = new Float64Array([1, 2, 3]);", "const b = a;", "console.log(total(b, 3));", ""].join("\n");
+
+  // `b` is another name for `a`, and the driver writes the array down once, so
+  // every name for it has to take the element type the parameter asks for. The
+  // refusal is the one place a user is told which line of which file to go
+  // and change, and it read as the literal text `this.body.file` instead.
+  assert.throws(() => {
+    const phase = runContractPhase({
+      frontend: frontendFor("typescript"),
+      input: { language: "typescript", source, entry: "" },
+      entry: { path: "1.ts", source },
+      read: () => null,
+    });
+    resolveProgram(phase.body!, phase.program);
+  }, (error: unknown) => error instanceof CompilerError && /line 8 of 1\.ts: allocate the array/.test(error.detail ?? ""));
+
 });

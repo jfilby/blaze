@@ -3,11 +3,12 @@
  *
  * All filesystem access in the compiler goes through this abstraction. Paths
  * are relative to a single root and may not escape it. Writes are atomic so a
- * build record is never observed half written.
+ * build record is never observed half written, and durable, so a record that
+ * has been renamed into place is still there after the power goes out.
  */
 
 import { createHash } from "node:crypto";
-import { readFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { CompilerError } from "./errors.ts";
 
@@ -26,7 +27,8 @@ export interface JsonStore {
    * The contents of a record that a build can do without: a missing file and
    * a file that is not JSON are both no record at all. It is for the records
    * a build regenerates when it cannot read them, never for one it has to be
-   * able to read.
+   * able to read. A record that is present and cannot be read is a fault, and
+   * is reported as one: no record at all would have the next write destroy it.
    */
   readIfValid<T>(relativePath: string): Promise<T | undefined>;
 }
@@ -50,6 +52,30 @@ export function hashValue(value: unknown): string {
  * second would then name its temporary file exactly as the first did.
  */
 let temporaryWrites = 0;
+
+/**
+ * Puts a path on the disk rather than in the page cache. A write renamed into
+ * place before its bytes are there leaves a name with nothing behind it, and
+ * the next build reads that file, finds it is a record it cannot read, and
+ * writes over the only copy of it.
+ */
+async function syncPath(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * A file and the directory entry it is reached by, both on the disk: one
+ * without the other is a record pointing at nothing.
+ */
+export async function flushToDisk(path: string): Promise<void> {
+  await syncPath(path);
+  await syncPath(dirname(path));
+}
 
 export function createJsonStore(root: string): JsonStore {
   const absoluteRoot = resolve(root);
@@ -105,7 +131,28 @@ export function createJsonStore(root: string): JsonStore {
 
     async readIfValid<T>(relativePath: string): Promise<T | undefined> {
       if (!(await store.exists(relativePath))) return undefined;
-      return store.read<T>(relativePath).catch(() => undefined);
+      // Only a file that is not JSON is no record at all. Every other read
+      // failure — a record the process may not read, a disk that stopped
+      // answering — is a fault, and it is raised rather than swallowed: the
+      // record is there, and a caller told it is absent writes over the only
+      // copy of it.
+      const file = resolveInStore(relativePath);
+      let text: string;
+      try {
+        text = await readFile(file, "utf8");
+      } catch (cause) {
+        throw new CompilerError({
+          category: "StorageError",
+          stage: "storage",
+          message: `cannot read ${relativePath}`,
+          detail: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        return undefined;
+      }
     },
 
     async write<T>(relativePath: string, value: T): Promise<void> {
@@ -118,7 +165,9 @@ export function createJsonStore(root: string): JsonStore {
       const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
       try {
         await writeFile(temporary, serializeJson(value), "utf8");
+        await syncPath(temporary);
         await rename(temporary, file);
+        await syncPath(dirname(file));
       } catch (cause) {
         await rm(temporary, { force: true });
         throw new CompilerError({
@@ -168,7 +217,9 @@ export function createJsonStore(root: string): JsonStore {
       const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
       try {
         await writeFile(temporary, contents, "utf8");
+        await syncPath(temporary);
         await rename(temporary, file);
+        await syncPath(dirname(file));
       } catch (cause) {
         await rm(temporary, { force: true });
         throw new CompilerError({
