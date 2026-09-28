@@ -148,7 +148,7 @@ const OUTPUT_LANGUAGE = {
     "Answer with the whole function as semantic IR, written in the syntax the IR SYNTAX section gives, and nothing else.",
     "The compiler reads it back, checks it against this contract, and writes the target code itself. A register, a stack offset, an instruction, an ABI and a calling convention are yours in neither sense: the IR has no way to say them.",
     "Change the IR, never the contract: the signature, the conditions, the effects, the object layouts and the callee names are the contract's, and the compiler refuses a candidate that disagrees with one of them.",
-    "A function whose body you can write as a different sequence of the same IR is a better answer than one you cannot: the IR is what the compiler validates, so an unvalid one is never compiled.",
+    "Express the implementation using only constructs defined by this IR. Prefer the simplest valid IR that exactly satisfies the contract. Do not invent constructs, semantics, or implicit behavior.",
   ],
 };
 
