@@ -617,7 +617,13 @@ class BodyAnalysis {
     if (type === null) {
       throw frontendError(`cannot infer the initial value of "${statement.name}" (line ${statement.line})`, "add an explicit initialiser");
     }
-    if (type.kind === "primitive" && isFloatType(type.name)) return type.name === "f32" ? "0.0'f32" : "0.0";
+    // The contract language has no `f32` suffix: a float is written as the
+    // number it denotes, and zero is the one value every float width holds
+    // exactly, so the width the declaration names does not reach the text.
+    // The Nim spelling `0.0'f32` is source syntax, and the contract tokenizer
+    // has no operator that starts with `'`, so a proc declaring a float
+    // without an initialiser could not be contracted at all.
+    if (type.kind === "primitive" && isFloatType(type.name)) return "0.0";
     if (type.kind === "primitive") return "0";
     throw frontendError(`variables of type ${typeToString(type)} are not supported (line ${statement.line})`);
   }

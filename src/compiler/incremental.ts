@@ -132,7 +132,13 @@ export function reusable(entry: IncrementalEntry | undefined, key: string, objec
 export async function readIncremental(store: JsonStore, path: string): Promise<IncrementalRecord> {
   const value = await store.readIfValid<unknown>(path);
   if (value === undefined || typeof value !== "object" || value === null) return {};
-  const record: IncrementalRecord = {};
+  // The record is keyed by whatever the source named its functions, and
+  // `__proto__` is a legal name. On an object with the usual prototype,
+  // assigning to that key is not an assignment at all: it is the inherited
+  // setter, and it replaces the prototype instead of adding an entry, so the
+  // stored implementation is dropped on the way in and never read on the way
+  // out. A record with no prototype has no such setter.
+  const record = Object.create(null) as IncrementalRecord;
   for (const [functionName, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry !== "object" || entry === null) continue;
     const candidate = entry as Partial<IncrementalEntry>;

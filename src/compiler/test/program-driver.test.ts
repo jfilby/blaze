@@ -68,14 +68,17 @@ test("a compound assignment a whole operator needs is written on a whole name", 
   // double it would be `x %= 3.0;`, which no C compiler takes.
   const written = driver("const a = new Float64Array([1, 2, 3]);\nlet x = a.length;\nx %= 3;\nconsole.log(x);\n");
   assert.match(written, /\bsize_t x = a_length;/);
-  assert.match(written, /\bx %= 3;/);
+  // The literal carries the width of the name it is written on, so the `3` is
+  // a `3ULL` here; what this is about is that it is not `3.0`, which is the C
+  // no compiler takes for a whole-only operator.
+  assert.match(written, /\bx %= 3(?:ULL|LL)?;/);
 });
 
 test("a loop bounded by a length is counted with a whole number", () => {
   // The index only ever takes whole values, so a whole-only operator on it is
   // not a diagnostic the source does not raise.
   const written = driver("const a = new Float64Array([1, 2, 3]);\nfor (let i = 0; i < a.length; i++) console.log(i % 2);\n");
-  assert.match(written, /for \((?:size_t|int64_t|int32_t) i = 0;/);
+  assert.match(written, /for \((?:size_t|int64_t|int32_t) i = /);
   assert.doesNotMatch(written, /for \(double i =/);
 });
 
@@ -87,6 +90,41 @@ test("a loop bounded by a length counts as one bounded by a written number", () 
   assert.notEqual(byLiteral, "");
   assert.equal(/^f(32|64)$/.test(byLength), false, byLength);
   assert.equal(/^f(32|64)$/.test(byLiteral), false, byLiteral);
+});
+
+test("a loop that starts between whole numbers counts in fractions", async () => {
+  // The index is what it is built from: a start of 0.5 is a fraction however
+  // whole the bound is, and counting it with a whole number truncates the
+  // start in the C declaration, so the program runs from 0.
+  const source = "for (let i = 0.5; i < 3.5; i++) { console.log(i); }\n";
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "0.5\n1.5\n2.5\n");
+  assert.equal(delivered.stdout, original);
+});
+
+test("a whole index counts in whole numbers against a bound that is not one", async () => {
+  // The bound only says where the loop stops, so it does not decide the width
+  // the index is counted with. A whole index against a fractional bound stops
+  // where the comparison says it does, which is where the source stops it.
+  const source = "for (let i = 0; i < 3.5; i++) { console.log(i); }\n";
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "0\n1\n2\n3\n");
+  assert.equal(delivered.stdout, original);
+});
+
+test("a whole number the source wrote as a bigint is whole to the width it was resolved at", async () => {
+  // `1 << 62` is a shift x86 masks to 5 bits, so a 64 bit whole operator over
+  // literals written as bare C ints is evaluated at 32 and the program prints
+  // 1073741824 where the source prints 4611686018427387904.
+  const source = "console.log(1n << 62n);\n";
+  const { binary } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "4611686018427387904\n");
 });
 
 test("a program that counts to a length prints what the source prints", async () => {
@@ -185,4 +223,19 @@ test("an array read at two element types is refused, alias or not", () => {
   assert.ok(phase.body !== null);
   const refused = diagnostic(() => resolveProgram(phase.body!, phase.program));
   assert.match(refused, /an array of (f64|i32) is used where/);
+});
+
+test("a name the emitter writes a temporary under is declared under another", async () => {
+  // A short-circuit arm that is a call is written out once, into a temporary
+  // the emitter names for itself. A program that declares `value_1` and then
+  // reaches that temporary was one name declared twice in the C, and the
+  // initializer read the one that had not been given a value yet.
+  const source = ["let value_1 = 7;", "console.log(Math.max(1, 2) > value_1 && value_1 < 9);", ""].join("\n");
+  const written = driver(source);
+  const declared = written.split("\n").filter((line) => /\b(?:double|bool) value_1\b/.test(line));
+  assert.equal(declared.length, 1, written);
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
 });

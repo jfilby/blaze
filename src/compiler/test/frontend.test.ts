@@ -11,6 +11,23 @@ const DOT_PRODUCT = `proc dotProduct(a: ptr float32, b: ptr float32, n: usize): 
   result = acc
 `;
 
+
+test("a float declared without an initialiser is contracted as the number zero", async () => {
+  // The contract language has no `f32` suffix, so the Nim spelling of a zero
+  // float is source syntax that cannot be lexed back out of a contract. Zero
+  // is the one value every float width holds exactly, so it is the same
+  // number in a contract whatever the declaration is typed at.
+  const contract = contractOf("nim", `proc dotProduct(a: ptr float32, b: ptr float32, n: usize): float32 =
+  var acc: float32
+  for i in 0 ..< n:
+    acc += a[i] * b[i]
+  result = acc
+`);
+  assert.equal(contract.function.returns, "f32");
+  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
+  parseContract(contract);
+});
+
 test("a counted loop becomes a half open reduction with matching memory ranges", async () => {
   const contract = contractOf("nim", DOT_PRODUCT);
   assert.equal(contract.function.name, "dotProduct");

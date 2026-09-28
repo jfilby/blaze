@@ -37,6 +37,51 @@ const ANY = 16;
 const WHOLE_SET = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]);
 
 /**
+ * The mnemonics that move rsp by one cell. They are named one by one rather
+ * than read off the opening of the mnemonic, because `popcnt` opens the same
+ * way and is a register operation: read as a pop it moved rsp that no
+ * instruction did, and a candidate that was aligned was turned away.
+ */
+const CELL_SET = new Set([
+  "push",
+  "pop",
+  // AT&T writes the operand size into the mnemonic, so `pushq %rbp` is as
+  // ordinary as `push %rbp` and both are the same instruction.
+  "pushb",
+  "pushw",
+  "pushl",
+  "pushq",
+  "pushbq",
+  "pushwq",
+  "pushlq",
+  "pushqq",
+  "popb",
+  "popw",
+  "popl",
+  "popq",
+  "popbq",
+  "popwq",
+  "poplq",
+  "popqq",
+  "pushf",
+  "pushfw",
+  "pushfd",
+  "pushfq",
+  "popf",
+  "popfw",
+  "popfd",
+  "popfq",
+]);
+/**
+ * The registers an instruction moves rsp by writing to. A write to `esp` or
+ * `sp` zero-extends into rsp, so `subl $8, %esp` moves it exactly as
+ * `subq $8, %rsp` does. Reading the operand as `%rsp` only left such an
+ * instruction looking like one that had not touched the stack at all, and a
+ * call that was then made eight bytes out of line was passed.
+ */
+const STACK_REGISTERS: ReadonlySet<string> = new Set(["%rsp", "%esp", "%sp"]);
+
+/**
  * Where a branch goes, as the line it names, or null when it names something
  * the walk cannot follow. A name is a label; the numeric local labels of GNU
  * as are numbered from the branch rather than from the file, so `1b` is the
@@ -63,7 +108,7 @@ function branchLine(
 
 /** What an instruction leaves the offset at, given what it started at. */
 function transfer(mnemonic: string, operands: string[], alignment: Alignment): Alignment {
-  if (mnemonic.startsWith("push") || mnemonic.startsWith("pop")) {
+  if (WHOLE_SET.has(mnemonic) || CELL_SET.has(mnemonic)) {
     // A push and a pop both move rsp by one cell, and one cell is half a
     // boundary, so either one leaves an aligned offset where it found a
     // misaligned one and the other way about. Pushing the whole register set
@@ -76,7 +121,8 @@ function transfer(mnemonic: string, operands: string[], alignment: Alignment): A
   // one whose size is the immediate and whose nesting is the second one: both
   // leave an offset nobody here knows.
   if (mnemonic === "leave" || mnemonic === "enter") return null;
-  if (operands.at(-1) !== "%rsp") return alignment;
+  const target = operands.at(-1);
+  if (target === undefined || !STACK_REGISTERS.has(target)) return alignment;
   if (alignment === null) return null;
 
   const source = operands[0] ?? "";
@@ -91,7 +137,9 @@ function transfer(mnemonic: string, operands: string[], alignment: Alignment): A
     // is learned from it.
     return Number.isSafeInteger(value) && (value & 0xf) === 0 ? 0 : null;
   }
-  if (mnemonic.startsWith("xor")) return source === "%rsp" ? 0 : null;
+  if (mnemonic.startsWith("xor")) return source === target ? 0 : null;
+  // Anything else that writes the stack pointer builds it from a value the
+  // walk did not read, so what it leaves is not something that can be said.
   return null;
 }
 

@@ -275,3 +275,72 @@ test("a field name that is not an identifier is refused before it reaches an emi
     ["a", "_b", "c9"],
   );
 });
+
+test("a field written from a loop counter holds the type the literal gave it", () => {
+  // The counter is what the loop starts at, not a `usize` whatever it was
+  // written at. Typing it `usize` made this field a `size_t` where the same
+  // literal gave every other function a `double`, and an object two functions
+  // build the same way is one object to the program, so the build was refused.
+  const contracts = contractsOf(
+    {
+      "main.ts": [
+        "export function make(n: number): any {",
+        "  const o = { value: 0, other: 0 };",
+        "  for (let i = 0; i < n; i++) { o.value = i; }",
+        "  return o;",
+        "}",
+        "export function seed(): any { return { value: 0, other: 0 }; }",
+        "console.log(`${make(2)} ${seed()}`);",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const make = parseContract(contracts.make);
+  const seed = parseContract(contracts.seed);
+  // Both functions build the object the same way, so both are given the one
+  // layout. The field is a double, which is what a number in the source is.
+  assert.deepEqual(make.contract.definition?.objects?.Object1.fields.map((field) => [field.name, field.type]), [
+    ["value", "f64"],
+    ["other", "f64"],
+  ]);
+  assert.deepEqual(
+    seed.contract.definition?.objects?.Object1.fields.map((field) => field.type),
+    make.contract.definition?.objects?.Object1.fields.map((field) => field.type),
+  );
+});
+
+test("a name declared in a loop body is not in scope after the loop", () => {
+  // A loop body is a scope, as an `if` arm is. A flat environment let a name
+  // declared inside one outlive it, so a body the source would not compile was
+  // walked and given a layout built from a name that is not there.
+  const refused = diagnostic(() =>
+    contractsOf(
+      {
+        "1.ts": [
+          "export function make(n: number): any {",
+          "  for (let i = 0; i < n; i++) { const o = { value: 0 }; }",
+          "  return o;",
+          "}",
+          "",
+        ].join("\n"),
+      },
+      "1.ts",
+    ),
+  );
+  assert.match(refused, /uses "o" before it is declared/);
+});
+
+test("a field name declared twice in a literal is refused before it reaches an emitter", () => {
+  // The C and Nim declarations write the field name verbatim, one per
+  // declaration, so a literal that names a field twice declares the same
+  // member twice in the struct. That is code no target compiler takes, and it
+  // told the model the field sat at two offsets at once.
+  const repeated = contractsOf(
+    {
+      "main.ts": ["export function make(): any {", "  return { a: 1, a: 2 };", "}", "console.log(`${make()}`);", ""].join("\n"),
+    },
+    "main.ts",
+  );
+  assert.match(diagnostic(() => parseContract(repeated.make)), /field Object1\.a is declared twice/);
+});

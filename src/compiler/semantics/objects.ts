@@ -148,13 +148,22 @@ class BodyTypes {
       case "result":
         this.results.push(this.expression(statement.value));
         return;
-      case "loop":
-        this.environment.set(statement.variable, { kind: "type", type: USIZE });
-        this.expression(statement.from);
+      case "loop": {
+        // The index is what the loop counts with, which is the value it starts
+        // at and the value it moves by. Typing it `usize` whatever it was
+        // written at made a field the body wrote from a counter a different
+        // type from the same field written from a written number, and an
+        // object two functions build the same way is one object to the
+        // program, so the build was refused over a counter.
+        const from = this.expression(statement.from);
         this.expression(statement.to);
-        if (statement.step !== null) this.expression(statement.step);
-        this.statements(statement.body);
+        const step = statement.step === null ? null : this.expression(statement.step);
+        const counted = from.kind === "type" ? (step === null || step.kind !== "type" ? from.type : numeric(from, step)) : null;
+        // A loop body is a scope, as an `if` arm is: a name declared in it is
+        // not in scope after it, and the index is not in scope before it.
+        this.branch(statement.body, statement.variable, { kind: "type", type: counted ?? USIZE });
         return;
+      }
       case "if":
         this.expression(statement.condition);
         this.branch(statement.then);
@@ -163,12 +172,11 @@ class BodyTypes {
       case "while":
       case "doWhile":
         this.expression(statement.condition);
-        this.statements(statement.body);
+        this.branch(statement.body);
         return;
       case "forOf":
         // The loop walks a name it is given, so its variable is one element of it.
-        this.environment.set(statement.variable, { kind: "type", type: this.element(statement.of) });
-        this.statements(statement.body);
+        this.branch(statement.body, statement.variable, { kind: "type", type: this.element(statement.of) });
         return;
       case "break":
       case "continue":
@@ -180,10 +188,14 @@ class BodyTypes {
    * A branch sees what came before it and declares nothing for what follows.
    * One flat environment let a name declared in one arm be read in the other
    * and after the statement, so a body the source would not compile passed.
+   * A loop body is a branch like any other, and the name it counts with is
+   * bound in it rather than before it, so it shadows an outer name for the
+   * loop alone.
    */
-  private branch(body: readonly Statement[]): void {
+  private branch(body: readonly Statement[], variable?: string, bound?: Inferred): void {
     const outer = this.environment;
     this.environment = new Map(outer);
+    if (variable !== undefined && bound !== undefined) this.environment.set(variable, bound);
     try {
       this.statements(body);
     } finally {

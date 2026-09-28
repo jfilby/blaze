@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { readIncremental, reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
 import type { AssemblyCandidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -151,4 +151,22 @@ test("two stores writing the same path do not share a temporary name", async () 
   assert.ok(["first", "second"].includes(written.from), `unexpected record: ${JSON.stringify(written)}`);
   const left = (await readdir(join(root, ".blaze/projects/p"))).filter((name) => name.endsWith(".tmp"));
   assert.deepEqual(left, [], "a temporary file was left behind");
+});
+
+test("a function the source named __proto__ is a stored implementation like any other", async () => {
+  // The record is keyed by whatever the source called the function, and
+  // `__proto__` is a legal name to call one. On an object with the usual
+  // prototype, assigning to that key is the inherited setter rather than an
+  // assignment: it replaces the prototype, adds no entry, and the stored
+  // implementation is dropped on the way in and never read on the way out.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-proto-"));
+  const entry = (key: string) =>
+    `{"key":"${key}","file":"f","selected":"c1","candidates":[],"outcomes":[{"candidate":"c1","valid":true}]}`;
+  // Written as text: `__proto__` in an object literal is the prototype setter,
+  // so a record built in memory would never have carried the key at all.
+  await writeFile(join(directory, "inc.json"), `{"good":${entry("k1")},"__proto__":${entry("k2")}}`);
+  const record = await readIncremental(createJsonStore(directory), "inc.json");
+  assert.deepEqual(Object.keys(record).sort(), ["__proto__", "good"]);
+  assert.equal(record.good?.key, "k1");
+  assert.equal(Object.prototype.hasOwnProperty.call(record, "__proto__"), true);
 });

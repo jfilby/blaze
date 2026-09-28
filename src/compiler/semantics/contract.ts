@@ -1075,6 +1075,7 @@ function validateDefinition(contract: FunctionContract): void {
     if (object.size <= 0 || object.align <= 0) {
       throw contractError(`object ${name} has no size`, `size ${object.size}, align ${object.align}`);
     }
+    const seen = new Set<string>();
     let expected = 0;
     for (const field of object.fields) {
       const type = parseType(field.type);
@@ -1084,6 +1085,13 @@ function validateDefinition(contract: FunctionContract): void {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.name)) {
         throw contractError(`invalid field name "${field.name}"`, `in ${name}`);
       }
+      // A name written twice in a literal is one field to the body, but the
+      // layout holds a field per declaration, and a struct that declares the
+      // same member twice is code no compiler takes.
+      if (seen.has(field.name)) {
+        throw contractError(`field ${name}.${field.name} is declared twice`, `in ${name}`);
+      }
+      seen.add(field.name);
       if (field.offset < expected) {
         throw contractError(
           `field ${name}.${field.name} overlaps the field before it`,

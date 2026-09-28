@@ -868,7 +868,11 @@ export async function runBuild(
      * program no longer compiles.
      */
     const prove = async (): Promise<void> => {
-      const proved: IncrementalRecord = {};
+      // Keyed by whatever the source named the function, and `__proto__` is a
+      // legal name: on an object with the usual prototype, assigning to it
+      // replaces the prototype instead of adding an entry, and the record
+      // this writes out is missing every entry it was going to keep.
+      const proved = Object.create(null) as IncrementalRecord;
       for (const unit of units) {
         const functionName = unit.contract.function.name;
         const entry = awaitingProgram.get(functionName) ?? incremental[functionName];

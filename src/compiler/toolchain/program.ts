@@ -254,6 +254,37 @@ function isWholeLiteral(text: string): boolean {
 }
 
 /**
+ * The value a whole number written in the source is, or null where the text is
+ * not one. `BigInt` takes a sign on a decimal literal only, so a negative
+ * hexadecimal one is negated rather than converted with its sign: handing it
+ * the text as written raised a SyntaxError out of the compiler, which is the
+ * one thing the check the value feeds is there to keep from happening.
+ */
+function integerLiteral(text: string): bigint | null {
+  if (/^[+-]?0[xX][0-9a-fA-F]+$/.test(text)) {
+    const negative = text.startsWith("-");
+    return (negative ? -1n : 1n) * BigInt(negative ? text.slice(1) : text);
+  }
+  return /^[+-]?[0-9]+$/.test(text) ? BigInt(text) : null;
+}
+
+/**
+ * True of a value that is a whole number as written, and so of a loop index
+ * built from it. A literal the source wrote without a point is one whatever
+ * type it is read back at; anything else is whole only when the type it
+ * resolved to is.
+ */
+function countsWhole(value: ResolvedValue): boolean {
+  if (value.k === "literal") {
+    return value.binding.type === null
+      ? isWholeLiteral(value.binding.text)
+      : isWhole(value.binding.type);
+  }
+  const name = primitive(typeOfValue(value));
+  return name !== null && isWhole(name);
+}
+
+/**
  * The type an operation on two whole numbers has: the one they have in
  * common. A number written in the source is a double, as it is in the
  * language it was written in, and a side with no type makes the operation a
@@ -407,10 +438,23 @@ class ProgramResolver {
   /* Scopes                                                                  */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * The names the emitter writes a temporary of its own under: a buffer
+   * literal, a counted index, and the value a short-circuit call is written
+   * out once for. A program name that reads like one is declared under
+   * another, because the two would otherwise be one name declared twice in
+   * the C the emitter writes, and the declaration that reads it — the
+   * temporary, initialised from the very name it collides with — is read
+   * before it has a value.
+   */
+  private static readonly TEMPORARY = /^(?:value|buffer|index)_\d+$/;
+
   /** The name the driver declares a source name under: unique per declaration. */
   private unique(name: string): string {
     let candidate = name;
-    for (let index = 2; this.used.has(candidate); index += 1) candidate = `${name}_${index}`;
+    for (let index = 2; this.used.has(candidate) || ProgramResolver.TEMPORARY.test(candidate); index += 1) {
+      candidate = `${name}_${index}`;
+    }
     this.used.add(candidate);
     return candidate;
   }
@@ -739,23 +783,29 @@ class ProgramResolver {
   private counted(statement: ProgramStatement & { kind: "for" }): ResolvedStatement {
     const bound = this.value(statement.to, null, statement.line);
     const boundType = primitive(typeOfValue(bound) ?? numeric("f64")) ?? "f64";
-    // The step decides what the index is. A loop that moves by whole numbers
-    // counts with a whole number whatever the bound is, because the index only
-    // ever takes whole values: a program cannot tell the two apart, and a
-    // whole number is what an array is indexed with.
+
+    // What the index is follows from what it is built from, which is the
+    // value it starts at and the value it moves by. The bound only says where
+    // the loop stops: a loop that starts at 0 and steps by 1 counts in whole
+    // numbers whatever it stops at, and a loop that starts at 0.5 counts in
+    // halves however whole the bound is. Reading the start as whole when it is
+    // not truncates it in the C declaration, and the program counts from 0.
     const written = statement.step === null ? null : this.value(statement.step, null, statement.line);
-    const stepIsWhole =
-      written === null ||
-      (written.k === "literal" &&
-        (isWholeLiteral(written.binding.text) || (written.binding.type !== null && isWhole(written.binding.type))));
-    // An index that moves by fractions counts in fractions, whatever the bound
-    // is: a whole index would add a half to nothing and stand still.
-    const whole = isWhole(boundType) && stepIsWhole;
-    // The index takes the width of the bound it counts to, which is what
-    // `wholeOf` settles between two whole numbers. It is not arithmetic on a
-    // number in the source, which is a double, so the rule that makes
-    // `length - 10` a double does not reach it.
-    const counted = whole ? wholeOf(boundType, boundType) : stepIsWhole ? "i64" : "f64";
+    const stepIsWhole = written === null || countsWhole(written);
+    const start = this.value(statement.from, null, statement.line);
+    const whole = countsWhole(start) && stepIsWhole;
+    // The width is the one a whole number the loop is built from was written
+    // at. A number written in the source carries no width of its own — it is
+    // a double until a use gives it another — so a loop over two of them
+    // settles on the width arithmetic on a whole number uses, and it is not
+    // the rule that makes `length - 10` a double. A bound of another width is
+    // left out of it: it is only ever compared against, and C promotes the
+    // index to the bound's width, which is the comparison the language makes.
+    const startType = primitive(typeOfValue(start));
+    const widths = [startType, isWhole(boundType) ? boundType : null].filter(
+      (name): name is PrimitiveTypeName => name !== null && isWhole(name),
+    );
+    const counted = whole ? (widths.length === 0 ? "i64" : wholeOf(widths[0], widths[1] ?? widths[0])) : "f64";
     const type = numeric(statement.down && counted.startsWith("u") ? "i64" : counted);
     const from = this.value(statement.from, type, statement.line);
     const to = this.value(statement.to, type, statement.line);
@@ -1275,8 +1325,9 @@ class ProgramResolver {
 
   /** A literal index the array does not have is refused where it is written. */
   private within(index: ResolvedValue, binding: BufferBinding, line: number): void {
-    if (index.k !== "literal" || !isWholeLiteral(index.binding.text)) return;
-    const at = BigInt(index.binding.text);
+    if (index.k !== "literal") return;
+    const at = integerLiteral(index.binding.text);
+    if (at === null) return;
     if (at < 0n || at >= BigInt(binding.length)) {
       throw programError(
         `${binding.name}[${index.binding.text}] is outside the array`,

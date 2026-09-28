@@ -264,3 +264,21 @@ test("a candidate with nothing but comments is rejected", () => {
 test("the contract used by the tests is itself valid", () => {
   parseContract(contract());
 });
+
+test("the stack walk reads a push or a pop by its mnemonic, and a write to esp as a move", () => {
+  // `popcnt` opens the way a pop does and is a register operation. Read by
+  // its opening it moved rsp that no instruction moved, and a candidate that
+  // was aligned was turned away over a frame it had already built.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tpushq\t%rbp\n\tmovq\t$7, %rax\n\tpopcnt\t%rax, %rax\n\tcall\tblaze_rt_print_newline\n\tpopq\t%rbp\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // A write to `esp` zero-extends into rsp, so `subl $8, %esp` moves the
+  // stack exactly as `subq $8, %rsp` does. Read as a write to nothing, the
+  // call below it was eight bytes out of line and was passed.
+  rejection(
+    "\t.globl dotProduct\ndotProduct:\n\tpushq\t%rbp\n\tsubl\t$8, %esp\n\tcall\tblaze_rt_print_newline\n\taddl\t$8, %esp\n\tpopq\t%rbp\n\tret\n",
+    /line 5: "call blaze_rt_print_newline" is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+});
