@@ -72,6 +72,17 @@ const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
   ir: "semantic IR",
 };
 
+/**
+ * What the generate stage names, which is what the model is writing there: the
+ * IR, on every kind. The kind only says how far the toolchain takes that one
+ * answer, so the line names the delivery the build asked for and leaves the
+ * name of the language itself to the stage that produces it — before one of
+ * them, nothing of that language exists.
+ */
+export function generationLabel(output: OutputKind): string {
+  return output === "ir" ? "semantic IR" : `semantic IR for ${implementationLabel(output)} output`;
+}
+
 export interface CodegenWorkspace {
   /** Directory for intermediate artifacts: assembly, objects, harness, test binaries. */
   workDirectory: string;

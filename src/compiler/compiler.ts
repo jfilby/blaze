@@ -60,8 +60,9 @@ import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
-  generateCandidates,
   exclusive,
+  generateCandidates,
+  generationLabel,
   implementationLabel,
   reusableFiles,
   reusedResult,
@@ -1103,7 +1104,7 @@ export async function runBuild(
           reporter.stage(
             "generate",
             "info",
-            `${repair ? "Repairing" : "Generating"} ${implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
+            `${repair ? "Repairing" : "Generating"} ${generationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
           );
         },
       });

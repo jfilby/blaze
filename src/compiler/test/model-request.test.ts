@@ -140,9 +140,12 @@ test("the compiler says which model it is waiting for", async (t) => {
   );
 
   assert.ok(lines.includes("Model: openai-compatible/silent"), `no model line in: ${lines.join(" | ")}`);
+  const generating = lines.filter((line) => line.startsWith("Generating "));
+  assert.equal(generating.length, 1, `expected one generating line in: ${lines.join(" | ")}`);
+  assert.match(generating[0], /: square, candidate 1 of 1, attempt 1 of 1, /);
   assert.ok(
-    lines.some((line) => line === "Generating assembly: square, candidate 1 of 1, attempt 1 of 1, waiting for openai-compatible/silent"),
-    `no generating line in: ${lines.join(" | ")}`,
+    generating[0].endsWith("waiting for openai-compatible/silent"),
+    `the generating line does not name the model: ${generating[0]}`,
   );
 });
 
