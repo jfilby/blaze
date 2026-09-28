@@ -156,14 +156,14 @@ function probeValue(type: TypeExpr): Value {
  * there is nothing to run, not that the candidate is wrong.
  */
 export function planProbe(contract: FunctionContract, parsed: ParsedContract): ProbePlan {
-  if (contract.definition === undefined) {
+  if (contract.ensures.length > 0) {
     return {
       kind: "skip",
       reason: "the contract states what the function returns, so the candidate is verified against its own vectors",
     };
   }
   const parameters = contract.function.params.map((param) => ({ name: param.name, type: parseType(param.type) }));
-  const objects = contract.definition.objects ?? {};
+  const objects = contract.definition.objects;
   const values = new Map<string, Value>(parameters.map((param) => [param.name, probeValue(param.type)]));
   const failures = preconditionFailures(parsed, values);
   if (failures.length > 0) {

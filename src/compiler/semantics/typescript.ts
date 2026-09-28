@@ -38,12 +38,11 @@ import { parseType, typeToString } from "./contract.ts";
 import { ARGV, ARGV_LENGTH } from "./builtins.ts";
 
 export { ARGV, ARGV_LENGTH };
-import { assembleContract, bufferContract, type AccessRange } from "./contract-build.ts";
-import { normalizeNumeric, normalizeOptimize } from "./contract.ts";
+import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { CompilerError, isCompilerError } from "../core/errors.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
-import type { Effect, FunctionContract, SourceInput, TypeExpr } from "../core/types.ts";
+import type { TypeExpr } from "../core/types.ts";
 import type {
   AssignOperator,
   BinaryOp,
@@ -1280,11 +1279,10 @@ class Uncontractable extends Error {
 }
 
 /**
- * What a body does, as the contract states it when no expression can: whether
- * it allocates, prints or reads the command line, and the buffer ranges it
- * reads. The ranges are the ones the contracted path collects too, so a
- * definition says which buffers it reads and how long they must be, exactly
- * as a reduction does.
+ * What a body does: whether it allocates, prints or reads the command line,
+ * and the buffer ranges it reads. Every function is described this way, and
+ * these are the ranges its preconditions state, because the body is what runs
+ * and a caller must provide everything the body reaches.
  */
 function usageOf(declaration: TypeScriptFunction): {
   allocates: boolean;
@@ -1487,44 +1485,10 @@ function usageOf(declaration: TypeScriptFunction): {
   return { allocates, prints, readsArgv, accesses };
 }
 
-/**
- * The contract of a function whose result is not one expression. It states the
- * signature, what the function does to the world, and the statements it runs:
- * the program contract, the target and the module source are what a backend
- * writes from, and the compiler checks the result by running the program.
- * What the body reads is stated the same way a reduction states it, so a
- * caller is still refused the buffers the body would read out of bounds.
- */
 /** The symbol a program entry named `main` is compiled under: a program is
  *  hosted by one that has a `main` of its own, so the two cannot share it. */
 const PROGRAM_ENTRY_SYMBOL = "blaze_main";
 
-function definitionContract(declaration: TypeScriptFunction, input: SourceInput): FunctionContract {
-  const usage = usageOf(declaration);
-  const buffers = bufferContract(declaration.params, usage.accesses);
-  const effects: Effect[] = [];
-  if (usage.allocates) effects.push("memory");
-  if (usage.prints) effects.push("io");
-  if (usage.readsArgv) effects.push("syscall");
-  return {
-    version: "1",
-    function: {
-      name: declaration.name,
-      symbol: declaration.name === "main" ? PROGRAM_ENTRY_SYMBOL : declaration.name,
-      params: declaration.params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
-      returns: typeToString(declaration.returns),
-    },
-    requires: buffers.requires,
-    ensures: [],
-    memory: { reads: buffers.reads, writes: [], aliasing: [] },
-    effects,
-    numeric: normalizeNumeric(input.numeric),
-    optimize: normalizeOptimize(input.optimize),
-    // The calls are filled in by the whole-program pass in objects.ts, which
-    // walks these same bodies knowing which names the program compiles.
-    definition: { statements: declaration.body, objects: {}, calls: [], ...usage },
-  };
-}
 
 /* -------------------------------------------------------------------------- */
 /* Body analysis                                                              */
@@ -1540,7 +1504,7 @@ interface LoopContext {
  * contract can say; every other loop leaves the body to the definition.
  */
 const LOOP_REMEDY =
-  "a contract is one expression the result must equal, so this body is contracted as a definition: the contract carries the statements themselves";
+  "a postcondition is one expression the result must equal, so this body states none: the contract carries the statements themselves";
 
 class BodyAnalysis {
   private readonly declaration: TypeScriptFunction;
@@ -1765,7 +1729,7 @@ class BodyAnalysis {
           this.uncontractable(
             "inverts a number bit by bit, which a contract cannot state",
             line,
-            "the body is contracted as a definition, which is what a function that branches or calls has",
+            "the body states no postcondition, which is what a function that branches or calls has",
           );
         }
         return `(${expression.op}${this.serialize(expression.operand, loop, line)})`;
@@ -1774,7 +1738,7 @@ class BodyAnalysis {
           this.uncontractable(
             `computes with ${expression.op}, which a contract cannot state`,
             line,
-            "the body is contracted as a definition, which is what a function that branches or calls has",
+            "the body states no postcondition, which is what a function that branches or calls has",
           );
         }
         return `(${this.serialize(expression.left, loop, line)} ${expression.op} ${this.serialize(expression.right, loop, line)})`;
@@ -1923,25 +1887,34 @@ export const typeScriptFrontend: Frontend = {
   contractFor(analysis, declared, input) {
     const declaration = declared.handle as TypeScriptFunction;
     const body = new BodyAnalysis(declaration).run();
-    // A result that is one expression is the contract: it states the semantics
-    // a backend has to meet, and the compiler is the oracle that decides it.
-    if (body.result === null) return definitionContract(declaration, input);
+    // A result that is one expression also states a postcondition: the
+    // compiler is the oracle that decides whether an implementation meets it.
+    // The body travels either way — it is what the function is, and the IR is
+    // written from it.
+    //
     // A buffer length is a property of the value, not of the pointer the callee
-    // receives: the implementation cannot observe it, so the result may not
-    // depend on it. Preconditions may, because the caller checks them.
-    if (body.result.includes("len(")) {
+    // receives: the implementation cannot observe it, so a postcondition may
+    // not depend on it. Preconditions may, because the caller checks them.
+    if (body.result !== null && body.result.includes("len(")) {
       throw frontendError(
         `the result of ${declaration.name} depends on a buffer length`,
         `${analysis.path}: the callee only receives the pointer, so pass the length as a parameter and loop over that`,
       );
     }
+    const usage = usageOf(declaration);
     return assembleContract({
       name: declaration.name,
       symbol: declaration.name === "main" ? PROGRAM_ENTRY_SYMBOL : declaration.name,
       params: declaration.params,
       returns: declaration.returns,
       result: body.result,
-      accesses: body.accesses,
+      accesses: usage.accesses,
+      definition: {
+        statements: declaration.body,
+        allocates: usage.allocates,
+        prints: usage.prints,
+        readsArgv: usage.readsArgv,
+      },
       input,
     });
   },

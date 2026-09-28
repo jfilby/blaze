@@ -502,11 +502,13 @@ test("a function is described whole, and reads back as itself", async () => {
   assert.match(printed, /return \[add\[f64\]/);
   assert.match(printed, /load_field\[ref<any>\]/);
 
-  // A function the contract states a result for has no body, and says so.
+  // A function whose contract states a result carries that result and a body
+  // both: the postcondition is what the result is held to, and the body is
+  // what the compiler resolved and would lower.
   const library = new URL("../../examples/hello_world/blaze.toml", import.meta.url).pathname;
   const said = await runSemanticIr(library, { function: "dotProduct" });
   assert.match(said, /ensures /);
-  assert.doesNotMatch(said, /block entry/);
+  assert.match(said, /^ {2}block entry: releases\[\]$/m);
 });
 
 test("the IR of a project is what the compiler resolved, and reads back as itself", async () => {

@@ -282,12 +282,12 @@ function renderTypes(contract: FunctionContract): string {
   return entries.join("\n");
 }
 
+/** What the function is: the body the compiler resolved, and how it is reached. */
 function renderDefinition(contract: FunctionContract, semantic: SemanticFunction): string {
   const definition = contract.definition;
-  if (definition === undefined) return "";
   const lines: string[] = [];
-  lines.push("This contract states what the function does, not what it returns:");
-  lines.push("there is no postcondition, because the result is not one expression. Implement the body.");
+  lines.push("This is the whole function as the compiler resolved it from the source: the signature it");
+  lines.push("is called by, what it does to the world, and the body it runs. Implement this body.");
   lines.push("");
   lines.push("WHAT IT DOES");
   lines.push(`allocates objects: ${definition.allocates ? "yes" : "no"}`);
@@ -327,29 +327,31 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
   }
   lines.push("");
   lines.push("HOW YOU ARE CHECKED");
-  lines.push(
-    "Nothing checks this function on its own. The compiler assembles it, links it with the other",
-  );
-  lines.push(
-    "functions of the program, runs that program, and compares what it prints with what the source",
-  );
-  lines.push(
-    "program prints when it is run on its own toolchain. The two must be the same text, line for line",
-  );
-  lines.push("and character for character.");
-  lines.push(
-    "Print every number with blaze_rt_print_number and never format one yourself: it already writes a",
-  );
-  lines.push(
-    "number the way the source language writes one, which is a whole number without a point (70, not",
-  );
-  lines.push(
-    "70.0), the shortest text that reads back as the same value, in full between 1e-6 and 1e21 and in",
-  );
-  lines.push(
-    "exponential form outside that, -0 for a negative zero, and Infinity, -Infinity or NaN for a value",
-  );
-  lines.push("that is not finite.");
+  if (contract.ensures.length > 0) {
+    lines.push("The result is checked against the postcondition below, over test vectors the compiler");
+    lines.push("builds from the contract and runs your implementation against. The body above is what");
+    lines.push("is implemented; the postcondition is what the result is held to.");
+  } else {
+    lines.push("Nothing checks this function on its own. The compiler assembles it, links it with the");
+    lines.push("other functions of the program, runs that program, and");
+    lines.push("compares what it prints with what the source program prints when it is run on its own");
+    lines.push("toolchain. The two must be the same text, line for line and character for character.");
+  }
+  if (definition.prints) {
+    lines.push(
+      "Print every number with blaze_rt_print_number and never format one yourself: it already writes a",
+    );
+    lines.push(
+      "number the way the source language writes one, which is a whole number without a point (70, not",
+    );
+    lines.push(
+      "70.0), the shortest text that reads back as the same value, in full between 1e-6 and 1e21 and in",
+    );
+    lines.push(
+      "exponential form outside that, -0 for a negative zero, and Infinity, -Infinity or NaN for a value",
+    );
+    lines.push("that is not finite.");
+  }
   lines.push("");
   lines.push("NUMBERS");
   lines.push(
@@ -390,26 +392,24 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
  */
 function renderWrittenOut(callee: FunctionContract, semantic: SemanticFunction | undefined): string[] {
   const signature = `${callee.function.name}(${callee.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${callee.function.returns}`;
-  if (semantic !== undefined && semantic.entry !== null) {
-    return [`${signature}, contracted by what it does:`, "```", printSemanticFunction(semantic), "```"];
+  if (semantic === undefined) {
+    return [
+      `${signature}, which must satisfy:`,
+      ...callee.requires.map((requirement) => `  requires ${requirement}`),
+      ...callee.ensures.map((condition) => `  ensures ${condition}`),
+    ];
   }
-  return [
-    `${signature}, which must satisfy:`,
-    ...callee.requires.map((requirement) => `  requires ${requirement}`),
-    ...callee.ensures.map((condition) => `  ensures ${condition}`),
-  ];
+  return [`${signature}, as the compiler resolved it:`, "```", printSemanticFunction(semantic), "```"];
 }
 
 /**
  * The contract as the model reads it. The body is not in it: the body is
- * rendered from the source above, and carrying the statement tree as well
- * would state it three times over for no gain.
+ * rendered from the IR below, and carrying the statement tree as well would
+ * state it three times over for no gain.
  */
 function renderContract(contract: FunctionContract): string {
-  const { definition, ...rest } = contract;
-  if (definition === undefined) return JSON.stringify(rest, null, 2);
-  const { statements, ...whatItDoes } = definition;
-  return JSON.stringify({ ...rest, definition: whatItDoes }, null, 2);
+  const { statements, ...whatItDoes } = contract.definition;
+  return JSON.stringify({ ...contract, definition: whatItDoes }, null, 2);
 }
 
 /**
@@ -423,15 +423,13 @@ function renderContract(contract: FunctionContract): string {
  * needs of its own to carry either. That leaves this body alone, which is
  * where every construct a candidate can reach through is stated.
  *
- * A contract that states a postcondition says nothing about how the work is
- * done, and a library implementation is free to take a working copy of what it
- * is given, so memory is always in reach there.
+ * The needs are read from the body the compiler resolved, so they say what this
+ * function reaches for rather than what an implementation might.
  */
 function runtimeNeeds(request: PromptRequest): RuntimeNeeds {
   const { contract } = request;
   if (isBufferType(parseType(contract.function.returns))) return { memory: true };
   const definition = contract.definition;
-  if (definition === undefined) return { memory: true };
   const needs: RuntimeNeeds = {};
   if (definition.allocates) Object.assign(needs, { memory: true, object: true });
   // A function that prints text has to have text to print, and the only way
@@ -651,38 +649,42 @@ export function buildUserPrompt(request: PromptRequest): string {
       ].join("\n"),
     );
   }
+  // What the function is, and what it is held to, are two sections: the body is
+  // the specification to implement, and the conditions beside it are what the
+  // result is checked against afterwards.
+  sections.push(["THE FUNCTION TO IMPLEMENT", renderDefinition(contract, semantic)].join("\n"));
   sections.push(
-    contract.definition === undefined
-      ? [
-          "SEMANTIC REQUIREMENTS",
-          "The function must satisfy these preconditions on entry:",
-          ...contract.requires.map((requirement) => `- ${requirement}`),
-          "and must satisfy these postconditions on return:",
-          ...contract.ensures.map((condition) => `- ${condition}`),
-          "",
-          "The postcondition defines the result mathematically. It does not prescribe an algorithm:",
-          "summation order, vector width, unrolling and register allocation are yours to choose.",
-        ].join("\n")
-      : ["SEMANTIC REQUIREMENTS", renderDefinition(contract, semantic)].join("\n"),
+    [
+      "WHAT THE RESULT MUST SATISFY",
+      "The function must satisfy these preconditions on entry:",
+      ...contract.requires.map((requirement) => `- ${requirement}`),
+      ...(contract.ensures.length === 0
+        ? [
+            "There is no postcondition: the result is not one expression, so what the function",
+            "returns is checked by running the program and comparing what it prints with what the",
+            "source program prints.",
+          ]
+        : [
+            "and these postconditions on return:",
+            ...contract.ensures.map((condition) => `- ${condition}`),
+            "",
+            "The postcondition defines the result mathematically. It does not prescribe an algorithm:",
+            "summation order, vector width, unrolling and register allocation are yours to choose.",
+          ]),
+    ].join("\n"),
   );
-  // A contract that states what a function does carries no memory ranges and
-  // no numeric policy, because a body is not summarized by either. Stating
-  // the empty ones would tell a model it reads nothing while its body reads a
-  // pointer, and that a summation order is fixed when the body chooses one.
-  if (contract.definition === undefined) {
-    sections.push(["MEMORY REQUIREMENTS", renderMemory(contract)].join("\n"));
-    sections.push(
-      [
-        "NUMERICAL SEMANTICS",
-        `floating point: ${contract.numeric.floatingPoint}`,
-        `rounding: ${contract.numeric.rounding}`,
-        `fast math: ${contract.numeric.fastMath}`,
-        contract.numeric.fastMath === false
-          ? "Reassociation, contraction and value changes are not allowed; results must be bit-reproducible within the accumulated rounding error of a sequential sum."
-          : "Rounding changes are permitted, but the result must still satisfy the postconditions.",
-      ].join("\n"),
-    );
-  }
+  sections.push(["MEMORY REQUIREMENTS", renderMemory(contract)].join("\n"));
+  sections.push(
+    [
+      "NUMERICAL SEMANTICS",
+      `floating point: ${contract.numeric.floatingPoint}`,
+      `rounding: ${contract.numeric.rounding}`,
+      `fast math: ${contract.numeric.fastMath}`,
+      contract.numeric.fastMath === false
+        ? "Reassociation, contraction and value changes are not allowed; results must be bit-reproducible within the accumulated rounding error of a sequential sum."
+        : "Rounding changes are permitted, but the result must still satisfy the postconditions.",
+    ].join("\n"),
+  );
   sections.push(
     [
       "EFFECTS",

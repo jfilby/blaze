@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/pr
 import { fingerprintSources, toolchainFingerprint } from "../core/version.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { returns as returnsValue } from "./definition.ts";
 
 function contractOf(name: string, returns: string, objects: Record<string, ObjectLayout> = {}): FunctionContract {
   return {
@@ -23,9 +24,7 @@ function contractOf(name: string, returns: string, objects: Record<string, Objec
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
     optimize: { primary: "latency" },
-    ...(Object.keys(objects).length === 0
-      ? {}
-      : { definition: { statements: [], objects, allocates: false, prints: false, readsArgv: false, calls: [] } }),
+    definition: returnsValue({ k: "ident", name: "x" }, objects),
   };
 }
 

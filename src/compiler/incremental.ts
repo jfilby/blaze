@@ -107,7 +107,7 @@ export interface UnitKeyInput {
  * reason the strategy is read here rather than treated as a note on the graph.
  */
 function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
-  const abi = { function: contract.function, objects: contract.definition?.objects ?? {} };
+  const abi = { function: contract.function, objects: contract.definition.objects };
   return holdsTheBody ? { ...abi, definition: contract.definition } : abi;
 }
 

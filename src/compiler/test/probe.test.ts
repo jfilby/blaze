@@ -24,7 +24,7 @@ function paramList(text: string): FunctionParam[] {
   });
 }
 
-/** A contract that states what a function does rather than what it returns. */
+/** A function that states no postcondition, so the program it is part of is the only thing that can check it. */
 function definition(overrides: Partial<FunctionContract> = {}, params = "n: f64"): FunctionContract {
   return {
     version: "1",
@@ -48,8 +48,9 @@ function definition(overrides: Partial<FunctionContract> = {}, params = "n: f64"
 }
 
 test("a contract that states a result is verified against its own vectors, not probed", () => {
+  // The function has a body here as it does everywhere: what stops the probe
+  // is the postcondition beside it, not the presence of a body.
   const contract = definition({ ensures: ["result == n * 2.0"] });
-  delete contract.definition;
   const plan = planProbe(contract, parseContract(contract));
   assert.equal(plan.kind, "skip");
   assert.match(plan.kind === "skip" ? plan.reason : "", /states what the function returns/);

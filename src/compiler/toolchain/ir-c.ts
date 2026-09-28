@@ -137,12 +137,6 @@ function builtinExpression(name: string, args: string[]): string {
  * compiler can compile it without the rest of the program beside it.
  */
 export function generateFunctionC(fn: SemanticFunction): string {
-  if (fn.entry === null) {
-    throw backendError(
-      `${fn.symbol} has no body to lower`,
-      "a function whose contract states what it returns is implemented against its postcondition, not lowered from a body",
-    );
-  }
   return new FunctionEmitter(fn).emit();
 }
 
@@ -168,7 +162,7 @@ class FunctionEmitter {
     const parameters = this.fn.params.map(
       (param) => `${declaredType(slotType(param))} ${this.names.declare(param.name, slotType(param))}`,
     );
-    this.block(this.fn.entry as SemanticBlock, 1);
+    this.block(this.fn.entry, 1);
     const layouts = cObjectDeclarations(this.fn.objects);
     const signature = `${declaredType(this.fn.returns)} ${this.fn.symbol}(${parameters.join(", ") || "void"})`;
     return [

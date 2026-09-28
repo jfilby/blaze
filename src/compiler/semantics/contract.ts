@@ -1039,21 +1039,14 @@ export function parseContract(contract: FunctionContract): ParsedContract {
   for (const statement of contract.memory.writes) validateRange(statement, env, "memory.writes");
   for (const statement of contract.memory.aliasing) validateAliasing(statement, env);
 
+  // The body is checked whether or not a postcondition states what the result
+  // must equal: it is what the function is, and a postcondition beside it says
+  // nothing about whether it can be lowered.
+  validateDefinition(contract);
   const definitions = ensures
     .map((expression, index) => ({ index, right: isResultDefinition(expression) ? expression.right : null }))
     .filter((entry) => entry.right !== null);
-  if (definitions.length === 0) {
-    // A contract that states what a function does rather than what it returns
-    // is complete on its own: it carries the body and the layout it writes.
-    if (contract.definition === undefined) {
-      throw contractError(
-        "contract has no result definition",
-        'at least one ensures entry must define the return value, e.g. "result == ..."',
-      );
-    }
-    validateDefinition(contract);
-    return { contract, env, requires, ensures, resultDefinition: null };
-  }
+  if (definitions.length === 0) return { contract, env, requires, ensures, resultDefinition: null };
   const distinct = new Set(definitions.map((entry) => contract.ensures[entry.index]));
   if (distinct.size > 1) {
     throw contractError("contract defines the result in more than one way", [...distinct].join(" | "));
@@ -1062,9 +1055,9 @@ export function parseContract(contract: FunctionContract): ParsedContract {
   return { contract, env, requires, ensures, resultDefinition: definitions[0].right as Expr };
 }
 
-/** What a definition may not leave out: a body, and a layout that fits itself. */
+/** What the body of a function may not leave out: its statements, and a layout that fits itself. */
 function validateDefinition(contract: FunctionContract): void {
-  const definition = contract.definition as NonNullable<FunctionContract["definition"]>;
+  const definition = contract.definition;
   if (definition.statements.length === 0) {
     throw contractError(`the definition of ${contract.function.name} is empty`, "a function body states what it does");
   }

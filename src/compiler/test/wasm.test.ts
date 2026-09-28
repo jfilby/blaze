@@ -9,6 +9,7 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
+import { dotProductBody } from "./definition.ts";
 
 /** The WebAssembly surface this test uses; @types/node does not declare it. */
 interface WasmModuleHandle {
@@ -41,6 +42,7 @@ const CONTRACT: FunctionContract = {
   effects: [],
   numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
   optimize: { primary: "throughput" },
+  definition: dotProductBody(),
 };
 
 /** The bytes of a WebAssembly value type, as the type section spells them. */

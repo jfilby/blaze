@@ -19,10 +19,10 @@
  * linked on its own, so it is judged by the program and by nothing else: no
  * probe, no run of its own, and a fault in it attributed to the program rather
  * than to the function it is in (see codegen.ts). A function with a
- * postcondition never pays this, because a body that calls anything is
- * contracted as a definition instead, so every caller is a definition and has
- * no vectors to lose. So what a call costs is the caller's own check, and the
- * only thing that gives it back is having nothing left to call.
+ * postcondition never pays this, because that postcondition is checked against
+ * vectors whatever the body does, so a body that calls anything is verified as
+ * surely as one that does not. So what a call costs is the caller's own check,
+ * and the only thing that gives it back is having nothing left to call.
  *
  * A call is therefore written out when three things hold. The callee must not
  * be verified on its own vectors, or writing it out replaces a body that was
@@ -39,6 +39,27 @@ import type { CallStrategy, FileContract, FunctionContract } from "../core/types
 export type ContractsByName = Map<string, FunctionContract>;
 
 /**
+ * Whether a callee is verified on its own, which is what makes its body worth
+ * calling rather than copying: a postcondition is checked against vectors, so
+ * that body was proved, and a copy of it inside a caller is a second body
+ * nothing has proved. A function with no postcondition has no vectors of its
+ * own, so the program it is part of is the only thing that can check it.
+ */
+function isVerified(contract: FunctionContract): boolean {
+  return contract.ensures.length > 0;
+}
+
+/**
+ * Whether a body owns anything a caller's frame would have to take over. What
+ * it allocates, prints or reads is what its own body does, so this is read from
+ * the body rather than from the conditions beside it.
+ */
+function isEffectFree(contract: FunctionContract): boolean {
+  const definition = contract.definition;
+  return !definition.allocates && !definition.prints && !definition.readsArgv;
+}
+
+/**
  * The functions of the program, by name. A name belongs to one function: one
  * symbol belongs to one function, and a symbol is the name unless the source
  * declared `main`, which is refused as a duplicate of the entry (see
@@ -50,27 +71,6 @@ export function contractsByName(files: readonly FileContract[]): ContractsByName
     for (const [name, contract] of Object.entries(file.functions)) contracts.set(name, contract);
   }
   return contracts;
-}
-
-/**
- * Whether a callee is verified on its own, which is what makes its body worth
- * calling rather than copying: a postcondition is checked against vectors, so
- * that body was proved, and a copy of it inside a caller is a second body
- * nothing has proved. It is also the common case — anything the source wrote as
- * one expression is contracted this way — which is why a call is the default.
- */
-function isVerified(contract: FunctionContract): boolean {
-  return contract.definition === undefined;
-}
-
-/** Whether a body owns anything a caller's frame would have to take over. */
-function isEffectFree(contract: FunctionContract): boolean {
-  const definition = contract.definition;
-  // A verified function is straight-line and pure by construction: the
-  // frontend refuses to state a result over an allocation, a print or a
-  // command line read, so there is nothing in it that owns memory.
-  if (definition === undefined) return true;
-  return !definition.allocates && !definition.prints && !definition.readsArgv;
 }
 
 /**
@@ -86,13 +86,13 @@ function isEffectFree(contract: FunctionContract): boolean {
  */
 function terminates(contracts: ContractsByName, caller: string, callee: string): boolean {
   const seen = new Set<string>();
-  const stack = (contracts.get(callee)?.definition?.calls ?? []).map((edge) => edge.callee);
+  const stack = (contracts.get(callee)?.definition.calls ?? []).map((edge) => edge.callee);
   while (stack.length > 0) {
     const name = stack.pop() as string;
     if (name === callee || name === caller) return false;
     if (seen.has(name)) continue;
     seen.add(name);
-    for (const edge of contracts.get(name)?.definition?.calls ?? []) stack.push(edge.callee);
+    for (const edge of contracts.get(name)?.definition.calls ?? []) stack.push(edge.callee);
   }
   return true;
 }
@@ -118,9 +118,7 @@ export function strategyFor(contracts: ContractsByName, caller: string, callee: 
 export function resolveCalls(files: readonly FileContract[]): void {
   const contracts = contractsByName(files);
   for (const contract of contracts.values()) {
-    const definition = contract.definition;
-    if (definition === undefined) continue;
-    for (const edge of definition.calls) {
+    for (const edge of contract.definition.calls) {
       edge.strategy = strategyFor(contracts, contract.function.name, edge.callee);
     }
   }
@@ -141,7 +139,7 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
     const name = current.function.name;
     if (bodies.has(name)) continue;
     bodies.set(name, current);
-    for (const edge of current.definition?.calls ?? []) {
+    for (const edge of current.definition.calls) {
       // The edges that are written out form a forest, because `strategyFor`
       // refuses the one whose callee reaches its caller back, so this ends.
       if (edge.strategy !== "inline") continue;
@@ -164,7 +162,7 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
 export function calledOut(contracts: ContractsByName, contract: FunctionContract): FunctionContract[] {
   const reached = new Map<string, FunctionContract>();
   for (const body of writtenOut(contracts, contract)) {
-    for (const edge of body.definition?.calls ?? []) {
+    for (const edge of body.definition.calls) {
       // A body written out is part of this object, so the calls its own
       // contract records are this candidate's to make. The written-out bodies
       // are already the whole closure, so an edge marked for writing out is a

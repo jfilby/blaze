@@ -16,7 +16,6 @@ import {
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
 import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
-import { entryContract } from "../semantics/program.ts";
 import { programWithSemantics } from "./phase.ts";
 import type { SourceInput } from "../core/types.ts";
 
@@ -93,14 +92,20 @@ test("the managed object representation is the same in the header and in the ada
 });
 
 test("the prompt tells the model which runtime entry points it may call", () => {
-  const files = { "module.nim": "proc dotProduct(a: ptr float32): float32 = 0.0\n" };
-  const { program, semantics } = programWithSemantics("nim", files, "module.nim");
+  // What the ABI section offers is what the body the compiler resolved
+  // reaches for, so the fixture allocates an object: that is what puts the
+  // allocator and the release in reach of a hosted candidate.
+  const files = {
+    "module.ts":
+      "export function make(): any {\n  return { left: null, right: null };\n}\nconst made = make();\n",
+  };
+  const { program, semantics } = programWithSemantics("typescript", files, "module.ts");
   const request: Omit<PromptRequest, "runtime"> = {
-    contract: entryContract(program),
-    unit: { file: "module.nim", function: "dotProduct" },
+    contract: program.files[0].functions.make,
+    unit: { file: "module.ts", function: "make" },
     program,
     semantics,
-    sources: [{ path: "module.nim", source: files["module.nim"] }],
+    sources: [{ path: "module.ts", source: files["module.ts"] }],
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     output: "machine",
     candidate: 1,

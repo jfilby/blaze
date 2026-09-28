@@ -23,12 +23,17 @@
  *   - parameter types: primitives, ptr T, openArray[T], array[N, T]
  *   - pure functions only: writing through a pointer or an indexed element is
  *     rejected, so every accepted contract has effects: [] and writes: []
+ *
+ * A parsed proc is lowered into the shared IR (see the lowering section), so a
+ * Nim proc and a TypeScript function are the same thing to everything past the
+ * frontend: a signature, a body and the conditions it is held to.
  */
 import { isFloatType, parseType, typeToString } from "./contract.ts";
-import { assembleContract } from "./contract-build.ts";
+import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { CompilerError } from "../core/errors.ts";
 import { typeScriptFrontend } from "./typescript.ts";
 import type { Frontend, ModuleImport } from "./module.ts";
+import type { Expression, Statement } from "../core/ir.ts";
 import type { TypeExpr } from "../core/types.ts";
 
 function frontendError(message: string, detail?: string): CompilerError {
@@ -249,12 +254,107 @@ function parseNimExpression(source: string, context: string): NimExpr {
 /* Statements                                                                 */
 /* -------------------------------------------------------------------------- */
 
+/** The parser's own statement node. The IR is not this: it is what the node lowers to. */
 type Stmt =
   | { kind: "declare"; name: string; typeText: string | null; init: NimExpr | null; line: number }
   | { kind: "loop"; variable: string; from: NimExpr; to: NimExpr; exclusive: boolean; body: Stmt[]; line: number }
   | { kind: "assign"; target: string; op: "=" | "+=" | "*=" | "-="; value: NimExpr; line: number }
   | { kind: "result"; value: NimExpr; line: number }
   | { kind: "indexAssign"; base: string; index: NimExpr; value: NimExpr; line: number };
+
+/* -------------------------------------------------------------------------- */
+/* Lowering                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The Nim AST is what the parser reads; the IR is what the compiler compiles.
+ * A parsed proc is lowered into the same statements and expressions every
+ * other frontend produces, so there is one semantic IR in this compiler rather
+ * than one per source language, and the resolvers, validators and backends
+ * downstream read a Nim proc exactly as they read a TypeScript one.
+ *
+ * A Nim proc is a smaller language than the one the IR describes — a proc
+ * assigns a result, loops over a range, and does little else — so the lowering
+ * is a total mapping rather than a translation, and nothing here decides
+ * anything the AST has already decided.
+ */
+
+/** The value a Nim local holds before it is written, which is one rule for both readers. */
+function zeroLiteral(type: TypeExpr | null, statement: Stmt & { kind: "declare" }): string {
+  if (type === null) {
+    throw frontendError(`cannot infer the initial value of "${statement.name}" (line ${statement.line})`, "add an explicit initialiser");
+  }
+  // The contract language has no `f32` suffix: a float is written as the
+  // number it denotes, and zero is the one value every float width holds
+  // exactly, so the width the declaration names does not reach the text.
+  // The Nim spelling `0.0'f32` is source syntax, and the contract tokenizer
+  // has no operator that starts with `'`, so a proc declaring a float
+  // without an initialiser could not be contracted at all.
+  if (type.kind === "primitive" && isFloatType(type.name)) return "0.0";
+  if (type.kind === "primitive") return "0";
+  throw frontendError(`variables of type ${typeToString(type)} are not supported (line ${statement.line})`);
+}
+
+/** One Nim expression, as the IR writes it. */
+function nimExpression(expression: NimExpr): Expression {
+  switch (expression.k) {
+    case "literal":
+      return { k: "literal", text: expression.text };
+    case "ident":
+      return { k: "ident", name: expression.name };
+    case "index":
+      return { k: "index", base: nimExpression(expression.base), index: nimExpression(expression.index) };
+    case "binary":
+      return { k: "binary", op: expression.op, left: nimExpression(expression.left), right: nimExpression(expression.right) };
+    case "negate":
+      return { k: "unary", op: "-", operand: nimExpression(expression.operand) };
+  }
+}
+
+/** Every statement a proc body runs, as the IR writes them. */
+function nimStatements(statements: readonly Stmt[]): Statement[] {
+  return statements.map((statement): Statement => {
+    switch (statement.kind) {
+      case "declare": {
+        const type = statement.typeText === null ? null : mapNimType(statement.typeText, `line ${statement.line}`);
+        return {
+          kind: "declare",
+          name: statement.name,
+          type,
+          init:
+            statement.init === null
+              ? { k: "literal", text: zeroLiteral(type, statement) }
+              : nimExpression(statement.init),
+          line: statement.line,
+        };
+      }
+      case "loop":
+        return {
+          kind: "loop",
+          variable: statement.variable,
+          from: nimExpression(statement.from),
+          to: nimExpression(statement.to),
+          inclusive: !statement.exclusive,
+          step: null,
+          down: false,
+          body: nimStatements(statement.body),
+          line: statement.line,
+        };
+      case "assign":
+        return { kind: "assign", target: statement.target, op: statement.op, value: nimExpression(statement.value), line: statement.line };
+      case "result":
+        return { kind: "result", value: nimExpression(statement.value), line: statement.line };
+      case "indexAssign":
+        return {
+          kind: "indexAssign",
+          buffer: statement.base,
+          index: nimExpression(statement.index),
+          value: nimExpression(statement.value),
+          line: statement.line,
+        };
+    }
+  });
+}
 
 interface SourceLine {
   number: number;
@@ -468,20 +568,14 @@ function splitTopLevel(text: string, separator: string): string[] {
 /* Body analysis                                                              */
 /* -------------------------------------------------------------------------- */
 
-interface AccessRecord {
-  parameter: string;
-  lo: string;
-  hi: string;
-}
-
-interface Analysis {
-  result: string;
-  reads: AccessRecord[];
-}
-
+/**
+ * The expression a proc body reduces its result to, and every buffer range it
+ * reads. A proc that assigns no result is refused rather than carried: the
+ * contract phase has to be able to say what the function returns.
+ */
 class BodyAnalysis {
   private readonly bindings = new Map<string, string>();
-  readonly reads: AccessRecord[] = [];
+  readonly accesses: AccessRange[] = [];
   private result: string | null = null;
 
   private readonly proc: NimProc;
@@ -493,12 +587,12 @@ class BodyAnalysis {
     for (const param of proc.params) this.bindings.set(param.name, param.name);
   }
 
-  run(statements: Stmt[]): Analysis {
+  run(statements: Stmt[]): { result: string; accesses: AccessRange[] } {
     for (const statement of statements) this.execute(statement, null);
     if (this.result === null) {
       throw frontendError(`proc ${this.proc.name} never assigns a result`, `at ${this.context}`);
     }
-    return { result: this.result, reads: this.reads };
+    return { result: this.result, accesses: this.accesses };
   }
 
   private execute(statement: Stmt, loop: LoopContext | null): void {
@@ -506,7 +600,7 @@ class BodyAnalysis {
       case "declare": {
         const type = statement.typeText === null ? null : mapNimType(statement.typeText, `line ${statement.line}`);
         if (statement.init === null) {
-          this.bindings.set(statement.name, this.zeroLiteral(type, statement));
+          this.bindings.set(statement.name, zeroLiteral(type, statement));
           return;
         }
         this.bindings.set(statement.name, this.serialize(statement.init, loop, statement.line));
@@ -618,20 +712,6 @@ class BodyAnalysis {
     return `(${initial} ${operator} ${reduce})`;
   }
 
-  private zeroLiteral(type: TypeExpr | null, statement: Stmt & { kind: "declare" }): string {
-    if (type === null) {
-      throw frontendError(`cannot infer the initial value of "${statement.name}" (line ${statement.line})`, "add an explicit initialiser");
-    }
-    // The contract language has no `f32` suffix: a float is written as the
-    // number it denotes, and zero is the one value every float width holds
-    // exactly, so the width the declaration names does not reach the text.
-    // The Nim spelling `0.0'f32` is source syntax, and the contract tokenizer
-    // has no operator that starts with `'`, so a proc declaring a float
-    // without an initialiser could not be contracted at all.
-    if (type.kind === "primitive" && isFloatType(type.name)) return "0.0";
-    if (type.kind === "primitive") return "0";
-    throw frontendError(`variables of type ${typeToString(type)} are not supported (line ${statement.line})`);
-  }
 
   private serialize(expression: NimExpr, loop: LoopContext | null, line: number): string {
     switch (expression.k) {
@@ -666,9 +746,9 @@ class BodyAnalysis {
               `the index must be the loop variable "${loop.variable}" to describe the accessed range`,
             );
           }
-          this.reads.push({ parameter: parameter.name, lo: loop.lo, hi: loop.hiExclusive });
+          this.accesses.push({ parameter: parameter.name, lo: loop.lo, hi: loop.hiExclusive });
         } else {
-          this.reads.push({ parameter: parameter.name, lo: indexText, hi: `(${indexText} + 1)` });
+          this.accesses.push({ parameter: parameter.name, lo: indexText, hi: `(${indexText} + 1)` });
         }
         return `${parameter.name}[${indexText}]`;
       }
@@ -724,12 +804,21 @@ export const nimFrontend: Frontend = {
   contractFor(analysis, declared, input) {
     const procedure = declared.handle as NimProc;
     const body = new BodyAnalysis(procedure, `${analysis.path}: proc ${procedure.name}`).run(procedure.body);
+    // A proc is a library function, so it allocates nothing, prints nothing and
+    // reads no command line: what it does beyond computing its result is
+    // nothing, whatever the reduction says it returns.
     return assembleContract({
       name: procedure.name,
       params: procedure.params.map((param) => ({ name: param.name, type: param.type })),
       returns: procedure.returns,
       result: body.result,
-      accesses: body.reads,
+      accesses: body.accesses,
+      definition: {
+        statements: nimStatements(procedure.body),
+        allocates: false,
+        prints: false,
+        readsArgv: false,
+      },
       input,
     });
   },

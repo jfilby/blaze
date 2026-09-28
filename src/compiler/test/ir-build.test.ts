@@ -225,10 +225,26 @@ test("a refused IR candidate is repaired with the diagnostic that refused it", a
   assert.equal(binary.stdout, PRINTED, "the program the repair built prints what the source prints");
 });
 
-test("a function whose contract states a postcondition is generated as C, not as IR", async (t) => {
-  const answer = "double square(double count) { return count * count; }\n";
-  const endpoint = await chatEndpoint(t, [], { answer: () => answer });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-ir-fallback-"));
+test("a function that states a postcondition is generated as IR, like any other", async (t) => {
+  // `square` is one expression, so it states a postcondition as well as
+  // carrying a body. Both travel: the body is what is implemented, and the
+  // postcondition is what the result is checked against. There is no path
+  // where a postcondition sends the build back to C.
+  const ir = [
+    "function square(count: f64) -> f64",
+    "  requires none",
+    '  ensures "result == (count * count)"',
+    "  allocates no",
+    "  prints no",
+    "  reads_argv no",
+    "  effects none",
+    "  param value[f64] count mutable",
+    "  block entry: releases[]",
+    "  return [mul[f64] local[f64] count local[f64] count]",
+    "",
+  ].join("\n");
+  const endpoint = await chatEndpoint(t, [], { answer: () => ir });
+  const directory = await mkdtemp(join(tmpdir(), "blaze-ir-postcondition-"));
   await writeFile(
     join(directory, "main.ts"),
     "export function square(count: number): number {\n  return count * count;\n}\n",
@@ -249,30 +265,23 @@ test("a function whose contract states a postcondition is generated as C, not as
     "build",
   );
 
-  // The project asks for the IR, and the one function it compiles states what
-  // it returns rather than what it does, so there is no body for the IR to
-  // describe. The build generates it in C: which output a function is
-  // generated in is a property of its contract, not of the project.
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.prompts.length, 1, "the function is asked for once");
-  assert.match(endpoint.prompts[0], /C11/, "the model is asked for C11");
-  assert.doesNotMatch(endpoint.prompts[0], /Answer with the whole function as semantic IR/);
-  assert.doesNotMatch(endpoint.prompts[0], /THE FUNCTION, AS THE COMPILER RESOLVED IT/);
+  assert.match(endpoint.prompts[0], /Answer with the whole function as semantic IR/);
+  assert.doesNotMatch(endpoint.prompts[0], /C11/, "a postcondition does not send the build back to C");
+  // The body the compiler resolved is what the model is asked to write from,
+  // and the postcondition is stated beside it as what the result is held to.
+  assert.match(endpoint.prompts[0], /THE FUNCTION TO IMPLEMENT/);
+  assert.match(endpoint.prompts[0], /result == \(count \* count\)/);
 
+  const work = (await readdir(join(directory, STATE_DIRECTORY, "projects/input/work/square"))).sort();
+  assert.ok(work.includes("c1.ir"), `the IR is what was generated: ${work.join(", ")}`);
+  assert.ok(work.includes("c1.o"), `the object the compiler lowered it into is in ${work.join(", ")}`);
+  // The result is checked against the postcondition, on vectors of its own,
+  // rather than by running a program there is no library of.
+  assert.ok((outcome.verification.square?.[0]?.cases ?? 0) > 0, "the postcondition verified the result");
   const stored = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
   ) as Record<string, { text: string }[]>;
-  assert.deepEqual(stored.square?.map((entry) => entry.text), [answer]);
-
-  // What the build wrote beside it is the C it compiled, and what it delivered
-  // is that C, not an implementation in the IR the project asked for.
-  const work = (await readdir(join(directory, STATE_DIRECTORY, "projects/input/work/square"))).sort();
-  assert.deepEqual(work.filter((name) => name.endsWith(".ir")), [], "nothing was generated as IR");
-  assert.ok(work.includes("c1.c"), `the C the backend compiled is in ${work.join(", ")}`);
-  assert.ok(work.includes("c1.o"), `the object the backend compiled is in ${work.join(", ")}`);
-  assert.equal(
-    await readFile(outcome.outputPath as string, "utf8"),
-    answer,
-    "the delivered source is the C that was verified",
-  );
+  assert.deepEqual(stored.square?.map((entry) => entry.text), [ir], "the IR is what was generated");
 });

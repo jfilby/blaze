@@ -112,6 +112,32 @@ test("a project that names a target cpu builds against it", async () => {
   );
 });
 
+test("a build says that it resolved and validated the IR before it asked for anything", async () => {
+  // The IR is a step of every build, not one a project opts into, so a reader
+  // watching the output sees it happen and sees how much of it there was. A
+  // postcondition is counted beside it because it is the other half of what a
+  // function is: the body is implemented, the postcondition is what it is
+  // checked against.
+  const directory = await workspace("ir-stage");
+  const log: string[] = [];
+  const stages: string[] = [];
+  const outcome = await runBuild(
+    "input.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    { stage: (stage, _status, message) => { stages.push(stage); log.push(message); } },
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  const reported = log.find((message) => message.startsWith("Semantic IR:"));
+  assert.ok(reported !== undefined, `the build reported no IR: ${log.join("\n")}`);
+  assert.match(reported, /1 function\(s\) resolved and validated/);
+  assert.match(reported, /1 postcondition\(s\)/);
+  // It is reported before anything is generated, which is the whole of what
+  // "inherent to the build" means: the IR exists whether or not it is lowered.
+  assert.ok(stages.indexOf("ir") < stages.indexOf("generate"), stages.join(", "));
+});
+
 test("a build produces assembly, a native executable and a complete record", async () => {
   const directory = await workspace("build");
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");

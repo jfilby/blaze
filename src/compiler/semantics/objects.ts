@@ -18,7 +18,7 @@ import type { Expression, Statement } from "../core/ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { FileContract, FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
 import { builtinFor } from "./builtins.ts";
-import { parseType, typeToString } from "./contract.ts";
+import { isFloatType, parseType, typeToString } from "./contract.ts";
 
 /** The number a reference takes: one pointer. */
 const POINTER_SIZE = 8;
@@ -367,9 +367,19 @@ function elementOfType(type: TypeExpr): TypeExpr {
   return type.kind === "primitive" || type.kind === "ref" || type.kind === "void" ? F64 : type.of ?? F64;
 }
 
+/**
+ * What an operation over two numbers yields. A whole 64 bit number is one
+ * whatever it is written with, and two floats of one width are that width,
+ * because an operation is written as one of the two types it works on and a
+ * target multiplies two single-precision values in single precision. Anything
+ * else is a double, which is what a number is until a use fixes it.
+ */
 export function numeric(left: Inferred, right: Inferred): TypeExpr {
   if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64") return I64;
   if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64") return I64;
+  if (left.kind === "type" && left.type.kind === "primitive" && right.kind === "type" && right.type.kind === "primitive") {
+    if (isFloatType(left.type.name) && left.type.name === right.type.name) return left.type;
+  }
   return F64;
 }
 
@@ -430,16 +440,15 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
 export function resolveObjects(files: readonly FileContract[]): Map<string, string> {
   const shapes = new Map<string, Shape>();
   const owners = new Map<string, string>();
-  const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
-  // Every function the program compiles is callable, whether its contract
-  // states what it returns or what it does: a body that calls one needs the
-  // other's return type either way, and a function contracted by a
-  // postcondition is a function the program still links beside it.
+  // Every function the program compiles is callable, and every one of them has
+  // a body, so every one of them is walked here: a body is what lays the
+  // objects out, and a function whose shape nothing claims would be an object
+  // the rest of the program has to guess the layout of.
   const callees = new Map<string, TypeExpr>();
+  const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
   for (const file of files) {
     for (const [name, contract] of Object.entries(file.functions)) {
       callees.set(name, parseType(contract.function.returns));
-      if (contract.definition === undefined) continue;
       callers.set(name, { file, name, contract });
     }
   }
@@ -450,7 +459,6 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
   const bodies = new Map<string, BodyTypes>();
   for (const caller of callers.values()) {
     const definition = caller.contract.definition;
-    if (definition === undefined) continue;
     const body = new BodyTypes(
       caller.file.path,
       caller.name,
@@ -474,7 +482,7 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
   for (const caller of callers.values()) {
     const definition = caller.contract.definition;
     const body = bodies.get(caller.name);
-    if (definition === undefined || body === undefined) continue;
+    if (body === undefined) continue;
     definition.objects = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
     // The call graph of the whole program, recorded by the one pass that walks
     // every body. Which of these calls is written out rather than made is not

@@ -2,8 +2,8 @@
  * The IR a compiled function is written in.
  *
  * A frontend parses a source language into these statements and expressions,
- * the contract phase carries them in a contract that states no postcondition,
- * and the driver emitter reads the same ones to write a program. Nothing here
+ * the contract phase carries them in every function's contract, and both the
+ * function resolver and the driver emitter read the same ones. Nothing here
  * names a source language, so a contract stays language neutral.
  */
 

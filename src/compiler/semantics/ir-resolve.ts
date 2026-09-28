@@ -2107,7 +2107,7 @@ export function resolveProgram(body: ProgramBody, program: ProgramContract): Sem
   const objects: Record<string, ObjectLayout> = {};
   for (const file of program.files) {
     for (const contract of Object.values(file.functions)) {
-      Object.assign(objects, contract.definition?.objects ?? {});
+      Object.assign(objects, contract.definition.objects);
     }
   }
   const resolver = new ProgramResolver(body, contractsOf(program), objects);

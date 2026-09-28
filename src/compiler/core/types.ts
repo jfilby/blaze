@@ -141,13 +141,18 @@ export interface FunctionContract {
   version: "1";
   function: FunctionSignature;
   requires: string[];
+  /**
+   * What the result must equal, when one expression can say it. A postcondition
+   * is a claim the implementation is checked against; it is not a description
+   * of the implementation, and a function has a body either way.
+   */
   ensures: string[];
   memory: MemoryContract;
   effects: Effect[];
   numeric: NumericContract;
   optimize: OptimizeSpec;
-  /** What the function is, for a result no expression can state. */
-  definition?: FunctionDefinition;
+  /** What the function is: the statements it runs and the objects it lays out. */
+  definition: FunctionDefinition;
 }
 
 /**
@@ -178,10 +183,11 @@ export interface ObjectLayout {
 }
 
 /**
- * The body of a function, for a contract that states no postcondition. A
- * function that branches, recurses, allocates, calls or prints has no result
- * that can be written as one expression, so the contract carries what the
- * function is instead: the statements it runs and the objects it lays out.
+ * The body of a function, as the source wrote it: the statements it runs and
+ * the objects it lays out. Every function carries one, whether or not a
+ * postcondition also says what its result must equal, because the body is what
+ * is implemented and lowered while the postcondition is what it is checked
+ * against.
  */
 export interface FunctionDefinition {
   statements: Statement[];
@@ -194,8 +200,7 @@ export interface FunctionDefinition {
   readsArgv: boolean;
   /**
    * Every call the body makes, in the order it first makes each, with the
-   * strategy the outline chose for it. A function with a postcondition calls
-   * nothing, so this is the whole of what a body it carries can reach.
+   * strategy the outline chose for it.
    */
   calls: CallEdge[];
 }
@@ -465,10 +470,9 @@ export interface VerificationResult {
 }
 
 /**
- * Where a program stopped saying what its source says. A function whose
- * contract states what it does rather than what it returns has no vector to
- * verify it against, so the program it belongs to is the only oracle it has,
- * and this is what that oracle reports.
+ * Where a program stopped saying what its source says. A function that states
+ * no postcondition has no vector to verify it against, so the program it
+ * belongs to is the only oracle it has, and this is what that oracle reports.
  */
 export interface ProgramMismatch {
   /** The first line the two disagree on, counted from 1. */

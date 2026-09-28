@@ -8,6 +8,7 @@ import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FunctionContract } from "../core/types.ts";
+import { dotProductBody } from "./definition.ts";
 
 const REFERENCE = `	.globl	dotProduct
 	.type	dotProduct, @function
@@ -47,7 +48,8 @@ function contract(): FunctionContract {
     memory: { reads: ["a[0:n]"], writes: [], aliasing: [] },
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
-      optimize: { primary: "throughput" },
+    optimize: { primary: "throughput" },
+    definition: dotProductBody(),
   };
 }
 

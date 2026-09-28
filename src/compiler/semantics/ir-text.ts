@@ -544,11 +544,12 @@ function conditionLines(keyword: "requires" | "ensures", conditions: readonly st
 }
 
 /**
- * Everything about a function that is not its body: its signature, its
- * conditions, what it does beyond computing its result, the objects it lays out,
- * the calls it makes, its parameters, and then the body itself where the
- * contract gave one. The header is the whole of what makes this a function
- * rather than a body, so it is written first and in one fixed order.
+ * Everything about a function and then its body: the signature, the conditions
+ * it is held to, what it does beyond computing its result, the objects it lays
+ * out, the calls it makes, its parameters, and the blocks the body is written
+ * as. The header is the whole of what makes this a function rather than a
+ * body, so it is written first and in one fixed order, and the body follows it
+ * because every function the IR holds has one.
  */
 function functionLines(fn: SemanticFunction): string[] {
   const lines = [functionText(fn)];
@@ -561,7 +562,7 @@ function functionLines(fn: SemanticFunction): string[] {
   for (const name of Object.keys(fn.objects)) lines.push(...objectLines(name, fn.objects[name], 2));
   for (const edge of fn.calls) lines.push(`  call ${edge.callee}`);
   for (const param of fn.params) lines.push(`  param ${slotText(param)}`);
-  if (fn.entry !== null) lines.push(...blockLines(fn.entry, 2, null));
+  lines.push(...blockLines(fn.entry, 2, null));
   return lines;
 }
 
@@ -605,7 +606,7 @@ class ContractBinder {
         this.functions[name] = declared;
         this.functions[declared.function.name] = declared;
         this.functions[declared.function.symbol] = declared;
-        Object.assign(this.layouts, declared.definition?.objects ?? {});
+        Object.assign(this.layouts, declared.definition.objects);
       }
     }
   }
@@ -1714,16 +1715,20 @@ class FunctionReader extends BlockReader {
 
     const requires = this.conditions("requires", declared.requires);
     const ensures = this.conditions("ensures", declared.ensures);
-    const holds = declared.definition;
-    const allocates = this.flag("allocates", holds?.allocates ?? false);
-    const prints = this.flag("prints", holds?.prints ?? false);
-    const readsArgv = this.flag("reads_argv", holds?.readsArgv ?? false);
+    const allocates = this.flag("allocates", declared.definition.allocates);
+    const prints = this.flag("prints", declared.definition.prints);
+    const readsArgv = this.flag("reads_argv", declared.definition.readsArgv);
     const effects = this.effects(declared.effects);
     const objects = this.objects();
     const calls = this.calls(declared);
     const params = this.params(signature);
-    const next = this.peek();
-    const entry = next !== null && next.indent === 2 && headOf(next) === "block" ? this.block(2, false).body : null;
+    // Every function the IR holds has a body, so a function written without
+    // one is a function that does not describe what the compiler resolved.
+    const body = this.peek();
+    if (body === null || body.indent !== 2 || headOf(body) !== "block") {
+      fail(line.number, 'the body of the function, as "block" and the name of its first block', body?.text ?? "the end of the function");
+    }
+    const entry = this.block(2, false).body;
     return { name, symbol, params, returns, requires, ensures, effects, allocates, prints, readsArgv, objects, calls, entry };
   }
 
@@ -1833,7 +1838,7 @@ class FunctionReader extends BlockReader {
 
   /** The calls the body makes, each of them an edge the contract records. */
   private calls(declared: FunctionContract): CallEdge[] {
-    const recorded = declared.definition?.calls ?? [];
+    const recorded = declared.definition.calls;
     const calls: CallEdge[] = [];
     for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "call"; line = this.peek()) {
       this.at += 1;

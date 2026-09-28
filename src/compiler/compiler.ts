@@ -60,7 +60,6 @@ import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
-  unitOutput,
   generateCandidates,
   exclusive,
   implementationLabel,
@@ -841,6 +840,13 @@ export async function runBuild(
     const program = phase.program;
     const units = compilationUnits(program, phase.body !== undefined);
     const semantics = semanticFunctions(program, phase.objectNames);
+    // The IR of every function is resolved and checked here, before a model is
+    // asked for anything: a function no backend may lower never reaches one.
+    reporter.stage(
+      "ir",
+      "ok",
+      `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${Object.values(semantics).reduce((total, fn) => total + fn.ensures.length, 0)} postcondition(s) to check them against`,
+    );
     const sourceHash = hashValue(phase.modules.map((module) => [module.path, module.source]));
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
@@ -978,7 +984,7 @@ export async function runBuild(
     const generateUnit = async (unit: CompilationUnit, mismatch: ProgramMismatch | undefined): Promise<void> => {
       const functionName = unit.contract.function.name;
       const previous = mismatch === undefined ? undefined : implementationOf(functionName);
-      if (mismatch !== undefined && (unit.contract.definition === undefined || previous === undefined)) return;
+      if (mismatch !== undefined && (unit.contract.ensures.length > 0 || previous === undefined)) return;
       const workspace = { workDirectory: `${base}/${functionName}`, functionName };
       await mkdir(workspace.workDirectory, { recursive: true });
       const key = keyOf(unit);
@@ -1021,7 +1027,7 @@ export async function runBuild(
         semantics,
         sources: phase.modules,
         target,
-        output: unitOutput(outputKind, unit.contract),
+        output: outputKind,
         runtime: runtimeKind,
         backend: () => {
           if (options.reuse) {
@@ -1236,7 +1242,10 @@ export async function runBuild(
     const driver = phase.body === undefined ? undefined : resolveProgram(phase.body, program);
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
-    if (driver !== undefined) validateSemanticProgram(driver);
+    if (driver !== undefined) {
+      validateSemanticProgram(driver);
+      reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
+    }
     const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
@@ -1385,25 +1394,18 @@ export async function runBuild(
       } else {
         const functionName = units[0].contract.function.name;
         const winner = selected[functionName];
-        // What was generated in, not what the project asked for: a project
-        // built through the IR generates a function whose contract states a
-        // postcondition in C, and the file delivered is the one that was built.
-        // What was generated in, not what the project asked for: a project
-        // built through the IR generates a function whose contract states a
-        // postcondition in C, and the file delivered is the one that was built.
-        const unit = unitOutput(outputKind, units[0].contract);
-        if (unit === "c") {
+        // What was built, and a project built through the IR delivers the IR
+        // the model answered with beside the binary the compiler lowered it
+        // into: there is no assembly, because the compiler never asked for any.
+        if (outputKind === "c") {
           await deliver(`${functionName}/${winner}.c`, paths.outputSource);
           outputPath = store.resolve(paths.outputSource);
-        } else if (unit === "wasm") {
+        } else if (outputKind === "wasm") {
           await deliver(`${functionName}/${winner}.wat`, paths.outputWebAssemblyText);
           await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
           outputPath = store.resolve(paths.outputModule);
           outputAssemblyPath = store.resolve(paths.outputWebAssemblyText);
-        } else if (unit === "ir") {
-          // A function built through the IR delivers the IR the model answered
-          // with and the binary the compiler lowered it into. There is no
-          // assembly to deliver: the compiler never asked for any.
+        } else if (outputKind === "ir") {
           await deliver(`${functionName}/${winner}.ir`, paths.outputSource);
           await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
           outputPath = store.resolve(paths.outputBinary);
@@ -1413,7 +1415,7 @@ export async function runBuild(
           await deliver(`${functionName}/${winner}.s`, paths.outputAssembly);
           outputAssemblyPath = store.resolve(paths.outputAssembly);
           outputPath = store.resolve(paths.outputAssembly);
-          if (unit === "machine") {
+          if (outputKind === "machine") {
             await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = store.resolve(paths.outputBinary);
           }
@@ -1592,7 +1594,7 @@ export async function runStored(
       parsed: unit.parsed,
       program,
       target,
-      output: unitOutput(output, unit.contract),
+      output,
       runtime,
       candidate,
       workspace,
@@ -1610,8 +1612,8 @@ export async function runStored(
     verification[functionName] = result.verification === undefined ? [] : [result.verification];
     benchmark[functionName] = result.benchmark === undefined ? [] : [result.benchmark];
 
-    // A function whose contract states what it does rather than what it returns
-    // has no vector to run, so there is nothing to report for it here.
+    // A function that states no postcondition has no vector to run, so there is
+    // nothing to report for it here.
     if (result.verification === undefined && result.benchmark === undefined) {
       reporter.stage(action, "info", `${functionName} has no vectors to run, so the program it is part of is what checks it`);
       continue;

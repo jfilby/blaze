@@ -146,8 +146,10 @@ function consoleReporter(): Reporter {
   return {
     stage(stage, status, message) {
       const mark = status === "ok" ? "✓" : status === "fail" ? "✗" : "·";
-      process.stdout.write(`${mark} ${message}\n`);
+      // Every message names the step it is about, so the stage is not printed
+      // again beside it.
       void stage;
+      process.stdout.write(`${mark} ${message}\n`);
     },
   };
 }

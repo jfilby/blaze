@@ -794,8 +794,7 @@ function layoutOf(context: Context, name: string): ObjectLayout | undefined {
   if (contract === undefined) return undefined;
   for (const file of contract.files) {
     for (const declared of Object.values(file.functions)) {
-      const objects = declared.definition?.objects;
-      const found = objects?.[name];
+      const found = declared.definition.objects[name];
       if (found !== undefined) return found;
     }
   }
@@ -814,13 +813,12 @@ function isLayout(context: Context, object: string): boolean {
   return Object.prototype.hasOwnProperty.call(context.objects, object);
 }
 
-/** A layout a contract lays out, for a function that has a body of its own. */
+/** A layout a contract lays out, which every function's body can reach. */
 function isContractLayout(contract: ProgramContract | undefined, object: string): boolean {
   if (contract === undefined) return false;
   for (const file of contract.files) {
     for (const declared of Object.values(file.functions)) {
-      const objects = declared.definition?.objects;
-      if (objects !== undefined && Object.prototype.hasOwnProperty.call(objects, object)) return true;
+      if (Object.prototype.hasOwnProperty.call(declared.definition.objects, object)) return true;
     }
   }
   return false;
@@ -1377,16 +1375,6 @@ function wayOutProblems(fn: SemanticFunction, tree: Tree): string[] {
 }
 
 /**
- * A function with no body is a function whose contract says what it returns:
- * a postcondition is a description of a function as well as a body is, so a
- * body the IR does not carry is only a function the postcondition speaks for.
- */
-function postconditionProblems(fn: SemanticFunction): string[] {
-  if (fn.entry !== null || fn.ensures.length > 0) return [];
-  return ["the function has no body and no postcondition, so it is not a function"];
-}
-
-/**
  * A parameter is one value of the type the signature declares, read by the
  * name the signature gives it. A parameter that is not a value slot is a
  * parameter a backend would have to give a home of its own, and a parameter
@@ -1493,7 +1481,9 @@ function conditionProblems(fn: SemanticFunction): string[] {
 }
 
 /**
- * Every way a function is not a function a backend may lower, contract or not.
+ * Every way a function is not a function a backend may lower. Every function
+ * has a body, so every function is checked as one; what a postcondition adds is
+ * the conditions beside it, and those are checked where they are parsed.
  * The context is what the body is read against: a function carries the layouts
  * its own body writes, and the program contract, where the caller has one,
  * names every function the body may call.
@@ -1503,18 +1493,16 @@ function functionProblems(
   contract: FunctionContract | undefined,
   program: ProgramContract | undefined,
 ): string[] {
-  const found = [...postconditionProblems(fn), ...conditionProblems(fn)];
-  if (fn.entry !== null) {
-    const tree = readFunctionTree(fn, fn.entry);
-    const context = functionContext(fn, program);
-    found.push(
-      ...parameterProblems(fn, contract),
-      ...bodyProblems(context, functionBody(fn.entry, tree), tree),
-      ...returnProblems(fn, context, tree),
-      ...wayOutProblems(fn, tree),
-      ...allocationProblems(fn, tree),
-    );
-  }
+  const tree = readFunctionTree(fn, fn.entry);
+  const context = functionContext(fn, program);
+  const found = [
+    ...conditionProblems(fn),
+    ...parameterProblems(fn, contract),
+    ...bodyProblems(context, functionBody(fn.entry, tree), tree),
+    ...returnProblems(fn, context, tree),
+    ...wayOutProblems(fn, tree),
+    ...allocationProblems(fn, tree),
+  ];
   // Every message names the function it is about, so a file of them is read one
   // function at a time: a block is called b1 in every function of a file, so
   // the function is what tells two of them apart.

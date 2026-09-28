@@ -258,8 +258,8 @@ function resolveEntry(
     return { file: entryFile.path, function: null };
   }
   // The entry is resolved the same way whether it was named or taken as the
-  // first export. A function that only states what it does was refused when
-  // it was named, and letting the default path past the check delivered an
+  // first export. A function that states no postcondition was refused when it
+  // was named, and letting the default path past the check delivered an
   // implementation nothing had verified, because in a library build there is
   // no program to check it.
   const name = requested === undefined || requested === "" ? available[0] : requested;
@@ -276,9 +276,9 @@ function resolveEntry(
       `exports: ${available.join(", ")}`,
     );
   }
-  if (chosen.definition !== undefined) {
+  if (chosen.ensures.length === 0) {
     throw contractPhaseError(
-      `${name} is a function whose contract states what it does rather than what it returns`,
+      `${name} is a function whose contract states no postcondition`,
       "nothing can check such a function on its own: build the module as a program, and the program is compared against its own toolchain",
     );
   }

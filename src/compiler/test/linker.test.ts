@@ -7,26 +7,27 @@ import { generateHarness } from "../toolchain/linker.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract } from "../core/types.ts";
+import { body } from "./definition.ts";
 
 /** Echoes the System V argument at `register`, so the harness is judged on what it hands over. */
 function echoContract(params: string, returns = "i32"): FunctionContract {
+  const declared = params.split(",").map((entry) => {
+    const [name, type] = entry.split(":").map((part) => part.trim());
+    return { name, type };
+  });
+  const first = declared[0].name;
   return {
     version: "1",
-    function: {
-      name: "clamp",
-      symbol: "clamp",
-      params: params.split(",").map((entry) => {
-        const [name, type] = entry.split(":").map((part) => part.trim());
-        return { name, type };
-      }),
-      returns,
-    },
+    function: { name: "clamp", symbol: "clamp", params: declared, returns },
     requires: [],
-    ensures: [],
+    // It echoes its first argument, so that is what its result must equal, and
+    // a postcondition is what earns it the harness that runs vectors.
+    ensures: [`result == ${first}`],
     memory: { reads: [], writes: [], aliasing: [] },
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
     optimize: { primary: "throughput" },
+    definition: body([{ kind: "result", value: { k: "ident", name: first }, line: 1 }]),
   };
 }
 

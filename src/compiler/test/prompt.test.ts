@@ -196,10 +196,10 @@ test("a function that states what it does is told how it is checked", () => {
   assert.match(prompt, /compares what it prints with what the source/);
   assert.match(prompt, /blaze_rt_print_number and never format one yourself/);
   assert.match(prompt, /70, not\n? ?70\.0/);
-  // A definition contract carries no memory ranges and no numeric policy, and
-  // stating the empty ones would claim the function reads nothing.
-  assert.doesNotMatch(prompt, /MEMORY REQUIREMENTS/);
-  assert.doesNotMatch(prompt, /NUMERICAL SEMANTICS/);
+  // It states no postcondition, so it is told that is the case rather than
+  // being given a result definition to meet.
+  assert.match(prompt, /There is no postcondition/);
+  assert.match(prompt, /MEMORY REQUIREMENTS/);
   assert.match(prompt, /A number in the source is a double/);
 });
 
@@ -293,8 +293,9 @@ test("the runtime section offers the entry points a candidate can reach", () => 
   assert.doesNotMatch(entry, /blaze_rt_initialize/);
   assert.doesNotMatch(entry, /blaze_rt_arguments_set/);
 
-  // A library function states a result and not how it is done, so it may take
-  // a working copy; a program function that touches nothing may not.
+  // A function that touches nothing reaches nothing: what a body allocates,
+  // prints or reads is what the ABI section offers, so a library function that
+  // only computes a result is not handed an allocator.
   const library = programWithSemantics("typescript", LIBRARY, "hello_world.ts", { entry: "dotProduct" });
   const dot = buildUserPrompt(
     request({
@@ -305,7 +306,7 @@ test("the runtime section offers the entry points a candidate can reach", () => 
       sources: [{ path: "hello_world.ts", source: LIBRARY["hello_world.ts"] }],
     }),
   );
-  assert.match(dot, /blaze_rt_allocate/);
+  assert.doesNotMatch(dot, /blaze_rt_allocate/);
   assert.doesNotMatch(dot, /blaze_rt_print_number/);
 });
 

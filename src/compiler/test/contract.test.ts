@@ -14,6 +14,7 @@ import {
   type Value,
 } from "../semantics/contract.ts";
 import { contractOf } from "./phase.ts";
+import { dotProductBody, returns, ZERO } from "./definition.ts";
 import type { FunctionContract } from "../core/types.ts";
 
 function dotProductContract(): FunctionContract {
@@ -34,7 +35,8 @@ function dotProductContract(): FunctionContract {
     memory: { reads: ["a[0:n]", "b[0:n]"], writes: [], aliasing: [] },
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
-      optimize: { primary: "throughput", secondary: "size" },
+    optimize: { primary: "throughput", secondary: "size" },
+    definition: dotProductBody(),
   };
 }
 
@@ -101,10 +103,17 @@ test("postconditions are checked against a candidate result", () => {
   assert.equal(postconditionFailures(parsed, values, 7).length, 1);
 });
 
-test("a contract without a result definition is rejected before generation", () => {
+test("a contract that states no postcondition is a function the program checks", () => {
+  // No `result ==` here is not an incomplete contract: the body says what the
+  // function is, and the program it is part of is what decides whether it is
+  // right. What is not allowed is a body that says nothing.
   const contract = dotProductContract();
   contract.ensures = ["result >= 0"];
-  assert.throws(() => parseContract(contract), /no result definition/);
+  assert.equal(parseContract(contract).resultDefinition, null);
+
+  const empty = dotProductContract();
+  empty.definition = { ...empty.definition, statements: [] };
+  assert.throws(() => parseContract(empty), /is empty/);
 });
 
 test("two different result definitions are rejected", () => {
@@ -185,7 +194,8 @@ function requiresContract(name: string, params: { name: string; type: string }[]
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
     optimize: { primary: "throughput", secondary: "size" },
-  } as FunctionContract;
+    definition: returns(ZERO),
+  };
 }
 
 test("nothing is ordered against not-a-number, so a NaN fails every ordering bound", () => {

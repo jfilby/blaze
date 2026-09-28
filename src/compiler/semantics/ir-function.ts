@@ -9,11 +9,13 @@
  * function is. What is computed here is the one thing a contract does not state
  * as IR: the body, walked into blocks, terminators and typed values.
  *
- * A function whose contract states a postcondition has no body to write, and
- * the IR says so — its `entry` is null. A function contracted as a definition
- * carries the statements the frontend parsed, and they are written down the way
- * a program's are: one block per place control can be, exactly one way out of
- * each, and no value a backend would have to decide anything about.
+ * Every function carries the statements the frontend parsed, and they are
+ * written down the way a program's are: one block per place control can be,
+ * exactly one way out of each, and no value a backend would have to decide
+ * anything about. A postcondition is a separate claim about what the result
+ * must equal, and it never stands in for the body: a function whose result is
+ * one expression has a body here like any other, and the conditions beside it
+ * are what an implementation of that body is checked against.
  *
  * ## Types
  *
@@ -1419,7 +1421,6 @@ function holds(declared: string, use: Inferred): boolean {
 /** One function, as the IR holds it: signature, conditions, effects and body. */
 export function resolveFunction(contract: FunctionContract, context: FunctionContext): SemanticFunction {
   const definition = contract.definition;
-  const body = definition === undefined ? null : new FunctionBody(contract, definition, context);
   return {
     name: contract.function.name,
     symbol: contract.function.symbol,
@@ -1433,12 +1434,12 @@ export function resolveFunction(contract: FunctionContract, context: FunctionCon
     requires: [...contract.requires],
     ensures: [...contract.ensures],
     effects: [...contract.effects],
-    allocates: definition?.allocates ?? false,
-    prints: definition?.prints ?? false,
-    readsArgv: definition?.readsArgv ?? false,
-    objects: definition?.objects ?? {},
-    calls: [...(definition?.calls ?? [])],
-    entry: body === null ? null : body.lower(),
+    allocates: definition.allocates,
+    prints: definition.prints,
+    readsArgv: definition.readsArgv,
+    objects: definition.objects,
+    calls: [...definition.calls],
+    entry: new FunctionBody(contract, definition, context).lower(),
   };
 }
 

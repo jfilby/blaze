@@ -159,9 +159,11 @@ test("a derived bound becomes a precondition the caller checks", async () => {
   assert.deepEqual(contract.memory.reads, ["values[0:1]"]);
 });
 
-test("a body whose result is not one expression is contracted by what it does", async () => {
+test("a body no one expression states still states what the function does", async () => {
   // Nothing here can be written as `result == ...`, so the contract states the
-  // signature, the effects and the body instead of refusing the function.
+  // signature, the effects and the body instead of refusing the function. What
+  // it does not do is drop the body: every function carries one, and a
+  // postcondition is what a body like this has nothing to say.
   const branch = contractOfExport(`export function pick(x: number): number {
   if (x > 0) return x;
   return 0;
@@ -169,7 +171,7 @@ test("a body whose result is not one expression is contracted by what it does", 
 `, "pick");
   assert.deepEqual(branch.ensures, []);
   assert.deepEqual(branch.effects, []);
-  assert.deepEqual(branch.definition?.statements.map((statement) => statement.kind), ["if", "result"]);
+  assert.deepEqual(branch.definition.statements.map((statement) => statement.kind), ["if", "result"]);
 
   const program = contractOfExport(`export function report(depth: number): void {
   let nodes = 0;
@@ -181,16 +183,16 @@ test("a body whose result is not one expression is contracted by what it does", 
 }
 `, "report");
   assert.deepEqual(program.effects, ["io"]);
-  assert.equal(program.definition?.prints, true);
-  assert.equal(program.definition?.allocates, false);
-  assert.equal(program.definition?.readsArgv, false);
+  assert.equal(program.definition.prints, true);
+  assert.equal(program.definition.allocates, false);
+  assert.equal(program.definition.readsArgv, false);
 
   const allocating = contractOfExport(`export function make(): any {
   return { left: null, right: null };
 }
 `, "make");
   assert.deepEqual(allocating.effects, ["memory"]);
-  assert.equal(allocating.definition?.allocates, true);
+  assert.equal(allocating.definition.allocates, true);
 
   const counting = contractOfExport(`export function everyOther(n: number): number {
   let total = 0;
@@ -200,7 +202,7 @@ test("a body whose result is not one expression is contracted by what it does", 
 `, "everyOther");
   assert.deepEqual(counting.ensures, []);
   assert.deepEqual(
-    counting.definition?.statements.map((statement) => statement.kind),
+    counting.definition.statements.map((statement) => statement.kind),
     ["declare", "loop", "result"],
   );
 });
@@ -303,7 +305,7 @@ test("arithmetic a contract cannot state is a definition, not a refused build", 
       "report",
     );
     assert.deepEqual(contract.ensures, [], written);
-    assert.notEqual(contract.definition, undefined, written);
+    assert.ok(contract.definition.statements.length > 0, written);
   }
 });
 

@@ -654,7 +654,7 @@ export function generateHostSource(contract: FunctionContract, demoRequest: stri
   const anchor = RUNTIME_ANCHOR.map((symbol) => `  cast[pointer](${symbol}),`).join("\n");
   // A `ref` parameter is named after the object it points at, so the types the
   // contract lays out are declared before the signature that spells them.
-  const objects = nimObjectDeclarations(contract.definition?.objects ?? {});
+  const objects = nimObjectDeclarations(contract.definition.objects);
 
   return `${HOST_PRELUDE}
 {.emit: """

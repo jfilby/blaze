@@ -603,11 +603,11 @@ export interface SemanticFunction {
   /** Every call the body makes, in the order it first makes each. */
   calls: CallEdge[];
   /**
-   * The body, as the block the function starts in, or null where the contract
-   * states what the function returns instead of how: a postcondition is a
-   * description of a function too, and the IR says which of the two it has.
+   * The body, as the block the function starts in. Every function has one: the
+   * body is what the source defined, and a postcondition is a separate claim
+   * about what it must return, not a substitute for the body that returns it.
    */
-  entry: SemanticBlock | null;
+  entry: SemanticBlock;
 }
 
 /** Every function of one source file, as the IR holds them. */

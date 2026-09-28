@@ -16,6 +16,7 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FunctionContract, TestConfig } from "../core/types.ts";
+import { body, dotProductBody } from "./definition.ts";
 
 const PYTHON = "python3";
 
@@ -52,6 +53,7 @@ const CONTRACT: FunctionContract = {
   effects: [],
   numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
   optimize: { primary: "throughput" },
+  definition: dotProductBody(),
 };
 
 const CONFIG: TestConfig = { randomCases: 8, maxLength: 64, seed: 0x5eed1234 };
@@ -175,6 +177,28 @@ const BYTES: FunctionContract = {
   requires: ["a != null", "len(a) >= n"],
   ensures: ["result == sum(i = 0..<n, a[i])"],
   memory: { reads: ["a[0:n]"], writes: [], aliasing: [] },
+  definition: body([
+    {
+      kind: "loop",
+      variable: "i",
+      from: { k: "literal", text: "0" },
+      to: { k: "ident", name: "n" },
+      inclusive: false,
+      step: null,
+      down: false,
+      line: 2,
+      body: [
+        {
+          kind: "assign",
+          target: "sum",
+          op: "+=",
+          line: 2,
+          value: { k: "index", base: { k: "ident", name: "a" }, index: { k: "ident", name: "i" } },
+        },
+      ],
+    },
+    { kind: "result", value: { k: "ident", name: "sum" }, line: 3 },
+  ]),
 };
 
 /** The values of one call of a function that sums `count` bytes of `value`. */

@@ -375,7 +375,7 @@ export function generateHarness(contract: FunctionContract, demoRequest: string)
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
     throw linkError("the contract function name is not a valid C identifier", undefined, name);
   }
-  if (contract.definition !== undefined) return generateDefinitionHarness(contract);
+  if (contract.ensures.length === 0) return generateDefinitionHarness(contract);
   const returns = parseType(contract.function.returns);
   if (isBuffer(returns)) throw linkError("a pointer return type cannot be called from the harness", undefined, name);
   sysvArgumentLocations(contract.function.params);
@@ -481,7 +481,7 @@ int main(void) {
  */
 function generateDefinitionHarness(contract: FunctionContract): string {
   const name = symbolOf(contract);
-  const objects = contract.definition?.objects ?? {};
+  const objects = contract.definition.objects;
   const parameters = contract.function.params
     .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
     .join(", ");
@@ -522,7 +522,7 @@ int main(void) {
  */
 export function generateProbeHarness(contract: FunctionContract, plan: ProbePlan & { kind: "call" }): string {
   const name = symbolOf(contract);
-  const objects = contract.definition?.objects ?? {};
+  const objects = contract.definition.objects;
   const parameters = contract.function.params
     .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
     .join(", ");

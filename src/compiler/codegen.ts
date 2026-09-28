@@ -412,56 +412,52 @@ async function materialize(
   // for the whole build, not once per candidate.
   const runtime = await request.prepareRuntime();
 
+  // The boundary: the model wrote the IR, the compiler checked it against the
+  // contract and is now the one that wrote the C, so nothing the model wrote
+  // is ever compiled. What comes out is an ordinary object, so a function whose
+  // contract states a postcondition is checked against its own vectors like any
+  // other, and one that states none is left to the program.
   if (request.output === "ir") {
-    // The boundary: the model wrote the IR, the compiler checked it against the
-    // contract and is now the one that wrote the C, so nothing the model wrote
-    // is ever compiled.
-    const built = await compileFunctionC({
-      fn: readSemanticCandidate(candidate, request.program, request.contract),
-      contract: request.contract,
-      target: request.target,
-      sourcePath: `${paths.implementation}.c`,
-      objectPath: paths.object,
-      ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
-    });
-    return {
-      runner: null,
-      sizeBytes: built.objectSizeBytes,
-      textSizeBytes: built.textSizeBytes,
-      implementationPath: paths.implementation,
-    };
+    // The IR is the implementation and is kept beside the C it lowers into,
+    // because it is what the model wrote and what a later round is shown.
+    await writeFile(paths.implementation, candidate.text, "utf8");
   }
-
   const object =
-    request.output === "c"
-      ? await compileC({
-          source: candidate.text,
+    request.output === "ir"
+      ? await compileFunctionC({
+          fn: readSemanticCandidate(candidate, request.program, request.contract),
           contract: request.contract,
           target: request.target,
-          sourcePath: paths.implementation,
+          sourcePath: `${paths.implementation}.c`,
           objectPath: paths.object,
-          candidate: candidate.id,
           ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
         })
-      : await assemble({
-          assembly: candidate.text,
-          assemblyPath: paths.implementation,
-          objectPath: paths.object,
-          contract: request.contract,
-          target: request.target,
-          candidate: candidate.id,
-          callable: request.callable,
-        });
-
+      : request.output === "c"
+        ? await compileC({
+            source: candidate.text,
+            contract: request.contract,
+            target: request.target,
+            sourcePath: paths.implementation,
+            objectPath: paths.object,
+            candidate: candidate.id,
+            ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
+          })
+        : await assemble({
+            assembly: candidate.text,
+            assemblyPath: paths.implementation,
+            objectPath: paths.object,
+            contract: request.contract,
+            target: request.target,
+            candidate: candidate.id,
+            callable: request.callable,
+          });
+  // What a size objective weighs is the text the model wrote, which for an IR
+  // candidate is the IR itself and not the C it was lowered into.
+  const textSizeBytes = (await stat(paths.implementation)).size;
   if (!standalone) {
     // Assembled, but not linked: the program this candidate is part of is the
     // one that has to run it, and it is linked once every candidate is chosen.
-    return {
-      runner: null,
-      sizeBytes: object.objectSizeBytes,
-      textSizeBytes: object.textSizeBytes,
-      implementationPath: paths.implementation,
-    };
+    return { runner: null, sizeBytes: object.objectSizeBytes, textSizeBytes, implementationPath: paths.implementation };
   }
 
   if (runtime !== undefined) {
@@ -477,7 +473,7 @@ async function materialize(
     return {
       runner: { command: paths.executable, args: [] },
       sizeBytes: object.objectSizeBytes,
-      textSizeBytes: object.textSizeBytes,
+      textSizeBytes,
       implementationPath: paths.implementation,
     };
   }
@@ -494,23 +490,11 @@ async function materialize(
   return {
     runner: host.runner,
     sizeBytes: object.objectSizeBytes,
-    textSizeBytes: object.textSizeBytes,
+    textSizeBytes,
     implementationPath: paths.implementation,
   };
 }
 
-/**
- * The output one function is generated in.
- *
- * An IR build generates a function the IR can describe from the IR. A function
- * whose contract states what it returns rather than what it does has no body to
- * describe — there is no behaviour in the source to lower — so the model
- * implements it against its postcondition, in C, the way it did before. Which of
- * the two a function is is a property of the contract, not of the project.
- */
-export function unitOutput(output: OutputKind, contract: FunctionContract): OutputKind {
-  return output === "ir" && contract.definition === undefined ? "c" : output;
-}
 
 export function implementationLabel(output: OutputKind): string {
   return IMPLEMENTATION_LABEL[output];
