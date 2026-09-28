@@ -20,7 +20,9 @@
     "@ai-sdk/google": "^4.0.82",
     "@ai-sdk/openai": "^4.0.78",
     "@ai-sdk/openai-compatible": "^3.0.57",
-    "ai": "^7.0.116"
+    "@ai-sdk/provider": "^4.0.18",
+    "ai": "^7.0.116",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

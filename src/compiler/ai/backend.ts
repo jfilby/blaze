@@ -17,6 +17,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createCommandCode } from "./commandcode.ts";
 import { generateText, type LanguageModel, type LanguageModelUsage } from "ai";
 import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -256,6 +257,13 @@ export class VercelAiBackend implements AiBackend {
         name: configuration.provider,
         baseURL,
         apiKey,
+        ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
+      })(configuration.model);
+    } else if (configuration.provider === "commandcode") {
+      if (baseURL === undefined) throw generationError("commandcode has no endpoint");
+      this.model = createCommandCode({
+        apiKey,
+        baseUrl: baseURL,
         ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
       })(configuration.model);
     } else if (configuration.provider === "anthropic") {
