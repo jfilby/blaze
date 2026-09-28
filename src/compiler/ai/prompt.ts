@@ -25,13 +25,14 @@ import type {
   TargetSpec,
 } from "../core/types.ts";
 import { isBufferType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
-import { printSemanticFunction } from "../semantics/ir-text.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { calledOut, contractsByName, writtenOut } from "../semantics/calls.ts";
 import { cSignature, cSourceRules } from "../toolchain/csource.ts";
 import { wasmSignature } from "../toolchain/wasm.ts";
 import { cDeclarationType, sysvArgumentLocations, sysvReturnLocation } from "../toolchain/linker.ts";
 import { runtimePromptSection, type RuntimeNeeds } from "../runtime/abi.ts";
+import { functionOutline, OUTLINE_NOTATION } from "./outline.ts";
+import { IR_EXAMPLE, IR_SYNTAX } from "./ir-format.ts";
 
 export interface PromptRequest {
   /** The contract of the function this candidate implements. */
@@ -49,9 +50,10 @@ export interface PromptRequest {
    */
   program: ProgramContract;
   /**
-   * Every function of the program as the IR holds it, by name. This is what a
-   * model reads a body from: the resolved, typed, validated program, rather
-   * than the source statements it was parsed from.
+   * Every function of the program as the compiler resolved it, by name. This
+   * is what a model reads a body from: the resolved, typed, validated program,
+   * rendered as the semantic view in `outline.ts` rather than as the IR the
+   * compiler lowers, which is a representation and not a specification.
    */
   semantics: Record<string, SemanticFunction>;
   /** The source each contract was derived from, in program order. */
@@ -182,7 +184,7 @@ const OUTPUT_LANGUAGE: Record<OutputKind, { language: string; rules: string[] }>
   ir: {
     language: "semantic IR",
     rules: [
-      "Answer with the whole function as semantic IR and nothing else: the header lines the compiler printed, then its body, exactly as they are printed above.",
+      "Answer with the whole function as semantic IR, written in the syntax the IR SYNTAX section gives, and nothing else.",
       "The compiler reads it back, checks it against this contract, and writes the target code itself. A register, a stack offset, an instruction, an ABI and a calling convention are yours in neither sense: the IR has no way to say them.",
       "Change the IR, never the contract: the signature, the conditions, the effects, the object layouts and the callee names are the contract's, and the compiler refuses a candidate that disagrees with one of them.",
       "A function whose body you can write as a different sequence of the same IR is a better answer than one you cannot: the IR is what the compiler validates, so an unvalid one is never compiled.",
@@ -224,9 +226,9 @@ export function buildSystemPrompt(output: OutputKind): string {
         ]),
     ...(output === "ir"
       ? [
-          "- The IR below is the program: it is what the compiler validates and what it",
-          "  lowers. Write it as the program you were asked for, and change it as the",
-          "  diagnostics below say to.",
+          "- The IR you write is the program: it is what the compiler validates and",
+          "  what it lowers. Write it in the syntax the request gives you, for the",
+          "  body the request describes, and change it as the diagnostics below say to.",
         ]
       : []),
     "- Do not write a description of the algorithm outside the code. A short comment",
@@ -371,14 +373,19 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
     "A logical operator is a value and not a condition: a || b is a when a is not 0, and b otherwise.",
   );
   lines.push("");
-  lines.push("THE FUNCTION, AS THE COMPILER RESOLVED IT");
+  lines.push("THE FUNCTION, WITH EVERY VALUE IN THE TYPE THE COMPILER RESOLVED IT TO");
   lines.push(
-    "This is the whole function: the signature it is called by, what it is held to, and the body",
-    "the compiler resolved from its source. Every value below states the type it is and every block",
-    "states where control goes, so the behaviour to implement is exactly what is written here.",
+    "This is the whole function as the compiler resolved it from its source: the signature it is",
+    "called by, what it is held to, and the body it runs. Every name states the type it is read",
+    "as, so the behaviour to implement is exactly what is written here, and nothing below is a",
+    "part of how the compiler represents it.",
   );
+  lines.push("");
+  lines.push("It is written in this notation:");
+  lines.push(...OUTLINE_NOTATION);
+  lines.push("");
   lines.push("```");
-  lines.push(printSemanticFunction(semantic));
+  lines.push(functionOutline(semantic));
   lines.push("```");
   return lines.join("\n");
 }
@@ -399,13 +406,13 @@ function renderWrittenOut(callee: FunctionContract, semantic: SemanticFunction |
       ...callee.ensures.map((condition) => `  ensures ${condition}`),
     ];
   }
-  return [`${signature}, as the compiler resolved it:`, "```", printSemanticFunction(semantic), "```"];
+  return [`${signature}, as the compiler resolved it:`, "```", functionOutline(semantic), "```"];
 }
 
 /**
  * The contract as the model reads it. The body is not in it: the body is
- * rendered from the IR below, and carrying the statement tree as well would
- * state it three times over for no gain.
+ * written out below, in the form a code generator reads it, and carrying the
+ * statement tree as well would state it twice over for no gain.
  */
 function renderContract(contract: FunctionContract): string {
   const { statements, ...whatItDoes } = contract.definition;
@@ -607,6 +614,13 @@ export function buildUserPrompt(request: PromptRequest): string {
   sections.push(renderTarget(target));
   if (output !== "wasm") sections.push(`RUNTIME\n${runtimePromptSection(runtime, runtimeNeeds(request))}`);
   sections.push(["OUTPUT LANGUAGE", `Write ${language.language}.`, ...rules.map((rule) => `- ${rule}`)].join("\n"));
+  // An IR candidate has to be told the form it is answering in. The compiler
+  // keeps the IR of the function being written to itself: a prompt carrying it
+  // would be carrying the answer, so what is stated here is the syntax of the
+  // form and a whole function written in it, and nothing of this program.
+  if (lowered) {
+    sections.push(["IR SYNTAX", ...IR_SYNTAX, "", "A whole function written in it:", "```", IR_EXAMPLE.trimEnd(), "```"].join("\n"));
+  }
   sections.push(
     [
       "SIGNATURE",

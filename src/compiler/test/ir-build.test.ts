@@ -26,6 +26,8 @@ import { STATE_DIRECTORY, runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
+import { functionOutline } from "../ai/outline.ts";
+import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { phaseOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
@@ -94,11 +96,21 @@ async function recorded(fixture: string): Promise<string> {
 }
 
 /** What the compiler resolved for `total`, which is what a fixture holds. */
-function resolved(): string {
+function resolvedFunction(): SemanticFunction {
   const phase = phaseOf("typescript", { "main.ts": ENTRY, "lib.ts": LIBRARY }, "main.ts");
   const contract = phase.program.files.find((file) => file.path === "lib.ts")?.functions.total;
   assert.ok(contract !== undefined, "the entry program imports the library function these tests build");
-  return printSemanticFunction(resolveFunction(contract, { objectNames: phase.objectNames, functions: {} }));
+  return resolveFunction(contract, { objectNames: phase.objectNames, functions: {} });
+}
+
+/** The IR text the compiler prints for it, which is what a fixture holds. */
+function resolved(): string {
+  return printSemanticFunction(resolvedFunction());
+}
+
+/** The behaviour of it as a code generator is shown it. */
+function outline(): string {
+  return functionOutline(resolvedFunction());
 }
 
 /**
@@ -208,10 +220,12 @@ test("a refused IR candidate is repaired with the diagnostic that refused it", a
   assert.equal(endpoint.prompts.length, 2, "the IR is generated once, then regenerated");
 
   // The first request asks for the IR of this function, and hands the model the
-  // IR the compiler resolved, which is what the answer is written from.
+  // behaviour the compiler resolved, in the form a code generator reads it.
   const generated = endpoint.prompts[0];
   assert.match(generated, /Answer with the whole function as semantic IR/);
-  assert.ok(generated.includes(right), "the resolved IR the candidate is written from is in the request");
+  assert.match(generated, /^IR SYNTAX$/m, "the form an answer is written in is stated");
+  assert.ok(generated.includes(outline()), "the behaviour the candidate is written from is in the request");
+  assert.ok(!generated.includes(resolved()), "the compiler's own IR of the function is not in the request");
 
   // The second is a repair: it carries the IR that was refused and the
   // diagnostic that refused it, so the next attempt knows what to change.
