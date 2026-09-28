@@ -4,10 +4,10 @@ output = "machine"
 
 [model]
 # provider = "openrouter"
-# model = "stealth/space-bunny-alpha"
+model = "stealth/space-bunny-alpha"
 
 provider = "commandcode"
-model = "stealth/pixel-canary"
+# model = "stealth/pixel-canary"
 
 [target]
 arch = "x86_64"
