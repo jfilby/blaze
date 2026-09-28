@@ -47,11 +47,29 @@ export class NameScope {
    * the source wrote is what the IR keeps; this is the name the target reads.
    */
   declare(name: string, type: SemanticType | null = null): string {
-    let emitted = name;
-    for (let index = 2; this.taken.has(emitted); index += 1) emitted = `${name}_${index}`;
+    // What is compared and recorded is the name the target is given, not the
+    // name the source wrote: escaping happens first, and a name that is
+    // reserved escapes to another one, which a program name that already reads
+    // as that one would collide with.
+    let emitted = this.escape(name);
+    for (let index = 2; this.taken.has(emitted); index += 1) emitted = this.escape(`${name}_${index}`);
     this.taken.add(emitted);
     this.scopes[this.scopes.length - 1].push({ name, emitted, type });
-    return this.escape(emitted);
+    return emitted;
+  }
+
+  /**
+   * Holds a name for the backend's own use, and answers the name it may be
+   * written as. A backend binds temporaries beside the program's names, and a
+   * temporary written as a name the program already declared is that name
+   * redeclared — and, where the temporary is initialised from the name it
+   * shadows, a variable read before it is written.
+   */
+  reserve(name: string): string {
+    let held = name;
+    for (let index = 2; this.taken.has(held); index += 1) held = `${name}_${index}`;
+    this.taken.add(held);
+    return held;
   }
 
   /** The declaration a name is read as, or null where nothing declares it. */

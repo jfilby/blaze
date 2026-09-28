@@ -746,6 +746,13 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       if (!isNumber(value.operand.type) || !isNumber(value.type)) {
         problems.push(`${prefix}${value.op} is written over a ${typeText(value.operand.type)} as a ${typeText(value.type)}`);
       }
+      // A bitwise inversion is the operation on whole numbers its binary forms
+      // are: there is no `~` of a double for a target to perform, so a body
+      // that asks for one is refused here rather than handed to a compiler
+      // that cannot read it.
+      if (value.op === "bitNot" && !isInteger(value.type)) {
+        problems.push(`${prefix}bitNot of a ${typeText(value.operand.type)} is a ${typeText(value.type)}, which is not a whole number`);
+      }
       return problems;
     }
     case "toText":

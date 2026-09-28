@@ -36,8 +36,9 @@ import {
   type SemanticStatement,
   type SemanticType,
   type SemanticValue,
+  type ValueKind,
 } from "../core/semantic-ir.ts";
-import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
+import { cDeclarationType, cMemberName, cObjectDeclarations } from "./linker.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cOperator } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
@@ -52,12 +53,19 @@ function declaredType(type: SemanticType | null): string {
   return cDeclarationType(type);
 }
 
-/** What a generated C function already occupies: the C it compiles against. */
+/**
+ * What a generated C function already occupies: the C it compiles against. The
+ * two names `Math.round` binds are in it as well, because they are written
+ * down rather than counted and a program is free to call a variable either of
+ * them.
+ */
 const TAKEN: Record<string, true> = {
   ...C_KEYWORDS,
   ...cHeaderNames(),
   ...cMacroNames(),
   ...RUNTIME_SYMBOLS,
+  blaze_operand: true,
+  blaze_rounded: true,
 };
 
 function backendError(message: string, detail?: string): CompilerError {
@@ -121,7 +129,9 @@ function builtinExpression(name: string, args: string[]): string {
     case "Math.trunc":
       return `trunc(${args[0]})`;
     case "Math.round":
-      return `({ double blaze_rounded = floor((${args[0]}) + 0.5); (blaze_rounded == 0.0 && (${args[0]}) < 0.0) ? -0.0 : blaze_rounded; })`;
+      // The argument is read twice, so it is bound: a value the IR calls is a
+      // call that would otherwise run twice.
+      return `({ double blaze_operand = ${args[0]}; double blaze_rounded = floor(blaze_operand + 0.5); (blaze_rounded == 0.0 && blaze_operand < 0.0) ? -0.0 : blaze_rounded; })`;
     default:
       throw backendError(
         `this backend cannot lower ${name}`,
@@ -185,7 +195,7 @@ class FunctionEmitter {
 
   private temporary(prefix: string): string {
     this.temporaries += 1;
-    return `${prefix}_${this.temporaries}`;
+    return this.names.reserve(`${prefix}_${this.temporaries}`);
   }
 
   private write(lines: readonly string[]): void {
@@ -230,9 +240,16 @@ class FunctionEmitter {
       }
       case "set": {
         const type = this.names.typeOf(statement.name, statement.value.type);
-        this.write([
-          `${pad(depth)}${this.names.read(statement.name)} ${statement.op} ${this.expression(statement.value, type, depth)};`,
-        ]);
+        const target = this.names.read(statement.name);
+        // A string grows: `+=` is a new value rather than an addition in place,
+        // and C adds two pointers by their addresses. It is written as the
+        // concatenation the IR states, which is what the other targets do.
+        if (statement.op === "+=" && (type === null || isTextType(type))) {
+          const held: SemanticValue = { k: "local", type: type ?? { kind: "text" }, name: statement.name };
+          this.write([`${pad(depth)}${target} = ${this.concat(held, statement.value, depth)};`]);
+          return;
+        }
+        this.write([`${pad(depth)}${target} ${statement.op} ${this.expression(statement.value, type, depth)};`]);
         return;
       }
       case "setElement": {
@@ -268,7 +285,7 @@ class FunctionEmitter {
         return;
       case "storeField":
         this.write([
-          `${pad(depth)}((struct ${statement.layout}*)${this.expression(statement.object, null, depth)})->${statement.field} = ${this.expression(statement.value, null, depth)};`,
+          `${pad(depth)}((struct ${statement.layout}*)${this.expression(statement.object, null, depth)})->${cMemberName(statement.field)} = ${this.expression(statement.value, null, depth)};`,
         ]);
         return;
       case "if":
@@ -307,19 +324,27 @@ class FunctionEmitter {
         break;
       case "counted": {
         const type = loop.type;
+        const written = declaredType(type);
         const variable = this.names.declare(loop.variable, type);
         const bound = `${COMPARE_OPERATORS[loop.down ? "gt" : "lt"]}${loop.inclusive ? "=" : ""}`;
+        // What the loop counts over is read once. The `for` reads its bound on
+        // every turn and adds its step on every turn, so a bound or a step the
+        // IR calls is a call the loop makes once per turn.
+        const from = this.temporary("blaze_from");
+        const to = this.temporary("blaze_to");
+        const given = loop.step;
+        const step = given === null ? null : this.temporary("blaze_step");
+        this.write([`${pad(depth)}${written} ${from} = ${this.expression(loop.from, type, depth)};`]);
+        this.write([`${pad(depth)}${written} ${to} = ${this.expression(loop.to, type, depth)};`]);
+        if (given !== null && step !== null) {
+          this.write([`${pad(depth)}${written} ${step} = ${this.expression(given, type, depth)};`]);
+        }
         // The step is the signed amount the index moves by, so a loop that
         // counts down carries a negative one and adds it like any other:
         // subtracting it from a step of -1 moves the index the other way, and
         // the loop never ends.
-        const step =
-          loop.step === null
-            ? `${variable}${loop.down ? "--" : "++"}`
-            : `${variable} += ${this.expression(loop.step, type, depth)}`;
-        this.write([
-          `${pad(depth)}for (${declaredType(type)} ${variable} = ${this.expression(loop.from, type, depth)}; ${variable} ${bound} ${this.expression(loop.to, type, depth)}; ${step}) {`,
-        ]);
+        const move = step === null ? `${variable}${loop.down ? "--" : "++"}` : `${variable} += ${step}`;
+        this.write([`${pad(depth)}for (${written} ${variable} = ${from}; ${variable} ${bound} ${to}; ${move}) {`]);
         this.block(loop.body, depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
@@ -327,8 +352,12 @@ class FunctionEmitter {
       case "each": {
         const index = this.names.declare(loop.index, USIZE);
         const element = this.names.declare(loop.element, loop.elementType);
+        // The length is read once, for the same reason a counted loop's bound
+        // is: the walk reads it on every turn.
+        const length = this.temporary("blaze_length");
+        this.write([`${pad(depth)}size_t ${length} = ${this.expression(loop.length, USIZE, depth)};`]);
         this.write([
-          `${pad(depth)}for (size_t ${index} = 0; ${index} < ${this.expression(loop.length, USIZE, depth)}; ${index}++) {`,
+          `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length}; ${index}++) {`,
           `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${this.names.read(loop.of)}[${index}];`,
         ]);
         this.block(loop.body, depth + 1);
@@ -374,8 +403,12 @@ class FunctionEmitter {
   /* ---------------------------------------------------------------------- */
 
   private condition(value: SemanticValue, depth: number): string {
-    const text = this.expression(value, null, depth);
-    switch (valueKind(value)) {
+    return this.truth(this.expression(value, null, depth), valueKind(value));
+  }
+
+  /** Whether C text already written answers as a truth. */
+  private truth(text: string, kind: ValueKind): string {
+    switch (kind) {
       case "text":
         return `((${text})[0] != '\\0')`;
       case "reference":
@@ -404,7 +437,7 @@ class FunctionEmitter {
     const symbol = call.signature.symbol;
     if (symbol === this.fn.symbol || this.externs.has(symbol)) return;
     const parameters = call.signature.params
-      .map((param) => `${declaredType(parseType(param.type))} ${param.name}`)
+      .map((param) => `${declaredType(parseType(param.type))} ${cEscape(param.name, TAKEN)}`)
       .join(", ");
     this.externs.set(
       symbol,
@@ -425,7 +458,7 @@ class FunctionEmitter {
   private buildObject(value: SemanticValue & { k: "newObject" }): string {
     const name = this.temporary("blaze_object");
     const written = value.fields.map(
-      (field) => `((${name})->${field.name} = ${this.expression(field.value, null, 0)});`,
+      (field) => `((${name})->${cMemberName(field.name)} = ${this.expression(field.value, null, 0)});`,
     );
     return (
       `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${RUNTIME_NAME}_object_new(` +
@@ -465,7 +498,7 @@ class FunctionEmitter {
       case "newObject":
         return this.buildObject(value);
       case "loadField":
-        return `((struct ${value.layout}*)${this.raw(value.object, depth)})->${value.field}`;
+        return `((struct ${value.layout}*)${this.raw(value.object, depth)})->${cMemberName(value.field)}`;
       case "length":
         return this.length(value.of, depth);
       case "element":
@@ -486,23 +519,51 @@ class FunctionEmitter {
       }
       case "arith":
         return this.arith(value, depth);
-      case "compare":
-        return `(${this.expression(value.left, value.operand, depth)} ${cOperator(COMPARE_OPERATORS[value.op])} ${this.expression(value.right, value.operand, depth)})`;
+      case "compare": {
+        if (!isTextType(value.operand)) {
+          return `(${this.expression(value.left, value.operand, depth)} ${cOperator(COMPARE_OPERATORS[value.op])} ${this.expression(value.right, value.operand, depth)})`;
+        }
+        // Two strings are compared by what they say and not by where they are:
+        // a string built at run time and one written out are two addresses that
+        // can say the same thing, and the addresses compared as if the strings
+        // did. An absent string is nothing, so it is equal to another absent
+        // string and to no other, which is what the driver answers.
+        const left = this.temporary("blaze_left");
+        const right = this.temporary("blaze_right");
+        const operator = cOperator(COMPARE_OPERATORS[value.op]);
+        return (
+          `({ const char* ${left} = ${this.raw(value.left, depth)}; ` +
+          `const char* ${right} = ${this.raw(value.right, depth)}; ` +
+          `${left} == NULL || ${right} == NULL ? ${left} ${operator} ${right} ` +
+          `: strcmp(${left}, ${right}) ${operator} 0; })`
+        );
+      }
       case "logical": {
-        const left = this.expression(value.left, value.type, depth);
-        const right = this.expression(value.right, value.type, depth);
         // The left arm decides and the value is one of the arms, which is what
-        // C's own `&&` and `||` are: they return the arm that answered.
-        return value.op === "and"
-          ? `((${this.condition(value.left, depth)}) ? ${right} : ${left})`
-          : `((${this.condition(value.left, depth)}) ? ${left} : ${right})`;
+        // C's own `&&` and `||` are: they return the arm that answered. It is
+        // written down as the test and again as the value that answers, so it
+        // is bound first.
+        const arm = this.temporary("blaze_arm");
+        const left = this.raw(value.left, depth);
+        const right = this.expression(value.right, value.type, depth);
+        return (
+          `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
+          `${this.truth(arm, valueKind(value.left))} ? ` +
+          `${value.op === "and" ? right : arm} : ${value.op === "and" ? arm : right}; })`
+        );
       }
       case "coalesce": {
-        const left = this.raw(value.left, depth);
         if (valueKind(value.left) !== "null" && valueKind(value.left) !== "reference" && !isTextType(value.left.type)) {
-          return left;
+          return this.raw(value.left, depth);
         }
-        return `((${left}) == NULL ? ${this.expression(value.right, value.type, depth)} : ${left})`;
+        // The left arm is the test and is what answers when it is there, so it
+        // is bound first.
+        const arm = this.temporary("blaze_arm");
+        const left = this.raw(value.left, depth);
+        return (
+          `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
+          `(${arm}) == NULL ? ${this.expression(value.right, value.type, depth)} : ${arm}; })`
+        );
       }
       case "select":
         return `((${this.condition(value.condition, depth)}) ? ${this.expression(value.then, value.type, depth)} : ${this.expression(value.otherwise, value.type, depth)})`;
@@ -514,35 +575,51 @@ class FunctionEmitter {
   }
 
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {
-    if (value.op === "concat") {
-      return this.text(
-        {
-          k: "text",
-          type: TEXT,
-          parts: [
-            { k: "value", value: value.left },
-            { k: "value", value: value.right },
-          ],
-        },
-        depth,
-      );
-    }
+    if (value.op === "concat") return this.concat(value.left, value.right, depth);
     const left = this.expression(value.left, value.type, depth);
     const right = this.expression(value.right, value.type, depth);
     switch (value.op) {
       case "pow":
         return `pow(${left}, ${right})`;
       case "min":
-        return `(${left} < ${right} ? ${left} : ${right})`;
-      case "max":
-        return `(${left} > ${right} ? ${left} : ${right})`;
+      case "max": {
+        // Each arm answers twice, so both are bound: a value the IR calls is a
+        // call that would otherwise run twice.
+        const low = this.temporary("blaze_arm");
+        const high = this.temporary("blaze_arm");
+        const type = declaredType(value.type);
+        return (
+          `({ ${type} ${low} = ${left}; ${type} ${high} = ${right}; ` +
+          `${low} ${value.op === "min" ? "<" : ">"} ${high} ? ${low} : ${high}; })`
+        );
+      }
       default:
         return `(${left} ${cOperator(ARITHMETIC_OPERATORS[value.op])} ${right})`;
     }
   }
 
+  /** Two texts as one, which is what `+` over text and `+=` into it are. */
+  private concat(left: SemanticValue, right: SemanticValue, depth: number): string {
+    return this.text(
+      {
+        k: "text",
+        type: TEXT,
+        parts: [
+          { k: "value", value: left },
+          { k: "value", value: right },
+        ],
+      },
+      depth,
+    );
+  }
+
   private length(of: SemanticValue, depth: number): string {
-    if (isTextType(of.type)) return `${RUNTIME_NAME}_string_length(${this.raw(of, depth)})`;
+    // A string is as long as its bytes. The runtime counts a string it owns
+    // from the header it installed before it, which a string written out in the
+    // source does not have: it is a C literal, and the header before it is
+    // whatever `.rodata` holds there. Both are NUL terminated, so both are as
+    // long as the C library says they are.
+    if (isTextType(of.type)) return `strlen(${this.raw(of, depth)})`;
     throw backendError(
       `${this.fn.symbol} reads the length of an array, which no C this compiler writes can answer`,
       "an array reaches a function as a pointer to its first element and no length arrives with it",
@@ -560,48 +637,72 @@ class FunctionEmitter {
     if (value.parts.every((part) => part.k === "text")) {
       return value.parts.map((part) => cTextLiteral(part.value)).join("");
     }
-    // The buffer holds the parts that are written down, and the compiler knows
-    // how long each of them is; a value interpolated beside them is bounded by
-    // the room left. Both copies stop at the end of it, because a copy that did
-    // not wrote past the end of a buffer on the stack.
-    const written = value.parts.filter((part) => part.k === "text");
-    const room = Math.max(64, written.reduce((total, part) => total + part.value.length, 0) + 256 * (value.parts.length - written.length));
+    // Every part is bound and measured before the string is laid out, so the
+    // buffer that holds it is exactly as long as the parts are. A buffer sized
+    // from the literals beside them and a fixed room for each interpolated one
+    // cut the string at the end of it, silently, and counted what a literal
+    // measures in UTF-16 units where the string holds UTF-8 bytes.
+    const parts: { text: string; length: string }[] = value.parts.map(() => ({
+      text: this.temporary("blaze_part"),
+      length: this.temporary("blaze_part_length"),
+    }));
+    // The parts are laid out in a buffer that is the string itself: it is the
+    // runtime's own, because its length is only known here, at run time, and a
+    // runtime allocation carrying its bytes and its terminator is what a string
+    // is. It is a statement expression for the same reason an object is: C
+    // binds no temporary inside an expression.
     const buffer = this.temporary("blaze_text");
     const filled = this.temporary("blaze_filled");
-    // The parts are laid out in a buffer and handed to the runtime, which is
-    // what owns a string. It is a statement expression for the same reason an
-    // object is: C binds no temporary inside an expression.
-    const lines = [`char ${buffer}[${room}];`, `size_t ${filled} = 0;`];
-    for (const part of value.parts) {
-      if (part.k === "text") {
-        lines.push(
-          `for (const char* blaze_c = ${cTextLiteral(part.value)}; *blaze_c != '\\0' && ${filled} < ${room - 1}; ++blaze_c) ${buffer}[${filled}++] = *blaze_c;`,
-        );
-        continue;
-      }
-      const length = this.temporary("blaze_written");
-      const interpolated = this.asText(part.value, depth);
+    const total = this.temporary("blaze_text_length");
+    const lines = value.parts.flatMap((part, index) => {
+      const { text, length } = parts[index];
+      const written = part.k === "text" ? cTextLiteral(part.value) : this.asText(part.value, depth);
+      return [
+        `const char* ${text} = ${written};`,
+        `size_t ${length} = ${text} == NULL ? 0 : strlen(${text});`,
+      ];
+    });
+    lines.push(`size_t ${total} = ${parts.map((part) => part.length).join(" + ")};`);
+    lines.push(`char* ${buffer} = (char*)${RUNTIME_NAME}_allocate(${total} + 1);`);
+    lines.push(`size_t ${filled} = 0;`);
+    for (const part of parts) {
       lines.push(
-        `int ${length} = (int)strlen(${interpolated}); for (int blaze_i = 0; blaze_i < ${length} && ${filled} < ${room - 1}; ++blaze_i) ${buffer}[${filled}++] = ${interpolated}[blaze_i];`,
+        `if (${part.length} != 0) memcpy(${buffer} + ${filled}, ${part.text}, ${part.length}); ${filled} += ${part.length};`,
       );
     }
     lines.push(`${buffer}[${filled}] = '\\0';`);
-    lines.push(`${RUNTIME_NAME}_string_new((const unsigned char*)${buffer}, ${filled});`);
+    lines.push(`${buffer};`);
     return `({ ${lines.join(" ")} })`;
   }
 
   /**
-   * A value as text, as a NUL terminated C string the runtime owns. A number is
-   * written by the runtime's formatter, so it reads the way the source language
-   * writes it; a truth and an absence are the words the source prints.
+   * A value as text, as a NUL terminated C string. A number is written by the
+   * runtime's formatter, so it reads the way the source language writes it; a
+   * truth and an absence are the words the source prints.
    */
   private asText(value: SemanticValue, depth: number): string {
     if (isTextType(value.type)) return this.raw(value, depth);
     if (valueKind(value) === "null") return '"null"';
     if (isBoolean(value.type)) return `(${this.raw(value, depth)} ? "true" : "false")`;
+    // A reference is no number of its own. An absent one is nothing, and the
+    // word for that is what the source prints; the rest are read as the address
+    // the driver prints for one, because a pointer is not a double and casting
+    // it to one is not C. It is bound first, since it is read twice.
+    if (isReference(value.type)) {
+      const pointer = this.temporary("blaze_reference");
+      const read = this.raw(value, depth);
+      return (
+        `({ const void* ${pointer} = ${read}; ` +
+        `${pointer} == NULL ? "null" : ${this.number(`(double)(uintptr_t)${pointer}`)}; })`
+      );
+    }
+    return this.number(this.raw(value, depth));
+  }
+
+  /** A number as text, written by the runtime the way the source writes one. */
+  private number(read: string): string {
     const buffer = this.temporary("blaze_number");
     const written = this.temporary("blaze_written");
-    const read = this.raw(value, depth);
     return (
       `({ char ${buffer}[64]; size_t ${written} = ${RUNTIME_NAME}_format_number((double)(${read}), ` +
       `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`

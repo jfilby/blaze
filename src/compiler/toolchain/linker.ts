@@ -104,12 +104,22 @@ export function cObjectDeclarations(objects: Record<string, ObjectLayout>): stri
       const fields = object.fields
         .map(
           (field) =>
-            `  ${cDeclarationType(parseType(field.type))} ${cEscape(field.name, MEMBER_RESERVED)}; /* +${field.offset} */`,
+            `  ${cDeclarationType(parseType(field.type))} ${cMemberName(field.name)}; /* +${field.offset} */`,
         )
         .join("\n");
       return `struct ${object.name} {\n${fields}\n}; /* ${object.size} bytes, align ${object.align} */`;
     })
     .join("\n");
+}
+
+/**
+ * A struct member as C spells it. The declaration above and every access to it
+ * have to agree on that name, so both write it down here: a field the source
+ * called `long`, or one the headers call `NULL`, is declared under a name C
+ * accepts and is read back under it.
+ */
+export function cMemberName(name: string): string {
+  return cEscape(name, MEMBER_RESERVED);
 }
 
 /** System V AMD64 argument locations, so the model knows where values arrive. */
