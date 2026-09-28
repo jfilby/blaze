@@ -856,15 +856,6 @@ export async function runBuild(
      * compile.
      */
     const contracts = contractsByName(program.files);
-    /** The functions one candidate is told about: those it calls, and those it writes out. */
-    const calleesOf = (contract: FunctionContract): FunctionContract[] => {
-      const reached = new Map<string, FunctionContract>();
-      for (const edge of contract.definition?.calls ?? []) {
-        const callee = contracts.get(edge.callee);
-        if (callee !== undefined) reached.set(callee.function.name, callee);
-      }
-      return [...reached.values()];
-    };
 
     /**
      * Records what this build proved: every function it verified against its
@@ -994,7 +985,6 @@ export async function runBuild(
         prepareRuntime,
         workspace,
         callable: callableSymbols(unit.contract, contracts),
-        callees: calleesOf(unit.contract),
         exclusive: machine,
         // A repair round asks the model again, so what an earlier build
         // stored is not what it starts from. Otherwise the stored

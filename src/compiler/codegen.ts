@@ -84,12 +84,6 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   program: ProgramContract;
   /** Every module of the program, with the source each contract came from. */
   sources: readonly SourceModule[];
-  /**
-   * The contracts of the other functions this build compiles, which the prompt
-   * states as callable. The symbols a candidate may reference are the same set,
-   * and are carried on the request as `callable`.
-   */
-  callees: readonly FunctionContract[];
   target: TargetSpec;
   output: OutputKind;
   /**
@@ -779,7 +773,6 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
             unit: { file: request.unitFile, function: request.contract.function.name },
             program: request.program,
             sources: request.sources,
-            callees: request.callees,
             target: request.target,
             output: request.output,
             runtime: request.runtime,

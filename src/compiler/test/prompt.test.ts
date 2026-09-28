@@ -66,11 +66,13 @@ test("the prompt states the labels and the calls a candidate may write", () => {
   // Each of these is a rejection in assembler.ts, and none of them is obvious
   // from a program whose source calls its own functions.
   assert.match(prompt, /Every other label you define must start with a dot/);
-  // A candidate that reaches nothing is left with its own symbol and the
-  // runtime, and is told it is run on its own, which is what a candidate that
-  // calls something is not.
-  assert.match(prompt, /The only symbols you may reference are "blaze_main", and the runtime ABI/);
-  assert.match(prompt, /assembled, linked and run on its own/);
+  // `main` calls two other functions of the program and writes none of them
+  // out, so its prompt names their symbols and says a candidate that calls one
+  // is linked only into the program. It used to claim the opposite, because the
+  // symbols came from a list the caller had to remember to pass rather than
+  // from the calls the contract records.
+  assert.match(prompt, /The only symbols you may reference are "blaze_main", "createTree", "checksum", and the runtime ABI/);
+  assert.doesNotMatch(prompt, /assembled, linked and run on its own/);
 });
 
 test("a candidate is told the functions of the program it may call, and how", () => {
@@ -80,7 +82,6 @@ test("a candidate is told the functions of the program it may call, and how", ()
       unit: { file: "1.ts", function: "main" },
       program: treeProgram,
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
-      callees: [treeChecksum, treeProgram.files[0].functions.createTree],
     }),
   );
   // The model is told the call, the symbol to make it on, and where the
@@ -96,6 +97,27 @@ test("a candidate is told the functions of the program it may call, and how", ()
   assert.doesNotMatch(prompt, /WRITE OUT/);
   // The entry is excluded: a candidate is already the implementation of it.
   assert.doesNotMatch(prompt, /C prototype: void blaze_main/);
+});
+
+test("a candidate that reaches nothing is told it is run on its own", () => {
+  // The counterpart of the rule above: nothing is called and nothing is written
+  // out, so the object references no other symbol of the program and is linked
+  // and probed by itself. `createTree` is recursive, so it is a call, and
+  // `checksum` is too: neither is a body this candidate can be handed.
+  const program = programOf("typescript", TREES, "1.ts");
+  const prompt = buildUserPrompt(
+    request({
+      contract: treeProgram.files[0].functions.createTree,
+      unit: { file: "1.ts", function: "createTree" },
+      program,
+      sources: [{ path: "1.ts", source: TREES["1.ts"] }],
+    }),
+  );
+  // It recurses, so it reaches its own symbol and nothing else: recursion is
+  // the one call a candidate may always make.
+  assert.match(prompt, /The only symbols you may reference are "createTree", and the runtime ABI/);
+  assert.doesNotMatch(prompt, /^CALLS$/m);
+  assert.match(prompt, /assembled, linked and run on its own/);
 });
 
 test("the prompt states what the function owes the convention it is called under", () => {

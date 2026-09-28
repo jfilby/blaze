@@ -27,7 +27,7 @@ import type {
 } from "../core/types.ts";
 import type { Expression, Statement, TextPart } from "../core/ir.ts";
 import { isBufferType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
-import { contractsByName, writtenOut } from "../semantics/calls.ts";
+import { calledOut, contractsByName, writtenOut } from "../semantics/calls.ts";
 import { cSignature, cSourceRules } from "../toolchain/csource.ts";
 import { wasmSignature } from "../toolchain/wasm.ts";
 import { cDeclarationType, sysvArgumentLocations, sysvReturnLocation } from "../toolchain/linker.ts";
@@ -50,14 +50,6 @@ export interface PromptRequest {
   program: ProgramContract;
   /** The source each contract was derived from, in program order. */
   sources: readonly SourceModule[];
-  /**
-   * The contracts of the functions this one reaches by a call, whether the
-   * outline marked each call as a call or as one to write out. A program is
-   * compiled one function at a time and linked together, so a call is a call
-   * rather than a reimplementation; what a candidate is told to do at each one
-   * is read off the contract's own recorded calls.
-   */
-  callees?: readonly FunctionContract[];
   target: TargetSpec;
   output: OutputKind;
   runtime: RuntimeKind;
@@ -131,35 +123,33 @@ function nativeRules(contract: FunctionContract, plan: CallPlan): string[] {
 }
 
 /**
- * The functions a candidate is told about, split by what it is told to do at
- * them: the ones it calls, and the ones it writes out. The outline has already
- * decided which is which (see semantics/calls.ts), so this reads the
- * contract's own recorded calls rather than judging them here.
+ * What a candidate is told about each function its body reaches: the ones it
+ * calls by symbol, and the ones it writes out. The outline has already decided
+ * which is which (see semantics/calls.ts), so this reads the contract's own
+ * recorded calls rather than judging them here.
  *
- * What is written out is the whole closure rather than the direct callees: a
- * body written out carries the calls it made too, and each of those was
- * decided the same way, so the candidate needs the body of everything that
- * ends up inside its own.
+ * Both sets follow the bodies written out, not just the candidate's own edges.
+ * A body written out lands inside this candidate's object, so a call written
+ * inside it is a call this candidate makes: it has to be offered as a symbol
+ * with the convention to call it under, or the candidate is shown a body it
+ * cannot implement and turned away for implementing it.
  */
 interface CallPlan {
   readonly called: readonly FunctionContract[];
   readonly written: readonly FunctionContract[];
 }
 
-function callPlan(
-  contract: FunctionContract,
-  program: ProgramContract,
-  callees: readonly FunctionContract[],
-): CallPlan {
-  const byName = new Map(callees.map((callee) => [callee.function.name, callee]));
-  const called: FunctionContract[] = [];
-  for (const edge of contract.definition?.calls ?? []) {
-    if (edge.strategy !== "call") continue;
-    const callee = byName.get(edge.callee);
-    if (callee !== undefined) called.push(callee);
-  }
-  // `writtenOut` leads with the function itself, which is the one being written.
-  return { called, written: writtenOut(contractsByName(program.files), contract).slice(1) };
+function callPlan(contract: FunctionContract, program: ProgramContract): CallPlan {
+  const contracts = contractsByName(program.files);
+  // `writtenOut` leads with the function itself, which is the one being
+  // written, and `calledOut` follows the same closure. The two sets are
+  // disjoint: a function reached by an edge marked for writing out is a body
+  // below, and one reached by an edge marked as a call is a symbol, so nothing
+  // is offered as both a body and a call.
+  return {
+    called: calledOut(contracts, contract).filter((callee) => symbolOf(callee) !== symbolOf(contract)),
+    written: writtenOut(contracts, contract).slice(1),
+  };
 }
 
 /** A callee as a call is written from it: signature, argument locations, result. */
@@ -772,11 +762,7 @@ export function buildUserPrompt(request: PromptRequest): string {
 
   const language = OUTPUT_LANGUAGE[output];
   const native = output === "asm" || output === "machine";
-  const plan = callPlan(
-    contract,
-    request.program,
-    (request.callees ?? []).filter((other) => symbolOf(other) !== symbolOf(contract)),
-  );
+  const plan = callPlan(contract, request.program);
   const rules = native ? nativeRules(contract, plan) : language.rules;
 
   const sections: string[] = [];

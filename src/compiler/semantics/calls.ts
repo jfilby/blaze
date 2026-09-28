@@ -151,3 +151,28 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
   }
   return [...bodies.values()];
 }
+
+/**
+ * Every function a candidate for `contract` reaches by a call, following the
+ * bodies it is told to write out. A body written out lands inside this
+ * candidate's object, so a call written in it is a call this candidate makes:
+ * its symbol has to be one the candidate may reference, and the prompt has to
+ * say how it is called under. A candidate that is only shown its own edges
+ * therefore cannot write out a body that calls anything, and the assembler
+ * turns away the candidate that got it right.
+ */
+export function calledOut(contracts: ContractsByName, contract: FunctionContract): FunctionContract[] {
+  const reached = new Map<string, FunctionContract>();
+  for (const body of writtenOut(contracts, contract)) {
+    for (const edge of body.definition?.calls ?? []) {
+      // A body written out is part of this object, so the calls its own
+      // contract records are this candidate's to make. The written-out bodies
+      // are already the whole closure, so an edge marked for writing out is a
+      // body above rather than a symbol.
+      if (edge.strategy !== "call") continue;
+      const callee = contracts.get(edge.callee);
+      if (callee !== undefined) reached.set(callee.function.name, callee);
+    }
+  }
+  return [...reached.values()];
+}

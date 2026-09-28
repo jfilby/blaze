@@ -983,6 +983,104 @@ test("a candidate that calls a callee it was told to write out is rejected", asy
   assert.match(`${failure.message}\n${failure.detail ?? ""}`, /"step" is referenced but not defined/);
 });
 
+/**
+ * A three-function program where the body `main` writes out is itself a caller:
+ * `main` writes out `step`, and `step` calls `twice`.
+ */
+const TRANSITIVE_PROGRAM = [
+  "function twice(n: number): number {",
+  "  return n * 2;",
+  "}",
+  "",
+  "function step(n: number): number {",
+  "  if (n > 2) {",
+  "    return twice(n);",
+  "  }",
+  "  return twice(n);",
+  "}",
+  "",
+  "function main(): void {",
+  "  console.log(step(3));",
+  "}",
+  "",
+  "main();",
+  "",
+].join("\n");
+
+/**
+ * The caller: it writes out what `step` does, and what `step` does is call
+ * `twice`. That call is `main`'s to make, so `twice` has to be a symbol this
+ * candidate may reference; before it was one, the assembler rejected the
+ * candidate for naming it and the build failed on a program it should deliver.
+ */
+const MAIN_WRITES_TRANSITIVE_ASSEMBLY = [
+  ".text",
+  "\t.globl\tblaze_main",
+  "blaze_main:",
+  "\tsubq\t$8, %rsp",
+  "\tmovabsq\t$4613937818241073152, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tcall\ttwice",
+  "\tmovq\t%xmm0, %rdi",
+  "\tcall\tblaze_rt_print_number",
+  "\tcall\tblaze_rt_print_newline",
+  "\taddq\t$8, %rsp",
+  "\tret",
+  "",
+].join("\n");
+
+/** `step` on its own: still a call to `twice`, and still its own object. */
+const STEP_TRANSITIVE_ASSEMBLY = [
+  ".text",
+  "\t.globl\tstep",
+  "step:",
+  "\tmovabsq\t$4611686018427387904, %rax",
+  "\tmovq\t%rax, %xmm1",
+  "\tcomisd\t%xmm1, %xmm0",
+  "\tjbe\t.Llow",
+  "\tmovabsq\t$4613937818241073152, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tret",
+  ".Llow:",
+  "\tmovabsq\t$4607182418800017408, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tret",
+  "",
+].join("\n");
+
+test("a call inside a body the outline tells a candidate to write out is a call it may make", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-writes-transitive-"));
+  await writeFile(join(directory, "main.ts"), TRANSITIVE_PROGRAM, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  await chatEndpoint(t, [], {
+    answer: (prompt: string) =>
+      prompt.includes("function being written: main")
+        ? MAIN_WRITES_TRANSITIVE_ASSEMBLY
+        : prompt.includes("function being written: step")
+          ? STEP_TRANSITIVE_ASSEMBLY
+          : TWICE_ASSEMBLY,
+  });
+
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  // `step(3)` is 6: the branch takes the `n > 2` arm, and `twice(3)` doubles it.
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "step", "twice"]);
+  assert.ok(outcome.outputPath !== null);
+  assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "6\n");
+});
+
 test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {
   const source = ["function main(): number {", "  return 40 + 2;", "}", "", "main();", 'console.log(`answer: ${42}`);', ""].join("\n");
   const assembly = [".text", ".globl blaze_main", "blaze_main:", "  movabsq $4631107791820423168, %rax", "  movq %rax, %xmm0", "  ret", ""].join("\n");

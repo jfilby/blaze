@@ -20,7 +20,7 @@ import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol } from "../runtime/abi.ts";
 import { symbolOf } from "../semantics/contract.ts";
-import type { ContractsByName } from "../semantics/calls.ts";
+import { calledOut, type ContractsByName } from "../semantics/calls.ts";
 import { stackAlignmentProblems } from "./stack-frame.ts";
 import { readAssemblyLines } from "./asm-text.ts";
 
@@ -47,14 +47,14 @@ const ALLOWED_DIRECTIVES = new Set([
  * for writing out is not referenceable: the body it would have to implement is
  * already in the prompt, and a symbol it names is a reimplementation behind a
  * local label, which is the thing the outline decided against.
+ *
+ * It follows the bodies written out rather than stopping at the candidate's own
+ * edges, because a body written out is part of this object: a call written
+ * inside it is a call this candidate makes, and refusing that symbol would turn
+ * away the candidate that implemented the body it was given.
  */
 export function callableSymbols(contract: FunctionContract, contracts: ContractsByName): Set<string> {
-  const called = (contract.definition?.calls ?? [])
-    .filter((edge) => edge.strategy === "call")
-    .map((edge) => contracts.get(edge.callee))
-    .filter((callee): callee is FunctionContract => callee !== undefined)
-    .map(symbolOf);
-  return new Set(called);
+  return new Set(calledOut(contracts, contract).map(symbolOf));
 }
 
 /** Whether a symbol is one a candidate is allowed to call. */

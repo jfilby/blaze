@@ -195,7 +195,6 @@ test("the prompt states a written-out callee as a body to implement rather than 
     unit: { file: "main.ts", function: "report" },
     program: of,
     sources: [{ path: "main.ts", source: "" }],
-    callees: [functionOf(of, "leaf")],
     target: TARGET,
     output: "machine",
     runtime: "none",
@@ -223,7 +222,6 @@ test("the prompt offers a called callee as a symbol and does not offer its body"
     unit: { file: "main.ts", function: "report" },
     program: of,
     sources: [{ path: "main.ts", source: "" }],
-    callees: [functionOf(of, "leaf")],
     target: TARGET,
     output: "machine",
     runtime: "none",
@@ -307,6 +305,77 @@ test("what a candidate has to write out is the whole closure, not the direct cal
   // thing, and what it is given has to be the whole thing.
   const written = writtenOut(contractsByName(of.files), functionOf(of, "report")).map((contract) => contract.function.name);
   assert.deepEqual(written.sort(), ["base", "middle", "report"]);
+});
+
+/**
+ * A program where the body a candidate writes out is itself a caller: `report`
+ * writes out `leaf`, and `leaf` calls `twice`.
+ */
+function overTransitiveCallee(): ProgramContract {
+  return program(
+    {
+      "main.ts": [
+        "export function twice(n: number): number { return n * 2; }",
+        "export function leaf(n: number): number {",
+        "  if (n > 2) { return twice(n); }",
+        "  return twice(n);",
+        "}",
+        "export function report(n: number): number {",
+        "  let total = 0;",
+        "  for (let i = 0; i < n; i++) { total = total + leaf(i); }",
+        "  return total;",
+        "}",
+        "console.log(`${report(3)}`);",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+}
+
+test("a call inside a written-out body is a call the candidate still has to make", () => {
+  // `report` writes out `leaf`, so `leaf`'s body lands inside `report`'s object,
+  // and the call `twice` is one `report` makes rather than one `leaf` makes. A
+  // candidate shown only its own edges is shown a body it cannot implement,
+  // and the assembler turns away the candidate that implemented it anyway.
+  const of = overTransitiveCallee();
+  assert.deepEqual(calls(of, "report"), ["leaf:inline"]);
+  assert.deepEqual(calls(of, "leaf"), ["twice:call"]);
+  const contracts = contractsByName(of.files);
+  assert.deepEqual([...callableSymbols(functionOf(of, "report"), contracts)], ["twice"]);
+});
+
+test("the prompt offers the symbol a written-out body calls, and how to call it", () => {
+  // Both sets follow the bodies written out: the body under WRITE OUT carries
+  // a call, and that call has to be offered under CALLS or the two sections
+  // contradict each other.
+  const of = overTransitiveCallee();
+  const prompt = buildUserPrompt({
+    contract: functionOf(of, "report"),
+    unit: { file: "main.ts", function: "report" },
+    program: of,
+    sources: [{ path: "main.ts", source: "" }],
+    target: TARGET,
+    output: "machine",
+    runtime: "none",
+    candidate: 1,
+    candidates: 1,
+    attempt: 1,
+  });
+
+  assert.match(prompt, /WRITE OUT/);
+  assert.match(prompt, /^CALLS$/m);
+  assert.match(prompt, /C prototype: double twice\(double n\)/);
+  assert.match(prompt, /The only symbols you may reference are "report", "twice", and the runtime ABI/);
+});
+
+test("a symbol a written-out body reaches is not one the candidate may call by name", () => {
+  // The converse of the rule above, and the reason the two are a pair: `leaf`
+  // is written out, so its symbol is not referenceable even though a body of
+  // it is in the prompt. Only what a written-out body *calls* is added.
+  const of = overTransitiveCallee();
+  const contracts = contractsByName(of.files);
+  assert.ok(![...callableSymbols(functionOf(of, "report"), contracts)].includes("leaf"));
 });
 
 test("a candidate with no calls is left with its own symbol and the runtime", () => {
