@@ -20,11 +20,12 @@ import type { SourceInput } from "../core/types.ts";
 import { z } from "zod";
 import { CompilerError } from "../core/errors.ts";
 import { writeProject } from "./project.ts";
+import { irOf } from "./phase.ts";
 
 const quiet = { stage: () => {} };
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
-/** x arrives in xmm0 as a double; the contract asks for x * x. */
-const SQUARE_ASSEMBLY = ["\t.globl\tsquare", "square:", "\tmulsd\t%xmm0, %xmm0", "\tret", ""].join("\n");
+/** The IR the compiler resolves for `square`, which is the form every answer now takes. */
+const SQUARE_IR = irOf("typescript", { "module.ts": SQUARE }, "module.ts", "square");
 
 /** The shape of the request the endpoint was sent, read back out of it. */
 interface RecordedRequest {
@@ -187,6 +188,9 @@ test("a request goes to the generate endpoint as the envelope it takes", async (
 });
 
 test("the answer is read out of the event stream, and reasoning kept out of it", async (t) => {
+  // The answer arrives in pieces, the way a stream carries it, so the provider
+  // has to put the whole of it back together.
+  const [signature, ...body] = SQUARE_IR.split("\n");
   const endpoint = await generateEndpoint(t, {
     answers: [
       {
@@ -196,8 +200,8 @@ test("the answer is read out of the event stream, and reasoning kept out of it",
           { type: "reasoning-delta", text: "a square" },
           { type: "reasoning-end" },
           { type: "text-start" },
-          { type: "text-delta", text: "\t.globl\tsquare\n" },
-          { type: "text-delta", text: "square:\n\tmulsd\t%xmm0, %xmm0\n\tret\n" },
+          { type: "text-delta", text: `${signature}\n` },
+          { type: "text-delta", text: body.join("\n") },
           { type: "text-end" },
         ],
       },
@@ -207,9 +211,9 @@ test("the answer is read out of the event stream, and reasoning kept out of it",
   const result = await generateText({ model: modelAt(endpoint.url), prompt: "write it" });
 
   // Thinking is the model's own account of the answer, and the answer is what
-  // the compiler assembles: one dropped into the other is assembly that was
-  // never written.
-  assert.equal(result.text, SQUARE_ASSEMBLY);
+  // the compiler runs: one dropped into the other is an implementation that
+  // was never written.
+  assert.equal(result.text, SQUARE_IR);
   assert.match(result.reasoning.filter((part) => part.type === "reasoning").map((part) => part.text).join(""), /a square/);
   assert.equal(result.finishReason, "stop");
   assert.equal(result.usage.inputTokens, 11);
@@ -326,7 +330,7 @@ async function projectUsing(t: TestContext, endpoint: GenerateEndpoint): Promise
     source: SQUARE,
     entry: "square",
     model: { provider: "commandcode", model: "stealth/pixel-canary" },
-    // The answer this build replays is assembly.
+    // The answer this build replays is the IR the compiler resolved.
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   };
@@ -352,8 +356,8 @@ test("a project built on CommandCode produces the machine it asked for", async (
       {
         events: [
           { type: "reasoning-delta", text: "the contract asks for a square" },
-          { type: "text-delta", text: "```asm\n" },
-          { type: "text-delta", text: SQUARE_ASSEMBLY },
+          { type: "text-delta", text: "```ir\n" },
+          { type: "text-delta", text: SQUARE_IR },
           { type: "text-delta", text: "```\n" },
         ],
       },

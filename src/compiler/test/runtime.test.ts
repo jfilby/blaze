@@ -20,7 +20,7 @@ import { programWithSemantics } from "./phase.ts";
 import type { SourceInput } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
-const C_REPLAY = new URL("./fixtures/runtime-dot-product-c-replay.json", import.meta.url).pathname;
+const OBJECT_REPLAY = new URL("./fixtures/runtime-object-replay.json", import.meta.url).pathname;
 const EXAMPLE = new URL("../../examples/hosted_dot_product", import.meta.url).pathname;
 const EXAMPLE_CANDIDATES = new URL("../../examples/hosted_dot_product/candidates.json", import.meta.url).pathname;
 
@@ -36,18 +36,37 @@ const INPUT: SourceInput = {
   ].join("\n"),
   entry: "dotProduct",
   target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-  // The fixtures this file replays are assembly and C.
+  // The fixture this file replays is the IR the compiler resolves for this.
   output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 1 },
   test: { randomCases: 4, maxLength: 32, seed: 11 },
   benchmark: { iterations: 50 },
 };
 
+/**
+ * A program whose only function allocates. Its contract states the memory
+ * effect, and that is what puts the runtime in reach of the lowering: the
+ * model writes the IR, and the compiler writes the call the object is built by.
+ */
+const ALLOCATING: SourceInput = {
+  language: "typescript",
+  source: [
+    "export function make(): any {",
+    "  return { left: null, right: null };",
+    "}",
+    "const made = make();",
+    "",
+  ].join("\n"),
+  target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+  output: "machine",
+  generation: { maxCandidates: 1, maxAttempts: 1 },
+};
+
 const quiet = { stage: () => {} };
 
-async function workspace(name: string): Promise<string> {
+async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
-  await writeProject(join(directory, "input.toml"), INPUT);
+  await writeProject(join(directory, "input.toml"), input);
   return directory;
 }
 
@@ -91,16 +110,16 @@ test("the managed object representation is the same in the header and in the ada
   }
 });
 
-test("the prompt tells the model which runtime entry points it may call", () => {
-  // What the ABI section offers is what the body the compiler resolved
-  // reaches for, so the fixture allocates an object: that is what puts the
-  // allocator and the release in reach of a hosted candidate.
+test("the prompt says the compiler writes the runtime calls, not the model", () => {
+  // A candidate no longer writes a runtime call, so the prompt has to say who
+  // does: the source allocates an object, and the answer is the effect in the
+  // body, which the lowering turns into the call the object is built by.
   const files = {
     "module.ts":
       "export function make(): any {\n  return { left: null, right: null };\n}\nconst made = make();\n",
   };
   const { program, semantics } = programWithSemantics("typescript", files, "module.ts");
-  const request: Omit<PromptRequest, "runtime"> = {
+  const request: PromptRequest = {
     contract: program.files[0].functions.make,
     unit: { file: "module.ts", function: "make" },
     program,
@@ -108,26 +127,29 @@ test("the prompt tells the model which runtime entry points it may call", () => 
     sources: [{ path: "module.ts", source: files["module.ts"] }],
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     output: "machine",
+    runtime: "nim",
     candidate: 1,
     attempt: 1,
     candidates: 1,
   };
 
-  const hosted = buildUserPrompt({ ...request, runtime: "nim" });
-  assert.match(hosted, /RUNTIME/);
-  assert.match(hosted, /Nim host runtime/);
-  assert.match(hosted, /void\* blaze_rt_allocate\(size_t bytes\)/);
-  assert.match(hosted, /blaze_rt_release/);
-  assert.ok(
-    !/The function is pure/.test(hosted),
-    "a hosted candidate may allocate, so the prompt must not tell the model the function is pure",
+  const prompt = buildUserPrompt(request);
+  assert.match(prompt, /Allocate an object with blaze_rt_object_new\(bytes, alignment\)/);
+  assert.match(
+    prompt,
+    /The compiler reaches them through the runtime when it lowers your IR, so state the effect in/,
   );
-
-  const standalone = buildUserPrompt({ ...request, runtime: "none" });
-  assert.match(standalone, /compiler runtime/);
+  assert.ok(
+    !/The function is pure/.test(prompt),
+    "a candidate that allocates must not be told the function is pure",
+  );
+  // What the model may write is the IR, and the IR names no runtime symbol, so
+  // the prompt offers it the C prototype of nothing.
+  assert.doesNotMatch(prompt, /void\* blaze_rt_allocate\(size_t bytes\)/);
+  assert.doesNotMatch(prompt, /blaze_rt_release/);
 });
 
-test("a standalone build links the compiler runtime and a candidate may allocate through it", async () => {
+test("a standalone build links the compiler runtime, and a function that allocates reaches it", async () => {
   const directory = await workspace("runtime-none");
   const outcome = await runBuild(
     "input.toml",
@@ -140,10 +162,9 @@ test("a standalone build links the compiler runtime and a candidate may allocate
   assert.equal(outcome.verification.dotProduct[0]?.passed, true);
   assert.equal(outcome.build.status, "success");
 
-  // The candidate calls the ABI, and the runtime object resolves it.
-  const undefinedSymbols = run("nm", ["--undefined-only", join(project(directory), "work/dotProduct/c1.o")], { timeoutMs: 30_000 });
-  assert.match(undefinedSymbols.stdout, /blaze_rt_allocate/);
-  assert.match(undefinedSymbols.stdout, /blaze_rt_release/);
+  // What a lowering reaches for, the runtime object is there to define, so the
+  // whole ABI is in it rather than the few entries one candidate happened to
+  // use.
   const runtimeObject = run("nm", ["--defined-only", join(project(directory), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
   for (const item of RUNTIME_ABI) {
     assert.ok(runtimeObject.stdout.includes(item.symbol), `${item.symbol} must be defined by the compiler runtime`);
@@ -152,22 +173,47 @@ test("a standalone build links the compiler runtime and a candidate may allocate
   const execution = run(outcome.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
   assert.equal(execution.code, 0, execution.stderr);
   assert.deepEqual(results(execution.stdout), [6, 8]);
+
+  // A function whose contract says it allocates is the one that reaches the
+  // runtime: the answer is the effect, and the call the object is built by is
+  // the compiler's to write, so it lands in the object unresolved and the
+  // runtime beside it is what settles it.
+  const allocating = await workspace("runtime-none-object", ALLOCATING);
+  const built = await runBuild(
+    "input.toml",
+    { cwd: allocating, reuse: false, model: `replay:${OBJECT_REPLAY}` },
+    quiet,
+    "build",
+  );
+  assert.equal(built.build.status, "success");
+  const undefinedSymbols = run("nm", ["--defined-only", join(project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
+  assert.doesNotMatch(undefinedSymbols.stdout, /blaze_rt_/, "a call the runtime defines belongs to the runtime object");
+  const asked = run("nm", ["--undefined-only", join(project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
+  assert.match(asked.stdout, /blaze_rt_object_new/, "a function that allocates must reach the runtime");
+  const beside = run("nm", ["--defined-only", join(project(allocating), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
+  for (const line of asked.stdout.split("\n").filter((entry) => /\sU\s/.test(entry))) {
+    const symbol = line.trim().split(/\s+/)[1] ?? "";
+    assert.ok(beside.stdout.includes(symbol), `the runtime object must define ${symbol}, which the candidate leaves to it`);
+  }
 });
 
-test("a C candidate may call the runtime ABI", async () => {
-  const directory = await workspace("runtime-c");
+test("the C a build compiles includes the runtime ABI, so a function that allocates calls through it", async () => {
+  const directory = await workspace("runtime-c", ALLOCATING);
   const outcome = await runBuild(
     "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${C_REPLAY}`, output: "c" },
+    { cwd: directory, reuse: false, model: `replay:${OBJECT_REPLAY}`, output: "c" },
     quiet,
     "build",
   );
 
   assert.equal(outcome.build.runtime, "none");
-  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
-  const source = await readFile(outcome.outputPath!, "utf8");
+  assert.equal(outcome.build.status, "success");
+  // What a `c` build compiles is the C the compiler wrote from the IR, and
+  // what it is built from is the header the ABI is declared in: an object the
+  // function allocates cannot be built without one.
+  const source = await readFile(join(project(directory), "work/make/c1.c"), "utf8");
   assert.match(source, /#include "blaze_rt\.h"/);
-  assert.match(source, /blaze_rt_allocate/);
+  assert.match(source, /blaze_rt_object_new/);
 });
 
 test("a hosted build runs the candidate inside a Nim host program", async (t) => {

@@ -597,16 +597,22 @@ interface BoundCall {
  * program does not call.
  */
 class ContractBinder {
-  private readonly functions: Record<string, FunctionContract> = {};
-  private readonly layouts: Record<string, ObjectLayout> = {};
+  // A name is whatever the source called the function, and `__proto__` and
+  // `constructor` are names a source may use. A table keyed by them has to be
+  // a Map: assigning `__proto__` on an object sets its prototype instead of
+  // adding a key, and the function silently vanishes from the table it is in.
+  private readonly functions = new Map<string, FunctionContract>();
+  private readonly layouts = new Map<string, ObjectLayout>();
 
   constructor(contract: ProgramContract) {
     for (const file of contract.files) {
       for (const [name, declared] of Object.entries(file.functions)) {
-        this.functions[name] = declared;
-        this.functions[declared.function.name] = declared;
-        this.functions[declared.function.symbol] = declared;
-        Object.assign(this.layouts, declared.definition.objects);
+        this.functions.set(name, declared);
+        this.functions.set(declared.function.name, declared);
+        this.functions.set(declared.function.symbol, declared);
+        for (const [layout, shape] of Object.entries(declared.definition.objects)) {
+          this.layouts.set(layout, shape);
+        }
       }
     }
   }
@@ -629,9 +635,8 @@ class ContractBinder {
    * builtin is the compiler's own and is never a declaration of its own.
    */
   declaration(name: string, line: number): FunctionContract {
-    if (builtinFor(name) === null && Object.prototype.hasOwnProperty.call(this.functions, name)) {
-      return this.functions[name];
-    }
+    const declared = builtinFor(name) === null ? this.functions.get(name) : undefined;
+    if (declared !== undefined) return declared;
     const compiled = this.names().join(", ") || "no functions";
     fail(line, `a function this program declares, one of: ${compiled}`, name);
   }
@@ -643,16 +648,26 @@ class ContractBinder {
 
   /** Every name a call may reach, which an error lists so that it can be fixed. */
   names(): string[] {
-    return Object.keys(this.functions);
+    return [...this.functions.keys()];
+  }
+
+  /**
+   * The callees the program records for one function, and an empty list for a
+   * name the program does not declare. A body written out brings its own calls
+   * into the caller, so a reader closing a call graph asks here.
+   */
+  callsOf(name: string): string[] {
+    return this.functions.get(name)?.definition.calls.map((call) => call.callee) ?? [];
   }
 
   /** The layout a contract hands back, which the text only names. */
   layout(name: string, line: number): ObjectLayout {
-    if (!Object.prototype.hasOwnProperty.call(this.layouts, name)) {
-      const handed = Object.keys(this.layouts).join(", ") || "no layouts";
+    const shape = this.layouts.get(name);
+    if (shape === undefined) {
+      const handed = this.names().length === 0 ? "no layouts" : [...this.layouts.keys()].join(", ");
       fail(line, `a layout this program hands back, one of: ${handed}`, name);
     }
-    return this.layouts[name];
+    return shape;
   }
 
   /**
@@ -665,8 +680,8 @@ class ContractBinder {
       const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) }));
       return { signature: { name, symbol: name, params, returns: typeToString(builtin.returns) }, effects: [], builtin: true };
     }
-    if (!Object.prototype.hasOwnProperty.call(this.functions, name)) return null;
-    const declared = this.functions[name];
+    const declared = this.functions.get(name);
+    if (declared === undefined) return null;
     return { signature: declared.function, effects: declared.effects, builtin: false };
   }
 }
@@ -691,6 +706,18 @@ class IrScanner {
   private readonly text: string;
   private readonly binder: ContractBinder;
   private at = 0;
+  /**
+   * The callees the function being read declared, and null where that does not
+   * apply. A scanner reading a call is a body reaching a callee, and a body may
+   * only reach one its own function declared, or wrote out.
+   */
+  declaredCallees: string[] | null = null;
+  /**
+   * Every callee the function being read may name, and where the reader
+   * computes it: the calls its own contract records, closed over the callees it
+   * writes out. Empty where a reader is not reading a function's header.
+   */
+  protected reachable: Set<string> = new Set<string>();
 
   constructor(text: string, line: number, binder: ContractBinder) {
     this.text = text;
@@ -1093,10 +1120,20 @@ class IrScanner {
     return parts;
   }
 
-  /** A call, bound to the contract that declares the callee. */
+  /**
+   * A call, bound to the contract that declares the callee and to the list the
+   * function declared. The two are not the same: the contract records every
+   * call the function may make, and the list is the ones this body makes. A
+   * body that reaches past its own list would be lowered into a call the build
+   * did not know it had, so it is refused where it is written.
+   */
   call(returns: SemanticType): SemanticCall {
     const callee = this.word();
     const bound = this.binder.bind(callee, this.line);
+    if (this.declaredCallees !== null && !this.declaredCallees.includes(callee)) {
+      const declared = this.declaredCallees.join(", ") || "no calls";
+      fail(this.line, `a call this function declared, one of: ${declared}`, callee);
+    }
     const argTypes: SemanticType[] = [];
     const args: SemanticValue[] = [];
     this.expect("[");
@@ -1259,8 +1296,23 @@ class BlockReader {
   }
 
   protected scanner(line: IrLine): IrScanner {
-    return new IrScanner(restOf(line), line.number, this.binder);
+    const scanner = new IrScanner(restOf(line), line.number, this.binder);
+    scanner.declaredCallees = this.declaredCallees;
+    return scanner;
   }
+
+  /**
+   * The callees the function being read declared, and null where that does not
+   * apply. A body may only reach a callee its own function declared: one it did
+   * not declare is one it was told to write out, so there is nothing to call.
+   */
+  declaredCallees: string[] | null = null;
+  /**
+   * Every callee the function being read may name, and where the reader
+   * computes it: the calls its own contract records, closed over the callees it
+   * writes out. Empty where a reader is not reading a function's header.
+   */
+  protected reachable: Set<string> = new Set<string>();
 
   /* ---------------------------------------------------------------------- */
   /* Blocks                                                                 */
@@ -1839,6 +1891,21 @@ class FunctionReader extends BlockReader {
   /** The calls the body makes, each of them an edge the contract records. */
   private calls(declared: FunctionContract): CallEdge[] {
     const recorded = declared.definition.calls;
+    // What this body may name is not only what this body names. A candidate is
+    // handed the body of any callee it is told to write out, and a body written
+    // out brings the calls that body makes with it — so `report` writing out
+    // `leaf` may call `twice`, because `leaf` is what calls it. Anything past
+    // that is not this function's to reach: the set is closed over written-out
+    // callees only, so a call behind a real call is still somebody else's.
+    this.reachable = new Set<string>(recorded.map((call) => call.callee));
+    const queue = recorded.filter((call) => call.strategy === "inline").map((call) => call.callee);
+    for (let at = 0; at < queue.length; at += 1) {
+      for (const call of this.binder.callsOf(queue[at])) {
+        if (this.reachable.has(call)) continue;
+        this.reachable.add(call);
+        queue.push(call);
+      }
+    }
     const calls: CallEdge[] = [];
     for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "call"; line = this.peek()) {
       this.at += 1;
@@ -1847,17 +1914,32 @@ class FunctionReader extends BlockReader {
       scanner.end();
       this.binder.bind(callee, line.number);
       const edge = recorded.find((call) => call.callee === callee);
-      if (edge === undefined) {
-        const reached = recorded.map((call) => call.callee).join(", ") || "no calls";
-        fail(line.number, `a call the contract records for this function, one of: ${reached}`, callee);
+      if (edge !== undefined) {
+        calls.push({ callee: edge.callee, strategy: edge.strategy });
+        continue;
       }
-      calls.push({ callee: edge.callee, strategy: edge.strategy });
+      // A callee this function does not name but may, because it sits behind a
+      // body it writes out. It is a real call in this object, so it is a call
+      // and not a write-out: the body it came from is already inside.
+      if (this.reachable.has(callee)) {
+        calls.push({ callee, strategy: "call" });
+        continue;
+      }
+      const reached = [...this.reachable].join(", ") || "no calls";
+      fail(line.number, `a call this function may make, one of: ${reached}`, callee);
     }
-    if (calls.length !== recorded.length) {
-      const at = this.where(null);
-      const reached = recorded.map((call) => call.callee).join(", ") || "no calls";
-      fail(at.number, `every call the contract records for this function, one of: ${reached}`, at.text);
+    // A callee the body writes out is one it declares no call for, so the list
+    // a candidate gives is a subset of the contract's, not the whole of it.
+    // What it may not do is declare a call twice, which would be a body whose
+    // reach the list does not describe.
+    for (const edge of calls) {
+      if (calls.filter((other) => other.callee === edge.callee).length > 1) {
+        fail(this.where(null).number, `each callee declared once, and ${edge.callee} is declared twice`, edge.callee);
+      }
     }
+    // The body is checked against this list as it is read, so the list is where
+    // the reader learns what the body is allowed to reach.
+    this.declaredCallees = calls.map((edge) => edge.callee);
     return calls;
   }
 

@@ -9,9 +9,10 @@
 ##   cd src/examples/hosted_dot_product
 ##   blaze build --model replay:candidates.json
 ##
-## The recorded candidate allocates its working copy through the runtime instead
-## of on the stack, which is what a hosted build is for: the host owns memory
-## management, and the generated code only asks for it through the ABI.
+## The recorded candidate is the IR the compiler resolves for the Nim below, so
+## this example builds offline. A hosted build is for a program that needs the
+## heap: the host owns memory management, and the generated code asks for it
+## through the ABI rather than managing memory itself.
 
 proc dotProduct(a: ptr float32, b: ptr float32, n: usize): float32 =
   var total: float32 = 0.0

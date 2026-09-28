@@ -9,6 +9,7 @@ import { CompilerError } from "../core/errors.ts";
 import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
+import { irOf } from "./phase.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
@@ -27,13 +28,44 @@ const INPUT: SourceInput = {
   ].join("\n"),
   entry: "dotProduct",
   target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-  // These builds answer a replay fixture of assembly, so they are builds of
-  // assembly. The IR path has its own tests, in ir-build.test.ts.
+  // Every kind answers in the semantic IR, so a machine build is a build of
+  // the IR a model wrote, lowered into the assembly the toolchain assembles.
   output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 2 },
   test: { randomCases: 6, maxLength: 64, seed: 7 },
   benchmark: { iterations: 200 },
 };
+
+/**
+ * The IR the compiler resolves for the function `INPUT` compiles, which is what
+ * a model is asked for and what every kind of answer is.
+ */
+const DOT_PRODUCT_IR = irOf("nim", { "module.nim": INPUT.source }, "module.nim", "dotProduct");
+
+/**
+ * The IR a build refuses, and why: an element of a `f32*` is a `f32`, and a
+ * body that adds one to a running total cannot read one as text. Nothing about
+ * it is visible until the candidate is read against the contract.
+ */
+const MISREAD_ELEMENT_IR = DOT_PRODUCT_IR.replace(
+  "[element[f32] local[f32*] a local[f64] i]",
+  "[element[text] local[f32*] a local[f64] i]",
+);
+
+/**
+ * The IR a build refuses a second time, for a different reason: a call to a
+ * function the program does not declare, which the text cannot name.
+ */
+const UNDECLARED_CALL_IR = DOT_PRODUCT_IR.replace(
+  "  return local[f32] acc",
+  "  return [call[f32] total [arg[f32] local[f32] acc] ownership=none retain=no]",
+);
+
+/**
+ * The IR a build refuses a third time: a body that hands back text where the
+ * contract states a number is not a function of that function.
+ */
+const TEXT_RESULT_IR = DOT_PRODUCT_IR.replace("  return local[f32] acc", "  return [to_text local[f32] acc]");
 
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
@@ -70,7 +102,7 @@ test("a function the source named __proto__ is compiled and recorded like any ot
     source: ["export function __proto__(n: bigint): bigint {", "  return n * 2n;", "}", ""].join("\n"),
     entry: "__proto__",
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-    // The fixture this build replays is assembly.
+    // The fixture this build replays answers in the IR, like every other kind.
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
     test: { randomCases: 3, maxLength: 16, seed: 3 },
@@ -186,48 +218,51 @@ test("the delivered executable computes the contracted function", async () => {
   );
 });
 
-test("the delivered assembly is the implementation that was verified", async () => {
+test("the delivered IR is the implementation that was verified, and the assembly is what it was lowered into", async () => {
   const directory = await workspace("asm");
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.ok(outcome.outputAssemblyPath !== null);
 
-  const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
+  // Every kind answers in the IR, so what a build verified is the IR, and the
+  // text it delivers beside the assembly is that IR itself and not a copy of
+  // something else: what the model wrote is what the contract was checked on.
   const stored = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
   ) as Record<string, { text: string }[]>;
-  assert.ok(delivered.endsWith(stored.dotProduct[0].text));
-  assert.ok(delivered.startsWith(".text"), "the architecture prelude is compiler controlled");
+  const implementation = await readFile(outcome.outputAssemblyPath.replace(/\.s$/, ".ir"), "utf8");
+  assert.equal(implementation, stored.dotProduct[0].text);
+
+  // What a machine build delivers is the assembly the toolchain made of the C
+  // the compiler wrote for that IR, so the delivered text is the target the
+  // object was assembled from rather than the IR itself.
+  const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
+  assert.notEqual(delivered, implementation, "the assembly is not the IR it was lowered from");
+  assert.match(delivered, /^\s*\.file\s+"c1\.lower\.c"$/m, "the assembly is the compiler's own lowering");
+  assert.match(delivered, /^\s*\.globl\s+dotProduct$/m, "the assembly defines the function the IR describes");
 });
 
 test("a C build delivers the C source the compiler verified", async () => {
   const directory = await workspace("c", { ...INPUT, output: "c" });
   const replay = join(directory, "candidates.json");
-  await writeFile(
-    replay,
-    JSON.stringify({
-      candidates: [
-        "#include <stddef.h>\nfloat dotProduct(const float* a, const float* b, size_t n) {\n  float total = 0.0f;\n  for (size_t i = 0; i < n; i++) total += a[i] * b[i];\n  return total;\n}\n",
-      ],
-    }),
-    "utf8",
-  );
+  // A `c` build is answered in the IR like every other kind: the C is the text
+  // the compiler wrote for it, so what a model never sees is a signature.
+  await writeFile(replay, JSON.stringify({ candidates: [DOT_PRODUCT_IR] }), "utf8");
 
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
   assert.equal(outcome.build.outputKind, "c");
   assert.ok(outcome.outputPath?.endsWith("output/input.c"));
 
   const source = await readFile(outcome.outputPath as string, "utf8");
-  assert.match(source, /float dotProduct\(const float\* a, const float\* b, size_t n\)/);
+  assert.match(source, /float dotProduct\(float\* a, float\* b, size_t n\)/);
 });
 
 test("a rejected candidate is replaced and its diagnostic is fed back", async () => {
   const directory = await workspace("retry");
   const replay = join(directory, "candidates.json");
-  const reference = JSON.parse(await readFile(REPLAY, "utf8")) as { candidates: string[] };
   await writeFile(
     replay,
     JSON.stringify({
-      candidates: ["\t.globl dotProduct\ndotProduct:\n\tsyscall\n\tret\n", reference.candidates[0]],
+      candidates: [MISREAD_ELEMENT_IR, DOT_PRODUCT_IR],
     }),
     "utf8",
   );
@@ -253,25 +288,23 @@ test("a rejected candidate is replaced and its diagnostic is fed back", async ()
     [["c1", 1, 1], ["c2", 1, 2]],
   );
   assert.equal(candidates[0].feedback, undefined);
-  assert.match(candidates[1].feedback?.[0] ?? "", /syscall/);
-  assert.match(candidates[1].feedback?.[0] ?? "", /^\[attempt 1]/);
+  // The diagnostic is the one that refused the candidate, and it says what in
+  // the IR is wrong rather than which line of a model answer it came from.
+  assert.match(candidates[1].feedback?.[0] ?? "", /^\[attempt 1] ir failed: dotProduct is not a function the compiler may lower/);
+  assert.match(candidates[1].feedback?.[0] ?? "", /an element of a f32\* is a f32, not a text/);
 });
 
 test("diagnostics accumulate across repairs and never reach the next candidate", async () => {
   const directory = await workspace("accumulate");
   const replay = join(directory, "candidates.json");
-  const reference = JSON.parse(await readFile(REPLAY, "utf8")) as { candidates: string[] };
   // Three rejections in a row, then a working answer: the first candidate burns
-  // its attempts, and the second one is generated from a clean prompt.
+  // its attempts, and the second one is generated from a clean prompt. Each
+  // refusal is a different one, so the third repair is shown three reasons
+  // rather than the same one three times.
   await writeFile(
     replay,
     JSON.stringify({
-      candidates: [
-        "\t.globl dotProduct\ndotProduct:\n\tsyscall\n\tret\n",
-        "\t.globl dotProduct\ndotProduct:\n\tnotaninstruction\n\tret\n",
-        "\t.globl dotProduct\ndotProduct:\n\tmovssq\n\tret\n",
-        reference.candidates[0],
-      ],
+      candidates: [MISREAD_ELEMENT_IR, UNDECLARED_CALL_IR, TEXT_RESULT_IR, DOT_PRODUCT_IR],
     }),
     "utf8",
   );
@@ -304,11 +337,14 @@ test("diagnostics accumulate across repairs and never reach the next candidate",
   // Every repair sees what this candidate already collected, oldest first.
   assert.equal(candidates[0].feedback, undefined);
   assert.equal(candidates[1].feedback?.length, 1);
-  assert.match(candidates[1].feedback?.[0] ?? "", /^\[attempt 1] assemble failed:.*syscall/s);
+  assert.match(
+    candidates[1].feedback?.[0] ?? "",
+    /^\[attempt 1] ir failed: dotProduct is not a function the compiler may lower.*an element of a f32\* is a f32, not a text/s,
+  );
   assert.equal(candidates[2].feedback?.length, 2);
   assert.match(candidates[2].feedback?.[0] ?? "", /^\[attempt 1]/);
-  assert.match(candidates[2].feedback?.[1] ?? "", /^\[attempt 2]/);
-  assert.match(candidates[2].feedback?.[1] ?? "", /notaninstruction/);
+  assert.match(candidates[2].feedback?.[1] ?? "", /^\[attempt 2] ir failed: the IR text is not a program at line \d+/);
+  assert.match(candidates[2].feedback?.[1] ?? "", /found "total"/);
 
   // The next candidate starts clean: candidate 1's diagnostics stay behind.
   assert.equal(candidates[3].feedback, undefined);
@@ -317,7 +353,9 @@ test("diagnostics accumulate across repairs and never reach the next candidate",
 test("a build where nothing is valid fails with a record that says why", async () => {
   const directory = await workspace("fail");
   const replay = join(directory, "candidates.json");
-  await writeFile(replay, JSON.stringify({ candidates: ["\t.globl dotProduct\ndotProduct:\n\tret\n"] }), "utf8");
+  // The one answer a build refuses, so nothing here can be selected: the record
+  // has to say so rather than leave a build that delivered nothing unexplained.
+  await writeFile(replay, JSON.stringify({ candidates: [TEXT_RESULT_IR] }), "utf8");
 
   await assert.rejects(
     () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
@@ -331,7 +369,7 @@ test("a build where nothing is valid fails with a record that says why", async (
   assert.equal(build.error?.category, "AiGenerationError");
 });
 
-test("reuse rebuilds from stored assembly without asking the model", async () => {
+test("reuse rebuilds from the stored implementation without asking the model", async () => {
   const directory = await workspace("reuse");
   const options = { cwd: directory, reuse: false, model: `replay:${REPLAY}` };
   const first = await runBuild("input.toml", options, quiet, "build");
@@ -352,23 +390,7 @@ test("reuse rebuilds from stored assembly without asking the model", async () =>
 /** The same contract, stated as a sum: the object that satisfies it is another. */
 const SUM_SOURCE = INPUT.source.replace("acc += a[i] * b[i]", "acc += a[i] + b[i]");
 
-const SUM_ASSEMBLY = [
-  "\t.globl\tdotProduct",
-  "dotProduct:",
-  "\tvxorps\t%xmm0, %xmm0, %xmm0",
-  "\ttest\t%rdx, %rdx",
-  "\tje\t1f",
-  "\tmovq\t%rdx, %rcx",
-  "2:\tvmovss\t(%rdi), %xmm1",
-  "\tvaddss\t(%rsi), %xmm1, %xmm1",
-  "\tvaddss\t%xmm1, %xmm0, %xmm0",
-  "\taddq\t$4, %rdi",
-  "\taddq\t$4, %rsi",
-  "\tsubq\t$1, %rcx",
-  "\tjne\t2b",
-  "1:\tret",
-  "",
-].join("\n");
+const SUM_IR = irOf("nim", { "module.nim": SUM_SOURCE }, "module.nim", "dotProduct");
 
 /** A replay file of its own, so a test can leave the model unable to answer. */
 async function writableReplay(directory: string, fixture: string): Promise<string> {
@@ -378,27 +400,48 @@ async function writableReplay(directory: string, fixture: string): Promise<strin
 }
 
 /**
- * A program whose only function recurses, which no postcondition can state, so
- * the program it is part of is the only oracle that has anything to say about
- * it.
+ * A program whose only function states no postcondition, which is what a
+ * function that is a branch rather than an expression comes to, so the program
+ * it is part of is the only oracle that has anything to say about it. It
+ * reaches no other function of the program, which is what leaves a candidate
+ * for it a candidate the build may call on its own.
  */
 const COUNTING_PROGRAM = [
   "function down(n: number): number {",
   "  if (n <= 0) {",
   "    return 0;",
   "  }",
-  "  return down(n - 1) + 1;",
+  "  return 1;",
   "}",
   "",
   "console.log(down(3));",
   "",
 ].join("\n");
 
-/** Returns its argument, which is what counting down to zero comes to. */
-const COUNT_ASSEMBLY = [".text", "\t.globl\tdown", "down:", "\tret", ""].join("\n");
+/** One above zero, one at or below it, which is what counting down comes to. */
+const COUNT_IR = irOf("typescript", { "1.ts": COUNTING_PROGRAM }, "1.ts", "down");
 
-/** Answers zero whatever it is given, so the program prints 0 where it prints 3. */
-const WRONG_COUNT_ASSEMBLY = [".text", "\t.globl\tdown", "down:", "\tpxor\t%xmm0, %xmm0", "\tret", ""].join("\n");
+/** Answers zero wherever the source answers one, so the program prints 0 where it prints 1. */
+const WRONG_COUNT_IR = COUNT_IR.replace("  return const[f64] 1", "  return const[f64] 0");
+
+/**
+ * Divides by its argument, which the contract states nothing about, so the zero
+ * an input built from the contract carries is a legal one and the candidate
+ * divides by it. It is the IR the source resolves to with the guard the source
+ * wrote dropped: a candidate that divided after the guard would answer the
+ * probe's zero with the source's own answer and never divide at all, and the
+ * defect this is here for is a division the probe is the first thing to reach.
+ * Nothing about it is visible to a static check: the IR is a function of the
+ * contract and the division is well formed. This is the class of defect the
+ * program round is the only oracle for, and the one faulting a single call is
+ * there to catch early.
+ */
+const DIVIDING_COUNT_IR = [
+  COUNT_IR.slice(0, COUNT_IR.indexOf("  block entry: releases[]")),
+  "  block entry: releases[]",
+  "  return [div[i32] const[i32] 7 local[f64] n]",
+  "",
+].join("\n");
 
 test("reuse refuses to rebuild a function whose contract changed", async () => {
   const directory = await workspace("changed");
@@ -419,7 +462,7 @@ test("a function whose contract changed is generated again", async () => {
   // The contract now states a sum rather than a product, so the object that
   // satisfied the old one cannot satisfy this one, and the model is asked.
   await writeProject(join(directory, "input.toml"), { ...INPUT, source: SUM_SOURCE });
-  await writeFile(replay, JSON.stringify({ candidates: [SUM_ASSEMBLY] }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: [SUM_IR] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
@@ -435,7 +478,7 @@ test("a build reuses a function it already proved, and asks no model for it", as
 
   // The model is left able to answer nothing at all: a build that reuses every
   // function it needs never reaches it.
-  await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: ["not the IR at all"] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
@@ -451,7 +494,7 @@ test("a change that leaves a contract alone does not rebuild the function", asyn
   // A comment is not part of what the function is contracted to do, so the
   // object that was verified is still the object this build links.
   await writeProject(join(directory, "input.toml"), { ...INPUT, source: `${INPUT.source}# a comment\n` });
-  await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: ["not the IR at all"] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
@@ -464,7 +507,7 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
-  await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: ["not the IR at all"] }), "utf8");
   const log: string[] = [];
   const second = await runBuild(
     "input.toml",
@@ -482,30 +525,9 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   assert.equal(run(second.outputPath, [], { input: "run\n5 5 5\n1 2 3 4 5\n1 1 1 1 1\n3 3 3\n2 2 2\n2 2 2\n", timeoutMs: 60_000 }).code, 0);
 });
 
-/**
- * Divides by its argument, which the contract states nothing about, so the zero
- * an input built from the contract carries is a legal one and the candidate
- * faults on it. Nothing about it is visible to a static check: the calls are
- * aligned, the registers are preserved, and the assembly is well formed. This is
- * the class of defect the program round is the only oracle for, and the one
- * faulting a single call is there to catch early.
- */
-const DIVIDING_COUNT_ASSEMBLY = [
-  ".text",
-  ".globl down",
-  "down:",
-  "  cvttsd2siq %xmm0, %rax",
-  "  movq %rax, %rcx",
-  "  movq $7, %rax",
-  "  cqto",
-  "  idivq %rcx",
-  "  ret",
-  "",
-].join("\n");
-
 /** A program project built from recorded candidates, with the generation limits the test needs. */
-async function countedProject(name: string, assemblies: string[], maxCandidates: number): Promise<string> {
-  const directory = await programProject(name, COUNTING_PROGRAM, assemblies[0]);
+async function countedProject(name: string, answers: string[], maxCandidates: number): Promise<string> {
+  const directory = await programProject(name, COUNTING_PROGRAM, answers[0]);
   await writeProject(join(directory, "input.toml"), {
     ...INPUT,
     language: "typescript",
@@ -513,12 +535,12 @@ async function countedProject(name: string, assemblies: string[], maxCandidates:
     source: COUNTING_PROGRAM,
     generation: { maxCandidates, maxAttempts: 1 },
   });
-  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: assemblies }), "utf8");
+  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: answers }), "utf8");
   return directory;
 }
 
 test("a definition candidate that faults on the call is rejected before it is selected", async () => {
-  const directory = await countedProject("faulting", [DIVIDING_COUNT_ASSEMBLY], 1);
+  const directory = await countedProject("faulting", [DIVIDING_COUNT_IR], 1);
   // The fault is attributed to the function and to the candidate that caused
   // it, which is what lets a repair round regenerate one function rather than
   // every definition in the program.
@@ -538,7 +560,7 @@ test("a definition candidate that faults on the call is rejected before it is se
 });
 
 test("a candidate that faults is not selected over one that runs", async () => {
-  const directory = await countedProject("one-good", [DIVIDING_COUNT_ASSEMBLY, COUNT_ASSEMBLY], 2);
+  const directory = await countedProject("one-good", [DIVIDING_COUNT_IR, COUNT_IR], 2);
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
@@ -558,7 +580,7 @@ test("a candidate that faults is not selected over one that runs", async () => {
 });
 
 test("a function the program never agreed with is not reused", async () => {
-  const directory = await programProject("unproved", COUNTING_PROGRAM, WRONG_COUNT_ASSEMBLY);
+  const directory = await programProject("unproved", COUNTING_PROGRAM, WRONG_COUNT_IR);
   const replay = join(directory, "candidates.json");
   await assert.rejects(
     () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
@@ -567,7 +589,7 @@ test("a function the program never agreed with is not reused", async () => {
 
   // The program is what proves a function it is the only oracle for, so an
   // implementation the program rejected is regenerated rather than reused.
-  await writeFile(replay, JSON.stringify({ candidates: [COUNT_ASSEMBLY] }), "utf8");
+  await writeFile(replay, JSON.stringify({ candidates: [COUNT_IR] }), "utf8");
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 },
@@ -672,31 +694,18 @@ const REFERENCE_PROGRAM = [
   "",
 ].join("\n");
 
-const DEPTH_ASSEMBLY = [
-  ".text",
-  ".globl depth",
-  "depth:",
-  "  testq %rdi, %rdi",
-  "  je .Lempty",
-  "  movabsq $4607182418800017408, %rax",
-  "  movq %rax, %xmm0",
-  "  ret",
-  ".Lempty:",
-  "  pxor %xmm0, %xmm0",
-  "  ret",
-  "",
-].join("\n");
+const DEPTH_IR = irOf("typescript", { "1.ts": REFERENCE_PROGRAM }, "1.ts", "depth");
 
 /** A program project, compiled by recorded candidates rather than by a model. */
-async function programProject(name: string, source: string, assembly: string): Promise<string> {
+async function programProject(name: string, source: string, answer: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeProject(join(directory, "input.toml"), { ...INPUT, language: "typescript", entry: "", source });
-  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: [assembly] }), "utf8");
+  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: [answer] }), "utf8");
   return directory;
 }
 
 test("a program whose function takes a reference is built, because the program is what checks it", async () => {
-  const directory = await programProject("reference", REFERENCE_PROGRAM, DEPTH_ASSEMBLY);
+  const directory = await programProject("reference", REFERENCE_PROGRAM, DEPTH_IR);
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
@@ -735,34 +744,10 @@ const CALLING_PROGRAM = [
 ].join("\n");
 
 /** The callee: returns its argument doubled, as the source says. */
-const TWICE_ASSEMBLY = [
-  ".text",
-  "\t.globl\ttwice",
-  "twice:",
-  "\taddsd\t%xmm0, %xmm0",
-  "\tret",
-  "",
-].join("\n");
+const TWICE_IR = irOf("typescript", { "main.ts": CALLING_PROGRAM }, "main.ts", "twice");
 
 /** The caller: prints what the callee returns, rather than computing it again. */
-// The entry returns: a candidate that runs off its own end falls into
-// whatever the linker put after it, so the program is killed by SIGSEGV and
-// the build reports that rather than the arithmetic it was written for.
-const MAIN_CALLS_TWICE_ASSEMBLY = [
-  ".text",
-  "\t.globl\tblaze_main",
-  "blaze_main:",
-  "\tsubq\t$24, %rsp",
-  "\tmovabsq\t$4626604192193052672, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tcall\ttwice",
-  "\tmovq\t%xmm0, %rdi",
-  "\tcall\tblaze_rt_print_number",
-  "\tcall\tblaze_rt_print_newline",
-  "\taddq\t$24, %rsp",
-  "\tret",
-  "",
-].join("\n");
+const MAIN_CALLS_TWICE_IR = irOf("typescript", { "main.ts": CALLING_PROGRAM }, "main.ts", "main");
 
 /**
  * A two-function program project, answered per function rather than per
@@ -782,11 +767,11 @@ async function callingProject(
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   });
-  return { directory, answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : TWICE_ASSEMBLY) };
+  return { directory, answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : TWICE_IR) };
 }
 
 test("a function that calls another function of the program is built and checked by it", async (t) => {
-  const { directory, answer } = await callingProject("calls-sibling", MAIN_CALLS_TWICE_ASSEMBLY);
+  const { directory, answer } = await callingProject("calls-sibling", MAIN_CALLS_TWICE_IR);
   await chatEndpoint(t, [], { answer });
 
   const outcome = await runBuild(
@@ -829,9 +814,9 @@ test("a function that calls another function wrongly is rejected by the program"
   // The caller doubles what the callee already doubled, so the program prints
   // 84 where the source prints 42. Nothing is wrong with the candidate on its
   // own, and the program is the only thing that can see it.
-  const wrong = MAIN_CALLS_TWICE_ASSEMBLY.replace(
-    "\tmovq\t%xmm0, %rdi",
-    "\taddsd\t%xmm0, %xmm0\n\tmovq\t%xmm0, %rdi",
+  const wrong = MAIN_CALLS_TWICE_IR.replace(
+    "print_number [call[f64] twice [arg[f64] const[f64] 21] ownership=none retain=no] @6",
+    "print_number [add[f64] [call[f64] twice [arg[f64] const[f64] 21] ownership=none retain=no] const[f64] 42] @6",
   );
   const { directory, answer } = await callingProject("wrong-call", wrong);
   await chatEndpoint(t, [], { answer });
@@ -874,62 +859,46 @@ const WRITTEN_OUT_PROGRAM = [
 ].join("\n");
 
 /** The callee: three above two, and one at or below it. */
-const STEP_ASSEMBLY = [
-  ".text",
-  "\t.globl\tstep",
-  "step:",
-  "\tmovabsq\t$4611686018427387904, %rax",
-  "\tmovq\t%rax, %xmm1",
-  "\tcomisd\t%xmm1, %xmm0",
-  "\tjbe\t.Llow",
-  "\tmovabsq\t$4613937818241073152, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tret",
-  ".Llow:",
-  "\tmovabsq\t$4607182418800017408, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tret",
+const STEP_IR = irOf("typescript", { "main.ts": WRITTEN_OUT_PROGRAM }, "main.ts", "step");
+
+/** The caller as the source writes it: a call to the callee it was told to write out. */
+const MAIN_CALLS_STEP_IR = irOf("typescript", { "main.ts": WRITTEN_OUT_PROGRAM }, "main.ts", "main");
+
+/**
+ * The same program with the callee's own body written into the caller, which is
+ * what the outline asks for: the IR the compiler resolves for a caller that
+ * computes `step(3)` itself is the answer a candidate that writes the call out
+ * is written from, so it is resolved rather than written by hand here. Its line
+ * numbers are that program's, which is nothing the contract reads.
+ */
+const WRITTEN_OUT_MAIN_PROGRAM = [
+  "function step(n: number): number {",
+  "  if (n > 2) {",
+  "    return 3;",
+  "  }",
+  "  return 1;",
+  "}",
+  "",
+  "function main(): void {",
+  "  const n = 3;",
+  "  if (n > 2) {",
+  "    console.log(3);",
+  "  } else {",
+  "    console.log(1);",
+  "  }",
+  "}",
+  "",
+  "main();",
   "",
 ].join("\n");
 
 /**
  * The caller: it writes out what `step` does rather than calling it, so it
- * references no other symbol of the program and is linked and probed on its
- * own. The branch is the callee's own, so the program is what says whether the
- * copy agrees with it. The entry returns, so a candidate that runs off its own
- * end falls into whatever the linker put after it.
+ * declares no call for it, references no other symbol of the program and is
+ * linked and probed on its own. The branch is the callee's own, so the program
+ * is what says whether the copy agrees with it.
  */
-const MAIN_WRITES_STEP_ASSEMBLY = [
-  ".text",
-  "\t.globl\tblaze_main",
-  "blaze_main:",
-  "\tsubq\t$24, %rsp",
-  "\tmovabsq\t$4613937818241073152, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tmovabsq\t$4611686018427387904, %rax",
-  "\tmovq\t%rax, %xmm1",
-  "\tcomisd\t%xmm1, %xmm0",
-  "\tjbe\t.Llow",
-  "\tmovabsq\t$4613937818241073152, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tjmp\t.Lprint",
-  ".Llow:",
-  "\tmovabsq\t$4607182418800017408, %rax",
-  "\tmovq\t%rax, %xmm0",
-  ".Lprint:",
-  "\tmovq\t%xmm0, %rdi",
-  "\tcall\tblaze_rt_print_number",
-  "\tcall\tblaze_rt_print_newline",
-  "\taddq\t$24, %rsp",
-  "\tret",
-  "",
-].join("\n");
-
-/** The same caller, but reaching for the callee's symbol the outline refused it. */
-const MAIN_CALLS_STEP_ASSEMBLY = MAIN_WRITES_STEP_ASSEMBLY.replace(
-  "\tmovq\t%xmm0, %rdi",
-  "\tcall\tstep\n\tmovq\t%xmm0, %rdi",
-);
+const MAIN_WRITES_STEP_IR = irOf("typescript", { "main.ts": WRITTEN_OUT_MAIN_PROGRAM }, "main.ts", "main");
 
 /**
  * A two-function program project answered per function rather than per request:
@@ -958,12 +927,7 @@ async function writtenOutProject(
 }
 
 test("a caller the outline tells to write a callee out is checked on its own", async (t) => {
-  const { directory, answer } = await writtenOutProject(
-    "writes-out",
-    WRITTEN_OUT_PROGRAM,
-    MAIN_WRITES_STEP_ASSEMBLY,
-    STEP_ASSEMBLY,
-  );
+  const { directory, answer } = await writtenOutProject("writes-out", WRITTEN_OUT_PROGRAM, MAIN_WRITES_STEP_IR, STEP_IR);
   await chatEndpoint(t, [], { answer });
 
   const outcome = await runBuild(
@@ -978,10 +942,10 @@ test("a caller the outline tells to write a callee out is checked on its own", a
   assert.ok(outcome.outputPath !== null);
   assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "3\n");
 
-  // The whole point of writing the call out: the caller references no other
-  // symbol of the program, so it is linked on its own and probed. A candidate
-  // that called the callee would be carried to the program round instead, with
-  // no run and no fault of its own.
+  // The whole point of writing the call out: the caller declares no call for
+  // the callee and references no other symbol of the program, so it is linked
+  // on its own and probed. A candidate that declared the call would be carried
+  // to the program round instead, with no run and no fault of its own.
   const generation = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
@@ -991,15 +955,11 @@ test("a caller the outline tells to write a callee out is checked on its own", a
 });
 
 test("a candidate that calls a callee it was told to write out is rejected", async (t) => {
-  // The symbol is not among the ones it may reference, and the assembler turns
-  // that away rather than letting the call stand: the body was already in its
-  // prompt, so a reference to it is a reimplementation behind a local label.
-  const { directory, answer } = await writtenOutProject(
-    "calls-refused",
-    WRITTEN_OUT_PROGRAM,
-    MAIN_CALLS_STEP_ASSEMBLY,
-    STEP_ASSEMBLY,
-  );
+  // The candidate declares the call the outline refused it, so the program is
+  // linked without the callee it was told to write out and the linker turns the
+  // reference away: the body was already in its prompt, so reaching for the
+  // symbol is a reimplementation behind a call.
+  const { directory, answer } = await writtenOutProject("calls-refused", WRITTEN_OUT_PROGRAM, MAIN_CALLS_STEP_IR, STEP_IR);
   await chatEndpoint(t, [], { answer });
 
   const failure = await runBuild(
@@ -1011,7 +971,7 @@ test("a candidate that calls a callee it was told to write out is rejected", asy
     () => { throw new Error("a candidate that calls a callee it was told to write out must not be delivered"); },
     (error: CompilerError) => error,
   );
-  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /"step" is referenced but not defined/);
+  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /undefined reference to `step'/);
 });
 
 /**
@@ -1041,43 +1001,26 @@ const TRANSITIVE_PROGRAM = [
 /**
  * The caller: it writes out what `step` does, and what `step` does is call
  * `twice`. That call is `main`'s to make, so `twice` has to be a symbol this
- * candidate may reference; before it was one, the assembler rejected the
- * candidate for naming it and the build failed on a program it should deliver.
+ * candidate may reference; before it was one, the candidate that named it was
+ * rejected and the build failed on a program it should deliver. A candidate
+ * handed a callee's body to write out may name the call that body makes, so
+ * `twice` is a call this candidate may declare even though the source's own
+ * `main` never names it. The answer is the IR the source resolves to with the
+ * call in the header changed to the one the written-out body makes, and the
+ * body making it: `step(3)` is `twice(3)`.
  */
-const MAIN_WRITES_TRANSITIVE_ASSEMBLY = [
-  ".text",
-  "\t.globl\tblaze_main",
-  "blaze_main:",
-  "\tsubq\t$8, %rsp",
-  "\tmovabsq\t$4613937818241073152, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tcall\ttwice",
-  "\tmovq\t%xmm0, %rdi",
-  "\tcall\tblaze_rt_print_number",
-  "\tcall\tblaze_rt_print_newline",
-  "\taddq\t$8, %rsp",
-  "\tret",
-  "",
-].join("\n");
+const MAIN_WRITES_TRANSITIVE_IR = irOf("typescript", { "main.ts": TRANSITIVE_PROGRAM }, "main.ts", "main")
+  .replace("  call step\n", "  call twice\n")
+  .replace(
+    "print_number [call[f64] step [arg[f64] const[f64] 3] ownership=none retain=no] @13",
+    "print_number [call[f64] twice [arg[f64] const[f64] 3] ownership=none retain=no] @13",
+  );
 
 /** `step` on its own: still a call to `twice`, and still its own object. */
-const STEP_TRANSITIVE_ASSEMBLY = [
-  ".text",
-  "\t.globl\tstep",
-  "step:",
-  "\tmovabsq\t$4611686018427387904, %rax",
-  "\tmovq\t%rax, %xmm1",
-  "\tcomisd\t%xmm1, %xmm0",
-  "\tjbe\t.Llow",
-  "\tmovabsq\t$4613937818241073152, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tret",
-  ".Llow:",
-  "\tmovabsq\t$4607182418800017408, %rax",
-  "\tmovq\t%rax, %xmm0",
-  "\tret",
-  "",
-].join("\n");
+const STEP_TRANSITIVE_IR = irOf("typescript", { "main.ts": TRANSITIVE_PROGRAM }, "main.ts", "step");
+
+/** The callee of both, which the program records as reachable from either. */
+const TWICE_TRANSITIVE_IR = irOf("typescript", { "main.ts": TRANSITIVE_PROGRAM }, "main.ts", "twice");
 
 test("a call inside a body the outline tells a candidate to write out is a call it may make", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "blaze-writes-transitive-"));
@@ -1092,10 +1035,10 @@ test("a call inside a body the outline tells a candidate to write out is a call 
   await chatEndpoint(t, [], {
     answer: (prompt: string) =>
       prompt.includes("function being written: main")
-        ? MAIN_WRITES_TRANSITIVE_ASSEMBLY
+        ? MAIN_WRITES_TRANSITIVE_IR
         : prompt.includes("function being written: step")
-          ? STEP_TRANSITIVE_ASSEMBLY
-          : TWICE_ASSEMBLY,
+          ? STEP_TRANSITIVE_IR
+          : TWICE_TRANSITIVE_IR,
   });
 
   const outcome = await runBuild(
@@ -1114,8 +1057,11 @@ test("a call inside a body the outline tells a candidate to write out is a call 
 
 test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {
   const source = ["function main(): number {", "  return 40 + 2;", "}", "", "main();", 'console.log(`answer: ${42}`);', ""].join("\n");
-  const assembly = [".text", ".globl blaze_main", "blaze_main:", "  movabsq $4631107791820423168, %rax", "  movq %rax, %xmm0", "  ret", ""].join("\n");
-  const directory = await programProject("entry-symbol", source, assembly);
+  // The entry is written under the symbol its contract names, so the IR a
+  // candidate answers with is headed `main as blaze_main`.
+  const answer = irOf("typescript", { "module.ts": source }, "module.ts", "main");
+  assert.match(answer, /^function main as blaze_main\(\) -> f64$/m);
+  const directory = await programProject("entry-symbol", source, answer);
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
@@ -1316,7 +1262,7 @@ async function multiFileProject(name: string, helper: string): Promise<string> {
     sourceFile: "dot.ts",
     entry: "dotProduct",
     target: INPUT.target,
-    // The fixture this build replays is assembly.
+    // The fixture this build replays answers in the IR, like every other kind.
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
     test: { randomCases: 4, maxLength: 32, seed: 3 },

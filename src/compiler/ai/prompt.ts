@@ -1,18 +1,19 @@
 /**
  * Prompt construction for the AI backend.
  *
- * The prompt states the target, the ABI, the function signature, the semantic
- * and memory requirements, the numerical semantics and the optimization
- * objective. It also states the program the function belongs to: the source of
- * the module being written, the contract of every other file, and the imports
- * between them, so a backend never has to infer a cross-file contract. It
- * never dictates an implementation strategy.
+ * The prompt states the target, the function signature, the semantic and memory
+ * requirements, the numerical semantics and the optimization objective. It
+ * also states the program the function belongs to: the source of the module
+ * being written, the contract of every other file, and the imports between
+ * them, so a backend never has to infer a cross-file contract. It never
+ * dictates an implementation strategy.
  *
- * Everything the toolchain rejects a candidate for is stated in the prompt
- * rather than left for the candidate to find out: the symbol to define, the
- * labels and the calls a candidate may write, the registers it has to preserve,
- * and what a candidate is checked against. A rule the assembler enforces and
- * the prompt does not state is an attempt the model spends to learn it.
+ * The answer is the semantic IR for every output kind, so what the prompt has
+ * to state is what a candidate may say, not how to say it in registers: the
+ * calls a candidate may write, the object layouts it may hand back, and what
+ * a candidate is checked against. A rule the lowering enforces is a rule the
+ * model cannot break, so the prompt says nothing about registers, calling
+ * conventions or an ABI: those are the compiler's, downstream of the answer.
  */
 
 import type {
@@ -25,12 +26,9 @@ import type {
   TargetSpec,
 } from "../core/types.ts";
 import { isBufferType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
+import { cDeclarationType } from "../toolchain/linker.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { calledOut, contractsByName, writtenOut } from "../semantics/calls.ts";
-import { cSignature, cSourceRules } from "../toolchain/csource.ts";
-import { wasmSignature } from "../toolchain/wasm.ts";
-import { cDeclarationType, sysvArgumentLocations, sysvReturnLocation } from "../toolchain/linker.ts";
-import { runtimePromptSection, type RuntimeNeeds } from "../runtime/abi.ts";
 import { functionOutline, OUTLINE_NOTATION } from "./outline.ts";
 import { IR_EXAMPLE, IR_SYNTAX } from "./ir-format.ts";
 
@@ -97,39 +95,6 @@ export interface ProgramFailure {
   readonly previous: string;
 }
 
-const NATIVE_LANGUAGE = "GNU assembler (GAS) AT&T syntax for x86-64";
-
-/**
- * The rules a machine candidate is held to. What can be read off the text of
- * the candidate is enforced by the assembler before it is run, so a rule left
- * out of that check is an attempt spent learning it from a rejection. The one
- * that is not is register preservation, which only shows up once the candidate
- * is linked and run.
- */
-function nativeRules(contract: FunctionContract, plan: CallPlan): string[] {
-  const symbol = symbolOf(contract);
-  const { called, written } = plan;
-  const referenceable = [symbol, ...called.map(symbolOf)].map((name) => `"${name}"`).join(", ");
-  return [
-    `Declare it with ".global ${symbol}" and define it with the label "${symbol}:", and export nothing else.`,
-    'Every other label you define must start with a dot, as in ".Lloop:": a label that is neither the contracted symbol nor a local one is rejected.',
-    `The only symbols you may reference are ${referenceable}, and the runtime ABI entry points above.`,
-    called.length === 0
-      ? "You call no other function of this program, so this candidate is assembled, linked and run on its own, and a fault in it is reported against this function."
-      : "The functions listed under CALLS are compiled on their own and linked beside yours, so call them by the symbol given rather than writing out what they do. A candidate that calls one is linked only into the program, which is the only thing that runs it, so nothing here checks it on its own.",
-    ...(written.length === 0
-      ? []
-      : [
-          "The functions listed under WRITE OUT are not symbols you may call, and the compiler rejects a",
-          "reference to one: what they do is in your prompt, so write each out where your body calls it.",
-        ]),
-    "It is entered and left as an ordinary System V call, so preserve rbx, rbp and r12 to r15, leave rsp where you found it, and return with ret.",
-    "You arrive with the return address still on the stack, so rsp is 8 past a 16-byte boundary, and it has to be back on a 16-byte boundary at every call you make: an allocation that is a multiple of 16 leaves it 8 out, and the runtime you call uses aligned moves on its own frame. Subtract a multiple of 16 plus 8, or realign with \"andq $-16, %rsp\" before the call and put it back after.",
-    "The 128 bytes below rsp are yours to use without adjusting it only while you make no calls; a call may use that space for itself.",
-    "Do not emit .section, .arch, .cpu, .file, .include, .incbin, .macro or .rept; the compiler supplies the architecture prelude.",
-  ];
-}
-
 /**
  * What a candidate is told about each function its body reaches: the ones it
  * calls by symbol, and the ones it writes out. The outline has already decided
@@ -160,53 +125,39 @@ function callPlan(contract: FunctionContract, program: ProgramContract): CallPla
   };
 }
 
-/** A callee as a call is written from it: signature, argument locations, result. */
+
+/** A callee as a call is written from it: its contract, and its result. */
 function renderCallable(callee: FunctionContract): string[] {
+  const parameters = callee.function.params.map((param) => `${param.name}: ${param.type}`);
   return [
-    `${symbolOf(callee)}(${callee.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${callee.function.returns}`,
-    `  C prototype: ${renderSignature(callee)}`,
-    `  argument locations: ${sysvArgumentLocations(callee.function.params)}`,
-    `  return value: ${sysvReturnLocation(parseType(callee.function.returns))}`,
+    `${callee.function.name}(${parameters.join(", ")}) -> ${callee.function.returns}`,
+    ...callee.requires.map((requirement) => `  requires ${requirement}`),
+    ...callee.ensures.map((condition) => `  ensures ${condition}`),
   ];
 }
 
-/** What a C or WebAssembly candidate is held to. The C compiler and the module checks enforce these. */
-const OUTPUT_LANGUAGE: Record<OutputKind, { language: string; rules: string[] }> = {
-  machine: { language: NATIVE_LANGUAGE, rules: [] },
-  asm: { language: NATIVE_LANGUAGE, rules: [] },
-  c: {
-    language: "C11",
-    rules: [
-      "Define exactly one function, named and typed as in the signature below, and nothing else: no main, no globals, no helper symbols.",
-      cSourceRules,
-    ],
-  },
-  ir: {
-    language: "semantic IR",
-    rules: [
-      "Answer with the whole function as semantic IR, written in the syntax the IR SYNTAX section gives, and nothing else.",
-      "The compiler reads it back, checks it against this contract, and writes the target code itself. A register, a stack offset, an instruction, an ABI and a calling convention are yours in neither sense: the IR has no way to say them.",
-      "Change the IR, never the contract: the signature, the conditions, the effects, the object layouts and the callee names are the contract's, and the compiler refuses a candidate that disagrees with one of them.",
-      "A function whose body you can write as a different sequence of the same IR is a better answer than one you cannot: the IR is what the compiler validates, so an unvalid one is never compiled.",
-    ],
-  },
-  wasm: {
-    language: "WebAssembly text format (WAT)",
-    rules: [
-      'Emit a single module that imports only its linear memory: (import "env" "memory" (memory 1)).',
-      "Export exactly the contracted function, with the signature below. Pointers are i32 byte offsets into the imported memory; the host places the buffers.",
-      "Do not import functions, tables or globals, do not export memory or _start, and do not use a start section.",
-      "Use only numeric instructions. The module must be self contained.",
-    ],
-  },
+/**
+ * What a candidate is held to, which is the same for every output kind: the
+ * answer is the IR, and the compiler lowers it to whatever the build asked for.
+ * A register, a stack offset, an instruction, an ABI and a calling convention
+ * are a model's to choose on no kind, because the IR has no way to say them.
+ */
+const OUTPUT_LANGUAGE = {
+  language: "semantic IR",
+  rules: [
+    "Answer with the whole function as semantic IR, written in the syntax the IR SYNTAX section gives, and nothing else.",
+    "The compiler reads it back, checks it against this contract, and writes the target code itself. A register, a stack offset, an instruction, an ABI and a calling convention are yours in neither sense: the IR has no way to say them.",
+    "Change the IR, never the contract: the signature, the conditions, the effects, the object layouts and the callee names are the contract's, and the compiler refuses a candidate that disagrees with one of them.",
+    "A function whose body you can write as a different sequence of the same IR is a better answer than one you cannot: the IR is what the compiler validates, so an unvalid one is never compiled.",
+  ],
 };
 
 /**
- * The system prompt, which the output kind decides: a WebAssembly module has
- * no architecture prelude and no harness, so telling a model to leave them
- * alone would be telling it about a build that does not exist.
+ * The system prompt, which no longer varies: every build answers in the IR
+ * and the compiler writes the target code, so there is no architecture
+ * prelude, harness or host for a model to be told to leave alone.
  */
-export function buildSystemPrompt(output: OutputKind): string {
+export function buildSystemPrompt(): string {
   return [
     "You are a code generation backend.",
     "",
@@ -218,19 +169,11 @@ export function buildSystemPrompt(output: OutputKind): string {
     "Rules for the implementation you emit:",
     "- Write it in the output language named in the request, and follow the rules",
     "  listed there exactly.",
-    ...(output === "wasm" || output === "ir"
-      ? []
-      : [
-          "- The architecture prelude, the harness, the host and the build are compiler",
-          "  code. Emit only the contracted function.",
-        ]),
-    ...(output === "ir"
-      ? [
-          "- The IR you write is the program: it is what the compiler validates and",
-          "  what it lowers. Write it in the syntax the request gives you, for the",
-          "  body the request describes, and change it as the diagnostics below say to.",
-        ]
-      : []),
+    "- The IR you write is the program: it is what the compiler validates and what",
+    "  it lowers to the target. Write it in the syntax the request gives you, for",
+    "  the body the request describes, and change it as the diagnostics say to.",
+    "- The target code, the build, the harness and the host are compiler code.",
+    "  Emit only the contracted function.",
     "- Do not write a description of the algorithm outside the code. A short comment",
     "  inside the code is fine.",
     "- Return the code and nothing else, and put nothing else beside it.",
@@ -248,11 +191,6 @@ export function buildSystemPrompt(output: OutputKind): string {
   ].join("\n");
 }
 
-function renderSignature(contract: FunctionContract): string {
-  const parameters = contract.function.params.map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`);
-  const returns = cDeclarationType(parseType(contract.function.returns));
-  return `${returns} ${contract.function.name}(${parameters.join(", ")})`;
-}
 
 function renderMemory(contract: FunctionContract): string {
   const lines: string[] = [];
@@ -419,34 +357,6 @@ function renderContract(contract: FunctionContract): string {
   return JSON.stringify({ ...contract, definition: whatItDoes }, null, 2);
 }
 
-/**
- * The runtime services a candidate can reach, which is what the ABI section
- * offers it.
- *
- * The needs are this function's own. A function it calls brings its own object
- * and its own needs with it, so they are not this candidate's to carry; a
- * function it writes out is one the outline only marked that way because it
- * allocates nothing, prints nothing and reads no arguments, and so has no
- * needs of its own to carry either. That leaves this body alone, which is
- * where every construct a candidate can reach through is stated.
- *
- * The needs are read from the body the compiler resolved, so they say what this
- * function reaches for rather than what an implementation might.
- */
-function runtimeNeeds(request: PromptRequest): RuntimeNeeds {
-  const { contract } = request;
-  if (isBufferType(parseType(contract.function.returns))) return { memory: true };
-  const definition = contract.definition;
-  const needs: RuntimeNeeds = {};
-  if (definition.allocates) Object.assign(needs, { memory: true, object: true });
-  // A function that prints text has to have text to print, and the only way
-  // to come by it is a string the runtime builds. Without the memory tag the
-  // constructor is filtered out of the ABI section and the prompt is left
-  // telling the model to print text it has no way to make.
-  if (definition.prints) Object.assign(needs, { output: true, memory: true });
-  if (definition.readsArgv) needs.arguments = true;
-  return needs;
-}
 
 /** The whole program: the module being written, and the contract of every other. */
 function renderProgram(request: PromptRequest): string {
@@ -513,17 +423,6 @@ function asBullet(entry: string): string {
   return [`- ${head}`, ...rest.map((line) => `  ${line}`)].join("\n");
 }
 
-/** The symbol every output is delivered under, which is not always its name. */
-function renderSymbol(contract: FunctionContract, output: OutputKind): string[] {
-  const symbol = symbolOf(contract);
-  if (output === "c") return [`function to define: ${symbol}`];
-  if (output === "wasm") return [`function to export: ${symbol}`];
-  return [
-    `symbol to define: ${symbol}`,
-    `label: ${symbol}:`,
-    `directive: .global ${symbol}`,
-  ];
-}
 
 /**
  * The section that repairs a candidate, which is either a rejection of the
@@ -596,69 +495,47 @@ function renderRepair(request: PromptRequest, language: string): string {
 }
 
 export function buildUserPrompt(request: PromptRequest): string {
-  const { contract, target, output, runtime, candidate, candidates, previous, programFailure } = request;
+  const { contract, target, candidate, candidates, previous, programFailure } = request;
 
-  const language = OUTPUT_LANGUAGE[output];
-  const native = output === "asm" || output === "machine";
-  // An IR candidate is lowered by the compiler, so the target facts a model needs
-  // in order to write machine code — where an argument is, which registers to
-  // preserve, how deep a frame is — are facts it is not asked for at all.
-  const lowered = output === "ir";
+  const language = OUTPUT_LANGUAGE;
   const semantic = request.semantics[contract.function.name];
   const plan = callPlan(contract, request.program);
-  const rules = native ? nativeRules(contract, plan) : language.rules;
 
   const sections: string[] = [];
   sections.push(`CONTRACT\n${renderContract(contract)}`);
   sections.push(renderProgram(request));
   sections.push(renderTarget(target));
-  if (output !== "wasm") sections.push(`RUNTIME\n${runtimePromptSection(runtime, runtimeNeeds(request))}`);
-  sections.push(["OUTPUT LANGUAGE", `Write ${language.language}.`, ...rules.map((rule) => `- ${rule}`)].join("\n"));
-  // An IR candidate has to be told the form it is answering in. The compiler
-  // keeps the IR of the function being written to itself: a prompt carrying it
-  // would be carrying the answer, so what is stated here is the syntax of the
-  // form and a whole function written in it, and nothing of this program.
-  if (lowered) {
-    sections.push(["IR SYNTAX", ...IR_SYNTAX, "", "A whole function written in it:", "```", IR_EXAMPLE.trimEnd(), "```"].join("\n"));
-  }
+  sections.push(["OUTPUT LANGUAGE", `Write ${language.language}.`, ...language.rules.map((rule) => `- ${rule}`)].join("\n"));
+  // A candidate has to be told the form it is answering in, on every kind. The
+  // compiler keeps the IR of the function being written to itself: a prompt
+  // carrying it would be carrying the answer, so what is stated here is the
+  // syntax of the form and a whole function written in it, and nothing of this
+  // program.
+  sections.push(["IR SYNTAX", ...IR_SYNTAX, "", "A whole function written in it:", "```", IR_EXAMPLE.trimEnd(), "```"].join("\n"));
+  // Nothing below tells a candidate where an argument is or which register a
+  // value lives in. The compiler writes the target code, and the target decides
+  // both, so those are facts the prompt does not carry because nothing asks.
   sections.push(
-    [
-      "SIGNATURE",
-      ...renderSymbol(contract, output),
-      `C prototype: ${renderSignature(contract)}`,
-      ...(native
-        ? [
-            `argument locations: ${sysvArgumentLocations(contract.function.params)}`,
-            `return value: ${sysvReturnLocation(parseType(contract.function.returns))}`,
-          ]
-        : []),
-      ...(lowered
-        ? ["The compiler lowers this IR to the target, and the target decides where arguments are and which registers a value lives in."]
-        : []),
-      ...(output === "c" ? [`C definition to write: ${cSignature(contract)}`] : []),
-      ...(output === "wasm" ? [`WebAssembly signature to export: ${wasmSignature(contract)}`] : []),
-      "parameter types:",
-      renderTypes(contract),
-    ].join("\n"),
+    ["SIGNATURE", `function to implement: ${symbolOf(contract)}`, "parameter types:", renderTypes(contract)].join("\n"),
   );
-  if (native && plan.called.length > 0) {
+  if (plan.called.length > 0) {
     sections.push(
       [
         "CALLS",
-        "Each of these is compiled on its own and linked beside yours, so call it instead of writing out",
-        "what it does. They are ordinary System V calls, at the locations given:",
+        "Each of these is compiled on its own and linked beside yours, so call it by name instead of",
+        "writing out what it does. Its contract is:",
         ...plan.called.flatMap((callee) => renderCallable(callee)),
         "The program you are part of is the only thing that runs a candidate that calls one, so nothing",
         "verifies it here and a call that is wrong shows up as the whole program printing something else.",
       ].join("\n"),
     );
   }
-  if (native && plan.written.length > 0) {
+  if (plan.written.length > 0) {
     sections.push(
       [
         "WRITE OUT",
-        "Your body reaches each of these, and each is implemented here rather than called, so their",
-        "symbols are not among the ones you may reference. What each one does:",
+        "Your body reaches each of these, and each is implemented here rather than called, so a call to",
+        "one is not a call you may make. What each one does:",
         ...plan.written.flatMap((callee) => renderWrittenOut(callee, request.semantics[callee.function.name])),
       ].join("\n"),
     );
@@ -706,8 +583,8 @@ export function buildUserPrompt(request: PromptRequest): string {
         ? ["none: the source function touches nothing outside its arguments, and neither may yours"]
         : [
             `the source function: ${contract.effects.join(", ")}`,
-            "these are reached through the runtime ABI above and never directly: the output entries",
-            "print, and the argument entries read the command line.",
+            "The compiler reaches them through the runtime when it lowers your IR, so state the effect in",
+            "the body and the compiler writes the call: printing, the command line, the heap.",
           ]),
     ].join("\n"),
   );

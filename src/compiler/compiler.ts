@@ -54,7 +54,7 @@ import { buildProgramHost } from "./runtime/nim-program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
-import { printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
+import { parseSemanticFunction, printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
 import { validateSemanticProgram } from "./semantics/ir-validate.ts";
 import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.ts";
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
@@ -128,7 +128,7 @@ export interface BuildOptions {
   cwd: string;
   /** Model specification, overriding AI_MODEL. */
   model?: string;
-  /** Reuse previously generated and verified assembly instead of calling the model. */
+  /** Reuse previously generated and verified candidates instead of calling the model. */
   reuse: boolean;
   maxCandidates?: number;
   maxAttempts?: number;
@@ -189,8 +189,8 @@ export interface ProjectPaths {
   outputBinary: string;
   outputAssembly: string;
   outputSource: string;
+  outputIr: string;
   outputModule: string;
-  outputWebAssemblyText: string;
   outputProgram: string;
 }
 
@@ -270,8 +270,8 @@ function projectPaths(id: string): ProjectPaths {
     outputBinary: `${root}/output/${id}`,
     outputAssembly: `${root}/output/${id}.s`,
     outputSource: `${root}/output/${id}.c`,
+    outputIr: `${root}/output/${id}.ir`,
     outputModule: `${root}/output/${id}.wasm`,
-    outputWebAssemblyText: `${root}/output/${id}.wat`,
     outputProgram: `${root}/output/${id}.program`,
   };
 }
@@ -432,7 +432,7 @@ export function modelSpec(selection: SourceInput["model"], path: string): string
         category: "InputError",
         stage: "input",
         message: `${path} selects the replay provider without a "file"`,
-        detail: 'the offline provider serves recorded assembly: "model": { "provider": "replay", "file": "candidate.json" }',
+        detail: 'the offline provider serves recorded IR: "model": { "provider": "replay", "file": "candidate.json" }',
       });
     }
     return `replay:${file}`;
@@ -632,18 +632,20 @@ function compilationUnits(program: ProgramContract, isProgram: boolean): Compila
   return units;
 }
 
-/** A program is delivered as a binary, so a program build links one. */
+/**
+ * A program is linked from native objects, so the one kind that produces no
+ * object cannot build one. Every other kind answers in the IR and the compiler
+ * writes the target code, so the driver links beside the others exactly as it
+ * always did.
+ */
 function assertProgramOutput(output: OutputKind): void {
-  // A program is delivered as a binary, and what its functions are generated in
-  // does not change that: IR is lowered by the compiler, and every other kind
-  // is a deliverable in its own right.
-  if (output === "machine" || output === "ir") return;
+  if (output !== "wasm") return;
   throw new CompilerError({
     category: "InputError",
     stage: "input",
-    message: `a program is delivered as a binary, not as ${output}`,
+    message: "a program is linked from native objects, so it is not built as WebAssembly",
     detail:
-      'build a program with "output": "machine" (the default), or make the entry module export the function to compile',
+      'build the program with another output kind, or make the entry module export the function to compile as "output": "wasm"',
   });
 }
 
@@ -662,11 +664,33 @@ interface UnitReuseRequest {
   functionName: string;
   output: OutputKind;
   linksObjects: boolean;
+  /** The contract graph a stored candidate is read against. */
+  program: ProgramContract;
   /** The functions of this build a stored candidate may call. */
   callable: ReadonlySet<string>;
   /** `--reuse` asks a model for nothing, so what it cannot reuse is an error. */
   required: boolean;
   id: string;
+}
+
+/**
+ * Whether a stored implementation calls out of the program it belongs to.
+ *
+ * Every output kind answers in the IR, so this reads the same text the build
+ * that stored it decided on. A record that cannot be read is a candidate whose
+ * files are not known, and is treated as one that links on its own so the
+ * demand for its executable fails the reuse rather than the whole build.
+ */
+function callsOutOfProgram(
+  text: string,
+  program: ProgramContract,
+  callable: ReadonlySet<string>,
+): boolean {
+  try {
+    return parseSemanticFunction(text, program).calls.some((edge) => callable.has(edge.callee));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -692,18 +716,19 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
           : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to regenerate it",
     });
   }
-  // The stored candidate's own text decides which files it produced: one that
+  // The stored candidate's own IR decides which files it produced: one that
   // calls a function of the program is never linked on its own, so its
   // executable is a file no build ever writes and demanding it would make
-  // every such function a cache miss for the life of the project.
+  // every such function a cache miss for the life of the project. An entry a
+  // build cannot read is treated as one that links on its own, so a corrupt
+  // record costs the files that are genuinely there and is rebuilt otherwise.
   const stored = entry.candidates.find((candidate) => candidate.id === entry.selected);
   const missing = reusableFiles(
     request.workspace,
     entry.selected,
     request.output,
     request.linksObjects,
-    stored?.text ?? "",
-    request.callable,
+    stored === undefined || !callsOutOfProgram(stored.text, request.program, request.callable),
   ).filter((file) => !existsSync(file));
   return { level: reusable(entry, key, missing.length === 0), entry, missing };
 }
@@ -777,7 +802,7 @@ export async function runBuild(
 
   // --model wins over the project file, which wins over AI_MODEL.
   const requested = options.model ?? modelSpec(input.model, absoluteInput);
-  // A reused build is answered by the model that generated the stored assembly,
+  // A reused build is answered by the model that generated the stored candidate,
   // so that is the model to name.
   const modelName = options.reuse ? previousBuild?.model : (requested ?? process.env.AI_MODEL);
   // The model is part of every answer this compiler gives, so it is named
@@ -995,6 +1020,7 @@ export async function runBuild(
         functionName,
         output: outputKind,
         linksObjects: checksProgram,
+        program,
         callable: callableSymbols(unit.contract, contracts),
         required: options.reuse,
         id,
@@ -1394,27 +1420,24 @@ export async function runBuild(
       } else {
         const functionName = units[0].contract.function.name;
         const winner = selected[functionName];
-        // What was built, and a project built through the IR delivers the IR
-        // the model answered with beside the binary the compiler lowered it
-        // into: there is no assembly, because the compiler never asked for any.
-        if (outputKind === "c") {
-          await deliver(`${functionName}/${winner}.c`, paths.outputSource);
-          outputPath = store.resolve(paths.outputSource);
-        } else if (outputKind === "wasm") {
-          await deliver(`${functionName}/${winner}.wat`, paths.outputWebAssemblyText);
+        // What the build delivers is the target the lowering produced, beside
+        // the IR it was lowered from, which is the text a model wrote and the
+        // one a later repair round is shown. Every kind answers in the IR, so
+        // what differs is only the file the compiler wrote.
+        await deliver(`${functionName}/${winner}.ir`, paths.outputIr);
+        if (outputKind === "wasm") {
           await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
           outputPath = store.resolve(paths.outputModule);
-          outputAssemblyPath = store.resolve(paths.outputWebAssemblyText);
         } else if (outputKind === "ir") {
-          await deliver(`${functionName}/${winner}.ir`, paths.outputSource);
           await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
           outputPath = store.resolve(paths.outputBinary);
         } else {
-          // The delivered assembly is the assembled one, architecture prelude
-          // included, so it can be fed straight back to the assembler.
-          await deliver(`${functionName}/${winner}.s`, paths.outputAssembly);
-          outputAssemblyPath = store.resolve(paths.outputAssembly);
-          outputPath = store.resolve(paths.outputAssembly);
+          // The delivered text is the one the object was built from, so it can
+          // be fed straight back to the toolchain that reads it.
+          const target = outputKind === "c" ? paths.outputSource : paths.outputAssembly;
+          await deliver(`${functionName}/${winner}.${outputKind === "c" ? "c" : "s"}`, target);
+          outputAssemblyPath = store.resolve(target);
+          outputPath = store.resolve(target);
           if (outputKind === "machine") {
             await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = store.resolve(paths.outputBinary);

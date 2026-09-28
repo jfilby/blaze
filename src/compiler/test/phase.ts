@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { frontendFor } from "../semantics/frontend.ts";
 import { resolveFunction, type FunctionContext } from "../semantics/ir-function.ts";
+import { printSemanticFunction } from "../semantics/ir-text.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import { entryContract, runContractPhase, type ContractPhase } from "../semantics/program.ts";
@@ -56,6 +57,20 @@ export function programWithSemantics(
 ): { program: ProgramContract; semantics: Record<string, SemanticFunction> } {
   const phase = phaseOf(language, files, entryFile, overrides);
   return { program: phase.program, semantics: semanticsOf(phase) };
+}
+
+/**
+ * The IR the compiler resolves for one function, which is what every output
+ * kind now answers in. A test that records a model answer records this, so the
+ * answer it replays is a program the compiler may lower.
+ */
+export function irOf(
+  language: string,
+  files: Record<string, string>,
+  entryFile: string,
+  name: string,
+): string {
+  return printSemanticFunction(semanticsOf(phaseOf(language, files, entryFile))[name] as SemanticFunction);
 }
 
 /** Contracts a one file program and returns the contract of its entry function. */

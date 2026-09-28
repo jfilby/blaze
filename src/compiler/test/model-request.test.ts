@@ -28,7 +28,7 @@ async function projectWaitingOn(
     source: SOURCE,
     entry: "square",
     model: { provider: "openai-compatible", model: "silent" },
-    // The answer this test waits on is assembly.
+    // The answer this test waits on is the IR of the entry function.
     output: "machine",
     generation,
   };
@@ -53,7 +53,7 @@ async function projectAnswering(
     source: SOURCE,
     entry: "square",
     model: { provider: "openai-compatible", model: "stub" },
-    // The answers this test queues are assembly.
+    // The answers this test queues are the IR of the entry function.
     output: "machine",
     generation,
   };
@@ -61,8 +61,23 @@ async function projectAnswering(
   return { directory, chat };
 }
 
-/** x arrives in xmm0 as a double; the contract asks for x * x. */
-const SQUARE_ASSEMBLY = ["\t.globl\tsquare", "square:", "\tmulsd\t%xmm0, %xmm0", "\tret", ""].join("\n");
+/**
+ * The IR of `square` as the compiler resolves it: every kind answers in it, so
+ * this is the only answer a model can give that a build will use.
+ */
+const SQUARE_IR = [
+  "function square(x: f64) -> f64",
+  "  requires none",
+  '  ensures "result == (x * x)"',
+  "  allocates no",
+  "  prints no",
+  "  reads_argv no",
+  "  effects none",
+  "  param value[f64] x mutable",
+  "  block entry: releases[]",
+  "  return [mul[f64] local[f64] x local[f64] x]",
+  "",
+].join("\n");
 
 test("a model that has not answered is waited for, not given up on", async (t) => {
   const { directory, received } = await projectWaitingOn(t, { maxCandidates: 1, maxAttempts: 1 });
@@ -134,7 +149,7 @@ test("the compiler says which model it is waiting for", async (t) => {
 test("an answer with no implementation is asked for again, and costs no repair attempt", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    ["", "   ", SQUARE_ASSEMBLY],
+    ["", "   ", SQUARE_IR],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 2 },
   );
   const lines: string[] = [];
@@ -255,17 +270,27 @@ test("a provider that reports no tokens is not said to have spent none", async (
 });
 
 /**
- * A reply that closes its fence and then stops: everything `extractImplementation`
- * asks for, and an implementation that ends mid-instruction. This is the
- * shape a token limit produces, and the reason the stop is checked before the
- * text rather than after it.
+ * A reply that stops where the limit fell: a whole function that ends
+ * mid-expression. This is the shape a token limit produces, and the reason the
+ * stop is checked before the text rather than after it.
  */
-const CUT_OFF_ASSEMBLY = ["```asm", "\t.globl\tsquare", "square:", "\tmulsd\t%xmm0, %xmm0", "\taddsd", "```"].join("\n");
+const CUT_OFF_IR = [
+  "function square(x: f64) -> f64",
+  "  requires none",
+  '  ensures "result == (x * x)"',
+  "  allocates no",
+  "  prints no",
+  "  reads_argv no",
+  "  effects none",
+  "  param value[f64] x mutable",
+  "  block entry: releases[]",
+  "  return [add[f64] [mul[f64] local[f64] x local[f64] x] const[f64]",
+].join("\n");
 
 test("a reply cut off at the token limit is not an implementation", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    [CUT_OFF_ASSEMBLY, SQUARE_ASSEMBLY],
+    [CUT_OFF_IR, SQUARE_IR],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
     { finishReasons: ["length", "stop"] },
   );
@@ -278,12 +303,12 @@ test("a reply cut off at the token limit is not an implementation", async (t) =>
     "build",
   );
 
-  // The half-written function is never assembled: what the candidate holds is
+  // The half-written function is never lowered: what the candidate holds is
   // the whole answer the re-request came back with, and none of the
-  // instruction the limit cut through.
+  // expression the limit cut through.
   assert.equal(outcome.candidates.square.length, 1);
-  assert.match(outcome.candidates.square[0].text, /mulsd/);
-  assert.doesNotMatch(outcome.candidates.square[0].text, /addsd/);
+  assert.match(outcome.candidates.square[0].text, /\[mul\[f64\] local\[f64\] x local\[f64\] x\]/);
+  assert.doesNotMatch(outcome.candidates.square[0].text, /\[add\[f64\]/);
   assert.equal(outcome.build.status, "success");
   // It cost a request, not an attempt: a reply that never became an
   // implementation never became a candidate to repair.
@@ -304,7 +329,7 @@ test("a reply cut off at the token limit is not an implementation", async (t) =>
 test("a model that keeps writing past the limit fails saying what it cost", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    [CUT_OFF_ASSEMBLY],
+    [CUT_OFF_IR],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
     { finishReason: "length", usage: { prompt: 900, completion: 4096, total: 4996 } },
   );
@@ -325,7 +350,7 @@ test("a model that keeps writing past the limit fails saying what it cost", asyn
 test("a request the provider failed is asked for again", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    [SQUARE_ASSEMBLY],
+    [SQUARE_IR],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
     { failFirst: 1 },
   );
@@ -369,7 +394,7 @@ test("a failure status with nothing under it is asked for again", async (t) => {
   // A status nobody accounted for is an answer that cannot be used rather
   // than a failure to believe, so the re-request says the report is missing
   // and the build carries on when the reason arrives.
-  const { directory, chat } = await projectAnswering(t, ["STATUS: failed", SQUARE_ASSEMBLY], {
+  const { directory, chat } = await projectAnswering(t, ["STATUS: failed", SQUARE_IR], {
     maxCandidates: 1,
     maxAttempts: 1,
     maxRetries: 1,

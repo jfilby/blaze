@@ -12,17 +12,29 @@
  * model only proposes.
  */
 
-import { assemble, programCalls } from "./toolchain/assembler.ts";
 import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
-import { buildWasm } from "./toolchain/wasm.ts";
-import { compileC } from "./toolchain/csource.ts";
+import { buildModule } from "./toolchain/ir-wasm.ts";
 import { compileFunctionC } from "./toolchain/ir-c.ts";
 import { parseSemanticFunction } from "./semantics/ir-text.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
-import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } from "./runtime/standalone.ts";
+import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
+
+/**
+ * What a build prepared once and then hands to every candidate: the ABI header
+ * the C the compiler wrote includes, and the C runtime object to link it
+ * against. The two are separate because they have separate lives: a hosted
+ * build writes the header and links no C runtime, since the host program is
+ * what carries the runtime services. A candidate of a hosted build still needs
+ * the header on its include path, so the header is reported either way.
+ */
+export interface PreparedRuntime {
+  headerPath: string;
+  /** Absent for a hosted build: the host program links, so there is no C object. */
+  objectPath?: string;
+}
 import { stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
@@ -98,7 +110,7 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   target: TargetSpec;
   output: OutputKind;
   /**
-   * Built on demand: a build that reuses stored assembly must not need model
+   * Built on demand: a build that reuses stored candidates must not need model
    * configuration, because it never asks a model anything.
    */
   backend: () => AiBackend;
@@ -140,8 +152,12 @@ export interface CodegenResult {
 }
 
 interface CandidatePaths {
-  /** The implementation as delivered: assembly, C source or WebAssembly text. */
+  /** The IR the model wrote, which every output kind answers in. */
   implementation: string;
+  /** The text the compiler lowered that IR into, which is the deliverable. */
+  lowered: string;
+  /** The C the compiler wrote, which is gcc's input and is not the deliverable except for a `c` build. */
+  loweredSource: string;
   object: string;
   harness: string;
   /** The harness that calls a definition-contract candidate once, and its binary. */
@@ -156,12 +172,24 @@ interface CandidatePaths {
  * Where a candidate's files are, by name. One place decides them, so what a
  * build delivers and what it looks for on disk to reuse a candidate cannot
  * drift apart.
+ *
+ * Every output kind answers in the IR, so the implementation is the IR on
+ * every one of them, and what differs is the text the compiler lowered it
+ * into: the C it wrote for a `c` build, the assembly the C compiler made of
+ * that C for an `asm` or `machine` build, and the module for a `wasm` one.
  */
 function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: OutputKind): CandidatePaths {
   const base = `${workspace.workDirectory}/${candidate}`;
-  const extension = output === "c" ? "c" : output === "wasm" ? "wat" : output === "ir" ? "ir" : "s";
+  // A `c` build delivers the C, so for that kind the C is the lowered text. For
+  // every other kind the lowered text is the assembly gcc makes of the C, and
+  // the C is named apart from it: the two are different files, and giving the
+  // C the deliverable's own name wrote `c1.c.c` beside a `c1.c` that was never
+  // written, so nothing could be delivered.
+  const deliveringC = output === "c";
   return {
-    implementation: `${base}.${extension}`,
+    implementation: `${base}.ir`,
+    lowered: `${base}.${deliveringC ? "c" : "s"}`,
+    loweredSource: deliveringC ? `${base}.c` : `${base}.lower.c`,
     object: `${base}.o`,
     harness: `${base}.harness.c`,
     probeHarness: `${base}.probe.c`,
@@ -179,30 +207,33 @@ function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: 
  * implementation rather than reused, so nothing is delivered that is missing.
  *
  * A candidate that calls another function of the program has no executable of
- * its own, because the program is the only thing that can link it. The
- * assembly is what says so, and requiring the executable anyway would report
- * a file that was never written as one that went missing, and rebuild the
- * candidate on every build for the life of the project.
+ * its own, because the program is the only thing that can link it. The IR is
+ * what says so, and requiring the executable anyway would report a file that
+ * was never written as one that went missing, and rebuild the candidate on
+ * every build for the life of the project.
  */
 export function reusableFiles(
   workspace: CodegenWorkspace,
   candidate: string,
   output: OutputKind,
   linksObjects: boolean,
-  text: string,
-  callable: ReadonlySet<string>,
+  /**
+   * Whether the candidate links on its own. A stored one says so by the calls
+   * its IR holds, and the build that stored it knew.
+   */
+  standalone: boolean,
 ): string[] {
   const paths = candidateFiles(workspace, candidate, output);
+  const delivered = output === "ir" ? paths.implementation : paths.lowered;
   if (output === "machine") {
-    const standalone = programCalls(text, callable).length === 0;
     return [
-      paths.implementation,
+      delivered,
       ...(standalone ? [paths.executable] : []),
       ...(linksObjects ? [paths.object] : []),
     ];
   }
-  if (output === "wasm") return [paths.implementation, paths.module];
-  return [paths.implementation];
+  if (output === "wasm") return [delivered, paths.module];
+  return [delivered];
 }
 
 /**
@@ -288,7 +319,7 @@ export interface CandidateEvaluationRequest {
    * generated at the same time, so two of them writing the same header would
    * race. Returns undefined for a WebAssembly build, which links no runtime.
    */
-  prepareRuntime: () => Promise<StandaloneRuntime | undefined>;
+  prepareRuntime: () => Promise<PreparedRuntime | undefined>;
   /**
    * The machine, one user at a time. Every candidate of every function of a
    * build is measured through this one, so a build may generate as many
@@ -306,14 +337,13 @@ export function runtimePreparer(request: {
   output: OutputKind;
   runtime: RuntimeKind;
   workspace: CodegenWorkspace;
-}): () => Promise<StandaloneRuntime | undefined> {
-  let pending: Promise<StandaloneRuntime | undefined> | null = null;
+}): () => Promise<PreparedRuntime | undefined> {
+  let pending: Promise<PreparedRuntime | undefined> | null = null;
   return () => {
-    pending ??= (async (): Promise<StandaloneRuntime | undefined> => {
+    pending ??= (async (): Promise<PreparedRuntime | undefined> => {
       if (request.output === "wasm") return undefined;
       if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory);
-      await writeRuntimeHeader(request.workspace.workDirectory);
-      return undefined;
+      return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
     })();
     return pending;
   };
@@ -372,15 +402,23 @@ export function readSemanticCandidate(
 }
 
 /**
- * Turns model output into something executable. Every kind is validated by the
- * native toolchain before it runs: assembly and C through the assembler and the
- * C compiler, WebAssembly through the module checks.
+ * Turns model output into something executable.
+ *
+ * Every output kind answers in the same language and is lowered the same way,
+ * so this is the only place a candidate becomes an object or a module: the
+ * model wrote the IR, the compiler checked it against the contract and is now
+ * the one that wrote the target, so nothing the model wrote is ever compiled.
+ * What the build delivers is the text that lowering produced, and what a size
+ * objective weighs is that text rather than the IR, which is the same for
+ * every candidate and so would order them by nothing at all.
  */
 async function materialize(
   request: CandidateEvaluationRequest,
   candidate: Candidate,
   paths: CandidatePaths,
   vectors: PlannedVectors | null,
+  /** The IR the model wrote, which every output kind answers in. */
+  fn: SemanticFunction,
   /**
    * Whether the candidate can be linked on its own. One that calls another
    * function of the program cannot: the object it needs is another
@@ -388,18 +426,17 @@ async function materialize(
    */
   standalone: boolean,
 ): Promise<Materialized> {
+  // The IR is the implementation and is kept beside what it lowers into,
+  // because it is what the model wrote and what a later round is shown.
+  await writeFile(paths.implementation, candidate.text, "utf8");
   if (request.output === "wasm") {
-    const module = await buildWasm({
-      text: candidate.text,
+    const module = await buildModule({
+      fn,
       contract: request.contract,
-      textPath: paths.implementation,
       modulePath: paths.module,
       hostPath: paths.host,
       candidate: candidate.id,
     });
-    // The module's own size is what the module weighs, but a size objective
-    // compares implementations, and the text is the implementation: reported
-    // as zero, every wasm candidate ties and the first one evaluated wins.
     return {
       runner: module.runner,
       sizeBytes: module.moduleSizeBytes,
@@ -407,60 +444,39 @@ async function materialize(
       implementationPath: paths.implementation,
     };
   }
-  // The ABI header exists before the candidate is compiled: a C candidate may
-  // include it, and the harness always does. It is written and compiled once
-  // for the whole build, not once per candidate.
+  // The ABI header exists before the candidate is compiled: the C the compiler
+  // wrote includes it, and the harness always does. It is written and compiled
+  // once for the whole build, not once per candidate.
   const runtime = await request.prepareRuntime();
-
-  // The boundary: the model wrote the IR, the compiler checked it against the
-  // contract and is now the one that wrote the C, so nothing the model wrote
-  // is ever compiled. What comes out is an ordinary object, so a function whose
-  // contract states a postcondition is checked against its own vectors like any
-  // other, and one that states none is left to the program.
-  if (request.output === "ir") {
-    // The IR is the implementation and is kept beside the C it lowers into,
-    // because it is what the model wrote and what a later round is shown.
-    await writeFile(paths.implementation, candidate.text, "utf8");
-  }
-  const object =
-    request.output === "ir"
-      ? await compileFunctionC({
-          fn: readSemanticCandidate(candidate, request.program, request.contract),
-          contract: request.contract,
-          target: request.target,
-          sourcePath: `${paths.implementation}.c`,
-          objectPath: paths.object,
-          ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
-        })
-      : request.output === "c"
-        ? await compileC({
-            source: candidate.text,
-            contract: request.contract,
-            target: request.target,
-            sourcePath: paths.implementation,
-            objectPath: paths.object,
-            candidate: candidate.id,
-            ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
-          })
-        : await assemble({
-            assembly: candidate.text,
-            assemblyPath: paths.implementation,
-            objectPath: paths.object,
-            contract: request.contract,
-            target: request.target,
-            candidate: candidate.id,
-            callable: request.callable,
-          });
-  // What a size objective weighs is the text the model wrote, which for an IR
-  // candidate is the IR itself and not the C it was lowered into.
-  const textSizeBytes = (await stat(paths.implementation)).size;
+  // A `c` build delivers the C the compiler wrote, an `asm` or `machine` one
+  // the assembly the C compiler made of it, and an `ir` one the IR itself.
+  // Only the last is what the model wrote, and it is the same for every
+  // candidate, so a size objective weighs the text below rather than it.
+  const deliversAssembly = request.output === "asm" || request.output === "machine";
+  const lowered = await compileFunctionC({
+    fn,
+    contract: request.contract,
+    target: request.target,
+    sourcePath: paths.loweredSource,
+    objectPath: paths.object,
+    ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
+    ...(deliversAssembly ? { assemblyPath: paths.lowered } : {}),
+  });
+  // The lowering weighs what the build delivers: the assembly when it asked
+  // for one, the C otherwise. An `ir` build delivers the model-written IR,
+  // which is the same text for every candidate and orders them by nothing.
+  const textSizeBytes =
+    request.output === "ir" ? (await stat(paths.implementation)).size : lowered.textSizeBytes;
+  const object = { objectSizeBytes: lowered.objectSizeBytes };
   if (!standalone) {
     // Assembled, but not linked: the program this candidate is part of is the
     // one that has to run it, and it is linked once every candidate is chosen.
     return { runner: null, sizeBytes: object.objectSizeBytes, textSizeBytes, implementationPath: paths.implementation };
   }
 
-  if (runtime !== undefined) {
+  // A build that links the C runtime runs the candidate in a C harness. A
+  // hosted build has no such object: the host program is what runs it.
+  if (runtime?.objectPath !== undefined) {
     await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? ""), "utf8");
     link({
       harnessPath: paths.harness,
@@ -523,19 +539,14 @@ async function measureCandidate(
     // A candidate may call the other functions of the program, and one that does
     // is linked only into the program, so nothing about it can be run on its own.
     // The program is the oracle for it, which is where a definition contract
-    // already sends its candidate. Reading the calls out of an IR candidate is
-    // reading its IR, so a candidate that is not a program the compiler may
-    // lower is refused here — inside the refusal path, where a diagnostic comes
-    // of it and a repair round is given the reason.
-    const calls =
-      request.output === "machine" || request.output === "asm"
-        ? programCalls(candidate.text, request.callable)
-        : request.output === "ir"
-          ? readSemanticCandidate(candidate, request.program, request.contract)
-              .calls.map((edge) => edge.callee)
-              .filter((callee) => request.callable.has(callee))
-          : [];
-    const built = await materialize(request, candidate, paths, vectors, calls.length === 0);
+    // already sends its candidate. Every output kind answers in the IR, so
+    // this is where one candidate is read on every kind — and a candidate that
+    // is not a program the compiler may lower is refused here, inside the
+    // refusal path, where a diagnostic comes of it and a repair round is given
+    // the reason.
+    const fn = readSemanticCandidate(candidate, request.program, request.contract);
+    const calls = fn.calls.map((edge) => edge.callee).filter((callee) => request.callable.has(callee));
+    const built = await materialize(request, candidate, paths, vectors, fn, calls.length === 0);
 
     // A candidate that calls another function of the program is judged by that
     // program and by nothing else: there is no standalone binary to probe and
@@ -689,13 +700,15 @@ async function probeCandidate(
   plan: ProbePlan,
 ): Promise<ProbeOutcome> {
   if (plan.kind === "skip") return { called: false, reason: plan.reason, stderr: "" };
-  // The probe links the candidate the way the C toolchain links it, so a
-  // backend that does not use that toolchain has no way to make the call.
-  if (request.output !== "machine" && request.output !== "c") {
-    return { called: false, reason: `a ${request.output} candidate is not run by the native probe`, stderr: "" };
+  // The probe links the object the C toolchain links, so it runs for every
+  // kind that produces one, whatever text that object was lowered from. A
+  // `wasm` build produces a module instead, and the host that runs a module
+  // is what calls it there.
+  if (request.output === "wasm") {
+    return { called: false, reason: "a wasm candidate is run by its module host, not the native probe", stderr: "" };
   }
   const runtime = await request.prepareRuntime();
-  if (runtime === undefined) {
+  if (runtime?.objectPath === undefined) {
     return { called: false, reason: "the build links no runtime for the probe to call into", stderr: "" };
   }
 
@@ -765,7 +778,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     candidates.push(existing);
     outcomes.push(await evaluateCandidate(request, existing, vectors));
     if (selectCandidate(outcomes, request.contract) !== null) {
-      // Nothing was generated: the stored assembly is reused as it stands.
+      // Nothing was generated: the stored candidate is reused as it stands.
       return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
     }
   }

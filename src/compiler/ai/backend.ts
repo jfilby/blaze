@@ -1,9 +1,10 @@
 /**
  * AI backends.
  *
- * The backend turns a function contract plus a target into an assembly
- * candidate. Model output is untrusted: it is recorded verbatim and handed to
- * the assembler for validation, never executed directly.
+ * The backend turns a function contract plus a target into a candidate. A
+ * candidate is the semantic IR whichever output kind is being built for.
+ * Model output is untrusted: it is recorded verbatim and handed to the IR
+ * reader, which validates it against the contract before anything is lowered.
  *
  * A model may also report that it cannot implement a contract at all: a reply
  * that opens with the failure status is a report from the model, not source,
@@ -12,9 +13,10 @@
  * Two backends implement the same contract:
  *
  *   - VercelAiBackend: the production backend, built on the Vercel AI SDK
- *   - ReplayBackend: an offline backend that returns recorded assembly, so the
- *     deterministic part of the pipeline (assembling, verifying, benchmarking,
- *     selection) can be exercised without network access or credentials
+ *   - ReplayBackend: an offline backend that returns recorded IR, so the
+ *     deterministic part of the pipeline (validating, lowering, verifying,
+ *     benchmarking, selection) can be exercised without network access or
+ *     credentials
  */
 
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -32,7 +34,7 @@ import { DEFAULT_GENERATION, type Candidate } from "../core/types.ts";
 
 /**
  * A model call that did not produce an implementation: the provider request
- * failed, or the reply carried no assembly. It is not a candidate and not a
+ * failed, or the reply carried no IR. It is not a candidate and not a
  * rejection of one, so the attempt is asked for again in place.
  */
 class UnusableAnswer extends Error {
@@ -99,7 +101,7 @@ export function extractImplementation(text: string): string {
 /**
  * The first line of a reply that reports the model cannot implement the
  * contract. Everything after it is the report, so it is read before the
- * assembly extractor, which would otherwise take the same words for source.
+ * IR extractor, which would otherwise take the same words for source.
  */
 const FAILED_STATUS = "STATUS: failed";
 
@@ -332,7 +334,7 @@ export class VercelAiBackend implements AiBackend {
    * candidate one of its repair attempts.
    */
   async generate(request: PromptRequest, sequence: number): Promise<Candidate> {
-    const system = buildSystemPrompt(request.output);
+    const system = buildSystemPrompt();
     const user = buildUserPrompt(request);
     this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();

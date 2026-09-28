@@ -3,10 +3,11 @@
  *
  * A prompt is a contract with the model, and the rules in it are the rules the
  * toolchain enforces afterwards. These tests state the ones whose absence costs
- * an attempt: the symbol to define, the labels and calls a candidate may write,
- * the registers it has to preserve, and what a candidate is checked against.
- * They match the facts rather than the sentences, so rewording the prompt does
- * not break them and a dropped rule does.
+ * an attempt: the symbol the answer is written as, the calls a candidate may
+ * write, and what a candidate is checked against. A register, a stack offset
+ * and a calling convention are the compiler's once the answer is IR, so no
+ * test here states one. They match the facts rather than the sentences, so
+ * rewording the prompt does not break them and a dropped rule does.
  */
 
 import assert from "node:assert/strict";
@@ -50,37 +51,41 @@ const treeSemantics = tree.semantics;
 const treeMain = treeProgram.files[0].functions.main;
 const treeChecksum = treeProgram.files[0].functions.checksum;
 
-test("the prompt names the symbol the assembler will accept", () => {
+test("the prompt names the entry by the symbol it is linked as, not by its name", () => {
   const prompt = buildUserPrompt(
     request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
-  // The C prototype of a program entry is not the symbol: the entry is
-  // compiled as blaze_main, and `.globl main` is rejected.
-  assert.match(prompt, /C prototype: void main\(\)/);
-  assert.match(prompt, /label: blaze_main:/);
-  assert.match(prompt, /\.global blaze_main/);
-  assert.doesNotMatch(prompt, /label: main:/);
+  // The function the entry is contracted as is `main` and the symbol the build
+  // links it under is `blaze_main`, so the answer is the latter: the IR names
+  // a function as the symbol it is compiled to, and a candidate that wrote
+  // `main` would be linked as a second entry.
+  assert.match(prompt, /"name": "main"/);
+  assert.match(prompt, /"symbol": "blaze_main"/);
+  assert.match(prompt, /^function to implement: blaze_main$/m);
+  assert.doesNotMatch(prompt, /function to implement: main\b/);
 });
 
-test("the prompt states the labels and the calls a candidate may write", () => {
+test("the prompt states the calls a candidate may write, and no more names than those", () => {
   const prompt = buildUserPrompt(
     request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
-  // Each of these is a rejection in assembler.ts, and none of them is obvious
-  // from a program whose source calls its own functions.
-  assert.match(prompt, /Every other label you define must start with a dot/);
-  // `main` calls two other functions of the program and writes none of them
-  // out, so its prompt names their symbols and says a candidate that calls one
-  // is linked only into the program. It used to claim the opposite, because the
-  // symbols came from a list the caller had to remember to pass rather than
-  // from the calls the contract records.
-  assert.match(prompt, /The only symbols you may reference are "blaze_main", "createTree", "checksum", and the runtime ABI/);
-  assert.doesNotMatch(prompt, /assembled, linked and run on its own/);
+  // `main` calls two other functions of the program and writes neither of them
+  // out, so both are offered as a name and its contract, and nothing is offered
+  // as a body. It used to claim the opposite, because the symbols came from a
+  // list the caller had to remember to pass rather than from the calls the
+  // contract records.
+  assert.match(prompt, /^CALLS$/m);
+  assert.match(prompt, /^createTree\(depth: f64\) -> ref<Object1>$/m);
+  assert.match(prompt, /^checksum\(node: ref<any>\) -> f64$/m);
+  assert.doesNotMatch(prompt, /^WRITE OUT$/m);
+  // A name outside that list is refused whatever it is called, because the IR
+  // is read back against the contract and a callee name is part of it.
+  assert.match(prompt, /the callee names are the contract's, and the compiler refuses a candidate that disagrees/);
 });
 
-test("a candidate is told the functions of the program it may call, and how", () => {
+test("a candidate is told the functions of the program it may call, and the contract each is called under", () => {
   const prompt = buildUserPrompt(
     request({
       contract: treeMain,
@@ -90,26 +95,25 @@ test("a candidate is told the functions of the program it may call, and how", ()
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
     }),
   );
-  // The model is told the call, the symbol to make it on, and where the
-  // arguments and the result go, because those are what a call is written from
-  // and none of them can be read off the TypeScript it was given.
+  // The model is told the call and what it must satisfy, because a `call` in
+  // the answer is read back against the callee's contract and none of it can
+  // be read off the TypeScript the candidate was given.
   assert.match(prompt, /^CALLS$/m);
-  assert.match(prompt, /C prototype: double checksum\(void\* node\)/);
-  assert.match(prompt, /argument locations: node -> rdi/);
-  assert.match(prompt, /return value: xmm0/);
-  assert.match(prompt, /call it instead of writing out/);
+  assert.match(prompt, /^createTree\(depth: f64\) -> ref<Object1>$/m);
+  assert.match(prompt, /^checksum\(node: ref<any>\) -> f64$/m);
+  assert.match(prompt, /call it by name instead of/);
+  assert.match(prompt, /writing out what it does\. Its contract is:/);
   // Both are calls: each recurses, and a body that reaches itself is not one a
-  // candidate can write out, so each is named as a symbol rather than a body.
-  assert.doesNotMatch(prompt, /WRITE OUT/);
+  // candidate can write out, so each is named as a call rather than a body.
+  assert.doesNotMatch(prompt, /^WRITE OUT$/m);
   // The entry is excluded: a candidate is already the implementation of it.
-  assert.doesNotMatch(prompt, /C prototype: void blaze_main/);
+  assert.doesNotMatch(prompt, /^blaze_main\(/m);
 });
 
-test("a candidate that reaches nothing is told it is run on its own", () => {
-  // The counterpart of the rule above: nothing is called and nothing is written
-  // out, so the object references no other symbol of the program and is linked
-  // and probed by itself. `createTree` is recursive, so it is a call, and
-  // `checksum` is too: neither is a body this candidate can be handed.
+test("a candidate that reaches nothing else is told the program is what it is checked by", () => {
+  // The counterpart of the rule above: `createTree` reaches only itself, and a
+  // body that reaches itself is the body being written, so there is no other
+  // function to offer as a call and none to write out either.
   const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
   const prompt = buildUserPrompt(
     request({
@@ -120,28 +124,12 @@ test("a candidate that reaches nothing is told it is run on its own", () => {
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
     }),
   );
-  // It recurses, so it reaches its own symbol and nothing else: recursion is
-  // the one call a candidate may always make.
-  assert.match(prompt, /The only symbols you may reference are "createTree", and the runtime ABI/);
   assert.doesNotMatch(prompt, /^CALLS$/m);
-  assert.match(prompt, /assembled, linked and run on its own/);
-});
-
-test("the prompt states what the function owes the convention it is called under", () => {
-  const prompt = buildUserPrompt(
-    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
-  );
-
-  assert.match(prompt, /preserve rbx, rbp and r12 to r15/);
-  assert.match(prompt, /return with ret/);
-  // The return address is still on the stack, so the boundary a candidate has
-  // to keep is not the one it arrives on. Stating it as if it were is what let
-  // a candidate allocate a multiple of 16 and fault every call it made.
-  assert.match(prompt, /rsp is 8 past a 16-byte boundary/);
-  assert.match(prompt, /a multiple of 16 plus 8/);
-  // The harness declares the function in C, so the result is read back by the
-  // C convention: xmm0 for a floating point return, rax for anything else.
-  assert.match(prompt, /return value: xmm0/);
+  assert.doesNotMatch(prompt, /^WRITE OUT$/m);
+  // Nothing checks it on its own, and it is told so rather than left to
+  // assume a caller checks the result: the program it belongs to is the oracle.
+  assert.match(prompt, /Nothing checks this function on its own/);
+  assert.match(prompt, /compares what it prints with what the source program prints/);
 });
 
 test("the program the model writes is the one the assembler is given", () => {
@@ -248,7 +236,11 @@ test("the effects of the source and the prohibition on the implementation are no
     request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program, semantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
   assert.match(printing, /the source function: io, syscall/);
-  assert.match(printing, /reached through the runtime ABI above and never directly/);
+  // The effect is the source's to state and the runtime call is the compiler's
+  // to write, so a candidate is told which effects it may state and nothing
+  // about how they are reached.
+  assert.match(printing, /The compiler reaches them through the runtime when it lowers your IR, so state the effect in/);
+  assert.match(printing, /the compiler writes the call: printing, the command line, the heap/);
 
   const pure = buildUserPrompt(
     request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, semantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
@@ -279,56 +271,18 @@ test("a second candidate is told what makes it worth a request", () => {
   assert.match(second, /only worth its request if it takes a/);
 });
 
-test("the runtime section offers the entry points a candidate can reach", () => {
-  const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
-  const sources = [{ path: "1.ts", source: TREES["1.ts"] }];
-  // `main` allocates nothing itself, but it may inline `createTree`, which
-  // does, so the object allocator has to be in reach of both.
-  const entry = buildUserPrompt(
-    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program, semantics, sources }),
-  );
-  assert.match(entry, /blaze_rt_object_new/);
-  assert.match(entry, /blaze_rt_print_number/);
-  // The host calls these, so a candidate is never told about them.
-  assert.doesNotMatch(entry, /blaze_rt_initialize/);
-  assert.doesNotMatch(entry, /blaze_rt_arguments_set/);
-
-  // A function that touches nothing reaches nothing: what a body allocates,
-  // prints or reads is what the ABI section offers, so a library function that
-  // only computes a result is not handed an allocator.
-  const library = programWithSemantics("typescript", LIBRARY, "hello_world.ts", { entry: "dotProduct" });
-  const dot = buildUserPrompt(
-    request({
-      contract: library.program.files[0].functions.dotProduct,
-      unit: { file: "hello_world.ts", function: "dotProduct" },
-      program: library.program,
-      semantics: library.semantics,
-      sources: [{ path: "hello_world.ts", source: LIBRARY["hello_world.ts"] }],
-    }),
-  );
-  assert.doesNotMatch(dot, /blaze_rt_allocate/);
-  assert.doesNotMatch(dot, /blaze_rt_print_number/);
-});
-
 /**
  * A function that prints and allocates nothing: the shape the compiler
  * contracts for a `void` function whose body is a console.log. It is the
- * smallest program there is, and the one the runtime section has to be right
- * about.
+ * smallest program there is, and the one the body a candidate is handed has
+ * to be right about.
  */
 const SAYING = {
   "main.ts": 'import { say } from "./say.ts";\nsay();\n',
   "say.ts": "export function say(): void {\n  console.log(`hello`);\n}\n",
 };
 
-/**
- * A definition contract that reaches for nothing at all. Neither frontend
- * contracts a body this silent today, and the rule the runtime section follows
- * is stated over exactly this shape: a function that neither prints, nor
- * allocates, nor reads the command line is offered no runtime service, and in
- * particular no allocator to build a string with.
- */
-test("a function that prints text is told how to make the text", () => {
+test("a function that prints is told the printers, and one that prints nothing is told none", () => {
   const { program, semantics } = programWithSemantics("typescript", SAYING, "main.ts");
   const sources = Object.entries(SAYING).map(([path, source]) => ({ path, source }));
   const prompt = buildUserPrompt(
@@ -341,16 +295,16 @@ test("a function that prints text is told how to make the text", () => {
     }),
   );
 
-  // The prompt tells this candidate to print with blaze_rt_print_text, and
-  // the ABI allows nothing but the runtime to build the string it prints:
-  // offering the printer without the constructor is an instruction the model
-  // cannot follow.
-  assert.match(prompt, /blaze_rt_print_text/);
-  assert.match(prompt, /blaze_rt_string_new/);
+  // A `print_text` in the answer is the compiler lowering one of these, so the
+  // runtime printers are named. The text it prints is a value the IR builds
+  // out of parts, so no string constructor is named and none is needed: a
+  // candidate cannot call one the answer has no way to write.
+  assert.match(prompt, /Print with blaze_rt_print_text for text, blaze_rt_print_number for a number, and blaze_rt_print_newline to end a line/);
+  assert.match(prompt, /^ {2}print_text "hello"$/m);
+  assert.doesNotMatch(prompt, /blaze_rt_string_new/);
 
-  // A function that reaches no runtime service is offered none: `checksum`
-  // reads a tree and returns a number, so it needs no string to print and none
-  // is named.
+  // A function that prints nothing is offered no printer: `checksum` reads a
+  // tree and returns a number, so it has no text to build and none is named.
   const silent = buildUserPrompt(
     request({
       contract: treeChecksum,
@@ -360,13 +314,15 @@ test("a function that prints text is told how to make the text", () => {
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
     }),
   );
-  assert.doesNotMatch(silent, /blaze_rt_string_new/);
   assert.doesNotMatch(silent, /blaze_rt_print_text/);
+  assert.doesNotMatch(silent, /Print with blaze_rt_print_number/);
 });
 
-test("the system prompt describes the build the model is in", () => {
-  const native = buildSystemPrompt("machine");
-  assert.match(native, /architecture prelude, the harness, the host and the build are compiler/);
-  assert.doesNotMatch(buildSystemPrompt("wasm"), /architecture prelude/);
-  assert.match(buildSystemPrompt("wasm"), /WebAssembly|output language/);
+test("the system prompt says the same thing to every build", () => {
+  // Every kind answers in the IR and the compiler writes the target code, so
+  // there is no build a model is told about differently from any other.
+  const system = buildSystemPrompt();
+  assert.match(system, /The IR you write is the program/);
+  assert.match(system, /The target code, the build, the harness and the host are compiler/);
+  assert.doesNotMatch(system, /WebAssembly|assembly|GAS/);
 });

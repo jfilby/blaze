@@ -1,5 +1,1 @@
-{
-  "candidates": [
-    "\t.globl\tdotProduct\n\t.type\tdotProduct, @function\ndotProduct:\n\tvcvttsd2si\t%xmm0, %rax\n\tvxorpd\t%xmm2, %xmm2, %xmm2\n\ttest\t%rax, %rax\n\tje\t2f\n1:\tvmovsd\t(%rdi), %xmm3\n\tmulsd\t(%rsi), %xmm3\n\taddsd\t%xmm3, %xmm2\n\taddq\t$8, %rdi\n\taddq\t$8, %rsi\n\tsubq\t$1, %rax\n\tjne\t1b\n2:\tvmovapd\t%xmm2, %xmm0\n\t.size\tdotProduct, .-dotProduct\n\tret\n"
-  ]
-}
+{"candidates":["function dotProduct(a: []f64, b: []f64, n: f64) -> f64\n  requires \"a != null\"\n  requires \"len(a) >= n\"\n  requires \"b != null\"\n  requires \"len(b) >= n\"\n  ensures \"result == sum(i = 0..<n, (a[i] * b[i]))\"\n  allocates no\n  prints no\n  reads_argv no\n  effects none\n  param value[[]f64] a mutable\n  param value[[]f64] b mutable\n  param value[f64] n mutable\n  block entry: releases[]\n    let value[f64] total mutable = const[f64] 0 @12\n    for[f64] i from const[f64] 0 to local[f64] n exclusive up step default header b1 exit entry @13\n      block b2: releases[]\n        set total += [mul[f64] [element[f64] local[[]f64] a local[f64] i] [element[f64] local[[]f64] b local[f64] i]] @14\n  return local[f64] total\n"]}

@@ -309,10 +309,14 @@ class FunctionEmitter {
         const type = loop.type;
         const variable = this.names.declare(loop.variable, type);
         const bound = `${COMPARE_OPERATORS[loop.down ? "gt" : "lt"]}${loop.inclusive ? "=" : ""}`;
+        // The step is the signed amount the index moves by, so a loop that
+        // counts down carries a negative one and adds it like any other:
+        // subtracting it from a step of -1 moves the index the other way, and
+        // the loop never ends.
         const step =
           loop.step === null
             ? `${variable}${loop.down ? "--" : "++"}`
-            : `${variable} ${loop.down ? "-=" : "+="} ${this.expression(loop.step, type, depth)}`;
+            : `${variable} += ${this.expression(loop.step, type, depth)}`;
         this.write([
           `${pad(depth)}for (${declaredType(type)} ${variable} = ${this.expression(loop.from, type, depth)}; ${variable} ${bound} ${this.expression(loop.to, type, depth)}; ${step}) {`,
         ]);
@@ -469,7 +473,9 @@ class FunctionEmitter {
         const operand = this.expression(value.operand, value.type, depth);
         if (value.op === "not") return `((${this.condition(value.operand, depth)}) == 0)`;
         if (value.op === "bitNot") return `(~${operand})`;
-        return `((${value.op === "neg" ? "-" : "+"})${operand})`;
+        // The sign binds to the operand, and the whole is parenthesised so a
+        // negation of a product stays a negation of the whole product.
+        return `(${value.op === "neg" ? "-" : "+"}${operand})`;
       }
       case "arith":
         return this.arith(value, depth);
@@ -599,17 +605,27 @@ export interface CompileFunctionRequest {
   objectPath: string;
   /** Directories the C includes the runtime header from. */
   includeDirectories?: string[];
+  /**
+   * Where the assembly is written, when the assembly is what the build
+   * delivers. The C compiler is asked for it as well as for the object, so
+   * the assembly delivered is the assembly the object was made from.
+   */
+  assemblyPath?: string;
 }
 
 export interface CompileFunctionResult {
   sourcePath: string;
   objectPath: string;
   objectSizeBytes: number;
+  /** The weight of what the build delivers: the C, or the assembly if it asked for one. */
   textSizeBytes: number;
+  /** Where the assembly is, when one was asked for. */
+  assemblyPath?: string;
 }
 
 /**
- * Builds the object of a function the compiler wrote itself.
+ * Builds the object of a function the compiler wrote itself, and the assembly
+ * it made on the way there when the build delivers that.
  *
  * The C a model supplies is checked against a subset before the compiler sees
  * it, because it is text the model wrote and nothing else about it can be
@@ -625,6 +641,33 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
 
   const archFlag = request.target.cpu === "" ? [] : [`-march=${request.target.cpu}`];
   const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
+  // Register allocation, instruction selection and the stack are the C
+  // compiler's, which is the point of the boundary: no register, offset or
+  // instruction is a model's to choose, on any target. An assembly build
+  // delivers what the C compiler decided rather than deciding it again.
+  if (request.assemblyPath !== undefined) {
+    const stopped = run(
+      "gcc",
+      ["-std=c11", "-O2", "-fno-lto", "-S", ...archFlag, ...includes, "-o", request.assemblyPath, request.sourcePath],
+      { timeoutMs: 120_000 },
+    );
+    if (stopped.spawnError !== undefined) {
+      throw new CompilerError({
+        category: "TargetError",
+        stage: "compile",
+        message: "the C compiler is not available",
+        detail: stopped.spawnError,
+      });
+    }
+    if (stopped.code !== 0) {
+      throw new CompilerError({
+        category: "LinkError",
+        stage: "compile",
+        message: `the C compiler could not stop at assembly for ${functionName}`,
+        detail: `${request.sourcePath}\n${stopped.stderr.trim()}`,
+      });
+    }
+  }
   const compiled = run(
     "gcc",
     ["-std=c11", "-O2", "-fno-lto", "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
@@ -655,10 +698,13 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
     );
   }
 
+  const delivered = request.assemblyPath ?? request.sourcePath;
   return {
     sourcePath: request.sourcePath,
     objectPath: request.objectPath,
     objectSizeBytes: (await stat(request.objectPath)).size,
-    textSizeBytes: (await stat(request.sourcePath)).size,
+    textSizeBytes: (await stat(delivered)).size,
+    ...(request.assemblyPath === undefined ? {} : { assemblyPath: request.assemblyPath }),
   };
 }
+

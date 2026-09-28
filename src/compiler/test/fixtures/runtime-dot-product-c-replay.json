@@ -1,5 +1,0 @@
-{
-  "candidates": [
-    "#include <stdint.h>\n#include \"blaze_rt.h\"\n\nfloat dotProduct(const float* a, const float* b, int64_t n) {\n  float* copy = (float*)blaze_rt_allocate((size_t)n * sizeof(float));\n  for (int64_t i = 0; i < n; i += 1) copy[i] = a[i];\n  float total = 0.0f;\n  for (int64_t i = 0; i < n; i += 1) total += copy[i] * b[i];\n  blaze_rt_release(copy);\n  return total;\n}\n"
-  ]
-}

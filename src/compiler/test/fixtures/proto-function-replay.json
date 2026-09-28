@@ -1,5 +1,1 @@
-{
-  "candidates": [
-    "\t.globl\t__proto__\n\t.type\t__proto__, @function\n__proto__:\n\tleaq\t(%rdi,%rdi), %rax\n\tret\n"
-  ]
-}
+{"candidates":["function __proto__(n: i64) -> i64\n  requires none\n  ensures \"result == (n * 2)\"\n  allocates no\n  prints no\n  reads_argv no\n  effects none\n  param value[i64] n mutable\n  block entry: releases[]\n  return [mul[i64] local[i64] n const[i64] 2]\n"]}

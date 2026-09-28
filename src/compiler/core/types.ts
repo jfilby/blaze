@@ -327,16 +327,19 @@ export interface BenchmarkConfig {
 }
 
 /**
- * What a build produces. The kind decides both the language the model is asked
- * to write and how far the toolchain takes it:
+ * What a build produces. The model is asked for the semantic IR whichever kind
+ * is asked for, and the kind is how far the toolchain takes that one answer:
  *
- *   ir       the semantic IR, read back from the model, checked against the
- *            contract and lowered by the compiler, delivered as the IR beside
- *            the program the compiler built from it
- *   c        C source, compiled and verified, delivered as source
- *   asm      x86-64 assembly, assembled and verified, delivered as assembly
- *   machine  x86-64 assembly, assembled, linked and verified, delivered as an executable
- *   wasm     WebAssembly text, assembled and verified, delivered as a module
+ *   ir       the IR as the model wrote it, checked against the contract
+ *   c        the C the compiler wrote for it, compiled and verified
+ *   asm      the assembly the C compiler made of that C, assembled and verified
+ *   machine  the same object, linked into a program and verified by running it
+ *   wasm     the WebAssembly module the compiler encoded from the IR, verified
+ *            by running it against the contract's vectors
+ *
+ * The kind is a delivery choice, not a language the model chooses between, so
+ * lowering is the compiler's work on every path and a rule it enforces is
+ * never a rule the model has to be told.
  */
 export type OutputKind = "c" | "asm" | "machine" | "wasm" | "ir";
 
@@ -414,9 +417,9 @@ export const DEFAULT_BENCHMARK: BenchmarkConfig = {
 export interface Candidate {
   id: string;
   /**
-   * What the model wrote, in the output language the prompt asked for: semantic
-   * IR, C, WebAssembly text, or assembly. It is the answer, uncompiled: every
-   * backend reads it, and none of them treats it as anything else.
+   * What the model wrote, which is the semantic IR for every kind, whatever is
+   * later delivered. It is the answer, uncompiled: every backend reads this,
+   * and none of them treats it as anything else.
    */
   text: string;
   model: string;

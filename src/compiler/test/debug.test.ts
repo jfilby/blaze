@@ -9,23 +9,28 @@ import { run } from "../core/process.ts";
 import type { SourceInput } from "../core/types.ts";
 import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
+import { irOf } from "./phase.ts";
+
+const SQUARE_SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
 
 const SQUARE: SourceInput = {
   language: "typescript",
-  source: "export function square(x: number): number {\n  return x * x;\n}\n",
+  source: SQUARE_SOURCE,
   entry: "square",
   model: { provider: "openai-compatible", model: "stub" },
-  // The answers these tests queue are assembly.
+  // The answers these tests queue are the IR the compiler resolved.
   output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 2 },
   optimize: { primary: "size" },
 };
 
-/** x arrives in xmm0 as a double; the contract asks for x * x. */
-const SQUARE_ASSEMBLY = ["\t.globl\tsquare", "square:", "\tmulsd\t%xmm0, %xmm0", "\tret", ""].join("\n");
+const SQUARE_IR = irOf("typescript", { "module.ts": SQUARE_SOURCE }, "module.ts", "square");
 
-/** Assembles and links cleanly, but computes x + x, so verification rejects it. */
-const WRONG_SQUARE_ASSEMBLY = ["\t.globl\tsquare", "square:", "\taddsd\t%xmm0, %xmm0", "\tret", ""].join("\n");
+/** Is a program the compiler will lower, but computes x + x, so verification rejects it. */
+const WRONG_SQUARE_IR = SQUARE_IR.replace(
+  "return [mul[f64] local[f64] x local[f64] x]",
+  "return [add[f64] local[f64] x local[f64] x]",
+);
 
 async function project(t: TestContext, answers: string[]): Promise<string> {
   await chatEndpoint(t, answers);
@@ -59,7 +64,7 @@ test("candidates are generated at the same time when candidate concurrency allow
   // point: it can only turn a real fan-out into a failure, never the reverse.
   const { directory, peak } = await fanOutProject(
     t,
-    [SQUARE_ASSEMBLY],
+    [SQUARE_IR],
     { generation: { maxCandidates: 3, maxAttempts: 1, candidateConcurrency: 3 } },
     3,
   );
@@ -72,7 +77,7 @@ test("candidates are generated at the same time when candidate concurrency allow
 test("candidate concurrency of one generates candidates one at a time", async (t) => {
   const { directory, peak } = await fanOutProject(
     t,
-    [SQUARE_ASSEMBLY],
+    [SQUARE_IR],
     { generation: { maxCandidates: 3, maxAttempts: 1, candidateConcurrency: 1 } },
   );
 
@@ -85,7 +90,7 @@ test("candidate concurrency of one generates candidates one at a time", async (t
 });
 
 test("without --debug the prompts stay out of the way", async (t) => {
-  const endpoint = await chatEndpoint(t, [SQUARE_ASSEMBLY]);
+  const endpoint = await chatEndpoint(t, [SQUARE_IR]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
@@ -105,7 +110,7 @@ test("without --debug the prompts stay out of the way", async (t) => {
 });
 
 test("--debug prints the system and user prompt of every attempt", async (t) => {
-  const directory = await project(t, [WRONG_SQUARE_ASSEMBLY, SQUARE_ASSEMBLY]);
+  const directory = await project(t, [WRONG_SQUARE_IR, SQUARE_IR]);
 
   const written: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
@@ -130,15 +135,15 @@ test("--debug prints the system and user prompt of every attempt", async (t) => 
   assert.match(debug, /result == \(x \* x\)/);
   assert.match(debug, /architecture: x86_64/);
   assert.match(debug, /OUTPUT LANGUAGE/);
-  assert.match(debug, /Write GNU assembler \(GAS\) AT&T syntax for x86-64/);
+  assert.match(debug, /Write semantic IR\./);
 
   // Only the repair names a rejected candidate; the first attempt is generated
   // from the contract alone and has nothing to repair.
   assert.equal(debug.match(/CANDIDATE 1 WAS REJECTED/g)?.length, 1);
 
-  // The repair is handed the assembly it is fixing, and why it was rejected.
+  // The repair is handed the implementation it is fixing, and why it was rejected.
   assert.match(debug, /THE OUTPUT BEING REPAIRED/);
-  assert.match(debug, /addsd\t%xmm0, %xmm0/, "the repair prompt carries the rejected assembly");
+  assert.match(debug, /return \[add\[f64\] local\[f64\] x local\[f64\] x\]/, "the repair prompt carries the rejected body");
   assert.match(debug, /This is repair attempt 2/);
   assert.match(debug, /verify failed: \d+ of \d+ test vectors did not match the contract/);
   assert.match(debug, /\[attempt 1] verify failed:/, "the diagnostic is attributed to the attempt that earned it");
@@ -146,7 +151,7 @@ test("--debug prints the system and user prompt of every attempt", async (t) => 
 });
 
 test("the prompt reaches the model as the contract and the instructions", async (t) => {
-  const endpoint = await chatEndpoint(t, [SQUARE_ASSEMBLY]);
+  const endpoint = await chatEndpoint(t, [SQUARE_IR]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
@@ -176,19 +181,10 @@ const PAIR_SOURCES: Record<string, string> = {
   ].join("\n"),
 };
 
-/** `twice` as the model writes it: x arrives in xmm0 as a double. */
-const TWICE_ASSEMBLY = ["\t.globl\ttwice", "twice:", "\taddsd\t%xmm0, %xmm0", "\tret", ""].join("\n");
+/** Each function answered with the IR the compiler resolved for it. */
+const TWICE_IR = irOf("typescript", PAIR_SOURCES, "twice.ts", "twice");
 
-/** `negate` flips the sign bit, which is what -x is for a double. */
-const NEGATE_ASSEMBLY = [
-  "\t.globl\tnegate",
-  "negate:",
-  "\tmovq\t$-9223372036854775808, %rax",
-  "\tmovq\t%rax, %xmm1",
-  "\txorpd\t%xmm1, %xmm0",
-  "\tret",
-  "",
-].join("\n");
+const NEGATE_IR = irOf("typescript", PAIR_SOURCES, "negate.ts", "negate");
 
 /**
  * A program of two functions, each answered from the prompt that asked for it:
@@ -202,7 +198,7 @@ async function pairProject(
 ): Promise<{ directory: string; endpoint: ChatEndpoint }> {
   const endpoint = await chatEndpoint(t, [], {
     until,
-    answer: (prompt) => (prompt.includes('"name": "twice"') ? TWICE_ASSEMBLY : NEGATE_ASSEMBLY),
+    answer: (prompt) => (prompt.includes('"name": "twice"') ? TWICE_IR : NEGATE_IR),
   });
   const directory = await mkdtemp(join(tmpdir(), "blaze-functions-"));
   for (const [name, source] of Object.entries(PAIR_SOURCES)) {
@@ -243,9 +239,8 @@ test("the default generates up to three functions at a time", async (t) => {
   // Four functions against a gate of four: a build that never reaches four in
   // flight is capped below it, and the gate opens on its own rather than
   // hanging, so the peak is what the cap is rather than what the gate allowed.
-  // Each function doubles its argument a different number of times, so the
-  // assembly is a whole number of `addsd` and every intermediate is exact:
-  // scaling by a power of two cannot round.
+  // Each function scales its argument by a different power of two, so every
+  // value the program prints is exact: doubling cannot round.
   const DOUBLES: Record<string, number> = { a: 1, b: 2, c: 3, d: 4 };
   const sources: Record<string, string> = Object.fromEntries(
     Object.entries(DOUBLES).map(([name, times]) => [
@@ -262,18 +257,18 @@ test("the default generates up to three functions at a time", async (t) => {
     "console.log(a(1) + b(1) + c(1) + d(1));",
     "",
   ].join("\n");
-  const assembly = (name: string, times: number): string =>
-    [`\t.globl\t${name}`, `${name}:`, ...Array.from({ length: times }, () => "\taddsd\t%xmm0, %xmm0"), "\tret", ""].join(
-      "\n",
-    );
+  const implementations = Object.fromEntries(
+    Object.keys(DOUBLES).map((name) => [name, irOf("typescript", sources, `${name}.ts`, name)]),
+  );
   const endpoint = await chatEndpoint(t, [], {
     until: 4,
     answer: (prompt) => {
       // The contract is in the prompt, so it says which function is being asked
       // for however the requests arrive.
       const name = /"name": "(\w+)"/.exec(prompt)?.[1];
-      assert.ok(name !== undefined, "the prompt names the function it is for");
-      return assembly(name, DOUBLES[name] ?? 1);
+      const implementation = name === undefined ? undefined : implementations[name];
+      assert.ok(implementation !== undefined, "the prompt names the function it is for");
+      return implementation;
     },
   });
   const directory = await mkdtemp(join(tmpdir(), "blaze-default-"));
