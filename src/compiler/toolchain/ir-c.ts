@@ -345,8 +345,15 @@ class FunctionEmitter {
     const terminator = block.terminator;
     if (terminator.k === "next") return;
     if (terminator.k === "return") {
-      const value = terminator.value === null ? "" : ` ${this.expression(terminator.value, this.fn.returns, depth)}`;
-      this.write([`${pad(depth)}return${value};`]);
+      // A body that falls off its end says so with a return carrying nothing,
+      // which a function that returns a value has nothing to say with: C will
+      // not compile `return;` in one, and nothing reaches it — an arm that
+      // returns leaves the end of the body past every path that got there.
+      if (terminator.value === null) {
+        if (this.fn.returns.kind === "void") this.write([`${pad(depth)}return;`]);
+        return;
+      }
+      this.write([`${pad(depth)}return ${this.expression(terminator.value, this.fn.returns, depth)};`]);
       return;
     }
     // A jump leaves the blocks it is written in, and frees what they owned on
@@ -553,25 +560,32 @@ class FunctionEmitter {
     if (value.parts.every((part) => part.k === "text")) {
       return value.parts.map((part) => cTextLiteral(part.value)).join("");
     }
+    // The buffer holds the parts that are written down, and the compiler knows
+    // how long each of them is; a value interpolated beside them is bounded by
+    // the room left. Both copies stop at the end of it, because a copy that did
+    // not wrote past the end of a buffer on the stack.
+    const written = value.parts.filter((part) => part.k === "text");
+    const room = Math.max(64, written.reduce((total, part) => total + part.value.length, 0) + 256 * (value.parts.length - written.length));
     const buffer = this.temporary("blaze_text");
     const filled = this.temporary("blaze_filled");
     // The parts are laid out in a buffer and handed to the runtime, which is
     // what owns a string. It is a statement expression for the same reason an
     // object is: C binds no temporary inside an expression.
-    const lines = [`char ${buffer}[512];`, `size_t ${filled} = 0;`];
+    const lines = [`char ${buffer}[${room}];`, `size_t ${filled} = 0;`];
     for (const part of value.parts) {
       if (part.k === "text") {
         lines.push(
-          `for (const char* blaze_c = ${cTextLiteral(part.value)}; *blaze_c != '\\0'; ++blaze_c) ${buffer}[${filled}++] = *blaze_c;`,
+          `for (const char* blaze_c = ${cTextLiteral(part.value)}; *blaze_c != '\\0' && ${filled} < ${room - 1}; ++blaze_c) ${buffer}[${filled}++] = *blaze_c;`,
         );
         continue;
       }
       const length = this.temporary("blaze_written");
-      const written = this.asText(part.value, depth);
+      const interpolated = this.asText(part.value, depth);
       lines.push(
-        `int ${length} = (int)strlen(${written}); for (int blaze_i = 0; blaze_i < ${length}; ++blaze_i) ${buffer}[${filled}++] = ${written}[blaze_i];`,
+        `int ${length} = (int)strlen(${interpolated}); for (int blaze_i = 0; blaze_i < ${length} && ${filled} < ${room - 1}; ++blaze_i) ${buffer}[${filled}++] = ${interpolated}[blaze_i];`,
       );
     }
+    lines.push(`${buffer}[${filled}] = '\\0';`);
     lines.push(`${RUNTIME_NAME}_string_new((const unsigned char*)${buffer}, ${filled});`);
     return `({ ${lines.join(" ")} })`;
   }

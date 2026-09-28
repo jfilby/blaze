@@ -250,9 +250,15 @@ function loopLines(loop: SemanticLoop, depth: number, loops: readonly SemanticLo
       return [`${here}do while ${valueText(loop.condition)}:`, ...body];
     case "counted": {
       const bound = loop.down ? (loop.inclusive ? ">=" : ">") : loop.inclusive ? "<=" : "<";
-      const step = loop.step === null ? "1" : valueText(loop.step);
+      // A step the loop names is the signed amount the index moves by, so a
+      // loop counting down carries a negative one: the direction is the sign,
+      // and writing it as a subtraction as well turns `-1` into `-= -1` and
+      // shows a loop counting up where the source wrote one counting down. A
+      // loop that names no step moves one the way it travels, which is where
+      // the direction belongs.
+      const move = loop.step === null ? `${loop.down ? "-=" : "+="} 1` : `+= ${valueText(loop.step)}`;
       return [
-        `${here}for (${loop.variable}: ${typeText(loop.type)} = ${valueText(loop.from)}; ${loop.variable} ${bound} ${valueText(loop.to)}; ${loop.variable} ${loop.down ? "-=" : "+="} ${step}):`,
+        `${here}for (${loop.variable}: ${typeText(loop.type)} = ${valueText(loop.from)}; ${loop.variable} ${bound} ${valueText(loop.to)}; ${loop.variable} ${move}):`,
         ...body,
       ];
     }

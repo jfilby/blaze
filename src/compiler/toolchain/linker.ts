@@ -378,7 +378,10 @@ export function generateHarness(contract: FunctionContract, demoRequest: string)
   if (contract.ensures.length === 0) return generateDefinitionHarness(contract);
   const returns = parseType(contract.function.returns);
   if (isBuffer(returns)) throw linkError("a pointer return type cannot be called from the harness", undefined, name);
-  sysvArgumentLocations(contract.function.params);
+  // The harness is C and the C compiler places the arguments, so an arity past
+  // the registers is a harness that still compiles: a ninth argument goes on
+  // the stack. Asking for a register for each one refused a contract whose
+  // harness was about to be written perfectly well.
 
   const types = contract.function.params.map((param) => parseType(param.type));
   const labels = contract.function.params.map((param) => param.name);

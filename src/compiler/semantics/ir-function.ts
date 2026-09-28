@@ -1245,6 +1245,10 @@ class FunctionBody {
 
   /** The type two values of one expression have in common, or a refusal. */
   private common(left: SemanticType, right: SemanticType, line: number): SemanticType {
+    // A truth is a type of its own, and two of them share one the way two
+    // numbers do: the arms of `a > 0 && b > 0` are both truths, and refusing
+    // them refuses every short-circuit operator over a condition.
+    if (isBoolean(left) && isBoolean(right)) return left;
     if (isText(left) && isText(right)) return TEXT;
     const number = commonNumber(left, right);
     if (number !== null) return number;

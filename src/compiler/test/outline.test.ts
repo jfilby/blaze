@@ -88,6 +88,32 @@ test("the outline states a counted loop as the three parts it runs on", () => {
   assert.match(written, /^ {4}sum \+= index$/m);
 });
 
+test("the outline states a loop that counts down by a step the direction is not also in", () => {
+  // A step the loop names is the signed amount the index moves by, so a loop
+  // counting down carries a negative one. Writing it as a subtraction as well
+  // shows the model `i -= -1`, and a model that implements the outline it was
+  // given counts up where the source counted down.
+  const named = outline([
+    "export function r(n: number): number {",
+    "  let sum = 0;",
+    "  for (let index = n; index > 0; index -= 1) { sum += index; }",
+    "  return sum;",
+    "}",
+  ]);
+  assert.match(named, /^ {2}for \(index: f64 = n; index > 0; index \+= -1\):$/m);
+
+  // A loop that names no step moves one the way it travels, so the direction is
+  // the only thing that says which way round it counts.
+  const unnamed = outline([
+    "export function r(n: number): number {",
+    "  let sum = 0;",
+    "  for (let index = n; index > 0; index--) { sum += index; }",
+    "  return sum;",
+    "}",
+  ]);
+  assert.match(unnamed, /^ {2}for \(index: f64 = n; index > 0; index -= 1\):$/m);
+});
+
 test("the outline states a whole number as one and a double as it was written", () => {
   const written = outline([
     "export function r(a: Float64Array): number {",

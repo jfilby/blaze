@@ -34,6 +34,7 @@ import {
   type SemanticStatement,
   type SemanticTerminator,
   type SemanticValue,
+  elementTypeOf,
   slotType,
   type SemanticType,
 } from "../core/semantic-ir.ts";
@@ -115,6 +116,25 @@ class Bytes {
     }
   }
 
+  /**
+   * A signed 64 bit integer, as the format's LEB128. A 32 bit word cannot hold
+   * one, so the arithmetic is done on a `bigint`: a constant past 2^31 written
+   * through the 32 bit path keeps its low half and reads as a different number.
+   */
+  varbig(value: bigint): void {
+    let rest = value;
+    for (;;) {
+      const low = Number(rest & 0x7fn);
+      rest >>= 7n;
+      const sign = low & 0x40;
+      if ((rest === 0n && sign === 0) || (rest === -1n && sign !== 0)) {
+        this.byte(low);
+        return;
+      }
+      this.byte(low | 0x80);
+    }
+  }
+
   name(value: string): void {
     const encoded = new TextEncoder().encode(value);
     this.varuint(encoded.length);
@@ -162,7 +182,10 @@ const F64 = 0x7c;
 
 /**
  * A type the module carries values in. A reference, a slice, a buffer and an
- * array are all a byte offset into the memory the host provides.
+ * array are all a byte offset into the memory the host provides, pointing at
+ * the first element: the count of a buffer is the word the offset sits one
+ * before, which the host writes there because a length arrives with no
+ * argument of its own.
  */
 function carrier(type: SemanticType): number {
   if (type.kind !== "primitive") return I32;
@@ -313,6 +336,8 @@ class Body {
   private readonly contract: FunctionContract;
   private readonly returns: SemanticType;
   private readonly candidate: string | undefined;
+  /** How many labels the body has opened that the IR does not name. */
+  private anonymous = 0;
 
   constructor(fn: SemanticFunction, contract: FunctionContract, returns: SemanticType, candidate: string | undefined) {
     this.fn = fn;
@@ -336,9 +361,9 @@ class Body {
     this.code.varint(value | 0);
   }
 
-  private i64(value: number): void {
+  private i64(value: bigint): void {
     this.op(0x42);
-    this.code.varint(value);
+    this.code.varbig(value);
   }
 
   private float(value: number, wide: boolean): void {
@@ -394,6 +419,16 @@ class Body {
       stage: "semantic-ir",
       message: `a jump to "${id}" leaves no block or loop it is a break or a continue of`,
     });
+  }
+
+  /**
+   * A label no jump names. An `if` or a block of its own still opens one, and
+   * the format counts every label a branch reaches past, so it is held here
+   * under a name no terminator can ask for.
+   */
+  private frame(): string {
+    this.anonymous += 1;
+    return `#${this.anonymous}`;
   }
 
   /** Converts what is on the stack into the type a use reads it in. */
@@ -460,26 +495,29 @@ class Body {
         this.convert(this.slot(value.name), carrier(at));
         return;
       case "length": {
-        // A length is counted in elements and a byte offset is counted in
-        // bytes, so a buffer's length is the offset the host placed divided by
-        // the width of what it holds. The length of a string is the runtime's
-        // to answer, and a module reaches no runtime.
+        // A module is handed a pointer to the elements of a buffer and no
+        // length beside it, so the host writes the count in the word the
+        // pointer sits one before, and the count is read from there. The
+        // length of a string is the runtime's to answer, and a module reaches
+        // no runtime.
         const held = value.of.type;
         if (held.kind !== "slice" && held.kind !== "array" && held.kind !== "ptr") {
           unreachable("take the length of a value that is not a buffer", this.contract, this.candidate);
         }
         this.value(value.of, USIZE);
-        const width = elementSize(held.of);
-        if (width !== 1) {
-          this.i64(width);
-          this.op(0x7e);
-        }
+        this.i64(8n);
+        this.op(0x7d);
+        this.op(0xa7);
+        this.op(0x29);
+        this.code.varuint(3);
+        this.code.varuint(0);
+        this.convert(value.type, carrier(at));
         return;
       }
       case "element": {
         this.value(value.of, USIZE);
         this.value(value.index, USIZE);
-        this.i64(elementSize(value.type));
+        this.i64(BigInt(elementSize(value.type)));
         this.op(0x7e);
         this.op(0x7c);
         this.op(0xa7);
@@ -506,24 +544,26 @@ class Body {
         return;
       }
       case "unary": {
+        // Every one of these answers in the type the use reads it in, like the
+        // rest: an operator works in the operand's own carrier, and what comes
+        // out of it is converted to the carrier the use asked for. A case that
+        // leaves its own type on the stack hands the next operator a value of
+        // the wrong width, which the format reads as a type error.
         const held = carrier(value.type);
         if (value.op === "pos") {
           this.value(value.operand, at);
-          this.convert(value.operand.type, carrier(at));
           return;
         }
         if (value.op === "not") {
           this.condition(value.operand);
           this.op(0x45);
-          return;
-        }
-        if (value.op === "bitNot") {
-          this.value(value.operand, value.type);
-          this.op(held === I64 ? 0x83 : 0x71);
+          this.convert({ kind: "primitive", name: "bool" }, carrier(at));
           return;
         }
         this.value(value.operand, value.type);
-        this.op(held === I64 ? 0x7d : held === I32 ? 0x6b : held === F32 ? 0x8c : 0x9a);
+        if (value.op === "bitNot") this.op(held === I64 ? 0x83 : 0x71);
+        else this.op(held === I64 ? 0x7d : held === I32 ? 0x6b : held === F32 ? 0x8c : 0x9a);
+        this.convert(value.type, carrier(at));
         return;
       }
       case "isNull":
@@ -533,37 +573,51 @@ class Body {
         this.convert({ kind: "primitive", name: "i32" }, carrier(at));
         return;
       case "select":
-        this.condition(value.condition);
+        // A `select` reads its condition last: it is the top of the stack, and
+        // the two arms below it are what it chooses between. Both arms are
+        // emitted in the type the use reads the whole in, so what it hands back
+        // is already that type.
         this.value(value.then, at);
         this.value(value.otherwise, at);
+        this.condition(value.condition);
         this.op(0x1b);
-        this.convert(value.then.type, carrier(at));
         return;
       case "coalesce":
-        this.value(value.left, at);
-        this.op(0x1a);
-        this.value(value.left, at);
-        this.i32(0);
-        this.op(carrier(value.left.type) === I64 ? 0x52 : 0x47);
+        // `left ?? right` is the right arm when the left one is nothing, and
+        // nothing is a zero of the left arm's own type: a zero of another width
+        // under a comparison of this one is a module the engine refuses.
         this.value(value.right, at);
+        this.value(value.left, at);
+        this.value(value.left, at);
+        const held = carrier(value.left.type);
+        if (held === I64) this.i64(0n);
+        else if (held === F64) this.float(0, true);
+        else if (held === F32) this.float(0, false);
+        else this.i32(0);
+        this.op(BINARY[held].eq as number);
         this.op(0x1b);
-        this.convert(value.left.type, carrier(at));
         return;
       case "logical":
         // A logical operator is a value and not a condition: the arm the truth
-        // of the left one chooses, which is a select over the two.
-        this.value(value.left, at);
-        this.condition(value.left);
+        // of the left one chooses, which is a select over the two. `&&` keeps
+        // the right arm when the left one holds and `||` keeps it when the left
+        // one does not, so one of them turns that truth over first.
         this.value(value.right, at);
         this.value(value.left, at);
+        this.condition(value.left);
+        if (value.op === "or") this.op(0x45);
         this.op(0x1b);
-        this.convert(value.left.type, carrier(at));
         return;
-      case "compare":
-      case "arith": {
-        const held = carrier(value.type);
-        this.value(value.left, value.type);
-        this.value(value.right, value.type);
+      case "arith":
+      case "compare": {
+        // A comparison names the type its two sides are compared as, which is
+        // not the type it answers with: comparing two doubles as whole numbers
+        // loses every fraction of them and answers the other arm than the one
+        // the source wrote. An operator's type is the operands' own type.
+        const compared = value.k === "compare" ? value.operand : value.type;
+        const held = carrier(compared);
+        this.value(value.left, compared);
+        this.value(value.right, compared);
         const op = BINARY[held][value.op];
         if (op === undefined) {
           unreachable(`compute ${value.op}`, this.contract, this.candidate);
@@ -588,8 +642,7 @@ class Body {
         this.i32(Number(BigInt(text)));
         return;
       case I64:
-        this.op(0x42);
-        this.code.varint(Number(BigInt(text)));
+        this.i64(BigInt(text));
         return;
       case F32:
         this.float(Number(text), false);
@@ -610,6 +663,7 @@ class Body {
     if (terminator.k === "next") return;
     if (terminator.k === "return") {
       if (terminator.value !== null) this.value(terminator.value, this.returns);
+      else if (this.returns.kind !== "void") this.answer();
       this.op(0x0f);
       return;
     }
@@ -633,25 +687,32 @@ class Body {
         return;
       }
       case "step": {
+        // A step is a statement, and nothing reads what it would hand back: a
+        // `tee` pushes the new value again, and in a body that falls through
+        // to the turn of the loop — a do-while, or the last statement of a
+        // block — that value is a module the engine refuses.
         const held = carrier(this.slot(statement.name));
         this.get(statement.name);
-        if (held === I64) this.i64(1);
+        if (held === I64) this.i64(1n);
         else if (held === F64) this.float(1, true);
         else if (held === F32) this.float(1, false);
         else this.i32(1);
         this.op(statement.op === "++" ? (BINARY[held].add as number) : (BINARY[held].sub as number));
-        if (statement.prefix) this.set(statement.name);
-        else {
-          this.op(0x22);
-          this.code.varuint(this.local(statement.name));
-        }
+        this.set(statement.name);
         return;
       }
       case "setElement": {
-        const element = this.slot(statement.buffer);
-        this.get(statement.buffer);
+        // What a name holds is the buffer; what one of its elements is takes
+        // the type out of that, and it is the element the address is counted in
+        // and the value written at — a name's own type is a reference, and a
+        // reference has no width.
+        const element = elementTypeOf(this.slot(statement.buffer));
+        if (element === null) {
+          unreachable(`write an element of "${statement.buffer}"`, this.contract, this.candidate);
+        }
+        this.value({ k: "local", type: this.slot(statement.buffer), name: statement.buffer }, USIZE);
         this.value(statement.index, USIZE);
-        this.i64(elementSize(element));
+        this.i64(BigInt(elementSize(element)));
         this.op(0x7e);
         this.op(0x7c);
         this.op(0xa7);
@@ -680,25 +741,32 @@ class Body {
         return;
       }
       case "if":
+        // An `if` opens a label the format counts when a branch reaches for one,
+        // so it is a frame like a loop's — a jump out of an arm is a depth from
+        // here, and a depth that forgets the arm is a jump to the wrong place.
         this.condition(statement.condition);
         this.op(0x04);
         this.code.byte(0x40);
+        this.frames.push(this.frame());
         this.block(statement.then, null);
         if (statement.otherwise !== null) {
           this.op(0x05);
           this.block(statement.otherwise, null);
         }
+        this.frames.pop();
         this.op(0x0b);
         return;
-      case "block": {
+      case "block":
         // A block of its own: the names it declares stop meaning past its end,
-        // and in a module with no scopes the body is emitted either way.
+        // and in a module with no scopes the body is emitted either way. It is
+        // a label, so a jump out of it is counted like any other.
         this.op(0x02);
         this.code.byte(0x40);
+        this.frames.push(this.frame());
         this.block(statement.body, null);
+        this.frames.pop();
         this.op(0x0b);
         return;
-      }
       case "loop":
         this.loop(statement.loop);
         return;
@@ -728,12 +796,19 @@ class Body {
    */
   private loop(loop: SemanticLoop): void {
     if (loop.kind === "counted") {
+      // A counted loop moves its index at the head of the turn rather than at
+      // the foot, because a `continue` branches to the head: a step at the foot
+      // is a step a `continue` skips, and a loop whose index never moves is a
+      // loop that never ends. The turn before the first is a turn of its own,
+      // so the index starts one step short of the value the source wrote.
       this.value(loop.from, loop.type);
       this.convert(loop.from.type, carrier(loop.type));
+      this.countedStep(loop);
+      this.op(BINARY[carrier(loop.type)].sub as number);
       this.set(loop.variable);
     }
     if (loop.kind === "each") {
-      this.i64(0);
+      this.i64(0n);
       this.set(loop.index);
     }
     this.op(0x02);
@@ -755,6 +830,12 @@ class Body {
       this.code.varuint(0);
     } else if (loop.kind === "counted") {
       this.get(loop.variable);
+      this.countedStep(loop);
+      // The step is the signed amount the index moves by, so a loop counting
+      // down carries a negative one and adds it like any other.
+      this.op(BINARY[carrier(loop.type)].add as number);
+      this.set(loop.variable);
+      this.get(loop.variable);
       this.value(loop.to, loop.type);
       this.convert(loop.to.type, carrier(loop.type));
       const bound = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
@@ -762,16 +843,6 @@ class Body {
       this.op(0x45);
       this.exitTest();
       this.block(loop.body, null);
-      this.get(loop.variable);
-      if (loop.step === null) this.value({ k: "const", type: loop.type, text: "1" }, loop.type);
-      else {
-        this.value(loop.step, loop.type);
-        this.convert(loop.step.type, carrier(loop.type));
-      }
-      // The step is the signed amount the index moves by, so a loop counting
-      // down carries a negative one and adds it like any other.
-      this.op(BINARY[carrier(loop.type)].add as number);
-      this.set(loop.variable);
       this.backToHeader();
     } else {
       // A for-of counts elements from the first to the length. It counts them
@@ -785,7 +856,7 @@ class Body {
       this.get(loop.of);
       this.convert(this.slot(loop.of), I64);
       this.get(loop.index);
-      this.i64(elementSize(loop.elementType));
+      this.i64(BigInt(elementSize(loop.elementType)));
       this.op(0x7e);
       this.op(0x7c);
       this.op(0xa7);
@@ -797,7 +868,7 @@ class Body {
       this.set(loop.element);
       this.block(loop.body, null);
       this.get(loop.index);
-      this.i64(1);
+      this.i64(1n);
       this.op(0x7c);
       this.set(loop.index);
       this.backToHeader();
@@ -806,6 +877,21 @@ class Body {
     this.frames.pop();
     this.op(0x0b);
     this.frames.pop();
+  }
+
+  /**
+   * What one turn of a counted loop moves its index by. A loop that names a
+   * step moves by it, and a loop that does not moves by one the way it already
+   * travels — which is a negative one when it counts down, or the index climbs
+   * for ever and the loop never ends.
+   */
+  private countedStep(loop: Extract<SemanticLoop, { kind: "counted" }>): void {
+    if (loop.step !== null) {
+      this.value(loop.step, loop.type);
+      this.convert(loop.step.type, carrier(loop.type));
+      return;
+    }
+    this.value({ k: "const", type: loop.type, text: loop.down ? "-1" : "1" }, loop.type);
   }
 
   /** Leaves the loop for its exit, which is the block the loop sits in. */
@@ -839,6 +925,29 @@ class Body {
     }
     for (const [type, count] of counts) groups.push(count, type);
     return groups;
+  }
+
+  /**
+   * A value of the contracted return type, for a body that falls out of its own
+   * end. A body that ends on a return has already answered, so nothing runs
+   * this — but a function that returns one still has to leave something of
+   * that type behind, and the format has no other way to fall off the end.
+   */
+  answer(): void {
+    if (this.returns.kind === "void") return;
+    if (this.returns.kind === "primitive" && this.returns.name === "f64") {
+      this.float(0, true);
+      return;
+    }
+    if (this.returns.kind === "primitive" && this.returns.name === "f32") {
+      this.float(0, false);
+      return;
+    }
+    if (carrier(this.returns) === I64) {
+      this.i64(0n);
+      return;
+    }
+    this.i32(0);
   }
 
   finish(): Uint8Array {
@@ -876,26 +985,7 @@ export function moduleBytes(
   code.counted(groups.length / 2, (locals) => groups.forEach((value) => locals.varuint(value)));
   body.block(fn.entry, null);
   code.raw(body.finish());
-  if (result !== undefined) {
-    // A body that falls out of itself still has to leave a value of the
-    // contracted type behind, and the IR is written so that a function which
-    // returns one always ends on a return.
-    if (result === F64) {
-      const view = new DataView(new ArrayBuffer(8));
-      code.byte(0x44);
-      for (let index = 0; index < 8; index += 1) code.byte(view.getUint8(index));
-    } else if (result === F32) {
-      const view = new DataView(new ArrayBuffer(4));
-      code.byte(0x43);
-      for (let index = 0; index < 4; index += 1) code.byte(view.getUint8(index));
-    } else if (result === I64) {
-      code.byte(0x42);
-      code.varint(0);
-    } else {
-      code.byte(0x41);
-      code.varint(0);
-    }
-  }
+  if (result !== undefined) body.answer();
   code.byte(0x0b);
   const compiled = code.build();
 

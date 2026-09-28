@@ -236,13 +236,21 @@ export function generateWasmHost(contract: FunctionContract): string {
       const type = parseType(param.type);
       if (type.kind === "primitive") return "";
       const size = elementSize(bufferElement(type));
-      return `  if (count_${param.name} !== 0) {
+      return `  {
+    storage_${param.name} = allocate(${POINTER_SIZE} + count_${param.name} * ${size});
+    // A module is handed a pointer to the elements and no length beside it, so
+    // the count is written in the word the pointer sits one before: a module
+    // reads a length as the count at (pointer - ${POINTER_SIZE}). The word is
+    // written for an empty buffer too, or a module asked to walk one would
+    // read a length from below the memory the host gave it.
+    view().setBigUint64(storage_${param.name}, BigInt(count_${param.name}), true);
+    ${param.name} = storage_${param.name} + ${POINTER_SIZE};
+  }
+  if (count_${param.name} !== 0) {
     const elements = nextTokens();
     if (elements === null || elements.length < count_${param.name}) fail("truncated data for ${param.name}");
-    storage_${param.name} = allocate(count_${param.name} * ${size});
-    ${param.name} = storage_${param.name};
     for (let element = 0; element < count_${param.name}; element += 1) {
-      ${scalarStore(bufferElement(type), `elements[element]`, `storage_${param.name} + element * ${size}`)}
+      ${scalarStore(bufferElement(type), `elements[element]`, `${param.name} + element * ${size}`)}
     }
   }`;
     })

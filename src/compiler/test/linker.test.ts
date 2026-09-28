@@ -37,13 +37,13 @@ function echoContract(params: string, returns = "i32"): FunctionContract {
  * Throws when the harness does not build, which is itself the defect for a
  * name the harness already holds.
  */
-async function harnessResult(params: string, vector: string, body = "movl\t%edi, %eax"): Promise<string> {
+async function harnessResult(params: string, vector: string, body = "movl\t%edi, %eax", returns = "i32"): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "blaze-harness-"));
   const harness = join(directory, "harness.c");
   const assembly = join(directory, "clamp.s");
   const object = join(directory, "clamp.o");
   const binary = join(directory, "clamp");
-  await writeFile(harness, generateHarness(echoContract(params), `run\n${vector}`), "utf8");
+  await writeFile(harness, generateHarness(echoContract(params, returns), `run\n${vector}`), "utf8");
   await writeFile(assembly, [".text", ".globl clamp", "clamp:", `\t${body}`, "\tret", ""].join("\n"), "utf8");
   assert.equal(run("as", ["--64", "-o", object, assembly]).code, 0, "as must assemble the candidate");
   const runtime = await buildStandaloneRuntime(directory);
@@ -85,6 +85,17 @@ test("a parameter named after a sibling's argument storage still receives its el
   assert.equal(
     await harnessResult("count_buffer: i32, storage_buffer: i32, buffer: ptr<i32>", vector, "movl\t(%rdx), %eax"),
     "RESULT 1\n",
+  );
+});
+
+test("a signature wider than the argument registers still builds a harness", async () => {
+  // The harness is C and the C compiler places the arguments, so a ninth one
+  // goes on the stack. Asking for a register for each argument refused a
+  // contract whose harness was about to be written perfectly well.
+  const names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+  assert.equal(
+    await harnessResult(names.map((name) => `${name}: f64`).join(", "), "5 1 2 3 4 5 6 7 8\n", "movsd %xmm0, %xmm0", "f64"),
+    "RESULT 5\n",
   );
 });
 
