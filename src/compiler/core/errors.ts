@@ -11,6 +11,7 @@ export type ErrorCategory =
   | "FrontendError"
   | "ContractError"
   | "AiGenerationError"
+  | "ModelDeclinedError"
   | "AssemblyError"
   | "VerificationError"
   | "BenchmarkError"

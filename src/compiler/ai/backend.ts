@@ -5,6 +5,10 @@
  * candidate. Model output is untrusted: it is recorded verbatim and handed to
  * the assembler for validation, never executed directly.
  *
+ * A model may also report that it cannot implement a contract at all: a reply
+ * that opens with the failure status is a report from the model, not source,
+ * and it ends the build rather than being repaired.
+ *
  * Two backends implement the same contract:
  *
  *   - VercelAiBackend: the production backend, built on the Vercel AI SDK
@@ -89,6 +93,45 @@ export function extractAssembly(text: string): string {
     throw generationError("the model returned only comments", assembly.slice(0, 400));
   }
   return `${assembly}\n`;
+}
+
+/**
+ * The first line of a reply that reports the model cannot implement the
+ * contract. Everything after it is the report, so it is read before the
+ * assembly extractor, which would otherwise take the same words for source.
+ */
+const FAILED_STATUS = "STATUS: failed";
+
+/** A failure the model reported itself, in place of an implementation. */
+export interface DeclaredFailure {
+  /** What the model said, as it said it, across every line it used. */
+  readonly message: string;
+}
+
+/**
+ * Reads the failure status a reply opens with, or null when it opens with
+ * anything else. The status is the first line and the whole of the marker: a
+ * reply that says it later, or says it beside source, is source, because the
+ * toolchain is what judges source and it has never heard of the status.
+ *
+ * The message may be empty. A failure nobody accounted for says nothing, and
+ * whether that is a model declining or a model answering badly is the
+ * caller's account to give, so what was there is reported as it was found.
+ */
+export function readFailureStatus(text: string): DeclaredFailure | null {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  if ((lines[0] ?? "").trim() !== FAILED_STATUS) return null;
+  return { message: lines.slice(1).join("\n").trim() };
+}
+
+/**
+ * A failure the model reported is the build's answer rather than an attempt
+ * that failed: it ends the request that carried it, no repair follows it, and
+ * it is recorded in the model's own words, which are the only account of why
+ * the contract could not be met.
+ */
+function declaredFailure(message: string, detail: string): CompilerError {
+  return new CompilerError({ category: "ModelDeclinedError", stage: "generate", message, detail });
 }
 
 /**
@@ -300,6 +343,12 @@ export class VercelAiBackend implements AiBackend {
         assembly = await this.ask(model, system, answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)));
         break;
       } catch (cause) {
+        // A failure the model reported is named for the function it is for
+        // here, where the request is. It is the answer rather than a fault of
+        // the request, so it is neither asked for again nor repaired.
+        if (cause instanceof CompilerError) {
+          throw new CompilerError({ ...cause.toJSON(), function: cause.functionName ?? request.contract.function.name });
+        }
         if (!(cause instanceof UnusableAnswer)) throw cause;
         if (!cause.retryable) throw cause.failure;
         answers.push({ reason: cause.reason, stop: cause.stop });
@@ -388,6 +437,27 @@ export class VercelAiBackend implements AiBackend {
         true,
         generationError("the model provider request failed", cause instanceof Error ? cause.message : String(cause)),
       );
+    }
+
+    // A model that cannot implement the contract says so in the first line,
+    // and the rest of the reply is why. That is a report rather than a wrong
+    // answer: there is nothing in it to assemble, and the build ends on it
+    // rather than asking the same model for the same contract again.
+    const declared = readFailureStatus(text);
+    if (declared !== null) {
+      if (declared.message === "") {
+        // A status with nothing under it accounts for nothing. A model that
+        // declined and left no reason behind has not reported a failure, it
+        // has answered unusably, and the re-request says so: the one thing it
+        // can still do about it is say why.
+        throw new UnusableAnswer(
+          "it reported a failure and said nothing about it",
+          true,
+          generationError("the model reported a failure without saying what it was"),
+          stop,
+        );
+      }
+      throw declaredFailure(declared.message, "reported by the model in place of an implementation; the build ends on it");
     }
 
     let assembly: string;
@@ -516,6 +586,19 @@ export class ReplayBackend implements AiBackend {
     // are generated at the same time, and a cursor would hand them out in
     // whatever order they happened to reach the backend.
     const entry = entries[Math.min(sequence - 1, entries.length - 1)];
+    // A recorded failure is served where a recorded implementation would have
+    // been, and ends the build in the words it was recorded in.
+    const declared = readFailureStatus(entry);
+    if (declared !== null) {
+      const file = String(this.configuration.replayFile);
+      if (declared.message === "") {
+        throw generationError(
+          "the replay file records a failure and gives no reason",
+          `entry ${Math.min(sequence - 1, entries.length - 1) + 1} of ${file}`,
+        );
+      }
+      throw declaredFailure(declared.message, `recorded in ${file} in place of an implementation`);
+    }
     return {
       id: `c${sequence}`,
       assembly: extractAssembly(entry),

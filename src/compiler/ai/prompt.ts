@@ -219,7 +219,18 @@ export function buildSystemPrompt(output: OutputKind): string {
         ]),
     "- Do not write a description of the algorithm outside the code. A short comment",
     "  inside the code is fine.",
-    "- Return the code and nothing else.",
+    "- Return the code and nothing else, and put nothing else beside it.",
+    "",
+    "If the contract asks for something you cannot implement at all, do not return",
+    "code. Answer with this first line:",
+    "",
+    "STATUS: failed",
+    "",
+    "and on the lines after it say what the contract asks for that you cannot do. The",
+    "build ends on the first answer like that and asks you nothing further for this",
+    "contract, so what you write there is the whole of the report it gets. The status",
+    "goes with that explanation and nothing else: never beside code, and never on its",
+    "own without saying why."
   ].join("\n");
 }
 

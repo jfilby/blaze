@@ -331,3 +331,48 @@ test("a request the provider failed is asked for again", async (t) => {
   assert.equal(chat.prompts.length, 2);
   assert.match(chat.prompts[1], /the provider request failed/);
 });
+
+const DECLINED = [
+  "STATUS: failed",
+  "The contract requires behavior that cannot be implemented",
+  "with the available information.",
+].join("\n");
+
+test("a model that reports it cannot implement the contract ends the build there", async (t) => {
+  const { directory, chat } = await projectAnswering(t, [DECLINED], { maxCandidates: 1, maxAttempts: 3, maxRetries: 2 });
+
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) =>
+      error instanceof CompilerError &&
+      error.category === "ModelDeclinedError" &&
+      error.stage === "generate" &&
+      error.functionName === "square" &&
+      error.message === "The contract requires behavior that cannot be implemented\nwith the available information.",
+  );
+  // One request and no repair: the report is the answer, so nothing asks the
+  // model again for the contract it just said it cannot meet.
+  assert.equal(chat.prompts.length, 1);
+  // The build record keeps the model's own account of why, not a diagnostic
+  // the compiler wrote about it.
+  const build = await inspectProject("input", directory);
+  assert.equal(build.status, "failed");
+  assert.equal(build.error?.category, "ModelDeclinedError");
+  assert.equal(build.error?.message, "The contract requires behavior that cannot be implemented\nwith the available information.");
+});
+
+test("a failure status with nothing under it is asked for again", async (t) => {
+  // A status nobody accounted for is an answer that cannot be used rather
+  // than a failure to believe, so the re-request says the report is missing
+  // and the build carries on when the reason arrives.
+  const { directory, chat } = await projectAnswering(t, ["STATUS: failed", SQUARE_ASSEMBLY], {
+    maxCandidates: 1,
+    maxAttempts: 1,
+    maxRetries: 1,
+  });
+
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(chat.prompts.length, 2);
+  assert.match(chat.prompts[1], /reported a failure and said nothing about it/);
+});

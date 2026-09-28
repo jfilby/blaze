@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolveModel, OPENROUTER_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
-import { createBackend, extractAssembly, VercelAiBackend } from "../ai/backend.ts";
+import { createBackend, extractAssembly, readFailureStatus, VercelAiBackend } from "../ai/backend.ts";
 
 function diagnostic(run: () => unknown): string {
   try {
@@ -95,4 +95,28 @@ test("assembly is recovered from a fenced or bare response", () => {
   assert.equal(extractAssembly("  \t.globl f\n  "), ".globl f\n");
   assert.match(diagnostic(() => extractAssembly("   ")), /empty response/);
   assert.match(diagnostic(() => extractAssembly("# just a comment\n")), /only comments/);
+});
+
+test("a failure status is read off the first line, with the model's own words", () => {
+  const declared = readFailureStatus("STATUS: failed\nThe contract requires behavior that cannot be implemented\nwith the available information.\n");
+  assert.equal(
+    declared?.message,
+    "The contract requires behavior that cannot be implemented\nwith the available information.",
+  );
+  // A model that indents its status still means it, and the blank lines it
+  // leaves around the report are not part of what it reported.
+  assert.equal(readFailureStatus("  STATUS: failed  \r\n\r\nI cannot meet this.\r\n")?.message, "I cannot meet this.");
+  // A status with nothing under it reports nothing, and says so by being
+  // empty rather than by being absent.
+  assert.equal(readFailureStatus("STATUS: failed")?.message, "");
+});
+
+test("only a first line that is exactly the status opens a failure", () => {
+  // Everything else is source. A reply that mentions the status later, or
+  // says it beside code, is what the toolchain is there to judge.
+  assert.equal(readFailureStatus("```asm\n\t.globl f\nf:\n\tret\n```"), null);
+  assert.equal(readFailureStatus("STATUS: ok\n\t.globl f"), null);
+  assert.equal(readFailureStatus("I cannot do this.\nSTATUS: failed"), null);
+  assert.equal(readFailureStatus("STATUS: failed to compile\treason"), null);
+  assert.equal(readFailureStatus("Here is the function.\nSTATUS: failed\nbecause"), null);
 });
