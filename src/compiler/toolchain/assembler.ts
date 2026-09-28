@@ -247,7 +247,7 @@ export function validateAssembly(
 
   if (problems.length > 0) {
     throw assemblyError(
-      `the assembly candidate for ${functionName} violates the contract`,
+      `the assembly for ${functionName} violates the contract`,
       problems.join("\n"),
       functionName,
       candidate,

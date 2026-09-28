@@ -1,5 +1,5 @@
 /**
- * Reading the text of an assembly candidate.
+ * Reading the assembly of a candidate.
  *
  * Every rule the compiler holds a candidate to is read off its text, so the
  * text is reduced to one shape in a single place: comments taken off, the

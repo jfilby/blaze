@@ -28,7 +28,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { CompilerError } from "../core/errors.ts";
 import type { ModelConfiguration } from "./model.ts";
 import { buildRetryPrompt, buildSystemPrompt, buildUserPrompt, type PromptRequest } from "./prompt.ts";
-import { DEFAULT_GENERATION, type AssemblyCandidate } from "../core/types.ts";
+import { DEFAULT_GENERATION, type Candidate } from "../core/types.ts";
 
 /**
  * A model call that did not produce an implementation: the provider request
@@ -71,7 +71,7 @@ export interface AiBackend {
    * in the build's candidate record and names it; the request says which
    * candidate and attempt it belongs to.
    */
-  generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate>;
+  generate(request: PromptRequest, sequence: number): Promise<Candidate>;
 }
 
 function generationError(message: string, detail?: string): CompilerError {
@@ -79,20 +79,21 @@ function generationError(message: string, detail?: string): CompilerError {
 }
 
 /**
- * Recovers the assembly from a model response: fenced blocks are unwrapped and
- * anything outside the first fence is dropped. The result is still untrusted.
+ * Recovers the implementation from a model response: fenced blocks are
+ * unwrapped and anything outside the first fence is dropped. The result is
+ * still untrusted.
  */
-export function extractAssembly(text: string): string {
+export function extractImplementation(text: string): string {
   const trimmed = text.trim();
   if (trimmed === "") throw generationError("the model returned an empty response");
   const fence = /```(?:[A-Za-z0-9_+-]*)\n([\s\S]*?)```/.exec(trimmed);
   const body = fence === null ? trimmed : fence[1];
-  const assembly = body.trim();
-  if (assembly === "") throw generationError("the model returned no assembly", trimmed.slice(0, 400));
-  if (!/\S/.test(assembly.replace(/^\s*[#;].*$/gm, ""))) {
-    throw generationError("the model returned only comments", assembly.slice(0, 400));
+  const implementation = body.trim();
+  if (implementation === "") throw generationError("the model returned no implementation", trimmed.slice(0, 400));
+  if (!/\S/.test(implementation.replace(/^\s*[#;].*$/gm, ""))) {
+    throw generationError("the model returned only comments", implementation.slice(0, 400));
   }
-  return `${assembly}\n`;
+  return `${implementation}\n`;
 }
 
 /**
@@ -330,17 +331,17 @@ export class VercelAiBackend implements AiBackend {
    * what was wrong with the one before it, and none of them costs the
    * candidate one of its repair attempts.
    */
-  async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
+  async generate(request: PromptRequest, sequence: number): Promise<Candidate> {
     const system = buildSystemPrompt(request.output);
     const user = buildUserPrompt(request);
     this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
     const answers: { reason: string; stop: ProviderStop | undefined }[] = [];
-    let assembly: string;
+    let text: string;
 
     for (let retry = 0; ; retry += 1) {
       try {
-        assembly = await this.ask(model, system, answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)));
+        text = await this.ask(model, system, answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)));
         break;
       } catch (cause) {
         // A failure the model reported is named for the function it is for
@@ -378,7 +379,7 @@ export class VercelAiBackend implements AiBackend {
 
     return {
       id: `c${sequence}`,
-      assembly,
+      text,
       model: this.id,
       modelConfig: this.id,
       generatedAt: new Date().toISOString(),
@@ -388,7 +389,7 @@ export class VercelAiBackend implements AiBackend {
     };
   }
 
-  /** One model call, answered in terms of the compiler: assembly, or none. */
+  /** One model call, answered in terms of the compiler: an implementation, or none. */
   private async ask(model: LanguageModel, system: string, user: string): Promise<string> {
     let text: string;
     let stop: ProviderStop | undefined;
@@ -460,9 +461,9 @@ export class VercelAiBackend implements AiBackend {
       throw declaredFailure(declared.message, "reported by the model in place of an implementation; the build ends on it");
     }
 
-    let assembly: string;
+    let implementation: string;
     try {
-      assembly = extractAssembly(text);
+      implementation = extractImplementation(text);
     } catch (cause) {
       // A reply with no implementation in it is the model not answering, not a
       // wrong answer: the toolchain never saw anything to judge. The provider
@@ -493,7 +494,7 @@ export class VercelAiBackend implements AiBackend {
         stop,
       );
     }
-    return assembly;
+    return implementation;
   }
 }
 
@@ -574,7 +575,7 @@ export class ReplayBackend implements AiBackend {
     return this.entries;
   }
 
-  async generate(request: PromptRequest, sequence: number): Promise<AssemblyCandidate> {
+  async generate(request: PromptRequest, sequence: number): Promise<Candidate> {
     const entries = await this.load();
     // A position before the first entry is not a position: a build names its
     // candidates from one, so one below that is a caller that lost count, and
@@ -601,7 +602,7 @@ export class ReplayBackend implements AiBackend {
     }
     return {
       id: `c${sequence}`,
-      assembly: extractAssembly(entry),
+      text: extractImplementation(entry),
       model: this.id,
       modelConfig: this.id,
       generatedAt: new Date().toISOString(),

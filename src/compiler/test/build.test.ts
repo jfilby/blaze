@@ -168,8 +168,8 @@ test("the delivered assembly is the implementation that was verified", async () 
   const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
   const stored = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as Record<string, { assembly: string }[]>;
-  assert.ok(delivered.endsWith(stored.dotProduct[0].assembly));
+  ) as Record<string, { text: string }[]>;
+  assert.ok(delivered.endsWith(stored.dotProduct[0].text));
   assert.ok(delivered.startsWith(".text"), "the architecture prelude is compiler controlled");
 });
 

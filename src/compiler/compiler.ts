@@ -90,7 +90,7 @@ import {
   DEFAULT_BENCHMARK,
   DEFAULT_GENERATION,
   DEFAULT_TEST,
-  type AssemblyCandidate,
+  type Candidate,
   type BenchmarkResult,
   type CandidateOutcome,
   type RuntimeKind,
@@ -164,7 +164,7 @@ export interface BuildOutcome {
   program: ProgramContract;
   /** The statements the build delivered a program for, when it is one. */
   body?: ProgramBody;
-  candidates: Record<string, AssemblyCandidate[]>;
+  candidates: Record<string, Candidate[]>;
   verification: Record<string, VerificationResult[]>;
   benchmark: Record<string, BenchmarkResult[]>;
   generation: Record<string, unknown>;
@@ -693,8 +693,8 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
           : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to regenerate it",
     });
   }
-  // The stored candidate's own assembly decides which files it produced: one
-  // that calls a function of the program is never linked on its own, so its
+  // The stored candidate's own text decides which files it produced: one that
+  // calls a function of the program is never linked on its own, so its
   // executable is a file no build ever writes and demanding it would make
   // every such function a cache miss for the life of the project.
   const stored = entry.candidates.find((candidate) => candidate.id === entry.selected);
@@ -703,7 +703,7 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
     entry.selected,
     request.output,
     request.linksObjects,
-    stored?.assembly ?? "",
+    stored?.text ?? "",
     request.callable,
   ).filter((file) => !existsSync(file));
   return { level: reusable(entry, key, missing.length === 0), entry, missing };
@@ -964,7 +964,7 @@ export async function runBuild(
       const entry = generatedByFunction.get(functionName);
       const selected = entry?.result.selected;
       if (entry === undefined || selected === null || selected === undefined) return undefined;
-      return entry.result.candidates.find((candidate) => candidate.id === selected)?.assembly;
+      return entry.result.candidates.find((candidate) => candidate.id === selected)?.text;
     };
 
     /**
@@ -1149,7 +1149,7 @@ export async function runBuild(
       // from entries rather than assigned into: a function called `__proto__`
       // would otherwise replace the prototype of the record instead of adding
       // an entry, and the record this build writes out would be missing it.
-      const candidateEntries: (readonly [string, AssemblyCandidate[]])[] = [];
+      const candidateEntries: (readonly [string, Candidate[]])[] = [];
       const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
       const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
       const selectedEntries: (readonly [string, string])[] = [];
@@ -1308,7 +1308,7 @@ export async function runBuild(
     const generated = unitsGenerated();
     // Keyed by whatever the source named the function, so these are built from
     // entries for the reason `record` above spells out.
-    const candidateEntries: (readonly [string, AssemblyCandidate[]])[] = [];
+    const candidateEntries: (readonly [string, Candidate[]])[] = [];
     const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
     const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
     const outcomeEntries: (readonly [string, CandidateOutcome[]])[] = [];
@@ -1544,7 +1544,7 @@ export async function runStored(
       ].join("\n"),
     });
   }
-  const stored = await store.read<Record<string, AssemblyCandidate[]>>(paths.candidates);
+  const stored = await store.read<Record<string, Candidate[]>>(paths.candidates);
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";

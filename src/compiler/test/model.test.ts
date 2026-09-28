@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolveModel, OPENROUTER_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
-import { createBackend, extractAssembly, readFailureStatus, VercelAiBackend } from "../ai/backend.ts";
+import { createBackend, extractImplementation, readFailureStatus, VercelAiBackend } from "../ai/backend.ts";
 
 function diagnostic(run: () => unknown): string {
   try {
@@ -87,14 +87,14 @@ test("an openrouter model object is constructible without contacting it", () => 
   assert.equal(backend.id, configuration.id);
 });
 
-test("assembly is recovered from a fenced or bare response", () => {
+test("the implementation is recovered from a fenced or bare response", () => {
   // Surrounding blank space and fence markers are removed; the instructions
   // themselves are passed through untouched.
-  const fenced = extractAssembly("Here you go:\n```asm\n\t.globl f\nf:\n\tret\n```\n");
+  const fenced = extractImplementation("Here you go:\n```asm\n\t.globl f\nf:\n\tret\n```\n");
   assert.equal(fenced, ".globl f\nf:\n\tret\n");
-  assert.equal(extractAssembly("  \t.globl f\n  "), ".globl f\n");
-  assert.match(diagnostic(() => extractAssembly("   ")), /empty response/);
-  assert.match(diagnostic(() => extractAssembly("# just a comment\n")), /only comments/);
+  assert.equal(extractImplementation("  \t.globl f\n  "), ".globl f\n");
+  assert.match(diagnostic(() => extractImplementation("   ")), /empty response/);
+  assert.match(diagnostic(() => extractImplementation("# just a comment\n")), /only comments/);
 });
 
 test("a failure status is read off the first line, with the model's own words", () => {

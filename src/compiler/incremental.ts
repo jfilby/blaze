@@ -36,7 +36,7 @@ import { hashValue, type JsonStore } from "./core/json-store.ts";
 import { contractsByName, writtenOut } from "./semantics/calls.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
 import type {
-  AssemblyCandidate,
+  Candidate,
   BenchmarkConfig,
   CandidateOutcome,
   FunctionContract,
@@ -55,7 +55,7 @@ export interface IncrementalEntry {
   file: string;
   /** The candidate the build selected, and the only one that may be reused. */
   selected: string;
-  candidates: AssemblyCandidate[];
+  candidates: Candidate[];
   /** The outcomes of those candidates, so a reuse reports what it relied on. */
   outcomes: CandidateOutcome[];
   /** The vector the benchmark ran, or null for a contract that returns nothing. */
@@ -190,7 +190,7 @@ export async function readIncremental(store: JsonStore, path: string): Promise<I
       key: candidate.key,
       file: candidate.file,
       selected: candidate.selected,
-      candidates: candidate.candidates as AssemblyCandidate[],
+      candidates: candidate.candidates as Candidate[],
       outcomes: candidate.outcomes as CandidateOutcome[],
       benchmarkVector: (candidate.benchmarkVector ?? null) as TestVector | null,
     };

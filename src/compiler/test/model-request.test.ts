@@ -255,7 +255,7 @@ test("a provider that reports no tokens is not said to have spent none", async (
 });
 
 /**
- * A reply that closes its fence and then stops: everything `extractAssembly`
+ * A reply that closes its fence and then stops: everything `extractImplementation`
  * asks for, and an implementation that ends mid-instruction. This is the
  * shape a token limit produces, and the reason the stop is checked before the
  * text rather than after it.
@@ -282,8 +282,8 @@ test("a reply cut off at the token limit is not an implementation", async (t) =>
   // the whole answer the re-request came back with, and none of the
   // instruction the limit cut through.
   assert.equal(outcome.candidates.square.length, 1);
-  assert.match(outcome.candidates.square[0].assembly, /mulsd/);
-  assert.doesNotMatch(outcome.candidates.square[0].assembly, /addsd/);
+  assert.match(outcome.candidates.square[0].text, /mulsd/);
+  assert.doesNotMatch(outcome.candidates.square[0].text, /addsd/);
   assert.equal(outcome.build.status, "success");
   // It cost a request, not an attempt: a reply that never became an
   // implementation never became a candidate to repair.

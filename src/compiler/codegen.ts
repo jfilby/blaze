@@ -34,7 +34,7 @@ import type { ProgramFailure } from "./ai/prompt.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
 import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
-  AssemblyCandidate,
+  Candidate,
   BenchmarkConfig,
   BenchmarkResult,
   CandidateOutcome,
@@ -107,7 +107,7 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   benchmark: BenchmarkConfig;
   workspace: CodegenWorkspace;
   /** Candidates from a previous build, tried before asking the model again. */
-  existing: AssemblyCandidate[];
+  existing: Candidate[];
   /**
    * What the program printed where its source prints something else, with the
    * implementation this function contributed to it. A contract that states
@@ -129,7 +129,7 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
 }
 
 export interface CodegenResult {
-  candidates: AssemblyCandidate[];
+  candidates: Candidate[];
   outcomes: CandidateOutcome[];
   selected: string | null;
   /** The vector a verified candidate is measured on, or null for a contract
@@ -189,12 +189,12 @@ export function reusableFiles(
   candidate: string,
   output: OutputKind,
   linksObjects: boolean,
-  assembly: string,
+  text: string,
   callable: ReadonlySet<string>,
 ): string[] {
   const paths = candidateFiles(workspace, candidate, output);
   if (output === "machine") {
-    const standalone = programCalls(assembly, callable).length === 0;
+    const standalone = programCalls(text, callable).length === 0;
     return [
       paths.implementation,
       ...(standalone ? [paths.executable] : []),
@@ -362,11 +362,11 @@ function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null
  * diagnostics are the ones a repair round is given.
  */
 export function readSemanticCandidate(
-  candidate: AssemblyCandidate,
+  candidate: Candidate,
   program: ProgramContract,
   contract: FunctionContract,
 ): SemanticFunction {
-  const fn = parseSemanticFunction(candidate.assembly, program);
+  const fn = parseSemanticFunction(candidate.text, program);
   validateSemanticFunction(fn, contract);
   return fn;
 }
@@ -378,7 +378,7 @@ export function readSemanticCandidate(
  */
 async function materialize(
   request: CandidateEvaluationRequest,
-  candidate: AssemblyCandidate,
+  candidate: Candidate,
   paths: CandidatePaths,
   vectors: PlannedVectors | null,
   /**
@@ -390,7 +390,7 @@ async function materialize(
 ): Promise<Materialized> {
   if (request.output === "wasm") {
     const module = await buildWasm({
-      text: candidate.assembly,
+      text: candidate.text,
       contract: request.contract,
       textPath: paths.implementation,
       modulePath: paths.module,
@@ -435,7 +435,7 @@ async function materialize(
   const object =
     request.output === "c"
       ? await compileC({
-          source: candidate.assembly,
+          source: candidate.text,
           contract: request.contract,
           target: request.target,
           sourcePath: paths.implementation,
@@ -444,7 +444,7 @@ async function materialize(
           ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
         })
       : await assemble({
-          assembly: candidate.assembly,
+          assembly: candidate.text,
           assemblyPath: paths.implementation,
           objectPath: paths.object,
           contract: request.contract,
@@ -523,7 +523,7 @@ export function implementationLabel(output: OutputKind): string {
  */
 async function evaluateCandidate(
   request: CandidateEvaluationRequest,
-  candidate: AssemblyCandidate,
+  candidate: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
   return request.exclusive.run(() => measureCandidate(request, candidate, vectors));
@@ -531,7 +531,7 @@ async function evaluateCandidate(
 
 async function measureCandidate(
   request: CandidateEvaluationRequest,
-  candidate: AssemblyCandidate,
+  candidate: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
@@ -545,7 +545,7 @@ async function measureCandidate(
     // of it and a repair round is given the reason.
     const calls =
       request.output === "machine" || request.output === "asm"
-        ? programCalls(candidate.assembly, request.callable)
+        ? programCalls(candidate.text, request.callable)
         : request.output === "ir"
           ? readSemanticCandidate(candidate, request.program, request.contract)
               .calls.map((edge) => edge.callee)
@@ -774,7 +774,7 @@ export function selectCandidate(outcomes: readonly CandidateOutcome[], contract:
 
 export async function generateCandidates(request: CodegenRequest): Promise<CodegenResult> {
   const vectors = planVectors(request);
-  const candidates: AssemblyCandidate[] = [];
+  const candidates: Candidate[] = [];
   const outcomes: CandidateOutcome[] = [];
 
   for (const existing of request.existing) {
@@ -801,7 +801,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
   // Each candidate owns a contiguous block of records and collects its own, so
   // the build reads the same way whatever order the candidates finish in.
   const chains = Array.from({ length: maxCandidates }, () => ({
-    candidates: [] as AssemblyCandidate[],
+    candidates: [] as Candidate[],
     outcomes: [] as CandidateOutcome[],
   }));
 
@@ -857,7 +857,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
         );
         modelDurationNs += process.hrtime.bigint() - startedAt;
         chain.candidates.push(generated);
-        previous = generated.assembly;
+        previous = generated.text;
 
         // Verification and benchmarking are blocking, so candidates are measured
         // one at a time even though they were generated together.
@@ -886,7 +886,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     throw new CompilerError({
       category: "AiGenerationError",
       stage: "generate",
-      message: "no assembly candidate was produced",
+      message: "no candidate was produced",
       function: request.contract.function.name,
     });
   }
@@ -903,7 +903,7 @@ export interface StoredCandidateResult {
   benchmark?: BenchmarkResult;
 }
 
-export type StoredCandidateRequest = CandidateEvaluationRequest & { candidate: AssemblyCandidate };
+export type StoredCandidateRequest = CandidateEvaluationRequest & { candidate: Candidate };
 
 /**
  * Re-runs assembly, linking, verification and benchmarking for a stored

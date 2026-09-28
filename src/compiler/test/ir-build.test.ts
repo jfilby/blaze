@@ -261,8 +261,8 @@ test("a function whose contract states a postcondition is generated as C, not as
 
   const stored = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as Record<string, { assembly: string }[]>;
-  assert.deepEqual(stored.square?.map((entry) => entry.assembly), [answer]);
+  ) as Record<string, { text: string }[]>;
+  assert.deepEqual(stored.square?.map((entry) => entry.text), [answer]);
 
   // What the build wrote beside it is the C it compiled, and what it delivered
   // is that C, not an implementation in the IR the project asked for.

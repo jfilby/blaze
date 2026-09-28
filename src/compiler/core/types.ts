@@ -325,6 +325,9 @@ export interface BenchmarkConfig {
  * What a build produces. The kind decides both the language the model is asked
  * to write and how far the toolchain takes it:
  *
+ *   ir       the semantic IR, read back from the model, checked against the
+ *            contract and lowered by the compiler, delivered as the IR beside
+ *            the program the compiler built from it
  *   c        C source, compiled and verified, delivered as source
  *   asm      x86-64 assembly, assembled and verified, delivered as assembly
  *   machine  x86-64 assembly, assembled, linked and verified, delivered as an executable
@@ -403,9 +406,14 @@ export const DEFAULT_BENCHMARK: BenchmarkConfig = {
 /* Candidates, verification, build records                                    */
 /* -------------------------------------------------------------------------- */
 
-export interface AssemblyCandidate {
+export interface Candidate {
   id: string;
-  assembly: string;
+  /**
+   * What the model wrote, in the output language the prompt asked for: semantic
+   * IR, C, WebAssembly text, or assembly. It is the answer, uncompiled: every
+   * backend reads it, and none of them treats it as anything else.
+   */
+  text: string;
   model: string;
   modelConfig: string;
   generatedAt: string;

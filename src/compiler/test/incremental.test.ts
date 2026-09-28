@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readIncremental, reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
-import type { AssemblyCandidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
+import type { Candidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
 import { mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { fingerprintSources, toolchainFingerprint } from "../core/version.ts";
@@ -99,9 +99,9 @@ test("a callee whose signature or object layout changed invalidates the caller",
 });
 
 function entry(overrides: Partial<IncrementalEntry> = {}): IncrementalEntry {
-  const candidate: AssemblyCandidate = {
+  const candidate: Candidate = {
     id: "c1",
-    assembly: ".globl main\nmain:\n  ret\n",
+    text: ".globl main\nmain:\n  ret\n",
     model: "openai/gpt-5",
     modelConfig: "openai/gpt-5",
     generatedAt: "2026-01-01T00:00:00.000Z",
