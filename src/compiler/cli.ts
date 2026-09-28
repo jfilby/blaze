@@ -24,9 +24,11 @@ import {
   listProjects,
   projectIdFor,
   runBuild,
+  runSemanticIr,
   runStored,
   type BuildOptions,
   type Reporter,
+  type SemanticIrOptions,
 } from "./compiler.ts";
 import { targetSummary } from "./core/target.ts";
 import {
@@ -55,6 +57,7 @@ const USAGE = `blaze - AI native compiler
 Usage:
   blaze build [input.toml] [arguments...] build a function, or a program
   blaze generate [input.toml] [options]  generate and validate assembly candidates
+  blaze ir [input.toml] [--from <file>] print the semantic IR of a program
   blaze test <project> [options]         re-verify the selected candidate
   blaze benchmark <project> [options]    re-benchmark the selected candidate
   blaze inspect <project>                print the build record
@@ -98,6 +101,8 @@ Options:
   --model <provider/model>  model configuration, overrides AI_MODEL
   --reuse                   build only from what an earlier build verified, and
                             fail rather than ask a model for anything
+  --from <file>              read IR from the file instead of resolving the
+                            source, and validate it against the contract
   --output <kind>           deliverable: c, asm, machine or wasm (default machine)
   --runtime <name>           host runtime: none or nim (default none)
   --max-candidates <n>      number of candidates to generate, each generated
@@ -259,6 +264,7 @@ async function main(argv: string[]): Promise<number> {
       "random-cases": { type: "string" },
       "max-length": { type: "string" },
       help: { type: "boolean", short: "h" },
+      from: { type: "string" },
     },
   });
   const values = parsed.values as Record<string, unknown>;
@@ -303,6 +309,13 @@ async function main(argv: string[]): Promise<number> {
         throw cause;
       }
       title.stop("ok");
+      return 0;
+    }
+    case "ir": {
+      const irOptions: SemanticIrOptions =
+        typeof values.from === "string" ? { from: values.from } : {};
+      const input = argument ?? defaultProjectFile();
+      process.stdout.write(await runSemanticIr(input, irOptions));
       return 0;
     }
     case "inspect": {

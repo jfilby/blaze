@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { frontendFor } from "../semantics/frontend.ts";
 import { runContractPhase } from "../semantics/program.ts";
 import { CompilerError } from "../core/errors.ts";
-import { resolveProgram } from "../toolchain/program.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { generateProgramDriver } from "../toolchain/driver.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
@@ -42,10 +42,10 @@ test("a program of functions is resolved, objects and all", async () => {
 
   // The program calls one function, which is compiled under a name of its own
   // because the executable the driver links already has an entry point.
-  assert.equal(resolved.statements.length, 1);
-  const invoked = resolved.statements[0];
-  assert.equal(invoked.kind, "invoke");
-  assert.equal(invoked.kind === "invoke" ? invoked.call.name : "", "blaze_main");
+  assert.equal(resolved.entry.statements.length, 1);
+  const invoked = resolved.entry.statements[0];
+  assert.equal(invoked.k, "call");
+  assert.equal(invoked.k === "call" ? invoked.call.signature.symbol : "", "blaze_main");
   assert.equal(contracts.main.function.symbol, "blaze_main");
   assert.equal(contracts.checksum.function.symbol, "checksum");
 

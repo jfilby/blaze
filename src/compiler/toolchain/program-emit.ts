@@ -1,50 +1,71 @@
 /**
  * Writing a program down.
  *
- * A program's statements are resolved (see program.ts) into a tree of names,
- * types and calls, and this module turns that tree into source. The tree says
- * what the program does; the *target* says how the language it is written in
- * spells it. The walk is here, once, and the two targets — the C driver and
- * the Nim host — differ only in the lines they return, so the two drivers
- * cannot drift apart in what they run.
+ * A program's statements are resolved (see semantics/ir-resolve.ts) into the
+ * semantic IR (see core/semantic-ir.ts), a target-independent tree of types,
+ * names, blocks and calls, and this module turns that tree into source. The
+ * tree says what the program does; the *target* says how the language it is
+ * written in spells it. The walk is here, once, and the two targets — the C
+ * driver and the Nim host — differ only in the lines they return, so the two
+ * drivers cannot drift apart in what they run.
  *
- * A value with a call in it is written into a temporary before it is used
- * where it would otherwise be written twice, so `a && f()` runs `f` once, as
- * the language the program was written in does.
+ * Everything the walk used to have to invent is in the IR by now: every
+ * temporary and every generated array is named before the walk sees it, every
+ * value states the type it is written as, and every block states what it owns
+ * and where control goes when it ends. So the walk decides only the order of
+ * the lines and which target method each node asks for.
  */
 
-import { parseType } from "../semantics/contract.ts";
+import { CompilerError } from "../core/errors.ts";
 import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
+import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import type { TypeExpr } from "../core/types.ts";
 import {
-  COMPARISON_OPERATORS,
-  commonNumber,
-  type BufferBinding,
-  type ResolvedCall,
-  type ResolvedProgram,
-  type ResolvedStatement,
-  type ResolvedValue,
-  isStringValue,
-  typeOfValue,
-} from "./program.ts";
+  elementTypeOf,
+  isNumber,
+  isSequence,
+  isTextType,
+  slotType,
+  typeText,
+  valueKind,
+  type CompareOp,
+  type SemanticBlock,
+  type SemanticCall,
+  type SemanticLoop,
+  type SemanticSlot,
+  type SemanticStatement,
+  type SemanticTerminator,
+  type SemanticType,
+  type SemanticValue,
+  type ValueKind,
+} from "../core/semantic-ir.ts";
 
-/** How a value is printed, which is not a question the type alone answers. */
-export type PrintKind = "text" | "number" | "boolean" | "null";
+/**
+ * The operator the source wrote for the one the IR states. The targets spell
+ * operators as the source language writes them, so the walk translates the one
+ * name into the other and leaves the spelling to the target.
+ */
+const ARITH_OPERATORS: Record<"add" | "sub" | "mul" | "div" | "shl" | "shr" | "and" | "or" | "xor", ProgramBinaryOp> = {
+  add: "+",
+  sub: "-",
+  mul: "*",
+  div: "/",
+  shl: "<<",
+  shr: ">>",
+  and: "&",
+  or: "|",
+  xor: "^",
+};
 
-/** What a value is, as printing and truth read it. */
-export type ValueKind = PrintKind | "reference";
-
-/** What a value is: a string, a number, a truth, nothing, or an object. */
-function kindOf(value: ResolvedValue): ValueKind {
-  if (value.k === "null") return "null";
-  if (isStringValue(value)) return "text";
-  if (value.k === "reference" && value.binding.kind === "reference") return "reference";
-  // A comparison is a boolean wherever it was written: as `a < b` or as the
-  // `a == b` the resolver keeps apart.
-  const type = typeOfValue(value);
-  if (type !== null && type.kind === "primitive" && type.name === "bool") return "boolean";
-  return "number";
-}
+/** The comparison the IR states, as C and Nim both spell it. */
+const COMPARE_OPERATORS: Record<CompareOp, string> = {
+  eq: "==",
+  ne: "!=",
+  lt: "<",
+  le: "<=",
+  gt: ">",
+  ge: ">=",
+};
 
 /**
  * How a target spells what a program does. Every method returns the text of a
@@ -53,36 +74,45 @@ function kindOf(value: ResolvedValue): ValueKind {
  */
 export interface ProgramTarget {
   /** Everything above the program body: helpers, object types, the functions. */
-  prelude(program: ResolvedProgram): string;
+  prelude(program: SemanticProgram): string;
   /** The lines that open the body of the program, runtime and all. */
   openProgram(): string[];
   /** The lines that close it, releasing what the program allocated. */
-  closeProgram(releases: string[]): string[];
+  closeProgram(releases: readonly string[]): string[];
   /** What the file says after the program body, outside it. */
   epilogue(): string[];
 
   /** The type a value of this type is declared as. */
-  type(type: TypeExpr): string;
+  type(type: SemanticType): string;
   /** The same value read as another type. */
-  cast(type: TypeExpr, expression: string): string;
+  cast(type: SemanticType, expression: string): string;
   /** One number as a literal of the type it initializes. */
   literal(text: string, type: string): string;
   /** A line that declares a value; a value of no type is a string. */
-  declare(name: string, type: TypeExpr | null, value: string): string;
+  declare(name: string, type: SemanticType | null, value: string): string;
   /** The lines that allocate a buffer of a known length and write it out. */
-  allocate(name: string, element: TypeExpr, length: number, values: string[]): string[];
+  allocate(name: string, element: SemanticType, length: number, values: string[]): string[];
   /** The lines that name a buffer another name already holds. */
-  alias(name: string, element: TypeExpr, source: string, length: string): string[];
+  alias(name: string, element: SemanticType, source: string, length: string): string[];
   /** One element of a buffer. */
   element(buffer: string, index: string): string;
   /** The line that changes what a name holds. */
-  assign(name: string, operator: string, value: string, type: TypeExpr | null): string;
+  assign(name: string, operator: string, value: string, type: SemanticType | null): string;
   /** The line that changes one element of a buffer. */
   elementAssign(buffer: string, index: string, operator: string, value: string): string;
   /** The line that moves a number up or down. */
   update(name: string, operator: string, prefix: boolean): string;
   /** The line that frees an allocation when the block it was made in ends. */
   release(name: string): string;
+  /** The line that keeps a reference alive across a release of it. */
+  retain(value: string): string;
+  /** The value an object is allocated as, of the layout it was declared with. */
+  allocateObject(layout: string): string;
+  /** One field of an object, read and written, of the layout it is a field of. */
+  field(object: string, layout: string, field: string): string;
+  assignField(object: string, layout: string, field: string, value: string): string;
+  /** Ends the program with a message. Nothing after it runs. */
+  raise(message: string): string;
 
   /** The truth of a value, as a condition reads it. */
   condition(expression: string, kind: ValueKind): string;
@@ -100,14 +130,14 @@ export interface ProgramTarget {
   closeDo(condition: string): string[];
   openFor(
     variable: string,
-    type: TypeExpr,
+    type: SemanticType,
     from: string,
     to: string,
     inclusive: boolean,
     down: boolean,
     step: string | null,
   ): string[];
-  openForOf(index: string, variable: string, type: TypeExpr, buffer: string, length: string): string[];
+  openForOf(index: string, variable: string, type: SemanticType, buffer: string, length: string): string[];
   /** The line that leaves the innermost loop, and the one that starts it again. */
   breakLine(): string;
   continueLine(): string;
@@ -116,15 +146,21 @@ export interface ProgramTarget {
   /** A call kept for what it does, which may return nothing at all. */
   discard(expression: string, returnsNothing: boolean): string;
 
-  /** One printed value, and the space between two values of one console.log. */
-  print(value: string, type: TypeExpr | null, kind: ValueKind): string[];
-  separator(): string;
+  /** One printed value, read the way printing reads it. */
+  print(value: string, type: SemanticType | null, kind: ValueKind): string[];
+  /** The newline that ends a line of output. */
   newline(): string;
   /** A call of a function the program compiled, and one the compiler provides. */
-  call(call: ResolvedCall, argumentsText: string[]): string;
-  builtin(call: ResolvedCall, argumentsText: string[]): string;
+  call(call: SemanticCall, argumentsText: string[]): string;
+  builtin(call: SemanticCall, argumentsText: string[]): string;
   /** One argument of a call, placed in the type its parameter takes. */
-  argument(type: TypeExpr, expression: string): string;
+  argument(type: SemanticType, expression: string): string;
+  /** How many arguments the program was started with, and one of them. */
+  argvCount(): string;
+  argv(index: string): string;
+  /** The smaller and the larger of two numbers, which the languages spell. */
+  min(left: string, right: string): string;
+  max(left: string, right: string): string;
 
   /** The text of a string, as a literal. */
   stringLiteral(text: string): string;
@@ -134,8 +170,8 @@ export interface ProgramTarget {
   stringLength(value: string): string;
   /** Whether two strings are the same text. */
   stringEqual(left: string, right: string): string;
-  /** One number written out the way the language writes it. */
-  numberText(value: string, type: TypeExpr | null): string;
+  /** A value carried inside a string, as the runtime writes it. */
+  toText(expression: string, type: SemanticType): string;
   /** The line that tests a value against nothing. */
   isNull(value: string, negate: boolean): string;
   /** The text of a value that is nothing. */
@@ -154,45 +190,9 @@ export interface ProgramTarget {
   escape(name: string): string;
 }
 
-/** True when writing a value twice would run it twice. */
-function hasCall(value: ResolvedValue): boolean {
-  switch (value.k) {
-    case "call":
-      return true;
-    case "buffer":
-    case "literal":
-    case "boolean":
-    case "null":
-    case "length":
-    case "reference":
-      return false;
-    case "element":
-      return hasCall(value.index);
-    case "stringLength":
-      return hasCall(value.of);
-    case "text":
-      return value.parts.some((part) => part.k === "value" && hasCall(part.value));
-    case "compare":
-      return hasCall(value.left) || hasCall(value.right);
-    case "isNull":
-      return hasCall(value.operand);
-    case "unary":
-      return hasCall(value.operand);
-    case "binary":
-      return hasCall(value.left) || hasCall(value.right);
-    case "conditional":
-      return hasCall(value.condition) || hasCall(value.then) || hasCall(value.otherwise);
-  }
-}
-
-/**
- * The type a value is written as. A number no use has fixed is a double, as it
- * is in the language it was written in, and prints as one.
- */
-function writtenType(value: ResolvedValue): TypeExpr | null {
-  const type = typeOfValue(value);
-  if (type !== null) return type;
-  return value.k === "literal" ? { kind: "primitive", name: "f64" } : null;
+/** A node neither target has been taught to write, which is a refusal. */
+function emitError(message: string, detail?: string): CompilerError {
+  return new CompilerError({ category: "SemanticIrError", stage: "emit", message, detail });
 }
 
 /** One line at a depth of a block. */
@@ -204,29 +204,28 @@ const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 
 class ProgramEmitter {
   private readonly target: ProgramTarget;
-  private readonly program: ResolvedProgram;
+  private readonly program: SemanticProgram;
   /** The body being written, one entry per line. */
   private lines: string[] = [];
-  /** Lines that must come before the line being written. */
-  private pending: string[] = [];
-  /** The buffer literal a binding was written out as, for this statement. */
-  private readonly buffers = new Map<BufferBinding, string>();
-  /** What each open block must release when it ends, and whether it is a loop. */
-  private frames: { releases: string[]; loop: boolean }[] = [];
-  /** What the run itself must release when the program ends. */
-  private readonly run: string[] = [];
+  /** The loops whose bodies are being written, the innermost last. */
+  private readonly loops: { header: string; exit: string }[] = [];
   private depth = 0;
-  private counter = 0;
+  /** The names the program declared, one entry per open scope, innermost last. */
+  private readonly scopes: { name: string; emitted: string; type: SemanticType | null }[][] = [[]];
+  /** Every name a target has been given, so no two declarations share one. */
+  private readonly taken = new Set<string>();
 
-  constructor(program: ResolvedProgram, target: ProgramTarget) {
+  constructor(program: SemanticProgram, target: ProgramTarget) {
     this.program = program;
     this.target = target;
   }
 
   emit(): string {
-    const body = this.statements(this.program.statements, 1);
+    const body = this.entry();
     const opened = this.target.openProgram().map((line) => indent(1, line));
-    const closed = this.target.closeProgram(this.run).map((line) => indent(1, line));
+    const closed = this.target
+      .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.name(name))))
+      .map((line) => indent(1, line));
     return [this.target.prelude(this.program), ...opened, ...body, ...closed, ...this.target.epilogue(), ""].join("\n");
   }
 
@@ -235,397 +234,465 @@ class ProgramEmitter {
   /* ---------------------------------------------------------------------- */
 
   private write(line: string): void {
-    for (const before of this.pending) this.lines.push(indent(this.depth, before));
-    this.pending = [];
     this.lines.push(indent(this.depth, line));
   }
 
-  /** A name no other value of the program can be holding. */
-  private fresh(prefix: string): string {
-    this.counter += 1;
-    return `${prefix}_${this.counter}`;
+  /**
+   * Declares a name, giving the target a name no other declaration holds. A
+   * name declared again in a nested block is a different variable, and a target
+   * whose blocks do not shadow — Nim refuses a second `var total` in a nested
+   * `if` — would refuse the program the language accepts, so the target is
+   * given `total_2` for the inner one. The IR keeps the name the source wrote.
+   */
+  private declareName(name: string, type: SemanticType | null = null): string {
+    let emitted = name;
+    for (let index = 2; this.taken.has(emitted); index += 1) emitted = `${name}_${index}`;
+    this.taken.add(emitted);
+    this.scopes[this.scopes.length - 1].push({ name, emitted, type });
+    return this.target.escape(emitted);
   }
 
-  /** A value written into a temporary, so a call in it runs once. */
-  private temporary(value: ResolvedValue, type: TypeExpr | null): string {
-    const name = this.fresh("value");
-    this.pending.push(this.target.declare(name, type, this.expression(value, type)));
-    return name;
+  /** The declaration a name is read as, or null when nothing declares it. */
+  private declared(name: string): { emitted: string; type: SemanticType | null } | null {
+    for (let index = this.scopes.length - 1; index >= 0; index -= 1) {
+      const found = this.scopes[index].find((entry) => entry.name === name);
+      if (found !== undefined) return { emitted: found.emitted, type: found.type };
+    }
+    return null;
+  }
+
+  /** The name a target knows a declared name by, or the name itself if none. */
+  private name(name: string): string {
+    const declared = this.declared(name);
+    return this.target.escape(declared === null ? name : declared.emitted);
+  }
+
+  /**
+   * The type a name is written at. A use converts inside a kind, and a target
+   * whose numbers do not convert on their own — Nim refuses `float64 += int64`
+   * — needs the conversion written rather than assumed, so the value is written
+   * at the type the name is declared as rather than the type it arrives with.
+   */
+  private typeOf(name: string, otherwise: SemanticType): SemanticType {
+    return this.declared(name)?.type ?? otherwise;
+  }
+
+  /** The statements of the block the run starts in, and where it ends. */
+  private entry(): string[] {
+    this.depth = 1;
+    for (const statement of this.program.entry.statements) this.statement(statement);
+    this.terminator(this.program.entry.terminator, null);
+    return this.lines;
   }
 
   /* ---------------------------------------------------------------------- */
   /* Statements                                                              */
   /* ---------------------------------------------------------------------- */
 
-  private statements(list: readonly ResolvedStatement[], depth: number): string[] {
-    const before = this.lines.length;
-    this.depth = depth;
-    for (const statement of list) this.statement(statement);
-    return this.lines.splice(before);
-  }
-
-  private statement(statement: ResolvedStatement): void {
-    this.buffers.clear();
-    switch (statement.kind) {
-      case "declare":
-        this.declaration(statement);
+  private statement(statement: SemanticStatement): void {
+    switch (statement.k) {
+      case "let":
+        this.declaration(statement.slot, statement.value);
         return;
-      case "assign":
+      case "set": {
+        const type = this.typeOf(statement.name, statement.value.type);
         this.write(
-          this.target.assign(
-            this.target.escape(statement.name),
-            statement.op,
-            this.expression(statement.value, statement.type),
-            statement.type,
-          ),
+          this.target.assign(this.name(statement.name), statement.op, this.expression(statement.value, type), type),
         );
         return;
-      case "elementAssign":
+      }
+      case "setElement": {
+        const buffer = this.declared(statement.buffer);
+        const element = buffer?.type !== null && buffer?.type !== undefined ? elementTypeOf(buffer.type) : null;
         this.write(
           this.target.elementAssign(
-            this.target.escape(statement.buffer),
+            this.name(statement.buffer),
             this.expression(statement.index, USIZE),
             statement.op,
-            this.expression(statement.value, statement.type),
+            this.expression(statement.value, element ?? statement.value.type),
           ),
         );
         return;
-      case "update":
-        this.write(this.target.update(this.target.escape(statement.name), statement.op, statement.prefix));
+      }
+      case "step":
+        this.write(this.target.update(this.name(statement.name), statement.op, statement.prefix));
         return;
-      case "print":
-        this.print(statement.values);
+      case "printText":
+      case "printNumber":
+        for (const line of this.target.print(
+          this.expression(statement.value),
+          statement.value.type,
+          valueKind(statement.value),
+        )) {
+          this.write(line);
+        }
         return;
-      case "invoke": {
+      case "printNewline":
+        this.write(this.target.newline());
+        return;
+      case "call":
         this.write(this.target.discard(this.call(statement.call), statement.call.returns.kind === "void"));
         return;
-      }
       case "if":
         this.write(this.target.openIf(this.condition(statement.condition)));
-        this.body(statement.then);
-        if (statement.otherwise.length > 0) {
+        this.body(statement.then, null);
+        if (statement.otherwise !== null) {
           this.write(this.target.closeBody() ?? "");
           this.write(this.target.openElse());
-          this.body(statement.otherwise);
+          this.body(statement.otherwise, null);
         }
         this.write(this.target.closeBody() ?? "");
         return;
-      case "while":
-        this.write(this.target.openWhile(this.condition(statement.condition)));
-        this.body(statement.body, true);
-        this.write(this.target.closeBody() ?? "");
-        return;
-      case "doWhile": {
-        // The condition is asked for before the body, because a language
-        // without a do-while tests it at the top of the loop.
-        const condition = this.condition(statement.condition);
-        for (const line of this.target.openDo(condition)) this.write(line);
-        this.body(statement.body, true);
-        for (const line of this.target.closeDo(condition)) this.write(line);
-        return;
-      }
-      case "for": {
-        const type = statement.type;
-        const to = this.expression(statement.to, type);
-        for (const line of this.target.openFor(
-          this.target.escape(statement.variable),
-          type,
-          this.expression(statement.from, type),
-          to,
-          statement.inclusive,
-          statement.down,
-          statement.step === null ? null : this.expression(statement.step, type),
-        )) {
-          this.write(line);
-        }
-        this.body(statement.body, true);
-        this.write(this.target.closeBody() ?? "");
-        return;
-      }
-      case "forOf": {
-        const index = this.fresh("index");
-        for (const line of this.target.openForOf(
-          index,
-          this.target.escape(statement.variable),
-          statement.type,
-          this.target.escape(statement.of),
-          this.expression(statement.length),
-        )) {
-          this.write(line);
-        }
-        this.body(statement.body, true);
-        this.write(this.target.closeBody() ?? "");
-        return;
-      }
-      case "break":
-        for (const line of this.releases()) this.write(line);
-        this.write(this.target.breakLine());
-        return;
-      case "continue":
-        for (const line of this.releases()) this.write(line);
-        this.write(this.target.continueLine());
+      case "loop":
+        this.loop(statement.loop);
         return;
       case "block":
         this.write(this.target.openBlock() ?? "");
-        this.body(statement.body);
+        this.body(statement.body, null);
         this.write(this.target.closeBody() ?? "");
+        return;
+      case "retain":
+        this.write(this.target.retain(this.expression(statement.value)));
+        return;
+      case "raise":
+        this.write(this.target.raise(this.expression(statement.message)));
+        return;
+      case "storeField":
+        this.write(
+          this.target.assignField(
+            this.expression(statement.object),
+            statement.layout,
+            this.target.escape(statement.field),
+            this.expression(statement.value),
+          ),
+        );
         return;
     }
   }
 
-  private print(values: readonly ResolvedValue[]): void {
-    values.forEach((value, position) => {
-      if (position > 0) this.write(this.target.separator());
-      for (const line of this.target.print(this.expression(value), writtenType(value), kindOf(value))) this.write(line);
-    });
-    this.write(this.target.newline());
-  }
-
-  private declaration(statement: ResolvedStatement & { kind: "declare" }): void {
-    const binding = statement.binding;
-    const name = this.target.escape(statement.name);
-    const value = statement.value;
-    if (value.k === "reference" && value.binding.kind === "buffer") {
+  private declaration(slot: SemanticSlot, value: SemanticValue): void {
+    const name = this.declareName(slot.name, slotType(slot));
+    if (slot.kind === "text") {
+      this.write(this.target.declare(name, null, this.expression(value)));
+      return;
+    }
+    if (slot.kind === "buffer") {
       // `const b = a` names the same array again, as the language means it.
-      const source = value.binding;
-      for (const line of this.target.alias(
+      if (value.k === "local" && isSequence(value.type)) {
+        for (const line of this.target.alias(
+          name,
+          slot.element,
+          this.name(value.name),
+          `${this.name(value.name)}_length`,
+        )) {
+          this.write(line);
+        }
+        return;
+      }
+      if (value.k !== "buffer") throw emitError(`the emitter cannot write down ${slot.name} as an array`);
+      for (const line of this.target.allocate(
         name,
-        { kind: "primitive", name: source.element ?? "f64" },
-        this.target.escape(source.name),
-        `${this.target.escape(source.name)}_length`,
+        slot.element,
+        value.length,
+        value.values.map((one) => this.expression(one, slot.element)),
       )) {
         this.write(line);
       }
       return;
     }
-    if (binding.kind === "buffer") {
-      const element = { kind: "primitive" as const, name: binding.element ?? "f64" };
-      for (const line of this.target.allocate(name, element, binding.length, binding.values.map((value) => this.expression(value, element)))) {
-        this.write(line);
-      }
-      this.releaseAt(name);
-      return;
-    }
-    if (binding.kind === "string" && binding.value !== null) {
-      this.write(this.target.declare(name, null, this.target.stringLiteral(binding.value)));
-      return;
-    }
-    // A number is declared as the number it is, and a string as a string: a
-    // literal that no use has fixed is a double, as it is in the language.
-    const type =
-      binding.kind === "scalar"
-        ? { kind: "primitive" as const, name: binding.type ?? "f64" }
-        : binding.kind === "string"
-          ? null
-          : typeOfValue(statement.value);
-    this.write(this.target.declare(name, type, this.expression(statement.value, type)));
+    this.write(this.target.declare(name, slot.type, this.expression(value, slot.type)));
   }
 
-  /** The statements of one body, in a block of their own. */
-  private body(list: readonly ResolvedStatement[], loop = false): void {
-    this.frames.push({ releases: [], loop });
+  private loop(loop: SemanticLoop): void {
+    this.loops.push({ header: loop.header, exit: loop.exit });
+    // The loop owns the names it counts with, so they are declared here rather
+    // than in the body, and a later loop may count with the same name again.
+    this.scopes.push([]);
+    if (loop.kind === "counted") this.declareName(loop.variable);
+    if (loop.kind === "each") {
+      this.declareName(loop.index);
+      this.declareName(loop.element);
+    }
+    // A `do` closes itself with its own condition, so it is the one loop the
+    // walk does not close with a brace of its own.
+    let closedByDo = false;
+    switch (loop.kind) {
+      case "while":
+        this.write(this.target.openWhile(this.condition(loop.condition)));
+        this.body(loop.body, loop);
+        break;
+      case "doWhile": {
+        // The condition is asked for before the body, because a language
+        // without a do-while tests it at the top of the loop.
+        const condition = this.condition(loop.condition);
+        for (const line of this.target.openDo(condition)) this.write(line);
+        this.body(loop.body, loop);
+        for (const line of this.target.closeDo(condition)) this.write(line);
+        closedByDo = true;
+        break;
+      }
+      case "counted": {
+        const type = loop.type;
+        for (const line of this.target.openFor(
+          this.name(loop.variable),
+          type,
+          this.expression(loop.from, type),
+          this.expression(loop.to, type),
+          loop.inclusive,
+          loop.down,
+          loop.step === null ? null : this.expression(loop.step, type),
+        )) {
+          this.write(line);
+        }
+        this.body(loop.body, loop);
+        break;
+      }
+      case "each": {
+        for (const line of this.target.openForOf(
+          this.name(loop.index),
+          this.name(loop.element),
+          loop.elementType,
+          this.name(loop.of),
+          this.expression(loop.length),
+        )) {
+          this.write(line);
+        }
+        this.body(loop.body, loop);
+        break;
+      }
+    }
+    if (!closedByDo) this.write(this.target.closeBody() ?? "");
+    this.loops.pop();
+    this.scopes.pop();
+  }
+
+  /** The statements of one block, and what is done when it ends. */
+  private body(block: SemanticBlock, loop: SemanticLoop | null): void {
+    this.scopes.push([]);
     this.depth += 1;
-    if (list.length === 0) {
+    if (block.statements.length === 0 && block.terminator.k === "next") {
       const empty = this.target.emptyBody();
       if (empty !== null) this.write(empty);
     }
-    for (const statement of list) this.statement(statement);
+    for (const statement of block.statements) this.statement(statement);
     // What the block allocated is freed before it ends, which is inside the
-    // braces of one target and inside the indentation of the other.
-    const frame = this.frames.pop();
-    for (const line of frame?.releases.reverse() ?? []) this.lines.push(indent(this.depth, line));
+    // braces of one target and inside the indentation of the other. A block
+    // that ends in a jump is not fallen out of, and the jump frees what the
+    // blocks it leaves own instead — the jump's own releases already say which.
+    if (block.terminator.k === "next" || block.terminator.k === "return") {
+      for (const name of block.releases) this.lines.push(indent(this.depth, this.target.release(this.name(name))));
+    }
+    this.terminator(block.terminator, loop);
     this.depth -= 1;
+    this.scopes.pop();
+  }
+
+  /**
+   * Where control goes when a block is done. A jump names the block it leaves,
+   * which is either the header of the loop it is in — the run goes on from the
+   * top of it — or the block the loop sits in, which the run carries on from.
+   */
+  private terminator(terminator: SemanticTerminator, loop: SemanticLoop | null): void {
+    if (terminator.k !== "jump") return;
+    for (const name of terminator.releases) this.write(this.target.release(this.name(name)));
+    const open = loop ?? this.loops[this.loops.length - 1];
+    if (open === undefined) throw emitError("a jump out of a block no loop is written in", terminator.target);
+    if (terminator.target === open.header) {
+      this.write(this.target.continueLine());
+      return;
+    }
+    if (terminator.target === open.exit) {
+      this.write(this.target.breakLine());
+      return;
+    }
+    throw emitError("a jump leaves for a block no loop around it names", terminator.target);
   }
 
   /* ---------------------------------------------------------------------- */
   /* Values                                                                  */
   /* ---------------------------------------------------------------------- */
 
-  private condition(value: ResolvedValue): string {
-    return this.target.condition(this.expression(value), kindOf(value));
+  private condition(value: SemanticValue): string {
+    return this.target.condition(this.expression(value), valueKind(value));
   }
 
-  private call(call: ResolvedCall): string {
+  private call(call: SemanticCall): string {
     const argumentsText = call.args.map((argument, index) => {
-      const type = parseType(call.signature.params[index].type);
+      const type = call.argTypes[index] ?? argument.type;
       return this.target.argument(type, this.expression(argument, type));
     });
     return call.builtin ? this.target.builtin(call, argumentsText) : this.target.call(call, argumentsText);
   }
 
-  private expression(value: ResolvedValue, as: TypeExpr | null = null): string {
-    if (value.k === "literal" && value.binding.type === null && as !== null && as.kind === "primitive") {
-      return this.target.literal(value.binding.text, as.name);
-    }
+  private expression(value: SemanticValue, as: SemanticType | null = null): string {
     const text = this.raw(value, as);
     if (as === null) return text;
-    const from = typeOfValue(value);
-    if (from === null || from.kind !== "primitive" || as.kind !== "primitive") return text;
-    return from.name === as.name ? text : this.target.cast(as, text);
+    // Only a number is written as another number: a reference and a string are
+    // the one the value carries, and the resolver has already chosen the type
+    // every use reads it as.
+    if (!isNumber(value.type) || !isNumber(as)) return text;
+    if (value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name) return text;
+    return this.target.cast(as, text);
   }
 
-  private raw(value: ResolvedValue, as: TypeExpr | null): string {
+  private raw(value: SemanticValue, as: SemanticType | null): string {
     switch (value.k) {
-      case "literal":
-        return this.target.literal(value.binding.text, value.binding.type ?? "f64");
-      case "boolean":
+      case "const":
+        // A constant the IR holds as text is a string written out; a number is
+        // written as the literal of the type it initializes.
+        return isTextType(value.type)
+          ? this.target.stringLiteral(value.text)
+          : this.target.literal(value.text, typeText(value.type));
+      case "bool":
         return value.value ? "true" : "false";
-      case "null":
+      case "nothing":
         return this.target.nullLiteral();
-      case "buffer":
-        return this.bufferName(value.binding);
-      case "reference":
-        return this.target.escape(value.name);
-      case "length":
-        return `${this.target.escape(value.buffer)}_length`;
-      case "element":
-        return this.target.element(this.target.escape(value.buffer), this.expression(value.index, USIZE));
-      case "stringLength":
-        return this.target.stringLength(this.expression(value.of));
-      case "call":
-        return this.call(value.call);
       case "text":
         return this.text(value);
+      case "local":
+        return this.name(value.name);
+      case "length":
+        return this.length(value);
+      case "element":
+        return this.target.element(this.expression(value.of), this.expression(value.index, USIZE));
+      case "buffer":
+        // The resolver names every array it allocates and puts it in a
+        // declaration, so an array read here is one it never wrote down.
+        throw emitError("the emitter cannot write down an array that is not a declaration");
+      case "newObject":
+        return this.target.allocateObject(value.object);
+      case "call":
+        return this.call(value.call);
+      case "loadField":
+        return this.target.field(this.expression(value.object), value.layout, this.target.escape(value.field));
+      case "toText":
+        // A string carried into a string is the string itself: a driver builds
+        // text out of pointers, and a number is the one thing it converts.
+        if (isTextType(value.of.type)) return this.expression(value.of);
+        return this.target.toText(this.expression(value.of), value.of.type);
+      case "argv":
+        return value.index === null ? this.target.argvCount() : this.target.argv(this.expression(value.index));
       case "compare":
         return this.compare(value);
       case "isNull":
         return this.target.isNull(this.expression(value.operand), value.negate);
       case "unary":
         return this.unary(value);
-      case "binary":
-        return this.binary(value);
-      case "conditional":
+      case "logical":
+        return this.logical(value);
+      case "coalesce":
+        return this.coalesce(value);
+      case "select":
         return this.target.conditional(
           this.condition(value.condition),
           this.expression(value.then, as),
           this.expression(value.otherwise, as),
         );
+      case "arith":
+        return this.arith(value);
     }
   }
 
   /** A string the program builds, one part after another. */
-  private text(value: ResolvedValue & { k: "text" }): string {
+  private text(value: SemanticValue & { k: "text" }): string {
     if (value.parts.length === 0) return this.target.stringLiteral("");
     let text: string | null = null;
     for (const part of value.parts) {
-      // A value interpolated into a string is a string already when it is one:
-      // the contract type language has no string type, so `typeOfValue` answers
-      // null for a string and for a value nothing types, and routing a string
-      // through the number path cast the pointer to a whole number and printed
-      // its address where the source printed the string.
-      const piece =
-        part.k === "text"
-          ? this.target.stringLiteral(part.value)
-          : isStringValue(part.value)
-            ? this.expression(part.value)
-            : this.target.numberText(this.expression(part.value), writtenType(part.value));
+      const piece = part.k === "text" ? this.target.stringLiteral(part.value) : this.expression(part.value);
       text = text === null ? piece : this.target.stringConcat(text, piece);
     }
     return text as string;
   }
 
-  private compare(value: ResolvedValue & { k: "compare" }): string {
-    if (value.how === "string") {
-      const equal = this.target.stringEqual(this.expression(value.left), this.expression(value.right));
-      return value.negate ? this.target.logicalNot(equal) : equal;
-    }
-    // The two sides are compared as one type, so a whole number and a literal
-    // are compared as whole numbers rather than as two different ones.
-    const type = commonNumber(typeOfValue(value.left), typeOfValue(value.right));
-    const equal = `${this.expression(value.left, type)} == ${this.expression(value.right, type)}`;
-    return value.negate ? this.target.logicalNot(equal) : equal;
-  }
-
-  private unary(value: ResolvedValue & { k: "unary" }): string {
-    if (value.op === "!") return this.target.logicalNot(this.condition(value.operand));
-    if (value.op === "~") return this.target.bitwiseNot(this.expression(value.operand, value.type));
-    return `(${value.op}${this.expression(value.operand, value.type)})`;
-  }
-
-  private binary(value: ResolvedValue & { k: "binary" }): string {
-    const op: ProgramBinaryOp = value.op;
-    // The left arm of a logical operator decides, and the source form of these
-    // operators writes it twice, so a call in it is written out once first.
-    if (op === "&&" || op === "||" || op === "??") {
-      const type = typeOfValue(value.left);
-      const left = hasCall(value.left) ? this.temporary(value.left, type) : this.expression(value.left);
-      const right = this.expression(value.right, value.type);
-      if (op === "??") {
-        // Only a reference or a string can be nothing: a number never is. A
-        // name resolves to a reference whatever it holds, so this asks what
-        // the value carries: reading a number as a reference compiles the
-        // fallback arm away and leaves a comparison that does not compile.
-        const nullable = kindOf(value.left);
-        if (nullable === "null" || nullable === "text" || nullable === "reference") {
-          return this.target.conditional(this.target.isNull(left, false), right, left);
-        }
-        return left;
-      }
-      const test = this.target.condition(left, kindOf(value.left));
-      if (op === "&&") return this.target.conditional(test, right, left);
-      return this.target.conditional(test, left, right);
-    }
-    if (op === "%") {
-      return this.target.modulo(this.expression(value.left, value.type), this.expression(value.right, value.type));
-    }
-    if (op === "+" && value.type === null) {
-      // A string is added to a string: the driver builds the text.
-      return this.target.stringConcat(this.expression(value.left), this.expression(value.right));
-    }
-    if (op === "**") {
-      // A power is floating point even over whole numbers, and Nim spells one
-      // with the operator that xors two whole numbers.
-      return this.target.power(this.expression(value.left, value.type), this.expression(value.right, value.type));
-    }
-    const type = COMPARISON_OPERATORS.includes(op)
-      ? commonNumber(typeOfValue(value.left), typeOfValue(value.right))
-      : value.type;
-    return `(${this.expression(value.left, type)} ${this.target.operator(op)} ${this.expression(value.right, type)})`;
-  }
-
-  /** The buffer a literal is written out as, allocating it the first time. */
-  private bufferName(binding: BufferBinding): string {
-    const written = this.buffers.get(binding);
-    if (written !== undefined) return written;
-    const name = this.fresh("buffer");
-    this.buffers.set(binding, name);
-    const element = { kind: "primitive" as const, name: binding.element ?? "f64" };
-    for (const line of this.target.allocate(name, element, binding.length, binding.values.map((value) => this.expression(value, element)))) {
-      this.pending.push(line);
-    }
-    this.releaseAt(name);
-    return name;
-  }
-
   /**
-   * What a `break` or a `continue` must free before it leaves: the blocks it
-   * leaves, which are the ones inside the innermost loop and the loop body
-   * itself. Neither one stays behind them, so the walk stops at the loop frame
-   * and the blocks the loop sits in keep what they own. Without this, an
-   * allocation made in a loop is never freed on the path that jumps out of it,
-   * and a `break` frees the blocks it never left.
+   * The length of an array is the sidecar its allocation wrote next to it, and
+   * the length of a string is counted by the runtime: the two are spelled the
+   * way the target spells them, and only the target knows which is which.
    */
-  private releases(): string[] {
-    const lines: string[] = [];
-    for (let index = this.frames.length - 1; index >= 0; index -= 1) {
-      const frame = this.frames[index];
-      for (const line of [...frame.releases].reverse()) lines.push(line);
-      frame.releases.length = 0;
-      if (frame.loop) break;
+  private length(value: SemanticValue & { k: "length" }): string {
+    if (isTextType(value.of.type)) return this.target.stringLength(this.expression(value.of));
+    if (value.of.k !== "local") {
+      throw emitError("the emitter cannot write down the length of an array", `${value.of.k} names no allocation`);
     }
-    return lines;
+    return `${this.name(value.of.name)}_length`;
   }
 
-  /** Frees an allocation when the block it was made in ends. */
-  private releaseAt(name: string): void {
-    const frame = this.frames[this.frames.length - 1];
-    if (frame === undefined) this.run.push(this.target.release(name));
-    else frame.releases.push(this.target.release(name));
+  private compare(value: SemanticValue & { k: "compare" }): string {
+    if (isTextType(value.operand)) {
+      const equal = this.target.stringEqual(this.expression(value.left), this.expression(value.right));
+      return value.op === "ne" ? this.target.logicalNot(equal) : equal;
+    }
+    // The two sides are compared as one type, which the IR states: a whole
+    // number and a literal are compared as whole numbers, not as two.
+    const left = this.expression(value.left, value.operand);
+    const right = this.expression(value.right, value.operand);
+    return `${left} ${COMPARE_OPERATORS[value.op]} ${right}`;
+  }
+
+  private unary(value: SemanticValue & { k: "unary" }): string {
+    if (value.op === "not") return this.target.logicalNot(this.condition(value.operand));
+    if (value.op === "bitNot") return this.target.bitwiseNot(this.expression(value.operand, value.type));
+    return `(${value.op === "neg" ? "-" : "+"}${this.expression(value.operand, value.type)})`;
+  }
+
+  private logical(value: SemanticValue & { k: "logical" }): string {
+    const left = this.expression(value.left);
+    const test = this.target.condition(left, valueKind(value.left));
+    const right = this.expression(value.right, value.type);
+    return value.op === "and"
+      ? this.target.conditional(test, right, left)
+      : this.target.conditional(test, left, right);
+  }
+
+  private coalesce(value: SemanticValue & { k: "coalesce" }): string {
+    const left = this.expression(value.left);
+    // Only a reference or a string can be nothing: a number never is. A name
+    // resolves to a reference whatever it holds, so this asks what the value
+    // carries: reading a number as a reference compiles the fallback arm away
+    // and leaves a comparison that does not compile.
+    const kind = valueKind(value.left);
+    if (kind === "null" || kind === "text" || kind === "reference") {
+      return this.target.conditional(this.target.isNull(left, false), this.expression(value.right, value.type), left);
+    }
+    return left;
+  }
+
+  private arith(value: SemanticValue & { k: "arith" }): string {
+    switch (value.op) {
+      case "concat":
+        // A string is added to a string: the driver builds the text.
+        return this.target.stringConcat(this.expression(value.left), this.expression(value.right));
+      case "min":
+        return this.target.min(this.expression(value.left, value.type), this.expression(value.right, value.type));
+      case "max":
+        return this.target.max(this.expression(value.left, value.type), this.expression(value.right, value.type));
+      case "mod":
+        return this.target.modulo(this.expression(value.left, value.type), this.expression(value.right, value.type));
+      case "pow":
+        // A power is floating point even over whole numbers, and Nim spells one
+        // with the operator that xors two whole numbers.
+        return this.target.power(this.expression(value.left, value.type), this.expression(value.right, value.type));
+      case "add":
+      case "sub":
+      case "mul":
+      case "div":
+      case "shl":
+      case "shr":
+      // The bitwise operators are whole numbers masked whole, and the targets
+      // already know how each of them is spelled.
+      case "and":
+      case "or":
+      case "xor": {
+        const left = this.expression(value.left, value.type);
+        const right = this.expression(value.right, value.type);
+        return `(${left} ${this.target.operator(ARITH_OPERATORS[value.op])} ${right})`;
+      }
+    }
   }
 }
 
 /** Emits the source of one program in the language a target speaks. */
-export function generateProgramSource(program: ResolvedProgram, target: ProgramTarget): string {
+export function generateProgramSource(program: SemanticProgram, target: ProgramTarget): string {
   return new ProgramEmitter(program, target).emit();
 }
 

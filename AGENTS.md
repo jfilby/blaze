@@ -10,6 +10,9 @@ This is Blaze, an AI compiler to generate assembly from traditional source.
 `src/compiler` is the npm package: manifest, lockfile, tsconfig, sources and
 tests all live there. Run commands from it.
 - `npm run typecheck`, `npm test`, `npm run aic -- <args>`
+- A program becomes the semantic IR (`core/semantic-ir.ts`) before any target
+  code is generated: `semantics/ir-resolve.ts` writes it, `ir-validate.ts`
+  checks it, `ir-text.ts` prints and reads it, and `blaze ir` shows it.
 
 
 ## Libraries

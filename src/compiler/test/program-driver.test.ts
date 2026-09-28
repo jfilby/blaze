@@ -14,7 +14,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateProgramDriver, buildProgramDriver } from "../toolchain/driver.ts";
-import { resolveProgram, type ResolvedProgram } from "../toolchain/program.ts";
+import { resolveProgram, type SemanticProgram } from "../semantics/ir-resolve.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { RUNTIME_NAME, runtimeHeaderSource } from "../runtime/abi.ts";
 import { run } from "../core/process.ts";
@@ -24,7 +24,7 @@ import { diagnostic, phaseOf } from "./phase.ts";
 let runtime: Promise<string> | null = null;
 
 /** A one file TypeScript program, resolved exactly as a build resolves it. */
-function resolved(source: string): ResolvedProgram {
+function resolved(source: string): SemanticProgram {
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   assert.ok(phase.body !== undefined);
   return resolveProgram(phase.body, phase.program);

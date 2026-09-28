@@ -1,0 +1,1455 @@
+/**
+ * The semantic IR as text: what a person reads and a model writes.
+ *
+ * The IR is the whole of what a program does, so its text has to be the whole
+ * of it too: every value names the operation and the type it is, every
+ * statement names the source line it was written on, and every block names
+ * itself, so the block a `jump` names is one a reader can go and find. No
+ * target appears anywhere in it, which is what lets one text lower to every
+ * backend.
+ *
+ * This file is both ends of one form. The printer decides the layout and the
+ * parser only ever reads what the printer wrote, so a program survives being
+ * written down and read back whole. What the text cannot carry is the
+ * contract: the signature of a callee, the functions the program calls, the
+ * layouts those functions hand back and the effects a call has are all read
+ * back out of the program contract, so a hand-written IR cannot invent a
+ * function or lay an object out for itself.
+ *
+ * The form, line by line. Indentation is two spaces per level, a blank line
+ * says nothing, and every line is one statement, one block head or one
+ * terminator. `@n` at the end of a statement is the line of the source it was
+ * written on.
+ *
+ *   ir 1
+ *   file "main.ts"
+ *   function dotProduct as main(a: ptr<f64>, b: ptr<f64>, n: usize) -> f64
+ *   object Node size 24 align 8
+ *     field x: f64 at 0
+ *     field next: ref<Node> at 8
+ *
+ *   block entry: releases[]
+ *     let value[i32] t1 immutable = const[i32] 70 @3
+ *     let buffer a1 mutable element[i32] 4 = [buffer[[i32; 4]] element[i32] 4 const[i32] 1 const[i32] 2]] @4
+ *     for[i32] i1 from const[i32] 0 to [length[usize] local[[i32; 4]] a1] exclusive up step default header b1 exit entry @5
+ *       block b2: releases[]
+ *         set_element a1 [element[i32] local[[i32; 4]] a1 local[i32] i1] = const[i32] 9 @6
+ *         step i1 ++ post @6
+ *       jump b1 [a1]
+ *     if [gt[i32] local[i32] i1 const[i32] 3] @8
+ *       block b3: releases[]
+ *         print_text [text "done: " [to_text local[i32] i1]] @9
+ *     else
+ *       block b4: releases[]
+ *         print_newline @9
+ *     return
+ *
+ * A block head names the block and what it owns. The way a block ends is its
+ * own line, unless it ends by falling out of itself: `return` ends the
+ * program, and `jump b1 [a1]` leaves for a block, freeing what is named after
+ * it.
+ *
+ *   block b2: releases[t1 t2]
+ *     jump b1 [t1]
+ *
+ * The statements, one line each. A statement that owns blocks writes them
+ * under itself, the way the source wrote them.
+ *
+ *   let <slot> = <value>
+ *   set <name> <op> <value>
+ *   set_element <buffer> <index> <op> <value>
+ *   step <name> ++|-- pre|post
+ *   if <condition>
+ *   while <condition> header <id> exit <id>
+ *   do_while <condition> header <id> exit <id>
+ *   for <type> <variable> from <value> to <value> inclusive|exclusive up|down step <value|default> header <id> exit <id>
+ *   for_of <type> <element> of <name> index <name> length <value> header <id> exit <id>
+ *   block <id>
+ *   print_text <value>
+ *   print_number <value>
+ *   print_newline
+ *   retain <value>
+ *   call <type> <callee> [arg[<type>] <value> ...] ownership=<none|borrowed|owned> retain=<yes|no>
+ *   raise <value>
+ *   load_field <value> <field>
+ *   store_field <value> <field> <value>
+ *
+ * A slot says what the name holds and whether the program may change it.
+ *
+ *   value[<type>] <name> mutable|immutable
+ *   text <name> mutable|immutable
+ *   buffer <name> mutable|immutable element[<type>] <length>
+ *   object[<type>] <name> mutable|immutable
+ *
+ * A value is one word, the type it is in brackets, and whatever else the
+ * operation needs. An operation that is made of other values is written in
+ * brackets around the whole of it, so a value is never cut short by the one
+ * written after it, and a value that is a name and a type alone is written
+ * without them.
+ *
+ *   const[i32] 70
+ *   local[i32] t1
+ *   bool[bool] true
+ *   nothing[ref Node]
+ *   new_object[ref Node] Node
+ *   argv[usize]
+ *   [length[usize] t1]
+ *   [element[i32] t1 const[i32] 0]
+ *   [add[i32] local[i32] t1 const[i32] 4]
+ *   [lt[bool] i32 local[i32] i1 const[i32] 4]
+ *   [unary neg[i32] local[i32] t1]
+ *   [is_not_null[bool] local[ref Node] n]
+ *   [to_text local[i32] i1]
+ *   [text "done: " [to_text local[i32] i1]]
+ *   [call[f64] main [arg[i32] t1] ownership=owned retain=no]
+ *
+ * A type is the IR's own name for it: `i32`, `bool`, `text`, `void`, `[]f64`,
+ * `[i32; 3]`, `f64*` and `ref Node`. The header states types as the contract
+ * names them, `ptr<f64>` and `ref<Node>`, so both spellings are read here.
+ */
+
+import { CompilerError } from "../core/errors.ts";
+import {
+  type ArithOp,
+  type CompareOp,
+  TEXT,
+  type Ownership,
+  type SemanticAssignOp,
+  type SemanticBlock,
+  type SemanticCall,
+  type SemanticLoop,
+  type SemanticProgram,
+  type SemanticSlot,
+  type SemanticStatement,
+  type SemanticTerminator,
+  type SemanticTextPart,
+  type SemanticType,
+  type SemanticValue,
+  type UnaryOp,
+  typeText,
+} from "../core/semantic-ir.ts";
+import {
+  PRIMITIVE_TYPES,
+  type Effect,
+  type FunctionContract,
+  type FunctionSignature,
+  type ObjectLayout,
+  type PrimitiveTypeName,
+  type ProgramContract,
+  type TypeExpr,
+} from "../core/types.ts";
+import { parseType, typeToString } from "./contract.ts";
+import { builtinFor } from "./builtins.ts";
+import { unescape } from "./typescript.ts";
+
+/* -------------------------------------------------------------------------- */
+/* Vocabulary                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** What the text form carries, so a form written for another one is refused. */
+const VERSION = "1";
+
+/** The operators `op=` accepts, which the IR names as they are written. */
+const ASSIGN_OPS: readonly SemanticAssignOp[] = ["=", "+=", "*=", "-=", "/=", "%="];
+
+/** The arithmetic a value states, each of which prints as the IR names it. */
+const ARITH_OPS: readonly ArithOp[] = [
+  "add",
+  "sub",
+  "mul",
+  "div",
+  "mod",
+  "pow",
+  "min",
+  "max",
+  "shl",
+  "shr",
+  "and",
+  "or",
+  "xor",
+  "concat",
+];
+
+/** The six comparisons, each of which prints as the IR names it. */
+const COMPARE_OPS: readonly CompareOp[] = ["eq", "ne", "lt", "le", "gt", "ge"];
+
+/** The four unary operations, each of which prints as the IR names it. */
+const UNARY_OPS: readonly UnaryOp[] = ["neg", "pos", "not", "bitNot"];
+
+/** Who owns what a call hands back, each of which prints as the IR names it. */
+const OWNERSHIPS: readonly Ownership[] = ["none", "borrowed", "owned"];
+
+/** Whether the caller must keep the result alive, which the IR states as a flag. */
+const RETAINS: readonly string[] = ["yes", "no"];
+
+/** What a name may hold, which is the word a slot is written with. */
+const SLOT_KINDS: readonly string[] = ["value", "text", "buffer", "object"];
+
+/** The two ways a name was declared, which the IR states as a flag. */
+type Mutability = "mutable" | "immutable";
+
+/** The two ways a name is stepped, which the IR states as a flag. */
+type Side = "pre" | "post";
+
+/** The two ways a name moves in a statement of its own. */
+type StepOp = "++" | "--";
+
+const STEP_OPS: readonly StepOp[] = ["++", "--"];
+
+/** The operator a logical value states, whose own name the arithmetic shares. */
+type LogicalOp = Extract<SemanticValue, { k: "logical" }>["op"];
+
+/** The two logical operators, named apart from the arithmetic `and` and `or`. */
+const LOGICAL_OPS: Record<"logical_and" | "logical_or", LogicalOp> = {
+  logical_and: "and",
+  logical_or: "or",
+};
+
+/** The two ways a reference is tested for nothing, which the IR states as a flag. */
+const NULL_TESTS: Record<"is_null" | "is_not_null", boolean> = { is_null: false, is_not_null: true };
+
+function isArithOp(word: string): word is ArithOp {
+  return (ARITH_OPS as readonly string[]).includes(word);
+}
+
+function isCompareOp(word: string): word is CompareOp {
+  return (COMPARE_OPS as readonly string[]).includes(word);
+}
+
+function isPrimitiveName(word: string): word is PrimitiveTypeName {
+  return (PRIMITIVE_TYPES as readonly string[]).includes(word);
+}
+
+/** A name, a keyword or a type word: everything up to the next delimiter. */
+function isWordCharacter(character: string): boolean {
+  return /[A-Za-z0-9_$.]/.test(character);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Strings                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** The escapes a string carries, which are the ones the frontend already reads. */
+const ESCAPES: Record<string, string> = {
+  "\\": "\\\\",
+  '"': '\\"',
+  "\n": "\\n",
+  "\t": "\\t",
+  "\r": "\\r",
+};
+
+/** A string as JavaScript writes one, so what a value carries survives a round trip. */
+function stringLiteral(value: string): string {
+  let text = '"';
+  for (const character of value) text += ESCAPES[character] ?? character;
+  return `${text}"`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Writing                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** What a name was declared as, which the IR states as a flag. */
+function mutabilityText(mutable: boolean): Mutability {
+  return mutable ? "mutable" : "immutable";
+}
+
+/** A function as the contract states it, under the name a call reaches it by. */
+function signatureText(signature: FunctionSignature): string {
+  const alias = signature.symbol === signature.name ? "" : ` as ${signature.symbol}`;
+  const params = signature.params.map((param) => `${param.name}: ${typeToString(parseType(param.type))}`).join(", ");
+  return `function ${signature.name}${alias}(${params}) -> ${typeToString(parseType(signature.returns))}`;
+}
+
+/** An object layout, with every field it holds on the line under it. */
+function objectLines(name: string, layout: ObjectLayout): string[] {
+  const lines = [`object ${name} size ${layout.size} align ${layout.align}`];
+  for (const field of layout.fields) {
+    lines.push(`  field ${field.name}: ${typeToString(parseType(field.type))} at ${field.offset}`);
+  }
+  return lines;
+}
+
+/** What a declared name holds, and whether the program may change it. */
+function slotText(slot: SemanticSlot): string {
+  const state = mutabilityText(slot.mutable);
+  switch (slot.kind) {
+    case "value":
+      return `value[${typeText(slot.type)}] ${slot.name} ${state}`;
+    case "text":
+      return `text ${slot.name} ${state}`;
+    case "buffer":
+      return `buffer ${slot.name} ${state} element[${typeText(slot.element)}] ${slot.length}`;
+    case "object":
+      return `object[${typeText(slot.type)}] ${slot.name} ${state}`;
+  }
+}
+
+/** One piece of a string: text as written, or a value put into it. */
+function partText(part: SemanticTextPart): string {
+  return part.k === "text" ? stringLiteral(part.value) : valueText(part.value);
+}
+
+/**
+ * A call as its callee, its arguments, and who owns what it hands back. The
+ * signature and the effects are not written: they are the contract's to state,
+ * and a call the text names is bound to the contract that declares it.
+ */
+function callText(call: SemanticCall): string {
+  const args = call.args
+    .map((argument, position) => `arg[${typeText(call.argTypes[position])}] ${valueText(argument)}`)
+    .join(" ");
+  const retain = call.retain ? "yes" : "no";
+  return `${call.callee} [${args}] ownership=${call.ownership} retain=${retain}`;
+}
+
+/** A value as the IR states it: the operation, the type, and what it is made of. */
+function valueText(value: SemanticValue): string {
+  switch (value.k) {
+    case "const":
+      return `const[${typeText(value.type)}] ${value.text}`;
+    case "text":
+      return `[text ${value.parts.map(partText).join(" ")}]`;
+    case "bool":
+      return `bool[${typeText(value.type)}] ${value.value ? "true" : "false"}`;
+    case "nothing":
+      return `nothing[${typeText(value.type)}]`;
+    case "local":
+      return `local[${typeText(value.type)}] ${value.name}`;
+    case "length":
+      return `[length[${typeText(value.type)}] ${valueText(value.of)}]`;
+    case "element":
+      return `[element[${typeText(value.type)}] ${valueText(value.of)} ${valueText(value.index)}]`;
+    case "buffer":
+      return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] ${value.length} ${value.values.map(valueText).join(" ")}]`;
+    case "newObject":
+      return `new_object[${typeText(value.type)}] ${value.object}`;
+    case "loadField":
+      return `[load_field[${typeText(value.type)}] ${valueText(value.object)} ${value.layout} ${value.field}]`;
+    case "newObject":
+      return `new_object[${typeText(value.type)}] ${value.object}`;
+    case "call":
+      return `[call[${typeText(value.type)}] ${callText(value.call)}]`;
+    case "arith":
+      return `[${value.op}[${typeText(value.type)}] ${valueText(value.left)} ${valueText(value.right)}]`;
+    case "compare":
+      return `[${value.op}[${typeText(value.type)}] ${typeText(value.operand)} ${valueText(value.left)} ${valueText(value.right)}]`;
+    case "logical": {
+      const word = value.op === "and" ? "logical_and" : "logical_or";
+      return `[${word}[${typeText(value.type)}] ${valueText(value.left)} ${valueText(value.right)}]`;
+    }
+    case "coalesce":
+      return `[coalesce[${typeText(value.type)}] ${valueText(value.left)} ${valueText(value.right)}]`;
+    case "select":
+      return `[select[${typeText(value.type)}] ${valueText(value.condition)} ${valueText(value.then)} ${valueText(value.otherwise)}]`;
+    case "unary":
+      return `[unary ${value.op}[${typeText(value.type)}] ${valueText(value.operand)}]`;
+    case "isNull":
+      return `[${value.negate ? "is_not_null" : "is_null"}[${typeText(value.type)}] ${valueText(value.operand)}]`;
+    case "toText":
+      return `[to_text ${valueText(value.of)}]`;
+    case "argv":
+      return value.index === null
+        ? `argv[${typeText(value.type)}]`
+        : `[argv[${typeText(value.type)}] ${valueText(value.index)}]`;
+  }
+}
+
+/** How a block ends, or null when it ends by falling out of itself. */
+function terminatorText(terminator: SemanticTerminator, indent: number): string | null {
+  const pad = " ".repeat(indent);
+  if (terminator.k === "next") return null;
+  if (terminator.k === "return") return `${pad}return`;
+  const releases = terminator.releases.length === 0 ? "" : ` [${terminator.releases.join(" ")}]`;
+  return `${pad}jump ${terminator.target}${releases}`;
+}
+
+/** A run of statements, each on its own line, two spaces in. */
+function statementLines(statements: readonly SemanticStatement[], indent: number): string[] {
+  return statements.flatMap((statement) => statementText(statement, indent));
+}
+
+/** A block, and the way it ends. The source line is written on a block statement. */
+function blockLines(block: SemanticBlock, indent: number, source: number | null): string[] {
+  const mark = source === null ? "" : ` @${source}`;
+  const lines = [`${" ".repeat(indent)}block ${block.id}: releases[${block.releases.join(" ")}]${mark}`];
+  lines.push(...statementLines(block.statements, indent + 2));
+  const end = terminatorText(block.terminator, indent);
+  if (end !== null) lines.push(end);
+  return lines;
+}
+
+/** A loop, the block it owns, and the blocks a `break` and a `continue` leave for. */
+function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
+  const pad = " ".repeat(indent);
+  const mark = ` header ${loop.header} exit ${loop.exit} @${line}`;
+  let head: string;
+  switch (loop.kind) {
+    case "while":
+      head = `${pad}while ${valueText(loop.condition)}`;
+      break;
+    case "doWhile":
+      head = `${pad}do_while ${valueText(loop.condition)}`;
+      break;
+    case "counted": {
+      const bound = loop.inclusive ? "inclusive" : "exclusive";
+      const direction = loop.down ? "down" : "up";
+      const step = loop.step === null ? "default" : valueText(loop.step);
+      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${valueText(loop.from)} to ${valueText(loop.to)} ${bound} ${direction} step ${step}`;
+      break;
+    }
+    case "each":
+      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${valueText(loop.length)}`;
+      break;
+  }
+  return [head + mark, ...blockLines(loop.body, indent + 2, null)];
+}
+
+/** One statement, and the blocks it owns. */
+function statementText(statement: SemanticStatement, indent: number): string[] {
+  const pad = " ".repeat(indent);
+  const mark = ` @${statement.line}`;
+  switch (statement.k) {
+    case "let":
+      return [`${pad}let ${slotText(statement.slot)} = ${valueText(statement.value)}${mark}`];
+    case "set":
+      return [`${pad}set ${statement.name} ${statement.op} ${valueText(statement.value)}${mark}`];
+    case "setElement":
+      return [
+        `${pad}set_element ${statement.buffer} ${valueText(statement.index)} ${statement.op} ${valueText(statement.value)}${mark}`,
+      ];
+    case "step": {
+      const side: Side = statement.prefix ? "pre" : "post";
+      return [`${pad}step ${statement.name} ${statement.op} ${side}${mark}`];
+    }
+    case "if": {
+      const lines = [`${pad}if ${valueText(statement.condition)}${mark}`, ...blockLines(statement.then, indent + 2, null)];
+      if (statement.otherwise !== null) {
+        lines.push(`${pad}else`, ...blockLines(statement.otherwise, indent + 2, null));
+      }
+      return lines;
+    }
+    case "loop":
+      return loopLines(statement.loop, indent, statement.line);
+    case "block":
+      return blockLines(statement.body, indent, statement.line);
+    case "printText":
+      return [`${pad}print_text ${valueText(statement.value)}${mark}`];
+    case "printNumber":
+      return [`${pad}print_number ${valueText(statement.value)}${mark}`];
+    case "printNewline":
+      return [`${pad}print_newline${mark}`];
+    case "retain":
+      return [`${pad}retain ${valueText(statement.value)}${mark}`];
+    case "call":
+      return [`${pad}call[${typeText(statement.call.returns)}] ${callText(statement.call)}${mark}`];
+    case "raise":
+      return [`${pad}raise ${valueText(statement.message)}${mark}`];
+    case "storeField":
+      return [
+        `${pad}store_field ${valueText(statement.object)} ${statement.layout} ${statement.field} ${valueText(statement.value)}${mark}`,
+      ];
+  }
+}
+
+/** The IR as text: what a person reads and a model writes. */
+export function printSemanticProgram(program: SemanticProgram): string {
+  const lines: string[] = [`ir ${VERSION}`, `file ${stringLiteral(program.file)}`];
+  for (const signature of program.functions) lines.push(signatureText(signature));
+  for (const name of Object.keys(program.objects)) lines.push(...objectLines(name, program.objects[name]));
+  lines.push("");
+  lines.push(...blockLines(program.entry, 0, null));
+  return `${lines.join("\n")}\n`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The contract                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** What a call is bound to, none of which the text itself carries. */
+interface BoundCall {
+  readonly signature: FunctionSignature;
+  /** What the call does beyond computing its result. */
+  readonly effects: Effect[];
+  readonly builtin: boolean;
+}
+
+/**
+ * Where every name the text uses is bound: the functions a program calls, the
+ * layouts those functions hand back, and what each of them costs. A name the
+ * contract does not declare, and the builtins do not either, is a name the
+ * program does not call.
+ */
+class ContractBinder {
+  private readonly functions: Record<string, FunctionContract> = {};
+  private readonly layouts: Record<string, ObjectLayout> = {};
+
+  constructor(contract: ProgramContract) {
+    for (const file of contract.files) {
+      for (const [name, declared] of Object.entries(file.functions)) {
+        this.functions[name] = declared;
+        this.functions[declared.function.name] = declared;
+        this.functions[declared.function.symbol] = declared;
+        Object.assign(this.layouts, declared.definition?.objects ?? {});
+      }
+    }
+  }
+
+  /**
+   * The contract of a call, read off the program the call is compiled against.
+   * A builtin is the compiler's own and is bound first, as the resolver reads
+   * a name: a name both tables declare is the compiler's.
+   */
+  bind(name: string, line: number): BoundCall {
+    const bound = this.lookup(name);
+    if (bound !== null) return bound;
+    const compiled = this.names().join(", ") || "no functions";
+    fail(line, `a function this program declares, one of: ${compiled}`, name);
+  }
+
+  /** What a name the text writes is bound to, or null when the program declares none. */
+  find(name: string): BoundCall | null {
+    return this.lookup(name);
+  }
+
+  /** Every name a call may reach, which an error lists so that it can be fixed. */
+  names(): string[] {
+    return Object.keys(this.functions);
+  }
+
+  /** The layout a contract hands back, which the text only names. */
+  layout(name: string, line: number): ObjectLayout {
+    if (!Object.prototype.hasOwnProperty.call(this.layouts, name)) {
+      const handed = Object.keys(this.layouts).join(", ") || "no layouts";
+      fail(line, `a layout this program hands back, one of: ${handed}`, name);
+    }
+    return this.layouts[name];
+  }
+
+  /**
+   * What a name is bound to, read by the name the text writes it under. A name
+   * no table declares is not a name the program calls.
+   */
+  private lookup(name: string): BoundCall | null {
+    const builtin = builtinFor(name);
+    if (builtin !== null) {
+      const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) }));
+      return { signature: { name, symbol: name, params, returns: typeToString(builtin.returns) }, effects: [], builtin: true };
+    }
+    if (!Object.prototype.hasOwnProperty.call(this.functions, name)) return null;
+    const declared = this.functions[name];
+    return { signature: declared.function, effects: declared.effects, builtin: false };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading one line                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** A line of the text is not a program, said as the line it was written on. */
+function fail(line: number, expected: string, found: string): never {
+  throw new CompilerError({
+    category: "ContractError",
+    stage: "ir",
+    message: `the IR text is not a program at line ${line}`,
+    detail: `line ${line}: expected ${expected}, found "${found}"`,
+  });
+}
+
+/** One value read out of a line, in the shape the printer wrote it. */
+class IrScanner {
+  readonly line: number;
+  private readonly text: string;
+  private readonly binder: ContractBinder;
+  private at = 0;
+
+  constructor(text: string, line: number, binder: ContractBinder) {
+    this.text = text;
+    this.line = line;
+    this.binder = binder;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Words                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  /** A line the reader is on cannot say what the text is meant to say. */
+  refuse(expected: string, found: string): never {
+    fail(this.line, expected, found);
+  }
+
+  /** What the next character is, or nothing where the line has ended. */
+  peek(): string {
+    return this.at >= this.text.length ? "" : this.text[this.at];
+  }
+
+  /** Spaces between the parts of a line say nothing. */
+  skip(): void {
+    while (this.peek() === " " || this.peek() === "\t") this.at += 1;
+  }
+
+  /** A name, a keyword or a type word: everything up to the next delimiter. */
+  word(): string {
+    this.skip();
+    const start = this.at;
+    while (isWordCharacter(this.peek())) this.at += 1;
+    if (this.at === start) this.refuse("a name", this.text.slice(this.at, this.at + 8));
+    return this.text.slice(start, this.at);
+  }
+
+  /** A symbol word, as an operator or a number is written. */
+  token(): string {
+    this.skip();
+    const start = this.at;
+    while (this.at < this.text.length && !/[\s[\]@,]/.test(this.text[this.at])) this.at += 1;
+    return this.text.slice(start, this.at);
+  }
+
+  /** A word the text fixes, read so that a wrong one is an error and not a name. */
+  keyword(word: string): void {
+    const read = this.word();
+    if (read !== word) this.refuse(`"${word}"`, read);
+  }
+
+  /** What the text fixes at this point, as a bracket, a colon or an arrow is. */
+  expect(written: string): void {
+    this.skip();
+    if (!this.text.startsWith(written, this.at)) this.refuse(`"${written}"`, this.text.slice(this.at));
+    this.at += written.length;
+  }
+
+  /**
+   * A word out of the set the text fixes for it, as an operator is written. A
+   * word the set does not hold is an error, and never a name read past.
+   */
+  oneOf<T extends string>(word: string, options: readonly T[]): T {
+    const found = options.find((option) => option === word);
+    if (found === undefined) this.refuse(`one of ${options.join(", ")}`, word);
+    return found;
+  }
+
+  /** A count, as the length of an array is written. */
+  integer(): number {
+    this.skip();
+    const start = this.at;
+    while (/[0-9]/.test(this.peek())) this.at += 1;
+    if (this.at === start) this.refuse("a count", this.text.slice(this.at, this.at + 8));
+    const count = Number.parseInt(this.text.slice(start, this.at), 10);
+    const next = this.peek();
+    if (next !== "" && !/[\s\]@,]/.test(next)) this.refuse("a count and what follows it", this.text.slice(start));
+    return count;
+  }
+
+  /** A string as JavaScript writes one, taken back to the characters it carries. */
+  string(): string {
+    this.skip();
+    if (this.peek() !== '"') this.refuse("a string in quotes", this.text.slice(this.at));
+    this.at += 1;
+    const start = this.at;
+    while (this.peek() !== "" && this.peek() !== '"') this.at += this.peek() === "\\" ? 2 : 1;
+    if (this.peek() !== '"') this.refuse('the closing quote of a string', this.text.slice(start));
+    const body = this.text.slice(start, this.at);
+    this.at += 1;
+    return unescape(body, this.line);
+  }
+
+  /** The line of the source a statement was written on, which ends its line. */
+  mark(): number {
+    this.skip();
+    if (this.peek() !== "@") this.refuse("the source line the statement was written on", this.text.slice(this.at));
+    this.at += 1;
+    const start = this.at;
+    while (/[0-9]/.test(this.peek())) this.at += 1;
+    if (this.at === start) this.refuse("a source line number", this.text.slice(this.at));
+    const line = Number.parseInt(this.text.slice(start, this.at), 10);
+    this.end();
+    return line;
+  }
+
+  /** Nothing more on this line, which every line that ends in itself does. */
+  end(): void {
+    this.skip();
+    if (this.at < this.text.length) this.refuse("the end of the line", this.text.slice(this.at));
+  }
+
+  /** A bracketed list of names, which is how releases and arguments are written. */
+  names(): string[] {
+    this.expect("[");
+    const names: string[] = [];
+    for (;;) {
+      this.skip();
+      if (this.peek() === "]") {
+        this.at += 1;
+        return names;
+      }
+      if (this.peek() === "") this.refuse('the "]" of a list of names', "");
+      names.push(this.word());
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Types                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  /** A type, as the IR names it or as the contract names it. */
+  type(): SemanticType {
+    const type = this.typeAtom();
+    if (type.kind !== "text") return this.pointers(type);
+    this.skip();
+    if (this.peek() === "*") this.refuse("a pointer to a type the contract declares", "text*");
+    return type;
+  }
+
+  /** The type a value is, in the brackets the operation is written with. */
+  typed(): SemanticType {
+    this.expect("[");
+    const type = this.type();
+    this.expect("]");
+    return type;
+  }
+
+  /**
+   * A type the contract declares, which is what a truth, a comparison and
+   * every type a contract type is made of is. The contract type language has
+   * no string type, so a text read where one is expected is an error.
+   */
+  contract(): TypeExpr {
+    const type = this.type();
+    if (type.kind === "text") this.refuse("a type the contract declares, not text", "text");
+    return type;
+  }
+
+  /** A type the contract declares, in the brackets a value is written with. */
+  contractType(): TypeExpr {
+    this.expect("[");
+    const type = this.contract();
+    this.expect("]");
+    return type;
+  }
+
+  /** A pointer is a `*` after the type it points at, however many of them. */
+  private pointers(type: TypeExpr): TypeExpr {
+    for (;;) {
+      this.skip();
+      if (this.peek() !== "*") return type;
+      this.at += 1;
+      type = { kind: "ptr", of: type };
+    }
+  }
+
+  private typeAtom(): SemanticType {
+    this.skip();
+    if (this.peek() === "[") return this.arrayType();
+    const head = this.word();
+    if (this.peek() === "<") return this.compositeType(head);
+    if (head === "void") return { kind: "void" };
+    if (head === "text") return { kind: "text" };
+    if (isPrimitiveName(head)) return { kind: "primitive", name: head };
+    this.refuse("a type", head);
+  }
+
+  /** A slice or an array, which are the two types that start with a bracket. */
+  private arrayType(): SemanticType {
+    this.at += 1;
+    if (this.peek() === "]") {
+      this.at += 1;
+      return { kind: "slice", of: this.contract() };
+    }
+    const of = this.contract();
+    this.skip();
+    let length: number | null = null;
+    if (this.peek() === ";") {
+      this.at += 1;
+      length = this.integer();
+      this.skip();
+    }
+    this.expect("]");
+    return { kind: "array", of, length };
+  }
+
+  /** A type the contract writes with its own name, as `ptr<f64>` or `ref<Node>`. */
+  private compositeType(head: string): SemanticType {
+    this.at += 1;
+    switch (head) {
+      case "ptr":
+      case "slice": {
+        const of = this.contract();
+        this.expect(">");
+        return { kind: head, of };
+      }
+      case "array": {
+        const of = this.contract();
+        this.skip();
+        const length = this.peek() === "," ? this.commaCount() : null;
+        this.expect(">");
+        return { kind: "array", of, length };
+      }
+      case "ref": {
+        const reference = this.referenceType();
+        this.expect(">");
+        return reference;
+      }
+      default:
+        this.refuse('a type written as "ptr<...>", "slice<...>", "array<...>" or "ref<...>"', head);
+    }
+  }
+
+  /**
+   * What a `ref` points at, which is nothing at all, a layout by the name it is
+   * exported as, or a type the contract declares. A layout is named with a
+   * capital, as the contract names one, and nothing else is.
+   */
+  private referenceType(): SemanticType {
+    this.skip();
+    const start = this.at;
+    while (isWordCharacter(this.peek())) this.at += 1;
+    const word = this.text.slice(start, this.at);
+    if (word === "any") return { kind: "ref", of: null };
+    if (this.peek() === ">") {
+      if (!/^[A-Z]/.test(word)) this.refuse("a layout name, written with a capital", word);
+      return { kind: "ref", of: null, name: word };
+    }
+    this.at = start;
+    return { kind: "ref", of: this.contract() };
+  }
+
+  private commaCount(): number {
+    this.at += 1;
+    const count = this.integer();
+    this.skip();
+    return count;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Values                                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  /** A value, which an operation over other values writes in brackets. */
+  value(): SemanticValue {
+    this.skip();
+    const bracketed = this.peek() === "[";
+    if (bracketed) this.at += 1;
+    const head = this.word();
+    if (head === "logical_and" || head === "logical_or") {
+      return this.closing(bracketed, {
+        k: "logical",
+        op: LOGICAL_OPS[head],
+        type: this.contractType(),
+        left: this.value(),
+        right: this.value(),
+      });
+    }
+    if (isArithOp(head)) {
+      return this.closing(bracketed, {
+        k: "arith",
+        op: head,
+        type: this.typed(),
+        left: this.value(),
+        right: this.value(),
+      });
+    }
+    if (isCompareOp(head)) {
+      return this.closing(bracketed, {
+        k: "compare",
+        op: head,
+        type: this.contractType(),
+        operand: this.type(),
+        left: this.value(),
+        right: this.value(),
+      });
+    }
+    switch (head) {
+      case "const": {
+        const type = this.typed();
+        const literal = this.token();
+        if (literal === "") this.refuse("a number written out", this.text.slice(this.at));
+        return this.bare(bracketed, { k: "const", type, text: literal });
+      }
+      case "bool": {
+        const type = this.contractType();
+        const literal = this.word();
+        if (literal !== "true" && literal !== "false") this.refuse('"true" or "false"', literal);
+        return this.bare(bracketed, { k: "bool", type, value: literal === "true" });
+      }
+      case "nothing":
+        return this.bare(bracketed, { k: "nothing", type: this.typed() });
+      case "local": {
+        const type = this.typed();
+        return this.bare(bracketed, { k: "local", type, name: this.word() });
+      }
+      case "new_object": {
+        const type = this.typed();
+        return this.bare(bracketed, { k: "newObject", type, object: this.word() });
+      }
+      case "load_field":
+        return this.closing(bracketed, {
+          k: "loadField",
+          type: this.typed(),
+          object: this.value(),
+          layout: this.word(),
+          field: this.word(),
+        });
+      case "argv": {
+        const type = this.typed();
+        if (!bracketed) return { k: "argv", type, index: null };
+        return this.closed({ k: "argv", type, index: this.value() });
+      }
+      case "coalesce":
+        return this.closing(bracketed, { k: "coalesce", type: this.typed(), left: this.value(), right: this.value() });
+      case "select":
+        return this.closing(bracketed, {
+          k: "select",
+          type: this.typed(),
+          condition: this.value(),
+          then: this.value(),
+          otherwise: this.value(),
+        });
+      case "to_text":
+        return this.closing(bracketed, { k: "toText", type: TEXT, of: this.value() });
+      case "length":
+        return this.closing(bracketed, { k: "length", type: this.typed(), of: this.value() });
+      case "element":
+        return this.closing(bracketed, { k: "element", type: this.typed(), of: this.value(), index: this.value() });
+      case "unary": {
+        const op = this.unaryOp();
+        return this.closing(bracketed, { k: "unary", op, type: this.typed(), operand: this.value() });
+      }
+      case "is_null":
+      case "is_not_null":
+        return this.closing(bracketed, {
+          k: "isNull",
+          type: this.contractType(),
+          operand: this.value(),
+          negate: NULL_TESTS[head],
+        });
+      case "text":
+        return this.closed({ k: "text", type: TEXT, parts: this.parts() });
+      case "buffer": {
+        const type = this.typed();
+        this.keyword("element");
+        const element = this.typed();
+        const length = this.integer();
+        const values: SemanticValue[] = [];
+        while (this.more()) values.push(this.value());
+        return this.closed({ k: "buffer", type, element, length, values });
+      }
+      case "call": {
+        const type = this.typed();
+        const call = this.call(type);
+        return this.closed({ k: "call", type, call });
+      }
+      default:
+        this.refuse("a value", head);
+    }
+  }
+
+  /** A unary operation, which the IR names and the text keeps. */
+  private unaryOp(): UnaryOp {
+    return this.oneOf(this.word(), UNARY_OPS);
+  }
+
+  /** The pieces of a string: text as written, or a value put into it. */
+  private parts(): SemanticTextPart[] {
+    const parts: SemanticTextPart[] = [];
+    while (this.more()) {
+      this.skip();
+      parts.push(this.peek() === '"' ? { k: "text", value: this.string() } : { k: "value", value: this.value() });
+    }
+    return parts;
+  }
+
+  /** A call, bound to the contract that declares the callee. */
+  call(returns: SemanticType): SemanticCall {
+    const callee = this.word();
+    const bound = this.binder.bind(callee, this.line);
+    const argTypes: SemanticType[] = [];
+    const args: SemanticValue[] = [];
+    this.expect("[");
+    while (this.more()) {
+      this.keyword("arg");
+      argTypes.push(this.typed());
+      args.push(this.value());
+    }
+    this.expect("]");
+    this.keyword("ownership");
+    this.expect("=");
+    const ownership = this.oneOf(this.word(), OWNERSHIPS);
+    this.keyword("retain");
+    this.expect("=");
+    const retain = this.oneOf(this.word(), RETAINS);
+    return {
+      callee,
+      signature: bound.signature,
+      args,
+      argTypes,
+      returns,
+      effects: bound.effects,
+      ownership,
+      retain: retain === "yes",
+      builtin: bound.builtin,
+    };
+  }
+
+  /** Whether a bracketed list still holds a value, which is how a list ends. */
+  private more(): boolean {
+    this.skip();
+    return this.peek() !== "" && this.peek() !== "]";
+  }
+
+  /** Ends an operation that is written in brackets around the whole of it. */
+  private closing(bracketed: boolean, value: SemanticValue): SemanticValue {
+    if (!bracketed) this.refuse("this operation, written in brackets", value.k);
+    return this.closed(value);
+  }
+
+  private closed<T>(value: T): T {
+    this.expect("]");
+    return value;
+  }
+
+  private bare<T>(bracketed: boolean, value: T): T {
+    if (bracketed) this.refuse("this value, written without brackets", "");
+    return value;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading the program                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** One line of the text, with the indentation it was written at. */
+interface IrLine {
+  readonly number: number;
+  readonly indent: number;
+  readonly text: string;
+}
+
+/** A block as it was read, with the source line it was written on when it is one. */
+interface ReadBlock {
+  readonly body: SemanticBlock;
+  readonly line: number;
+}
+
+/**
+ * The lines of the text, with the blank ones dropped. Indentation is two
+ * spaces per level, so a line indented by anything else is an error rather
+ * than a block the reader has to guess the width of.
+ */
+function readLines(text: string): IrLine[] {
+  const lines: IrLine[] = [];
+  const source = text.split("\n");
+  for (let index = 0; index < source.length; index += 1) {
+    const raw = source[index].endsWith("\r") ? source[index].slice(0, -1) : source[index];
+    if (raw.trim() === "") continue;
+    let indent = 0;
+    while (raw[indent] === " ") indent += 1;
+    const number = index + 1;
+    if (raw[indent] === "\t") fail(number, "indentation made of spaces", "\t");
+    if (indent % 2 !== 0) fail(number, "indentation of two spaces per level", `${indent} spaces`);
+    lines.push({ number, indent, text: raw.slice(indent) });
+  }
+  return lines;
+}
+
+/** The first word of a line, which is the statement, block or term it is. */
+function headOf(line: IrLine): string {
+  const end = line.text.search(/[\s\[]/);
+  return end < 0 ? line.text : line.text.slice(0, end);
+}
+
+/** The rest of a line, once the word that names what it is has been read. */
+function restOf(line: IrLine): string {
+  return line.text.slice(headOf(line).length).trim();
+}
+
+/** One program, read a line at a time in the shape the printer wrote it. */
+class ProgramReader {
+  private readonly lines: IrLine[];
+  private readonly binder: ContractBinder;
+  private at = 0;
+
+  constructor(lines: IrLine[], binder: ContractBinder) {
+    this.lines = lines;
+    this.binder = binder;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Lines                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  private peek(): IrLine | null {
+    return this.at < this.lines.length ? this.lines[this.at] : null;
+  }
+
+  /** The line that is read now, which has to be written at this level. */
+  private line(indent: number): IrLine {
+    const line = this.peek();
+    if (line === null) {
+      fail(this.after(), `a line written at ${indent} spaces of indentation`, "the end of the text");
+    }
+    if (line.indent !== indent) {
+      fail(line.number, `a line written at ${indent} spaces of indentation`, `${line.indent} spaces`);
+    }
+    return line;
+  }
+
+  /** The line a line that is missing would have been written on. */
+  private after(): number {
+    const line = this.at > 0 ? this.lines[this.at - 1] : null;
+    return line === null ? 1 : line.number + 1;
+  }
+
+  private atIndent(indent: number): boolean {
+    const line = this.peek();
+    return line !== null && line.indent === indent;
+  }
+
+  private scanner(line: IrLine): IrScanner {
+    return new IrScanner(restOf(line), line.number, this.binder);
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* The program                                                            */
+  /* ---------------------------------------------------------------------- */
+
+  program(): SemanticProgram {
+    const version = this.line(0);
+    this.at += 1;
+    if (version.text !== `ir ${VERSION}`) fail(version.number, `"ir ${VERSION}"`, version.text);
+
+    const file = this.file();
+    const functions: FunctionSignature[] = [];
+    const objects: Record<string, ObjectLayout> = {};
+    for (let line = this.peek(); line !== null && line.indent === 0; line = this.peek()) {
+      const head = headOf(line);
+      if (head !== "function" && head !== "object") break;
+      this.at += 1;
+      if (head === "function") functions.push(this.function(line));
+      else this.object(line, objects);
+    }
+
+    const entry = this.block(0, false).body;
+    const trailing = this.peek();
+    if (trailing !== null) fail(trailing.number, "the end of the program", trailing.text);
+    return { file, entry, functions, objects };
+  }
+
+  private file(): string {
+    const line = this.line(0);
+    this.at += 1;
+    if (headOf(line) !== "file") fail(line.number, '"file" and the source it was written in', line.text);
+    const scanner = this.scanner(line);
+    const file = scanner.string();
+    scanner.end();
+    return file;
+  }
+
+  /**
+   * A function the program calls. What it takes and what it hands back are the
+   * contract's to state, so the line is read to be sure of what it says and
+   * the signature is the one the contract binds the name to.
+   */
+  private function(line: IrLine): FunctionSignature {
+    const scanner = this.scanner(line);
+    const name = scanner.word();
+    let alias = name;
+    if (scanner.peek() === " ") {
+      scanner.keyword("as");
+      alias = scanner.word();
+    }
+    scanner.expect("(");
+    for (;;) {
+      scanner.skip();
+      if (scanner.peek() === ")") break;
+      scanner.word();
+      scanner.expect(":");
+      scanner.type();
+      scanner.skip();
+      if (scanner.peek() !== ",") break;
+      scanner.expect(",");
+    }
+    scanner.expect(")");
+    scanner.expect("->");
+    scanner.type();
+    scanner.end();
+
+    const bound = this.binder.find(name) ?? (alias === name ? null : this.binder.find(alias));
+    if (bound === null) {
+      const compiled = this.binder.names().join(", ") || "no functions";
+      fail(line.number, `a function this program declares, one of: ${compiled}`, line.text);
+    }
+    return bound.signature;
+  }
+
+  /**
+   * A layout the program hands back, which the contract states. The fields the
+   * line names are read to be sure of what it says; the layout itself is the
+   * one the contract hands back, so a model cannot lay an object out for itself.
+   */
+  private object(line: IrLine, objects: Record<string, ObjectLayout>): void {
+    const scanner = this.scanner(line);
+    const name = scanner.word();
+    scanner.keyword("size");
+    scanner.integer();
+    scanner.keyword("align");
+    scanner.integer();
+    scanner.end();
+    objects[name] = this.binder.layout(name, line.number);
+
+    while (this.atIndent(2) && headOf(this.lines[this.at]) === "field") {
+      const field = this.line(2);
+      this.at += 1;
+      const fields = this.scanner(field);
+      fields.word();
+      fields.expect(":");
+      fields.type();
+      fields.keyword("at");
+      fields.integer();
+      fields.end();
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Blocks                                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  /** A block, the statements in it, and where control goes when they are done. */
+  private block(indent: number, statement: boolean): ReadBlock {
+    const line = this.line(indent);
+    if (headOf(line) !== "block") fail(line.number, '"block" and the name of the block', line.text);
+    this.at += 1;
+    const scanner = this.scanner(line);
+    const id = scanner.word();
+    scanner.expect(":");
+    scanner.keyword("releases");
+    const releases = scanner.names();
+    let source = 0;
+    if (statement) source = scanner.mark();
+    else scanner.end();
+    const body: SemanticBlock = {
+      id,
+      statements: this.statements(indent + 2),
+      releases,
+      terminator: this.terminator(indent),
+    };
+    return { body, line: source };
+  }
+
+  private terminator(indent: number): SemanticTerminator {
+    const line = this.peek();
+    if (line === null || line.indent !== indent) return { k: "next" };
+    const head = headOf(line);
+    if (head !== "return" && head !== "jump") return { k: "next" };
+    this.at += 1;
+    const scanner = this.scanner(line);
+    if (head === "return") {
+      scanner.end();
+      return { k: "return" };
+    }
+    const target = scanner.word();
+    scanner.skip();
+    const releases = scanner.peek() === "[" ? scanner.names() : [];
+    scanner.end();
+    return { k: "jump", target, releases };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Statements                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  private statements(indent: number): SemanticStatement[] {
+    const statements: SemanticStatement[] = [];
+    while (this.atIndent(indent)) statements.push(this.statement(indent));
+    return statements;
+  }
+
+  private statement(indent: number): SemanticStatement {
+    const line = this.line(indent);
+    const head = headOf(line);
+    const scanner = this.scanner(line);
+    this.at += 1;
+    switch (head) {
+      case "let": {
+        const slot = this.slot(scanner);
+        scanner.expect("=");
+        const value = scanner.value();
+        return { k: "let", slot, value, line: scanner.mark() };
+      }
+      case "set": {
+        const name = scanner.word();
+        const op = this.assignOp(scanner);
+        const value = scanner.value();
+        return { k: "set", name, op, value, line: scanner.mark() };
+      }
+      case "set_element": {
+        const buffer = scanner.word();
+        const index = scanner.value();
+        const op = this.assignOp(scanner);
+        const value = scanner.value();
+        return { k: "setElement", buffer, index, op, value, line: scanner.mark() };
+      }
+      case "step": {
+        const name = scanner.word();
+        const op = scanner.oneOf(scanner.token(), STEP_OPS);
+        const side = scanner.word();
+        if (side !== "pre" && side !== "post") scanner.refuse('"pre" or "post"', side);
+        return { k: "step", name, op, prefix: side === "pre", line: scanner.mark() };
+      }
+      case "if": {
+        const condition = scanner.value();
+        const at = scanner.mark();
+        const then = this.block(indent + 2, false).body;
+        let otherwise: SemanticBlock | null = null;
+        const next = this.peek();
+        if (next !== null && next.indent === indent && headOf(next) === "else") {
+          this.at += 1;
+          this.scanner(next).end();
+          otherwise = this.block(indent + 2, false).body;
+        }
+        return { k: "if", condition, then, otherwise, line: at };
+      }
+      case "while":
+      case "do_while": {
+        const condition = scanner.value();
+        const { header, exit, at } = this.loopTail(scanner);
+        const body = this.block(indent + 2, false).body;
+        const kind = head === "while" ? "while" : "doWhile";
+        return { k: "loop", loop: { kind, condition, header, exit, body }, line: at };
+      }
+      case "for": {
+        const type = scanner.typed();
+        const variable = scanner.word();
+        scanner.keyword("from");
+        const from = scanner.value();
+        scanner.keyword("to");
+        const to = scanner.value();
+        const bound = scanner.word();
+        if (bound !== "inclusive" && bound !== "exclusive") {
+          scanner.refuse('"inclusive" or "exclusive"', bound);
+        }
+        const direction = scanner.word();
+        if (direction !== "up" && direction !== "down") scanner.refuse('"up" or "down"', direction);
+        scanner.keyword("step");
+        scanner.skip();
+        let step: SemanticValue | null = null;
+        if (scanner.peek() === "default") scanner.word();
+        else step = scanner.value();
+        const { header, exit, at } = this.loopTail(scanner);
+        const body = this.block(indent + 2, false).body;
+        return {
+          k: "loop",
+          loop: {
+            kind: "counted",
+            variable,
+            type,
+            from,
+            to,
+            inclusive: bound === "inclusive",
+            down: direction === "down",
+            step,
+            header,
+            exit,
+            body,
+          },
+          line: at,
+        };
+      }
+      case "for_of": {
+        const elementType = scanner.contractType();
+        const element = scanner.word();
+        scanner.keyword("of");
+        const of = scanner.word();
+        scanner.keyword("index");
+        const index = scanner.word();
+        scanner.keyword("length");
+        const length = scanner.value();
+        const { header, exit, at } = this.loopTail(scanner);
+        const body = this.block(indent + 2, false).body;
+        return { k: "loop", loop: { kind: "each", index, element, elementType, of, length, header, exit, body }, line: at };
+      }
+      case "block": {
+        // The statement is the head of its own block, so the block reads the line.
+        this.at -= 1;
+        const read = this.block(indent, true);
+        return { k: "block", body: read.body, line: read.line };
+      }
+      case "print_text":
+        return { k: "printText", value: scanner.value(), line: scanner.mark() };
+      case "print_newline":
+        return { k: "printNewline", line: scanner.mark() };
+      case "print_number":
+        return { k: "printNumber", value: scanner.value(), line: scanner.mark() };
+      case "retain":
+        return { k: "retain", value: scanner.value(), line: scanner.mark() };
+      case "call": {
+        const returns = scanner.typed();
+        const call = scanner.call(returns);
+        return { k: "call", call, line: scanner.mark() };
+      }
+      case "raise":
+        return { k: "raise", message: scanner.value(), line: scanner.mark() };
+      case "store_field": {
+        const object = scanner.value();
+        const layout = scanner.word();
+        const field = scanner.word();
+        const value = scanner.value();
+        return { k: "storeField", object, layout, field, value, line: scanner.mark() };
+      }
+      default:
+        fail(line.number, "a statement", line.text);
+    }
+  }
+
+  /** The blocks a `break` and a `continue` leave a loop for. */
+  private loopTail(scanner: IrScanner): { header: string; exit: string; at: number } {
+    scanner.keyword("header");
+    const header = scanner.word();
+    scanner.keyword("exit");
+    const exit = scanner.word();
+    return { header, exit, at: scanner.mark() };
+  }
+
+  /** An assignment as it is written, which the IR states as an operator. */
+  private assignOp(scanner: IrScanner): SemanticAssignOp {
+    return scanner.oneOf(scanner.token(), ASSIGN_OPS);
+  }
+
+  /** What a declared name holds, read as the declaration states it. */
+  private slot(scanner: IrScanner): SemanticSlot {
+    const kind = scanner.word();
+    if (!SLOT_KINDS.includes(kind)) scanner.refuse(`a slot, one of ${SLOT_KINDS.join(", ")}`, kind);
+    if (kind === "buffer") {
+      const name = scanner.word();
+      const mutable = this.mutable(scanner);
+      scanner.keyword("element");
+      const element = scanner.contractType();
+      const length = scanner.integer();
+      return { kind, name, mutable, element, length };
+    }
+    if (kind === "text") {
+      const name = scanner.word();
+      return { kind, name, mutable: this.mutable(scanner) };
+    }
+    const type = scanner.typed();
+    const name = scanner.word();
+    const mutable = this.mutable(scanner);
+    return kind === "value" ? { kind, name, mutable, type } : { kind: "object", name, mutable, type };
+  }
+
+  /** Whether the program may change a name, which the IR states as a flag. */
+  private mutable(scanner: IrScanner): boolean {
+    const state = scanner.word();
+    if (state !== "mutable" && state !== "immutable") scanner.refuse('"mutable" or "immutable"', state);
+    return state === "mutable";
+  }
+}
+
+/**
+ * Reads IR text back, binding every callee to the contract it was declared in.
+ * A line the IR cannot express, a name the contract does not declare, or a
+ * malformed type is an error naming the line it was written on, never a
+ * silently dropped instruction.
+ */
+export function parseSemanticProgram(text: string, contract: ProgramContract): SemanticProgram {
+  return new ProgramReader(readLines(text), new ContractBinder(contract)).program();
+}

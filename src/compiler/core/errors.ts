@@ -12,6 +12,8 @@ export type ErrorCategory =
   | "ContractError"
   | "AiGenerationError"
   | "ModelDeclinedError"
+  /** A program that is not one, found before any target saw it. */
+  | "SemanticIrError"
   | "AssemblyError"
   | "VerificationError"
   | "BenchmarkError"

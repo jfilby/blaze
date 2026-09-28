@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
-import { resolveProgram, type ResolvedValue } from "../toolchain/program.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
+import type { SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
@@ -44,7 +45,7 @@ function resolved(files: Record<string, string>) {
 }
 
 /** The call a resolved statement makes, which is the only interesting value. */
-function callOf(value: ResolvedValue) {
+function callOf(value: SemanticValue) {
   assert.equal(value.k, "call");
   if (value.k !== "call") throw new Error("expected a call");
   return value.call;
@@ -131,29 +132,28 @@ test("a value takes the type of the call it is passed to", () => {
     "dot.ts": DOT,
   });
 
-  // The array is f64 because the parameter is, and the length stays a length:
-  // the driver reads it as one and converts it where the call wants a number.
-  const declared = program.statements[1];
-  assert.equal(declared.kind, "declare");
-  if (declared.kind !== "declare") throw new Error("expected a declaration");
+  // The array is read as the array it is, the length as a length, and the call
+  // says the type every argument is passed as and the type it returns.
+  const declared = program.entry.statements[1];
+  assert.equal(declared.k, "let");
+  if (declared.k !== "let") throw new Error("expected a declaration");
   const call = callOf(declared.value);
-  assert.equal(call.name, "dot");
+  assert.equal(call.callee, "dot");
+  assert.deepEqual(call.argTypes, [
+    { kind: "slice", of: { kind: "primitive", name: "f64" } },
+    { kind: "slice", of: { kind: "primitive", name: "f64" } },
+    { kind: "primitive", name: "f64" },
+  ]);
   assert.deepEqual(call.args[0], {
-    k: "reference",
+    k: "local",
+    type: { kind: "array", of: { kind: "primitive", name: "f64" }, length: 2 },
     name: "a",
-    binding: {
-      kind: "buffer",
-      name: "a",
-      mutable: false,
-      element: "f64",
-      length: 2,
-      values: [
-        { k: "literal", binding: { kind: "scalar", name: "", mutable: false, type: null, text: "1" } },
-        { k: "literal", binding: { kind: "scalar", name: "", mutable: false, type: null, text: "2" } },
-      ],
-    },
   });
-  assert.deepEqual(call.args[2], { k: "length", buffer: "a", type: "usize" });
+  assert.deepEqual(call.args[2], {
+    k: "length",
+    type: { kind: "primitive", name: "usize" },
+    of: { k: "local", type: { kind: "array", of: { kind: "primitive", name: "f64" }, length: 2 }, name: "a" },
+  });
   assert.deepEqual(call.returns, { kind: "primitive", name: "f64" });
 });
 
@@ -324,15 +324,19 @@ test("a name declared in a block is a variable of its own", () => {
   const program = resolved({
     "main.ts": ["let total = 0;", "{", "  let total = 10;", "  total += 1;", "}", "console.log(total);", ""].join("\n"),
   });
-  const inner = program.statements[1];
-  assert.equal(inner.kind, "block");
-  if (inner.kind !== "block") throw new Error("expected a block");
-  const declared = inner.body[0];
-  assert.equal(declared.kind, "declare");
-  if (declared.kind !== "declare") throw new Error("expected a declaration");
-  // The block declares `total_2`, so the outer `total` is untouched by it.
-  assert.equal(declared.name, "total_2");
-  assert.equal(program.statements[0].kind === "declare" ? program.statements[0].name : "", "total");
+  const inner = program.entry.statements[1];
+  assert.equal(inner.k, "block");
+  if (inner.k !== "block") throw new Error("expected a block");
+  const declared = inner.body.statements[0];
+  assert.equal(declared.k, "let");
+  if (declared.k !== "let") throw new Error("expected a declaration");
+  // The block keeps the name the source wrote, and the two `total` are two
+  // variables because each block declares its own. A target whose blocks do
+  // not shadow is the one that has to tell them apart.
+  assert.equal(declared.slot.name, "total");
+  assert.notEqual(inner.body.id, program.entry.id);
+  const outer = program.entry.statements[0];
+  assert.equal(outer.k === "let" ? outer.slot.name : "", "total");
 });
 
 test("a value declared with const cannot be changed", () => {
@@ -346,10 +350,12 @@ test("a loop that moves by whole numbers counts with a whole number", () => {
   const program = resolved({
     "main.ts": ["for (let i = 0; i < 4; i += 1) {", "  console.log(i);", "}", ""].join("\n"),
   });
-  const loop = program.statements[0];
-  assert.equal(loop.kind, "for");
-  if (loop.kind !== "for") throw new Error("expected a counted loop");
-  assert.deepEqual(loop.type, { kind: "primitive", name: "i64" });
+  const loop = program.entry.statements[0];
+  assert.equal(loop.k, "loop");
+  if (loop.k !== "loop") throw new Error("expected a loop");
+  assert.equal(loop.loop.kind, "counted");
+  if (loop.loop.kind !== "counted") throw new Error("expected a counted loop");
+  assert.deepEqual(loop.loop.type, { kind: "primitive", name: "i64" });
 });
 
 test("a program prints numbers the way the language it was written in prints them", async () => {

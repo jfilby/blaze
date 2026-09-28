@@ -1,12 +1,20 @@
 /**
  * The compiler pipeline.
  *
- *   program -> contract phase -> target generation -> verification -> output
+ *   program -> contract phase -> semantic IR -> target generation -> output
  *
  * The contract phase (semantics/program.ts) reads and contracts every file of
  * the program and validates the whole graph. Nothing generates target code
  * until that phase has produced a valid program contract, and every backend is
  * handed the source and that contract.
+ *
+ * A program body then becomes the semantic IR (core/semantic-ir.ts, written by
+ * semantics/ir-resolve.ts): what the program does, with every value typed and
+ * every block naming where control goes. It is validated (semantics/
+ * ir-validate.ts) before any toolchain is asked for anything, so a program no
+ * backend may lower never reaches gcc, nim or a linker. `blaze ir` prints it,
+ * and reads back IR that a model or a person wrote, which is the same check
+ * applied to text instead of to a source file.
  *
  * Everything the compiler produces lives under `.blaze/` in the directory the
  * compiler was run from: JSON build records, intermediate artifacts and the
@@ -26,7 +34,9 @@ import type { ProgramBody } from "./semantics/module.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
-import { resolveProgram } from "./toolchain/program.ts";
+import { resolveProgram } from "./semantics/ir-resolve.ts";
+import { validateSemanticProgram } from "./semantics/ir-validate.ts";
+import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.ts";
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
@@ -1162,6 +1172,9 @@ export async function runBuild(
     // Resolving a program and writing out the source the toolchain runs are
     // the same for every round: only the objects it links change.
     const driver = phase.body === undefined ? undefined : resolveProgram(phase.body, program);
+    // The IR is checked here, before a toolchain is asked for anything: a
+    // program no backend may lower never reaches gcc, nim or a linker.
+    if (driver !== undefined) validateSemanticProgram(driver);
     const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
@@ -1543,6 +1556,45 @@ export async function runStored(
   await store.write(paths.verification, verification);
   await store.write(paths.benchmark, benchmark);
   return { project, functions };
+}
+
+export interface SemanticIrOptions {
+  /**
+   * IR text to read instead of resolving the source, as a model or a person
+   * writes it. Whatever wrote it, the program is validated against the
+   * contract before it is printed, so nothing reaches a backend unchecked.
+   */
+  from?: string;
+}
+
+/**
+ * The semantic IR of a project's program: what the program does, before any
+ * target is chosen. Printing it is how a person reads what the compiler
+ * resolved; reading it back is how IR that was written rather than resolved is
+ * checked against the contract it claims to implement.
+ */
+export async function runSemanticIr(inputPath: string, options: SemanticIrOptions): Promise<string> {
+  const { input, entry, directory } = readInput(inputPath);
+  const phase = runContractPhase({
+    frontend: frontendFor(input.language),
+    input,
+    entry,
+    read: moduleReader(directory),
+  });
+  if (phase.body === undefined) {
+    throw new CompilerError({
+      category: "InputError",
+      stage: "ir",
+      message: `${projectIdFor(inputPath)} has no program body`,
+      detail: "the semantic IR is the program a project runs; this project only declares functions",
+    });
+  }
+  const program =
+    options.from === undefined
+      ? resolveProgram(phase.body, phase.program)
+      : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
+  validateSemanticProgram(program, phase.program);
+  return printSemanticProgram(program);
 }
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {

@@ -3,7 +3,7 @@
  *
  * A program build delivers a binary, not a harness: the statements of the
  * entry module are run by this driver, which the compiler writes from the
- * resolved program (see program.ts) and links with the objects of the
+ * semantic IR (see core/semantic-ir.ts) and links with the objects of the
  * functions the program compiled. The walk over the program is shared with the
  * Nim host (see program-emit.ts); what is here is how C spells it.
  *
@@ -16,11 +16,19 @@ import { parseType, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
-import { generateProgramSource, type PrintKind, type ProgramTarget, type ValueKind } from "./program-emit.ts";
-import type { ResolvedCall, ResolvedProgram } from "./program.ts";
-import type { FunctionSignature, Runner, TypeExpr } from "../core/types.ts";
+import { generateProgramSource, type ProgramTarget } from "./program-emit.ts";
+import type { SemanticProgram } from "../semantics/ir-resolve.ts";
+import {
+  isBoolean,
+  isFloat,
+  isTextType,
+  isUnsigned,
+  type SemanticCall,
+  type SemanticType,
+  type ValueKind,
+} from "../core/semantic-ir.ts";
+import type { FunctionSignature, Runner } from "../core/types.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { ARGV, ARGV_LENGTH } from "../semantics/builtins.ts";
 
 import { C_KEYWORDS, cEscape, cHeaderNames } from "./c-names.ts";
 
@@ -173,8 +181,13 @@ function cStringLiteral(text: string): string {
   return `"${escaped}"`;
 }
 
-function isFloat(type: TypeExpr | null): boolean {
-  return type !== null && type.kind === "primitive" && (type.name === "f32" || type.name === "f64");
+/**
+ * The C a value is declared as. A string is a C string, and a value of no
+ * type is one too: the contract type language has no string type of its own.
+ */
+function declaredType(type: SemanticType | null): string {
+  if (type === null || isTextType(type)) return "const char*";
+  return cDeclarationType(type);
 }
 
 /**
@@ -235,7 +248,7 @@ function literal(text: string, type: string): string {
 
 /** The C driver of one program. */
 class CDriver implements ProgramTarget {
-  prelude(program: ResolvedProgram): string {
+  prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
     const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
     return `${DRIVER_PRELUDE}
@@ -277,24 +290,24 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return [];
   }
 
-  type(type: TypeExpr): string {
-    return cDeclarationType(type);
+  type(type: SemanticType): string {
+    return declaredType(type);
   }
 
-  cast(type: TypeExpr, expression: string): string {
-    return `(${cDeclarationType(type)})(${expression})`;
+  cast(type: SemanticType, expression: string): string {
+    return `(${declaredType(type)})(${expression})`;
   }
 
   literal(text: string, type: string): string {
     return literal(text, type);
   }
 
-  declare(name: string, type: TypeExpr | null, value: string): string {
-    return `${type === null ? "const char*" : cDeclarationType(type)} ${name} = ${value};`;
+  declare(name: string, type: SemanticType | null, value: string): string {
+    return `${declaredType(type)} ${name} = ${value};`;
   }
 
-  allocate(name: string, element: TypeExpr, length: number, values: string[]): string[] {
-    const written = cDeclarationType(element);
+  allocate(name: string, element: SemanticType, length: number, values: string[]): string[] {
+    const written = declaredType(element);
     const bytes = length === 0 ? 1 : length;
     return [
       `const size_t ${name}_length = ${length};`,
@@ -304,8 +317,8 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     ];
   }
 
-  alias(name: string, element: TypeExpr, source: string, length: string): string[] {
-    const written = cDeclarationType(element);
+  alias(name: string, element: SemanticType, source: string, length: string): string[] {
+    const written = declaredType(element);
     return [`const size_t ${name}_length = ${length};`, `${written}* ${name} = ${source};`];
   }
 
@@ -313,9 +326,9 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `${buffer}[${index}]`;
   }
 
-  assign(name: string, operator: string, value: string, type: TypeExpr | null): string {
+  assign(name: string, operator: string, value: string, type: SemanticType | null): string {
     // A string grows: `+=` is a new value rather than an addition in place.
-    if (type === null && operator === "+=") return `${name} = program_concat(${name}, ${value});`;
+    if ((type === null || isTextType(type)) && operator === "+=") return `${name} = program_concat(${name}, ${value});`;
     return `${name} ${operator} ${value};`;
   }
 
@@ -329,6 +342,30 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 
   release(name: string): string {
     return `${RUNTIME_NAME}_release(${name});`;
+  }
+
+  retain(value: string): string {
+    return `${RUNTIME_NAME}_retain(${value});`;
+  }
+
+  allocateObject(layout: string): string {
+    // A layout the contract laid out is a struct the driver declared, so the
+    // object is allocated as one and nothing of the layout is written twice.
+    return `(struct ${layout}*)${RUNTIME_NAME}_object_new(sizeof(struct ${layout}), _Alignof(struct ${layout}))`;
+  }
+
+  field(object: string, layout: string, field: string): string {
+    // A reference is held as a pointer, and a pointer has no fields, so the
+    // layout the access names is what the field is read through.
+    return `((struct ${layout}*)${object})->${field}`;
+  }
+
+  assignField(object: string, layout: string, field: string, value: string): string {
+    return `((struct ${layout}*)${object})->${field} = ${value};`;
+  }
+
+  raise(message: string): string {
+    return `${RUNTIME_NAME}_raise(${message});`;
   }
 
   condition(expression: string, kind: ValueKind): string {
@@ -376,7 +413,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 
   openFor(
     variable: string,
-    type: TypeExpr,
+    type: SemanticType,
     from: string,
     to: string,
     inclusive: boolean,
@@ -385,13 +422,13 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   ): string[] {
     const bound = down ? (inclusive ? ">=" : ">") : inclusive ? "<=" : "<";
     const move = step === null ? `${variable}${down ? "--" : "++"}` : `${variable} += ${step}`;
-    return [`for (${cDeclarationType(type)} ${variable} = ${from}; ${variable} ${bound} ${to}; ${move}) {`];
+    return [`for (${declaredType(type)} ${variable} = ${from}; ${variable} ${bound} ${to}; ${move}) {`];
   }
 
-  openForOf(index: string, variable: string, type: TypeExpr, buffer: string, length: string): string[] {
+  openForOf(index: string, variable: string, type: SemanticType, buffer: string, length: string): string[] {
     return [
       `for (size_t ${index} = 0; ${index} < (${length}); ${index} += 1) {`,
-      `  const ${cDeclarationType(type)} ${variable} = ${buffer}[${index}];`,
+      `  const ${declaredType(type)} ${variable} = ${buffer}[${index}];`,
     ];
   }
 
@@ -411,36 +448,27 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `${expression};`;
   }
 
-  print(value: string, type: TypeExpr | null, kind: PrintKind): string[] {
+  print(value: string, type: SemanticType | null, kind: ValueKind): string[] {
     if (kind === "text") return [`program_print_string(${value});`];
     if (kind === "null") return [`program_print_string("null");`];
     if (kind === "boolean") return [`fputs((${value}) ? "true" : "false", stdout);`];
-    if (isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
-    const unsigned = type !== null && type.kind === "primitive" && (type.name.startsWith("u") || type.name === "usize");
-    const format = unsigned ? "%llu" : "%lld";
-    const cast = unsigned ? "unsigned long long" : "long long";
+    if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
+    const format = type !== null && isUnsigned(type) ? "%llu" : "%lld";
+    const cast = type !== null && isUnsigned(type) ? "unsigned long long" : "long long";
     return [`printf("${format}", (${cast})(${value}));`];
-  }
-
-  separator(): string {
-    return `fputc(' ', stdout);`;
   }
 
   newline(): string {
     return `fputc('\\n', stdout);`;
   }
 
-  call(call: ResolvedCall, argumentsText: string[]): string {
-    return `${call.name}(${argumentsText.join(", ")})`;
+  call(call: SemanticCall, argumentsText: string[]): string {
+    return `${call.signature.symbol}(${argumentsText.join(", ")})`;
   }
 
-  builtin(call: ResolvedCall, argumentsText: string[]): string {
+  builtin(call: SemanticCall, argumentsText: string[]): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
-    switch (call.name) {
-      case "Math.max":
-        return `program_max(${argument(0)}, ${argument(1)})`;
-      case "Math.min":
-        return `program_min(${argument(0)}, ${argument(1)})`;
+    switch (call.callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;
       case "Math.floor":
@@ -449,22 +477,34 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
         return `program_round(${argument(0)})`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
-      case ARGV_LENGTH:
-        // The runtime already counts where the program runs and the file it
-        // runs, so this is the length of process.argv as node reports it.
-        return `${RUNTIME_NAME}_argv_count()`;
-      case ARGV:
-        return `${RUNTIME_NAME}_argv((size_t)(${argument(0)}))`;
       default:
-        throw driverError(`the driver cannot write down ${call.name}`);
+        throw driverError(`the driver cannot write down ${call.callee}`);
     }
   }
 
-  argument(type: TypeExpr, expression: string): string {
+  argument(type: SemanticType, expression: string): string {
     if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
       return `(${cDeclarationType(type.of)}*)(${expression})`;
     }
     return expression;
+  }
+
+  argvCount(): string {
+    // The runtime already counts where the program runs and the file it runs,
+    // so this is the length of process.argv as node reports it.
+    return `${RUNTIME_NAME}_argv_count()`;
+  }
+
+  argv(index: string): string {
+    return `${RUNTIME_NAME}_argv((size_t)(${index}))`;
+  }
+
+  min(left: string, right: string): string {
+    return `program_min(${left}, ${right})`;
+  }
+
+  max(left: string, right: string): string {
+    return `program_max(${left}, ${right})`;
   }
 
   stringLiteral(text: string): string {
@@ -483,19 +523,22 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `program_string_equal(${left}, ${right})`;
   }
 
-  numberText(value: string, type: TypeExpr | null): string {
+  toText(value: string, type: SemanticType): string {
     // A reference to nothing has no number of its own, and the word for it is
     // what the language prints: casting it to a number hands out the zero the
     // source never printed.
-    if (type !== null && type.kind === "ref" && type.of === null) {
+    if (type.kind === "void") {
+      // Nothing has no number of its own, and the word for it is what the
+      // language prints: casting it to a number hands out the zero the source
+      // never printed.
+      return '"null"';
+    }
+    if (type.kind === "ref" && type.of === null) {
       return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;
     }
-    if (type !== null && type.kind === "primitive" && type.name === "bool") {
-      return `(${value} ? "true" : "false")`;
-    }
+    if (isBoolean(type)) return `(${value} ? "true" : "false")`;
     if (isFloat(type)) return `program_number_text((double)(${value}))`;
-    const unsigned = type !== null && type.kind === "primitive" && (type.name.startsWith("u") || type.name === "usize");
-    return unsigned
+    return isUnsigned(type)
       ? `program_unsigned_text((unsigned long long)(${value}))`
       : `program_integer_text((long long)(${value}))`;
   }
@@ -536,12 +579,12 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 }
 
 /** Emits the C driver for a program. The driver is compiler code. */
-export function generateProgramDriver(program: ResolvedProgram): string {
+export function generateProgramDriver(program: SemanticProgram): string {
   return generateProgramSource(program, new CDriver());
 }
 
 export interface ProgramDriverRequest {
-  program: ResolvedProgram;
+  program: SemanticProgram;
   /** Directory the driver is written and linked in. */
   workDirectory: string;
   /** Object of every function of the program, in the order they compile. */
