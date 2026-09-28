@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { functionOutline } from "../ai/outline.ts";
-import { IR_EXAMPLE } from "../ai/ir-format.ts";
+import { IR_EXAMPLE, IR_SYNTAX, type IrFormKind } from "../ai/ir-format.ts";
 import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
 import { validateSemanticFunction } from "../semantics/ir-validate.ts";
 import type { FunctionContract, ProgramContract } from "../core/types.ts";
@@ -168,6 +168,75 @@ test("the IR syntax the prompt states is the syntax the compiler reads an answer
   // answer with, and prints back as itself. A form the prompt states and the
   // parser does not agree on leaves a model with no way to write an answer.
   assert.equal(printSemanticFunction(read).trimEnd(), IR_EXAMPLE.trimEnd());
+});
+
+/**
+ * A program whose function the forms of the syntax are written in. It has the
+ * three parameters the example reads and it calls another function, so a form
+ * that is a call is a call the contract the parser binds to declares.
+ */
+function calling(): { files: Record<string, string>; entry: string } {
+  return {
+    files: {
+      "main.ts": `import { clamp } from "./lib.ts";\nconsole.log(clamp(2, 3, 4));\n`,
+      "lib.ts": [
+        "export function clamp(x: number, lo: number, hi: number): number {",
+        "  if (x < lo) { return lo; }",
+        "  const h = hi + scale(x);",
+        "  if (x > h) { return h; }",
+        "  for (let i = 0; i < 2; i++) { console.log(x); }",
+        "  return x;",
+        "}",
+        "export function scale(x: number): number {",
+        "  return x * 0;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    entry: "main.ts",
+  };
+}
+
+/**
+ * The lines a form is written as, in the place the syntax says it is written: a
+ * type is the type of a constant, a value is the value a `let` is given, and a
+ * terminator is the last line of a block of its own. Every line is written at
+ * the indentation it is read at inside the entry block.
+ */
+function linesAs(form: IrFormKind, text: string): string[] {
+  switch (form) {
+    case "type":
+      return [`let value[${text}] t immutable = const[f64] 0`];
+    case "value":
+      return [`let value[f64] t immutable = ${text}`];
+    case "statement":
+    case "block":
+      return text.split("\n");
+    case "terminator":
+      return ["block b_form: releases[]", text];
+  }
+}
+
+test("every form the prompt states is a line the parser reads an answer back with", () => {
+  const program = calling();
+  const contracted = programWithSemantics("typescript", program.files, program.entry);
+  // The header is read back out of the contract rather than out of the text, so
+  // it is the compiler's own and is not written out again here: what is under
+  // test is the body, which is every form of the syntax the prompt carries.
+  const printed = printSemanticFunction(contracted.semantics.clamp).split("\n");
+  const entry = printed.findIndex((line) => line.startsWith("  block "));
+  const header = printed.slice(0, entry + 1);
+
+  for (const line of IR_SYNTAX) {
+    if (typeof line === "string") continue;
+    const body = linesAs(line.form, line.text).map((written) => `    ${written}`);
+    try {
+      parseSemanticFunction([...header, ...body, ""].join("\n"), contracted.program);
+    } catch (cause) {
+      const error = cause as { detail?: string };
+      assert.fail(`the prompt states a form the parser refuses: ${line.text}\n${error.detail ?? String(cause)}`);
+    }
+  }
 });
 
 /**

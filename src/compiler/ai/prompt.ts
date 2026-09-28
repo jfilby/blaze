@@ -511,7 +511,13 @@ export function buildUserPrompt(request: PromptRequest): string {
   // carrying it would be carrying the answer, so what is stated here is the
   // syntax of the form and a whole function written in it, and nothing of this
   // program.
-  sections.push(["IR SYNTAX", ...IR_SYNTAX, "", "A whole function written in it:", "```", IR_EXAMPLE.trimEnd(), "```"].join("\n"));
+  // A form is shown under the prose that introduces it and two spaces in, which
+  // is the indentation it is written at inside a function, so a list of them
+  // reads as a list and not as more prose.
+  const syntax = IR_SYNTAX.map((line) =>
+    typeof line === "string" ? line : line.text.split("\n").map((written) => `  ${written}`).join("\n"),
+  );
+  sections.push(["IR SYNTAX", ...syntax, "", "A whole function written in it:", "```", IR_EXAMPLE.trimEnd(), "```"].join("\n"));
   // Nothing below tells a candidate where an argument is or which register a
   // value lives in. The compiler writes the target code, and the target decides
   // both, so those are facts the prompt does not carry because nothing asks.

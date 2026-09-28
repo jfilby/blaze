@@ -746,12 +746,20 @@ class IrScanner {
     while (this.peek() === " " || this.peek() === "\t") this.at += 1;
   }
 
-  /** A name, a keyword or a type word: everything up to the next delimiter. */
+  /**
+   * A name, a keyword or a type word: everything up to the next delimiter. A
+   * name is written bare, and the one thing the text does write in quotes is
+   * the text of a string, so a name in quotes is said here rather than left as
+   * a quote at the front of what was found.
+   */
   word(): string {
     this.skip();
     const start = this.at;
     while (isWordCharacter(this.peek())) this.at += 1;
-    if (this.at === start) this.refuse("a name", this.text.slice(this.at, this.at + 8));
+    if (this.at === start) {
+      const quoted = this.peek() === '"' ? "a name is written bare, not in quotes" : "a name";
+      this.refuse(quoted, this.text.slice(this.at, this.at + 8));
+    }
     return this.text.slice(start, this.at);
   }
 
@@ -1335,7 +1343,13 @@ class BlockReader {
    * writes out. Empty where a reader is not reading a function's header.
    */
   protected reachable: Set<string> = new Set<string>();
-
+  /**
+   * Every block the text has declared by the time it is read, in the order it
+   * declared them. A body names its own blocks in the terminators of its
+   * blocks, so a jump to a name none of them carries is a name there is
+   * nothing to read, and the ones that are say which there are.
+   */
+  protected readonly blocks: string[] = [];
   /* ---------------------------------------------------------------------- */
   /* Blocks                                                                 */
   /* ---------------------------------------------------------------------- */
@@ -1347,6 +1361,7 @@ class BlockReader {
     this.at += 1;
     const scanner = this.scanner(line);
     const id = scanner.word();
+    this.blocks.push(id);
     scanner.expect(":");
     scanner.keyword("releases");
     const releases = scanner.names();
@@ -1527,6 +1542,20 @@ class BlockReader {
         return { k: "storeField", object, layout, field, value, line: scanner.mark() };
       }
       default:
+        // A terminator is a word the text owns and a statement position is not
+        // a place it is written, which is a thing the words themselves can say:
+        // where a terminator goes, and which blocks a jump has to name.
+        if (head === "jump" || head === "return") {
+          const reaches =
+            head === "jump"
+              ? `a jump names one of the blocks this text declares: ${this.blocks.join(" ") || "none are declared yet"}`
+              : "a return with no value ends the function";
+          fail(
+            line.number,
+            `a statement; a "${head}" is the last line of a block, written at the indentation of the block head it ends, and ${reaches}`,
+            line.text,
+          );
+        }
         fail(line.number, "a statement", line.text);
     }
   }
