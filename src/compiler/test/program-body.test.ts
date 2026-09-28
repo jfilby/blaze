@@ -19,6 +19,7 @@ import { resolveProgram, type ResolvedValue } from "../toolchain/program.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
+import { writeProject } from "./project.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const quiet = { stage: () => {} };
@@ -219,18 +220,14 @@ const PRINTED = [
 async function numberProgram(runtime?: "nim"): Promise<{ directory: string; binary: string }> {
   const directory = await mkdtemp(join(tmpdir(), "blaze-numbers-"));
   await writeFile(join(directory, "numbers.ts"), `${NUMBERS.map((text) => `console.log(${text});`).join("\n")}\n`, "utf8");
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "numbers.ts",
-      model: { provider: "replay", file: REPLAY },
-      output: "machine",
-      ...(runtime === undefined ? {} : { runtime }),
-    }),
-    "utf8",
-  );
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "numbers.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+    ...(runtime === undefined ? {} : { runtime }),
+  });
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
   return { directory, binary: outcome.outputPath };
 }
@@ -273,18 +270,14 @@ const LANGUAGE = [
 async function program(source: string, runtime?: "nim"): Promise<{ directory: string; binary: string }> {
   const directory = await mkdtemp(join(tmpdir(), "blaze-program-"));
   await writeFile(join(directory, "main.ts"), source, "utf8");
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "replay", file: REPLAY },
-      output: "machine",
-      ...(runtime === undefined ? {} : { runtime }),
-    }),
-    "utf8",
-  );
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+    ...(runtime === undefined ? {} : { runtime }),
+  });
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
   return { directory, binary: outcome.outputPath };
 }
@@ -739,19 +732,15 @@ test("a program that prints something else is regenerated with the line it diffe
   const endpoint = await chatEndpoint(t, [TOTAL_WRONG, TOTAL_RIGHT]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-repair-"));
   await writeFile(join(directory, "main.ts"), SUM, "utf8");
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "openai-compatible", model: "stub" },
-      output: "machine",
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    }),
-    "utf8",
-  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
 
   assert.equal(outcome.build.status, "success", "the repaired program is the one that is delivered");
   assert.equal(endpoint.prompts.length, 2, "the program is generated once, then regenerated");
@@ -792,19 +781,15 @@ test("a program that is killed is regenerated with why it stopped", async (t) =>
   const endpoint = await chatEndpoint(t, [TOTAL_CRASHES, TOTAL_RIGHT]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-stopped-repair-"));
   await writeFile(join(directory, "main.ts"), SUM, "utf8");
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "openai-compatible", model: "stub" },
-      output: "machine",
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    }),
-    "utf8",
-  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
 
   // A program that never finishes, is killed or fails is a verdict like any
   // other: the build spends its repair rounds on it instead of stopping at the

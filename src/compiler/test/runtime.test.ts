@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeProject } from "./project.ts";
 import { runBuild, STATE_DIRECTORY } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import {
@@ -45,7 +46,7 @@ const quiet = { stage: () => {} };
 
 async function workspace(name: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
-  await writeFile(join(directory, "input.json"), JSON.stringify(INPUT, null, 2), "utf8");
+  await writeProject(join(directory, "input.toml"), INPUT);
   return directory;
 }
 
@@ -121,7 +122,7 @@ test("the prompt tells the model which runtime entry points it may call", () => 
 test("a standalone build links the compiler runtime and a candidate may allocate through it", async () => {
   const directory = await workspace("runtime-none");
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
     quiet,
     "build",
@@ -148,7 +149,7 @@ test("a standalone build links the compiler runtime and a candidate may allocate
 test("a C candidate may call the runtime ABI", async () => {
   const directory = await workspace("runtime-c");
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${C_REPLAY}`, output: "c" },
     quiet,
     "build",
@@ -168,7 +169,7 @@ test("a hosted build runs the candidate inside a Nim host program", async (t) =>
   }
   const directory = await workspace("runtime-nim");
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}`, runtime: "nim" },
     quiet,
     "build",
@@ -199,13 +200,13 @@ test("both runtimes answer the harness protocol identically", async (t) => {
     return;
   }
   const standalone = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: await workspace("runtime-parity-none"), reuse: false, model: `replay:${REPLAY}` },
     quiet,
     "build",
   );
   const hosted = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: await workspace("runtime-parity-nim"), reuse: false, model: `replay:${REPLAY}`, runtime: "nim" },
     quiet,
     "build",
@@ -240,7 +241,7 @@ test("the shipped hosted example builds against the Nim runtime", async (t) => {
   const directory = join(root, "hosted_dot_product");
   await cp(EXAMPLE, directory, { recursive: true });
   const outcome = await runBuild(
-    join(directory, "blaze.json"),
+    join(directory, "blaze.toml"),
     { cwd: directory, reuse: false, model: `replay:${EXAMPLE_CANDIDATES}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -258,7 +259,7 @@ test("the shipped hosted example builds against the Nim runtime", async (t) => {
 test("an unknown runtime is rejected before anything is built", async () => {
   const directory = await workspace("runtime-unknown");
   await assert.rejects(
-    runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}`, runtime: "go" as never }, quiet, "build"),
+    runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}`, runtime: "go" as never }, quiet, "build"),
     /unknown runtime "go"/,
   );
 });
@@ -267,7 +268,7 @@ test("a WebAssembly module cannot link a host runtime", async () => {
   const directory = await workspace("runtime-wasm");
   await assert.rejects(
     runBuild(
-      "input.json",
+      "input.toml",
       { cwd: directory, reuse: false, model: `replay:${REPLAY}`, output: "wasm", runtime: "nim" },
       quiet,
       "build",
@@ -282,13 +283,9 @@ test("a project file may name its runtime", async (t) => {
     return;
   }
   const directory = await workspace("runtime-project");
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, runtime: "nim" }, null, 2),
-    "utf8",
-  );
+  await writeProject(join(directory, "input.toml"), { ...INPUT, runtime: "nim" });
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
     quiet,
     "build",

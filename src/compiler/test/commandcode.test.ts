@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from "node:http";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateText, streamText } from "ai";
@@ -19,6 +19,7 @@ import { COMMANDCODE_BASE_URL, COMMANDCODE_CLI_VERSION, createCommandCode } from
 import type { SourceInput } from "../core/types.ts";
 import { z } from "zod";
 import { CompilerError } from "../core/errors.ts";
+import { writeProject } from "./project.ts";
 
 const quiet = { stage: () => {} };
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -327,7 +328,7 @@ async function projectUsing(t: TestContext, endpoint: GenerateEndpoint): Promise
     model: { provider: "commandcode", model: "stealth/pixel-canary" },
     generation: { maxCandidates: 1, maxAttempts: 1 },
   };
-  await writeFile(join(directory, "input.json"), JSON.stringify(input), "utf8");
+  await writeProject(join(directory, "input.toml"), input);
   const previous = { key: process.env.COMMANDCODE_API_KEY, url: process.env.COMMANDCODE_BASE_URL };
   process.env.COMMANDCODE_API_KEY = "user_test";
   process.env.COMMANDCODE_BASE_URL = endpoint.url;
@@ -358,7 +359,7 @@ test("a project built on CommandCode produces the machine it asked for", async (
   });
   const directory = await projectUsing(t, endpoint);
 
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(outcome.build.model, "commandcode/stealth/pixel-canary");

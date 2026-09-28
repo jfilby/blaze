@@ -1,0 +1,18 @@
+language = "nim"
+sourceFile = "hosted_dot_product.nim"
+entry = "dotProduct"
+runtime = "nim"
+output = "machine"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+
+[optimize]
+primary = "throughput"
+secondary = "size"
+
+[generation]
+maxCandidates = 1
+maxAttempts = 1

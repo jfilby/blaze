@@ -1,0 +1,20 @@
+language = "typescript"
+sourceFile = "main.ts"
+output = "machine"
+
+[model]
+provider = "openrouter"
+model = "stealth/space-bunny-alpha"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+
+[optimize]
+primary = "throughput"
+secondary = "size"
+
+[generation]
+maxCandidates = 2
+maxAttempts = 3

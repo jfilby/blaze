@@ -5,7 +5,7 @@
  * The TypeScript below is the input. The frontend turns it into a function
  * contract, the model writes an implementation, and the compiler assembles,
  * links, runs and verifies it against the contract. Nothing here is a mock:
- * `blaze build blaze.json` compiles this file.
+ * `blaze build blaze.toml` compiles this file.
  */
 
 export function dotProduct(a: Float64Array, b: Float64Array, n: number): number {
