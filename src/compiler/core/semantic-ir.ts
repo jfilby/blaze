@@ -529,7 +529,17 @@ export type SemanticLoop =
 /** The operators `op=` accepts. */
 export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "%=";
 
+/**
+ * The line of the source a statement was written on, for one that states
+ * none. A statement carries that line so a diagnostic can name the place in
+ * the program it came from, and nothing is computed from it: the frontend
+ * always knows the line, and a candidate that states none is a body that
+ * computes the same thing without it.
+ */
+export const UNSTATED_LINE = 0;
+
 /** What a program does, one statement at a time. */
+
 export type SemanticStatement =
   /** A name declared, with what it holds and what it starts as. */
   | { k: "let"; slot: SemanticSlot; value: SemanticValue; line: number }

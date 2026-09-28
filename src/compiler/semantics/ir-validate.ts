@@ -43,6 +43,7 @@ import {
   isTextType,
   localNames,
   slotType,
+  UNSTATED_LINE,
   typeEquals,
   typeText,
   walkValues,
@@ -233,9 +234,13 @@ interface Tree {
   loops: LoopFrame[];
 }
 
-/** Where a message is written, so a message names the block and the line. */
+/**
+ * Where a message is written, so a message names the block and the line. A
+ * statement that states no line of the source is named by its block alone,
+ * which is as much as there is to name it by.
+ */
 function label(blockId: string, line?: number): string {
-  return line === undefined ? `${blockId}: ` : `${blockId}: line ${line}: `;
+  return line === undefined || line === UNSTATED_LINE ? `${blockId}: ` : `${blockId}: line ${line}: `;
 }
 
 /** The slot a loop names itself, which the loop body reads but no `let` declares. */

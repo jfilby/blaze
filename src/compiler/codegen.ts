@@ -437,9 +437,6 @@ async function materialize(
    */
   standalone: boolean,
 ): Promise<Materialized> {
-  // The IR is the implementation and is kept beside what it lowers into,
-  // because it is what the model wrote and what a later round is shown.
-  await writeFile(paths.implementation, candidate.text, "utf8");
   if (request.output === "wasm") {
     const module = await buildModule({
       fn,
@@ -547,6 +544,15 @@ async function measureCandidate(
 ): Promise<CandidateOutcome> {
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
   try {
+    // The IR is the implementation and is kept beside whatever it lowers
+    // into, because it is what the model wrote, what a later round is shown and
+    // what a build that failed on it leaves behind to be read. It is written
+    // before it is read rather than once it has been lowered, so that a
+    // candidate the reader refused is on disk beside the ones it accepted: a
+    // refusal that names a line of the IR and leaves no copy of the IR is a
+    // diagnostic nothing can be done about.
+    await writeFile(paths.implementation, candidate.text, "utf8");
+
     // A candidate may call the other functions of the program, and one that does
     // is linked only into the program, so nothing about it can be run on its own.
     // The program is the oracle for it, which is where a definition contract

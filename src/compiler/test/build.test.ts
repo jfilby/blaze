@@ -367,6 +367,13 @@ test("a build where nothing is valid fails with a record that says why", async (
   ) as BuildStatus;
   assert.equal(build.status, "failed");
   assert.equal(build.error?.category, "AiGenerationError");
+  // The answer that was refused is what the diagnostic is about, and a build
+  // that ends without it on disk leaves nothing to read the diagnostic
+  // against: the record names a line of a text no one has.
+  assert.equal(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/work/dotProduct/c1.ir"), "utf8"),
+    TEXT_RESULT_IR,
+  );
 });
 
 test("reuse rebuilds from the stored implementation without asking the model", async () => {

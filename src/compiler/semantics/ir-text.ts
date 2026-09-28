@@ -2,11 +2,11 @@
  * The semantic IR as text: what a person reads and a model writes.
  *
  * The IR is the whole of what a program does, so its text has to be the whole
- * of it too: every value names the operation and the type it is, every
- * statement names the source line it was written on, and every block names
- * itself, so the block a `jump` names is one a reader can go and find. No
- * target appears anywhere in it, which is what lets one text lower to every
- * backend.
+ * of it too: every value names the operation and the type it is, every block
+ * names itself so the block a `jump` names is one a reader can go and find,
+ * and every statement names the source line it was written on where the text
+ * states one. No target appears anywhere in it, which is what lets one text
+ * lower to every backend.
  *
  * This file is both ends of one form. The printer decides the layout and the
  * parser only ever reads what the printer wrote, so a program survives being
@@ -18,8 +18,9 @@
  *
  * The form, line by line. Indentation is two spaces per level, a blank line
  * says nothing, and every line is one statement, one block head or one
- * terminator. `@n` at the end of a statement is the line of the source it was
- * written on.
+ * terminator. A statement may end with `@n`, the line of the source it was
+ * written on, which names it in a diagnostic and is nothing else, so an
+ * answer that states none is read as a statement of no stated line.
  *
  *   ir 1
  *   file "main.ts"
@@ -164,6 +165,7 @@ import {
   type SemanticType,
   type SemanticValue,
   type UnaryOp,
+  UNSTATED_LINE,
   slotType,
   typeEquals,
   typeText,
@@ -809,17 +811,26 @@ class IrScanner {
     return unescape(body, this.line);
   }
 
-  /** The line of the source a statement was written on, which ends its line. */
+  /**
+   * The line of the source a statement was written on, which ends its line.
+   *
+   * The mark is how a diagnostic names the place a statement was written, and
+   * nothing is lowered from it, so a line that states none states the same body
+   * as a line that does and is read rather than refused.
+   */
   mark(): number {
     this.skip();
-    if (this.peek() !== "@") this.refuse("the source line the statement was written on", this.text.slice(this.at));
-    this.at += 1;
-    const start = this.at;
-    while (/[0-9]/.test(this.peek())) this.at += 1;
-    if (this.at === start) this.refuse("a source line number", this.text.slice(this.at));
-    const line = Number.parseInt(this.text.slice(start, this.at), 10);
+    if (this.peek() === "@") {
+      this.at += 1;
+      const start = this.at;
+      while (/[0-9]/.test(this.peek())) this.at += 1;
+      if (this.at === start) this.refuse("a source line number", this.text.slice(this.at));
+      const line = Number.parseInt(this.text.slice(start, this.at), 10);
+      this.end();
+      return line;
+    }
     this.end();
-    return line;
+    return UNSTATED_LINE;
   }
 
   /** Nothing more on this line, which every line that ends in itself does. */
@@ -828,12 +839,23 @@ class IrScanner {
     if (this.at < this.text.length) this.refuse("the end of the line", this.text.slice(this.at));
   }
 
+  /**
+   * What stands between two names of a list. The text writes a list with its
+   * names side by side, and a comma between them is read as the space it
+   * stands in for, so both spellings are one list — and what a list holds is
+   * checked against the contract either way.
+   */
+  separator(): void {
+    this.skip();
+    if (this.peek() === ",") this.at += 1;
+  }
+
   /** A bracketed list of names, which is how releases and arguments are written. */
   names(): string[] {
     this.expect("[");
     const names: string[] = [];
     for (;;) {
-      this.skip();
+      this.separator();
       if (this.peek() === "]") {
         this.at += 1;
         return names;
@@ -1328,7 +1350,7 @@ class BlockReader {
     scanner.expect(":");
     scanner.keyword("releases");
     const releases = scanner.names();
-    let source = 0;
+    let source = UNSTATED_LINE;
     if (statement) source = scanner.mark();
     else scanner.end();
     const body: SemanticBlock = {
@@ -1834,7 +1856,7 @@ class FunctionReader extends BlockReader {
     const scanner = this.scanner(line);
     const effects: Effect[] = [];
     for (;;) {
-      scanner.skip();
+      scanner.separator();
       if (scanner.peek() === "") break;
       const word = scanner.word();
       if (word === "none") break;

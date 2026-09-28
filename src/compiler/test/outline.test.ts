@@ -9,6 +9,8 @@ import { test } from "node:test";
 import { functionOutline } from "../ai/outline.ts";
 import { IR_EXAMPLE } from "../ai/ir-format.ts";
 import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
+import { validateSemanticFunction } from "../semantics/ir-validate.ts";
+import type { FunctionContract, ProgramContract } from "../core/types.ts";
 import { programWithSemantics } from "./phase.ts";
 
 /** A program of an entry that calls a library function, so its body is contracted. */
@@ -166,4 +168,67 @@ test("the IR syntax the prompt states is the syntax the compiler reads an answer
   // answer with, and prints back as itself. A form the prompt states and the
   // parser does not agree on leaves a model with no way to write an answer.
   assert.equal(printSemanticFunction(read).trimEnd(), IR_EXAMPLE.trimEnd());
+});
+
+/**
+ * A function of a program that reads the command line and prints, so its
+ * contract states two effects and its IR is the header a build refused an
+ * answer of `main` over.
+ */
+function reported(): { program: ProgramContract; contract: FunctionContract; ir: string } {
+  const files = {
+    "main.ts": `import { r } from "./lib.ts";\nconsole.log(r(2));\n`,
+    "lib.ts": [
+      "export function r(n: number): number {",
+      "  console.log(process.argv[2]);",
+      "  return n;",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const contracted = programWithSemantics("typescript", files, "main.ts");
+  const file = contracted.program.files.find((entry) => entry.path === "lib.ts");
+  const contract = file?.functions.r;
+  if (contract === undefined) throw new Error("the function under test was not contracted");
+  return { program: contracted.program, contract, ir: printSemanticFunction(contracted.semantics.r) };
+}
+
+test("a header list written with commas is the header the contract states", () => {
+  const contracted = reported();
+  assert.match(contracted.ir, /^ {2}effects io syscall$/m, "the frontend writes the list side by side");
+
+  // The contract holds the effects in an array and a model writes them the way
+  // the array holds them. Which effects there are is the contract's to fix
+  // either way, so a comma between two of them is a spelling and not a
+  // different body — and a build that read it as a refusal threw away every
+  // candidate it was given over a punctuation.
+  const read = parseSemanticFunction(contracted.ir.replace("effects io syscall", "effects io, syscall"), contracted.program);
+  assert.deepEqual(read.effects, contracted.contract.effects);
+  assert.match(printSemanticFunction(read), /^ {2}effects io syscall$/m);
+});
+
+test("a statement that states no line of the source is the statement it was written as", () => {
+  const contracted = reported();
+  // The mark is what a diagnostic names the place in a program by, and nothing
+  // is lowered from it, so an answer that leaves every one of them out says
+  // the same thing in fewer characters.
+  const unmarked = contracted.ir.replace(/ @\d+$/gm, "");
+  assert.ok(!unmarked.includes("@"), "the answer states no line of the source at all");
+
+  const read = parseSemanticFunction(unmarked, contracted.program);
+  // It is held to the contract like any other answer, so what makes it lowerable
+  // is unchanged: the mark was never part of that.
+  validateSemanticFunction(read, contracted.contract);
+  assert.equal(printSemanticFunction(read).replace(/ @\d+$/gm, ""), unmarked);
+  assert.notEqual(printSemanticFunction(read), contracted.ir, "the lines of the source are lost, not stated");
+});
+
+test("a list of names written with commas is the list without them", () => {
+  const contracted = reported();
+  // What a block frees is stated in its head, and a candidate writes the names
+  // the way it writes every other list. Which names a block frees is the
+  // reader's to take whatever separates them.
+  const listed = contracted.ir.replace("block entry: releases[]", "block entry: releases[n, t]");
+  assert.deepEqual(parseSemanticFunction(listed, contracted.program).entry.releases, ["n", "t"]);
+  assert.match(printSemanticFunction(parseSemanticFunction(listed, contracted.program)), /^ {2}block entry: releases\[n t\]$/m);
 });
