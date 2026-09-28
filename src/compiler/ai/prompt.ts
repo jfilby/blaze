@@ -27,6 +27,7 @@ import type {
 } from "../core/types.ts";
 import type { Expression, Statement, TextPart } from "../core/ir.ts";
 import { isBufferType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
+import { contractsByName, writtenOut } from "../semantics/calls.ts";
 import { cSignature, cSourceRules } from "../toolchain/csource.ts";
 import { wasmSignature } from "../toolchain/wasm.ts";
 import { cDeclarationType, sysvArgumentLocations, sysvReturnLocation } from "../toolchain/linker.ts";
@@ -50,9 +51,11 @@ export interface PromptRequest {
   /** The source each contract was derived from, in program order. */
   sources: readonly SourceModule[];
   /**
-   * The contracts of the other functions this build compiles, which the
-   * candidate may call. A program is compiled one function at a time and linked
-   * together, so a call is a call rather than a reimplementation.
+   * The contracts of the functions this one reaches by a call, whether the
+   * outline marked each call as a call or as one to write out. A program is
+   * compiled one function at a time and linked together, so a call is a call
+   * rather than a reimplementation; what a candidate is told to do at each one
+   * is read off the contract's own recorded calls.
    */
   callees?: readonly FunctionContract[];
   target: TargetSpec;
@@ -103,18 +106,23 @@ const NATIVE_LANGUAGE = "GNU assembler (GAS) AT&T syntax for x86-64";
  * that is not is register preservation, which only shows up once the candidate
  * is linked and run.
  */
-function nativeRules(contract: FunctionContract, callable: readonly FunctionContract[]): string[] {
+function nativeRules(contract: FunctionContract, plan: CallPlan): string[] {
   const symbol = symbolOf(contract);
-  const others = callable.filter((other) => symbolOf(other) !== symbol);
+  const { called, written } = plan;
+  const referenceable = [symbol, ...called.map(symbolOf)].map((name) => `"${name}"`).join(", ");
   return [
     `Declare it with ".global ${symbol}" and define it with the label "${symbol}:", and export nothing else.`,
     'Every other label you define must start with a dot, as in ".Lloop:": a label that is neither the contracted symbol nor a local one is rejected.',
-    others.length === 0
-      ? `The only symbols you may reference are "${symbol}" itself, for recursion, and the runtime ABI entry points above.`
-      : `The only symbols you may reference are "${symbol}" itself, for recursion, the runtime ABI entry points above, and ${others.map((other) => `"${symbolOf(other)}"`).join(", ")}.`,
-    others.length === 0
-      ? "This function is the only one this build compiles, so what it calls it has to write out itself."
-      : "The other functions of this program are compiled on their own and linked beside yours, so call them by the symbol above rather than writing out what they do. Calling one is ordinary: preserve the registers across the call, and note that the program is the only thing that runs this candidate, so nothing here checks it on its own.",
+    `The only symbols you may reference are ${referenceable}, and the runtime ABI entry points above.`,
+    called.length === 0
+      ? "You call no other function of this program, so this candidate is assembled, linked and run on its own, and a fault in it is reported against this function."
+      : "The functions listed under CALLS are compiled on their own and linked beside yours, so call them by the symbol given rather than writing out what they do. A candidate that calls one is linked only into the program, which is the only thing that runs it, so nothing here checks it on its own.",
+    ...(written.length === 0
+      ? []
+      : [
+          "The functions listed under WRITE OUT are not symbols you may call, and the compiler rejects a",
+          "reference to one: what they do is in your prompt, so write each out where your body calls it.",
+        ]),
     "It is entered and left as an ordinary System V call, so preserve rbx, rbp and r12 to r15, leave rsp where you found it, and return with ret.",
     "You arrive with the return address still on the stack, so rsp is 8 past a 16-byte boundary, and it has to be back on a 16-byte boundary at every call you make: an allocation that is a multiple of 16 leaves it 8 out, and the runtime you call uses aligned moves on its own frame. Subtract a multiple of 16 plus 8, or realign with \"andq $-16, %rsp\" before the call and put it back after.",
     "The 128 bytes below rsp are yours to use without adjusting it only while you make no calls; a call may use that space for itself.",
@@ -123,10 +131,38 @@ function nativeRules(contract: FunctionContract, callable: readonly FunctionCont
 }
 
 /**
- * The functions of the program a candidate may call, each with the calling
- * convention it is called under, so a call is written from the contract rather
- * than guessed from the source.
+ * The functions a candidate is told about, split by what it is told to do at
+ * them: the ones it calls, and the ones it writes out. The outline has already
+ * decided which is which (see semantics/calls.ts), so this reads the
+ * contract's own recorded calls rather than judging them here.
+ *
+ * What is written out is the whole closure rather than the direct callees: a
+ * body written out carries the calls it made too, and each of those was
+ * decided the same way, so the candidate needs the body of everything that
+ * ends up inside its own.
  */
+interface CallPlan {
+  readonly called: readonly FunctionContract[];
+  readonly written: readonly FunctionContract[];
+}
+
+function callPlan(
+  contract: FunctionContract,
+  program: ProgramContract,
+  callees: readonly FunctionContract[],
+): CallPlan {
+  const byName = new Map(callees.map((callee) => [callee.function.name, callee]));
+  const called: FunctionContract[] = [];
+  for (const edge of contract.definition?.calls ?? []) {
+    if (edge.strategy !== "call") continue;
+    const callee = byName.get(edge.callee);
+    if (callee !== undefined) called.push(callee);
+  }
+  // `writtenOut` leads with the function itself, which is the one being written.
+  return { called, written: writtenOut(contractsByName(program.files), contract).slice(1) };
+}
+
+/** A callee as a call is written from it: signature, argument locations, result. */
 function renderCallable(callee: FunctionContract): string[] {
   return [
     `${symbolOf(callee)}(${callee.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${callee.function.returns}`,
@@ -505,6 +541,32 @@ function renderDefinition(contract: FunctionContract): string {
 }
 
 /**
+ * A callee this candidate is told to write out rather than call: what it does,
+ * in the language its source was written in, so the body can be implemented
+ * here where the call was. What it is checked by is not restated, because it
+ * is not checked on its own here either: the body lands in this candidate, and
+ * this candidate is what the program runs.
+ */
+function renderWrittenOut(callee: FunctionContract): string[] {
+  const definition = callee.definition;
+  const signature = `${callee.function.name}(${callee.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${callee.function.returns}`;
+  if (definition !== undefined) {
+    return [
+      `${signature}, contracted by what it does:`,
+      ...callee.requires.map((requirement) => `  requires ${requirement}`),
+      "```",
+      renderStatements(definition.statements),
+      "```",
+    ];
+  }
+  return [
+    `${signature}, which must satisfy:`,
+    ...callee.requires.map((requirement) => `  requires ${requirement}`),
+    ...callee.ensures.map((condition) => `  ensures ${condition}`),
+  ];
+}
+
+/**
  * The contract as the model reads it. The body is not in it: the body is
  * rendered from the source above, and carrying the statement tree as well
  * would state it three times over for no gain.
@@ -520,31 +582,30 @@ function renderContract(contract: FunctionContract): string {
  * The runtime services a candidate can reach, which is what the ABI section
  * offers it.
  *
- * A candidate may not call another function of the program, so what it inlines
- * has to be written into it: the needs of a definition are therefore the needs
- * of every function of the file being written, not only of this one. A
- * contract that states a postcondition says nothing about how the work is done,
- * and a library implementation is free to take a working copy of what it is
- * given, so memory is always in reach there.
+ * The needs are this function's own. A function it calls brings its own object
+ * and its own needs with it, so they are not this candidate's to carry; a
+ * function it writes out is one the outline only marked that way because it
+ * allocates nothing, prints nothing and reads no arguments, and so has no
+ * needs of its own to carry either. That leaves this body alone, which is
+ * where every construct a candidate can reach through is stated.
+ *
+ * A contract that states a postcondition says nothing about how the work is
+ * done, and a library implementation is free to take a working copy of what it
+ * is given, so memory is always in reach there.
  */
 function runtimeNeeds(request: PromptRequest): RuntimeNeeds {
-  const { contract, unit, program } = request;
+  const { contract } = request;
   if (isBufferType(parseType(contract.function.returns))) return { memory: true };
-  const siblings = Object.values(program.files.find((file) => file.path === unit.file)?.functions ?? {});
-  const bodies = [contract, ...siblings];
-  if (bodies.every((body) => body.definition === undefined)) return { memory: true };
+  const definition = contract.definition;
+  if (definition === undefined) return { memory: true };
   const needs: RuntimeNeeds = {};
-  for (const body of bodies) {
-    const definition = body.definition;
-    if (definition === undefined) continue;
-    if (definition.allocates) Object.assign(needs, { memory: true, object: true });
-    // A function that prints text has to have text to print, and the only way
-    // to come by it is a string the runtime builds. Without the memory tag the
-    // constructor is filtered out of the ABI section and the prompt is left
-    // telling the model to print text it has no way to make.
-    if (definition.prints) Object.assign(needs, { output: true, memory: true });
-    if (definition.readsArgv) needs.arguments = true;
-  }
+  if (definition.allocates) Object.assign(needs, { memory: true, object: true });
+  // A function that prints text has to have text to print, and the only way
+  // to come by it is a string the runtime builds. Without the memory tag the
+  // constructor is filtered out of the ABI section and the prompt is left
+  // telling the model to print text it has no way to make.
+  if (definition.prints) Object.assign(needs, { output: true, memory: true });
+  if (definition.readsArgv) needs.arguments = true;
   return needs;
 }
 
@@ -700,8 +761,12 @@ export function buildUserPrompt(request: PromptRequest): string {
 
   const language = OUTPUT_LANGUAGE[output];
   const native = output === "asm" || output === "machine";
-  const callees = (request.callees ?? []).filter((other) => symbolOf(other) !== symbolOf(contract));
-  const rules = native ? nativeRules(contract, request.callees ?? []) : language.rules;
+  const plan = callPlan(
+    contract,
+    request.program,
+    (request.callees ?? []).filter((other) => symbolOf(other) !== symbolOf(contract)),
+  );
+  const rules = native ? nativeRules(contract, plan) : language.rules;
 
   const sections: string[] = [];
   sections.push(`CONTRACT\n${renderContract(contract)}`);
@@ -726,15 +791,25 @@ export function buildUserPrompt(request: PromptRequest): string {
       renderTypes(contract),
     ].join("\n"),
   );
-  if (native && callees.length > 0) {
+  if (native && plan.called.length > 0) {
     sections.push(
       [
-        "FUNCTIONS YOU MAY CALL",
+        "CALLS",
         "Each of these is compiled on its own and linked beside yours, so call it instead of writing out",
         "what it does. They are ordinary System V calls, at the locations given:",
-        ...callees.flatMap((callee) => renderCallable(callee)),
-        "The program you are part of is the only thing that runs this candidate: nothing verifies it here,",
-        "so a call that is wrong shows up as the whole program printing something else.",
+        ...plan.called.flatMap((callee) => renderCallable(callee)),
+        "The program you are part of is the only thing that runs a candidate that calls one, so nothing",
+        "verifies it here and a call that is wrong shows up as the whole program printing something else.",
+      ].join("\n"),
+    );
+  }
+  if (native && plan.written.length > 0) {
+    sections.push(
+      [
+        "WRITE OUT",
+        "Your body reaches each of these, and each is implemented here rather than called, so their",
+        "symbols are not among the ones you may reference. What each one does:",
+        ...plan.written.flatMap((callee) => renderWrittenOut(callee)),
       ].join("\n"),
     );
   }

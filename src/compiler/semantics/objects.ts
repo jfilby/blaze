@@ -253,6 +253,7 @@ class BodyTypes {
             "a function may only call the functions of the program it is part of",
           );
         }
+        this.call(expression.name);
         return { kind: "type", type: returns };
       }
       case "object":
@@ -335,6 +336,17 @@ class BodyTypes {
 
   /** Every object this function wrote, for the program to name. */
   readonly registered = new Map<string, Shape>();
+  /**
+   * Every program function this body calls, in the order it first calls each.
+   * A builtin is not one: the driver answers it, so it is not a symbol this
+   * build emits and there is nothing to decide about it.
+   */
+  readonly called: string[] = [];
+
+  /** Records a call the body makes, once however many times it makes it. */
+  private call(name: string): void {
+    if (!this.called.includes(name)) this.called.push(name);
+  }
 }
 
 function describe(value: Inferred): string {
@@ -454,6 +466,11 @@ export function resolveObjects(files: readonly FileContract[]): void {
     const body = bodies.get(caller.name);
     if (definition === undefined || body === undefined) continue;
     definition.objects = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
+    // The call graph of the whole program, recorded by the one pass that walks
+    // every body. Which of these calls is written out rather than made is not
+    // decided here: it is a property of the whole graph, and `resolveCalls`
+    // decides it immediately after this pass runs.
+    definition.calls = body.called.map((callee) => ({ callee, strategy: "call" }));
     const result = body.result();
     if (result === null || result.kind !== "object") continue;
     // `any` said a reference without saying to what; the body says which.

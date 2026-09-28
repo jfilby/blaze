@@ -826,6 +826,176 @@ test("a function that calls another function wrongly is rejected by the program"
   assert.match(`${failure.message}\n${failure.detail ?? ""}`, /the program prints "84"/);
 });
 
+/**
+ * A program of two functions where the call is one the outline writes out.
+ *
+ * `step` branches, so its contract states what it does and there are no
+ * vectors to check it against: nothing about it is proved but by the program.
+ * It allocates nothing, prints nothing, reads no arguments and reaches
+ * nothing, so writing it out is what the outline decides, and `report` is
+ * written as the body rather than as a call to `step`.
+ */
+const WRITTEN_OUT_PROGRAM = [
+  "function step(n: number): number {",
+  "  if (n > 2) {",
+  "    return 3;",
+  "  }",
+  "  return 1;",
+  "}",
+  "",
+  "function main(): void {",
+  "  console.log(step(3));",
+  "}",
+  "",
+  "main();",
+  "",
+].join("\n");
+
+/** The callee: three above two, and one at or below it. */
+const STEP_ASSEMBLY = [
+  ".text",
+  "\t.globl\tstep",
+  "step:",
+  "\tmovabsq\t$4611686018427387904, %rax",
+  "\tmovq\t%rax, %xmm1",
+  "\tcomisd\t%xmm1, %xmm0",
+  "\tjbe\t.Llow",
+  "\tmovabsq\t$4613937818241073152, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tret",
+  ".Llow:",
+  "\tmovabsq\t$4607182418800017408, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tret",
+  "",
+].join("\n");
+
+/**
+ * The caller: it writes out what `step` does rather than calling it, so it
+ * references no other symbol of the program and is linked and probed on its
+ * own. The branch is the callee's own, so the program is what says whether the
+ * copy agrees with it. The entry returns, so a candidate that runs off its own
+ * end falls into whatever the linker put after it.
+ */
+const MAIN_WRITES_STEP_ASSEMBLY = [
+  ".text",
+  "\t.globl\tblaze_main",
+  "blaze_main:",
+  "\tsubq\t$24, %rsp",
+  "\tmovabsq\t$4613937818241073152, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tmovabsq\t$4611686018427387904, %rax",
+  "\tmovq\t%rax, %xmm1",
+  "\tcomisd\t%xmm1, %xmm0",
+  "\tjbe\t.Llow",
+  "\tmovabsq\t$4613937818241073152, %rax",
+  "\tmovq\t%rax, %xmm0",
+  "\tjmp\t.Lprint",
+  ".Llow:",
+  "\tmovabsq\t$4607182418800017408, %rax",
+  "\tmovq\t%rax, %xmm0",
+  ".Lprint:",
+  "\tmovq\t%xmm0, %rdi",
+  "\tcall\tblaze_rt_print_number",
+  "\tcall\tblaze_rt_print_newline",
+  "\taddq\t$24, %rsp",
+  "\tret",
+  "",
+].join("\n");
+
+/** The same caller, but reaching for the callee's symbol the outline refused it. */
+const MAIN_CALLS_STEP_ASSEMBLY = MAIN_WRITES_STEP_ASSEMBLY.replace(
+  "\tmovq\t%xmm0, %rdi",
+  "\tcall\tstep\n\tmovq\t%xmm0, %rdi",
+);
+
+/**
+ * A two-function program project answered per function rather than per request:
+ * the two are generated at the same time, so which answer a request gets is
+ * decided by the function the prompt is for.
+ */
+async function writtenOutProject(
+  name: string,
+  source: string,
+  caller: string,
+  callee: string,
+): Promise<{ directory: string; answer: (prompt: string) => string }> {
+  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeFile(
+    join(directory, "blaze.json"),
+    JSON.stringify({
+      language: "typescript",
+      sourceFile: "main.ts",
+      model: { provider: "openai-compatible", model: "stub" },
+      output: "machine",
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+    }),
+    "utf8",
+  );
+  return {
+    directory,
+    answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : callee),
+  };
+}
+
+test("a caller the outline tells to write a callee out is checked on its own", async (t) => {
+  const { directory, answer } = await writtenOutProject(
+    "writes-out",
+    WRITTEN_OUT_PROGRAM,
+    MAIN_WRITES_STEP_ASSEMBLY,
+    STEP_ASSEMBLY,
+  );
+  await chatEndpoint(t, [], { answer });
+
+  const outcome = await runBuild(
+    "blaze.json",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "step"]);
+  assert.ok(outcome.outputPath !== null);
+  assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "3\n");
+
+  // The whole point of writing the call out: the caller references no other
+  // symbol of the program, so it is linked on its own and probed. A candidate
+  // that called the callee would be carried to the program round instead, with
+  // no run and no fault of its own.
+  const generation = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+  ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
+  const [mainOutcome] = generation.functions.main.outcomes;
+  assert.notEqual(mainOutcome.probe, undefined);
+  assert.equal(mainOutcome.probe?.called, true);
+});
+
+test("a candidate that calls a callee it was told to write out is rejected", async (t) => {
+  // The symbol is not among the ones it may reference, and the assembler turns
+  // that away rather than letting the call stand: the body was already in its
+  // prompt, so a reference to it is a reimplementation behind a local label.
+  const { directory, answer } = await writtenOutProject(
+    "calls-refused",
+    WRITTEN_OUT_PROGRAM,
+    MAIN_CALLS_STEP_ASSEMBLY,
+    STEP_ASSEMBLY,
+  );
+  await chatEndpoint(t, [], { answer });
+
+  const failure = await runBuild(
+    "blaze.json",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  ).then(
+    () => { throw new Error("a candidate that calls a callee it was told to write out must not be delivered"); },
+    (error: CompilerError) => error,
+  );
+  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /"step" is referenced but not defined/);
+});
+
 test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {
   const source = ["function main(): number {", "  return 40 + 2;", "}", "", "main();", 'console.log(`answer: ${42}`);', ""].join("\n");
   const assembly = [".text", ".globl blaze_main", "blaze_main:", "  movabsq $4631107791820423168, %rax", "  movq %rax, %xmm0", "  ret", ""].join("\n");

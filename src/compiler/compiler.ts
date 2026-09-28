@@ -20,6 +20,7 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
+import { contractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
@@ -845,12 +846,23 @@ export async function runBuild(
      */
     const awaitingProgram = new Map<string, IncrementalEntry>();
     /**
-     * The other functions of this build, by contract. A program is compiled one
-     * function at a time and linked together, so a candidate that calls one of
-     * these is calling an object the build is going to produce rather than
-     * reimplementing it behind a local label.
+     * Every function of the program, by the name the source gave it. The
+     * outline has already decided, for each call, whether it is made or
+     * written out (see semantics/calls.ts), so what a candidate may reference
+     * and what its prompt has to carry both follow from one function's own
+     * recorded calls rather than from the set of units this build happens to
+     * compile.
      */
-    const callees = units.map((entry) => entry.contract);
+    const contracts = contractsByName(program.files);
+    /** The functions one candidate is told about: those it calls, and those it writes out. */
+    const calleesOf = (contract: FunctionContract): FunctionContract[] => {
+      const reached = new Map<string, FunctionContract>();
+      for (const edge of contract.definition?.calls ?? []) {
+        const callee = contracts.get(edge.callee);
+        if (callee !== undefined) reached.set(callee.function.name, callee);
+      }
+      return [...reached.values()];
+    };
 
     /**
      * Records what this build proved: every function it verified against its
@@ -913,7 +925,7 @@ export async function runBuild(
         functionName,
         output: outputKind,
         linksObjects: checksProgram,
-        callable: callableSymbols(callees),
+        callable: callableSymbols(unit.contract, contracts),
         required: options.reuse,
         id,
       });
@@ -979,8 +991,8 @@ export async function runBuild(
         benchmark: benchmarkConfig,
         prepareRuntime,
         workspace,
-        callable: callableSymbols(callees),
-        callees,
+        callable: callableSymbols(unit.contract, contracts),
+        callees: calleesOf(unit.contract),
         exclusive: machine,
         // A repair round asks the model again, so what an earlier build
         // stored is not what it starts from. Otherwise the stored
@@ -1465,10 +1477,11 @@ export async function runStored(
     runtime,
     workspace: { workDirectory: base, functionName: program.entry.file },
   });
-  // A stored candidate that calls another function of the program is only
-  // linked by the program, so `blaze test` and `blaze benchmark` are given the
-  // same callable set the build that stored it was given.
-  const callable = callableSymbols(units.map((unit) => unit.contract));
+  // A stored candidate is given the same symbols the build that stored it was
+  // given, which is what its own recorded calls say rather than what the build
+  // happened to compile: the outline decided which of them is a call, and a
+  // candidate is measured against the same rule it was checked under.
+  const contracts = contractsByName(program.files);
   // `blaze test` measures one stored candidate at a time, but it measures them
   // the way a build does, so it goes through the same lock.
   const machine = exclusive();
@@ -1501,7 +1514,7 @@ export async function runStored(
       runtime,
       candidate,
       workspace,
-      callable,
+      callable: callableSymbols(unit.contract, contracts),
       prepareRuntime,
       exclusive: machine,
       test: testConfigFor(input, options),

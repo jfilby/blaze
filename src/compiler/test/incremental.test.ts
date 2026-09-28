@@ -23,7 +23,9 @@ function contractOf(name: string, returns: string, objects: Record<string, Objec
     effects: [],
     numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
     optimize: { primary: "latency" },
-    ...(Object.keys(objects).length === 0 ? {} : { definition: { statements: [], objects, allocates: false, prints: false, readsArgv: false } }),
+    ...(Object.keys(objects).length === 0
+      ? {}
+      : { definition: { statements: [], objects, allocates: false, prints: false, readsArgv: false, calls: [] } }),
   };
 }
 

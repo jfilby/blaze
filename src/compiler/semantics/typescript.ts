@@ -1520,7 +1520,9 @@ function definitionContract(declaration: TypeScriptFunction, input: SourceInput)
     effects,
     numeric: normalizeNumeric(input.numeric),
     optimize: normalizeOptimize(input.optimize),
-    definition: { statements: declaration.body, objects: {}, ...usage },
+    // The calls are filled in by the whole-program pass in objects.ts, which
+    // walks these same bodies knowing which names the program compiles.
+    definition: { statements: declaration.body, objects: {}, calls: [], ...usage },
   };
 }
 

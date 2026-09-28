@@ -41,6 +41,7 @@ function definition(overrides: Partial<FunctionContract> = {}, params = "n: f64"
       allocates: false,
       prints: false,
       readsArgv: false,
+      calls: [],
     },
     ...overrides,
   };

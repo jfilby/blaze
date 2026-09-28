@@ -20,6 +20,7 @@ import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol } from "../runtime/abi.ts";
 import { symbolOf } from "../semantics/contract.ts";
+import type { ContractsByName } from "../semantics/calls.ts";
 import { stackAlignmentProblems } from "./stack-frame.ts";
 import { readAssemblyLines } from "./asm-text.ts";
 
@@ -38,14 +39,22 @@ const ALLOWED_DIRECTIVES = new Set([
 ]);
 
 /**
- * The symbols a candidate may call: the runtime ABI, and the other functions
- * the same build compiles. A program is compiled one function at a time and
- * linked together afterwards, so a function that calls a sibling is calling an
- * object that exists rather than one it has to reimplement. The set is what
- * makes the difference between a call and a rejected symbol.
+ * The symbols a candidate may call: the functions of the program whose calls
+ * the outline marked as calls (see semantics/calls.ts), and nothing else.
+ *
+ * The set is what makes the difference between a call and a rejected symbol,
+ * and it is per candidate rather than per build. A callee the outline marked
+ * for writing out is not referenceable: the body it would have to implement is
+ * already in the prompt, and a symbol it names is a reimplementation behind a
+ * local label, which is the thing the outline decided against.
  */
-export function callableSymbols(contracts: Iterable<FunctionContract>): Set<string> {
-  return new Set([...contracts].map(symbolOf));
+export function callableSymbols(contract: FunctionContract, contracts: ContractsByName): Set<string> {
+  const called = (contract.definition?.calls ?? [])
+    .filter((edge) => edge.strategy === "call")
+    .map((edge) => contracts.get(edge.callee))
+    .filter((callee): callee is FunctionContract => callee !== undefined)
+    .map(symbolOf);
+  return new Set(called);
 }
 
 /** Whether a symbol is one a candidate is allowed to call. */

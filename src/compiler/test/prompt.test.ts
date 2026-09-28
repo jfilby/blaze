@@ -66,11 +66,11 @@ test("the prompt states the labels and the calls a candidate may write", () => {
   // Each of these is a rejection in assembler.ts, and none of them is obvious
   // from a program whose source calls its own functions.
   assert.match(prompt, /Every other label you define must start with a dot/);
-  assert.match(prompt, /for recursion/);
-  // Without the sibling contracts there is nothing to call, so the prompt says
-  // what it may reference rather than naming functions it was not handed.
-  assert.match(prompt, /The only symbols you may reference are "blaze_main" itself, for recursion, and the runtime ABI/);
-  assert.match(prompt, /This function is the only one this build compiles/);
+  // A candidate that reaches nothing is left with its own symbol and the
+  // runtime, and is told it is run on its own, which is what a candidate that
+  // calls something is not.
+  assert.match(prompt, /The only symbols you may reference are "blaze_main", and the runtime ABI/);
+  assert.match(prompt, /assembled, linked and run on its own/);
 });
 
 test("a candidate is told the functions of the program it may call, and how", () => {
@@ -83,19 +83,19 @@ test("a candidate is told the functions of the program it may call, and how", ()
       callees: [treeChecksum, treeProgram.files[0].functions.createTree],
     }),
   );
-
   // The model is told the call, the symbol to make it on, and where the
   // arguments and the result go, because those are what a call is written from
   // and none of them can be read off the TypeScript it was given.
-  assert.match(prompt, /FUNCTIONS YOU MAY CALL/);
-  assert.match(prompt, /"checksum", "createTree"/);
+  assert.match(prompt, /^CALLS$/m);
   assert.match(prompt, /C prototype: double checksum\(void\* node\)/);
   assert.match(prompt, /argument locations: node -> rdi/);
   assert.match(prompt, /return value: xmm0/);
   assert.match(prompt, /call it instead of writing out/);
+  // Both are calls: each recurses, and a body that reaches itself is not one a
+  // candidate can write out, so each is named as a symbol rather than a body.
+  assert.doesNotMatch(prompt, /WRITE OUT/);
   // The entry is excluded: a candidate is already the implementation of it.
   assert.doesNotMatch(prompt, /C prototype: void blaze_main/);
-  assert.doesNotMatch(prompt, /Calling another function of this program is rejected/);
 });
 
 test("the prompt states what the function owes the convention it is called under", () => {
@@ -290,7 +290,7 @@ const SILENT: FunctionContract = {
   effects: [],
   numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
   optimize: { primary: "throughput" },
-  definition: { allocates: false, prints: false, readsArgv: false, objects: {}, statements: [] },
+  definition: { allocates: false, prints: false, readsArgv: false, objects: {}, statements: [], calls: [] },
 };
 
 test("a function that prints text is told how to make the text", () => {

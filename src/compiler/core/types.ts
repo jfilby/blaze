@@ -151,6 +151,21 @@ export interface FunctionContract {
 }
 
 /**
+ * What an emitted caller does at one call its source wrote: call the callee's
+ * symbol, or write out what the callee does. Decided once for the whole
+ * program, because whether a call can be written out is a property of every
+ * function the call reaches, not of the one call.
+ */
+export type CallStrategy = "call" | "inline";
+
+/** One call a function's body makes, and what the artifact does at it. */
+export interface CallEdge {
+  /** The name the source called it by. */
+  callee: string;
+  strategy: CallStrategy;
+}
+
+/**
  * An object a function allocates: the fields it holds, where each one sits and
  * what the whole object takes. A pointer field is a reference, so an object of
  * references is the tree a recursive function builds.
@@ -177,6 +192,12 @@ export interface FunctionDefinition {
   prints: boolean;
   /** The function reads the arguments the program was given. */
   readsArgv: boolean;
+  /**
+   * Every call the body makes, in the order it first makes each, with the
+   * strategy the outline chose for it. A function with a postcondition calls
+   * nothing, so this is the whole of what a body it carries can reach.
+   */
+  calls: CallEdge[];
 }
 
 /* -------------------------------------------------------------------------- */

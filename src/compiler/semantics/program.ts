@@ -28,6 +28,7 @@ import { byName } from "../core/named-record.ts";
 import { parseContract } from "./contract.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import { resolveObjects } from "./objects.ts";
+import { resolveCalls } from "./calls.ts";
 import type { ContractEdge, FileContract, FunctionContract, ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
 
 /** The path a source given inline to a project file is known by. */
@@ -319,6 +320,10 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   // The objects a program allocates are named once for the whole program,
   // because a field is often what another function returns.
   resolveObjects(files);
+  // Which of the calls that pass recorded is written out rather than made is
+  // a property of the whole graph, so it is decided here, once the graph is
+  // complete and before anything is generated from it.
+  resolveCalls(files);
   const program: ProgramContract = {
     version: "1",
     language: request.input.language,

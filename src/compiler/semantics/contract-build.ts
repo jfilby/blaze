@@ -20,6 +20,10 @@ export interface AccessRange {
   hi: string;
 }
 
+/**
+ * What a frontend has worked out about one function, before it becomes a
+ * contract. Both frontends answer this the same way, so the shape is shared.
+ */
 export interface ContractAssembly {
   /** Name of the function in the source language. */
   name: string;

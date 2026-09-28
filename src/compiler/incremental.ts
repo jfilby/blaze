@@ -17,6 +17,12 @@
  * change to either does invalidate the caller, which is the one change that
  * can break an object that is not rebuilt.
  *
+ * A callee whose body this one writes out rather than calls is the exception,
+ * and the key follows the outline's decision: that body is inside this
+ * object, so its whole definition is part of the key rather than its ABI
+ * alone. Without that, a fix to a callee would rebuild the callee and leave
+ * every caller holding the body it was given before the fix.
+ *
  * The record is one file that a build adds each function to as soon as that
  * function is verified, so a build that fails on a later function still leaves
  * the earlier ones reusable. Reuse is therefore per function and survives
@@ -27,6 +33,7 @@
  */
 
 import { hashValue, type JsonStore } from "./core/json-store.ts";
+import { contractsByName, writtenOut } from "./semantics/calls.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
 import type {
   AssemblyCandidate,
@@ -88,9 +95,20 @@ export interface UnitKeyInput {
   toolchain: string;
 }
 
-/** What another function of the program may be linked against. */
-function abiOf(contract: FunctionContract): unknown {
-  return { function: contract.function, objects: contract.definition?.objects ?? {} };
+/**
+ * What another function of the program contributes to this one: the ABI of a
+ * function this one calls, and the body of a function this one writes out.
+ *
+ * A call is a symbol, so a callee's implementation cannot change what the
+ * caller's object does and only its signature and object layouts matter. A
+ * body written out is the opposite: the text of the callee is inside the
+ * caller's object, so a callee whose body changes leaves a stored caller
+ * holding the old one, and the caller has to be regenerated. That is the whole
+ * reason the strategy is read here rather than treated as a note on the graph.
+ */
+function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
+  const abi = { function: contract.function, objects: contract.definition?.objects ?? {} };
+  return holdsTheBody ? { ...abi, definition: contract.definition } : abi;
 }
 
 /**
@@ -99,10 +117,17 @@ function abiOf(contract: FunctionContract): unknown {
  */
 export function unitKey(input: UnitKeyInput): string {
   const own = input.contract.function.name;
+  // The whole closure, not the direct callees: a body written out carries the
+  // calls it made, so what ends up inside this object is everything below it.
+  const written = new Set(
+    writtenOut(contractsByName(input.program.files), input.contract)
+      .map((contract) => contract.function.name)
+      .filter((name) => name !== own),
+  );
   const others = input.program.files
     .flatMap((file) => Object.entries(file.functions))
     .filter(([name]) => name !== own)
-    .map(([name, contract]): readonly [string, unknown] => [name, abiOf(contract)])
+    .map(([name, contract]): readonly [string, unknown] => [name, abiOf(contract, written.has(name))])
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   return hashValue({
     contract: input.contract,
