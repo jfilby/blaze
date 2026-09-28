@@ -23,18 +23,23 @@ import { parseType, typeToString } from "./contract.ts";
 /** The number a reference takes: one pointer. */
 const POINTER_SIZE = 8;
 
-const F64: TypeExpr = { kind: "primitive", name: "f64" };
-const I64: TypeExpr = { kind: "primitive", name: "i64" };
-const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
-const BOOL: TypeExpr = { kind: "primitive", name: "bool" };
+export const F64: TypeExpr = { kind: "primitive", name: "f64" };
+export const I64: TypeExpr = { kind: "primitive", name: "i64" };
+export const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
+export const BOOL: TypeExpr = { kind: "primitive", name: "bool" };
 /** A reference to an object whose fields the source never pins down. */
-const ANY_REF: TypeExpr = { kind: "ref", of: null };
+export const ANY_REF: TypeExpr = { kind: "ref", of: null };
 
 const COMPARISONS: Record<string, true> = { "<": true, "<=": true, ">": true, ">=": true, "===": true, "!==": true, "==": true, "!=": true };
 const LOGICAL: Record<string, true> = { "&&": true, "||": true };
 
-/** What an expression is: a type, or a reference to an object the source wrote. */
-type Inferred = { kind: "type"; type: TypeExpr } | { kind: "object"; key: string };
+/**
+ * What an expression is: a type, or a reference to an object the source wrote.
+ * The rules that decide it are exported, because the IR that describes a
+ * function body types the same expressions and must reach the same answers: one
+ * set of rules, written once, rather than two that drift.
+ */
+export type Inferred = { kind: "type"; type: TypeExpr } | { kind: "object"; key: string };
 
 /** One object the source writes, before it is named and laid out. */
 interface Shape {
@@ -349,11 +354,11 @@ class BodyTypes {
   }
 }
 
-function describe(value: Inferred): string {
+export function describe(value: Inferred): string {
   return value.kind === "object" ? `object(${value.key})` : typeToString(value.type);
 }
 
-function elementOf(value: Inferred): TypeExpr {
+export function elementOf(value: Inferred): TypeExpr {
   if (value.kind === "object") return ANY_REF;
   return value.type.kind === "primitive" ? value.type : elementOfType(value.type);
 }
@@ -362,7 +367,7 @@ function elementOfType(type: TypeExpr): TypeExpr {
   return type.kind === "primitive" || type.kind === "ref" || type.kind === "void" ? F64 : type.of ?? F64;
 }
 
-function numeric(left: Inferred, right: Inferred): TypeExpr {
+export function numeric(left: Inferred, right: Inferred): TypeExpr {
   if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64") return I64;
   if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64") return I64;
   return F64;
@@ -373,7 +378,7 @@ function numeric(left: Inferred, right: Inferred): TypeExpr {
  * being chosen is one. Only an unshaped reference — the null a literal gives,
  * and the `any` the source declared — says nothing, and takes the right.
  */
-function coalesce(left: Inferred, right: Inferred): Inferred {
+export function coalesce(left: Inferred, right: Inferred): Inferred {
   if (left.kind === "object") return left;
   if (left.type.kind === "ref" && left.type.of === null && left.type.name === undefined) return right;
   return left;
@@ -416,8 +421,13 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
  * Lays every object of the program out, and writes the layout into the
  * definition of every function that has one. A signature the source left as
  * `any` is narrowed to the object its body actually returns.
+ *
+ * Returns the name each shape is laid out as. A function body writes objects,
+ * and the IR that describes that body names the layout each of them is: a
+ * shape is keyed by the fields it holds, so the same literal in two functions
+ * is one object with one name, and only this pass can say which.
  */
-export function resolveObjects(files: readonly FileContract[]): void {
+export function resolveObjects(files: readonly FileContract[]): Map<string, string> {
   const shapes = new Map<string, Shape>();
   const owners = new Map<string, string>();
   const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
@@ -433,7 +443,7 @@ export function resolveObjects(files: readonly FileContract[]): void {
       callers.set(name, { file, name, contract });
     }
   }
-  if (callers.size === 0) return;
+  if (callers.size === 0) return new Map<string, string>();
 
   // The declared return of every function is known before any body is walked,
   // because one function's body may call another's.
@@ -479,6 +489,8 @@ export function resolveObjects(files: readonly FileContract[]): void {
       caller.contract.function.returns = `ref<${names.get(result.key)}>`;
     }
   }
+
+  return names;
 }
 
 /** The bytes of one object: every field at its own alignment, the object at its own. */

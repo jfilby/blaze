@@ -1,5 +1,6 @@
 /**
- * The check that a semantic IR program is a program.
+ * The check that a semantic IR program is a program, and that a function is a
+ * function.
  *
  * Everything a backend needs is stated in the IR, so everything a backend
  * would otherwise read wrongly is worth refusing here: a jump to a block that
@@ -8,7 +9,15 @@
  * field read from an object no layout has. The problems are collected rather
  * than thrown one at a time, so one run of the compiler says everything that is
  * wrong with a program, in the order the program is written.
-
+ *
+ * A function's body is a program body's tree of blocks, read from the
+ * function's own lowering rather than from a source file, and the rules below
+ * read the two the same way: a function is checked by the eight groups a
+ * program is checked by, plus what only a function has — a return that hands
+ * back the type the signature declares, a parameter the body reads as the
+ * signature declares it, an object the body builds for its caller, and the
+ * conditions the contract holds the function to.
+ *
  * Nothing here may see a target. A rule that could only be written in terms of
  * a register or a stack offset is a rule this module has to refuse to state.
  *
@@ -41,7 +50,9 @@ import {
 import type {
   SemanticBlock,
   SemanticCall,
+  SemanticFunction,
   SemanticLoop,
+  SemanticModule,
   SemanticProgram,
   SemanticSlot,
   SemanticStatement,
@@ -76,7 +87,84 @@ const EFFECT_NAMES: Record<Effect, true> = {
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /* -------------------------------------------------------------------------- */
-/* Reading the program as a tree                                              */
+/* What a body is checked against                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a rule about a body looks a name up in: the layouts the body allocates
+ * an object by, the functions it may call, and the contract, when the caller
+ * has one. A program holds every layout of every function of the program; a
+ * function holds the layouts its own body writes, and — the callee universe is
+ * null when nothing declares one — a function checked on its own is not
+ * refused a call it cannot resolve, because the file it is in is not the whole
+ * program.
+ */
+interface Context {
+  /** The layouts the IR itself carries, as `Object1` and the rest. */
+  objects: Record<string, ObjectLayout>;
+  /** Every function this body may call, or null where nothing declares them. */
+  functions: FunctionSignature[] | null;
+  /** The whole program contract, where the caller has one. */
+  contract?: ProgramContract;
+  /** The names the body itself declares, which no other body declares. */
+  declared: string[];
+}
+
+/**
+ * The body being checked: the block it starts in and the tree of blocks written
+ * in it. A program body and a function body have the same shape, so one set of
+ * rules reads both. What differs is what the body is called in a message, and
+ * whether it has one end: a program ends once, in its entry block, while a
+ * function may hand back a value from an arm of the body.
+ */
+interface Body {
+  /** The block the body starts in. */
+  entry: SemanticBlock;
+  tree: Tree;
+  /** What a block of this body is a way out of, as a message names it. */
+  subject: string;
+  /** The body itself, as a message names it. */
+  own: string;
+  /** True when the body has one end, which is the one its entry block ends in. */
+  single: boolean;
+}
+
+/** What a program body is checked against: everything the program holds. */
+function programContext(program: SemanticProgram, contract?: ProgramContract): Context {
+  return { objects: program.objects, functions: program.functions, contract, declared: [] };
+}
+
+/** What a function body is checked against: what the function itself holds. */
+function functionContext(fn: SemanticFunction, program?: ProgramContract): Context {
+  return {
+    objects: fn.objects,
+    functions: program === undefined ? null : signaturesOf(program),
+    contract: program,
+    declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)],
+  };
+}
+
+/** Every signature the program contract declares, in the order it declares them. */
+function signaturesOf(program: ProgramContract): FunctionSignature[] {
+  const signatures: FunctionSignature[] = [];
+  for (const file of program.files) {
+    for (const declared of Object.values(file.functions)) signatures.push(declared.function);
+  }
+  return signatures;
+}
+
+/** A program body, read as a body of its own. */
+function programBody(program: SemanticProgram, tree: Tree): Body {
+  return { entry: program.entry, tree, subject: "a program", own: "the program", single: true };
+}
+
+/** A function body, read as a body of its own. */
+function functionBody(entry: SemanticBlock, tree: Tree): Body {
+  return { entry, tree, subject: "a function", own: "the function", single: false };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading a body as a tree                                                   */
 /* -------------------------------------------------------------------------- */
 
 /** A loop, with the block a `break` leaves it for. */
@@ -106,6 +194,17 @@ interface PlacedBlock {
   /** The slot each of those names holds. */
   /** The block this one is written in, or null for the body of the program. */
   parent: PlacedBlock | null;
+  /** What the block's terminator may read, once its own statements are done. */
+  final: Scope;
+  /**
+   * True when reaching this block is a choice the body makes: an arm of an
+   * `if`, the body of a loop, or a block written inside one of those. A return
+   * written in such a block is an early return, and the block around it still
+   * has a way through that does not return.
+   */
+  guarded: boolean;
+  /** How many statements the block around this one writes after this one. */
+  rest: number;
 }
 
 /** A statement, with the block it is written in and what that block may read. */
@@ -116,7 +215,7 @@ interface PlacedStatement {
   scope: Scope;
 }
 
-/** Every block and statement of a program, in the order they are written. */
+/** Every block and statement of a body, in the order they are written. */
 interface Tree {
   blocks: PlacedBlock[];
   statements: PlacedStatement[];
@@ -166,7 +265,10 @@ function innerScope(scope: Scope, slots: SemanticSlot[]): Scope {
 
 /**
  * One block and everything written in it, each block placed in the loops
- * around it and holding the names it may read.
+ * around it and holding the names it may read. `rest` is how much the block
+ * around this one writes after it and `guarded` is whether reaching it at all
+ * is a choice the body makes, which is what tells an early return from a
+ * return that ends the body.
  */
 function walkBlock(
   block: SemanticBlock,
@@ -174,27 +276,31 @@ function walkBlock(
   scope: Scope,
   tree: Tree,
   parent: PlacedBlock | null = null,
+  guarded = false,
+  rest = 0,
 ): PlacedBlock {
-  const placed: PlacedBlock = { block, loops, own: [], parent };
+  const placed: PlacedBlock = { block, loops, own: [], parent, final: scope, guarded, rest };
   tree.blocks.push(placed);
 
   let current = scope;
-  for (const statement of block.statements) {
+  for (let at = 0; at < block.statements.length; at += 1) {
+    const statement = block.statements[at];
     tree.statements.push({ statement, block: placed, scope: current });
     if (statement.k === "let") {
       current = declaring(current, statement.slot);
       placed.own.push(statement.slot.name);
       continue;
     }
+    const after = block.statements.length - at - 1;
     if (statement.k === "if") {
-      walkBlock(statement.then, loops, current, tree, placed);
+      walkBlock(statement.then, loops, current, tree, placed, true, after);
       if (statement.otherwise !== null) {
-        walkBlock(statement.otherwise, loops, current, tree, placed);
+        walkBlock(statement.otherwise, loops, current, tree, placed, true, after);
       }
       continue;
     }
     if (statement.k === "block") {
-      walkBlock(statement.body, loops, current, tree, placed);
+      walkBlock(statement.body, loops, current, tree, placed, guarded, after);
       continue;
     }
     if (statement.k === "loop") {
@@ -206,9 +312,12 @@ function walkBlock(
         innerScope(current, loopSlots(statement.loop)),
         tree,
         placed,
+        true,
+        after,
       );
     }
   }
+  placed.final = current;
 
   return placed;
 }
@@ -218,6 +327,23 @@ function readTree(program: SemanticProgram): Tree {
   const tree: Tree = { blocks: [], statements: [], loops: [] };
   walkBlock(program.entry, [], { slots: new Map(), visible: new Set() }, tree);
   return tree;
+}
+
+/**
+ * A function's body as a tree, with the parameters already declared: a
+ * parameter is a name the body reads that no `let` of the body declares, so
+ * the rules about names are the rules a program is checked by.
+ */
+function readFunctionTree(fn: SemanticFunction, entry: SemanticBlock): Tree {
+  const tree: Tree = { blocks: [], statements: [], loops: [] };
+  walkBlock(entry, [], innerScope({ slots: new Map(), visible: new Set() }, fn.params), tree);
+  return tree;
+}
+
+/** The name a body hands its caller back, where it hands back a name at all. */
+function returnedName(value: SemanticValue | null): string | null {
+  if (value === null) return null;
+  return value.k === "local" ? value.name : null;
 }
 
 /** Every value a statement computes, in the order the statement writes them. */
@@ -254,12 +380,24 @@ function statementValues(statement: SemanticStatement): SemanticValue[] {
 function statementCalls(statement: SemanticStatement): SemanticCall[] {
   const calls: SemanticCall[] = [];
   for (const value of statementValues(statement)) {
-    walkValues(value, (inner) => {
+    walked(value, (inner) => {
       if (inner.k === "call") calls.push(inner.call);
     });
   }
   if (statement.k === "call") calls.push(statement.call);
   return calls;
+}
+
+/**
+ * Every value a statement's values are made of, the fields of an object being
+ * built among them: the fields are values of their own and a call written into
+ * one is a call the body makes.
+ */
+function walked(value: SemanticValue, visit: (value: SemanticValue) => void): void {
+  walkValues(value, (inner) => {
+    visit(inner);
+    if (inner.k === "newObject") for (const field of inner.fields) walked(field.value, visit);
+  });
 }
 
 /** The type a sequence holds elements of, or null for anything else. */
@@ -269,12 +407,15 @@ function statementCalls(statement: SemanticStatement): SemanticCall[] {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The shape of a program: one entry, one way out of every block, and no block
- * a jump names that the program does not hold.
+ * The shape of a body: one entry, one way out of every block, and no block a
+ * jump names that the body does not hold. What a block may end in is the same
+ * for a program and for a function; what differs is the one end a program has
+ * and a function does not, and the name of the body a message is written for.
  */
-function structureProblems(program: SemanticProgram, tree: Tree): string[] {
+function structureProblems(body: Body): string[] {
   const problems: string[] = [];
   const ids = new Set<string>();
+  const tree = body.tree;
 
   for (const placed of tree.blocks) {
     if (ids.has(placed.block.id)) {
@@ -284,8 +425,11 @@ function structureProblems(program: SemanticProgram, tree: Tree): string[] {
     ids.add(placed.block.id);
   }
 
-  if (program.entry.id !== "entry") {
-    problems.push(`entry: the program's entry block is "${program.entry.id}" rather than entry`);
+  // The entry block of a program is the one block the IR names, so that a model
+  // writing a program back out writes the same program. A function's blocks are
+  // named by the lowering that wrote them, and the function is named instead.
+  if (body.single && body.entry.id !== "entry") {
+    problems.push(`entry: the program's entry block is "${body.entry.id}" rather than entry`);
   }
 
   const headers = new Set(tree.loops.map((frame) => frame.loop.header));
@@ -293,17 +437,16 @@ function structureProblems(program: SemanticProgram, tree: Tree): string[] {
   for (const placed of tree.blocks) {
     const where = label(placed.block.id);
     const terminator = placed.block.terminator;
-    const isEntry = placed.block === program.entry;
-
+    const isEntry = placed.block === body.entry;
     if (TERMINATOR_KINDS[terminator.k] !== true) {
-      problems.push(`${where}the block ends in nothing a program may end in`);
+      problems.push(`${where}the block ends in nothing ${body.subject} may end in`);
       continue;
     }
-    if (terminator.k === "return" && !isEntry) {
-      problems.push(`${where}only the entry block ends the program`);
+    if (terminator.k === "return" && body.single && !isEntry) {
+      problems.push(`${where}only the entry block ends ${body.own}`);
     }
     if (terminator.k === "jump" && isEntry) {
-      problems.push(`${where}the program body leaves for ${terminator.target} rather than ending`);
+      problems.push(`${where}${body.own} body leaves for ${terminator.target} rather than ending`);
     }
     if (terminator.k === "jump" && !ids.has(terminator.target) && !headers.has(terminator.target)) {
       problems.push(`${where}jumps to ${terminator.target}, which is not a block of the program`);
@@ -378,7 +521,11 @@ function valueProblems(tree: Tree): string[] {
       const buffer = scope.slots.get(statement.buffer);
       if (buffer === undefined) {
         problems.push(`${prefix}"${statement.buffer}" is not declared where it is written`);
-      } else if (buffer.kind !== "buffer") {
+      } else if (!isSequence(slotType(buffer))) {
+        // What a name has to hold to have an element written into it is a
+        // sequence, not a slot of one kind: a program allocates the array it
+        // writes and a function is handed a slice as a parameter, and both are
+        // written the same way.
         problems.push(`${prefix}"${statement.buffer}" is a ${typeText(slotType(buffer))}, which has no elements to write`);
       }
     }
@@ -423,12 +570,7 @@ function comparableTo(side: SemanticValue, operand: SemanticType): boolean {
 }
 
 /** What one value computes has to be the type the value says it is. */
-function valueTypeProblems(
-  prefix: string,
-  value: SemanticValue,
-  program: SemanticProgram,
-  contract?: ProgramContract,
-): string[] {
+function valueTypeProblems(prefix: string, value: SemanticValue, context: Context): string[] {
   const problems: string[] = [];
 
   if (!isSemanticType(value.type)) problems.push(`${prefix}${typeText(value.type)} is not a type`);
@@ -482,15 +624,28 @@ function valueTypeProblems(
       }
       return problems;
     }
-    case "newObject":
-      if (!isLayout(program, value.object) && !isContractLayout(contract, value.object)) {
-        problems.push(`${prefix}the object ${value.object} is not a layout the program lays out`);
+    case "newObject": {
+      // A field of an object being built is read the way a field of an object
+      // already built is read: the layout must be one the program lays out, the
+      // field must be one of its fields, and what is written must be readable
+      // as the type the layout gives that field.
+      if (!isLayout(context, value.layout) && !isContractLayout(context.contract, value.layout)) {
+        problems.push(`${prefix}the object ${value.layout} is not a layout the program lays out`);
+        return problems;
+      }
+      for (const field of value.fields) {
+        problems.push(...layoutProblems(prefix, value.layout, field.name, context));
+        const declared = fieldType(value.layout, field.name, context);
+        if (declared !== null && !fieldReadsAs(declared, field.value.type)) {
+          problems.push(`${prefix}${value.layout}.${field.name} is a ${typeText(declared)}, not a ${typeText(field.value.type)}`);
+        }
       }
       return problems;
+    }
     case "loadField": {
-      problems.push(...layoutProblems(prefix, value.layout, value.field, program, contract));
-      const declared = fieldType(value, program, contract);
-      if (declared !== null && !convertibleTo(declared, value.type)) {
+      problems.push(...layoutProblems(prefix, value.layout, value.field, context));
+      const declared = fieldType(value.layout, value.field, context);
+      if (declared !== null && !fieldReadsAs(declared, value.type)) {
         problems.push(`${prefix}${value.layout}.${value.field} is a ${typeText(declared)}, not a ${typeText(value.type)}`);
       }
       return problems;
@@ -537,10 +692,17 @@ function valueTypeProblems(
       }
       return problems;
     case "logical": {
-      // `&&` and `||` return one of their arms rather than a truth, so what
-      // they are written as is the type both arms are.
-      if (!convertibleTo(value.left.type, value.type) || !convertibleTo(value.right.type, value.type)) {
-        problems.push(`${prefix}${value.op} over a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);
+      // `&&` and `||` hand back one of their arms rather than a truth, so what
+      // they are written as is the type of the arm they hand back. A reference
+      // is that type, and the other arm is then the test that decides whether to
+      // hand it back — `n > 0 && node.left` is the reference when the test says
+      // so — so one reference arm is enough and a number or a truth beside it
+      // is the test rather than a second value of another type. This is the
+      // reading the program pass gives the same two arms.
+      const arms: [SemanticType, SemanticType] = [value.left.type, value.right.type];
+      const holds = arms.filter((arm) => convertibleTo(arm, value.type));
+      if (isReference(value.type) ? holds.length < 1 : holds.length !== arms.length) {
+        problems.push(`${prefix}${value.op} over a ${typeText(arms[0])} and a ${typeText(arms[1])} is a ${typeText(value.type)}`);
       }
       return problems;
     }
@@ -575,18 +737,25 @@ function valueTypeProblems(
   }
 }
 
-/** A field of a layout the program lays out, and the type the layout gives it. */
-function layoutProblems(
-  prefix: string,
-  layout: string,
-  field: string,
-  program: SemanticProgram,
-  contract?: ProgramContract,
-): string[] {
-  if (!isLayout(program, layout) && !isContractLayout(contract, layout)) {
+/**
+ * Whether a field a layout gives a type is the field the IR reads it as. A
+ * layout spells a string as the number a string is stored as, because the
+ * contract type language has no string type, so a number in a layout and text
+ * in the IR are the same field written two ways rather than a conflict. Two
+ * numbers are compared the way a use compares two numbers, by whether one
+ * converts to the other.
+ */
+function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
+  if (isTextType(read) && isNumber(declared)) return true;
+  return convertibleTo(declared, read);
+}
+
+/** A field of a layout the body lays out, and the type the layout gives it. */
+function layoutProblems(prefix: string, layout: string, field: string, context: Context): string[] {
+  if (!isLayout(context, layout) && !isContractLayout(context.contract, layout)) {
     return [`${prefix}the object ${layout} is not a layout the program lays out`];
   }
-  const found = layoutOf(program, contract, layout);
+  const found = layoutOf(context, layout);
   const declared = found?.fields.find((one) => one.name === field);
   if (declared === undefined) {
     return [`${prefix}${layout} has no field ${field}`];
@@ -594,13 +763,10 @@ function layoutProblems(
   return [];
 }
 
-/** The layout a program carries, wherever it came from. */
-function layoutOf(
-  program: SemanticProgram,
-  contract: ProgramContract | undefined,
-  name: string,
-): ObjectLayout | undefined {
-  if (isLayout(program, name)) return program.objects[name];
+/** The layout a body carries, wherever it came from. */
+function layoutOf(context: Context, name: string): ObjectLayout | undefined {
+  if (isLayout(context, name)) return context.objects[name];
+  const contract = context.contract;
   if (contract === undefined) return undefined;
   for (const file of contract.files) {
     for (const declared of Object.values(file.functions)) {
@@ -613,15 +779,15 @@ function layoutOf(
 }
 
 /** The type a layout gives a field, as a type the IR states. */
-function fieldType(value: SemanticValue & { k: "loadField" }, program: SemanticProgram, contract?: ProgramContract) {
-  const layout = layoutOf(program, contract, value.layout);
-  const declared = layout?.fields.find((one) => one.name === value.field);
+function fieldType(layout: string, field: string, context: Context): SemanticType | null {
+  const found = layoutOf(context, layout);
+  const declared = found?.fields.find((one) => one.name === field);
   return declared === undefined ? null : parseType(declared.type);
 }
 
 /** A layout the IR itself carries. */
-function isLayout(program: SemanticProgram, object: string): boolean {
-  return Object.prototype.hasOwnProperty.call(program.objects, object);
+function isLayout(context: Context, object: string): boolean {
+  return Object.prototype.hasOwnProperty.call(context.objects, object);
 }
 
 /** A layout a contract lays out, for a function that has a body of its own. */
@@ -636,8 +802,8 @@ function isContractLayout(contract: ProgramContract | undefined, object: string)
   return false;
 }
 
-/** The conditions, prints, raises and retains a program writes. */
-function typeProblems(program: SemanticProgram, tree: Tree, contract?: ProgramContract): string[] {
+/** The conditions, prints, raises and retains a body writes. */
+function typeProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
   for (const placed of tree.statements) {
@@ -660,19 +826,20 @@ function typeProblems(program: SemanticProgram, tree: Tree, contract?: ProgramCo
     }
     if (statement.k === "setElement") {
       const buffer = placed.scope.slots.get(statement.buffer);
-      if (buffer !== undefined && buffer.kind === "buffer") {
+      const element = buffer === undefined ? null : elementTypeOf(slotType(buffer));
+      if (element !== null) {
         if (statement.op === "=") {
-          if (!convertibleTo(statement.value.type, buffer.element)) {
-            problems.push(`${prefix}"${statement.buffer}" holds a ${typeText(buffer.element)}, not a ${typeText(statement.value.type)}`);
+          if (!convertibleTo(statement.value.type, element)) {
+            problems.push(`${prefix}"${statement.buffer}" holds a ${typeText(element)}, not a ${typeText(statement.value.type)}`);
           }
         } else {
-          problems.push(...compoundProblems(buffer.element, statement.value, statement.op, prefix, `${statement.buffer}[...]`));
+          problems.push(...compoundProblems(element, statement.value, statement.op, prefix, `${statement.buffer}[...]`));
         }
       }
     }
 
     for (const value of statementValues(statement)) {
-      walkValues(value, (inner) => problems.push(...valueTypeProblems(prefix, inner, program, contract)));
+      walked(value, (inner) => problems.push(...valueTypeProblems(prefix, inner, context)));
     }
   }
 
@@ -692,13 +859,25 @@ function contractType(text: string): SemanticType | null {
   }
 }
 
-/** The signature a call is made against, as the program declares it. */
-function declaredSignature(program: SemanticProgram, callee: string) {
+/**
+ * The signature a call is made against, as the context declares it. A context
+ * that declares no function of its own — a single function, checked where the
+ * file it is in is not the whole program — declares nothing, and a call it
+ * cannot name is a call it may not refuse.
+ */
+function declaredSignature(context: Context, callee: string): FunctionSignature | null {
+  const functions = context.functions;
+  if (functions === null) return null;
   return (
-    program.functions.find((signature) => signature.name === callee) ??
-    program.functions.find((signature) => signature.symbol === callee) ??
+    functions.find((signature) => signature.name === callee) ??
+    functions.find((signature) => signature.symbol === callee) ??
     null
   );
+}
+
+/** Whether a context declares the whole program, and so every callee in it. */
+function declaresEveryCallee(context: Context): boolean {
+  return context.functions !== null;
 }
 
 /**
@@ -706,13 +885,13 @@ function declaredSignature(program: SemanticProgram, callee: string) {
  * provides, passes the arguments the signature takes, and says it returns the
  * type the signature returns.
  */
-function callProblems(program: SemanticProgram, tree: Tree): string[] {
+function callProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
   for (const placed of tree.statements) {
     const prefix = label(placed.block.block.id, placed.statement.line);
     for (const call of statementCalls(placed.statement)) {
-      problems.push(...oneCallProblems(prefix, call, program));
+      problems.push(...oneCallProblems(prefix, call, context));
     }
   }
 
@@ -720,13 +899,18 @@ function callProblems(program: SemanticProgram, tree: Tree): string[] {
 }
 
 /** One call, against the signature the program or the compiler declares it with. */
-function oneCallProblems(prefix: string, call: SemanticCall, program: SemanticProgram): string[] {
+function oneCallProblems(prefix: string, call: SemanticCall, context: Context): string[] {
   const problems: string[] = [];
   const builtin = builtinFor(call.callee);
-  const signature = declaredSignature(program, call.callee);
+  const signature = declaredSignature(context, call.callee);
 
+  // A context that declares no program cannot say what a call it cannot name
+  // takes or returns, so it may neither refuse the call nor read it against a
+  // signature it does not have.
   if (builtin === null && signature === null) {
-    problems.push(`${prefix}${call.callee} is neither a function of the program nor a builtin`);
+    if (declaresEveryCallee(context)) {
+      problems.push(`${prefix}${call.callee} is neither a function of the program nor a builtin`);
+    }
     return problems;
   }
   if (call.builtin && builtin === null) {
@@ -879,7 +1063,15 @@ function jumpReleaseProblems(prefix: string, releases: string[], expected: strin
   return problems;
 }
 
-/** Names freed on the way out, in the order the block declared them. */
+/**
+ * Names freed on the way out, in the order the block declared them. The order
+ * is the resolver's LIFO list, so it is a rule about the names a block owns: a
+ * name the block does not own is reported as not its own and is left out of the
+ * order, because where such a name sits in the list says nothing about the
+ * block's own names. A function's blocks are read exactly this way — it owns
+ * the names its own `let` statements declare, and no others, its parameters
+ * among them.
+ */
 function releaseProblems(prefix: string, releases: string[], declared: string[]): string[] {
   const problems: string[] = [];
   const position = new Map(declared.map((name, index) => [name, index]));
@@ -908,15 +1100,17 @@ function releaseProblems(prefix: string, releases: string[], declared: string[])
 
 /**
  * What a call does beyond computing its result, who owns what it hands back,
- * and what every way out of a block frees on the way.
+ * and what every way out of a block frees on the way. A block is read the same
+ * way whether it is a block of a program or of a function: it owns the names
+ * it declares, in the order it declares them, and frees them on the way out.
  */
-function effectAndOwnershipProblems(tree: Tree, contract?: ProgramContract): string[] {
+function effectAndOwnershipProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
   for (const placed of tree.statements) {
     const prefix = label(placed.block.block.id, placed.statement.line);
     for (const call of statementCalls(placed.statement)) {
-      problems.push(...effectProblems(prefix, call, contractedFunction(contract, call.callee)));
+      problems.push(...effectProblems(prefix, call, contractedFunction(context.contract, call.callee)));
       problems.push(...ownershipProblems(prefix, call));
     }
   }
@@ -955,7 +1149,7 @@ function evaluatedOnceProblems(tree: Tree): string[] {
   for (const placed of tree.statements) {
     const prefix = label(placed.block.block.id, placed.statement.line);
     for (const value of statementValues(placed.statement)) {
-      walkValues(value, (inner) => {
+      walked(value, (inner) => {
         if (inner.k !== "logical" && inner.k !== "coalesce") return;
         if (!hasCall(inner.left)) return;
         const callee = inner.left.k === "call" ? inner.left.call.callee : "a function";
@@ -981,12 +1175,14 @@ function checkName(problems: string[], prefix: string, name: string): void {
 }
 
 /**
- * Every name the program carries is a plain identifier: no register, no stack
+ * Every name a body carries is a plain identifier: no register, no stack
  * offset, no punctuation a target would have to escape before it emitted it.
  * The guarantee that the model names no target lives in the model; this is the
- * check that a program did not smuggle one in through a name.
+ * check that a body did not smuggle one in through a name. A function declares
+ * its own name, its symbol and its parameters, and a program declares the
+ * signatures of the functions it calls.
  */
-function nameProblems(program: SemanticProgram, tree: Tree): string[] {
+function nameProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
   for (const placed of tree.blocks) {
@@ -1020,8 +1216,11 @@ function nameProblems(program: SemanticProgram, tree: Tree): string[] {
       checkName(problems, prefix, statement.field);
     }
     for (const value of statementValues(statement)) {
-      walkValues(value, (inner) => {
-        if (inner.k === "newObject") checkName(problems, prefix, inner.object);
+      walked(value, (inner) => {
+        if (inner.k === "newObject") {
+          checkName(problems, prefix, inner.layout);
+          for (const field of inner.fields) checkName(problems, prefix, field.name);
+        }
         if (inner.k === "loadField") {
           checkName(problems, prefix, inner.layout);
           checkName(problems, prefix, inner.field);
@@ -1033,14 +1232,15 @@ function nameProblems(program: SemanticProgram, tree: Tree): string[] {
     }
   }
 
-  for (const signature of program.functions) {
+  for (const signature of context.functions ?? []) {
     checkName(problems, "", signature.name);
     checkName(problems, "", signature.symbol);
   }
-  for (const layout of Object.values(program.objects)) {
+  for (const layout of Object.values(context.objects)) {
     checkName(problems, "", layout.name);
     for (const field of layout.fields) checkName(problems, "", field.name);
   }
+  for (const name of context.declared) checkName(problems, "", name);
 
   return problems;
 }
@@ -1049,29 +1249,295 @@ function nameProblems(program: SemanticProgram, tree: Tree): string[] {
 /* The check                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** Every way the program is not a program a backend may lower, contract or not. */
+/**
+ * Every way the program is not a program a backend may lower, contract or not.
+ */
 export function semanticIrProblems(program: SemanticProgram, contract?: ProgramContract): string[] {
   const tree = readTree(program);
+  return bodyProblems(programContext(program, contract), programBody(program, tree), tree);
+}
+
+/* -------------------------------------------------------------------------- */
+/* A function, which is the same body plus what only a function has           */
+/* -------------------------------------------------------------------------- */
+
+/** Every rule a body of blocks is checked by, in the order they are stated. */
+function bodyProblems(context: Context, body: Body, tree: Tree): string[] {
   return [
-    ...structureProblems(program, tree),
+    ...structureProblems(body),
     ...controlFlowProblems(tree),
     ...valueProblems(tree),
-    ...typeProblems(program, tree, contract),
-    ...callProblems(program, tree),
-    ...effectAndOwnershipProblems(tree, contract),
+    ...typeProblems(context, tree),
+    ...callProblems(context, tree),
+    ...effectAndOwnershipProblems(context, tree),
     ...evaluatedOnceProblems(tree),
-    ...nameProblems(program, tree),
+    ...nameProblems(context, tree),
   ];
+}
+
+/**
+ * A return hands back what the signature declares: a value of the declared
+ * type, nothing where the return type is void, and nothing at all where the
+ * function returns nothing. The value is read where the block that owns what
+ * it reads is still open, so a return that names a name its own block does not
+ * hold is a return that reads a left.
+ */
+function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): string[] {
+  const problems: string[] = [];
+
+  for (const placed of tree.blocks) {
+    const terminator = placed.block.terminator;
+    if (terminator.k !== "return") continue;
+    const where = label(placed.block.id);
+    const value = terminator.value;
+
+    // A return type the IR does not state is a return nothing can be checked
+    // against, so the return that hands it back is refused rather than read.
+    if (!isSemanticType(fn.returns)) {
+      problems.push(`${where}the body returns ${typeText(fn.returns)}, which is not a type`);
+      continue;
+    }
+    if (fn.returns.kind === "void") {
+      if (value !== null) {
+        problems.push(`${where}the body returns a ${typeText(value.type)} and is declared to return nothing`);
+      }
+      continue;
+    }
+    if (value === null) {
+      problems.push(`${where}the body returns nothing and is declared to return a ${typeText(fn.returns)}`);
+      continue;
+    }
+    if (!convertibleTo(value.type, fn.returns)) {
+      problems.push(`${where}the body returns a ${typeText(value.type)} and is declared to return a ${typeText(fn.returns)}`);
+    }
+    for (const read of localNames(value)) {
+      if (!placed.final.visible.has(read)) {
+        problems.push(`${where}returns ${read}, which the block it is written in does not hold`);
+      }
+    }
+    walked(value, (inner) => problems.push(...valueTypeProblems(where, inner, context)));
+  }
+
+  return problems;
+}
+
+/**
+ * A body with no way out is a function that never returns: every block of it
+ * ends in a way that carries on, so the entry block is where the run ends, and
+ * a return written anywhere but the end of what the block around it can reach
+ * is a return that ends the function before the block is done.
+ */
+function wayOutProblems(fn: SemanticFunction, tree: Tree): string[] {
+  const problems: string[] = [];
+
+  for (const placed of tree.blocks) {
+    const where = label(placed.block.id);
+    if (placed.block === fn.entry) {
+      const terminator = placed.block.terminator;
+      if (terminator.k !== "return") {
+        problems.push(`entry: the entry block ends in ${terminator.k} rather than in a return`);
+      }
+      continue;
+    }
+    // A return in an arm or a loop body is an early return, and the block
+    // around it still has a way through that does not return. A return in a
+    // block of its own is not: it ends the function, and every statement the
+    // block around it writes after it is a statement nothing reaches.
+    if (placed.block.terminator.k === "return" && !placed.guarded && placed.rest > 0) {
+      const around = placed.parent === null ? "the body" : placed.parent.block.id;
+      problems.push(`${where}returns, and ${placed.rest} statements of ${around} after it are never reached`);
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * A function with no body is a function whose contract says what it returns:
+ * a postcondition is a description of a function as well as a body is, so a
+ * body the IR does not carry is only a function the postcondition speaks for.
+ */
+function postconditionProblems(fn: SemanticFunction): string[] {
+  if (fn.entry !== null || fn.ensures.length > 0) return [];
+  return ["the function has no body and no postcondition, so it is not a function"];
+}
+
+/**
+ * A parameter is one value of the type the signature declares, read by the
+ * name the signature gives it. A parameter that is not a value slot is a
+ * parameter a backend would have to give a home of its own, and a parameter
+ * whose type is not the declared one is a body reading what the caller did not
+ * pass.
+ */
+function parameterProblems(fn: SemanticFunction, contract?: FunctionContract): string[] {
+  const problems: string[] = [];
+  const seen = new Set<string>();
+
+  for (const param of fn.params) {
+    if (seen.has(param.name)) {
+      problems.push(`${param.name}: the function takes a parameter of that name twice`);
+    }
+    seen.add(param.name);
+    if (param.kind !== "value") {
+      problems.push(`${param.name}: a parameter is one value, and this one is a ${param.kind}`);
+      continue;
+    }
+    if (!isSemanticType(param.type)) {
+      problems.push(`${param.name}: a parameter is read as ${typeText(param.type)}, which is not a type`);
+    }
+  }
+
+  if (contract !== undefined) {
+    const declared = contract.function.params;
+    if (declared.length !== fn.params.length) {
+      problems.push(`the body takes ${fn.params.length} parameters and the signature declares ${declared.length}`);
+    }
+    for (let index = 0; index < declared.length; index += 1) {
+      const expected = declared[index];
+      const held = fn.params[index];
+      if (expected === undefined || held === undefined) continue;
+      if (held.name !== expected.name) {
+        problems.push(`parameter ${index + 1} is ${held.name} and the signature declares ${expected.name}`);
+      }
+      const wanted = contractType(expected.type);
+      if (wanted === null) {
+        problems.push(`parameter ${index + 1} declares a type that is not a type`);
+        continue;
+      }
+      if (held.kind === "value" && !convertibleTo(held.type, wanted)) {
+        problems.push(`${held.name} is read as a ${typeText(held.type)} and the signature declares a ${typeText(wanted)}`);
+      }
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * A function that allocates builds an object and hands it to its caller, so no
+ * block of its body frees it: the name the return hands back is the caller's to
+ * free, and a body that frees it frees what its caller is about to read. A
+ * body that frees a name it does not own is the same problem it is for a
+ * program, and the shared rules above already report it.
+ */
+function allocationProblems(fn: SemanticFunction, tree: Tree): string[] {
+  if (!fn.allocates) return [];
+  const problems: string[] = [];
+
+  for (const placed of tree.blocks) {
+    const where = label(placed.block.id);
+    const terminator = placed.block.terminator;
+    const returned = terminator.k === "return" ? returnedName(terminator.value) : null;
+    for (const release of placed.block.releases) {
+      if (release === returned) {
+        problems.push(`${where}frees ${release}, which the caller of the function owns`);
+      }
+    }
+    if (terminator.k === "jump") {
+      for (const release of terminator.releases) {
+        if (release === returned) {
+          problems.push(`${where}frees ${release} on the way out, which the caller of the function owns`);
+        }
+      }
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * The conditions a function is held to are the contract's own text: they are
+ * claims about the function rather than things it does, and they are checked
+ * where the contract is parsed. So nothing here types them, and nothing here
+ * may — this says only that the IR carries a condition that is there at all.
+ */
+function conditionProblems(fn: SemanticFunction): string[] {
+  const problems: string[] = [];
+
+  for (const requires of fn.requires) {
+    if (typeof requires !== "string" || requires.trim() === "") {
+      problems.push("a precondition of the function is empty");
+    }
+  }
+  for (const ensures of fn.ensures) {
+    if (typeof ensures !== "string" || ensures.trim() === "") {
+      problems.push("a postcondition of the function is empty");
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * Every way a function is not a function a backend may lower, contract or not.
+ * The context is what the body is read against: a function carries the layouts
+ * its own body writes, and the program contract, where the caller has one,
+ * names every function the body may call.
+ */
+function functionProblems(
+  fn: SemanticFunction,
+  contract: FunctionContract | undefined,
+  program: ProgramContract | undefined,
+): string[] {
+  const found = [...postconditionProblems(fn), ...conditionProblems(fn)];
+  if (fn.entry !== null) {
+    const tree = readFunctionTree(fn, fn.entry);
+    const context = functionContext(fn, program);
+    found.push(
+      ...parameterProblems(fn, contract),
+      ...bodyProblems(context, functionBody(fn.entry, tree), tree),
+      ...returnProblems(fn, context, tree),
+      ...wayOutProblems(fn, tree),
+      ...allocationProblems(fn, tree),
+    );
+  }
+  // Every message names the function it is about, so a file of them is read one
+  // function at a time: a block is called b1 in every function of a file, so
+  // the function is what tells two of them apart.
+  return found.map((problem) => `${fn.symbol}: ${problem}`);
+}
+
+/**
+ * Every way a function is not a function a backend may lower. A function
+ * checked on its own is checked against its own contract, which is not the
+ * whole program, so a call it cannot resolve is left to the module check.
+ */
+export function semanticFunctionProblems(fn: SemanticFunction, contract?: FunctionContract): string[] {
+  return functionProblems(fn, contract, undefined);
+}
+
+/** The same, for every function of a file, in the order the file declares them. */
+export function semanticModuleProblems(module: SemanticModule, program?: ProgramContract): string[] {
+  const problems: string[] = [];
+  for (const fn of module.functions) {
+    const contract = contractedFunction(program, fn.symbol);
+    problems.push(...functionProblems(fn, contract ?? undefined, program));
+  }
+  return problems;
 }
 
 /** Refuses a program that is not one. Throws one CompilerError. */
 export function validateSemanticProgram(program: SemanticProgram, contract?: ProgramContract): void {
-  const problems = semanticIrProblems(program, contract);
+  refuse(`${program.file} is not a program the compiler may lower`, semanticIrProblems(program, contract));
+}
+
+/** Refuses a function that is not one. Throws one CompilerError. */
+export function validateSemanticFunction(fn: SemanticFunction, contract?: FunctionContract): void {
+  refuse(`${fn.symbol} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract));
+}
+
+/** Refuses a module holding a function that is not one. Throws one CompilerError. */
+export function validateSemanticModule(module: SemanticModule, program?: ProgramContract): void {
+  refuse(`${module.path} is not a module the compiler may lower`, semanticModuleProblems(module, program));
+}
+
+/** The one error a caller is given: what it read, and everything wrong with it. */
+function refuse(message: string, problems: string[]): void {
   if (problems.length === 0) return;
   throw new CompilerError({
     category: "SemanticIrError",
     stage: "ir",
-    message: `${program.file} is not a program the compiler may lower`,
+    message,
     detail: problems.join("\n"),
   });
 }

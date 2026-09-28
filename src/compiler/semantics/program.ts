@@ -50,6 +50,12 @@ export interface ContractPhase {
   modules: SourceModule[];
   /** The statements of the entry module, when it is a program rather than a library. */
   body?: ProgramBody;
+  /**
+   * The name each object the program writes is laid out as, by the shape of
+   * the literal that writes it. The IR of a function body reads this to name
+   * the layout of every object the body writes.
+   */
+  objectNames: Record<string, string>;
 }
 
 function contractPhaseError(message: string, detail?: string): CompilerError {
@@ -318,8 +324,10 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const files = records.map((record) => contracts.get(record.path) as FileContract);
   validateFunctionNames(files);
   // The objects a program allocates are named once for the whole program,
-  // because a field is often what another function returns.
-  resolveObjects(files);
+  // because a field is often what another function returns. The names are
+  // carried out of the phase, because the IR that describes a function body
+  // names the layout of every object the body writes.
+  const objectNames = resolveObjects(files);
   // Which of the calls that pass recorded is written out rather than made is
   // a property of the whole graph, so it is decided here, once the graph is
   // complete and before anything is generated from it.
@@ -335,6 +343,7 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   return {
     program,
     modules: records.map((record) => ({ path: record.path, source: record.source })),
+    objectNames: Object.fromEntries(objectNames),
     ...(body === undefined ? {} : { body }),
   };
 }

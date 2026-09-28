@@ -106,11 +106,11 @@ export interface ProgramTarget {
   release(name: string): string;
   /** The line that keeps a reference alive across a release of it. */
   retain(value: string): string;
-  /** The value an object is allocated as, of the layout it was declared with. */
-  allocateObject(layout: string): string;
   /** One field of an object, read and written, of the layout it is a field of. */
   field(object: string, layout: string, field: string): string;
   assignField(object: string, layout: string, field: string, value: string): string;
+  /** The value an object is built as, allocated and with every field written. */
+  buildObject(layout: string, fields: { field: string; value: string }[]): string;
   /** Ends the program with a message. Nothing after it runs. */
   raise(message: string): string;
 
@@ -560,7 +560,12 @@ class ProgramEmitter {
         // declaration, so an array read here is one it never wrote down.
         throw emitError("the emitter cannot write down an array that is not a declaration");
       case "newObject":
-        return this.target.allocateObject(value.object);
+        // The fields are written where the object is built, so a literal in the
+        // arm of a conditional is only built when that arm is taken.
+        return this.target.buildObject(
+          value.layout,
+          value.fields.map((field) => ({ field: this.target.escape(field.name), value: this.expression(field.value) })),
+        );
       case "call":
         return this.call(value.call);
       case "loadField":

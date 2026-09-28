@@ -248,6 +248,8 @@ function literal(text: string, type: string): string {
 
 /** The C driver of one program. */
 class CDriver implements ProgramTarget {
+  /** The objects built so far, so each one built as a value is named apart. */
+  private builds = 0;
   prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
     const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
@@ -348,12 +350,6 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `${RUNTIME_NAME}_retain(${value});`;
   }
 
-  allocateObject(layout: string): string {
-    // A layout the contract laid out is a struct the driver declared, so the
-    // object is allocated as one and nothing of the layout is written twice.
-    return `(struct ${layout}*)${RUNTIME_NAME}_object_new(sizeof(struct ${layout}), _Alignof(struct ${layout}))`;
-  }
-
   field(object: string, layout: string, field: string): string {
     // A reference is held as a pointer, and a pointer has no fields, so the
     // layout the access names is what the field is read through.
@@ -362,6 +358,20 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 
   assignField(object: string, layout: string, field: string, value: string): string {
     return `((struct ${layout}*)${object})->${field} = ${value};`;
+  }
+
+  buildObject(layout: string, fields: { field: string; value: string }[]): string {
+    // An object is one value the program holds, so it is allocated and filled
+    // where it is written, and a value may not be a statement. C has no way to
+    // bind a temporary inside an expression, so this is a statement
+    // expression: a GNU extension, which this driver needs because it builds
+    // with gcc, and the only form that keeps the object inside the arm of a
+    // conditional it was written in. A backend that must speak standard C
+    // instead writes the arms of such a conditional as control flow and joins
+    // them on a name, which is the same program with more lines.
+    const name = `blaze_object_${(this.builds += 1)}`;
+    const written = fields.map((one) => `((struct ${layout}*)${name})->${one.field} = ${one.value};`);
+    return `({ struct ${layout}* ${name} = (struct ${layout}*)${RUNTIME_NAME}_object_new(sizeof(struct ${layout}), _Alignof(struct ${layout})); ${written.join(" ")} ${name}; })`;
   }
 
   raise(message: string): string {

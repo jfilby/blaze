@@ -3,6 +3,12 @@
  *
  *   program -> contract phase -> semantic IR -> target generation -> output
  *
+ * The IR covers a program body and every function the program declares, each
+ * as a whole: its signature, the conditions it is held to, its effects, the
+ * objects it lays out, the calls it makes, and its body. `blaze ir` prints any
+ * of them, and reads IR back from a file for the same validation a resolved
+ * program gets.
+ *
  * The contract phase (semantics/program.ts) reads and contracts every file of
  * the program and validates the whole graph. Nothing generates target code
  * until that phase has produced a valid program contract, and every backend is
@@ -31,10 +37,14 @@ import { parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
+import type { SemanticFunction } from "./core/semantic-ir.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
+import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
+import { validateSemanticFunction } from "./semantics/ir-validate.ts";
+import { printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
 import { validateSemanticProgram } from "./semantics/ir-validate.ts";
 import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.ts";
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
@@ -554,6 +564,37 @@ interface CompilationUnit {
   parsed: ParsedContract;
 }
 
+/**
+ * Every function the program declares, as the IR holds it: the signature, the
+ * conditions, the effects and the body. The IR is the boundary between what a
+ * model reasons about and what the compiler generates, so a function is
+ * described here once and everything downstream reads the same description.
+ */
+function functionContext(phase: { program: ProgramContract; objectNames: Record<string, string> }): FunctionContext {
+  return {
+    objectNames: phase.objectNames,
+    functions: Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions))),
+  };
+}
+
+function semanticFunctions(program: ProgramContract, objectNames: Record<string, string>): Record<string, SemanticFunction> {
+  const context: FunctionContext = {
+    objectNames,
+    functions: Object.fromEntries(program.files.flatMap((file) => Object.entries(file.functions))),
+  };
+  const resolved: Record<string, SemanticFunction> = {};
+  for (const file of program.files) {
+    for (const [name, contract] of Object.entries(file.functions)) {
+      const semantic = resolveFunction(contract, context);
+      // A function is checked before it is shown to anything, so a function
+      // that is not one a backend may lower never reaches a model.
+      validateSemanticFunction(semantic, contract);
+      resolved[name] = semantic;
+    }
+  }
+  return resolved;
+}
+
 /** What generation produced for one function of a build. */
 interface UnitGeneration {
   unit: CompilationUnit;
@@ -780,6 +821,7 @@ export async function runBuild(
     });
     const program = phase.program;
     const units = compilationUnits(program, phase.body !== undefined);
+    const semantics = semanticFunctions(program, phase.objectNames);
     const sourceHash = hashValue(phase.modules.map((module) => [module.path, module.source]));
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
@@ -957,6 +999,7 @@ export async function runBuild(
         unitFile: unit.file,
         parsed: unit.parsed,
         program,
+        semantics,
         sources: phase.modules,
         target,
         output: outputKind,
@@ -1565,6 +1608,10 @@ export interface SemanticIrOptions {
    * contract before it is printed, so nothing reaches a backend unchecked.
    */
   from?: string;
+  /** The function to describe, rather than the program the project runs. */
+  function?: string;
+  /** Every function of every file, rather than one. */
+  all?: boolean;
 }
 
 /**
@@ -1581,12 +1628,32 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     entry,
     read: moduleReader(directory),
   });
+  // A function is the unit the IR describes, so a function can be asked for by
+  // name, and every function of the program can be asked for at once.
+  if (options.function !== undefined || options.all === true) {
+    const semantics = semanticFunctions(phase.program, phase.objectNames);
+    if (options.function === undefined) {
+      return phase.program.files
+        .map((file) => printSemanticModule(resolveModule(file.path, file.functions, functionContext(phase))))
+        .join("\n");
+    }
+    const wanted = semantics[options.function];
+    if (wanted === undefined) {
+      throw new CompilerError({
+        category: "InputError",
+        stage: "ir",
+        message: `${projectIdFor(inputPath)} has no function called ${options.function}`,
+        detail: `it declares ${Object.keys(semantics).join(", ") || "nothing"}`,
+      });
+    }
+    return printSemanticFunction(wanted);
+  }
   if (phase.body === undefined) {
     throw new CompilerError({
       category: "InputError",
       stage: "ir",
       message: `${projectIdFor(inputPath)} has no program body`,
-      detail: "the semantic IR is the program a project runs; this project only declares functions",
+      detail: "this project declares functions and runs nothing of its own; ask for one with --function, or for all of them with --all",
     });
   }
   const program =

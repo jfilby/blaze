@@ -28,8 +28,10 @@ import {
 } from "../core/semantic-ir.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { semanticIrProblems, validateSemanticProgram } from "../semantics/ir-validate.ts";
-import { parseSemanticProgram, printSemanticProgram } from "../semantics/ir-text.ts";
+import { parseSemanticModule, parseSemanticProgram, printSemanticModule, printSemanticProgram } from "../semantics/ir-text.ts";
+import { run } from "../core/process.ts";
 import { generateProgramDriver } from "../toolchain/driver.ts";
+import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "../runtime/abi.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import type { ProgramContract } from "../core/types.ts";
 import { phaseOf } from "./phase.ts";
@@ -43,6 +45,25 @@ function resolved(files: Record<string, string>): { program: SemanticProgram; co
 const NUMBER = { kind: "primitive", name: "f64" } as const;
 const USIZE = { kind: "primitive", name: "usize" } as const;
 const I64 = { kind: "primitive", name: "i64" } as const;
+
+/**
+ * The C driver of a program, compiled and linked into an executable, the way a
+ * build does. An IR node that lowers to text no compiler takes is caught here
+ * rather than by a text assertion that passes on nonsense.
+ */
+async function deliverDriver(program: SemanticProgram): Promise<{ binary: string; directory: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-ir-driver-"));
+  const header = join(directory, `${RUNTIME_NAME}.h`);
+  const source = join(directory, `${RUNTIME_NAME}.c`);
+  const driver = join(directory, "program.c");
+  const binary = join(directory, "program");
+  writeFileSync(header, runtimeHeaderSource(), "utf8");
+  writeFileSync(source, runtimeSourceSource(), "utf8");
+  writeFileSync(driver, generateProgramDriver(program), "utf8");
+  const built = run("gcc", ["-std=c11", "-O2", "-o", binary, driver, source, "-lm"], { timeoutMs: 120_000 });
+  assert.equal(built.code, 0, built.stderr);
+  return { binary, directory };
+}
 
 test("a value is what it is, read off the type it states", () => {
   assert.equal(valueKind({ k: "local", type: NUMBER, name: "total" }), "number");
@@ -172,6 +193,24 @@ test("a program round trips through the text a model may write it in", () => {
   // same program: a call is still made against the contract it was made against.
   assert.deepEqual(read.entry.statements, program.entry.statements);
   assert.deepEqual(read.entry.releases, program.entry.releases);
+});
+
+test("a function round trips through the text a model may write it in", async () => {
+  const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
+  const printed = await runSemanticIr(example, { all: true });
+  // Reading a module back binds every signature, effect, call and layout to
+  // the contract, so what comes back is the same module or an error.
+  const phase = phaseOf(
+    "typescript",
+    { "1.ts": readFileSync(new URL("../../examples/binarytrees/1.ts", import.meta.url).pathname, "utf8") },
+    "1.ts",
+  );
+  const read = parseSemanticModule(printed, phase.program);
+  assert.equal(printSemanticModule(read), printed);
+  assert.deepEqual(
+    read.functions.map((fn) => fn.symbol),
+    ["blaze_main", "checksum", "createTree"],
+  );
 });
 
 test("a reference with no layout is a type the text form writes and reads back", () => {
@@ -344,7 +383,7 @@ test("a program that is not one is refused before a target is asked for anything
   assert.match(refused, /neverDeclared/);
 });
 
-test("the objects and the errors the IR states are what the runtime is asked for", () => {
+test("the objects and the errors the IR states are what the runtime is asked for", async () => {
   // A field read, a field write, an object, a retain and a raise are IR
   // operations, and both backends write them as the runtime's own services: a
   // program that states one is a program a backend may lower, not one it
@@ -361,9 +400,14 @@ test("the objects and the errors the IR states are what the runtime is asked for
     entry: {
       id: "entry",
       releases: ["node"],
-      terminator: { k: "return" },
+      terminator: { k: "return", value: null },
       statements: [
-        { k: "let", slot: { kind: "object", name: "node", mutable: true, type: reference }, value: { k: "newObject", type: reference, object: "Object1" }, line: 1 },
+        {
+          k: "let",
+          slot: { kind: "object", name: "node", mutable: true, type: reference },
+          value: { k: "newObject", type: reference, layout: "Object1", fields: [] },
+          line: 1,
+        },
         { k: "storeField", object: node, layout: "Object1", field: "value", value: { k: "const", type: NUMBER, text: "7" }, line: 2 },
         { k: "retain", value: node, line: 3 },
         { k: "printNumber", value: { k: "loadField", type: NUMBER, object: node, layout: "Object1", field: "value" }, line: 4 },
@@ -384,6 +428,85 @@ test("the objects and the errors the IR states are what the runtime is asked for
   assert.match(nim, /\(cast\[Object1\]\(node\)\)\.value = 7\.0/);
   assert.match(nim, /blaze_rt_retain/);
   assert.match(nim, /blaze_rt_raise\("boom"\)/);
+
+  // An object is one value, and C has no way to spell a value out of several
+  // statements without a statement expression. The text matching above would
+  // pass on a line no compiler takes, so the driver is compiled and run here:
+  // what an object literal lowers to has to be a program.
+  const built: SemanticProgram = {
+    ...program,
+    entry: {
+      id: "entry",
+      releases: [],
+      terminator: { k: "return", value: null },
+      statements: [
+        {
+          k: "let",
+          slot: { kind: "object", name: "node", mutable: true, type: reference },
+          value: {
+            k: "newObject",
+            type: reference,
+            layout: "Object1",
+            fields: [{ name: "value", value: { k: "const", type: NUMBER, text: "7" } }],
+          },
+          line: 1,
+        },
+        {
+          k: "printNumber",
+          value: { k: "loadField", type: NUMBER, object: node, layout: "Object1", field: "value" },
+          line: 2,
+        },
+        { k: "printNewline", line: 2 },
+      ],
+    },
+  };
+  validateSemanticProgram(built);
+  const { binary, directory } = await deliverDriver(built);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.equal(ran.stdout, "7\n");
+  assert.ok(directory !== "");
+});
+
+test("an object built in the arm of a conditional is built when that arm is taken", async () => {
+  // `depth-- > 0 ? {left: createTree(depth), ...} : {left: null, right: null}`
+  // calls createTree once. An IR that hoisted either object out of its arm
+  // would build both, and the program the model reads would not be the program
+  // the source writes.
+  const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
+  const printed = await runSemanticIr(example, { function: "createTree" });
+
+  const calls = (printed.match(/createTree \[arg/g) ?? []).length;
+  const objects = (printed.match(/new_object/g) ?? []).length;
+  // The body says: compare, then choose one of two objects, and each object
+  // holds two fields.
+  assert.equal(calls, 2, "each arm builds one object, so each names the call once");
+  assert.equal(objects, 2, "one object per arm, and neither is hoisted out of it");
+  assert.doesNotMatch(printed, /store_field/);
+  // The arms are inside the selection, which is what keeps them lazy.
+  assert.match(printed, /return \[select\[/);
+  assert.match(printed, /new_object\[ref<Object1>\] Object1 left .* right /);
+});
+
+test("a function is described whole, and reads back as itself", async () => {
+  // A function is not a body: the IR carries what it is called by, what it is
+  // held to, what it does beyond computing its result, and its body. Every
+  // function of a real project, printed and parsed, has to come back the same.
+  const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
+  const printed = await runSemanticIr(example, { all: true });
+  assert.match(printed, /^function checksum\(node: ref<any>\) -> f64$/m);
+  assert.match(printed, /^ {2}allocates no$/m);
+  assert.match(printed, /^ {2}effects io syscall$/m);
+  assert.match(printed, /^ {2}param value\[f64\] depth mutable$/m);
+  // The body is the function's: a field read, a recursive call, a return.
+  assert.match(printed, /return \[add\[f64\]/);
+  assert.match(printed, /load_field\[ref<any>\]/);
+
+  // A function the contract states a result for has no body, and says so.
+  const library = new URL("../../examples/hello_world/blaze.toml", import.meta.url).pathname;
+  const said = await runSemanticIr(library, { function: "dotProduct" });
+  assert.match(said, /ensures /);
+  assert.doesNotMatch(said, /block entry/);
 });
 
 test("the IR of a project is what the compiler resolved, and reads back as itself", async () => {

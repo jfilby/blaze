@@ -91,7 +91,7 @@
  *   local[i32] t1
  *   bool[bool] true
  *   nothing[ref Node]
- *   new_object[ref Node] Node
+ *   [new_object[ref Node] Node left local[ref Node] n right nothing[ref Node]]
  *   argv[usize]
  *   [length[usize] t1]
  *   [element[i32] t1 const[i32] 0]
@@ -106,6 +106,42 @@
  * A type is the IR's own name for it: `i32`, `bool`, `text`, `void`, `[]f64`,
  * `[i32; 3]`, `f64*` and `ref Node`. The header states types as the contract
  * names them, `ptr<f64>` and `ref<Node>`, so both spellings are read here.
+ *
+ * A function is a header and a body, and the header is everything about the
+ * function that is not its body: what it is called by, what it is held to,
+ * what it does beyond computing its result, the objects it lays out, the calls
+ * it makes and the parameters its body reads. The body is the grammar above,
+ * written under the header, and a function whose contract states a
+ * postcondition rather than a body ends at its parameters.
+ *
+ *   function createTree(depth: f64) -> ref<Object1>
+ *     requires none
+ *     ensures none
+ *     allocates yes
+ *     prints no
+ *     reads_argv no
+ *     effects memory
+ *     object Object1 size 16 align 8
+ *       field left: ref<any> at 0
+ *       field right: ref<any> at 8
+ *     call checksum
+ *     param value[f64] depth mutable
+ *     block entry: releases[]
+ *       let object[ref<Object1>] node = [new_object[ref<Object1>] Object1 ] @3
+ *       return local[ref<Object1>] node @5
+ *
+ * The header is written in that order and read in it, one line per declaration
+ * except a run of conditions, which is as long as there are. A symbol that is
+ * not the name is written after `as`, as `function main as blaze_main()` is.
+ *
+ * Every line of that header is read back out of the contract rather than out
+ * of the text, so a function written in this form cannot widen its own
+ * signature, invent an effect or lay an object out for itself: the contract is
+ * what the text is checked against, and a line that disagrees with it is an
+ * error naming itself. `none` is how a list with nothing in it is written, a
+ * condition is a string in quotes because a condition is a claim in the
+ * contract's own language, and a file of functions is a version, the file it
+ * was written in, and the functions themselves.
  */
 
 import { CompilerError } from "../core/errors.ts";
@@ -117,7 +153,9 @@ import {
   type SemanticAssignOp,
   type SemanticBlock,
   type SemanticCall,
+  type SemanticFunction,
   type SemanticLoop,
+  type SemanticModule,
   type SemanticProgram,
   type SemanticSlot,
   type SemanticStatement,
@@ -126,10 +164,13 @@ import {
   type SemanticType,
   type SemanticValue,
   type UnaryOp,
+  slotType,
+  typeEquals,
   typeText,
 } from "../core/semantic-ir.ts";
 import {
   PRIMITIVE_TYPES,
+  type CallEdge,
   type Effect,
   type FunctionContract,
   type FunctionSignature,
@@ -179,8 +220,22 @@ const UNARY_OPS: readonly UnaryOp[] = ["neg", "pos", "not", "bitNot"];
 /** Who owns what a call hands back, each of which prints as the IR names it. */
 const OWNERSHIPS: readonly Ownership[] = ["none", "borrowed", "owned"];
 
-/** Whether the caller must keep the result alive, which the IR states as a flag. */
-const RETAINS: readonly string[] = ["yes", "no"];
+/** The two ways a flag is stated, which is every flag the IR writes as a word. */
+const FLAGS: readonly string[] = ["yes", "no"];
+
+/** What a function may do beyond computing its result, as the contract names it. */
+const EFFECTS: readonly Effect[] = [
+  "memory",
+  "io",
+  "filesystem",
+  "network",
+  "syscall",
+  "random",
+  "clock",
+  "panic",
+  "exception",
+  "atomic"
+];
 
 /** What a name may hold, which is the word a slot is written with. */
 const SLOT_KINDS: readonly string[] = ["value", "text", "buffer", "object"];
@@ -262,10 +317,11 @@ function signatureText(signature: FunctionSignature): string {
 }
 
 /** An object layout, with every field it holds on the line under it. */
-function objectLines(name: string, layout: ObjectLayout): string[] {
-  const lines = [`object ${name} size ${layout.size} align ${layout.align}`];
+function objectLines(name: string, layout: ObjectLayout, indent = 0): string[] {
+  const pad = " ".repeat(indent);
+  const lines = [`${pad}object ${name} size ${layout.size} align ${layout.align}`];
   for (const field of layout.fields) {
-    lines.push(`  field ${field.name}: ${typeToString(parseType(field.type))} at ${field.offset}`);
+    lines.push(`${pad}  field ${field.name}: ${typeToString(parseType(field.type))} at ${field.offset}`);
   }
   return lines;
 }
@@ -323,11 +379,9 @@ function valueText(value: SemanticValue): string {
     case "buffer":
       return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] ${value.length} ${value.values.map(valueText).join(" ")}]`;
     case "newObject":
-      return `new_object[${typeText(value.type)}] ${value.object}`;
+      return `[new_object[${typeText(value.type)}] ${value.layout} ${value.fields.map((field) => `${field.name} ${valueText(field.value)}`).join(" ")}]`;
     case "loadField":
       return `[load_field[${typeText(value.type)}] ${valueText(value.object)} ${value.layout} ${value.field}]`;
-    case "newObject":
-      return `new_object[${typeText(value.type)}] ${value.object}`;
     case "call":
       return `[call[${typeText(value.type)}] ${callText(value.call)}]`;
     case "arith":
@@ -359,7 +413,9 @@ function valueText(value: SemanticValue): string {
 function terminatorText(terminator: SemanticTerminator, indent: number): string | null {
   const pad = " ".repeat(indent);
   if (terminator.k === "next") return null;
-  if (terminator.k === "return") return `${pad}return`;
+  if (terminator.k === "return") {
+    return terminator.value === null ? `${pad}return` : `${pad}return ${valueText(terminator.value)}`;
+  }
   const releases = terminator.releases.length === 0 ? "" : ` [${terminator.releases.join(" ")}]`;
   return `${pad}jump ${terminator.target}${releases}`;
 }
@@ -463,6 +519,65 @@ export function printSemanticProgram(program: SemanticProgram): string {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Writing a function                                                          */
+/* -------------------------------------------------------------------------- */
+
+/** A function as the contract states it, under the name a call reaches it by. */
+function functionText(fn: SemanticFunction): string {
+  const alias = fn.symbol === fn.name ? "" : ` as ${fn.symbol}`;
+  const params = fn.params.map((param) => `${param.name}: ${typeText(slotType(param))}`).join(", ");
+  return `function ${fn.name}${alias}(${params}) -> ${typeText(fn.returns)}`;
+}
+
+/** What a flag of a function is stated as, which is the word a call states one with. */
+function flagText(value: boolean): string {
+  return value ? "yes" : "no";
+}
+
+/**
+ * The conditions a function is held to, one to a line and quoted, because a
+ * condition is a claim in the contract's own language and is not a word.
+ */
+function conditionLines(keyword: "requires" | "ensures", conditions: readonly string[]): string[] {
+  if (conditions.length === 0) return [`  ${keyword} none`];
+  return conditions.map((condition) => `  ${keyword} ${stringLiteral(condition)}`);
+}
+
+/**
+ * Everything about a function that is not its body: its signature, its
+ * conditions, what it does beyond computing its result, the objects it lays out,
+ * the calls it makes, its parameters, and then the body itself where the
+ * contract gave one. The header is the whole of what makes this a function
+ * rather than a body, so it is written first and in one fixed order.
+ */
+function functionLines(fn: SemanticFunction): string[] {
+  const lines = [functionText(fn)];
+  lines.push(...conditionLines("requires", fn.requires));
+  lines.push(...conditionLines("ensures", fn.ensures));
+  lines.push(`  allocates ${flagText(fn.allocates)}`);
+  lines.push(`  prints ${flagText(fn.prints)}`);
+  lines.push(`  reads_argv ${flagText(fn.readsArgv)}`);
+  lines.push(`  effects ${fn.effects.length === 0 ? "none" : fn.effects.join(" ")}`);
+  for (const name of Object.keys(fn.objects)) lines.push(...objectLines(name, fn.objects[name], 2));
+  for (const edge of fn.calls) lines.push(`  call ${edge.callee}`);
+  for (const param of fn.params) lines.push(`  param ${slotText(param)}`);
+  if (fn.entry !== null) lines.push(...blockLines(fn.entry, 2, null));
+  return lines;
+}
+
+/** The whole function as text: its signature, its conditions, and its body. */
+export function printSemanticFunction(fn: SemanticFunction): string {
+  return `${functionLines(fn).join("\n")}\n`;
+}
+
+/** Every function of a file, as text. */
+export function printSemanticModule(module: SemanticModule): string {
+  const lines = [`ir ${VERSION}`, `module ${stringLiteral(module.path)}`];
+  for (const fn of module.functions) lines.push("", ...functionLines(fn));
+  return `${lines.join("\n")}\n`;
+}
+
+/* -------------------------------------------------------------------------- */
 /* The contract                                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -503,6 +618,19 @@ class ContractBinder {
   bind(name: string, line: number): BoundCall {
     const bound = this.lookup(name);
     if (bound !== null) return bound;
+    const compiled = this.names().join(", ") || "no functions";
+    fail(line, `a function this program declares, one of: ${compiled}`, name);
+  }
+
+  /**
+   * The contract of a function the text describes whole, which is what its own
+   * signature, conditions, flags, layouts and call edges are read against. A
+   * builtin is the compiler's own and is never a declaration of its own.
+   */
+  declaration(name: string, line: number): FunctionContract {
+    if (builtinFor(name) === null && Object.prototype.hasOwnProperty.call(this.functions, name)) {
+      return this.functions[name];
+    }
     const compiled = this.names().join(", ") || "no functions";
     fail(line, `a function this program declares, one of: ${compiled}`, name);
   }
@@ -879,7 +1007,13 @@ class IrScanner {
       }
       case "new_object": {
         const type = this.typed();
-        return this.bare(bracketed, { k: "newObject", type, object: this.word() });
+        const layout = this.word();
+        const fields: { name: string; value: SemanticValue }[] = [];
+        while (this.more()) {
+          const name = this.word();
+          fields.push({ name, value: this.value() });
+        }
+        return this.closing(bracketed, { k: "newObject", type, layout, fields });
       }
       case "load_field":
         return this.closing(bracketed, {
@@ -976,7 +1110,7 @@ class IrScanner {
     const ownership = this.oneOf(this.word(), OWNERSHIPS);
     this.keyword("retain");
     this.expect("=");
-    const retain = this.oneOf(this.word(), RETAINS);
+    const retain = this.oneOf(this.word(), FLAGS);
     return {
       callee,
       signature: bound.signature,
@@ -1014,7 +1148,7 @@ class IrScanner {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Reading the program                                                         */
+/* The lines a body is written on                                            */
 /* -------------------------------------------------------------------------- */
 
 /** One line of the text, with the indentation it was written at. */
@@ -1062,11 +1196,15 @@ function restOf(line: IrLine): string {
   return line.text.slice(headOf(line).length).trim();
 }
 
-/** One program, read a line at a time in the shape the printer wrote it. */
-class ProgramReader {
-  private readonly lines: IrLine[];
-  private readonly binder: ContractBinder;
-  private at = 0;
+/**
+ * The lines a body is read from: the blocks, the statements in them, and where
+ * control goes when they are done. A program's body and a function's body are
+ * one grammar, so both readers are this and differ only in what surrounds it.
+ */
+class BlockReader {
+  protected readonly lines: IrLine[];
+  protected readonly binder: ContractBinder;
+  protected at = 0;
 
   constructor(lines: IrLine[], binder: ContractBinder) {
     this.lines = lines;
@@ -1077,12 +1215,12 @@ class ProgramReader {
   /* Lines                                                                  */
   /* ---------------------------------------------------------------------- */
 
-  private peek(): IrLine | null {
+  protected peek(): IrLine | null {
     return this.at < this.lines.length ? this.lines[this.at] : null;
   }
 
   /** The line that is read now, which has to be written at this level. */
-  private line(indent: number): IrLine {
+  protected line(indent: number): IrLine {
     const line = this.peek();
     if (line === null) {
       fail(this.after(), `a line written at ${indent} spaces of indentation`, "the end of the text");
@@ -1094,20 +1232,294 @@ class ProgramReader {
   }
 
   /** The line a line that is missing would have been written on. */
-  private after(): number {
+  protected after(): number {
     const line = this.at > 0 ? this.lines[this.at - 1] : null;
     return line === null ? 1 : line.number + 1;
   }
 
-  private atIndent(indent: number): boolean {
+  /**
+ * Where an error about a run of lines belongs: the first of them when there
+ * was one, and where they should have ended when there was not.
+ */
+  protected where(seen: IrLine | null): { number: number; text: string } {
+    const line = seen ?? this.peek();
+    return line === null ? { number: this.after(), text: "the end of the text" } : line;
+  }
+
+  protected atIndent(indent: number): boolean {
     const line = this.peek();
     return line !== null && line.indent === indent;
   }
 
-  private scanner(line: IrLine): IrScanner {
+  /** Nothing more on the lines, which every whole text ends with. */
+  protected finish(what: string): void {
+    const line = this.peek();
+    if (line !== null) fail(line.number, what, line.text);
+  }
+
+  protected scanner(line: IrLine): IrScanner {
     return new IrScanner(restOf(line), line.number, this.binder);
   }
 
+  /* ---------------------------------------------------------------------- */
+  /* Blocks                                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  /** A block, the statements in it, and where control goes when they are done. */
+  protected block(indent: number, statement: boolean): ReadBlock {
+    const line = this.line(indent);
+    if (headOf(line) !== "block") fail(line.number, '"block" and the name of the block', line.text);
+    this.at += 1;
+    const scanner = this.scanner(line);
+    const id = scanner.word();
+    scanner.expect(":");
+    scanner.keyword("releases");
+    const releases = scanner.names();
+    let source = 0;
+    if (statement) source = scanner.mark();
+    else scanner.end();
+    const body: SemanticBlock = {
+      id,
+      statements: this.statements(indent + 2),
+      releases,
+      terminator: this.terminator(indent),
+    };
+    return { body, line: source };
+  }
+
+  protected terminator(indent: number): SemanticTerminator {
+    const line = this.peek();
+    if (line === null || line.indent !== indent) return { k: "next" };
+    const head = headOf(line);
+    if (head !== "return" && head !== "jump") return { k: "next" };
+    this.at += 1;
+    const scanner = this.scanner(line);
+    if (head === "return") {
+      scanner.skip();
+      const value = scanner.peek() === "" ? null : scanner.value();
+      scanner.end();
+      return { k: "return", value };
+    }
+    const target = scanner.word();
+    scanner.skip();
+    const releases = scanner.peek() === "[" ? scanner.names() : [];
+    scanner.end();
+    return { k: "jump", target, releases };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Statements                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  protected statements(indent: number): SemanticStatement[] {
+    const statements: SemanticStatement[] = [];
+    while (this.atIndent(indent)) statements.push(this.statement(indent));
+    return statements;
+  }
+
+  protected statement(indent: number): SemanticStatement {
+    const line = this.line(indent);
+    const head = headOf(line);
+    const scanner = this.scanner(line);
+    this.at += 1;
+    switch (head) {
+      case "let": {
+        const slot = this.slot(scanner);
+        scanner.expect("=");
+        const value = scanner.value();
+        return { k: "let", slot, value, line: scanner.mark() };
+      }
+      case "set": {
+        const name = scanner.word();
+        const op = this.assignOp(scanner);
+        const value = scanner.value();
+        return { k: "set", name, op, value, line: scanner.mark() };
+      }
+      case "set_element": {
+        const buffer = scanner.word();
+        const index = scanner.value();
+        const op = this.assignOp(scanner);
+        const value = scanner.value();
+        return { k: "setElement", buffer, index, op, value, line: scanner.mark() };
+      }
+      case "step": {
+        const name = scanner.word();
+        const op = scanner.oneOf(scanner.token(), STEP_OPS);
+        const side = scanner.word();
+        if (side !== "pre" && side !== "post") scanner.refuse('"pre" or "post"', side);
+        return { k: "step", name, op, prefix: side === "pre", line: scanner.mark() };
+      }
+      case "if": {
+        const condition = scanner.value();
+        const at = scanner.mark();
+        const then = this.block(indent + 2, false).body;
+        let otherwise: SemanticBlock | null = null;
+        const next = this.peek();
+        if (next !== null && next.indent === indent && headOf(next) === "else") {
+          this.at += 1;
+          this.scanner(next).end();
+          otherwise = this.block(indent + 2, false).body;
+        }
+        return { k: "if", condition, then, otherwise, line: at };
+      }
+      case "while":
+      case "do_while": {
+        const condition = scanner.value();
+        const { header, exit, at } = this.loopTail(scanner);
+        const body = this.block(indent + 2, false).body;
+        const kind = head === "while" ? "while" : "doWhile";
+        return { k: "loop", loop: { kind, condition, header, exit, body }, line: at };
+      }
+      case "for": {
+        const type = scanner.typed();
+        const variable = scanner.word();
+        scanner.keyword("from");
+        const from = scanner.value();
+        scanner.keyword("to");
+        const to = scanner.value();
+        const bound = scanner.word();
+        if (bound !== "inclusive" && bound !== "exclusive") {
+          scanner.refuse('"inclusive" or "exclusive"', bound);
+        }
+        const direction = scanner.word();
+        if (direction !== "up" && direction !== "down") scanner.refuse('"up" or "down"', direction);
+        scanner.keyword("step");
+        // A step no loop names is the word `default`, and no value is written
+        // with a word that starts with a d.
+        scanner.skip();
+        let step: SemanticValue | null = null;
+        if (scanner.peek() === "d") scanner.keyword("default");
+        else step = scanner.value();
+        const { header, exit, at } = this.loopTail(scanner);
+        const body = this.block(indent + 2, false).body;
+        return {
+          k: "loop",
+          loop: {
+            kind: "counted",
+            variable,
+            type,
+            from,
+            to,
+            inclusive: bound === "inclusive",
+            down: direction === "down",
+            step,
+            header,
+            exit,
+            body,
+          },
+          line: at,
+        };
+      }
+      case "for_of": {
+        const elementType = scanner.contractType();
+        const element = scanner.word();
+        scanner.keyword("of");
+        const of = scanner.word();
+        scanner.keyword("index");
+        const index = scanner.word();
+        scanner.keyword("length");
+        const length = scanner.value();
+        const { header, exit, at } = this.loopTail(scanner);
+        const body = this.block(indent + 2, false).body;
+        return { k: "loop", loop: { kind: "each", index, element, elementType, of, length, header, exit, body }, line: at };
+      }
+      case "block": {
+        // The statement is the head of its own block, so the block reads the line.
+        this.at -= 1;
+        const read = this.block(indent, true);
+        return { k: "block", body: read.body, line: read.line };
+      }
+      case "print_text":
+        return { k: "printText", value: scanner.value(), line: scanner.mark() };
+      case "print_newline":
+        return { k: "printNewline", line: scanner.mark() };
+      case "print_number":
+        return { k: "printNumber", value: scanner.value(), line: scanner.mark() };
+      case "retain":
+        return { k: "retain", value: scanner.value(), line: scanner.mark() };
+      case "call": {
+        const returns = scanner.typed();
+        const call = scanner.call(returns);
+        return { k: "call", call, line: scanner.mark() };
+      }
+      case "raise":
+        return { k: "raise", message: scanner.value(), line: scanner.mark() };
+      case "store_field": {
+        const object = scanner.value();
+        const layout = scanner.word();
+        const field = scanner.word();
+        const value = scanner.value();
+        return { k: "storeField", object, layout, field, value, line: scanner.mark() };
+      }
+      default:
+        fail(line.number, "a statement", line.text);
+    }
+  }
+
+  /** The blocks a `break` and a `continue` leave a loop for. */
+  protected loopTail(scanner: IrScanner): { header: string; exit: string; at: number } {
+    scanner.keyword("header");
+    const header = scanner.word();
+    scanner.keyword("exit");
+    const exit = scanner.word();
+    return { header, exit, at: scanner.mark() };
+  }
+
+  /** An assignment as it is written, which the IR states as an operator. */
+  protected assignOp(scanner: IrScanner): SemanticAssignOp {
+    return scanner.oneOf(scanner.token(), ASSIGN_OPS);
+  }
+
+  /** What a declared name holds, read as the declaration states it. */
+  protected slot(scanner: IrScanner): SemanticSlot {
+    const kind = scanner.word();
+    if (!SLOT_KINDS.includes(kind)) scanner.refuse(`a slot, one of ${SLOT_KINDS.join(", ")}`, kind);
+    if (kind === "buffer") {
+      const name = scanner.word();
+      const mutable = this.mutable(scanner);
+      scanner.keyword("element");
+      const element = scanner.contractType();
+      const length = scanner.integer();
+      return { kind, name, mutable, element, length };
+    }
+    if (kind === "text") {
+      const name = scanner.word();
+      return { kind, name, mutable: this.mutable(scanner) };
+    }
+    const type = scanner.typed();
+    const name = scanner.word();
+    const mutable = this.mutable(scanner);
+    return kind === "value" ? { kind, name, mutable, type } : { kind: "object", name, mutable, type };
+  }
+
+  /** Whether the program may change a name, which the IR states as a flag. */
+  protected mutable(scanner: IrScanner): boolean {
+    const state = scanner.word();
+    if (state !== "mutable" && state !== "immutable") scanner.refuse('"mutable" or "immutable"', state);
+    return state === "mutable";
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The entry points                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Reads IR text back, binding every callee to the contract it was declared in.
+ * A line the IR cannot express, a name the contract does not declare, or a
+ * malformed type is an error naming the line it was written on, never a
+ * silently dropped instruction.
+ */
+export function parseSemanticProgram(text: string, contract: ProgramContract): SemanticProgram {
+  return new ProgramReader(readLines(text), new ContractBinder(contract)).program();
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading the program                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** One program, read a line at a time in the shape the printer wrote it. */
+class ProgramReader extends BlockReader {
   /* ---------------------------------------------------------------------- */
   /* The program                                                            */
   /* ---------------------------------------------------------------------- */
@@ -1129,8 +1541,7 @@ class ProgramReader {
     }
 
     const entry = this.block(0, false).body;
-    const trailing = this.peek();
-    if (trailing !== null) fail(trailing.number, "the end of the program", trailing.text);
+    this.finish("the end of the program");
     return { file, entry, functions, objects };
   }
 
@@ -1208,248 +1619,284 @@ class ProgramReader {
       fields.end();
     }
   }
+}
 
-  /* ---------------------------------------------------------------------- */
-  /* Blocks                                                                 */
-  /* ---------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* Reading the function                                                        */
+/* -------------------------------------------------------------------------- */
 
-  /** A block, the statements in it, and where control goes when they are done. */
-  private block(indent: number, statement: boolean): ReadBlock {
-    const line = this.line(indent);
-    if (headOf(line) !== "block") fail(line.number, '"block" and the name of the block', line.text);
-    this.at += 1;
-    const scanner = this.scanner(line);
-    const id = scanner.word();
-    scanner.expect(":");
-    scanner.keyword("releases");
-    const releases = scanner.names();
-    let source = 0;
-    if (statement) source = scanner.mark();
-    else scanner.end();
-    const body: SemanticBlock = {
-      id,
-      statements: this.statements(indent + 2),
-      releases,
-      terminator: this.terminator(indent),
-    };
-    return { body, line: source };
+/**
+ * One function, read a line at a time in the shape the printer wrote it. The
+ * header is read against the contract the function was declared in, so every
+ * name, type, condition, effect and layout in it comes from there and a line
+ * that says otherwise is an error naming itself rather than a new declaration.
+ */
+class FunctionReader extends BlockReader {
+  /** The one function the text holds, and the end of the text after it. */
+  function(): SemanticFunction {
+    const fn = this.described();
+    this.finish("the end of the function");
+    return fn;
   }
 
-  private terminator(indent: number): SemanticTerminator {
-    const line = this.peek();
-    if (line === null || line.indent !== indent) return { k: "next" };
-    const head = headOf(line);
-    if (head !== "return" && head !== "jump") return { k: "next" };
+  /** Every function of one file, in the order the text lists them. */
+  module(): SemanticModule {
+    const version = this.line(0);
     this.at += 1;
-    const scanner = this.scanner(line);
-    if (head === "return") {
-      scanner.end();
-      return { k: "return" };
-    }
-    const target = scanner.word();
-    scanner.skip();
-    const releases = scanner.peek() === "[" ? scanner.names() : [];
+    if (version.text !== `ir ${VERSION}`) fail(version.number, `"ir ${VERSION}"`, version.text);
+    const head = this.line(0);
+    this.at += 1;
+    if (headOf(head) !== "module") fail(head.number, '"module" and the file it was written in', head.text);
+    const scanner = this.scanner(head);
+    const path = scanner.string();
     scanner.end();
-    return { k: "jump", target, releases };
+    const functions: SemanticFunction[] = [];
+    while (this.peek() !== null) functions.push(this.described());
+    return { path, functions };
   }
 
-  /* ---------------------------------------------------------------------- */
-  /* Statements                                                             */
-  /* ---------------------------------------------------------------------- */
-
-  private statements(indent: number): SemanticStatement[] {
-    const statements: SemanticStatement[] = [];
-    while (this.atIndent(indent)) statements.push(this.statement(indent));
-    return statements;
-  }
-
-  private statement(indent: number): SemanticStatement {
-    const line = this.line(indent);
-    const head = headOf(line);
-    const scanner = this.scanner(line);
+  /**
+   * One function whole: the signature the contract declares, the header it is
+   * held to and does, the objects it lays out, the calls it makes, the slots
+   * its parameters are read as, and the body it runs.
+   */
+  private described(): SemanticFunction {
+    const line = this.line(0);
     this.at += 1;
-    switch (head) {
-      case "let": {
-        const slot = this.slot(scanner);
-        scanner.expect("=");
-        const value = scanner.value();
-        return { k: "let", slot, value, line: scanner.mark() };
-      }
-      case "set": {
-        const name = scanner.word();
-        const op = this.assignOp(scanner);
-        const value = scanner.value();
-        return { k: "set", name, op, value, line: scanner.mark() };
-      }
-      case "set_element": {
-        const buffer = scanner.word();
-        const index = scanner.value();
-        const op = this.assignOp(scanner);
-        const value = scanner.value();
-        return { k: "setElement", buffer, index, op, value, line: scanner.mark() };
-      }
-      case "step": {
-        const name = scanner.word();
-        const op = scanner.oneOf(scanner.token(), STEP_OPS);
-        const side = scanner.word();
-        if (side !== "pre" && side !== "post") scanner.refuse('"pre" or "post"', side);
-        return { k: "step", name, op, prefix: side === "pre", line: scanner.mark() };
-      }
-      case "if": {
-        const condition = scanner.value();
-        const at = scanner.mark();
-        const then = this.block(indent + 2, false).body;
-        let otherwise: SemanticBlock | null = null;
-        const next = this.peek();
-        if (next !== null && next.indent === indent && headOf(next) === "else") {
-          this.at += 1;
-          this.scanner(next).end();
-          otherwise = this.block(indent + 2, false).body;
-        }
-        return { k: "if", condition, then, otherwise, line: at };
-      }
-      case "while":
-      case "do_while": {
-        const condition = scanner.value();
-        const { header, exit, at } = this.loopTail(scanner);
-        const body = this.block(indent + 2, false).body;
-        const kind = head === "while" ? "while" : "doWhile";
-        return { k: "loop", loop: { kind, condition, header, exit, body }, line: at };
-      }
-      case "for": {
-        const type = scanner.typed();
-        const variable = scanner.word();
-        scanner.keyword("from");
-        const from = scanner.value();
-        scanner.keyword("to");
-        const to = scanner.value();
-        const bound = scanner.word();
-        if (bound !== "inclusive" && bound !== "exclusive") {
-          scanner.refuse('"inclusive" or "exclusive"', bound);
-        }
-        const direction = scanner.word();
-        if (direction !== "up" && direction !== "down") scanner.refuse('"up" or "down"', direction);
-        scanner.keyword("step");
-        scanner.skip();
-        let step: SemanticValue | null = null;
-        if (scanner.peek() === "default") scanner.word();
-        else step = scanner.value();
-        const { header, exit, at } = this.loopTail(scanner);
-        const body = this.block(indent + 2, false).body;
-        return {
-          k: "loop",
-          loop: {
-            kind: "counted",
-            variable,
-            type,
-            from,
-            to,
-            inclusive: bound === "inclusive",
-            down: direction === "down",
-            step,
-            header,
-            exit,
-            body,
-          },
-          line: at,
-        };
-      }
-      case "for_of": {
-        const elementType = scanner.contractType();
-        const element = scanner.word();
-        scanner.keyword("of");
-        const of = scanner.word();
-        scanner.keyword("index");
-        const index = scanner.word();
-        scanner.keyword("length");
-        const length = scanner.value();
-        const { header, exit, at } = this.loopTail(scanner);
-        const body = this.block(indent + 2, false).body;
-        return { k: "loop", loop: { kind: "each", index, element, elementType, of, length, header, exit, body }, line: at };
-      }
-      case "block": {
-        // The statement is the head of its own block, so the block reads the line.
-        this.at -= 1;
-        const read = this.block(indent, true);
-        return { k: "block", body: read.body, line: read.line };
-      }
-      case "print_text":
-        return { k: "printText", value: scanner.value(), line: scanner.mark() };
-      case "print_newline":
-        return { k: "printNewline", line: scanner.mark() };
-      case "print_number":
-        return { k: "printNumber", value: scanner.value(), line: scanner.mark() };
-      case "retain":
-        return { k: "retain", value: scanner.value(), line: scanner.mark() };
-      case "call": {
-        const returns = scanner.typed();
-        const call = scanner.call(returns);
-        return { k: "call", call, line: scanner.mark() };
-      }
-      case "raise":
-        return { k: "raise", message: scanner.value(), line: scanner.mark() };
-      case "store_field": {
-        const object = scanner.value();
-        const layout = scanner.word();
-        const field = scanner.word();
-        const value = scanner.value();
-        return { k: "storeField", object, layout, field, value, line: scanner.mark() };
-      }
-      default:
-        fail(line.number, "a statement", line.text);
+    if (headOf(line) !== "function") {
+      fail(line.number, '"function" and the name of the function', line.text);
     }
-  }
-
-  /** The blocks a `break` and a `continue` leave a loop for. */
-  private loopTail(scanner: IrScanner): { header: string; exit: string; at: number } {
-    scanner.keyword("header");
-    const header = scanner.word();
-    scanner.keyword("exit");
-    const exit = scanner.word();
-    return { header, exit, at: scanner.mark() };
-  }
-
-  /** An assignment as it is written, which the IR states as an operator. */
-  private assignOp(scanner: IrScanner): SemanticAssignOp {
-    return scanner.oneOf(scanner.token(), ASSIGN_OPS);
-  }
-
-  /** What a declared name holds, read as the declaration states it. */
-  private slot(scanner: IrScanner): SemanticSlot {
-    const kind = scanner.word();
-    if (!SLOT_KINDS.includes(kind)) scanner.refuse(`a slot, one of ${SLOT_KINDS.join(", ")}`, kind);
-    if (kind === "buffer") {
-      const name = scanner.word();
-      const mutable = this.mutable(scanner);
-      scanner.keyword("element");
-      const element = scanner.contractType();
-      const length = scanner.integer();
-      return { kind, name, mutable, element, length };
-    }
-    if (kind === "text") {
-      const name = scanner.word();
-      return { kind, name, mutable: this.mutable(scanner) };
-    }
-    const type = scanner.typed();
+    const scanner = this.scanner(line);
     const name = scanner.word();
-    const mutable = this.mutable(scanner);
-    return kind === "value" ? { kind, name, mutable, type } : { kind: "object", name, mutable, type };
+    let symbol = name;
+    if (scanner.peek() === " ") {
+      scanner.keyword("as");
+      symbol = scanner.word();
+    }
+    const written: { name: string; type: SemanticType }[] = [];
+    scanner.expect("(");
+    for (;;) {
+      scanner.skip();
+      if (scanner.peek() === ")") break;
+      const param = scanner.word();
+      scanner.expect(":");
+      written.push({ name: param, type: scanner.type() });
+      scanner.skip();
+      if (scanner.peek() !== ",") break;
+      scanner.expect(",");
+    }
+    scanner.expect(")");
+    scanner.expect("->");
+    const returns = scanner.type();
+    scanner.end();
+
+    const declared = this.binder.declaration(name, line.number);
+    const signature = declared.function;
+    if (symbol !== signature.symbol) {
+      fail(line.number, `the symbol the contract declares, "${signature.symbol}"`, symbol);
+    }
+    if (written.length !== signature.params.length) {
+      const named = signature.params.map((param) => param.name).join(", ") || "no parameters";
+      fail(line.number, `the parameters the contract declares: ${named}`, line.text);
+    }
+    for (let index = 0; index < written.length; index += 1) {
+      const expected = signature.params[index];
+      if (written[index].name !== expected.name) {
+        fail(line.number, `the parameter the contract declares, "${expected.name}"`, written[index].name);
+      }
+      if (!typeEquals(written[index].type, parseType(expected.type))) {
+        fail(line.number, `the type the contract declares for "${expected.name}", "${expected.type}"`, typeText(written[index].type));
+      }
+    }
+    if (!typeEquals(returns, parseType(signature.returns))) {
+      fail(line.number, `the return type the contract declares, "${signature.returns}"`, typeText(returns));
+    }
+
+    const requires = this.conditions("requires", declared.requires);
+    const ensures = this.conditions("ensures", declared.ensures);
+    const holds = declared.definition;
+    const allocates = this.flag("allocates", holds?.allocates ?? false);
+    const prints = this.flag("prints", holds?.prints ?? false);
+    const readsArgv = this.flag("reads_argv", holds?.readsArgv ?? false);
+    const effects = this.effects(declared.effects);
+    const objects = this.objects();
+    const calls = this.calls(declared);
+    const params = this.params(signature);
+    const next = this.peek();
+    const entry = next !== null && next.indent === 2 && headOf(next) === "block" ? this.block(2, false).body : null;
+    return { name, symbol, params, returns, requires, ensures, effects, allocates, prints, readsArgv, objects, calls, entry };
   }
 
-  /** Whether the program may change a name, which the IR states as a flag. */
-  private mutable(scanner: IrScanner): boolean {
-    const state = scanner.word();
-    if (state !== "mutable" && state !== "immutable") scanner.refuse('"mutable" or "immutable"', state);
-    return state === "mutable";
+  /**
+   * The conditions a function is held to, one to a line. A condition is a claim
+   * in the contract's own language, so it is quoted, and `none` is how a
+   * function with no condition of that kind says so.
+   */
+  private conditions(keyword: "requires" | "ensures", declared: readonly string[]): string[] {
+    const conditions: string[] = [];
+    let first: IrLine | null = null;
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === keyword; line = this.peek()) {
+      if (first === null) first = line;
+      this.at += 1;
+      const scanner = this.scanner(line);
+      scanner.skip();
+      if (scanner.peek() === '"') {
+        conditions.push(scanner.string());
+      } else {
+        const none = scanner.word();
+        if (none !== "none") scanner.refuse('"none" or a condition in quotes', none);
+      }
+      scanner.end();
+    }
+    const same = conditions.length === declared.length && conditions.every((condition, index) => condition === declared[index]);
+    if (!same) {
+      const at = this.where(first);
+      const stated = declared.length === 0 ? "none" : declared.map(stringLiteral).join(" ");
+      fail(at.number, `the ${keyword} the contract states: ${stated}`, at.text);
+    }
+    return conditions;
+  }
+
+  /** What the contract states a function does, as the word it states it with. */
+  private flag(keyword: string, declared: boolean): boolean {
+    const line = this.line(2);
+    this.at += 1;
+    const scanner = this.scanner(line);
+    const word = scanner.oneOf(scanner.word(), FLAGS);
+    scanner.end();
+    if ((word === "yes") !== declared) {
+      fail(line.number, `${keyword} ${flagText(declared)}, which the contract states`, word);
+    }
+    return declared;
+  }
+
+  /** What a function does beyond computing its result, which the contract states. */
+  private effects(declared: readonly Effect[]): Effect[] {
+    const line = this.line(2);
+    this.at += 1;
+    const scanner = this.scanner(line);
+    const effects: Effect[] = [];
+    for (;;) {
+      scanner.skip();
+      if (scanner.peek() === "") break;
+      const word = scanner.word();
+      if (word === "none") break;
+      effects.push(scanner.oneOf(word, EFFECTS));
+    }
+    scanner.end();
+    if (effects.length !== declared.length || !effects.every((effect) => declared.includes(effect))) {
+      const stated = declared.length === 0 ? "none" : declared.join(" ");
+      fail(line.number, `the effects the contract states: ${stated}`, line.text);
+    }
+    return [...declared];
+  }
+
+  /**
+   * The layouts the function hands back, each of them the one the contract lays
+   * out. The lines are read to be sure of what they say and then compared with
+   * the layout the contract hands back, so a model cannot lay out an object for
+   * itself by writing a different one down.
+   */
+  private objects(): Record<string, ObjectLayout> {
+    const objects: Record<string, ObjectLayout> = {};
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "object"; line = this.peek()) {
+      this.at += 1;
+      const scanner = this.scanner(line);
+      const name = scanner.word();
+      scanner.keyword("size");
+      scanner.integer();
+      scanner.keyword("align");
+      scanner.integer();
+      scanner.end();
+      const written = [line.text];
+      while (this.atIndent(4) && headOf(this.lines[this.at]) === "field") {
+        const field = this.line(4);
+        this.at += 1;
+        const fields = this.scanner(field);
+        fields.word();
+        fields.expect(":");
+        fields.type();
+        fields.keyword("at");
+        fields.integer();
+        fields.end();
+        written.push(field.text);
+      }
+      const layout = this.binder.layout(name, line.number);
+      const stated = objectLines(name, layout, 0).map((text) => text.trimStart());
+      if (written.join("\n") !== stated.join("\n")) {
+        fail(line.number, `the layout the contract lays out: ${stated.join(" / ")}`, line.text);
+      }
+      objects[name] = layout;
+    }
+    return objects;
+  }
+
+  /** The calls the body makes, each of them an edge the contract records. */
+  private calls(declared: FunctionContract): CallEdge[] {
+    const recorded = declared.definition?.calls ?? [];
+    const calls: CallEdge[] = [];
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "call"; line = this.peek()) {
+      this.at += 1;
+      const scanner = this.scanner(line);
+      const callee = scanner.word();
+      scanner.end();
+      this.binder.bind(callee, line.number);
+      const edge = recorded.find((call) => call.callee === callee);
+      if (edge === undefined) {
+        const reached = recorded.map((call) => call.callee).join(", ") || "no calls";
+        fail(line.number, `a call the contract records for this function, one of: ${reached}`, callee);
+      }
+      calls.push({ callee: edge.callee, strategy: edge.strategy });
+    }
+    if (calls.length !== recorded.length) {
+      const at = this.where(null);
+      const reached = recorded.map((call) => call.callee).join(", ") || "no calls";
+      fail(at.number, `every call the contract records for this function, one of: ${reached}`, at.text);
+    }
+    return calls;
+  }
+
+  /**
+   * The parameters, as the slots the body reads them by. A slot is named and
+   * typed by the body, so the contract only fixes which names there are and how
+   * many: a parameter the signature declares and no slot reads is a body that
+   * left one out.
+   */
+  private params(declared: FunctionSignature): SemanticSlot[] {
+    const params: SemanticSlot[] = [];
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "param"; line = this.peek()) {
+      this.at += 1;
+      const scanner = this.scanner(line);
+      const slot = this.slot(scanner);
+      scanner.end();
+      const expected = declared.params[params.length];
+      if (expected === undefined || expected.name !== slot.name) {
+        const named = declared.params.map((param) => param.name).join(", ") || "no parameters";
+        fail(line.number, `a parameter the signature declares, one of: ${named}`, slot.name);
+      }
+      params.push(slot);
+    }
+    if (params.length !== declared.params.length) {
+      const at = this.where(null);
+      const named = declared.params.map((param) => param.name).join(", ") || "no parameters";
+      fail(at.number, `a slot for every parameter the signature declares, one of: ${named}`, at.text);
+    }
+    return params;
   }
 }
 
 /**
- * Reads IR text back, binding every callee to the contract it was declared in.
- * A line the IR cannot express, a name the contract does not declare, or a
- * malformed type is an error naming the line it was written on, never a
- * silently dropped instruction.
+ * Reads a function back, binding every callee to the contract it was declared
+ * in. The contract is what the header is checked against, so a signature, a
+ * condition, an effect, a parameter or a layout the text disagrees with is an
+ * error naming its line, never a wider function read back.
  */
-export function parseSemanticProgram(text: string, contract: ProgramContract): SemanticProgram {
-  return new ProgramReader(readLines(text), new ContractBinder(contract)).program();
+export function parseSemanticFunction(text: string, contract: ProgramContract): SemanticFunction {
+  return new FunctionReader(readLines(text), new ContractBinder(contract)).function();
 }
+
+/** Reads a file's functions back, in the order the text lists them. */
+export function parseSemanticModule(text: string, contract: ProgramContract): SemanticModule {
+  return new FunctionReader(readLines(text), new ContractBinder(contract)).module();
+}
+

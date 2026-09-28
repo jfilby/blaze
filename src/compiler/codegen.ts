@@ -23,6 +23,7 @@ import { buildStandaloneRuntime, writeRuntimeHeader, type StandaloneRuntime } fr
 import { stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
+import type { SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
@@ -82,6 +83,12 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   unitFile: string;
   /** The whole program, contracted: what a backend needs about every file. */
   program: ProgramContract;
+  /**
+   * Every function of the program as the IR holds it, by name. The prompt
+   * reads a function from here rather than from its source statements, so what
+   * a model reasons about is the same description a backend is given.
+   */
+  semantics: Record<string, SemanticFunction>;
   /** Every module of the program, with the source each contract came from. */
   sources: readonly SourceModule[];
   target: TargetSpec;
@@ -772,6 +779,7 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
             contract: request.contract,
             unit: { file: request.unitFile, function: request.contract.function.name },
             program: request.program,
+            semantics: request.semantics,
             sources: request.sources,
             target: request.target,
             output: request.output,

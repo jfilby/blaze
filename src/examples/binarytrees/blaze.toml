@@ -3,8 +3,11 @@ sourceFile = "1.ts"
 output = "machine"
 
 [model]
-provider = "openrouter"
-model = "stealth/space-bunny-alpha"
+# provider = "openrouter"
+# model = "stealth/space-bunny-alpha"
+
+provider = "commandcode"
+model = "stealth/pixel-canary"
 
 [target]
 arch = "x86_64"

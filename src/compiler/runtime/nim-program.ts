@@ -521,12 +521,6 @@ ${anchor}
     return `discard ${RUNTIME_NAME}_retain(cast[pointer](${value}))`;
   }
 
-  allocateObject(layout: string): string {
-    // A layout the contract laid out is an object type the host declared, so
-    // the object is allocated as one and nothing of the layout is written twice.
-    return `create(${RUNTIME_NAME}_object_new(sizeof(${layout}), alignof(${layout})))`;
-  }
-
   field(object: string, layout: string, field: string): string {
     // A reference is held as a pointer, and a pointer has no fields, so the
     // layout the access names is what the field is read through.
@@ -535,6 +529,15 @@ ${anchor}
 
   assignField(object: string, layout: string, field: string, value: string): string {
     return `(cast[${layout}](${object})).${field} = ${value}`;
+  }
+
+  buildObject(layout: string, fields: { field: string; value: string }[]): string {
+    // An object is one value the program holds, so it is allocated and filled
+    // where it is written: a block expression is how Nim spells several
+    // statements as one value.
+    const name = this.fresh("blaze_object");
+    const written = fields.map((one) => `(cast[${layout}](${name})).${one.field} = ${one.value}`);
+    return `(block: let ${name} = create(${RUNTIME_NAME}_object_new(sizeof(${layout}), alignof(${layout}))); ${written.join("; ")}; ${name})`;
   }
 
   raise(message: string): string {

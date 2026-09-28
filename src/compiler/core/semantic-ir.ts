@@ -17,6 +17,7 @@
  */
 
 import type {
+  CallEdge,
   Effect,
   FunctionSignature,
   ObjectLayout,
@@ -258,8 +259,14 @@ export type SemanticValue =
   | { k: "element"; type: SemanticType; of: SemanticValue; index: SemanticValue }
   /** A typed array, allocated where the program wrote it out. */
   | { k: "buffer"; type: SemanticType; element: SemanticType; length: number; values: SemanticValue[] }
-  /** An object on the heap, of the layout it is allocated as. */
-  | { k: "newObject"; type: SemanticType; object: string }
+  /**
+   * An object on the heap, allocated and filled as one value. Its fields are
+   * written where the object is built rather than beside it, so an object built
+   * in the arm of a conditional is built when that arm is taken — which is what
+   * the source means, and what hoisting the allocation out of the arm would
+   * stop meaning.
+   */
+  | { k: "newObject"; type: SemanticType; layout: string; fields: { name: string; value: SemanticValue }[] }
   /**
    * One field of an object, read out of it. A field is a field of a layout, so
    * the access names the layout: a reference is a pointer, and a pointer has
@@ -437,8 +444,13 @@ export function slotType(slot: SemanticSlot): SemanticType {
 export type SemanticTerminator =
   /** The block ends and what follows it runs. */
   | { k: "next" }
-  /** The program ends. Only the entry block ends this way. */
-  | { k: "return" }
+  /**
+   * The function ends, handing back what the block computed. A program ends
+   * with nothing to hand back, so its return carries nothing; a function's
+   * return carries the value of its declared return type, or nothing for a
+   * function that returns nothing. Only the entry block ends this way.
+   */
+  | { k: "return"; value: SemanticValue | null }
   /**
    * The block is left for another one, after freeing what it owns on the way
    * out. A jump names a loop header (`continue`) or a loop exit (`break`).
@@ -529,6 +541,64 @@ export type SemanticStatement =
 /* -------------------------------------------------------------------------- */
 /* Program                                                                    */
 /* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/* Functions                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A function the IR holds whole: the signature it is called by, what it is
+ * held to, what it does beyond computing its result, and the body that computes
+ * it. A function is not a body in this compiler — it is a symbol other
+ * functions call, an allocation the program has to account for, and a promise
+ * the program is checked against, and a description of only the body would
+ * leave the rest of it to be re-derived by every consumer.
+ *
+ * The body is the same shape the program's is — the same blocks, terminators,
+ * ownership and calls — so one walk, one validator and one text form cover both
+ * a function and the program that runs it.
+ */
+export interface SemanticFunction {
+  /** The name the function was written as. */
+  name: string;
+  /** The symbol it is linked by, which the program and its callees call. */
+  symbol: string;
+  /** The parameters, as the slots the body reads them by. */
+  params: SemanticSlot[];
+  returns: SemanticType;
+  /**
+   * The conditions the function is held to, as the contract writes them. The
+   * IR does not type them: they are the contract's own language, checked when
+   * the contract is parsed, and a condition is a claim about the function
+   * rather than a thing the function does.
+   */
+  requires: string[];
+  ensures: string[];
+  /** What the function does beyond computing its result. */
+  effects: Effect[];
+  /** True when the function builds an object and hands it to its caller. */
+  allocates: boolean;
+  prints: boolean;
+  /** True when the function reads the arguments the program was started with. */
+  readsArgv: boolean;
+  /** The objects of the program, laid out as the contract lays them out. */
+  objects: Record<string, ObjectLayout>;
+  /** Every call the body makes, in the order it first makes each. */
+  calls: CallEdge[];
+  /**
+   * The body, as the block the function starts in, or null where the contract
+   * states what the function returns instead of how: a postcondition is a
+   * description of a function too, and the IR says which of the two it has.
+   */
+  entry: SemanticBlock | null;
+}
+
+/** Every function of one source file, as the IR holds them. */
+export interface SemanticModule {
+  /** The source file, relative to the project. */
+  path: string;
+  functions: SemanticFunction[];
+}
 
 /**
  * A program the IR holds whole: the body it runs, the functions that body

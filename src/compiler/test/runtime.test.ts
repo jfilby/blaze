@@ -17,7 +17,7 @@ import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
 import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
 import { entryContract } from "../semantics/program.ts";
-import { programOf } from "./phase.ts";
+import { programWithSemantics } from "./phase.ts";
 import type { SourceInput } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
@@ -92,11 +92,12 @@ test("the managed object representation is the same in the header and in the ada
 
 test("the prompt tells the model which runtime entry points it may call", () => {
   const files = { "module.nim": "proc dotProduct(a: ptr float32): float32 = 0.0\n" };
-  const program = programOf("nim", files, "module.nim");
+  const { program, semantics } = programWithSemantics("nim", files, "module.nim");
   const request: Omit<PromptRequest, "runtime"> = {
     contract: entryContract(program),
     unit: { file: "module.nim", function: "dotProduct" },
     program,
+    semantics,
     sources: [{ path: "module.nim", source: files["module.nim"] }],
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     output: "machine",

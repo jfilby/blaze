@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { programOf } from "./phase.ts";
+import { programOf, semanticsOf } from "./phase.ts";
 import { callableSymbols } from "../toolchain/assembler.ts";
 import { contractsByName, writtenOut } from "../semantics/calls.ts";
 import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
@@ -194,6 +194,7 @@ test("the prompt states a written-out callee as a body to implement rather than 
     contract: functionOf(of, "report"),
     unit: { file: "main.ts", function: "report" },
     program: of,
+    semantics: semanticsOf({ program: of, objectNames: {} }),
     sources: [{ path: "main.ts", source: "" }],
     target: TARGET,
     output: "machine",
@@ -221,6 +222,7 @@ test("the prompt offers a called callee as a symbol and does not offer its body"
     contract: functionOf(of, "report"),
     unit: { file: "main.ts", function: "report" },
     program: of,
+    semantics: semanticsOf({ program: of, objectNames: {} }),
     sources: [{ path: "main.ts", source: "" }],
     target: TARGET,
     output: "machine",
@@ -354,6 +356,7 @@ test("the prompt offers the symbol a written-out body calls, and how to call it"
     contract: functionOf(of, "report"),
     unit: { file: "main.ts", function: "report" },
     program: of,
+    semantics: semanticsOf({ program: of, objectNames: {} }),
     sources: [{ path: "main.ts", source: "" }],
     target: TARGET,
     output: "machine",

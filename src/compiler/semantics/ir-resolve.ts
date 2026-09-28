@@ -1567,7 +1567,7 @@ class ProgramLowering {
   }
 
   lower(program: DraftProgram): SemanticProgram {
-    const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "return" } };
+    const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "return", value: null } };
     this.enter(entry, null);
     this.statements(program.statements);
     this.leave();

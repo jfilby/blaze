@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { buildSystemPrompt, buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
 import { CompilerError } from "../core/errors.ts";
 import { validateAssembly } from "../toolchain/assembler.ts";
-import { programOf } from "./phase.ts";
+import { programWithSemantics } from "./phase.ts";
 import type { FunctionContract } from "../core/types.ts";
 
 const EXAMPLE = "/jason/My_Development/blaze/src/examples";
@@ -29,7 +29,10 @@ const LIBRARY = {
   "hello_world.ts": readFileSync(`${EXAMPLE}/hello_world/hello_world.ts`, "utf8"),
 };
 
-function request(overrides: Partial<PromptRequest> & Pick<PromptRequest, "contract" | "unit" | "program" | "sources">): PromptRequest {
+function request(
+  overrides: Partial<PromptRequest> &
+    Pick<PromptRequest, "contract" | "unit" | "program" | "sources" | "semantics">,
+): PromptRequest {
   return {
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     output: "machine",
@@ -41,13 +44,15 @@ function request(overrides: Partial<PromptRequest> & Pick<PromptRequest, "contra
   };
 }
 
-const treeProgram = programOf("typescript", TREES, "1.ts");
+const tree = programWithSemantics("typescript", TREES, "1.ts");
+const treeProgram = tree.program;
+const treeSemantics = tree.semantics;
 const treeMain = treeProgram.files[0].functions.main;
 const treeChecksum = treeProgram.files[0].functions.checksum;
 
 test("the prompt names the symbol the assembler will accept", () => {
   const prompt = buildUserPrompt(
-    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
   // The C prototype of a program entry is not the symbol: the entry is
@@ -60,7 +65,7 @@ test("the prompt names the symbol the assembler will accept", () => {
 
 test("the prompt states the labels and the calls a candidate may write", () => {
   const prompt = buildUserPrompt(
-    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
   // Each of these is a rejection in assembler.ts, and none of them is obvious
@@ -81,6 +86,7 @@ test("a candidate is told the functions of the program it may call, and how", ()
       contract: treeMain,
       unit: { file: "1.ts", function: "main" },
       program: treeProgram,
+      semantics: treeSemantics,
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
     }),
   );
@@ -104,12 +110,13 @@ test("a candidate that reaches nothing is told it is run on its own", () => {
   // out, so the object references no other symbol of the program and is linked
   // and probed by itself. `createTree` is recursive, so it is a call, and
   // `checksum` is too: neither is a body this candidate can be handed.
-  const program = programOf("typescript", TREES, "1.ts");
+  const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
   const prompt = buildUserPrompt(
     request({
       contract: treeProgram.files[0].functions.createTree,
       unit: { file: "1.ts", function: "createTree" },
       program,
+      semantics,
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
     }),
   );
@@ -122,7 +129,7 @@ test("a candidate that reaches nothing is told it is run on its own", () => {
 
 test("the prompt states what the function owes the convention it is called under", () => {
   const prompt = buildUserPrompt(
-    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program: treeProgram, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
   assert.match(prompt, /preserve rbx, rbp and r12 to r15/);
@@ -181,7 +188,7 @@ test("the program the model writes is the one the assembler is given", () => {
 
 test("a function that states what it does is told how it is checked", () => {
   const prompt = buildUserPrompt(
-    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
   // Nothing runs such a function on its own, so the program is the oracle, and
@@ -197,10 +204,12 @@ test("a function that states what it does is told how it is checked", () => {
 });
 
 test("a contract that states a result keeps the memory and numeric sections", () => {
-  const program = programOf("typescript", LIBRARY, "hello_world.ts", { entry: "dotProduct" });
+  const { program, semantics } = programWithSemantics("typescript", LIBRARY, "hello_world.ts", {
+    entry: "dotProduct",
+  });
   const contract = program.files[0].functions.dotProduct;
   const prompt = buildUserPrompt(
-    request({ contract, unit: { file: "hello_world.ts", function: "dotProduct" }, program, sources: [{ path: "hello_world.ts", source: LIBRARY["hello_world.ts"] }] }),
+    request({ contract, unit: { file: "hello_world.ts", function: "dotProduct" }, program, semantics, sources: [{ path: "hello_world.ts", source: LIBRARY["hello_world.ts"] }] }),
   );
 
   assert.match(prompt, /result == sum\(i = 0\.\.<n/);
@@ -212,9 +221,9 @@ test("a contract that states a result keeps the memory and numeric sections", ()
 });
 
 test("the target says which instructions the machine has", () => {
-  const program = programOf("typescript", TREES, "1.ts");
+  const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
   const prompt = buildUserPrompt(
-    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, semantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
 
   assert.match(prompt, /instruction set: the x86_64 baseline, and nothing wider/);
@@ -225,6 +234,7 @@ test("the target says which instructions the machine has", () => {
       contract: treeChecksum,
       unit: { file: "1.ts", function: "checksum" },
       program,
+      semantics,
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
       target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: ["avx2"] },
     }),
@@ -233,27 +243,35 @@ test("the target says which instructions the machine has", () => {
 });
 
 test("the effects of the source and the prohibition on the implementation are not the same rule", () => {
-  const program = programOf("typescript", TREES, "1.ts");
+  const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
   const printing = buildUserPrompt(
-    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program, semantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
   assert.match(printing, /the source function: io, syscall/);
   assert.match(printing, /reached through the runtime ABI above and never directly/);
 
   const pure = buildUserPrompt(
-    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, semantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
   );
   assert.match(pure, /none: the source function touches nothing outside its arguments/);
 });
 
 test("a second candidate is told what makes it worth a request", () => {
-  const program = programOf("typescript", TREES, "1.ts");
+  const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
   const sources = [{ path: "1.ts", source: TREES["1.ts"] }];
   const first = buildUserPrompt(
-    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, sources }),
+    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, semantics, sources }),
   );
   const second = buildUserPrompt(
-    request({ contract: treeChecksum, unit: { file: "1.ts", function: "checksum" }, program, sources, candidate: 2, candidates: 2 }),
+    request({
+      contract: treeChecksum,
+      unit: { file: "1.ts", function: "checksum" },
+      program,
+      semantics,
+      sources,
+      candidate: 2,
+      candidates: 2,
+    }),
   );
 
   assert.doesNotMatch(first, /only worth its request/);
@@ -262,12 +280,12 @@ test("a second candidate is told what makes it worth a request", () => {
 });
 
 test("the runtime section offers the entry points a candidate can reach", () => {
-  const program = programOf("typescript", TREES, "1.ts");
+  const { program, semantics } = programWithSemantics("typescript", TREES, "1.ts");
   const sources = [{ path: "1.ts", source: TREES["1.ts"] }];
   // `main` allocates nothing itself, but it may inline `createTree`, which
   // does, so the object allocator has to be in reach of both.
   const entry = buildUserPrompt(
-    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program, sources }),
+    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program, semantics, sources }),
   );
   assert.match(entry, /blaze_rt_object_new/);
   assert.match(entry, /blaze_rt_print_number/);
@@ -277,9 +295,15 @@ test("the runtime section offers the entry points a candidate can reach", () => 
 
   // A library function states a result and not how it is done, so it may take
   // a working copy; a program function that touches nothing may not.
-  const library = programOf("typescript", LIBRARY, "hello_world.ts", { entry: "dotProduct" });
+  const library = programWithSemantics("typescript", LIBRARY, "hello_world.ts", { entry: "dotProduct" });
   const dot = buildUserPrompt(
-    request({ contract: library.files[0].functions.dotProduct, unit: { file: "hello_world.ts", function: "dotProduct" }, program: library, sources: [{ path: "hello_world.ts", source: LIBRARY["hello_world.ts"] }] }),
+    request({
+      contract: library.program.files[0].functions.dotProduct,
+      unit: { file: "hello_world.ts", function: "dotProduct" },
+      program: library.program,
+      semantics: library.semantics,
+      sources: [{ path: "hello_world.ts", source: LIBRARY["hello_world.ts"] }],
+    }),
   );
   assert.match(dot, /blaze_rt_allocate/);
   assert.doesNotMatch(dot, /blaze_rt_print_number/);
@@ -303,26 +327,15 @@ const SAYING = {
  * allocates, nor reads the command line is offered no runtime service, and in
  * particular no allocator to build a string with.
  */
-const SILENT: FunctionContract = {
-  version: "1",
-  function: { name: "hold", symbol: "hold", params: [], returns: "void" },
-  requires: [],
-  ensures: [],
-  memory: { reads: [], writes: [], aliasing: [] },
-  effects: [],
-  numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
-  optimize: { primary: "throughput" },
-  definition: { allocates: false, prints: false, readsArgv: false, objects: {}, statements: [], calls: [] },
-};
-
 test("a function that prints text is told how to make the text", () => {
-  const program = programOf("typescript", SAYING, "main.ts");
+  const { program, semantics } = programWithSemantics("typescript", SAYING, "main.ts");
   const sources = Object.entries(SAYING).map(([path, source]) => ({ path, source }));
   const prompt = buildUserPrompt(
     request({
       contract: program.files.find((file) => file.path === "say.ts")!.functions.say,
       unit: { file: "say.ts", function: "say" },
       program,
+      semantics,
       sources,
     }),
   );
@@ -334,10 +347,17 @@ test("a function that prints text is told how to make the text", () => {
   assert.match(prompt, /blaze_rt_print_text/);
   assert.match(prompt, /blaze_rt_string_new/);
 
-  // A function that prints nothing needs no string, and is offered none.
-  const trees = programOf("typescript", TREES, "1.ts");
+  // A function that reaches no runtime service is offered none: `checksum`
+  // reads a tree and returns a number, so it needs no string to print and none
+  // is named.
   const silent = buildUserPrompt(
-    request({ contract: SILENT, unit: { file: "hold.ts", function: "hold" }, program: trees, sources: [] }),
+    request({
+      contract: treeChecksum,
+      unit: { file: "1.ts", function: "checksum" },
+      program: treeProgram,
+      semantics: treeSemantics,
+      sources: [{ path: "1.ts", source: TREES["1.ts"] }],
+    }),
   );
   assert.doesNotMatch(silent, /blaze_rt_string_new/);
   assert.doesNotMatch(silent, /blaze_rt_print_text/);
