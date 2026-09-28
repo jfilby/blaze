@@ -66,6 +66,38 @@ test("the C driver declares the objects, takes the arguments and calls the progr
   assert.match(driver, /\n {2}blaze_main\(\);\n/);
 });
 
+test("an object field named after a C keyword or a macro is declared under another name", async () => {
+  // A field is named by whatever the source called it, and `long` is a legal
+  // identifier to this compiler and a reserved word to the C one, so
+  // `struct { double long; }` is not C: the driver, the harness and the probe
+  // that declared it were all source no target compiler takes. A macro is the
+  // same problem by a different road, since `bool` is substituted for `_Bool`
+  // before the declaration is read. A typedef is not: a member is in a
+  // namespace of its own, so `size_t` is left as the source wrote it.
+  const source = [
+    "function make(): any {",
+    "  return { long: 1, register: 2, bool: 3, size_t: 4, alpha: 5 };",
+    "}",
+    "function main(): void {",
+    "  console.log(`${make()}`);",
+    "}",
+    "main();",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  assert.match(driver, /double long_; \/\* \+0 \*\//);
+  assert.match(driver, /double register_; \/\* \+8 \*\//);
+  assert.match(driver, /double bool_; \/\* \+16 \*\//);
+  assert.match(driver, /double size_t; \/\* \+24 \*\//);
+  assert.match(driver, /double alpha; \/\* \+32 \*\//);
+});
+
 test("the Nim host runs the same program the C driver does", async () => {
   const { resolved } = await trees();
   const host = generateProgramHostSource(resolved);

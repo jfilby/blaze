@@ -137,6 +137,20 @@ test("unsupported types and languages are rejected", async () => {
   assert.throws(() => frontendFor("rust"), /unsupported language/);
 });
 
+test("a Nim type named after an Object.prototype member is an unsupported type", () => {
+  // The primitive table is a plain object and the guard was `in`, which walks
+  // the prototype chain: a type named `constructor` passed the guard and the
+  // table answered with `Object.prototype`'s own member, so the type parser
+  // was handed a function and the source died with a TypeError instead of
+  // the diagnostic naming the type it does not support.
+  for (const type of ["constructor", "toString", "valueOf", "hasOwnProperty"]) {
+    assert.throws(
+      () => contractOf("nim", `proc bad(x: ${type}): float32 = 0.0\n`),
+      new RegExp(`unsupported Nim type "${type}"`),
+    );
+  }
+});
+
 test("the optimization objective comes from the input, the target does not", () => {
   const contract = contractOf("nim", DOT_PRODUCT, { optimize: { primary: "size" } });
   assert.equal(contract.optimize.primary, "size");

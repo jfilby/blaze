@@ -207,6 +207,39 @@ test("a candidate that calls with the stack off a boundary is rejected", () => {
   );
 });
 
+test("a frame size is read the way the assembler reads it", () => {
+  // The assembler reads `$040` as octal 32 and `$010` as octal 8. Reading the
+  // digits in base ten cleared a misalignment the assembler creates: a frame of
+  // `$040` walks to a boundary the machine never reaches, and the delivered
+  // program faults on the first aligned move inside the runtime it called.
+  rejection(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$040, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$040, %rsp\n\tret\n",
+    /is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+  // And it condemned frames the assembler gets right, so a correct candidate
+  // was turned away over a frame it had written correctly.
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$010, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$010, %rsp\n\tret\n",
+    contract(),
+    "c1",
+  );
+  // The bases the assembler knows, from an eight byte entry point.
+  rejection(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$0x20, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$0x20, %rsp\n\tret\n",
+    /is made with rsp 8 byte\(s\) off a 16-byte boundary/,
+  );
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$0x18, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$0x18, %rsp\n\tret\n",
+    contract(),
+    "c1",
+  );
+  validateAssembly(
+    "\t.globl dotProduct\ndotProduct:\n\tsubq\t$24, %rsp\n\tcall\tblaze_rt_print_newline\n\taddq\t$24, %rsp\n\tret\n",
+    contract(),
+    "c1",
+  );
+});
+
 test("a candidate the walk cannot follow is not turned away over its alignment", () => {
   // rsp moved by something the walk does not read leaves nothing to judge.
   validateAssembly(

@@ -361,7 +361,13 @@ static void* blaze_rt_block(size_t bytes, size_t alignment) {
   /* The payload is placed with a mask, which only places it for a power of
      two, and an alignment past the cap names no block the runtime can give. */
   if ((alignment & (alignment - 1)) != 0) blaze_rt_refuse("object alignment must be a power of two");
-  if (alignment > BLAZE_RT_MAX_ALLOCATION) blaze_rt_refuse("object alignment is too large");
+  /* The budget the next line checks against is the cap less the alignment less
+     the header, and an alignment at the cap leaves that subtraction to wrap:
+     the guard reads as the whole size_t range, every request is under it, and
+     the total below wraps into a small allocation whose payload is then
+     placed a terabyte away from the block that was actually mapped. The cap
+     has to leave room for the header as well as for the payload. */
+  if (alignment > BLAZE_RT_MAX_ALLOCATION - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("object alignment is too large");
   if (bytes > BLAZE_RT_MAX_ALLOCATION - alignment - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("request too large");
   const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
   char* base = (char*)calloc(1, total);

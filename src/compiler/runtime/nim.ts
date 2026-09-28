@@ -302,9 +302,15 @@ proc blaze_rt_object_new*(bytes, alignment: csize_t): pointer {.exportc, cdecl.}
   # block has to cover the gap that alignment leaves as well as the bytes it
   # holds: sizing it by the bytes alone returns a pointer past the end of the
   # allocation. The header follows the payload, so it is written there too.
-  let total = bytes.uint64 + align + BlazeHeaderSize
-  if total > BlazeMaxAllocation:
+  # An alignment at the cap makes the budget below wrap, which turns the guard
+  # into the whole uint64 range and lets a total that wraps into a small
+  # allocation through, with the payload then placed past the block that was
+  # actually mapped. The cap has to leave room for the header too.
+  if align > BlazeMaxAllocation - BlazeHeaderSize:
+    blazeStop("blaze_rt_object_new: alignment is too large")
+  if bytes.uint64 > BlazeMaxAllocation - align - BlazeHeaderSize:
     blazeStop("blaze_rt_object_new: request too large")
+  let total = bytes.uint64 + align + BlazeHeaderSize
   let base = allocShared0(int(total))
   if base == nil:
     blazeStop("blaze_rt_object_new: out of memory")

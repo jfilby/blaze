@@ -63,7 +63,12 @@ const NIM_PRIMITIVES: Record<string, string> = {
 /** Maps a Nim type expression onto a contract type expression. */
 function mapNimType(text: string, position: string): TypeExpr {
   const source = text.trim();
-  if (source in NIM_PRIMITIVES) {
+  // `in` walks the prototype chain, and a Nim type named `constructor` or
+  // `toString` is a legal one: the guard passed and the table answered with
+  // `Object.prototype`'s own member, so the type parser was handed a function
+  // and the source was refused with a TypeError instead of the diagnostic
+  // naming the type it does not support.
+  if (Object.prototype.hasOwnProperty.call(NIM_PRIMITIVES, source)) {
     return parseType(NIM_PRIMITIVES[source]);
   }
   const pointer = /^ptr\s+(.+)$/.exec(source);

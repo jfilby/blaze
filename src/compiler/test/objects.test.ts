@@ -344,3 +344,19 @@ test("a field name declared twice in a literal is refused before it reaches an e
   );
   assert.match(diagnostic(() => parseContract(repeated.make)), /field Object1\.a is declared twice/);
 });
+
+test("a call named after an Object.prototype member is refused as an unknown call", () => {
+  // A call is named by whatever the source called it, and the builtins are
+  // read off a plain object: `toString` answered from `Object.prototype` as a
+  // builtin whose `params` was undefined, and counting them threw a TypeError
+  // rather than reporting the call the program does not compile.
+  for (const name of ["toString", "valueOf", "constructor", "hasOwnProperty", "isPrototypeOf"]) {
+    const refused = diagnostic(() =>
+      contractsOf(
+        { "main.ts": ["export function f(x: number): number {", `  return ${name}(x);`, "}", ""].join("\n") },
+        "main.ts",
+      ),
+    );
+    assert.match(refused, new RegExp(`calls "${name}", which the program does not compile`));
+  }
+});

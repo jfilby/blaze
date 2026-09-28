@@ -106,6 +106,33 @@ function branchLine(
   return byLabel.get(operand)?.[0] ?? null;
 }
 
+/**
+ * What a GNU as immediate is worth, or NaN when it is not a number this walk
+ * can read.
+ *
+ * The assembler reads `$010` as octal 8, and `Number` reads it as decimal 10.
+ * The walk has to model the instruction the assembler emits, not the one the
+ * text looks like: reading the digits in base ten cleared a misalignment the
+ * assembler creates (`addq $010, %rsp` at offset 6 walks to 0 and assembles to
+ * 14), so a candidate that faults at the first aligned move inside what it
+ * called was the one check in the build that said it was fine.
+ */
+function immediateValue(operand: string): number {
+  const text = operand.startsWith("$") ? operand.slice(1) : operand;
+  const sign = text.startsWith("-") ? -1 : text.startsWith("+") ? 1 : 0;
+  const digits = sign === 0 ? text : text.slice(1);
+  const magnitude = /^0[xX][0-9a-fA-F]+$/.test(digits)
+    ? Number.parseInt(digits.slice(2), 16)
+    : /^0[bB][01]+$/.test(digits)
+      ? Number.parseInt(digits.slice(2), 2)
+      : /^0[0-7]+$/.test(digits)
+        ? Number.parseInt(digits.slice(1), 8)
+        : /^[0-9]+$/.test(digits)
+          ? Number.parseInt(digits, 10)
+          : Number.NaN;
+  return sign === 0 ? magnitude : sign * magnitude;
+}
+
 /** What an instruction leaves the offset at, given what it started at. */
 function transfer(mnemonic: string, operands: string[], alignment: Alignment): Alignment {
   if (WHOLE_SET.has(mnemonic) || CELL_SET.has(mnemonic)) {
@@ -126,7 +153,7 @@ function transfer(mnemonic: string, operands: string[], alignment: Alignment): A
   if (alignment === null) return null;
 
   const source = operands[0] ?? "";
-  const value = source.startsWith("$") ? Number(source.slice(1)) : Number.NaN;
+  const value = immediateValue(operands[0] ?? "");
   if (mnemonic.startsWith("sub") || mnemonic.startsWith("add")) {
     if (!Number.isSafeInteger(value)) return null;
     return (((mnemonic.startsWith("sub") ? alignment - value : alignment + value) % ANY) + ANY) % ANY;

@@ -37,5 +37,18 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);
 
+/**
+ * The builtin a source name calls, or null when the name is not one of them.
+ *
+ * A call is named by whatever the source called it, and `toString` is a legal
+ * name: reading it off the table with `[...]` answers from `Object.prototype`,
+ * so a call the program does not declare reads as a builtin whose `params` is
+ * undefined, and the reader that goes on to count them throws a TypeError
+ * instead of reporting the call the program does not compile.
+ */
+export function builtinFor(name: string): BuiltinSignature | null {
+  return Object.prototype.hasOwnProperty.call(BUILTINS, name) ? BUILTINS[name] : null;
+}
+
 /** The builtins a `Math.` call may name, as the error message lists them. */
 export const MATH_NAMES: readonly string[] = BUILTIN_NAMES.filter((name) => name.startsWith("Math."));

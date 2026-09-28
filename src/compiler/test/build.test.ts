@@ -11,6 +11,7 @@ import { chatEndpoint } from "./model-endpoint.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
+const PROTO_REPLAY = new URL("./fixtures/proto-function-replay.json", import.meta.url).pathname;
 const EXAMPLE_DIRECTORY = new URL("../../examples/hello_world", import.meta.url).pathname;
 
 const INPUT: SourceInput = {
@@ -52,6 +53,66 @@ async function exampleWorkspace(name: string): Promise<string> {
 }
 
 const quiet = { stage: () => {} };
+
+test("a function the source named __proto__ is compiled and recorded like any other", async () => {
+  // Every record of a build is keyed by whatever the source called the
+  // function, and `__proto__` is a legal name: the contract phase's duplicate
+  // check read the inherited accessor, so it refused a program that declares
+  // the name once, and the records were assigned into rather than built, so
+  // the entry never existed in them.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-proto-"));
+  await writeFile(
+    join(directory, "input.json"),
+    JSON.stringify(
+      {
+        language: "typescript",
+        source: ["export function __proto__(n: bigint): bigint {", "  return n * 2n;", "}", ""].join("\n"),
+        entry: "__proto__",
+        target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+        generation: { maxCandidates: 1, maxAttempts: 1 },
+        test: { randomCases: 3, maxLength: 16, seed: 3 },
+        benchmark: { iterations: 10 },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  const outcome = await runBuild(
+    "input.json",
+    { cwd: directory, reuse: false, model: `replay:${PROTO_REPLAY}` },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(Object.keys(outcome.build.selectedCandidates ?? {}), ["__proto__"]);
+  for (const file of ["candidates.json", "verification.json"]) {
+    const record = JSON.parse(
+      await readFile(join(directory, STATE_DIRECTORY, "projects/input", file), "utf8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(record), ["__proto__"], `${file} must record the function`);
+  }
+});
+
+test("a project that names a target cpu builds against it", async () => {
+  // The x86 assembler takes the machine to emit for as `-march=` on its command
+  // line. The cpu was written into the source as `.arch`, which is the ARM
+  // pseudo-op: the x86 assembler reads it as the architecture named `x86` and
+  // refused every build of a project that set a cpu, with `no such
+  // architecture: 'x86'`.
+  const directory = await workspace("cpu", { ...INPUT, target: { ...INPUT.target, cpu: "znver1" } });
+  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.target.cpu, "znver1");
+
+  // And a cpu the assembler does not know is still refused, and named.
+  const refused = await workspace("cpu-bad", { ...INPUT, target: { ...INPUT.target, cpu: "not-a-cpu" } });
+  await assert.rejects(
+    runBuild("input.json", { cwd: refused, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /the assembler does not support target\.cpu "not-a-cpu"/,
+  );
+});
 
 test("a build produces assembly, a native executable and a complete record", async () => {
   const directory = await workspace("build");

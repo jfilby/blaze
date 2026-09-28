@@ -119,9 +119,17 @@ export function assertBuildableTarget(target: TargetSpec, functionName?: string)
  */
 export const EXECUTABLE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 
-/** The `.arch` prelude line for a target, or null when the toolchain default applies. */
-export function archDirective(target: TargetSpec): string | null {
-  return target.cpu === "" ? null : `.arch ${target.cpu}`;
+/**
+ * The assembler options a target's cpu asks for, empty when the toolchain
+ * default applies.
+ *
+ * The x86 assembler takes the machine it is to emit for as a command line
+ * option, `-march=<cpu>`. `.arch` is the ARM and AArch64 pseudo-op, and the
+ * x86 assembler reads it as the architecture named `x86`, so every build of a
+ * project that set a cpu failed in the assembler with `no such architecture`.
+ */
+export function archOptions(target: TargetSpec): string[] {
+  return target.cpu === "" ? [] : [`-march=${target.cpu}`];
 }
 
 export function targetSummary(target: TargetSpec): string {

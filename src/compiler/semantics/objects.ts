@@ -17,7 +17,7 @@
 import type { Expression, Statement } from "../core/ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { FileContract, FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
-import { BUILTINS } from "./builtins.ts";
+import { builtinFor } from "./builtins.ts";
 import { parseType, typeToString } from "./contract.ts";
 
 /** The number a reference takes: one pointer. */
@@ -236,8 +236,8 @@ class BodyTypes {
       }
       case "call": {
         for (const argument of expression.args) this.expression(argument);
-        const builtin = BUILTINS[expression.name];
-        if (builtin !== undefined) {
+        const builtin = builtinFor(expression.name);
+        if (builtin !== null) {
           if (expression.args.length !== builtin.params.length) {
             throw objectsError(
               `${expression.name} takes ${builtin.params.length} argument${builtin.params.length === 1 ? "" : "s"}`,

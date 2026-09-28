@@ -14,7 +14,7 @@
  */
 
 import { stat, writeFile } from "node:fs/promises";
-import { archDirective } from "../core/target.ts";
+import { archOptions } from "../core/target.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
@@ -272,10 +272,10 @@ export interface ObjectInfo {
 
 /** Confirms the assembler understands the requested architecture. */
 export function assertAssemblerSupportsArch(target: TargetSpec): void {
-  const directive = archDirective(target);
-  if (directive === null) return;
-  const probe = run("as", ["--64", "-o", "/dev/null", "-"], {
-    input: `${directive}\n.text\n.globl probe\nprobe:\n\tret\n`,
+  const options = archOptions(target);
+  if (options.length === 0) return;
+  const probe = run("as", ["--64", ...options, "-o", "/dev/null", "-"], {
+    input: ".text\n.globl probe\nprobe:\n\tret\n",
     timeoutMs: 30_000,
   });
   if (probe.spawnError !== undefined) {
@@ -318,14 +318,33 @@ export function inspectObject(objectPath: string, functionName: string, candidat
     .filter((symbol) => symbol !== "");
 
   // `size --format=berkeley` prints a header line and one data line:
-  // text, data, bss, dec, hex, filename.
+  // text, data, bss, dec, hex, filename. A `size` that did not run reports no
+  // data line, and its absence reads as a text size of zero, which is the
+  // smallest size there is: a size-optimised build would then pick whichever
+  // candidate it happened to evaluate first, and report it as the smallest.
   const sizeResult = run("size", ["--format=berkeley", objectPath], { timeoutMs: 30_000 });
+  if (sizeResult.code !== 0) {
+    throw assemblyError(
+      `cannot measure the object file for ${functionName}`,
+      sizeResult.spawnError ?? sizeResult.stderr.trim(),
+      functionName,
+      candidate,
+    );
+  }
   const dataLine = sizeResult.stdout
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => /^[0-9]/.test(line))
     .pop();
-  const textSizeBytes = Number.parseInt((dataLine ?? "").split(/\s+/)[0] ?? "", 10);
+  if (dataLine === undefined) {
+    throw assemblyError(
+      `cannot measure the object file for ${functionName}`,
+      `size reported no size line:\n${sizeResult.stdout.trim()}`,
+      functionName,
+      candidate,
+    );
+  }
+  const textSizeBytes = Number.parseInt(dataLine.split(/\s+/)[0], 10);
   return { defined, undefined, textSizeBytes: Number.isFinite(textSizeBytes) ? textSizeBytes : 0, objectSizeBytes: 0 };
 }
 
@@ -336,11 +355,11 @@ export async function assemble(request: AssembleRequest): Promise<AssembleResult
   const functionName = symbolOf(request.contract);
   validateAssembly(request.assembly, request.contract, request.candidate, request.callable);
 
-  const directive = archDirective(request.target);
-  const prelude = `${directive === null ? "" : `${directive}\n`}.text\n`;
-  await writeFile(request.assemblyPath, `${prelude}${request.assembly}`, "utf8");
+  await writeFile(request.assemblyPath, `.text\n${request.assembly}`, "utf8");
 
-  const result = run("as", ["--64", "-o", request.objectPath, request.assemblyPath], { timeoutMs: 60_000 });
+  const result = run("as", ["--64", ...archOptions(request.target), "-o", request.objectPath, request.assemblyPath], {
+    timeoutMs: 60_000,
+  });
   if (result.spawnError !== undefined) {
     throw new CompilerError({
       category: "TargetError",

@@ -30,7 +30,8 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, FunctionParam, ObjectLayout, TypeExpr } from "../core/types.ts";
 import type { ProbePlan } from "./probe.ts";
-import { RUNTIME_NAME } from "../runtime/abi.ts";
+import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cMacroNames } from "./c-names.ts";
 
 const INTEGER_ARGUMENT_REGISTERS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 const SSE_ARGUMENT_REGISTERS = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
@@ -86,11 +87,25 @@ export function cDeclarationType(type: TypeExpr): string {
  * a field is at the same offset everywhere: `offsetof` in the definition is the
  * offset the contract states.
  */
+
+/** What a struct member may not be called: a keyword, or a macro. */
+const MEMBER_RESERVED: Record<string, true> = { ...C_KEYWORDS, ...cMacroNames() };
+
 export function cObjectDeclarations(objects: Record<string, ObjectLayout>): string {
   return Object.values(objects)
     .map((object) => {
+      // A field is named by whatever the source called it, and a C keyword is
+      // a legal identifier to the compiler and a reserved word to the C
+      // compiler: `struct { double long; }` is not C, so a source with a field
+      // called `long` produced a driver, a harness and a probe that no target
+      // compiler takes. The Nim host already writes its fields under names of
+      // their own, and a member is in a namespace of its own, so a typedef the
+      // headers define is still a legal member; a keyword and a macro are not.
       const fields = object.fields
-        .map((field) => `  ${cDeclarationType(parseType(field.type))} ${field.name}; /* +${field.offset} */`)
+        .map(
+          (field) =>
+            `  ${cDeclarationType(parseType(field.type))} ${cEscape(field.name, MEMBER_RESERVED)}; /* +${field.offset} */`,
+        )
         .join("\n");
       return `struct ${object.name} {\n${fields}\n}; /* ${object.size} bytes, align ${object.align} */`;
     })
@@ -191,6 +206,70 @@ static long long now_ns(void) {
 }
 `;
 
+/**
+ * The names the harness has already taken, for a contract that wrote a name
+ * down as one of them. The harness holds each argument in a file-scope static
+ * named after the contract's parameter, so a parameter called `value` is a
+ * second `value` in `main` and the call reads the local instead of the vector:
+ * the candidate is verified against an indeterminate number and the build says
+ * it is wrong. A parameter called `input` is a redeclaration of the prelude's
+ * and the harness does not compile at all. The harness side is the side that
+ * has to be right, so the parameter is written down under a C name of its own.
+ *
+ * The prelude's names are read out of the prelude itself, so adding a helper
+ * cannot leave the list behind. The names `main` holds are listed, because they
+ * are written in the body of `generateHarness` rather than in the prelude.
+ */
+const HARNESS_RESERVED: Record<string, true> = {
+  ...C_KEYWORDS,
+  ...cHeaderNames(),
+  ...RUNTIME_SYMBOLS,
+  ...Object.fromEntries(
+    [...HARNESS_PRELUDE.replace(/\/\*[\s\S]*?\*\//g, " ").matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map(
+      (match) => [match[0], true as const],
+    ),
+  ),
+  // main's own entry, and everything held in its scope.
+  main: true,
+  value: true,
+  sink: true,
+  mode: true,
+  mode_cursor: true,
+  bench_mode: true,
+  count_token: true,
+  iterations: true,
+  iteration: true,
+  calls: true,
+  start: true,
+  elapsed: true,
+  demo_request: true,
+  read_header: true,
+  read_data: true,
+};
+
+/** The storage each parameter is written into when a vector is read. */
+const ARGUMENT_STORAGE_PREFIXES: readonly string[] = ["count_", "storage_", "declared_"];
+
+/**
+ * The C names the parameters of a signature are written down under. A buffer
+ * parameter is read into a `count_`/`storage_` pair, so a parameter whose own
+ * name is one of those pairs for a sibling has to move as well, and a name that
+ * moves takes its pair with it. The set grows until nothing moves, which it
+ * does after one pass for any signature a person would write.
+ */
+function harnessArgumentNames(names: readonly string[]): string[] {
+  const reserved: Record<string, true> = { ...HARNESS_RESERVED };
+  let escaped = names.map((name) => cEscape(name, reserved));
+  for (;;) {
+    for (const name of escaped) {
+      for (const prefix of ARGUMENT_STORAGE_PREFIXES) reserved[`${prefix}${name}`] = true;
+    }
+    const next = names.map((name) => cEscape(name, reserved));
+    if (next.every((name, index) => name === escaped[index])) return escaped;
+    escaped = next;
+  }
+}
+
 function vectorCounters(types: readonly TypeExpr[], names: readonly string[]): string {
   return types
     .map((type, index) => (isBuffer(type) ? `static size_t count_${names[index]};` : ""))
@@ -199,7 +278,7 @@ function vectorCounters(types: readonly TypeExpr[], names: readonly string[]): s
 }
 
 /** Reads the header line of the next vector into the static arguments. */
-function headerReader(types: readonly TypeExpr[], names: readonly string[]): string {
+function headerReader(types: readonly TypeExpr[], names: readonly string[], labels: readonly string[]): string {
   const body: string[] = ["  if (getline(&input_line, &input_capacity, input) <= 0) return 0;"];
   // A vector of a function that takes nothing is an empty line, so a blank one
   // is only a line to skip where there are arguments on it to read.
@@ -207,10 +286,11 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
   body.push("  char* cursor = input_line;");
   types.forEach((type, index) => {
     const name = names[index];
+    const label = labels[index];
     if (type.kind === "primitive") {
       body.push("  {");
       body.push(`    char* token = next_token(&cursor);`);
-      body.push(`    if (token == NULL) fail("missing value for ${name}");`);
+      body.push(`    if (token == NULL) fail("missing value for ${label}");`);
       body.push(`    ${name} = (${cDeclarationType(type)})${scalarReadExpression(type, "token")};`);
       body.push("  }");
       return;
@@ -219,10 +299,10 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
     const elementType = cDeclarationType(bufferElement(type));
     body.push("  {");
     body.push(`    char* token = next_token(&cursor);`);
-    body.push(`    if (token == NULL) fail("missing length for ${name}");`);
+    body.push(`    if (token == NULL) fail("missing length for ${label}");`);
     body.push(`    const long declared_${name} = strtol(token, NULL, 10);`);
     if (length !== null) {
-      body.push(`    if (declared_${name} != ${length}) fail("${name} must have length ${length}");`);
+      body.push(`    if (declared_${name} != ${length}) fail("${label} must have length ${length}");`);
     }
     body.push(
       `    count_${name} = ${length === null ? `(declared_${name} < 0 ? 0 : (size_t)declared_${name})` : String(length)};`,
@@ -244,17 +324,17 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
 }
 
 /** Reads the data line of every buffer parameter of the current vector. */
-function dataReader(types: readonly TypeExpr[], names: readonly string[]): string {
+function dataReader(types: readonly TypeExpr[], names: readonly string[], labels: readonly string[]): string {
   const body: string[] = [];
   types.forEach((type, index) => {
     if (type.kind === "primitive") return;
     const name = names[index];
     body.push(`  if (count_${name} != 0) {`);
-    body.push(`    if (getline(&input_line, &input_capacity, input) <= 0) fail("missing data for ${name}");`);
+    body.push(`    if (getline(&input_line, &input_capacity, input) <= 0) fail("missing data for ${labels[index]}");`);
     body.push("    char* cursor = input_line;");
     body.push(`    for (size_t element = 0; element < count_${name}; element += 1) {`);
     body.push(`      char* token = next_token(&cursor);`);
-    body.push(`      if (token == NULL) fail("truncated data for ${name}");`);
+    body.push(`      if (token == NULL) fail("truncated data for ${labels[index]}");`);
     body.push(`      storage_${name}[element] = ${scalarReadExpression(bufferElement(type), "token")};`);
     body.push("    }");
     body.push("  }");
@@ -301,7 +381,8 @@ export function generateHarness(contract: FunctionContract, demoRequest: string)
   sysvArgumentLocations(contract.function.params);
 
   const types = contract.function.params.map((param) => parseType(param.type));
-  const names = contract.function.params.map((param) => param.name);
+  const labels = contract.function.params.map((param) => param.name);
+  const names = harnessArgumentNames(labels);
   for (const type of types) {
     if (type.kind === "array" && type.length === null) {
       throw linkError("array parameters need a fixed length", undefined, name);
@@ -325,13 +406,13 @@ ${vectorStorage(types, names)}
 
 /* Reads the header line of the next vector; returns 0 at end of input. */
 static int read_header(void) {
-${headerReader(types, names)}
+${headerReader(types, names, labels)}
   return 1;
 }
 
 /* Reads one data line per buffer parameter of the current vector. */
 static void read_data(void) {
-${dataReader(types, names)}
+${dataReader(types, names, labels)}
 }
 int main(void) {
   static volatile double sink = 0.0;

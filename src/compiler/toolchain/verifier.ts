@@ -27,6 +27,7 @@ import {
   type Value,
 } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
+import { byName } from "../core/named-record.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
 import type { FunctionContract, Runner, TestConfig, TestFailure, VerificationResult } from "../core/types.ts";
 
@@ -201,22 +202,26 @@ interface VectorBuilder {
 }
 
 function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParameters: readonly string[]): TestVector {
-  const args: Record<string, string | string[] | null> = {};
+  // Keyed by whatever the source called the parameter, so this is built from
+  // entries: a parameter called `__proto__` would otherwise set the prototype
+  // of the record instead of adding an argument, and the vector would reach
+  // the harness with one argument short.
+  const args: (readonly [string, string | string[] | null])[] = [];
   for (const param of parsed.contract.function.params) {
     const type = parseType(param.type);
     if (lengthParameters.includes(param.name)) {
-      args[param.name] = formatScalar(type, BigInt(builder.length));
+      args.push([param.name, formatScalar(type, BigInt(builder.length))]);
       continue;
     }
     if (type.kind !== "primitive") {
       const element = bufferElement(type);
       const size = type.kind === "array" && type.length !== null ? type.length : builder.length;
-      args[param.name] = Array.from({ length: size }, (_, index) => formatScalar(element, scalarFor(builder, element, index)));
+      args.push([param.name, Array.from({ length: size }, (_, index) => formatScalar(element, scalarFor(builder, element, index)))]);
       continue;
     }
-    args[param.name] = formatScalar(type, randomScalar(builder.random, type));
+    args.push([param.name, formatScalar(type, randomScalar(builder.random, type))]);
   }
-  return { id: builder.id, kind: builder.kind, args };
+  return { id: builder.id, kind: builder.kind, args: byName(args) };
 }
 
 function scalarFor(builder: VectorBuilder, type: ScalarType, index: number): ScalarValue {

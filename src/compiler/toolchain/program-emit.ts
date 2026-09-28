@@ -508,10 +508,17 @@ class ProgramEmitter {
     if (value.parts.length === 0) return this.target.stringLiteral("");
     let text: string | null = null;
     for (const part of value.parts) {
+      // A value interpolated into a string is a string already when it is one:
+      // the contract type language has no string type, so `typeOfValue` answers
+      // null for a string and for a value nothing types, and routing a string
+      // through the number path cast the pointer to a whole number and printed
+      // its address where the source printed the string.
       const piece =
         part.k === "text"
           ? this.target.stringLiteral(part.value)
-          : this.target.numberText(this.expression(part.value), writtenType(part.value));
+          : isStringValue(part.value)
+            ? this.expression(part.value)
+            : this.target.numberText(this.expression(part.value), writtenType(part.value));
       text = text === null ? piece : this.target.stringConcat(text, piece);
     }
     return text as string;

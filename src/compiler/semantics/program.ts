@@ -24,6 +24,7 @@
 
 import { posix } from "node:path";
 import { CompilerError } from "../core/errors.ts";
+import { byName } from "../core/named-record.ts";
 import { parseContract } from "./contract.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import { resolveObjects } from "./objects.ts";
@@ -139,18 +140,20 @@ function modulePath(candidate: string, from: string): string {
  * runs them whether or not it exports them.
  */
 function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isProgram: boolean): FileContract {
-  const functions: Record<string, FunctionContract> = {};
+  const entries: (readonly [string, FunctionContract])[] = [];
+  const declaredNames = new Set<string>();
   for (const declared of record.analysis.functions) {
     if (!declared.exported && !isProgram) continue;
-    if (functions[declared.name] !== undefined) {
+    if (declaredNames.has(declared.name)) {
       throw contractPhaseError(`${record.path} declares "${declared.name}" more than once`);
     }
     // A malformed contract fails here, before a backend is ever asked for code.
     const contract = request.frontend.contractFor(record.analysis, declared, request.input);
     parseContract(contract);
-    functions[declared.name] = contract;
+    declaredNames.add(declared.name);
+    entries.push([declared.name, contract]);
   }
-  return { path: record.path, functions, imports: [...record.resolved] };
+  return { path: record.path, functions: byName(entries), imports: [...record.resolved] };
 }
 
 /* -------------------------------------------------------------------------- */

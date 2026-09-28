@@ -1,0 +1,5 @@
+{
+  "candidates": [
+    "\t.globl\t__proto__\n\t.type\t__proto__, @function\n__proto__:\n\tleaq\t(%rdi,%rdi), %rax\n\tret\n"
+  ]
+}

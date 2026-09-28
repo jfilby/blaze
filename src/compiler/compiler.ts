@@ -39,6 +39,7 @@ import {
 } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, hashValue, type JsonStore } from "./core/json-store.ts";
+import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel, type ModelConfiguration } from "./ai/model.ts";
 import {
@@ -1078,21 +1079,29 @@ export async function runBuild(
     /** What every unit generated so far, as the build records it. */
     const record = async (): Promise<Record<string, string>> => {
       const generated = unitsGenerated();
-      const candidates: Record<string, AssemblyCandidate[]> = {};
-      const verification: Record<string, VerificationResult[]> = {};
-      const benchmark: Record<string, BenchmarkResult[]> = {};
-      const outcomes: Record<string, CandidateOutcome[]> = {};
-      const selected: Record<string, string> = {};
+      // Keyed by whatever the source named the function, so these are built
+      // from entries rather than assigned into: a function called `__proto__`
+      // would otherwise replace the prototype of the record instead of adding
+      // an entry, and the record this build writes out would be missing it.
+      const candidateEntries: (readonly [string, AssemblyCandidate[]])[] = [];
+      const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
+      const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
+      const selectedEntries: (readonly [string, string])[] = [];
       for (const entry of generated) {
         const functionName = entry.unit.contract.function.name;
-        candidates[functionName] = entry.result.candidates;
-        outcomes[functionName] = entry.result.outcomes;
-        verification[functionName] = entry.result.outcomes
-          .map((outcome) => outcome.verification)
-          .filter((outcome): outcome is VerificationResult => outcome !== undefined);
-        benchmark[functionName] = entry.result.outcomes
-          .map((outcome) => outcome.benchmark)
-          .filter((outcome): outcome is BenchmarkResult => outcome !== undefined);
+        candidateEntries.push([functionName, entry.result.candidates]);
+        verificationEntries.push([
+          functionName,
+          entry.result.outcomes
+            .map((outcome) => outcome.verification)
+            .filter((outcome): outcome is VerificationResult => outcome !== undefined),
+        ]);
+        benchmarkEntries.push([
+          functionName,
+          entry.result.outcomes
+            .map((outcome) => outcome.benchmark)
+            .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
+        ]);
         const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
         reporter.stage(
           "generate",
@@ -1116,8 +1125,12 @@ export async function runBuild(
             detail: detail.trim(),
           });
         }
-        selected[functionName] = entry.result.selected;
+        selectedEntries.push([functionName, entry.result.selected]);
       }
+      const candidates = byName(candidateEntries);
+      const verification = byName(verificationEntries);
+      const benchmark = byName(benchmarkEntries);
+      const selected = byName(selectedEntries);
       await store.write(paths.candidates, candidates);
       await store.write(paths.generation, {
         model: build.model,
@@ -1224,20 +1237,28 @@ export async function runBuild(
     if (checked !== undefined) await prove();
 
     const generated = unitsGenerated();
-    const candidates: Record<string, AssemblyCandidate[]> = {};
-    const verification: Record<string, VerificationResult[]> = {};
-    const benchmark: Record<string, BenchmarkResult[]> = {};
-    const outcomes: Record<string, CandidateOutcome[]> = {};
+    // Keyed by whatever the source named the function, so these are built from
+    // entries for the reason `record` above spells out.
+    const candidateEntries: (readonly [string, AssemblyCandidate[]])[] = [];
+    const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
+    const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
+    const outcomeEntries: (readonly [string, CandidateOutcome[]])[] = [];
     for (const entry of generated) {
       const functionName = entry.unit.contract.function.name;
-      candidates[functionName] = entry.result.candidates;
-      outcomes[functionName] = entry.result.outcomes;
-      verification[functionName] = entry.result.outcomes
-        .map((outcome) => outcome.verification)
-        .filter((outcome): outcome is VerificationResult => outcome !== undefined);
-      benchmark[functionName] = entry.result.outcomes
-        .map((outcome) => outcome.benchmark)
-        .filter((outcome): outcome is BenchmarkResult => outcome !== undefined);
+      candidateEntries.push([functionName, entry.result.candidates]);
+      outcomeEntries.push([functionName, entry.result.outcomes]);
+      verificationEntries.push([
+        functionName,
+        entry.result.outcomes
+          .map((outcome) => outcome.verification)
+          .filter((outcome): outcome is VerificationResult => outcome !== undefined),
+      ]);
+      benchmarkEntries.push([
+        functionName,
+        entry.result.outcomes
+          .map((outcome) => outcome.benchmark)
+          .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
+      ]);
       const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
       if (reusedByFunction.has(functionName)) {
         // Nothing was assembled or run for this function: what it delivered is
@@ -1268,6 +1289,10 @@ export async function runBuild(
         `Benchmark completed for ${functionName} (${outcome.benchmark?.iterations ?? 0} iterations, ${outcome.benchmark?.durationNs ?? 0} ns)`,
       );
     }
+    const candidates = byName(candidateEntries);
+    const verification = byName(verificationEntries);
+    const benchmark = byName(benchmarkEntries);
+    const outcomes = byName(outcomeEntries);
 
     let outputPath: string | null = null;
     let outputAssemblyPath: string | null = null;

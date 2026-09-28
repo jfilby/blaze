@@ -57,7 +57,7 @@ import type {
   ProgramValue,
 } from "../semantics/module.ts";
 import type { FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
-import { BUILTINS } from "../semantics/builtins.ts";
+import { builtinFor } from "../semantics/builtins.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Bindings                                                                   */
@@ -1188,8 +1188,8 @@ class ProgramResolver {
   }
 
   private call(value: ProgramValue & { k: "call" }, line: number): ResolvedCall {
-    const builtin = BUILTINS[value.function];
-    if (builtin !== undefined) {
+    const builtin = builtinFor(value.function);
+    if (builtin !== null) {
       if (value.args.length !== builtin.params.length) {
         throw programError(
           `${value.function} takes ${builtin.params.length} argument(s), not ${value.args.length}`,
@@ -1286,7 +1286,7 @@ class ProgramResolver {
           `an array of ${fixed.element} is used where ${wanted} is expected`,
           this.body,
           line,
-          `line ${line} of this.body.file: allocate the array with the element type the parameter takes`,
+          `line ${line} of ${this.body.file}: allocate the array with the element type the parameter takes`,
         );
       }
       for (const member of group) member.element = wanted;

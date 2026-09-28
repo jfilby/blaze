@@ -151,6 +151,26 @@ test("a null interpolated in a string is the word for it, not a zero", async () 
   assert.equal(delivered.stdout, original);
 });
 
+test("a string interpolated in a string is the string, not the address of it", async () => {
+  // The contract type language has no string type, so a string value has no
+  // type and every interpolated value was written through the number path:
+  // the pointer was cast to a whole number and the delivered program printed
+  // where the string lived in memory in place of the string.
+  const cases: readonly [string, string][] = [
+    ["const s = `hello`;\nconsole.log(`value ${s} end`);\n", "value hello end\n"],
+    ["const s = `a` + `b`;\nconsole.log(`v=${s}`);\n", "v=ab\n"],
+    ["const s = `x`;\nconsole.log(`${1} ${s}`);\n", "1 x\n"],
+    ["const c = true;\nconst s = c ? `yes` : `no`;\nconsole.log(`[${s}]`);\n", "[yes]\n"],
+  ];
+  for (const [source, expected] of cases) {
+    const { binary, original } = await deliver(source);
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, expected, `for ${JSON.stringify(source)}`);
+    assert.equal(delivered.stdout, original);
+  }
+});
+
 test("a name the driver's own headers define is declared under another one", async () => {
   // `bool` is the _Bool of <stdbool.h> and `size_t` a typedef, so declaring
   // either of them is C the compiler turns away.

@@ -12,6 +12,7 @@ import {
   runtimeHeaderSource,
   runtimeSourceSource,
 } from "../runtime/abi.ts";
+import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
 import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
 import { entryContract } from "../semantics/program.ts";
@@ -357,4 +358,65 @@ test("an over-aligned object is writable across its whole length in the Nim adap
   // the header follows the payload: sizing it by the bytes alone returned a
   // pointer past the end and a header nothing could read.
   assert.equal(out.stdout.trim(), "done");
+});
+
+test("an object alignment that leaves the allocator no budget is refused, not wrapped", async () => {
+  // The budget the block allocator checks is the cap less the alignment less
+  // the header. An alignment of exactly the cap made that subtraction wrap, so
+  // the guard read as the whole size_t range, the total wrapped into a 4 KiB
+  // allocation, and the payload was then placed a terabyte from it: the
+  // header write was a wild write rather than a refusal.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-alloc-"));
+  const runtime = await buildStandaloneRuntime(directory);
+  const compile = async (request: string[], name: string): Promise<string> => {
+    const path = join(directory, `${name}.c`);
+    await writeFile(
+      path,
+      [
+        "#include <stdio.h>",
+        `#include "${RUNTIME_NAME}.h"`,
+        "int main(void) {",
+        "  setbuf(stdout, NULL);",
+        "  unsigned char* at;",
+        "  void* block;",
+        ...request,
+        "  return 0;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    const built = run("gcc", ["-std=c11", "-O2", "-I", directory, "-o", join(directory, name), path, runtime.objectPath]);
+    assert.equal(built.code, 0, built.stderr);
+    return join(directory, name);
+  };
+
+  const atCap = await compile(
+    [
+      "  block = blaze_rt_object_new((size_t)BLAZE_RT_MAX_ALLOCATION, (size_t)BLAZE_RT_MAX_ALLOCATION);",
+      '  printf("answered %p\\n", block);',
+    ],
+    "at_cap",
+  );
+  const refused = run(atCap, [], { timeoutMs: 60_000 });
+  assert.equal(refused.code, 2, `an alignment at the cap must be refused, not answered:\n${refused.stdout}`);
+  assert.match(refused.stderr, /alignment is too large/);
+
+  // The ordinary alignments a contract actually asks for still work, and the
+  // block is writable across its whole length.
+  const ordinary = await compile(
+    [
+      "  block = blaze_rt_object_new(64, 64);",
+      '  if (blaze_rt_object_size(block) != 64) { printf("wrong size\\n"); return 1; }',
+      '  if ((size_t)block % 64 != 0) { printf("misaligned\\n"); return 1; }',
+      "  at = (unsigned char*)block;",
+      "  for (size_t i = 0; i < 64; i += 1) at[i] = (unsigned char)i;",
+      '  for (size_t i = 0; i < 64; i += 1) if (at[i] != (unsigned char)i) { printf("corrupt\\n"); return 1; }',
+      "  blaze_rt_release(block);",
+      '  printf("ok\\n");',
+    ],
+    "ordinary",
+  );
+  const worked = run(ordinary, [], { timeoutMs: 60_000 });
+  assert.equal(worked.code, 0, worked.stderr);
+  assert.equal(worked.stdout.trim(), "ok");
 });
