@@ -37,6 +37,8 @@ const INPUT: SourceInput = {
   ].join("\n"),
   entry: "dotProduct",
   target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+  // The fixtures this file replays are assembly and C.
+  output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 1 },
   test: { randomCases: 4, maxLength: 32, seed: 11 },
   benchmark: { iterations: 50 },

@@ -326,6 +326,8 @@ async function projectUsing(t: TestContext, endpoint: GenerateEndpoint): Promise
     source: SQUARE,
     entry: "square",
     model: { provider: "commandcode", model: "stealth/pixel-canary" },
+    // The answer this build replays is assembly.
+    output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   };
   await writeProject(join(directory, "input.toml"), input);

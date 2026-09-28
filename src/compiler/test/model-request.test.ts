@@ -28,6 +28,8 @@ async function projectWaitingOn(
     source: SOURCE,
     entry: "square",
     model: { provider: "openai-compatible", model: "silent" },
+    // The answer this test waits on is assembly.
+    output: "machine",
     generation,
   };
   await writeProject(join(directory, "input.toml"), input);
@@ -51,6 +53,8 @@ async function projectAnswering(
     source: SOURCE,
     entry: "square",
     model: { provider: "openai-compatible", model: "stub" },
+    // The answers this test queues are assembly.
+    output: "machine",
     generation,
   };
   await writeProject(join(directory, "input.toml"), input);

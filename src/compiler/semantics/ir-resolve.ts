@@ -77,6 +77,8 @@ import {
   TEXT,
   VOID,
   isTextType,
+  isWhole,
+  wholeOf,
   valueKind,
   type ArithOp,
   type CompareOp,
@@ -279,26 +281,7 @@ function isBufferType(type: TypeExpr): boolean {
 }
 
 /** True of a type a value is counted with, rather than measured. */
-function isWhole(type: PrimitiveTypeName): boolean {
-  return type !== "f32" && type !== "f64" && type !== "bool";
-}
-
-const WHOLE_RANK: Record<string, number> = { i8: 1, u8: 1, i16: 2, u16: 2, i32: 3, u32: 3, i64: 4, u64: 4, isize: 4, usize: 4 };
-
 /** The whole number type two whole numbers have in common. */
-function wholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTypeName {
-  if (a === b) return a;
-  const rank = Math.max(WHOLE_RANK[a] ?? 0, WHOLE_RANK[b] ?? 0);
-  const top = [a, b].filter((type) => (WHOLE_RANK[type] ?? 0) === rank);
-  for (const signed of ["i64", "isize", "i32", "i16", "i8"]) {
-    if (top.includes(signed as PrimitiveTypeName)) return signed as PrimitiveTypeName;
-  }
-  for (const unsigned of ["usize", "u64", "u32", "u16", "u8"]) {
-    if (top.includes(unsigned as PrimitiveTypeName)) return unsigned as PrimitiveTypeName;
-  }
-  return "i64";
-}
-
 /** True when a number written in the source is a whole number. */
 function isWholeLiteral(text: string): boolean {
   return /^[+-]?\d+$/.test(text) || /^[+-]?0[xX][0-9a-fA-F]+$/.test(text);
@@ -443,6 +426,17 @@ function contractsOf(program: ProgramContract): Map<string, { signature: Functio
     }
   }
   return contracts;
+}
+
+/**
+ * The whole number a whole operator yields. `%`, a shift and a bitwise operator
+ * are operations on whole numbers whatever the literals were written as, and
+ * `1 << 4` is 16 rather than a shift of two doubles, so the result is a whole
+ * number: the one the operands share when both are already whole, and an i64
+ * otherwise.
+ */
+function wholeResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | null): PrimitiveTypeName {
+  return left !== null && right !== null && isWhole(left) && isWhole(right) ? wholeOf(left, right) : "i64";
 }
 
 /** The operators only whole numbers have. */
@@ -1185,13 +1179,9 @@ class ProgramResolver {
     const whole = WHOLE_OPERATORS.includes(op);
     const type = COMPARISONS[op] !== null
       ? numeric("bool")
-      : numeric(
-          numericResult(
-            whole ? (leftName ?? "i64") : leftName,
-            whole ? (rightName ?? "i64") : rightName,
-            op === "/",
-          ),
-        );
+      : whole
+        ? numeric(wholeResult(leftName, rightName))
+        : numeric(numericResult(leftName, rightName, op === "/"));
     return { k: "binary", op, left, right, type };
   }
 

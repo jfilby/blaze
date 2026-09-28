@@ -9,6 +9,16 @@
  * of them, and reads IR back from a file for the same validation a resolved
  * program gets.
  *
+ * The IR is also where generation starts. A build with `output = "ir"`, which
+ * is the default, asks a model for the IR of a function, checks the answer
+ * against the contract, and lowers it to a target itself (toolchain/ir-c.ts),
+ * so the model never writes a register, an offset or a calling convention. A
+ * function whose contract states what it returns rather than what it does has
+ * no body to lower — the source states a result, not behaviour — so the model
+ * implements it in C, which is still the model writing a function and the
+ * compiler compiling it. Machine code is written by a model only when a
+ * project asks for it.
+ *
  * The contract phase (semantics/program.ts) reads and contracts every file of
  * the program and validates the whole graph. Nothing generates target code
  * until that phase has produced a valid program contract, and every backend is
@@ -50,6 +60,7 @@ import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
+  unitOutput,
   generateCandidates,
   exclusive,
   implementationLabel,
@@ -184,9 +195,14 @@ export interface ProjectPaths {
   outputProgram: string;
 }
 
-/** Normalizes the requested deliverable. */
+/**
+ * Normalizes the requested deliverable. A project that names none is built
+ * through the boundary: the model writes the semantic IR of a function and the
+ * compiler writes the target code from it, so no register, offset or calling
+ * convention is ever a model's to choose.
+ */
 function resolveOutputKind(requested: OutputKind | undefined): OutputKind {
-  if (requested === undefined) return "machine";
+  if (requested === undefined) return "ir";
   if (!OUTPUT_KINDS.includes(requested)) {
     throw new CompilerError({
       category: "InputError",
@@ -619,7 +635,10 @@ function compilationUnits(program: ProgramContract, isProgram: boolean): Compila
 
 /** A program is delivered as a binary, so a program build links one. */
 function assertProgramOutput(output: OutputKind): void {
-  if (output === "machine") return;
+  // A program is delivered as a binary, and what its functions are generated in
+  // does not change that: IR is lowered by the compiler, and every other kind
+  // is a deliverable in its own right.
+  if (output === "machine" || output === "ir") return;
   throw new CompilerError({
     category: "InputError",
     stage: "input",
@@ -1002,7 +1021,7 @@ export async function runBuild(
         semantics,
         sources: phase.modules,
         target,
-        output: outputKind,
+        output: unitOutput(outputKind, unit.contract),
         runtime: runtimeKind,
         backend: () => {
           if (options.reuse) {
@@ -1366,21 +1385,35 @@ export async function runBuild(
       } else {
         const functionName = units[0].contract.function.name;
         const winner = selected[functionName];
-        if (outputKind === "c") {
+        // What was generated in, not what the project asked for: a project
+        // built through the IR generates a function whose contract states a
+        // postcondition in C, and the file delivered is the one that was built.
+        // What was generated in, not what the project asked for: a project
+        // built through the IR generates a function whose contract states a
+        // postcondition in C, and the file delivered is the one that was built.
+        const unit = unitOutput(outputKind, units[0].contract);
+        if (unit === "c") {
           await deliver(`${functionName}/${winner}.c`, paths.outputSource);
           outputPath = store.resolve(paths.outputSource);
-        } else if (outputKind === "wasm") {
+        } else if (unit === "wasm") {
           await deliver(`${functionName}/${winner}.wat`, paths.outputWebAssemblyText);
           await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
           outputPath = store.resolve(paths.outputModule);
           outputAssemblyPath = store.resolve(paths.outputWebAssemblyText);
+        } else if (unit === "ir") {
+          // A function built through the IR delivers the IR the model answered
+          // with and the binary the compiler lowered it into. There is no
+          // assembly to deliver: the compiler never asked for any.
+          await deliver(`${functionName}/${winner}.ir`, paths.outputSource);
+          await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
+          outputPath = store.resolve(paths.outputBinary);
         } else {
           // The delivered assembly is the assembled one, architecture prelude
           // included, so it can be fed straight back to the assembler.
           await deliver(`${functionName}/${winner}.s`, paths.outputAssembly);
           outputAssemblyPath = store.resolve(paths.outputAssembly);
           outputPath = store.resolve(paths.outputAssembly);
-          if (outputKind === "machine") {
+          if (unit === "machine") {
             await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = store.resolve(paths.outputBinary);
           }
@@ -1557,8 +1590,9 @@ export async function runStored(
     const result = await evaluateStoredCandidate({
       contract: unit.contract,
       parsed: unit.parsed,
+      program,
       target,
-      output,
+      output: unitOutput(output, unit.contract),
       runtime,
       candidate,
       workspace,

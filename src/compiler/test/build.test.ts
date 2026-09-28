@@ -27,6 +27,9 @@ const INPUT: SourceInput = {
   ].join("\n"),
   entry: "dotProduct",
   target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+  // These builds answer a replay fixture of assembly, so they are builds of
+  // assembly. The IR path has its own tests, in ir-build.test.ts.
+  output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 2 },
   test: { randomCases: 6, maxLength: 64, seed: 7 },
   benchmark: { iterations: 200 },
@@ -67,6 +70,8 @@ test("a function the source named __proto__ is compiled and recorded like any ot
     source: ["export function __proto__(n: bigint): bigint {", "  return n * 2n;", "}", ""].join("\n"),
     entry: "__proto__",
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+    // The fixture this build replays is assembly.
+    output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
     test: { randomCases: 3, maxLength: 16, seed: 3 },
     benchmark: { iterations: 10 },
@@ -1285,6 +1290,8 @@ async function multiFileProject(name: string, helper: string): Promise<string> {
     sourceFile: "dot.ts",
     entry: "dotProduct",
     target: INPUT.target,
+    // The fixture this build replays is assembly.
+    output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
     test: { randomCases: 4, maxLength: 32, seed: 3 },
     benchmark: { iterations: 100 },

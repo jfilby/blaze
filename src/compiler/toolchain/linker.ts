@@ -579,7 +579,9 @@ export function link(request: LinkRequest): void {
   // The harness includes the runtime header by name, and a build keeps the
   // runtime beside the work directory rather than beside every candidate.
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
-  const result = run("gcc", ["-O2", ...includes, "-o", request.outputPath, ...inputs], { timeoutMs: 120_000 });
+  // A function the compiler lowered from IR may call the maths library, and a
+  // harness or a probe that runs one links it in.
+  const result = run("gcc", ["-O2", ...includes, "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

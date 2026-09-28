@@ -30,24 +30,9 @@ import {
 import type { FunctionSignature, Runner } from "../core/types.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
-import { C_KEYWORDS, cEscape, cHeaderNames } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cOperator, cStringLiteral } from "./c-names.ts";
 
 /** The operator C spells for the one the source used. */
-const C_OPERATORS: Record<string, string> = {
-  "+": "+",
-  "-": "-",
-  "*": "*",
-  "/": "/",
-  "<<": "<<",
-  ">>": ">>",
-  "&": "&",
-  "|": "|",
-  "^": "^",
-  "<": "<",
-  "<=": "<=",
-  ">": ">",
-  ">=": ">=",
-};
 
 /** The helpers a program needs that the runtime does not provide. */
 const DRIVER_HELPERS = `/* A string the program built, held as a NUL terminated managed value. */
@@ -166,21 +151,6 @@ const RESERVED: Record<string, true> = {
   ...RUNTIME_SYMBOLS,
 };
 
-function driverError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "LinkError", stage: "link", message, detail });
-}
-
-function cStringLiteral(text: string): string {
-  const escaped = text
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\t/g, "\\t")
-    .replace(/\r/g, "\\r")
-    .replace(/\0/g, "\\0");
-  return `"${escaped}"`;
-}
-
 /**
  * The C a value is declared as. A string is a C string, and a value of no
  * type is one too: the contract type language has no string type of its own.
@@ -190,61 +160,10 @@ function declaredType(type: SemanticType | null): string {
   return cDeclarationType(type);
 }
 
-/**
- * The whole numbers wider than an int, and the suffix that keeps a literal
- * written as one of them at that width. A C integer literal takes its width
- * from its own magnitude, so an i64 written as a bare `1` is an int: `1 << 62`
- * is a shift x86 masks to 5 bits, and the whole operator the resolver settled
- * on 64 bits is evaluated at 32. The suffix puts the width the resolver chose
- * back into the source the C compiler reads.
- */
-const C_WIDE_INTEGERS: Record<string, { type: string; suffix: string; low: bigint; high: bigint }> = {
-  i64: { type: "int64_t", suffix: "LL", low: -(2n ** 63n), high: 2n ** 63n - 1n },
-  u64: { type: "uint64_t", suffix: "ULL", low: 0n, high: 2n ** 64n - 1n },
-  usize: { type: "size_t", suffix: "ULL", low: 0n, high: 2n ** 64n - 1n },
-  isize: { type: "intptr_t", suffix: "LL", low: -(2n ** 63n), high: 2n ** 63n - 1n },
-};
-
-/** The value an integer literal is, or null where the text is not one. */
-function integerLiteral(text: string): bigint | null {
-  if (/^[+-]?0[xX]/.test(text)) {
-    // BigInt takes the sign of a decimal literal only, so a negative
-    // hexadecimal one is negated rather than converted with its sign.
-    const negative = text.startsWith("-");
-    return (negative ? -1n : 1n) * BigInt(negative ? text.slice(1) : text);
-  }
-  return /^[+-]?[0-9]+$/.test(text) ? BigInt(text) : null;
+function driverError(message: string, detail?: string): CompilerError {
+  return new CompilerError({ category: "LinkError", stage: "link", message, detail });
 }
 
-/** One number as the C type of the value it initializes. */
-function literal(text: string, type: string): string {
-  if (type === "bool") return text === "0" ? "false" : "true";
-  const wide = C_WIDE_INTEGERS[type];
-  if (wide !== undefined) {
-    const value = integerLiteral(text);
-    if (value !== null && value >= wide.low && value <= wide.high) return `${text}${wide.suffix}`;
-    // A value the type cannot hold as a magnitude is written as the bits it
-    // is rather than as that magnitude: a decimal constant too large for any
-    // signed type is not something C will read, and the bits are what the
-    // width is about.
-    if (value !== null) {
-      const bits = value < 0n ? (1n << 64n) + value : value;
-      return `(${wide.type})0x${bits.toString(16)}ULL`;
-    }
-  }
-  if (type !== "f32" && type !== "f64") return text;
-  if (/^[+-]?0[xX]/.test(text)) {
-    // BigInt takes the sign of a decimal literal only, so a negative
-    // hexadecimal one is negated rather than converted with its sign.
-    const negative = text.startsWith("-");
-    const digits = negative ? text.slice(1) : text;
-    const value = BigInt(digits);
-    return `${negative ? "-" : ""}${value.toString()}.0`;
-  }
-  // A whole number written without a point is an integer in C, and a value too
-  // large for one cannot be written that way at all.
-  return /^[+-]?[0-9]+$/.test(text) ? `${text}.0` : text;
-}
 
 /** The C driver of one program. */
 class CDriver implements ProgramTarget {
@@ -301,7 +220,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
   literal(text: string, type: string): string {
-    return literal(text, type);
+    return cLiteral(text, type);
   }
 
   declare(name: string, type: SemanticType | null, value: string): string {
@@ -578,9 +497,11 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
   operator(op: string): string {
-    const written = C_OPERATORS[op];
-    if (written === undefined) throw driverError(`the driver cannot write ${op} down`);
-    return written;
+    try {
+      return cOperator(op);
+    } catch {
+      throw driverError(`the driver cannot write ${op} down`);
+    }
   }
 
   escape(name: string): string {

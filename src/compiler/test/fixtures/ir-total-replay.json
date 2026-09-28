@@ -1,0 +1,5 @@
+{
+  "candidates": [
+    "function total(values: []f64, count: f64) -> f64\n  requires \"values != null\"\n  requires \"len(values) >= count\"\n  ensures none\n  allocates no\n  prints no\n  reads_argv no\n  effects none\n  param value[[]f64] values mutable\n  param value[f64] count mutable\n  block entry: releases[]\n    if [le[bool] f64 local[f64] count const[f64] 0] @2\n      block b1: releases[]\n      return const[f64] 0\n    let value[f64] sum mutable = const[f64] 0 @5\n    for[f64] index from const[f64] 0 to local[f64] count exclusive up step default header b2 exit entry @6\n      block b3: releases[]\n        set sum += [element[f64] local[[]f64] values local[f64] index] @7\n  return local[f64] sum\n"
+  ]
+}

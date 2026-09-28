@@ -17,6 +17,7 @@
  */
 
 import { CompilerError } from "../core/errors.ts";
+import { NameScope } from "./names.ts";
 import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import type { TypeExpr } from "../core/types.ts";
@@ -210,21 +211,20 @@ class ProgramEmitter {
   /** The loops whose bodies are being written, the innermost last. */
   private readonly loops: { header: string; exit: string }[] = [];
   private depth = 0;
-  /** The names the program declared, one entry per open scope, innermost last. */
-  private readonly scopes: { name: string; emitted: string; type: SemanticType | null }[][] = [[]];
-  /** Every name a target has been given, so no two declarations share one. */
-  private readonly taken = new Set<string>();
+  /** The names the program declared, and the names a target reads them by. */
+  private names!: NameScope;
 
   constructor(program: SemanticProgram, target: ProgramTarget) {
     this.program = program;
     this.target = target;
+    this.names = new NameScope((name) => target.escape(name));
   }
 
   emit(): string {
     const body = this.entry();
     const opened = this.target.openProgram().map((line) => indent(1, line));
     const closed = this.target
-      .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.name(name))))
+      .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.names.read(name))))
       .map((line) => indent(1, line));
     return [this.target.prelude(this.program), ...opened, ...body, ...closed, ...this.target.epilogue(), ""].join("\n");
   }
@@ -235,46 +235,6 @@ class ProgramEmitter {
 
   private write(line: string): void {
     this.lines.push(indent(this.depth, line));
-  }
-
-  /**
-   * Declares a name, giving the target a name no other declaration holds. A
-   * name declared again in a nested block is a different variable, and a target
-   * whose blocks do not shadow — Nim refuses a second `var total` in a nested
-   * `if` — would refuse the program the language accepts, so the target is
-   * given `total_2` for the inner one. The IR keeps the name the source wrote.
-   */
-  private declareName(name: string, type: SemanticType | null = null): string {
-    let emitted = name;
-    for (let index = 2; this.taken.has(emitted); index += 1) emitted = `${name}_${index}`;
-    this.taken.add(emitted);
-    this.scopes[this.scopes.length - 1].push({ name, emitted, type });
-    return this.target.escape(emitted);
-  }
-
-  /** The declaration a name is read as, or null when nothing declares it. */
-  private declared(name: string): { emitted: string; type: SemanticType | null } | null {
-    for (let index = this.scopes.length - 1; index >= 0; index -= 1) {
-      const found = this.scopes[index].find((entry) => entry.name === name);
-      if (found !== undefined) return { emitted: found.emitted, type: found.type };
-    }
-    return null;
-  }
-
-  /** The name a target knows a declared name by, or the name itself if none. */
-  private name(name: string): string {
-    const declared = this.declared(name);
-    return this.target.escape(declared === null ? name : declared.emitted);
-  }
-
-  /**
-   * The type a name is written at. A use converts inside a kind, and a target
-   * whose numbers do not convert on their own — Nim refuses `float64 += int64`
-   * — needs the conversion written rather than assumed, so the value is written
-   * at the type the name is declared as rather than the type it arrives with.
-   */
-  private typeOf(name: string, otherwise: SemanticType): SemanticType {
-    return this.declared(name)?.type ?? otherwise;
   }
 
   /** The statements of the block the run starts in, and where it ends. */
@@ -295,18 +255,18 @@ class ProgramEmitter {
         this.declaration(statement.slot, statement.value);
         return;
       case "set": {
-        const type = this.typeOf(statement.name, statement.value.type);
+        const type = this.names.typeOf(statement.name, statement.value.type);
         this.write(
-          this.target.assign(this.name(statement.name), statement.op, this.expression(statement.value, type), type),
+          this.target.assign(this.names.read(statement.name), statement.op, this.expression(statement.value, type), type),
         );
         return;
       }
       case "setElement": {
-        const buffer = this.declared(statement.buffer);
+        const buffer = this.names.declared(statement.buffer);
         const element = buffer?.type !== null && buffer?.type !== undefined ? elementTypeOf(buffer.type) : null;
         this.write(
           this.target.elementAssign(
-            this.name(statement.buffer),
+            this.names.read(statement.buffer),
             this.expression(statement.index, USIZE),
             statement.op,
             this.expression(statement.value, element ?? statement.value.type),
@@ -315,7 +275,7 @@ class ProgramEmitter {
         return;
       }
       case "step":
-        this.write(this.target.update(this.name(statement.name), statement.op, statement.prefix));
+        this.write(this.target.update(this.names.read(statement.name), statement.op, statement.prefix));
         return;
       case "printText":
       case "printNumber":
@@ -371,7 +331,7 @@ class ProgramEmitter {
   }
 
   private declaration(slot: SemanticSlot, value: SemanticValue): void {
-    const name = this.declareName(slot.name, slotType(slot));
+    const name = this.names.declare(slot.name, slotType(slot));
     if (slot.kind === "text") {
       this.write(this.target.declare(name, null, this.expression(value)));
       return;
@@ -382,8 +342,8 @@ class ProgramEmitter {
         for (const line of this.target.alias(
           name,
           slot.element,
-          this.name(value.name),
-          `${this.name(value.name)}_length`,
+          this.names.read(value.name),
+          `${this.names.read(value.name)}_length`,
         )) {
           this.write(line);
         }
@@ -407,11 +367,11 @@ class ProgramEmitter {
     this.loops.push({ header: loop.header, exit: loop.exit });
     // The loop owns the names it counts with, so they are declared here rather
     // than in the body, and a later loop may count with the same name again.
-    this.scopes.push([]);
-    if (loop.kind === "counted") this.declareName(loop.variable);
+    this.names.enter();
+    if (loop.kind === "counted") this.names.declare(loop.variable);
     if (loop.kind === "each") {
-      this.declareName(loop.index);
-      this.declareName(loop.element);
+      this.names.declare(loop.index);
+      this.names.declare(loop.element);
     }
     // A `do` closes itself with its own condition, so it is the one loop the
     // walk does not close with a brace of its own.
@@ -434,7 +394,7 @@ class ProgramEmitter {
       case "counted": {
         const type = loop.type;
         for (const line of this.target.openFor(
-          this.name(loop.variable),
+          this.names.read(loop.variable),
           type,
           this.expression(loop.from, type),
           this.expression(loop.to, type),
@@ -449,10 +409,10 @@ class ProgramEmitter {
       }
       case "each": {
         for (const line of this.target.openForOf(
-          this.name(loop.index),
-          this.name(loop.element),
+          this.names.read(loop.index),
+          this.names.read(loop.element),
           loop.elementType,
-          this.name(loop.of),
+          this.names.read(loop.of),
           this.expression(loop.length),
         )) {
           this.write(line);
@@ -463,12 +423,12 @@ class ProgramEmitter {
     }
     if (!closedByDo) this.write(this.target.closeBody() ?? "");
     this.loops.pop();
-    this.scopes.pop();
+    this.names.leave();
   }
 
   /** The statements of one block, and what is done when it ends. */
   private body(block: SemanticBlock, loop: SemanticLoop | null): void {
-    this.scopes.push([]);
+    this.names.enter();
     this.depth += 1;
     if (block.statements.length === 0 && block.terminator.k === "next") {
       const empty = this.target.emptyBody();
@@ -480,11 +440,11 @@ class ProgramEmitter {
     // that ends in a jump is not fallen out of, and the jump frees what the
     // blocks it leaves own instead — the jump's own releases already say which.
     if (block.terminator.k === "next" || block.terminator.k === "return") {
-      for (const name of block.releases) this.lines.push(indent(this.depth, this.target.release(this.name(name))));
+      for (const name of block.releases) this.lines.push(indent(this.depth, this.target.release(this.names.read(name))));
     }
     this.terminator(block.terminator, loop);
     this.depth -= 1;
-    this.scopes.pop();
+    this.names.leave();
   }
 
   /**
@@ -494,7 +454,7 @@ class ProgramEmitter {
    */
   private terminator(terminator: SemanticTerminator, loop: SemanticLoop | null): void {
     if (terminator.k !== "jump") return;
-    for (const name of terminator.releases) this.write(this.target.release(this.name(name)));
+    for (const name of terminator.releases) this.write(this.target.release(this.names.read(name)));
     const open = loop ?? this.loops[this.loops.length - 1];
     if (open === undefined) throw emitError("a jump out of a block no loop is written in", terminator.target);
     if (terminator.target === open.header) {
@@ -550,7 +510,7 @@ class ProgramEmitter {
       case "text":
         return this.text(value);
       case "local":
-        return this.name(value.name);
+        return this.names.read(value.name);
       case "length":
         return this.length(value);
       case "element":
@@ -619,7 +579,7 @@ class ProgramEmitter {
     if (value.of.k !== "local") {
       throw emitError("the emitter cannot write down the length of an array", `${value.of.k} names no allocation`);
     }
-    return `${this.name(value.of.name)}_length`;
+    return `${this.names.read(value.of.name)}_length`;
   }
 
   private compare(value: SemanticValue & { k: "compare" }): string {

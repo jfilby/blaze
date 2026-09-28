@@ -140,39 +140,6 @@ export function typeEquals(left: SemanticType, right: SemanticType): boolean {
   return typeText(left) === typeText(right);
 }
 
-/**
- * The type two numbers are compared as. A number no use has fixed is a double
- * and takes the type of the side it is compared with, so a whole number is not
- * compared as a double of its own; a whole number compared with a double is a
- * double, so `2 < 2.5` is the comparison the source wrote rather than one
- * rounded to whole numbers.
- */
-export function commonNumber(left: SemanticType | null, right: SemanticType | null): SemanticType | null {
-  if (left === null && right === null) return null;
-  if (left === null) return right !== null && isNumber(right) ? right : null;
-  if (right === null) return isNumber(left) ? left : null;
-  if (!isNumber(left) || !isNumber(right)) return null;
-  return left.name === right.name
-    ? left
-    : { kind: "primitive", name: promoted(left.name as PrimitiveTypeName, right.name as PrimitiveTypeName) };
-}
-
-/** The whole number type two whole numbers have in common, signed before unsigned. */
-function promoted(left: PrimitiveTypeName, right: PrimitiveTypeName): PrimitiveTypeName {
-  if (left === "f32" || left === "f64" || right === "f32" || right === "f64") {
-    return left === "f32" && right === "f32" ? "f32" : "f64";
-  }
-  const rank = Math.max(WHOLE_RANK[left] ?? 0, WHOLE_RANK[right] ?? 0);
-  const widest: PrimitiveTypeName[] = [left, right].filter((name) => (WHOLE_RANK[name] ?? 0) === rank);
-  for (const signed of ["i64", "isize", "i32", "i16", "i8"]) {
-    if (widest.includes(signed as PrimitiveTypeName)) return signed as PrimitiveTypeName;
-  }
-  for (const unsigned of ["usize", "u64", "u32", "u16", "u8"]) {
-    if (widest.includes(unsigned as PrimitiveTypeName)) return unsigned as PrimitiveTypeName;
-  }
-  return "i64";
-}
-
 const WHOLE_RANK: Record<string, number> = {
   i8: 1,
   u8: 1,
@@ -185,6 +152,56 @@ const WHOLE_RANK: Record<string, number> = {
   isize: 4,
   usize: 4,
 };
+
+/** The number two numbers are computed as, a whole pair included. */
+function promoted(left: PrimitiveTypeName, right: PrimitiveTypeName): PrimitiveTypeName {
+  if (left === "f32" || left === "f64" || right === "f32" || right === "f64") {
+    return left === "f32" && right === "f32" ? "f32" : "f64";
+  }
+  return wholeOf(left, right);
+}
+
+/**
+ * The type two numbers are compared as. A number no use has fixed is a double
+ * and takes the type of the side it is compared with, so a whole number is not
+ * compared as a double of its own; a whole number compared with a double is a
+ * double, so `2 < 2.5` is the comparison the source wrote rather than one
+ * rounded to whole numbers.
+ */
+export function commonNumber(left: SemanticType | null, right: SemanticType | null): SemanticType | null {
+  if (left === null && right === null) return null;
+  if (left === null) return right !== null && isNumber(right) ? right : null;
+  if (right === null) return isNumber(left) ? left : null;
+  if (!isNumber(left) || !isNumber(right)) return null;
+  return left.name === right.name ? left : { kind: "primitive", name: promoted(left.name, right.name) };
+}
+
+/**
+ * True when a number is a whole number. `f32`, `f64` and `bool` are not, and
+ * everything else is.
+ */
+export function isWhole(type: PrimitiveTypeName): boolean {
+  return type !== "f32" && type !== "f64" && type !== "bool";
+}
+
+/** True when a type is a whole number, which is what a shift and a remainder are. */
+export function isInteger(type: SemanticType): boolean {
+  return isNumber(type) && isWhole(type.name);
+}
+
+/** The whole number type two whole numbers have in common, signed before unsigned. */
+export function wholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTypeName {
+  if (a === b) return a;
+  const rank = Math.max(WHOLE_RANK[a] ?? 0, WHOLE_RANK[b] ?? 0);
+  const widest = [a, b].filter((name) => (WHOLE_RANK[name] ?? 0) === rank);
+  for (const signed of ["i64", "isize", "i32", "i16", "i8"]) {
+    if (widest.includes(signed as PrimitiveTypeName)) return signed as PrimitiveTypeName;
+  }
+  for (const unsigned of ["usize", "u64", "u32", "u16", "u8"]) {
+    if (widest.includes(unsigned as PrimitiveTypeName)) return unsigned as PrimitiveTypeName;
+  }
+  return "i64";
+}
 
 /**
  * Whether a value of one type may be used where another is expected. A use

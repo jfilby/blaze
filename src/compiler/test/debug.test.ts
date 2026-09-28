@@ -15,6 +15,8 @@ const SQUARE: SourceInput = {
   source: "export function square(x: number): number {\n  return x * x;\n}\n",
   entry: "square",
   model: { provider: "openai-compatible", model: "stub" },
+  // The answers these tests queue are assembly.
+  output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 2 },
   optimize: { primary: "size" },
 };

@@ -56,7 +56,7 @@ const USAGE = `blaze - AI native compiler
 
 Usage:
   blaze build [input.toml] [arguments...] build a function, or a program
-  blaze generate [input.toml] [options]  generate and validate assembly candidates
+  blaze generate [input.toml] [options]  generate and validate candidates
   blaze ir [input.toml] [options] print the semantic IR: the program the
                             project runs, one function, or every function
   blaze test <project> [options]         re-verify the selected candidate
@@ -107,7 +107,8 @@ Options:
   --function <name>          print one function of the project as the IR holds
                             it, rather than the program it runs
   --all                      print every function of every file as the IR holds it
-  --output <kind>           deliverable: c, asm, machine or wasm (default machine)
+  --output <kind>           what is generated: ir (semantic IR the compiler lowers),
+                            c, asm, machine or wasm (default ir)
   --runtime <name>           host runtime: none or nim (default none)
   --max-candidates <n>      number of candidates to generate, each generated
                             from the contract alone

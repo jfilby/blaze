@@ -57,7 +57,9 @@ import { parseType, typeToString } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, coalesce, describe, elementOf, numeric } from "./objects.ts";
+import { isWhole, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
+import type { PrimitiveTypeName } from "../core/types.ts";
 import type { AssignOperator, BinaryOp, Expression, Statement, UnaryOp as SourceUnaryOp } from "../core/ir.ts";
 import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
 import {
@@ -149,6 +151,22 @@ const WHOLE: Inferred = { kind: "type", type: USIZE };
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/** The operators that are operations on whole numbers and yield one. */
+const WHOLE_OPERATORS: Record<string, true> = { "%": true, "<<": true, ">>": true, "&": true, "|": true, "^": true };
+
+/**
+ * The whole number a whole operator yields: the one both operands already are,
+ * and an i64 otherwise, because a shift, a remainder or a bitwise operator over
+ * a double is not an operation any target has.
+ */
+function wholeResult(left: Inferred, right: Inferred): TypeExpr {
+  const whole = (side: Inferred): PrimitiveTypeName | null =>
+    side.kind === "type" && side.type.kind === "primitive" && isWhole(side.type.name) ? side.type.name : null;
+  const a = whole(left);
+  const b = whole(right);
+  return { kind: "primitive", name: a !== null && b !== null ? wholeOf(a, b) : "i64" };
+}
 
 /** What the operators a binary expression is written with state in the IR. */
 const ARITHMETIC: Record<BinaryOp, ArithOp | null> = {
@@ -1006,7 +1024,10 @@ class FunctionBody {
         inferred: asType(numeric(left.inferred, right.inferred)),
       };
     }
-    const type = numeric(left.inferred, right.inferred);
+    // `%`, a shift and a bitwise operator are operations on whole numbers
+    // whatever the literals were written as: `1 << 4` is 16, not a shift of
+    // two doubles, and a target has no shift of anything else.
+    const type = WHOLE_OPERATORS[op] === true ? wholeResult(left.inferred, right.inferred) : numeric(left.inferred, right.inferred);
     return {
       value: { k: "arith", type, op: ARITHMETIC[op] as ArithOp, left: left.value, right: right.value },
       inferred: asType(type),
@@ -1042,7 +1063,9 @@ class FunctionBody {
         return { value: { k: "unary", type: BOOLEAN, op: UNARY["!"], operand: operand.value }, inferred: asType(BOOL) };
       }
       if (isReference(operand.value.type)) {
-        return { value: { k: "isNull", type: BOOLEAN, operand: operand.value, negate: true }, inferred: asType(BOOL) };
+        // `!a` asks whether a reference is nothing, which is the null test and
+        // not its negation: `!node.left` is the arm a leaf takes.
+        return { value: { k: "isNull", type: BOOLEAN, operand: operand.value, negate: false }, inferred: asType(BOOL) };
       }
       throw this.error(
         `negates a ${typeText(operand.value.type)}, which is not a truth`,

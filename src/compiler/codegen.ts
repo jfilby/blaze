@@ -16,6 +16,9 @@ import { assemble, programCalls } from "./toolchain/assembler.ts";
 import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
 import { buildWasm } from "./toolchain/wasm.ts";
 import { compileC } from "./toolchain/csource.ts";
+import { compileFunctionC } from "./toolchain/ir-c.ts";
+import { parseSemanticFunction } from "./semantics/ir-text.ts";
+import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
@@ -54,6 +57,7 @@ const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
   asm: "assembly",
   machine: "assembly",
   wasm: "WebAssembly",
+  ir: "semantic IR",
 };
 
 export interface CodegenWorkspace {
@@ -155,7 +159,7 @@ interface CandidatePaths {
  */
 function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: OutputKind): CandidatePaths {
   const base = `${workspace.workDirectory}/${candidate}`;
-  const extension = output === "c" ? "c" : output === "wasm" ? "wat" : "s";
+  const extension = output === "c" ? "c" : output === "wasm" ? "wat" : output === "ir" ? "ir" : "s";
   return {
     implementation: `${base}.${extension}`,
     object: `${base}.o`,
@@ -270,6 +274,8 @@ export interface CandidateEvaluationRequest {
   callable: ReadonlySet<string>;
   contract: FunctionContract;
   parsed: ParsedContract;
+  /** The whole program, contracted: what an IR candidate is bound to. */
+  program: ProgramContract;
   target: TargetSpec;
   output: OutputKind;
   workspace: CodegenWorkspace;
@@ -350,6 +356,22 @@ function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null
 }
 
 /**
+ * The IR a candidate answered with, bound to the contract it is an
+ * implementation of and checked against it. A candidate that is not a program
+ * the compiler may lower is refused here, before anything is compiled, and the
+ * diagnostics are the ones a repair round is given.
+ */
+export function readSemanticCandidate(
+  candidate: AssemblyCandidate,
+  program: ProgramContract,
+  contract: FunctionContract,
+): SemanticFunction {
+  const fn = parseSemanticFunction(candidate.assembly, program);
+  validateSemanticFunction(fn, contract);
+  return fn;
+}
+
+/**
  * Turns model output into something executable. Every kind is validated by the
  * native toolchain before it runs: assembly and C through the assembler and the
  * C compiler, WebAssembly through the module checks.
@@ -389,6 +411,26 @@ async function materialize(
   // include it, and the harness always does. It is written and compiled once
   // for the whole build, not once per candidate.
   const runtime = await request.prepareRuntime();
+
+  if (request.output === "ir") {
+    // The boundary: the model wrote the IR, the compiler checked it against the
+    // contract and is now the one that wrote the C, so nothing the model wrote
+    // is ever compiled.
+    const built = await compileFunctionC({
+      fn: readSemanticCandidate(candidate, request.program, request.contract),
+      contract: request.contract,
+      target: request.target,
+      sourcePath: `${paths.implementation}.c`,
+      objectPath: paths.object,
+      ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
+    });
+    return {
+      runner: null,
+      sizeBytes: built.objectSizeBytes,
+      textSizeBytes: built.textSizeBytes,
+      implementationPath: paths.implementation,
+    };
+  }
 
   const object =
     request.output === "c"
@@ -457,6 +499,19 @@ async function materialize(
   };
 }
 
+/**
+ * The output one function is generated in.
+ *
+ * An IR build generates a function the IR can describe from the IR. A function
+ * whose contract states what it returns rather than what it does has no body to
+ * describe — there is no behaviour in the source to lower — so the model
+ * implements it against its postcondition, in C, the way it did before. Which of
+ * the two a function is is a property of the contract, not of the project.
+ */
+export function unitOutput(output: OutputKind, contract: FunctionContract): OutputKind {
+  return output === "ir" && contract.definition === undefined ? "c" : output;
+}
+
 export function implementationLabel(output: OutputKind): string {
   return IMPLEMENTATION_LABEL[output];
 }
@@ -480,15 +535,22 @@ async function measureCandidate(
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
-  // A candidate may call the other functions of the program, and one that does
-  // is linked only into the program, so nothing about it can be run on its own.
-  // The program is the oracle for it, which is where a definition contract
-  // already sends its candidate.
-  const calls =
-    request.output === "machine" || request.output === "asm"
-      ? programCalls(candidate.assembly, request.callable)
-      : [];
   try {
+    // A candidate may call the other functions of the program, and one that does
+    // is linked only into the program, so nothing about it can be run on its own.
+    // The program is the oracle for it, which is where a definition contract
+    // already sends its candidate. Reading the calls out of an IR candidate is
+    // reading its IR, so a candidate that is not a program the compiler may
+    // lower is refused here — inside the refusal path, where a diagnostic comes
+    // of it and a repair round is given the reason.
+    const calls =
+      request.output === "machine" || request.output === "asm"
+        ? programCalls(candidate.assembly, request.callable)
+        : request.output === "ir"
+          ? readSemanticCandidate(candidate, request.program, request.contract)
+              .calls.map((edge) => edge.callee)
+              .filter((callee) => request.callable.has(callee))
+          : [];
     const built = await materialize(request, candidate, paths, vectors, calls.length === 0);
 
     // A candidate that calls another function of the program is judged by that
@@ -853,6 +915,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
     {
       contract: request.contract,
       parsed: request.parsed,
+      program: request.program,
       target: request.target,
       output: request.output,
       runtime: request.runtime,

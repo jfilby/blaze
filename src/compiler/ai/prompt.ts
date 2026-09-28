@@ -179,6 +179,15 @@ const OUTPUT_LANGUAGE: Record<OutputKind, { language: string; rules: string[] }>
       cSourceRules,
     ],
   },
+  ir: {
+    language: "semantic IR",
+    rules: [
+      "Answer with the whole function as semantic IR and nothing else: the header lines the compiler printed, then its body, exactly as they are printed above.",
+      "The compiler reads it back, checks it against this contract, and writes the target code itself. A register, a stack offset, an instruction, an ABI and a calling convention are yours in neither sense: the IR has no way to say them.",
+      "Change the IR, never the contract: the signature, the conditions, the effects, the object layouts and the callee names are the contract's, and the compiler refuses a candidate that disagrees with one of them.",
+      "A function whose body you can write as a different sequence of the same IR is a better answer than one you cannot: the IR is what the compiler validates, so an unvalid one is never compiled.",
+    ],
+  },
   wasm: {
     language: "WebAssembly text format (WAT)",
     rules: [
@@ -207,12 +216,19 @@ export function buildSystemPrompt(output: OutputKind): string {
     "Rules for the implementation you emit:",
     "- Write it in the output language named in the request, and follow the rules",
     "  listed there exactly.",
-    ...(output === "wasm"
+    ...(output === "wasm" || output === "ir"
       ? []
       : [
           "- The architecture prelude, the harness, the host and the build are compiler",
           "  code. Emit only the contracted function.",
         ]),
+    ...(output === "ir"
+      ? [
+          "- The IR below is the program: it is what the compiler validates and what it",
+          "  lowers. Write it as the program you were asked for, and change it as the",
+          "  diagnostics below say to.",
+        ]
+      : []),
     "- Do not write a description of the algorithm outside the code. A short comment",
     "  inside the code is fine.",
     "- Return the code and nothing else, and put nothing else beside it.",
@@ -579,6 +595,10 @@ export function buildUserPrompt(request: PromptRequest): string {
 
   const language = OUTPUT_LANGUAGE[output];
   const native = output === "asm" || output === "machine";
+  // An IR candidate is lowered by the compiler, so the target facts a model needs
+  // in order to write machine code — where an argument is, which registers to
+  // preserve, how deep a frame is — are facts it is not asked for at all.
+  const lowered = output === "ir";
   const semantic = request.semantics[contract.function.name];
   const plan = callPlan(contract, request.program);
   const rules = native ? nativeRules(contract, plan) : language.rules;
@@ -599,6 +619,9 @@ export function buildUserPrompt(request: PromptRequest): string {
             `argument locations: ${sysvArgumentLocations(contract.function.params)}`,
             `return value: ${sysvReturnLocation(parseType(contract.function.returns))}`,
           ]
+        : []),
+      ...(lowered
+        ? ["The compiler lowers this IR to the target, and the target decides where arguments are and which registers a value lives in."]
         : []),
       ...(output === "c" ? [`C definition to write: ${cSignature(contract)}`] : []),
       ...(output === "wasm" ? [`WebAssembly signature to export: ${wasmSignature(contract)}`] : []),

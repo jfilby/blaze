@@ -330,9 +330,9 @@ export interface BenchmarkConfig {
  *   machine  x86-64 assembly, assembled, linked and verified, delivered as an executable
  *   wasm     WebAssembly text, assembled and verified, delivered as a module
  */
-export type OutputKind = "c" | "asm" | "machine" | "wasm";
+export type OutputKind = "c" | "asm" | "machine" | "wasm" | "ir";
 
-export const OUTPUT_KINDS: readonly OutputKind[] = ["c", "asm", "machine", "wasm"];
+export const OUTPUT_KINDS: readonly OutputKind[] = ["c", "asm", "machine", "wasm", "ir"];
 
 /**
  * The runtime a build links against. Generated code reaches runtime services

@@ -35,7 +35,7 @@ import {
   commonNumber,
   hasCall,
   isBoolean,
-  isFloat,
+  isInteger,
   isNumber,
   isReference,
   isSemanticType,
@@ -85,6 +85,16 @@ const EFFECT_NAMES: Record<Effect, true> = {
 
 /** A name the IR is allowed to carry: an identifier, and nothing else. */
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** The operations that are on whole numbers and yield one. */
+const WHOLE_OPERATIONS: Record<string, true> = {
+  mod: true,
+  shl: true,
+  shr: true,
+  and: true,
+  or: true,
+  xor: true,
+};
 
 /* -------------------------------------------------------------------------- */
 /* What a body is checked against                                              */
@@ -599,8 +609,12 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         problems.push(`${prefix}an element is read out of a ${typeText(value.of.type)}, which is not a sequence`);
         return problems;
       }
-      if (isNumber(value.index.type) && isFloat(value.index.type)) {
-        problems.push(`${prefix}an element is read at a ${typeText(value.index.type)}, which is not a whole number`);
+      // An index is a whole number, and the source may write one as a double —
+      // a loop counting in fractions indexes just as well. What has to be a
+      // number is the index: a truth or a reference is not a place in an array,
+      // and a target has no way to read one as one.
+      if (!isNumber(value.index.type)) {
+        problems.push(`${prefix}an element is read at a ${typeText(value.index.type)}, which is not a number`);
       }
       const element = elementTypeOf(value.of.type);
       if (element !== null && !typeEquals(element, value.type)) {
@@ -660,6 +674,16 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       if (value.op === "add" && (isTextType(value.left.type) || isTextType(value.right.type))) {
         if (!isTextType(value.type)) {
           problems.push(`${prefix}text added to a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);
+        }
+        return problems;
+      }
+      // A shift, a remainder and a bitwise operator are operations on whole
+      // numbers whatever the literals were written as, so they yield one: there
+      // is no shift of two doubles for a target to perform.
+      if (WHOLE_OPERATIONS[value.op] === true) {
+        if (!isInteger(value.type)) {
+          problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is not a whole number`);
+          return problems;
         }
         return problems;
       }
