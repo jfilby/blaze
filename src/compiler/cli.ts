@@ -48,28 +48,30 @@ function titleAnimation(label: string): TitleAnimation {
 }
 
 /** The file that describes a project, and the default input of `blaze build`. */
-const PROJECT_FILE = "blaze.json";
+const PROJECT_FILE = "blaze.toml";
 
 const USAGE = `blaze - AI native compiler
 
 Usage:
-  blaze build [input.json] [arguments...] build a function, or a program
-  blaze generate [input.json] [options]  generate and validate assembly candidates
+  blaze build [input.toml] [arguments...] build a function, or a program
+  blaze generate [input.toml] [options]  generate and validate assembly candidates
   blaze test <project> [options]         re-verify the selected candidate
   blaze benchmark <project> [options]    re-benchmark the selected candidate
   blaze inspect <project>                print the build record
   blaze projects                         list projects in ${STATE_DIRECTORY}/projects
 
-  blaze build                       build the ./blaze.json in this directory
-  blaze build <input.json>          build the given input instead
+  blaze build                       build the ./blaze.toml in this directory
+  blaze build <input.toml>          build the given input instead
 
 A project is described by a ${PROJECT_FILE} file, and a directory that holds one is
 named after that directory, so "blaze build examples/hello_world/${PROJECT_FILE}"
-builds project hello_world. Any other input file names its own project.
+builds project hello_world. Any other .toml file names its own project.
 
 A project names its provider and model, never its key:
 
-  "model": { "provider": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+  [model]
+  provider = "openrouter"
+  model = "anthropic/claude-sonnet-4.5"
 
 The credential comes from the environment. --model overrides the project, and
 the project overrides AI_MODEL.
@@ -148,7 +150,7 @@ function defaultProjectFile(): string {
       category: "InputError",
       stage: "input",
       message: `no ${PROJECT_FILE} in ${process.cwd()}`,
-      detail: "run from a project directory, or name the input: blaze build <input.json>",
+      detail: "run from a project directory, or name the input: blaze build <input.toml>",
     });
   }
   return candidate;
@@ -272,7 +274,7 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case "build":
     case "generate": {
-      // With no argument, build the project described by ./blaze.json.
+      // With no argument, build the project described by ./blaze.toml.
       const input = argument ?? defaultProjectFile();
       const title = titleAnimation(projectIdFor(resolve(input)));
       try {

@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
+import { parse as parseToml } from "smol-toml";
 import { parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName } from "./semantics/calls.ts";
@@ -203,9 +204,9 @@ function resolveRuntimeKind(requested: RuntimeKind | undefined, output: OutputKi
 }
 
 /**
- * A project is named after its `blaze.json`, or after the directory that
- * holds one: a directory with a blaze.json in it is the project. Any other
- * input file names its own project, so examples can stay flat.
+ * A project is named after its `blaze.toml`, or after the directory that
+ * holds one: a directory with a blaze.toml in it is the project. Any other
+ * `.toml` file names its own project, so examples can stay flat.
  */
 export function projectIdFor(inputPath: string): string {
   const name = basename(inputPath, extname(inputPath));
@@ -261,29 +262,26 @@ function readInput(path: string): ProjectInput {
       detail: cause instanceof Error ? cause.message : String(cause),
     });
   }
-  let parsed: unknown;
-  // A source file is not a project file. Saying so beats reporting a JSON
+  // A source file is not a project file. Saying so beats reporting a TOML
   // parse error on code the compiler was never meant to read directly.
-  if (!text.trimStart().startsWith("{")) {
+  if (extname(path) !== ".toml") {
     throw new CompilerError({
       category: "InputError",
       stage: "input",
       message: `${path} is a source file, not a project file`,
-      detail: "blaze builds the JSON project file, which names the source file to compile; run blaze build with the blaze.json beside it",
+      detail: "blaze builds the TOML project file, which names the source file to compile; run blaze build with the blaze.toml beside it",
     });
   }
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = parseToml(text);
   } catch (cause) {
     throw new CompilerError({
       category: "InputError",
       stage: "input",
-      message: `${path} is not valid JSON`,
+      message: `${path} is not valid TOML`,
       detail: cause instanceof Error ? cause.message : String(cause),
     });
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new CompilerError({ category: "InputError", stage: "input", message: `${path} must contain a JSON object` });
   }
   const input = parsed as Partial<SourceInput> & { sourceFile?: string };
   if (typeof input.language !== "string") {
@@ -292,8 +290,9 @@ function readInput(path: string): ProjectInput {
   rejectCredentials(path, input);
   const directory = dirname(path);
   // `sourceFile` names a source file next to the project file, so the example
-  // projects compile the real file instead of a copy of it pasted into JSON.
-  // Its path is the one the program is known by, so it names every contract.
+  // projects compile the real file instead of a copy of it pasted into the
+  // project file. Its path is the one the program is known by, so it names
+  // every contract.
   let entryPath = INLINE_MODULE;
   if (input.sourceFile !== undefined) {
     if (typeof input.sourceFile !== "string" || input.sourceFile === "") {
@@ -355,9 +354,9 @@ const CREDENTIAL_WORDS: readonly string[] = [
 ];
 
 function rejectCredentials(path: string, input: Record<string, unknown>): void {
-  // The key itself is what leaks, wherever it sits: a project file is copied
-  // into the store whole, so a credential named at the top level is stored
-  // just as much as one nested under a provider.
+  // The key itself is what leaks, wherever it sits: a project is written into
+  // the store whole, so a credential named at the top level is stored just as
+  // much as one nested under a provider.
   const scan = (fields: Record<string, unknown>, where: string): void => {
     for (const [key, value] of Object.entries(fields)) {
       const at = where === "" ? key : `${where}.${key}`;
@@ -719,7 +718,10 @@ export async function runBuild(
   await store.mkdirp(paths.root);
   await store.mkdirp(paths.work);
   await store.mkdirp(paths.output);
-  await copyFile(absoluteInput, store.resolve(paths.input));
+  // The project is stored as the record the rest of the compiler reads, which
+  // is JSON whatever the project file is, so `blaze test` and `blaze benchmark`
+  // re-run a build against the project it was given.
+  await store.write(paths.input, input);
 
   const createdAt = new Date().toISOString();
   const build: BuildStatus = {

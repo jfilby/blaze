@@ -8,6 +8,7 @@ import { exclusive } from "../codegen.ts";
 import { run } from "../core/process.ts";
 import type { SourceInput } from "../core/types.ts";
 import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
+import { writeProject } from "./project.ts";
 
 const SQUARE: SourceInput = {
   language: "typescript",
@@ -27,7 +28,7 @@ const WRONG_SQUARE_ASSEMBLY = ["\t.globl\tsquare", "square:", "\taddsd\t%xmm0, %
 async function project(t: TestContext, answers: string[]): Promise<string> {
   await chatEndpoint(t, answers);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
-  await writeFile(join(directory, "blaze.json"), JSON.stringify(SQUARE), "utf8");
+  await writeProject(join(directory, "blaze.toml"), SQUARE);
   return directory;
 }
 
@@ -45,7 +46,7 @@ async function fanOutProject(
     generation: { maxCandidates: 1, maxAttempts: 1 },
     ...input,
   };
-  await writeFile(join(directory, "blaze.json"), JSON.stringify(project), "utf8");
+  await writeProject(join(directory, "blaze.toml"), project);
   return { directory, peak: endpoint.peak };
 }
 
@@ -61,7 +62,7 @@ test("candidates are generated at the same time when candidate concurrency allow
     3,
   );
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(peak(), 3, "three candidates should have been in flight together");
 });
@@ -73,7 +74,7 @@ test("candidate concurrency of one generates candidates one at a time", async (t
     { generation: { maxCandidates: 3, maxAttempts: 1, candidateConcurrency: 1 } },
   );
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(peak(), 1, "a candidate must be answered before the next is asked for");
   // One record per candidate, whatever order they were produced in.
@@ -84,7 +85,7 @@ test("candidate concurrency of one generates candidates one at a time", async (t
 test("without --debug the prompts stay out of the way", async (t) => {
   const endpoint = await chatEndpoint(t, [SQUARE_ASSEMBLY]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
-  await writeFile(join(directory, "blaze.json"), JSON.stringify(SQUARE), "utf8");
+  await writeProject(join(directory, "blaze.toml"), SQUARE);
 
   const written: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
@@ -96,7 +97,7 @@ test("without --debug the prompts stay out of the way", async (t) => {
     process.stderr.write = original;
   });
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
   assert.equal(outcome.build.status, "success", endpoint.url);
   assert.equal(written.join(""), "", "a quiet build writes no diagnostics");
 });
@@ -114,7 +115,7 @@ test("--debug prints the system and user prompt of every attempt", async (t) => 
     process.stderr.write = original;
   });
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
   assert.equal(outcome.build.status, "success", "the repair should succeed");
   assert.equal(outcome.build.selectedCandidates?.square, "c2");
 
@@ -145,9 +146,9 @@ test("--debug prints the system and user prompt of every attempt", async (t) => 
 test("the prompt reaches the model as the contract and the instructions", async (t) => {
   const endpoint = await chatEndpoint(t, [SQUARE_ASSEMBLY]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
-  await writeFile(join(directory, "blaze.json"), JSON.stringify(SQUARE), "utf8");
+  await writeProject(join(directory, "blaze.toml"), SQUARE);
 
-  await runBuild("blaze.json", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
+  await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
 
   assert.equal(endpoint.prompts.length, 1);
   const sent = endpoint.prompts[0];
@@ -205,17 +206,13 @@ async function pairProject(
   for (const [name, source] of Object.entries(PAIR_SOURCES)) {
     await writeFile(join(directory, name), source, "utf8");
   }
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "openai-compatible", model: "stub" },
-      output: "machine",
-      generation: { maxCandidates: 1, maxAttempts: 1, ...generation },
-    }),
-    "utf8",
-  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1, ...generation },
+  });
   return { directory, endpoint };
 }
 
@@ -224,7 +221,7 @@ test("functions are generated at the same time when function concurrency allows 
   // that generated one function at a time could never get past the first.
   const { directory, endpoint } = await pairProject(t, { functionConcurrency: 2 }, 2);
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.peak(), 2, "both functions should have been in flight together");
@@ -234,7 +231,7 @@ test("functions are generated at the same time when function concurrency allows 
 test("function concurrency of one generates functions one at a time", async (t) => {
   const { directory, endpoint } = await pairProject(t, { functionConcurrency: 1 });
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.peak(), 1, "a function must be answered before the next is asked for");
@@ -281,19 +278,15 @@ test("the default generates up to three functions at a time", async (t) => {
   for (const [name, source] of Object.entries(sources)) {
     await writeFile(join(directory, name), source, "utf8");
   }
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "openai-compatible", model: "stub" },
-      output: "machine",
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    }),
-    "utf8",
-  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
 
-  const outcome = await runBuild("blaze.json", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.peak(), 3, "three functions at a time is the default");

@@ -8,6 +8,7 @@ import { run } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
+import { writeProject } from "./project.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
@@ -33,7 +34,7 @@ const INPUT: SourceInput = {
 
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
-  await writeFile(join(directory, "input.json"), JSON.stringify(input, null, 2), "utf8");
+  await writeProject(join(directory, "input.toml"), input);
   return directory;
 }
 
@@ -61,25 +62,17 @@ test("a function the source named __proto__ is compiled and recorded like any ot
   // the name once, and the records were assigned into rather than built, so
   // the entry never existed in them.
   const directory = await mkdtemp(join(tmpdir(), "blaze-proto-"));
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify(
-      {
-        language: "typescript",
-        source: ["export function __proto__(n: bigint): bigint {", "  return n * 2n;", "}", ""].join("\n"),
-        entry: "__proto__",
-        target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-        generation: { maxCandidates: 1, maxAttempts: 1 },
-        test: { randomCases: 3, maxLength: 16, seed: 3 },
-        benchmark: { iterations: 10 },
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    source: ["export function __proto__(n: bigint): bigint {", "  return n * 2n;", "}", ""].join("\n"),
+    entry: "__proto__",
+    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+    test: { randomCases: 3, maxLength: 16, seed: 3 },
+    benchmark: { iterations: 10 },
+  });
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${PROTO_REPLAY}` },
     quiet,
     "build",
@@ -102,21 +95,21 @@ test("a project that names a target cpu builds against it", async () => {
   // refused every build of a project that set a cpu, with `no such
   // architecture: 'x86'`.
   const directory = await workspace("cpu", { ...INPUT, target: { ...INPUT.target, cpu: "znver1" } });
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(outcome.build.target.cpu, "znver1");
 
   // And a cpu the assembler does not know is still refused, and named.
   const refused = await workspace("cpu-bad", { ...INPUT, target: { ...INPUT.target, cpu: "not-a-cpu" } });
   await assert.rejects(
-    runBuild("input.json", { cwd: refused, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    runBuild("input.toml", { cwd: refused, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
     /the assembler does not support target\.cpu "not-a-cpu"/,
   );
 });
 
 test("a build produces assembly, a native executable and a complete record", async () => {
   const directory = await workspace("build");
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(outcome.build.outputKind, "machine");
@@ -150,7 +143,7 @@ test("a build produces assembly, a native executable and a complete record", asy
 
 test("the delivered executable computes the contracted function", async () => {
   const directory = await workspace("run");
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.ok(outcome.outputPath !== null);
 
   const request = ["run", "5 5 5", "1 2 3 4 5", "1 1 1 1 1", "3 3 3", "2 2 2", "2 2 2", ""].join("\n");
@@ -164,7 +157,7 @@ test("the delivered executable computes the contracted function", async () => {
 
 test("the delivered assembly is the implementation that was verified", async () => {
   const directory = await workspace("asm");
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.ok(outcome.outputAssemblyPath !== null);
 
   const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
@@ -188,7 +181,7 @@ test("a C build delivers the C source the compiler verified", async () => {
     "utf8",
   );
 
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
   assert.equal(outcome.build.outputKind, "c");
   assert.ok(outcome.outputPath?.endsWith("output/input.c"));
 
@@ -209,7 +202,7 @@ test("a rejected candidate is replaced and its diagnostic is fed back", async ()
   );
 
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 2 },
     quiet,
     "build",
@@ -253,7 +246,7 @@ test("diagnostics accumulate across repairs and never reach the next candidate",
   );
 
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 3, maxCandidates: 2 },
     quiet,
     "build",
@@ -296,7 +289,7 @@ test("a build where nothing is valid fails with a record that says why", async (
   await writeFile(replay, JSON.stringify({ candidates: ["\t.globl dotProduct\ndotProduct:\n\tret\n"] }), "utf8");
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
     (error: unknown) => error instanceof CompilerError && /no candidate for dotProduct/.test(error.message),
   );
 
@@ -310,12 +303,12 @@ test("a build where nothing is valid fails with a record that says why", async (
 test("reuse rebuilds from stored assembly without asking the model", async () => {
   const directory = await workspace("reuse");
   const options = { cwd: directory, reuse: false, model: `replay:${REPLAY}` };
-  const first = await runBuild("input.json", options, quiet, "build");
+  const first = await runBuild("input.toml", options, quiet, "build");
   assert.equal(first.build.status, "success");
 
   // A model that cannot be resolved would fail if it were consulted at all.
   const reused = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: true, model: "openai/this-model-does-not-exist" },
     quiet,
     "build",
@@ -378,11 +371,11 @@ const WRONG_COUNT_ASSEMBLY = [".text", "\t.globl\tdown", "down:", "\tpxor\t%xmm0
 
 test("reuse refuses to rebuild a function whose contract changed", async () => {
   const directory = await workspace("changed");
-  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: SUM_SOURCE }), "utf8");
+  await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  await writeProject(join(directory, "input.toml"), { ...INPUT, source: SUM_SOURCE });
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: true, model: `replay:${REPLAY}` }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: true, model: `replay:${REPLAY}` }, quiet, "build"),
     /the stored implementation of dotProduct was built from different inputs/,
   );
 });
@@ -390,13 +383,13 @@ test("reuse refuses to rebuild a function whose contract changed", async () => {
 test("a function whose contract changed is generated again", async () => {
   const directory = await workspace("incremental-changed");
   const replay = await writableReplay(directory, REPLAY);
-  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   // The contract now states a sum rather than a product, so the object that
   // satisfied the old one cannot satisfy this one, and the model is asked.
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: SUM_SOURCE }), "utf8");
+  await writeProject(join(directory, "input.toml"), { ...INPUT, source: SUM_SOURCE });
   await writeFile(replay, JSON.stringify({ candidates: [SUM_ASSEMBLY] }), "utf8");
-  const second = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
   assert.deepEqual(second.build.reused, {});
@@ -406,13 +399,13 @@ test("a function whose contract changed is generated again", async () => {
 test("a build reuses a function it already proved, and asks no model for it", async () => {
   const directory = await workspace("incremental");
   const replay = await writableReplay(directory, REPLAY);
-  const first = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  const first = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
   assert.equal(first.build.status, "success");
 
   // The model is left able to answer nothing at all: a build that reuses every
   // function it needs never reaches it.
   await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
-  const second = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
   assert.deepEqual(second.build.reused, { dotProduct: "c1" });
@@ -422,13 +415,13 @@ test("a build reuses a function it already proved, and asks no model for it", as
 test("a change that leaves a contract alone does not rebuild the function", async () => {
   const directory = await workspace("incremental-comment");
   const replay = await writableReplay(directory, REPLAY);
-  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   // A comment is not part of what the function is contracted to do, so the
   // object that was verified is still the object this build links.
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, source: `${INPUT.source}# a comment\n` }), "utf8");
+  await writeProject(join(directory, "input.toml"), { ...INPUT, source: `${INPUT.source}# a comment\n` });
   await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
-  const second = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
   assert.deepEqual(second.build.reused, { dotProduct: "c1" });
@@ -437,13 +430,13 @@ test("a change that leaves a contract alone does not rebuild the function", asyn
 test("a stored implementation whose files are gone is rebuilt from it, without a model", async () => {
   const directory = await workspace("incremental-partial");
   const replay = await writableReplay(directory, REPLAY);
-  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
   await writeFile(replay, JSON.stringify({ candidates: ["not assembly at all"] }), "utf8");
   const log: string[] = [];
   const second = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${replay}` },
     { stage: (_stage, _status, message) => log.push(message) },
     "build",
@@ -482,11 +475,13 @@ const DIVIDING_COUNT_ASSEMBLY = [
 /** A program project built from recorded candidates, with the generation limits the test needs. */
 async function countedProject(name: string, assemblies: string[], maxCandidates: number): Promise<string> {
   const directory = await programProject(name, COUNTING_PROGRAM, assemblies[0]);
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, language: "typescript", entry: "", source: COUNTING_PROGRAM, generation: { maxCandidates, maxAttempts: 1 } }),
-    "utf8",
-  );
+  await writeProject(join(directory, "input.toml"), {
+    ...INPUT,
+    language: "typescript",
+    entry: "",
+    source: COUNTING_PROGRAM,
+    generation: { maxCandidates, maxAttempts: 1 },
+  });
   await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: assemblies }), "utf8");
   return directory;
 }
@@ -497,7 +492,7 @@ test("a definition candidate that faults on the call is rejected before it is se
   // it, which is what lets a repair round regenerate one function rather than
   // every definition in the program.
   const failure = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
     quiet,
     "build",
@@ -514,7 +509,7 @@ test("a definition candidate that faults on the call is rejected before it is se
 test("a candidate that faults is not selected over one that runs", async () => {
   const directory = await countedProject("one-good", [DIVIDING_COUNT_ASSEMBLY, COUNT_ASSEMBLY], 2);
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
     quiet,
     "build",
@@ -535,7 +530,7 @@ test("a function the program never agreed with is not reused", async () => {
   const directory = await programProject("unproved", COUNTING_PROGRAM, WRONG_COUNT_ASSEMBLY);
   const replay = join(directory, "candidates.json");
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
     /the program does not print what the source prints|the program stopped/,
   );
 
@@ -543,7 +538,7 @@ test("a function the program never agreed with is not reused", async () => {
   // implementation the program rejected is regenerated rather than reused.
   await writeFile(replay, JSON.stringify({ candidates: [COUNT_ASSEMBLY] }), "utf8");
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -554,7 +549,7 @@ test("a function the program never agreed with is not reused", async () => {
 
 test("test and benchmark re-run against the selected candidate", async () => {
   const directory = await workspace("stored");
-  await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   const options = { cwd: directory, reuse: false, model: `replay:${REPLAY}` };
 
   const verified = await runStored("input", options, quiet, "test");
@@ -570,7 +565,7 @@ test("test and benchmark re-run against the selected candidate", async () => {
 test("the shipped TypeScript example builds into a program that prints what it claims", async () => {
   const directory = await exampleWorkspace("example");
   const outcome = await runBuild(
-    join(directory, "blaze.json"),
+    join(directory, "blaze.toml"),
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -605,7 +600,7 @@ test("a program is delivered to the project directory under the platform's name"
 
   const suffix = process.platform === "win32" ? ".exe" : "";
   const outcome = await runBuild(
-    join(directory, "blaze.json"),
+    join(directory, "blaze.toml"),
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -664,7 +659,7 @@ const DEPTH_ASSEMBLY = [
 /** A program project, compiled by recorded candidates rather than by a model. */
 async function programProject(name: string, source: string, assembly: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, language: "typescript", entry: "", source }), "utf8");
+  await writeProject(join(directory, "input.toml"), { ...INPUT, language: "typescript", entry: "", source });
   await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: [assembly] }), "utf8");
   return directory;
 }
@@ -672,7 +667,7 @@ async function programProject(name: string, source: string, assembly: string): P
 test("a program whose function takes a reference is built, because the program is what checks it", async () => {
   const directory = await programProject("reference", REFERENCE_PROGRAM, DEPTH_ASSEMBLY);
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -749,17 +744,13 @@ async function callingProject(
 ): Promise<{ directory: string; answer: (prompt: string) => string }> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeFile(join(directory, "main.ts"), CALLING_PROGRAM, "utf8");
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "openai-compatible", model: "stub" },
-      output: "machine",
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    }),
-    "utf8",
-  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
   return { directory, answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : TWICE_ASSEMBLY) };
 }
 
@@ -768,7 +759,7 @@ test("a function that calls another function of the program is built and checked
   await chatEndpoint(t, [], { answer });
 
   const outcome = await runBuild(
-    "blaze.json",
+    "blaze.toml",
     { cwd: directory, reuse: false, model: "openai-compatible/stub" },
     quiet,
     "build",
@@ -815,7 +806,7 @@ test("a function that calls another function wrongly is rejected by the program"
   await chatEndpoint(t, [], { answer });
 
   const failure = await runBuild(
-    "blaze.json",
+    "blaze.toml",
     { cwd: directory, reuse: false, model: "openai-compatible/stub" },
     quiet,
     "build",
@@ -922,17 +913,13 @@ async function writtenOutProject(
 ): Promise<{ directory: string; answer: (prompt: string) => string }> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeFile(join(directory, "main.ts"), source, "utf8");
-  await writeFile(
-    join(directory, "blaze.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "main.ts",
-      model: { provider: "openai-compatible", model: "stub" },
-      output: "machine",
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    }),
-    "utf8",
-  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
   return {
     directory,
     answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : callee),
@@ -949,7 +936,7 @@ test("a caller the outline tells to write a callee out is checked on its own", a
   await chatEndpoint(t, [], { answer });
 
   const outcome = await runBuild(
-    "blaze.json",
+    "blaze.toml",
     { cwd: directory, reuse: false, model: "openai-compatible/stub" },
     quiet,
     "build",
@@ -985,7 +972,7 @@ test("a candidate that calls a callee it was told to write out is rejected", asy
   await chatEndpoint(t, [], { answer });
 
   const failure = await runBuild(
-    "blaze.json",
+    "blaze.toml",
     { cwd: directory, reuse: false, model: "openai-compatible/stub" },
     quiet,
     "build",
@@ -1001,7 +988,7 @@ test("a program entry is accepted under the symbol its contract names, not under
   const assembly = [".text", ".globl blaze_main", "blaze_main:", "  movabsq $4631107791820423168, %rax", "  movq %rax, %xmm0", "  ret", ""].join("\n");
   const directory = await programProject("entry-symbol", source, assembly);
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -1058,7 +1045,7 @@ test("a delivered program started on a terminal runs and exits instead of hangin
   }
   const directory = await exampleWorkspace("tty");
   const outcome = await runBuild(
-    join(directory, "blaze.json"),
+    join(directory, "blaze.toml"),
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -1073,13 +1060,13 @@ test("a delivered program started on a terminal runs and exits instead of hangin
 
 test("a project names its provider and model, and the flag overrides it", async () => {
   const directory = await workspace("models");
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, model: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" } }),
-  );
+  await writeProject(join(directory, "input.toml"), {
+    ...INPUT,
+    model: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" },
+  });
   // The project names OpenRouter; only the flag lets this build run offline.
   const fromFile = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
     quiet,
     "build",
@@ -1090,46 +1077,43 @@ test("a project names its provider and model, and the flag overrides it", async 
 
 test("the model in a project file is what a build uses", async () => {
   const directory = await workspace("file-model");
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, model: { provider: "replay", file: REPLAY } }),
-  );
+  await writeProject(join(directory, "input.toml"), { ...INPUT, model: { provider: "replay", file: REPLAY } });
   // No --model and no AI_MODEL: the project file is the only source.
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
   assert.equal(outcome.build.model, `replay:${REPLAY}`);
   assert.equal(outcome.build.modelConfig, `replay:${REPLAY}`);
 });
 
 test("a project file may use the provider/model shorthand", async () => {
   const directory = await workspace("shorthand");
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, model: `replay:${REPLAY}` }));
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  await writeProject(join(directory, "input.toml"), { ...INPUT, model: `replay:${REPLAY}` });
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
   assert.equal(outcome.build.status, "success");
 });
 
 test("an incomplete model selection is reported before any work happens", async () => {
   const directory = await workspace("incomplete");
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, model: { provider: "openai" } }));
+  await writeProject(join(directory, "input.toml"), { ...INPUT, model: { provider: "openai" } });
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     /must name both a provider and a model/,
   );
 
-  await writeFile(join(directory, "input.json"), JSON.stringify({ ...INPUT, model: { provider: "replay" } }));
+  await writeProject(join(directory, "input.toml"), { ...INPUT, model: { provider: "replay" } });
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     /replay provider without a "file"/,
   );
 });
 
 test("a credential in a project file is refused", async () => {
   const directory = await workspace("credential");
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, model: { provider: "openrouter", model: "openai/gpt-5", apiKey: "sk-or-leaked" } }),
-  );
+  await writeProject(join(directory, "input.toml"), {
+    ...INPUT,
+    model: { provider: "openrouter", model: "openai/gpt-5", apiKey: "sk-or-leaked" },
+  });
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
     /puts a credential in "model.apiKey"/,
   );
 });
@@ -1149,12 +1133,14 @@ test("a program that names an entry function is refused, because a program is it
   const directory = await workspace("program-with-entry");
   await writeFile(join(directory, "module.ts"), 'import { f } from "./f.ts";\nconsole.log(f());\n');
   await writeFile(join(directory, "f.ts"), "export function f(): number {\n  return 1;\n}\n");
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, language: "typescript", sourceFile: "module.ts", entry: "f" }),
-  );
+  await writeProject(join(directory, "input.toml"), {
+    ...INPUT,
+    language: "typescript",
+    sourceFile: "module.ts",
+    entry: "f",
+  });
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
     /entry "f" names a function, but module.ts is a program/,
   );
 });
@@ -1170,12 +1156,9 @@ test("an imported module that runs code is refused, because nothing would run it
     'import { g } from "./g.ts";\nexport function f(): number {\n  return 1;\n}\nconsole.log(g());\n',
   );
   await writeFile(join(directory, "g.ts"), "export function g(): number {\n  return 2;\n}\n");
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({ ...INPUT, language: "typescript", sourceFile: "main.ts" }),
-  );
+  await writeProject(join(directory, "input.toml"), { ...INPUT, language: "typescript", sourceFile: "main.ts" });
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
     /f.ts runs code at the top level/,
   );
 });
@@ -1199,18 +1182,15 @@ async function multiFileProject(name: string, helper: string): Promise<string> {
     ].join("\n"),
   );
   await writeFile(join(directory, "scale.ts"), helper);
-  await writeFile(
-    join(directory, "input.json"),
-    JSON.stringify({
-      language: "typescript",
-      sourceFile: "dot.ts",
-      entry: "dotProduct",
-      target: INPUT.target,
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-      test: { randomCases: 4, maxLength: 32, seed: 3 },
-      benchmark: { iterations: 100 },
-    }),
-  );
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    sourceFile: "dot.ts",
+    entry: "dotProduct",
+    target: INPUT.target,
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+    test: { randomCases: 4, maxLength: 32, seed: 3 },
+    benchmark: { iterations: 100 },
+  });
   return directory;
 }
 
@@ -1219,7 +1199,7 @@ const SCALE = "export function scale(x: number): number {\n  return x * 2;\n}\n"
 test("every file of a program is contracted before any code is generated", async () => {
   const directory = await multiFileProject("program", SCALE);
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
     quiet,
     "build",
@@ -1236,7 +1216,7 @@ test("every file of a program is contracted before any code is generated", async
 test("a contract failure stops the build before a model is asked for code", async () => {
   const directory = await multiFileProject("unresolved", "export function other(x: number): number {\n  return x;\n}\n");
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}` }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}` }, quiet, "build"),
     /imports "scale" from ".\/scale.ts", which does not export it/,
   );
   // Nothing was generated: the failure came from the contract phase itself.
@@ -1254,7 +1234,7 @@ test("an unknown project is reported, not guessed", async () => {
 
 test("generate stops at candidate selection and delivers nothing", async () => {
   const directory = await workspace("generate");
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "generate");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "generate");
   assert.equal(outcome.outputPath, null);
   assert.equal(outcome.build.status, "success");
   await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/output/input"), "utf8"));

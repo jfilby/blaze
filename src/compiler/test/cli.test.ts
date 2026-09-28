@@ -18,7 +18,7 @@ async function projectDirectory(): Promise<string> {
 }
 
 /**
- * The example project names its model in blaze.json, so the tests override it
+ * The example project names its model in blaze.toml, so the tests override it
  * on the command line, which is also how the precedence is exercised.
  */
 function blaze(directory: string, ...args: string[]) {
@@ -29,7 +29,7 @@ function blaze(directory: string, ...args: string[]) {
   });
 }
 
-test("build with no argument builds the blaze.json in the current directory", async () => {
+test("build with no argument builds the blaze.toml in the current directory", async () => {
   const directory = await projectDirectory();
   const execution = blaze(directory, "build");
 
@@ -57,18 +57,27 @@ test("an explicit path still builds, and the state lands in the current director
   // build runs in: the two are different directories here, which is the point.
   const project = await projectDirectory();
   const directory = await mkdtemp(join(tmpdir(), "blaze-cli-elsewhere-"));
-  const execution = blaze(directory, "build", join(project, "blaze.json"));
+  const execution = blaze(directory, "build", join(project, "blaze.toml"));
   assert.equal(execution.code, 0, execution.stderr);
   assert.match(execution.stdout, /projects\/hello_world\/output\/hello_world/);
 });
 
-test("without a blaze.json the default says what to do", async () => {
+test("without a blaze.toml the default says what to do", async () => {
   const directory = await mkdtemp(join(tmpdir(), "blaze-cli-empty-"));
   const execution = blaze(directory, "build");
 
   assert.notEqual(execution.code, 0);
-  assert.match(execution.stderr, /no blaze\.json in/);
-  assert.match(execution.stderr, /blaze build <input\.json>/);
+  assert.match(execution.stderr, /no blaze\.toml in/);
+  assert.match(execution.stderr, /blaze build <input\.toml>/);
+});
+
+test("a source file handed to build is not a project file", async () => {
+  const directory = await projectDirectory();
+  const execution = blaze(directory, "build", join(directory, "main.ts"));
+
+  assert.notEqual(execution.code, 0);
+  assert.match(execution.stderr, /main\.ts is a source file, not a project file/);
+  assert.match(execution.stderr, /blaze\.toml beside it/);
 });
 
 test("an unknown command prints the usage and fails", async () => {

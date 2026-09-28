@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild, inspectProject } from "../compiler.ts";
 import type { SourceInput } from "../core/types.ts";
 import { CompilerError } from "../core/errors.ts";
 import { chatEndpoint, type ChatEndpoint, type ChatEndpointOptions } from "./model-endpoint.ts";
+import { writeProject } from "./project.ts";
 
 const quiet = { stage: () => {} };
 const SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -29,7 +30,7 @@ async function projectWaitingOn(
     model: { provider: "openai-compatible", model: "silent" },
     generation,
   };
-  await writeFile(join(directory, "input.json"), JSON.stringify(input), "utf8");
+  await writeProject(join(directory, "input.toml"), input);
   return { directory, received: endpoint.received };
 }
 
@@ -52,7 +53,7 @@ async function projectAnswering(
     model: { provider: "openai-compatible", model: "stub" },
     generation,
   };
-  await writeFile(join(directory, "input.json"), JSON.stringify(input), "utf8");
+  await writeProject(join(directory, "input.toml"), input);
   return { directory, chat };
 }
 
@@ -63,7 +64,7 @@ test("a model that has not answered is waited for, not given up on", async (t) =
   const { directory, received } = await projectWaitingOn(t, { maxCandidates: 1, maxAttempts: 1 });
 
   let settled = false;
-  const building = runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build").then(
+  const building = runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build").then(
     () => {
       settled = true;
     },
@@ -86,7 +87,7 @@ test("a project that sets a budget gives up when the model overruns it", async (
   const { directory } = await projectWaitingOn(t, { maxCandidates: 1, maxAttempts: 1, timeoutSeconds: 1 });
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) => {
       const diagnostic =
         error instanceof Error ? `${error.message}\n${(error as { detail?: string }).detail ?? ""}` : String(error);
@@ -99,7 +100,7 @@ test("a project that sets a budget gives up when the model overruns it", async (
 
 test("the build record keeps the model that was asked", async (t) => {
   const { directory } = await projectWaitingOn(t, { maxCandidates: 1, maxAttempts: 1, timeoutSeconds: 1 });
-  await assert.rejects(() => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"));
+  await assert.rejects(() => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"));
 
   const build = await inspectProject("input", directory);
   assert.equal(build.status, "failed");
@@ -112,7 +113,7 @@ test("the compiler says which model it is waiting for", async (t) => {
   const lines: string[] = [];
   await assert.rejects(() =>
     runBuild(
-      "input.json",
+      "input.toml",
       { cwd: directory, reuse: false },
       { stage: (_stage, _status, message) => lines.push(message) },
       "build",
@@ -134,7 +135,7 @@ test("an answer with no implementation is asked for again, and costs no repair a
   );
   const lines: string[] = [];
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false },
     { stage: (_stage, _status, message) => lines.push(message) },
     "build",
@@ -165,7 +166,7 @@ test("a model that never answers with an implementation fails with every reason 
   });
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) =>
       error instanceof CompilerError &&
       error.message === "the model returned an empty response" &&
@@ -186,7 +187,7 @@ test("an answer the provider stopped short of says why it stopped", async (t) =>
   await assert.rejects(
     () =>
       runBuild(
-        "input.json",
+        "input.toml",
         { cwd: directory, reuse: false },
         { stage: (_stage, _status, message) => lines.push(message) },
         "build",
@@ -223,7 +224,7 @@ test("a stop the provider names differently says both names", async (t) => {
   );
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) =>
       error instanceof CompilerError &&
       /finish reason: content-filter, raw: content_filter/.test(error.detail ?? ""),
@@ -241,7 +242,7 @@ test("a provider that reports no tokens is not said to have spent none", async (
   );
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) =>
       error instanceof CompilerError &&
       /the model returned an empty response \(finish reason: length\)/.test(error.detail ?? "") &&
@@ -267,7 +268,7 @@ test("a reply cut off at the token limit is not an implementation", async (t) =>
   const lines: string[] = [];
 
   const outcome = await runBuild(
-    "input.json",
+    "input.toml",
     { cwd: directory, reuse: false },
     { stage: (_stage, _status, message) => lines.push(message) },
     "build",
@@ -305,7 +306,7 @@ test("a model that keeps writing past the limit fails saying what it cost", asyn
   );
 
   await assert.rejects(
-    () => runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build"),
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) =>
       error instanceof CompilerError &&
       error.message === "the model wrote more than it was allowed to answer" &&
@@ -325,7 +326,7 @@ test("a request the provider failed is asked for again", async (t) => {
     { failFirst: 1 },
   );
 
-  const outcome = await runBuild("input.json", { cwd: directory, reuse: false }, quiet, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(chat.prompts.length, 2);
   assert.match(chat.prompts[1], /the provider request failed/);
