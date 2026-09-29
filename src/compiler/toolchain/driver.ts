@@ -63,6 +63,11 @@ static bool program_string_equal(const char* left, const char* right) {
   return strcmp(left, right) == 0;
 }
 
+static int program_string_compare(const char* left, const char* right) {
+  if (left == NULL || right == NULL) return left == right ? 0 : (left == NULL ? -1 : 1);
+  return strcmp(left, right);
+}
+
 static void program_print_string(const char* text) {
   if (text != NULL) fputs(text, stdout);
 }
@@ -457,6 +462,10 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 
   stringEqual(left: string, right: string): string {
     return `program_string_equal(${left}, ${right})`;
+  }
+
+  stringCompare(left: string, right: string): string {
+    return `program_string_compare(${left}, ${right})`;
   }
 
   toText(value: string, type: SemanticType): string {

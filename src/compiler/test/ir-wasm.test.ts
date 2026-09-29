@@ -16,6 +16,7 @@ import { programWithSemantics } from "./phase.ts";
 import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
+import { CompilerError } from "../core/errors.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 
 /** The parts of the engine a case here drives a module with. */
@@ -135,6 +136,46 @@ test("a negation and a complement of a whole number are the arithmetic that is t
   // numbers, which is the only place the language allows one.
   await compute("n: bigint", ["  return -n;"], "run\n5\n\n", "RESULT -5\n");
   await compute("n: bigint", ["  return ~n;"], "run\n5\n\n", "RESULT -6\n");
+});
+
+test("a negation of a 32 bit whole number is a module the engine takes", async () => {
+  // There is no `i32.neg` either. The 64 bit case above pushes the zero it
+  // subtracts from; the 32 bit one did not, so it emitted `i32.sub` with a
+  // single operand on the stack and the engine refused the whole module —
+  // "not enough arguments on the stack for i32.sub (need 2, got 1)". A `u32`
+  // element is the only 32 bit whole number a source can negate, so the array
+  // is how the case is reached.
+  await compute("a: Uint32Array", ["  return -a[0];"], "run\n1\n7\n", "RESULT -7\n");
+  await compute("a: Uint32Array", ["  return -a[0];"], "run\n2\n0 1\n", "RESULT 0\n");
+});
+
+test("a maths builtin is the instruction of its own name", async () => {
+  // Every maths builtin is one instruction, but the table that carried it was
+  // keyed by the bare name the opcode is called (`abs`) rather than the name a
+  // callee is contracted under (`Math.abs`), so no entry ever matched and every
+  // maths call in a module was refused. The opcodes were the `f32` ones of the
+  // same names over arguments that are doubles.
+  await compute("n: number", ["  return Math.abs(n);"], "run\n-2.5\n\n", "RESULT 2.5\n");
+  await compute("n: number", ["  return Math.floor(n);"], "run\n-2.5\n\n", "RESULT -3\n");
+  await compute("n: number", ["  return Math.trunc(n);"], "run\n-2.5\n\n", "RESULT -2\n");
+  // Used inside an expression rather than returned whole, so the argument and
+  // the answer both have to sit on the stack around the instruction.
+  await compute("n: number", ["  return Math.abs(n) + 1;"], "run\n-2.5\n\n", "RESULT 3.5\n");
+});
+
+test("a maths builtin that is not one instruction is refused by name", async () => {
+  // `Math.round` rounds a half up and the only rounding a module has rounds a
+  // half to even, so no instruction of it is the same number. The refusal says
+  // which one and why, rather than reporting it as a call a module cannot make.
+  await assert.rejects(
+    compute("n: number", ["  return Math.round(n);"], "run\n1\n\n", ""),
+    (error: unknown) => {
+      assert.ok(error instanceof CompilerError);
+      assert.match(error.message, /cannot round the way the source language does/);
+      assert.match(error.detail ?? "", /rounds a half up and the module's own rounding rounds a half to even/);
+      return true;
+    },
+  );
 });
 
 test("a walk stops at the count even when the memory past the buffer is not empty", async () => {

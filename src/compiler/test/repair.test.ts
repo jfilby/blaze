@@ -301,3 +301,40 @@ test("inline-call keeps a call edge a terminator still makes", () => {
     ["twice"],
   );
 });
+
+test("common-subexpression binds a value under the declaration it reads", () => {
+  // `n * n` is computed twice and never changes, so it is bound once. The
+  // binding cannot go at the top of the block: `n` is declared in this block,
+  // and a binding written above that declaration reads a slot nothing has
+  // filled in yet, which the validator refuses and the C backend cannot
+  // write. It goes directly under the declaration instead, and every use of
+  // the name is still below it.
+  const lib = [
+    "export function squared(): number {",
+    "  let n = 2;",
+    "  let first = n * n;",
+    "  let spare = 5;",
+    "  let second = n * n;",
+    "  return first + second + spare;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": "import { squared } from './lib.ts';\nconsole.log(squared());\n", "lib.ts": lib };
+  const own = phaseOf("typescript", files, "main.ts");
+  const ownSemantics = semanticsOf(own);
+  const outcome = applyProposal(structuredClone(ownSemantics.squared as SemanticFunction), proposalsIn(repaired("common-subexpression entry"))[0] as Proposal, {
+    functions: new Map(Object.entries(ownSemantics)),
+  });
+  assert.ok("applied" in outcome, "the rule applies: the value is computed twice and nothing writes it");
+  // `apply` above is what every other test here goes through, and it validates:
+  // this is the assertion that the binding is written under `let n`.
+  validateSemanticFunction(outcome.applied, own.program.files[1].functions.squared as FunctionContract);
+  const statements = (outcome.applied as SemanticFunction).entry.statements;
+  const bound = statements.findIndex((statement) => statement.k === "let" && statement.slot.name.startsWith("shared"));
+  const declared = statements.findIndex((statement) => statement.k === "let" && statement.slot.name === "n");
+  assert.ok(bound !== -1, `a value was bound: ${JSON.stringify(statements)}`);
+  assert.ok(bound > declared, "the binding is written after the declaration it reads");
+  // And the artifact a build lowers is the one the source is: 4 + 4 + 5.
+  const reread = parseSemanticFunction(printSemanticFunction(outcome.applied), own.program);
+  assert.equal(validateSemanticFunction(reread, own.program.files[1].functions.squared as FunctionContract), undefined);
+});

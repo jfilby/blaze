@@ -76,6 +76,8 @@ import {
   NUMERIC,
   TEXT,
   VOID,
+  isBoolean,
+  isReference,
   isTextType,
   isWhole,
   wholeOf,
@@ -1090,6 +1092,20 @@ class ProgramResolver {
       if (holdsText(operand)) {
         return { k: "compare", how: "string", negate: true, left: operand, right: { k: "text", parts: [{ k: "text", value: "" }] } };
       }
+      // `!a` over a reference asks whether it is nothing, which is the null
+      // test and not its negation: `!node.left` is the arm a leaf takes. The
+      // function lowering has always answered it this way; here it fell
+      // through to the truth below and the validator refused the program with
+      // a diagnostic naming a truth the source never wrote.
+      // A use that fixed no type is a number here: nothing else is written
+      // without one, and it is not a truth.
+      const held = draftType(operand);
+      if (held !== null && isReference(held)) {
+        return { k: "isNull", operand, negate: false };
+      }
+      if (held === null || !isBoolean(held)) {
+        throw programError("`!` needs something that is a truth", this.body, line, `line ${line} of ${this.body.file}: a number is not a truth, so the program says what it means by it`);
+      }
       return { k: "unary", op: "!", operand, type: { kind: "primitive", name: "bool" } };
     }
     // `~` inverts a whole number bit by bit, and a number written in the source
@@ -2015,9 +2031,11 @@ class ProgramLowering {
     if (op === "&&" || op === "||") {
       return {
         k: "logical",
-        // The arms have the type they have in common, which a truth and a
-        // truth is; only a string pair has none, and nothing prints that.
-        type: value.type ?? BOOLEAN,
+        // The arms have the type they have in common, and a truth and a truth
+        // is one; a string pair has no common type the resolver recorded, and
+        // `&&` and `||` hand back one of the arms, so the arm's own type is the
+        // type of the expression. `??` below reads the same null the same way.
+        type: value.type ?? TEXT,
         op: op === "&&" ? "and" : "or",
         left: this.decide(value.left, line),
         right: this.value(value.right, value.type, line),

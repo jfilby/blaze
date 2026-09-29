@@ -19,6 +19,8 @@ import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { RUNTIME_NAME, runtimeHeaderSource } from "../runtime/abi.ts";
 import { run } from "../core/process.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
+import { semanticIrProblems } from "../semantics/ir-validate.ts";
+import { parseSemanticProgram } from "../semantics/ir-text.ts";
 
 /** The object the driver of every program here links against, built once. */
 let runtime: Promise<string> | null = null;
@@ -302,4 +304,84 @@ test("a for-of element that shadows the buffer reads the buffer, not itself", ()
   // reads the buffer (`a`). Before the fix the element shadowed the buffer, so
   // the initializer read the element itself.
   assert.deepEqual(element.slice(1), ["a_2", "a"]);
+});
+
+test("a short-circuit over two strings is the string it hands back", async () => {
+  // `&&` and `||` hand back one of their arms, so a pair of strings is a
+  // string. Typed as a truth it was refused by the validator with a diagnostic
+  // naming a type the source never wrote, and the program could not be built
+  // at all — the function lowering has always answered this one `text`.
+  const source = 'let s = "";\ns = "a" && "b";\nconsole.log(s);\n';
+  assert.deepEqual(semanticIrProblems(resolved(source), phaseOf("typescript", { "main.ts": source }, "main.ts").program), []);
+  // The arm that decides is the string the source wrote, and the one it hands
+  // back is the other: a truth over two strings would have been refused, and a
+  // number would have printed the wrong one.
+  const written = driver(source);
+  assert.match(written, /s = \(\(\("a"\)\[0\] != '\\0'\) \? \("b"\) : \("a"\)\);/);
+  const { binary, original } = await deliver(source);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.stdout, original, "the delivered program prints what the source prints");
+  assert.equal(ran.stdout, "b\n");
+});
+
+test("`!` over a reference is the null test, and over a number is refused", async () => {
+  // `!a` asks whether a reference is nothing, which is `is_null` and not a
+  // truth. Lowered as `unary not` it named a bool the source never wrote, and
+  // the validator refused the program — the function lowering has always
+  // answered it as the null test, and `x === null` in a program still does.
+  const reference = [
+    "function make(v: number): any {",
+    "  return { left: null, right: null, value: v };",
+    "}",
+    "",
+    "const t = make(1);",
+    'if (!t) { console.log("empty"); } else { console.log("has"); }',
+    "",
+  ].join("\n");
+  const problems = semanticIrProblems(resolved(reference), phaseOf("typescript", { "main.ts": reference }, "main.ts").program);
+  assert.deepEqual(problems, [], "a program that tests a reference for nothing is one the compiler may lower");
+  assert.match(driver(reference), /\(t\) == NULL/, "and it is lowered as the null test");
+  // A number is not a truth, and saying `!` over one is a mistake the program
+  // should be told about rather than lowered into a negation of a number.
+  assert.match(diagnostic(() => resolved("let n = 3;\nif (!n) { console.log(0); }\n")), /`!` needs something that is a truth/);
+});
+
+test("a string is ordered by what it says, not by whether it matches", async () => {
+  // A model writes the artifact, so the emitter has to be right about a
+  // comparison a source would not let it write. Every operator but `eq` and
+  // `ne` was answered with the equality test, so `"apple" < "banana"` printed
+  // false: the two are not the same text, which says nothing about which one
+  // comes first. The function emitter has always used `strcmp` for this.
+  const source = 'let a = "apple";\nlet b = "banana";\nconsole.log(a === b);\n';
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  assert.match(generateProgramDriver(resolveProgram(phase.body!, phase.program)), /program_string_equal/, "an equality is still an equality");
+  const turned = parseSemanticProgram(
+    [
+      'ir 1',
+      'file "main.ts"',
+      "",
+      "block entry: releases[]",
+      '  let text a mutable = [text "apple"] @1',
+      '  let text b mutable = [text "banana"] @2',
+      "  print_text [to_text [lt[bool] text local[text] a local[text] b]] @3",
+      "  print_newline @3",
+      "return",
+      "",
+    ].join("\n"),
+    phase.program,
+  );
+  assert.deepEqual(semanticIrProblems(turned, phase.program), [], "the artifact is one the compiler may lower");
+  const directory = await mkdtemp(join(tmpdir(), "blaze-order-"));
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
+  const runner = await buildProgramDriver({
+    mode: "debug",
+    program: turned,
+    workDirectory: directory,
+    objectPaths: [],
+    runtimeObjectPath: await runtime,
+    outputPath: join(directory, "program"),
+  });
+  const ran = run(runner.command, [], { timeoutMs: 60_000 });
+  assert.equal(ran.stdout, "true\n", "apple reads before banana");
 });

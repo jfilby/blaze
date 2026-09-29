@@ -27,6 +27,7 @@ import { generateWasmHost, wasmValueType } from "./wasm.ts";
 import type { Runner } from "../core/types.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import type { FunctionContract } from "../core/types.ts";
+import { builtinFor } from "../semantics/builtins.ts";
 import {
   type SemanticBlock,
   type SemanticFunction,
@@ -274,6 +275,19 @@ const BINARY: Record<number, Record<string, number>> = {
     add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3, min: 0xa4, max: 0xa5,
     eq: 0x61, ne: 0x62, lt: 0x63, gt: 0x64, le: 0x65, ge: 0x66,
   },
+};
+
+/**
+ * The maths builtin each source name is a single instruction of, keyed by the
+ * name a callee is contracted under. Every one of them takes and answers a
+ * double, so every opcode is an `f64` one: the `f32` opcode of the same name
+ * would read an operand off a stack the engine never put one on, and the
+ * module would be refused for a reason nothing in it shows.
+ */
+const MATH: Record<string, number> = {
+  "Math.abs": 0x99,
+  "Math.floor": 0x9c,
+  "Math.trunc": 0x9d,
 };
 
 /** A byte offset into the memory the host provides, which is the whole width. */
@@ -566,12 +580,13 @@ class Body {
           this.convert({ kind: "primitive", name: "bool" }, carrier(at));
           return;
         }
-        // WebAssembly has no `i64.neg` and no integer complement. A 32 bit and
-        // a float width each have a negation of their own, so they use it; an
-        // i64 is written as `0 - x`, and a complement as `0 - 1 - x`, which is
-        // `~x` in two's complement at every width. A sub takes its left operand
-        // first, so the zero goes down before the value: `x - 0` is not a
-        // negation of anything.
+        // WebAssembly has no `i32.neg` and no `i64.neg`, and no integer
+        // complement: an integer is negated by taking it from a zero of its own
+        // width, and a complement is `0 - 1 - x`, which is `~x` in two's
+        // complement at every width. A sub takes its left operand first, so the
+        // zero goes down before the value: `x - 0` is not a negation of
+        // anything. A float width is the one case with a negation of its own
+        // (`f32.neg`, `f64.neg`), and it uses it.
         if (value.op === "bitNot") {
           if (held === I64) this.i64(0n);
           else if (held === F64) this.float(0, true);
@@ -588,9 +603,13 @@ class Body {
           this.i64(0n);
           this.value(value.operand, value.type);
           this.op(BINARY[held].sub as number);
+        } else if (held === I32) {
+          this.i32(0);
+          this.value(value.operand, value.type);
+          this.op(BINARY[held].sub as number);
         } else {
           this.value(value.operand, value.type);
-          this.op(held === I32 ? 0x6b : held === F32 ? 0x8c : 0x9a);
+          this.op(held === F32 ? 0x8c : 0x9a);
         }
         this.convert(value.type, carrier(at));
         return;
@@ -656,6 +675,22 @@ class Body {
           this.convert({ kind: "primitive", name: "i32" }, carrier(at));
           return;
         }
+        this.convert(value.type, carrier(at));
+        return;
+      }
+      case "call": {
+        // A module reaches no other function of the program, so the only call
+        // it can lower is a maths builtin, and that is an instruction over the
+        // argument rather than a call. Every argument goes down first, in the
+        // order the call passes them, and the instruction takes the last one
+        // off the top.
+        if (builtinFor(value.call.callee) === null) {
+          unreachable(`call ${value.call.callee}`, this.contract, this.candidate);
+        }
+        for (const [position, argument] of value.call.args.entries()) {
+          this.value(argument, value.call.argTypes[position] ?? argument.type);
+        }
+        this.builtin(value.call.callee);
         this.convert(value.type, carrier(at));
         return;
       }
@@ -959,10 +994,22 @@ class Body {
   }
 
   private builtin(callee: string): void {
-    const wide: Record<string, number> = { abs: 0x8b, floor: 0x8e, trunc: 0x8f };
-    const code = wide[callee];
+    const code = MATH[callee];
     if (code === undefined) {
-      unreachable(`call the builtin ${callee}`, this.contract, this.candidate);
+      // `Math.round` is the one maths builtin with no instruction of its own:
+      // the source language rounds a half up, and the only rounding a module
+      // has rounds a half to even, so nothing in it is the same number.
+      throw new CompilerError({
+        category: "TargetError",
+        stage: "compile",
+        message: `a WebAssembly module cannot round the way the source language does, in ${symbolOf(this.contract)}`,
+        detail:
+          "Math.round rounds a half up and the module's own rounding rounds a half to even, so the two disagree " +
+          "on every half. Math.abs, Math.floor and Math.trunc are one instruction each and are lowered. Build " +
+          "this function as the c, asm or machine output kind to round as the source does",
+        function: symbolOf(this.contract),
+        candidate: this.candidate,
+      });
     }
     this.op(code);
   }

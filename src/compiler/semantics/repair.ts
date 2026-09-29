@@ -643,11 +643,22 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
   // Every use is rewritten before the binding is written, so a binding never
   // reads the name it declares.
   for (const nested of nestedBlocks(block)) rewriteBlock(nested, bound);
-  // The bindings go at the top of the block: what they compute reads nothing
-  // the block writes, so it is the same value wherever in the block it is
-  // computed, and the top is the only place every use of it is under.
-  const line = block.statements[0]?.line ?? 0;
-  block.statements.unshift(
+  // The bindings go as high in the block as every name they read is declared.
+  // At the top they are not: a binding computes its value where it is written,
+  // so a name the block declares below it is read before that declaration has
+  // run, and the C the backend writes for it names a local that does not exist
+  // yet — an artifact no compiler takes, on the commonest shape there is, a
+  // value repeated across a name the block itself binds. Sitting under the last
+  // such declaration is as high as it may go and every use is still below it.
+  const declared = new Set(ordered.flatMap((value) => namesRead(value)));
+  let at = 0;
+  block.statements.forEach((statement, index) => {
+    if (statement.k === "let" && declared.has(statement.slot.name)) at = index + 1;
+  });
+  const line = block.statements[at]?.line ?? block.statements[0]?.line ?? 0;
+  block.statements.splice(
+    at,
+    0,
     ...ordered.map((value, index) => ({
       k: "let" as const,
       slot: slotFor(value, names[index] ?? ""),

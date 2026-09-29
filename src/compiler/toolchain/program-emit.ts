@@ -171,6 +171,12 @@ export interface ProgramTarget {
   stringLength(value: string): string;
   /** Whether two strings are the same text. */
   stringEqual(left: string, right: string): string;
+  /**
+   * Two strings in the order they read, as a number that is negative, zero or
+   * positive. Equality is its own answer and is asked apart, because a
+   * comparison that is not an equality is a question about the order.
+   */
+  stringCompare(left: string, right: string): string;
   /** A value carried inside a string, as the runtime writes it. */
   toText(expression: string, type: SemanticType): string;
   /** The line that tests a value against nothing. */
@@ -590,8 +596,17 @@ class ProgramEmitter {
 
   private compare(value: SemanticValue & { k: "compare" }): string {
     if (isTextType(value.operand)) {
-      const equal = this.target.stringEqual(this.expression(value.left), this.expression(value.right));
-      return value.op === "ne" ? this.target.logicalNot(equal) : equal;
+      const left = this.expression(value.left);
+      const right = this.expression(value.right);
+      // Two strings are ordered by what they say. Every operator but `eq` and
+      // `ne` used to be answered with the equality test, so `"apple" <
+      // "banana"` was reported as false — the two are not the same text, which
+      // says nothing about which one comes first.
+      if (value.op === "eq" || value.op === "ne") {
+        const equal = this.target.stringEqual(left, right);
+        return value.op === "ne" ? this.target.logicalNot(equal) : equal;
+      }
+      return `${this.target.stringCompare(left, right)} ${COMPARE_OPERATORS[value.op]} 0`;
     }
     // The two sides are compared as one type, which the IR states: a whole
     // number and a literal are compared as whole numbers, not as two.

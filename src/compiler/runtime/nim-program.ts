@@ -509,6 +509,13 @@ ${anchor}
     return `(${left}) == (${right})`;
   }
 
+  stringCompare(left: string, right: string): string {
+    // `cmp` is the order two strings read in: negative, zero or positive. Two
+    // strings in Nim are compared as text, so `<` would do, and `cmp` is the
+    // one that says which of the three answers is which.
+    return `cmp(${left}, ${right})`;
+  }
+
   toText(value: string, type: SemanticType): string {
     // Nothing prints as the word for it, as the language does: `$(nil)` is the
     // empty string, which the source never printed.
