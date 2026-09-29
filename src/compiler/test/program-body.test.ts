@@ -16,6 +16,7 @@ import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { semanticIrProblems } from "../semantics/ir-validate.ts";
 import { typeText, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
@@ -705,6 +706,34 @@ test("a program runs the shapes a number and a name decide", async (t) => {
   await agreesWithNode(SHAPES, "nim");
 });
 
+test("a maximum of two zeros is a positive zero and a minimum a negative one", async (t) => {
+  // `fmax(0.0, -0.0)` is -0.0 in C and `+0` in the source, and the two numbers
+  // compare equal, so the sign is the only thing that tells the two apart: a
+  // tie has to be answered by it rather than by whichever arm was written
+  // first.
+  const source = [
+    "console.log(Math.max(0, -0), Math.min(0, -0));",
+    "console.log(Math.max(-0, 0), Math.min(-0, 0));",
+    "console.log(Math.max(0, 0), Math.min(0, 0));",
+    "console.log(Math.max(1, 2), Math.min(1, 2), Math.max(2, 1), Math.min(2, 1));",
+    "console.log(Math.max(-5, -5), Math.min(-5, -5));",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["0 -0", "0 -0", "0 0", "2 1 2 1", "-5 -5"]);
+  assert.equal(delivered.stdout, original.stdout);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  await agreesWithNode(source, "nim");
+});
+
 test("a program refuses what the language has no answer for", () => {
   // A typed array has no element outside itself, and a whole operator rounds
   // what it is given, which the language raises on rather than doing.
@@ -715,6 +744,17 @@ test("a program refuses what the language has no answer for", () => {
   assert.match(
     diagnostic(() => resolved({ "main.ts": ["console.log(7.5 % 2);", ""].join("\n") })),
     /"%" needs whole numbers/,
+  );
+  // A bigint is an i64 here, and a literal outside that range was written out
+  // as the low sixty-four bits of itself: `18446744073709551615n` printed -1.
+  assert.match(
+    diagnostic(() => resolved({ "main.ts": ["console.log(18446744073709551615n);", ""].join("\n") })),
+    /18446744073709551615 is not a number an i64 holds/,
+  );
+  // The ends of the range are the numbers themselves, and are kept.
+  assert.deepEqual(
+    semanticIrProblems(resolved({ "main.ts": ["console.log(9223372036854775807n, -9223372036854775808n);", ""].join("\n") })),
+    [],
   );
   assert.match(
     diagnostic(() => resolved({ "main.ts": ["break;", ""].join("\n") })),
@@ -743,6 +783,33 @@ test("a value with no decimal of its own is written the way the language writes 
   const hostedOutput = run(hosted.binary, [], { timeoutMs: 60_000 });
   assert.equal(hostedOutput.code, 0, hostedOutput.stderr);
   assert.equal(hostedOutput.stdout, source.stdout);
+});
+
+test("a value that is not a number holds nothing, as a condition reads it", async (t) => {
+  // `NaN != 0` is true in C and `Boolean(NaN)` is false in the source, so a
+  // condition written as a comparison against zero takes the arm it should not.
+  const source = [
+    "console.log(0 / 0 ? 1 : 0);",
+    "console.log(0 / 0 || 7);",
+    "console.log(1 ? 1 : 0, 0 ? 1 : 0, 1 / 0 ? 1 : 0);",
+    "let n = 0 / 0;",
+    "while (n) { console.log(`never`); n = 0; }",
+    "if (0 / 0) console.log(`never`); else console.log(`falsy`);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["0", "7", "1 0 1", "falsy"]);
+  assert.equal(delivered.stdout, original.stdout);
+
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  await agreesWithNode(source, "nim");
 });
 
 test("a program in a language the compiler cannot run is refused", async () => {
@@ -797,4 +864,28 @@ test("a stepped loop runs the values the source runs, in both drivers", async (t
   // short of it, in either direction: reading the bound as always exclusive
   // dropped the last value, and reading it as always inclusive ran one too far.
   assert.equal(hostedOutput.stdout, sourceRun.stdout);
+});
+
+test("a number of one width is compared with a number of another as the source compares them", async () => {
+  // A `Uint32Array` holds every 32 bit number the source can write, and the
+  // values above 2^31 are the ones a signed type cannot hold. Compared as the
+  // signed one of the two widths the array was paired with, 4000000000 is
+  // -294967296 and every comparison against a small number answers the other
+  // way round.
+  const source = [
+    "const wide = new Uint32Array([4000000000, 0, 2147483648]);",
+    "const narrow = new Int32Array([1, 1, -2147483648]);",
+    "console.log(wide[0] > narrow[0]);",
+    "console.log(wide[1] < narrow[1]);",
+    "console.log(wide[2] == narrow[2]);",
+    "console.log(wide[0] >= 0, wide[0] < 0);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "true\ntrue\nfalse\ntrue false\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
 });

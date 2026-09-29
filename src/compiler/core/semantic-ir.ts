@@ -67,8 +67,8 @@ export function isNumber(type: SemanticType): type is TypeExpr & { kind: "primit
   return type.kind === "primitive" && (NUMERIC as readonly string[]).includes(type.name);
 }
 
-export function isFloat(type: SemanticType): boolean {
-  return isNumber(type) && type.name.startsWith("f");
+export function isFloat(type: SemanticType | null): boolean {
+  return type !== null && isNumber(type) && type.name.startsWith("f");
 }
 
 export function isUnsigned(type: SemanticType): boolean {
@@ -129,7 +129,15 @@ export function isSemanticType(value: unknown): value is SemanticType {
         ((value as { length?: unknown }).length === null || typeof (value as { length?: unknown }).length === "number")
       );
     case "ref":
-      return (value as { of?: unknown }).of === null || typeof (value as { of?: unknown }).of === "string";
+      // A reference carries the type it points at under `of`, and the name of
+      // the object it points at under `name`. Reading `of` as if it were the
+      // name refused a legal `ref<f64>` — the shape `semantics/contract.ts`
+      // parses and the shape this IR's own text writes — and accepted a
+      // `ref` whose name was a number.
+      return (
+        ((value as { of?: unknown }).of === null || isSemanticType((value as { of?: unknown }).of)) &&
+        ((value as { name?: unknown }).name === undefined || typeof (value as { name?: unknown }).name === "string")
+      );
     default:
       return false;
   }
@@ -189,18 +197,24 @@ export function isInteger(type: SemanticType): boolean {
   return isNumber(type) && isWhole(type.name);
 }
 
-/** The whole number type two whole numbers have in common, signed before unsigned. */
+/**
+ * The whole number type two whole numbers have in common. This is the rule
+ * `semantics/contract.ts` evaluates an expression with, and the rule every
+ * backend is handed the type from, so one program cannot be answered two ways:
+ * a `usize` is over everything, an `isize` over the rest, and at one width the
+ * unsigned of the pair, because a value above the signed range of that width is
+ * above it as an unsigned number and a negative number as a signed one.
+ */
 export function wholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTypeName {
   if (a === b) return a;
+  if (a === "usize" || b === "usize") return "usize";
+  if (a === "isize" || b === "isize") return "isize";
   const rank = Math.max(WHOLE_RANK[a] ?? 0, WHOLE_RANK[b] ?? 0);
-  const widest = [a, b].filter((name) => (WHOLE_RANK[name] ?? 0) === rank);
-  for (const signed of ["i64", "isize", "i32", "i16", "i8"]) {
-    if (widest.includes(signed as PrimitiveTypeName)) return signed as PrimitiveTypeName;
+  const widest: readonly PrimitiveTypeName[] = [a, b].filter((name) => (WHOLE_RANK[name] ?? 0) === rank);
+  for (const unsigned of ["u64", "u32", "u16", "u8"] as const) {
+    if (widest.includes(unsigned)) return unsigned;
   }
-  for (const unsigned of ["usize", "u64", "u32", "u16", "u8"]) {
-    if (widest.includes(unsigned as PrimitiveTypeName)) return unsigned as PrimitiveTypeName;
-  }
-  return "i64";
+  return widest[0] ?? "i64";
 }
 
 /**
@@ -344,6 +358,14 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
     case "element":
       walkValues(value.of, visit);
       walkValues(value.index, visit);
+      return;
+    case "argv":
+      // The index of an argument is an expression of its own, and a call
+      // written in it is a call the value makes: `hasCall` answers for it, and
+      // so does the rule that a left arm is written once. An index the walk
+      // does not read makes both answer "nothing here", and the backend writes
+      // the call down under the test and again under the value.
+      if (value.index !== null) walkValues(value.index, visit);
       return;
     case "call":
       for (const argument of value.call.args) walkValues(argument, visit);

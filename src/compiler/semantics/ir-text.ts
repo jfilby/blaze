@@ -802,7 +802,13 @@ class IrScanner {
     if (this.at === start) this.refuse("a count", this.text.slice(this.at, this.at + 8));
     const count = Number.parseInt(this.text.slice(start, this.at), 10);
     const next = this.peek();
-    if (next !== "" && !/[\s\]@,]/.test(next)) this.refuse("a count and what follows it", this.text.slice(start));
+    // A count is followed by whatever closes what it counts: `]` in the
+    // bracket spelling `[i32; 3]`, and `>` in the angle-bracketed one the
+    // signature lines and the object layouts are written in — `array<i32,3>`,
+    // which is what `semantics/contract.ts` writes and what `parseType` reads.
+    // The reader refused its own printer's spelling, so a function with a
+    // fixed-length array could not be read back from what was printed.
+    if (next !== "" && !/[\s\]@,>]/.test(next)) this.refuse("a count and what follows it", this.text.slice(start));
     return count;
   }
 

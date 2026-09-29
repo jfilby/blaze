@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { run } from "../core/process.ts";
@@ -251,6 +252,50 @@ test("a loop bound is read once rather than once per turn", async () => {
   assert.equal(stdout, "2.000000 calls=1\n");
 });
 
+test("a counted loop counts from the name around it when its index is that name", async () => {
+  // The index is declared before the bounds are read, so a bound that reads
+  // the same name resolved to the loop's own declaration: the C read a
+  // variable it had not declared yet and the object did not build. The name
+  // around the loop is what the loop starts from.
+  const body: SemanticBlock = {
+    id: "loopBody",
+    statements: [{ k: "set", name: "total", op: "+=", value: local("limit"), line: 3 }],
+    releases: [],
+    terminator: { k: "next" },
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: { k: "const", type: F64, text: "0" }, line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted",
+            variable: "limit",
+            type: F64,
+            from: local("limit"),
+            to: { k: "const", type: F64, text: "5" },
+            inclusive: false,
+            down: false,
+            step: null,
+            header: "head",
+            exit: "out",
+            body,
+          },
+        },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("total") },
+    },
+    [{ kind: "value", name: "limit", mutable: false, type: F64 }],
+  );
+  // 3 + 4 over a bound of 5: the loop starts at the limit around it.
+  assert.equal(await lowered(fn, (name) => `printf("%g\\n", ${name}(3.0));`), "7\n");
+});
+
 test("a string grows by concatenation rather than by adding to a pointer", async () => {
   // `+=` over a string is a new value, not an addition in place, and the C used
   // to write the operator down as written: `+=` on two pointers, which the C
@@ -452,4 +497,93 @@ test("every operator the IR states is one C can spell", async () => {
     (name) => `printf("%lld\\n", ${name}(12LL, 5LL));`,
   );
   assert.equal(stdout, "2\n");
+});
+
+test("a minimum and a maximum answer a value that is not a number, and a signed zero", async () => {
+  // `NaN > 1.0` is false in C, so the order alone answers one of the arms
+  // where the source answers NaN, and `fmax(0.0, -0.0)` is `-0.0` where the
+  // source answers `+0`. Both are the language rather than C: a NaN is carried
+  // through whatever it is compared with, and a tie between two zeros is
+  // answered by the sign, which is the only thing that tells them apart.
+  const constant = (text: string): SemanticValue => ({ k: "const", type: F64, text });
+  const extremum = (op: "min" | "max", left: SemanticValue, right: SemanticValue): SemanticFunction =>
+    subject(F64, handsBack({ k: "arith", type: F64, op, left, right }));
+  /** What the lowered function answered, as the language writes a value. */
+  const answer = (name: string): string =>
+    `const double r = ${name}(); printf("%s\\n", isnan(r) ? "nan" : (r == 0.0 ? (signbit(r) ? "-0" : "0") : "number"));`;
+  const shapes: { name: string; fn: SemanticFunction; expected: string }[] = [
+    { name: "a maximum of a NaN and a number", fn: extremum("max", constant("0.0 / 0.0"), constant("1.0")), expected: "nan\n" },
+    { name: "a maximum of a number and a NaN", fn: extremum("max", constant("1.0"), constant("0.0 / 0.0")), expected: "nan\n" },
+    { name: "a minimum of a NaN and a number", fn: extremum("min", constant("0.0 / 0.0"), constant("1.0")), expected: "nan\n" },
+    { name: "a maximum of a positive and a negative zero", fn: extremum("max", constant("0.0"), constant("-0.0")), expected: "0\n" },
+    { name: "a maximum of a negative and a positive zero", fn: extremum("max", constant("-0.0"), constant("0.0")), expected: "0\n" },
+    { name: "a minimum of a positive and a negative zero", fn: extremum("min", constant("0.0"), constant("-0.0")), expected: "-0\n" },
+    { name: "a minimum of a negative and a positive zero", fn: extremum("min", constant("-0.0"), constant("0.0")), expected: "-0\n" },
+    { name: "a maximum of two numbers", fn: extremum("max", constant("1.0"), constant("2.0")), expected: "number\n" },
+    { name: "a minimum of two equal numbers", fn: extremum("min", constant("-5.0"), constant("-5.0")), expected: "number\n" },
+  ];
+  for (const shape of shapes) {
+    assert.equal(await lowered(shape.fn, answer), shape.expected, shape.name);
+  }
+});
+
+test("a whole number is written as the integer it is, above the width of a double", async () => {
+  // The runtime's formatter takes a double, and a double holds every i64 only
+  // up to 2^53: 9223372036854775807 went out as 9223372036854775808 and a u64
+  // above 2^53 lost its last digits. Both the way a value is printed and the
+  // way a string interpolates it answer the whole number itself.
+  const shapes: { name: string; type: SemanticType; argument: string; written: string }[] = [
+    { name: "the largest i64", type: { kind: "primitive", name: "i64" }, argument: "9223372036854775807LL", written: "9223372036854775807" },
+    { name: "the smallest i64", type: { kind: "primitive", name: "i64" }, argument: "-9223372036854775807LL - 1", written: "-9223372036854775808" },
+    { name: "the largest u64", type: { kind: "primitive", name: "u64" }, argument: "18446744073709551615ULL", written: "18446744073709551615" },
+    { name: "a usize past a double", type: { kind: "primitive", name: "usize" }, argument: "9007199254740993ULL", written: "9007199254740993" },
+    { name: "the smallest i32", type: { kind: "primitive", name: "i32" }, argument: "-2147483647 - 1", written: "-2147483648" },
+  ];
+  for (const shape of shapes) {
+    const parameter: SemanticSlot = { kind: "value", name: "n", mutable: false, type: shape.type };
+    const read: SemanticValue = { k: "local", type: shape.type, name: "n" };
+    const printed = await lowered(
+      subject(VOID, runs([{ k: "printNumber", value: read, line: 1 }]), [parameter]),
+      (name) => `${name}(${shape.argument});`,
+    );
+    assert.equal(printed.trimEnd(), shape.written, shape.name);
+
+    const interpolated = await lowered(
+      subject(TEXT, handsBack(joined(literal("v="), { k: "toText", type: TEXT, of: read })), [parameter]),
+      (name) => `printf("%s\\n", ${name}(${shape.argument}));`,
+    );
+    assert.equal(interpolated.trimEnd(), `v=${shape.written}`, shape.name);
+  }
+});
+
+test("a constant states the type it is written at, and a text one is a string", async () => {
+  // The literal writer only quotes a float and hands every other text back as
+  // it was given, so a constant written at the text type came out as a bare
+  // identifier: `return hello;` is a C the compiler turns away, and the
+  // candidate's object is never built.
+  const stdout = await lowered(
+    subject(TEXT, handsBack({ k: "const", type: TEXT, text: 'hi "there"\n' })),
+    (name) => `printf("%s", ${name}());`,
+  );
+  assert.equal(stdout, 'hi "there"\n');
+});
+
+test("a power is a floating value, whatever the operands are", async () => {
+  // `pow` takes and hands back a double, so a power written as a whole number
+  // is a truncation: `2 ** 40` is 1099511627776 and a 32 bit answer holds
+  // something else entirely. The resolver gives it a double, whatever the two
+  // sides are, and IR that says otherwise is refused before a backend reads it.
+  const I32: SemanticType = { kind: "primitive", name: "i32" };
+  const power = (type: SemanticType): SemanticValue => ({
+    k: "arith",
+    type,
+    op: "pow",
+    left: { k: "const", type, text: "2" },
+    right: { k: "const", type, text: "10" },
+  });
+  const whole: SemanticValue = { k: "arith", type: I32, op: "pow", left: { k: "const", type: I32, text: "2" }, right: { k: "const", type: I32, text: "10" } };
+  assert.deepEqual(semanticFunctionProblems(subject(I32, handsBack(whole))), [
+    "subject: entry: pow of a i32 and a i32 is a i32, which is not a floating value",
+  ]);
+  assert.deepEqual(semanticFunctionProblems(subject(F64, handsBack(power(F64)))), []);
 });

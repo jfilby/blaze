@@ -115,8 +115,12 @@ export interface ProgramTarget {
   /** Ends the program with a message. Nothing after it runs. */
   raise(message: string): string;
 
-  /** The truth of a value, as a condition reads it. */
-  condition(expression: string, kind: ValueKind): string;
+  /**
+   * The truth of a value, as a condition reads it. The type is here as well as
+   * the kind because a value holds or does not by what it is: a number that is
+   * not a number is not a truth, and only the type says it is a float.
+   */
+  condition(expression: string, kind: ValueKind, type: SemanticType | null): string;
   /** A bare block of statements, and the end of any body. */
   openBlock(): string | null;
   closeBody(): string | null;
@@ -485,7 +489,7 @@ class ProgramEmitter {
   /* ---------------------------------------------------------------------- */
 
   private condition(value: SemanticValue): string {
-    return this.target.condition(this.expression(value), valueKind(value));
+    return this.target.condition(this.expression(value), valueKind(value), value.type);
   }
 
   private call(call: SemanticCall): string {
@@ -623,7 +627,7 @@ class ProgramEmitter {
 
   private logical(value: SemanticValue & { k: "logical" }): string {
     const left = this.expression(value.left);
-    const test = this.target.condition(left, valueKind(value.left));
+    const test = this.target.condition(left, valueKind(value.left), value.left.type);
     const right = this.expression(value.right, value.type);
     return value.op === "and"
       ? this.target.conditional(test, right, left)

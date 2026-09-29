@@ -17,18 +17,22 @@ import { runSemanticIr } from "../compiler.ts";
 import { CompilerError } from "../core/errors.ts";
 import {
   convertibleTo,
+  isSemanticType,
   hasCall,
   localNames,
   slotType,
   typeText,
   valueKind,
+  wholeOf,
   type SemanticFunction,
   type SemanticProgram,
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
-import { semanticIrProblems, validateSemanticProgram } from "../semantics/ir-validate.ts";
+import { semanticFunctionProblems, semanticIrProblems, validateSemanticProgram } from "../semantics/ir-validate.ts";
+import { parseType } from "../semantics/contract.ts";
+import { generateFunctionC } from "../toolchain/ir-c.ts";
 import {
   parseSemanticFunction,
   parseSemanticModule,
@@ -42,7 +46,7 @@ import { generateProgramDriver } from "../toolchain/driver.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "../runtime/abi.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import type { ProgramContract } from "../core/types.ts";
-import { phaseOf, semanticsOf } from "./phase.ts";
+import { phaseOf, programOf, semanticsOf } from "./phase.ts";
 
 /** A program of one entry module and the library it calls, resolved to the IR. */
 function resolved(files: Record<string, string>): { program: SemanticProgram; contract: ProgramContract } {
@@ -123,6 +127,63 @@ test("the fields of an object being built are values the walk reaches", () => {
   assert.equal(hasCall(inField), true);
 });
 
+test("the index an argument is read at is a value the walk reaches", () => {
+  // `process.argv[i]` carries the expression that computes the index, and a
+  // call written in it is a call the value makes. The walk had no case for it,
+  // so `hasCall` answered "no call here" for a value whose whole body is one:
+  // the rule that refuses an arm deciding on a call was disarmed, and the
+  // backend wrote the call under the test and again under the value.
+  const call: SemanticValue = {
+    k: "call",
+    type: NUMBER,
+    call: {
+      callee: "which",
+      args: [],
+      signature: { symbol: "which", name: "which", params: [], returns: "f64" },
+      argTypes: [],
+      returns: NUMBER,
+      effects: [],
+      ownership: "none",
+      retain: false,
+      builtin: false,
+    },
+  };
+  const byName: SemanticValue = { k: "argv", type: NUMBER, index: { k: "local", type: USIZE, name: "i" } };
+  const byCall: SemanticValue = { k: "argv", type: NUMBER, index: call };
+  assert.deepEqual(localNames(byName), ["i"]);
+  assert.equal(hasCall(byName), false);
+  assert.equal(hasCall(byCall), true);
+
+  // The rule the walk exists for: an arm written under a test and again as the
+  // value that answers runs a call in it twice.
+  const fn: SemanticFunction = {
+    name: "first",
+    symbol: "first",
+    params: [],
+    returns: NUMBER,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: true,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      releases: [],
+      statements: [],
+      terminator: {
+        k: "return",
+        value: { k: "logical", type: NUMBER, op: "or", left: byCall, right: { k: "const", type: NUMBER, text: "5" } },
+      },
+    },
+  };
+  assert.deepEqual(semanticFunctionProblems(fn), [
+    "first: entry: logical decides on an arm that calls a function, which is written twice",
+  ]);
+});
+
 test("a use converts inside a kind and never across kinds", () => {
   assert.equal(convertibleTo(I64, NUMBER), true);
   assert.equal(convertibleTo({ kind: "text" }, { kind: "text" }), true);
@@ -136,6 +197,19 @@ test("a use converts inside a kind and never across kinds", () => {
     convertibleTo({ kind: "array", of: NUMBER, length: 3 }, { kind: "slice", of: { kind: "primitive", name: "bool" } }),
     false,
   );
+});
+
+test("a reference is read back as the type it points at, under the field it carries it in", () => {
+  // A reference carries the type it points at under `of` and the name of the
+  // object under `name`. The reader took `of` for the name, so a `ref<f64>` —
+  // what `semantics/contract.ts` parses and what this IR's own text writes —
+  // was not a type, and a reference whose name was a number was one.
+  assert.equal(isSemanticType(parseType("ref<f64>")), true);
+  assert.equal(isSemanticType({ kind: "ref", of: { kind: "primitive", name: "f64" } }), true);
+  assert.equal(isSemanticType({ kind: "ref", of: null }), true);
+  assert.equal(isSemanticType({ kind: "ref", of: null, name: "Point" }), true);
+  assert.equal(isSemanticType({ kind: "ref", of: { kind: "primitive", name: "nope" } }), false);
+  assert.equal(isSemanticType({ kind: "ref", of: null, name: 42 }), false);
 });
 
 test("a value is walked whole, an array length among the values it is made of", () => {
@@ -299,6 +373,30 @@ test("a reference with no layout is a type the text form writes and reads back",
   const printed = printSemanticProgram(program);
   assert.match(printed, /ref<any>/);
   assert.equal(printSemanticProgram(parseSemanticProgram(printed, contract)), printed);
+});
+
+test("a fixed-length array is a type the text form writes and reads back", () => {
+  // `semantics/contract.ts` writes a count inside angle brackets — the
+  // signature lines and the object layouts of a program are written that way —
+  // and the reader stopped at the count, so a function with a fixed-length
+  // array was written, reviewed, and then refused on the way back in. Both
+  // spellings are the same type and both are read.
+  const source = [
+    "proc total(values: array[3, float64]): float64 =",
+    "  var sum = 0.0",
+    "  for i in 0 ..< 3:",
+    "    sum += values[i]",
+    "  result = sum",
+    "",
+  ].join("\n");
+  const files = { "module.nim": `${source}main();\n` };
+  const phase = phaseOf("nim", files, "module.nim");
+  const printed = printSemanticFunction(semanticsOf(phase).total as SemanticFunction);
+  assert.match(printed, /values: \[f64; 3\]/);
+  assert.equal(printSemanticFunction(parseSemanticFunction(printed, phase.program)), printed);
+  // The angle-bracketed spelling the contract writes is the same function.
+  const written = printed.replace("[f64; 3]", "array<f64,3>");
+  assert.equal(printSemanticFunction(parseSemanticFunction(written, phase.program)), printed);
 });
 
 test("a line the IR cannot express is refused, naming the line", () => {
@@ -507,6 +605,120 @@ test("a name is written with a value its own declared type takes", () => {
   assert.match(semanticIrProblems(assigned, contract).join("\n"), /"total" holds a f64, not a text/);
 });
 
+test("a name, an element, a field and an arm are read as what they are written as", () => {
+  // The places a value meets a type it has to agree with. A declaration starts
+  // a name as a value of another type, a `for..of` reads each element at the
+  // type it names, a field is written through a reference, and a conditional
+  // hands back one of its arms. None of them was compared, and each is a place
+  // where the C emitter casts to a type the value is not.
+  const { contract } = resolved({ "main.ts": "console.log(1);\n" });
+  const problems = (body: readonly string[]): string => {
+    const indented = body.map((line) => (line.startsWith(" ") ? line : `  ${line}`));
+    const program = parseSemanticProgram(
+      ["ir 1", 'file "main.ts"', "", "block entry: releases[]", ...indented, "return", ""].join("\n"),
+      contract,
+    );
+    return semanticIrProblems(program, contract).join("\n");
+  };
+
+  // A number declared where a string is written becomes a pointer the emitter
+  // casts to a double.
+  assert.match(
+    problems(['let value[f64] n immutable = [text "hi"] @1', "print_number local[f64] n @1"]),
+    /"n" holds a f64, not a text/,
+  );
+  // A number declared where a string is written is the same statement, and the
+  // other way round a string declared where a number is.
+  assert.match(
+    problems(["let text s immutable = const[f64] 1 @1", "print_text local[text] s @1"]),
+    /"s" holds a text, not a f64/,
+  );
+
+  // An element read at the wrong width is the low half of each double, and the
+  // conversion the emitter writes is a legal one, so nothing says so.
+  assert.match(
+    problems([
+      "  let buffer data immutable element[f64] 2 = [buffer[[f64; 2]] element[f64] 2 const[f64] 1 const[f64] 2] @1",
+      "  for_of[i32] e of data index i1 length [length[usize] local[[f64; 2]] data] header b1 exit entry @2",
+      "    block b2: releases[]",
+      "      print_number local[i32] e @2",
+      "      print_newline @2",
+    ]),
+    /an element of a \[f64; 2\] is a f64, not a i32/,
+  );
+
+  // A field written is read back the way a field read is, so it takes the same
+  // three checks: the layout is one the body lays out, the field is one of its
+  // fields, and the object is a reference to write through. The layout here is
+  // one a function's body lays out, which is where a field is written.
+  const program = programOf(
+    "typescript",
+    {
+      "1.ts": [
+        "function make(): any {",
+        "  const node = { value: 1, other: 2 };",
+        "  node.value = 3;",
+        "  return node;",
+        "}",
+        "make();",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  assert.ok(
+    program.files.find((file) => file.path === "1.ts")?.functions.make !== undefined,
+    "expected a function that lays out an object",
+  );
+  const held = "    let object[ref<Object1>] node mutable = [new_object[ref<Object1>] Object1 value const[f64] 1 other const[f64] 2] @1";
+  const stored = (body: readonly string[]): string =>
+    semanticFunctionProblems(
+      parseSemanticFunction(
+        [
+          "function make() -> ref<Object1>",
+          "  requires none",
+          "  ensures none",
+          "  allocates yes",
+          "  prints no",
+          "  reads_argv no",
+          "  effects memory",
+          "  object Object1 size 16 align 8",
+          "    field value: f64 at 0",
+          "    field other: f64 at 8",
+          "  block entry: releases[]",
+          ...body,
+          "  return local[ref<Object1>] node",
+          "",
+        ].join("\n"),
+        program,
+      ),
+    ).join("\n");
+  assert.match(
+    stored([
+      "    let value[f64] node immutable = const[f64] 4096 @1",
+      "    store_field local[f64] node Object1 value const[f64] 7 @2",
+    ]),
+    /written through a f64, which is not a reference/,
+  );
+  assert.match(stored([held, "    store_field local[ref<Object1>] node Object1 missing const[f64] 7 @2"]), /Object1 has no field missing/);
+  assert.match(
+    stored([held, "    store_field local[ref<Object1>] node Absent value const[f64] 7 @2"]),
+    /the object Absent is not a layout the program lays out/,
+  );
+
+  // A conditional hands back one of its two arms, so a string beside a number
+  // is a conditional no compiler takes.
+  assert.match(
+    problems(['print_number [select[i32] [gt[bool] f64 const[f64] 1 const[f64] 0] [text "hi"] const[i32] 0] @1']),
+    /the then arm of a conditional is a text, and the whole is a i32/,
+  );
+  // And `??` hands back one of its arms the same way.
+  assert.match(
+    problems(['print_number [coalesce[i32] [text "hi"] const[i32] 0] @1']),
+    /the left arm of \?\? is a text, and the whole is a i32/,
+  );
+});
+
 test("a name a target would have to escape is not a name the IR holds", () => {
   const { program, contract } = resolved({ "main.ts": "let total = 0;\nconsole.log(total);\n" });
   assert.deepEqual(semanticIrProblems(program, contract), []);
@@ -693,4 +905,59 @@ test("the type of a program is the type its names read as", () => {
   if (declared.k !== "let") throw new Error("expected a declaration");
   assert.equal(typeText(slotType(declared.slot)), "[f64; 2]");
   assert.equal(declared.slot.kind, "buffer");
+});
+
+test("two whole numbers of one width are computed as the unsigned of the pair", () => {
+  // The contract language keeps a value above the signed range of its width
+  // above it: a `u32` holding 4000000000 is not -294967296, and an IR that
+  // computed the pair as a signed number would be verified against one answer
+  // and compiled into another. A `usize` is over everything and an `isize` over
+  // the rest, so a length read with a signed number is still computed as one.
+  assert.equal(wholeOf("u32", "i32"), "u32");
+  assert.equal(wholeOf("i32", "u32"), "u32");
+  assert.equal(wholeOf("u8", "i8"), "u8");
+  assert.equal(wholeOf("u64", "i64"), "u64");
+  assert.equal(wholeOf("u32", "i16"), "u32");
+  assert.equal(wholeOf("i64", "u32"), "i64");
+  assert.equal(wholeOf("usize", "i64"), "usize");
+  assert.equal(wholeOf("usize", "isize"), "usize");
+  assert.equal(wholeOf("isize", "i32"), "isize");
+  assert.equal(wholeOf("i32", "i32"), "i32");
+
+  // A compound assignment over the pair writes what the contract language
+  // computes, so the validator does not refuse a program the evaluator and the
+  // backend both answer the same way, and the C writes it back unsigned: a
+  // signed accumulator wraps at 2^31 and answers -294967295 where the contract
+  // answers 4000000001.
+  const wide: SemanticType = { kind: "primitive", name: "u32" };
+  const narrow: SemanticType = { kind: "primitive", name: "i32" };
+  const a: SemanticValue = { k: "local", type: wide, name: "a" };
+  const b: SemanticValue = { k: "local", type: narrow, name: "b" };
+  const fn: SemanticFunction = {
+    name: "add",
+    symbol: "add",
+    params: [
+      { kind: "value", name: "a", mutable: true, type: wide },
+      { kind: "value", name: "b", mutable: true, type: narrow },
+    ],
+    returns: wide,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      releases: [],
+      statements: [{ k: "set", name: "a", op: "+=", value: b, line: 1 }],
+      terminator: { k: "return", value: { k: "arith", type: wide, op: "add", left: a, right: b } },
+    },
+  };
+  assert.deepEqual(semanticFunctionProblems(fn), []);
+  const written = generateFunctionC(fn);
+  assert.match(written, /\ba \+= \(uint32_t\)\(b\);/);
+  assert.match(written, /\breturn \(a \+ \(uint32_t\)\(b\)\);/);
 });

@@ -24,8 +24,11 @@ import { ARGV_LENGTH } from "../semantics/builtins.ts";
 import {
   elementTypeOf,
   isBoolean,
+  isFloat,
+  isInteger,
   isNumber,
   isReference,
+  isUnsigned,
   isTextType,
   slotType,
   valueKind,
@@ -166,6 +169,7 @@ class FunctionEmitter {
       "#include <stdbool.h>",
       "#include <stdint.h>",
       "#include <math.h>",
+      "#include <stdio.h>",
       "#include <string.h>",
       "",
       `#include "${RUNTIME_NAME}.h"`,
@@ -254,9 +258,19 @@ class FunctionEmitter {
       case "printText":
         this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${this.expression(statement.value, TEXT, depth)});`]);
         return;
-      case "printNumber":
-        this.write([`${pad(depth)}${RUNTIME_NAME}_print_number(${this.expression(statement.value, NUMBER, depth)});`]);
+      case "printNumber": {
+        // A whole number is written as the integer it is. The runtime's
+        // formatter takes a double, and a double holds every `i64` only up to
+        // 2^53, so a larger one lost its last digits on the way out.
+        const value = statement.value;
+        if (isNumber(value.type) && isInteger(value.type)) {
+          const text = this.number(this.expression(value, value.type, depth), value.type);
+          this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${text});`]);
+          return;
+        }
+        this.write([`${pad(depth)}${RUNTIME_NAME}_print_number(${this.expression(value, NUMBER, depth)});`]);
         return;
+      }
       case "printNewline":
         this.write([`${pad(depth)}${RUNTIME_NAME}_print_newline();`]);
         return;
@@ -317,19 +331,29 @@ class FunctionEmitter {
       case "counted": {
         const type = loop.type;
         const written = declaredType(type);
-        const variable = this.names.declare(loop.variable, type);
         const bound = `${COMPARE_OPERATORS[loop.down ? "gt" : "lt"]}${loop.inclusive ? "=" : ""}`;
+        // The index is declared under its own name, and a loop that counts
+        // from a value of that same name counts from the outer one:
+        // `for (let limit = limit; ...)` starts at the `limit` around it. The
+        // bounds are read before the index is declared, because after it the
+        // name resolves to the loop's own declaration — which is written into
+        // the `for` below, so reading it first named a variable the C did not
+        // declare yet and the object did not build.
+        const given = loop.step;
+        const start = this.expression(loop.from, type, depth);
+        const end = this.expression(loop.to, type, depth);
+        const by = given === null ? null : this.expression(given, type, depth);
+        const variable = this.names.declare(loop.variable, type);
         // What the loop counts over is read once. The `for` reads its bound on
         // every turn and adds its step on every turn, so a bound or a step the
         // IR calls is a call the loop makes once per turn.
         const from = this.temporary("blaze_from");
         const to = this.temporary("blaze_to");
-        const given = loop.step;
-        const step = given === null ? null : this.temporary("blaze_step");
-        this.write([`${pad(depth)}${written} ${from} = ${this.expression(loop.from, type, depth)};`]);
-        this.write([`${pad(depth)}${written} ${to} = ${this.expression(loop.to, type, depth)};`]);
-        if (given !== null && step !== null) {
-          this.write([`${pad(depth)}${written} ${step} = ${this.expression(given, type, depth)};`]);
+        const step = by === null ? null : this.temporary("blaze_step");
+        this.write([`${pad(depth)}${written} ${from} = ${start};`]);
+        this.write([`${pad(depth)}${written} ${to} = ${end};`]);
+        if (by !== null && step !== null) {
+          this.write([`${pad(depth)}${written} ${step} = ${by};`]);
         }
         // The step is the signed amount the index moves by, so a loop that
         // counts down carries a negative one and adds it like any other:
@@ -395,11 +419,11 @@ class FunctionEmitter {
   /* ---------------------------------------------------------------------- */
 
   private condition(value: SemanticValue, depth: number): string {
-    return this.truth(this.expression(value, null, depth), valueKind(value));
+    return this.truth(this.expression(value, null, depth), valueKind(value), value.type);
   }
 
   /** Whether C text already written answers as a truth. */
-  private truth(text: string, kind: ValueKind): string {
+  private truth(text: string, kind: ValueKind, type: SemanticType | null): string {
     switch (kind) {
       case "text":
         return `((${text})[0] != '\\0')`;
@@ -408,6 +432,13 @@ class FunctionEmitter {
       case "boolean":
         return `(${text})`;
       default:
+        // A value that is not a number holds nothing, and `NaN != 0` is true
+        // in C, so the test asks for a number that is a number. The value is
+        // bound because it is read twice, and a value the IR calls is a call.
+        if (isFloat(type)) {
+          const arm = this.temporary("blaze_truth");
+          return `({ double ${arm} = (${text}); ${arm} == ${arm} && ${arm} != 0; })`;
+        }
         return `((${text}) != 0)`;
     }
   }
@@ -474,6 +505,11 @@ class FunctionEmitter {
   private raw(value: SemanticValue, depth: number): string {
     switch (value.k) {
       case "const":
+        // A constant states the type it is written at, and a text one is a
+        // string: the numeric literal writer leaves anything that is not a
+        // float as the text it was given, so a text constant came out as a
+        // bare identifier the C compiler has never heard of.
+        if (isTextType(value.type)) return cStringLiteral(value.text);
         return cLiteral(value.text, isNumber(value.type) && value.type.kind === "primitive" ? value.type.name : "f64");
       case "bool":
         return value.value ? "1" : "0";
@@ -540,7 +576,7 @@ class FunctionEmitter {
         const right = this.expression(value.right, value.type, depth);
         return (
           `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
-          `${this.truth(arm, valueKind(value.left))} ? ` +
+          `${this.truth(arm, valueKind(value.left), value.left.type)} ? ` +
           `${value.op === "and" ? right : arm} : ${value.op === "and" ? arm : right}; })`
         );
       }
@@ -580,6 +616,21 @@ class FunctionEmitter {
         const low = this.temporary("blaze_arm");
         const high = this.temporary("blaze_arm");
         const type = declaredType(value.type);
+        // A whole number has no NaN and no signed zero, so the order answers
+        // it. A float has both, and neither is answered by the order alone: the
+        // language carries a NaN through rather than answering one of the arms
+        // (`NaN > 1.0` is false in C, so the test alone answers 1.0 where the
+        // source answers NaN), and a zero is answered by its sign — a maximum
+        // is `+0` and a minimum is `-0` however the two zeros were written.
+        if (isFloat(value.type)) {
+          const ordered = value.op === "min" ? "<" : ">";
+          return (
+            `({ ${type} ${low} = ${left}; ${type} ${high} = ${right}; ` +
+            `isnan(${low}) || isnan(${high}) ? ${low} + ${high} : ` +
+            `${low} ${ordered} ${high} ? ${low} : ${high} ${ordered} ${low} ? ${high} : ` +
+            `(${low} == 0.0 && (signbit(${low}) || signbit(${high})) ? ${value.op === "min" ? "-0.0" : "0.0"} : ${low}); })`
+          );
+        }
         return (
           `({ ${type} ${low} = ${left}; ${type} ${high} = ${right}; ` +
           `${low} ${value.op === "min" ? "<" : ">"} ${high} ? ${low} : ${high}; })`
@@ -685,15 +736,25 @@ class FunctionEmitter {
       const read = this.raw(value, depth);
       return (
         `({ const void* ${pointer} = ${read}; ` +
-        `${pointer} == NULL ? "null" : ${this.number(`(double)(uintptr_t)${pointer}`)}; })`
+        `${pointer} == NULL ? "null" : ${this.number(`(double)(uintptr_t)${pointer}`, NUMBER)}; })`
       );
     }
-    return this.number(this.raw(value, depth));
+    return this.number(this.raw(value, depth), value.type);
   }
 
-  /** A number as text, written by the runtime the way the source writes one. */
-  private number(read: string): string {
+  /**
+   * A number as text, written the way the source language writes it. A whole
+   * number is written as the integer it is: the runtime's formatter takes a
+   * double, and a double holds every `i64` only up to 2^53, so
+   * 9223372036854775807 went out as 9223372036854775808 and every `u64` above
+   * 2^53 lost its last digits. A float is the runtime's own.
+   */
+  private number(read: string, type: SemanticType | null): string {
     const buffer = this.temporary("blaze_number");
+    if (type !== null && isInteger(type)) {
+      const signed = isUnsigned(type) ? "unsigned long long" : "long long";
+      return `({ char ${buffer}[32]; snprintf(${buffer}, sizeof ${buffer}, "${isUnsigned(type) ? "%llu" : "%lld"}", (${signed})(${read})); ${buffer}; })`;
+    }
     const written = this.temporary("blaze_written");
     return (
       `({ char ${buffer}[64]; size_t ${written} = ${RUNTIME_NAME}_format_number((double)(${read}), ` +

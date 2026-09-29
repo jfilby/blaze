@@ -72,7 +72,6 @@ import type { Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, Progra
 import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
 import {
   BOOLEAN,
-  commonNumber,
   NUMERIC,
   TEXT,
   VOID,
@@ -304,6 +303,10 @@ function integerLiteral(text: string): bigint | null {
   return /^[+-]?[0-9]+$/.test(text) ? BigInt(text) : null;
 }
 
+/** The range an `i64` holds, which is the range a bigint literal is written at. */
+const I64_MAX = 9223372036854775807n;
+const I64_MIN = -9223372036854775808n;
+
 /**
  * True of a value that is a whole number as written, and so of a loop index
  * built from it. A literal the source wrote without a point is one whatever
@@ -319,24 +322,35 @@ function countsWhole(value: DraftValue): boolean {
   const name = primitive(draftType(value));
   return name !== null && isWhole(name);
 }
+/**
+ * The whole number two whole numbers are computed as, in a program. The source
+ * wrote both of them as doubles and the driver has to answer as one, so a
+ * length — read as a `usize`, and only because a length is read as one — is
+ * computed with a signed number: `length - 10` is -7 here, where the contract
+ * language's own rule, which keeps a whole pair unsigned, would answer a very
+ * large unsigned number. `core/semantic-ir.ts:wholeOf` is that rule, and is
+ * what a contract is evaluated with.
+ */
+function programWholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTypeName {
+  if (a === b) return a;
+  for (const signed of ["i64", "isize", "i32", "i16", "i8"]) {
+    if (a === signed || b === signed) return signed as PrimitiveTypeName;
+  }
+  return wholeOf(a, b);
+}
+
 
 /**
- * The type an operation on two whole numbers has: the one they have in
- * common. A number written in the source is a double, as it is in the
- * language it was written in, and a side with no type makes the operation a
- * double. A floating operation is always floating: `7 / 2` is `3.5` in
- * TypeScript, and the driver has to agree.
+ * The type an operation on two numbers has in a program: a double, whatever the
+ * source typed them as. Every number in a program is a double, and the
+ * arithmetic is the language's own, so `7 / 2` is 3.5 and a `Uint32Array`
+ * holding 4000000000 added to 1 is 4000000001 rather than a negative number
+ * from a type narrower than the answer. The operators the language has no
+ * floating form for — a remainder, a shift, the bitwise pair — are whole by
+ * another rule (`wholeResult`), and a length is a whole number because a
+ * length is read as one, not because arithmetic on it is.
  */
-function numericResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | null, floating: boolean): PrimitiveTypeName {
-  if (floating) return "f64";
-  const whole = (side: PrimitiveTypeName | null): PrimitiveTypeName | null =>
-    side !== null && isWhole(side) ? side : null;
-  const a = whole(left);
-  const b = whole(right);
-  // A number in the source is a double, as it is in the language it was written
-  // in, and arithmetic on one is a double: a length is a whole number, and
-  // `length - 10` is -7 rather than a very large unsigned number.
-  if (a !== null && b !== null) return wholeOf(a, b);
+function numericResult(_left: PrimitiveTypeName | null, _right: PrimitiveTypeName | null, _floating: boolean): PrimitiveTypeName {
   return "f64";
 }
 
@@ -438,7 +452,7 @@ function contractsOf(program: ProgramContract): Map<string, { signature: Functio
  * otherwise.
  */
 function wholeResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | null): PrimitiveTypeName {
-  return left !== null && right !== null && isWhole(left) && isWhole(right) ? wholeOf(left, right) : "i64";
+  return left !== null && right !== null && isWhole(left) && isWhole(right) ? programWholeOf(left, right) : "i64";
 }
 
 /** The operators only whole numbers have. */
@@ -893,7 +907,7 @@ class ProgramResolver {
     const widths = [startType, isWhole(boundType) ? boundType : null].filter(
       (name): name is PrimitiveTypeName => name !== null && isWhole(name),
     );
-    const counted = whole ? (widths.length === 0 ? "i64" : wholeOf(widths[0], widths[1] ?? widths[0])) : "f64";
+    const counted = whole ? (widths.length === 0 ? "i64" : programWholeOf(widths[0], widths[1] ?? widths[0])) : "f64";
     const type = numeric(statement.down && counted.startsWith("u") ? "i64" : counted);
     const from = this.value(statement.from, type, statement.line);
     const to = this.value(statement.to, type, statement.line);
@@ -979,8 +993,22 @@ class ProgramResolver {
         if (expect !== null && primitive(expect) !== null) this.expectNumber(expect, held, line);
         return { k: "literal", held };
       }
-      case "bigint":
+      case "bigint": {
+        // A bigint is a whole number, and a whole number here is an `i64`. A
+        // literal outside that range is not a value the program can hold: it
+        // was written out as the low sixty-four bits of itself, so
+        // `18446744073709551615n` printed -1 where the source prints itself.
+        const literal = integerLiteral(value.text);
+        if (literal !== null && (literal > I64_MAX || literal < I64_MIN)) {
+          throw programError(
+            `${value.text} is not a number an i64 holds`,
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: a bigint is an i64, which runs from ${I64_MIN} to ${I64_MAX}`,
+          );
+        }
         return { k: "literal", held: { kind: "number", name: "", mutable: false, type: "i64", text: value.text } };
+      }
       case "boolean":
         return { k: "boolean", value: value.value };
       case "null":
@@ -1079,6 +1107,19 @@ class ProgramResolver {
 
   private unary(value: ProgramValue & { k: "unary" }, line: number): DraftValue {
     if (value.op === "-" || value.op === "+") {
+      // The most negative value is written as a magnitude and a sign in front
+      // of it, so the literal this reads is one past the top of the range. The
+      // sign is folded in here, where the value it makes is in range, rather
+      // than refused as a literal no `i64` holds.
+      if (value.op === "-" && value.operand.k === "bigint") {
+        const literal = integerLiteral(value.operand.text);
+        if (literal !== null && literal === -I64_MIN) {
+          return {
+            k: "literal",
+            held: { kind: "number", name: "", mutable: false, type: "i64", text: `-${value.operand.text}` },
+          };
+        }
+      }
       // A number written with its sign is one literal, so a use can still fix
       // its type without a conversion.
       if (value.operand.k === "number") {
@@ -1935,7 +1976,7 @@ class ProgramLowering {
           k: "compare",
           type: BOOLEAN,
           op: value.negate ? "ne" : "eq",
-          operand: value.how === "string" ? TEXT : this.operand(value.left, value.right),
+          operand: value.how === "string" ? TEXT : this.operand,
           left: this.value(value.left, null, line),
           right: this.value(value.right, null, line),
         };
@@ -1961,11 +2002,15 @@ class ProgramLowering {
     }
   }
 
-  /** The type two values are compared at, which is the double they are. */
-  private operand(left: DraftValue, right: DraftValue): TypeExpr {
-    const type = commonNumber(draftType(left), draftType(right));
-    return type !== null && !isTextType(type) ? type : numeric("f64");
-  }
+  /**
+   * The type two values are compared at, which is the double they are. A
+   * number in a program is a double whichever array it was read out of, and
+   * compared as one of the two it answers a different question: a
+   * `Uint32Array` holding 4000000000 is above every signed 32 bit number, and
+   * read as a signed one it is negative, so `a[0] > b[0]` is false where the
+   * source says true.
+   */
+  private readonly operand: TypeExpr = numeric("f64");
 
   /** A value as text, which is how a string carries a number. */
   private written(value: DraftValue, line: number): SemanticValue {
@@ -2049,12 +2094,11 @@ class ProgramLowering {
         right: this.value(value.right, value.type, line),
       };
     }
-    // The two sides of a comparison are compared as the one type they have in
-    // common, so a whole number and a literal are compared as whole numbers
-    // rather than as two different ones.
+    // The two sides of a comparison are compared as the double they are, which
+    // is what a number in a program is whichever array it was read out of.
     const comparison = COMPARISONS[op];
     if (comparison !== null) {
-      const operand = this.operand(value.left, value.right);
+      const operand = this.operand;
       return {
         k: "compare",
         type: BOOLEAN,
@@ -2077,7 +2121,7 @@ class ProgramLowering {
     if (call.builtin) {
       const extreme = EXTREMES[call.name];
       if (extreme !== undefined) {
-        const type = this.operand(call.args[0], call.args[1]);
+        const type = this.operand;
         return {
           k: "arith",
           type,

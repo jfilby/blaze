@@ -543,8 +543,19 @@ function valueProblems(tree: Tree): string[] {
         problems.push(`${prefix}"${statement.buffer}" is a ${typeText(slotType(buffer))}, which has no elements to write`);
       }
     }
-    if (statement.k === "loop" && statement.loop.kind === "each" && !scope.visible.has(statement.loop.of)) {
-      problems.push(`${prefix}"${statement.loop.of}" is not declared where it is read`);
+    if (statement.k === "loop" && statement.loop.kind === "each") {
+      if (!scope.visible.has(statement.loop.of)) {
+        problems.push(`${prefix}"${statement.loop.of}" is not declared where it is read`);
+      } else {
+        // The element is declared as the type the walk reads it at, and the C
+        // emitter declares it as that type too: an element of a `[]f64` read
+        // as an `i32` is the low half of each double, with no diagnostic.
+        const held = scope.slots.get(statement.loop.of);
+        const element = held === undefined ? null : elementTypeOf(slotType(held));
+        if (element !== null && !typeEquals(element, statement.loop.elementType)) {
+          problems.push(`${prefix}an element of a ${typeText(slotType(held as SemanticSlot))} is a ${typeText(element)}, not a ${typeText(statement.loop.elementType)}`);
+        }
+      }
     }
 
     for (const name of writes) {
@@ -691,6 +702,15 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         }
         return problems;
       }
+      // A power is the one arithmetic operation no target has over whole
+      // numbers: `pow` takes and hands back a double, so writing the result as
+      // a whole number is a truncation, and `2 ** 40` is 1099511627776 rather
+      // than what a 32 bit answer would hold. The resolver gives it a double,
+      // whatever the operands are.
+      if (value.op === "pow" && isInteger(value.type)) {
+        problems.push(`${prefix}pow of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is not a floating value`);
+        return problems;
+      }
       // What an operation is written as is one of the two types it works on —
       // `length - 10` is a double and `10 - length` is a whole number, because
       // that is what the language says — and both sides convert to it.
@@ -737,9 +757,32 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
     case "isNull":
       if (!isBoolean(value.type)) problems.push(`${prefix}a null test is written as a ${typeText(value.type)}`);
       return problems;
-    case "coalesce":
-    case "select":
+    case "coalesce": {
+      // `a ?? b` hands back one of its two arms, the way `&&` and `||` do, so
+      // what it is written as is the type both of them convert to. The left arm
+      // is the one that decides, and it is only a null test if it can be
+      // nothing: a left arm that always holds leaves the right one dead, which
+      // is a different program from the one that is written.
+      for (const [what, arm] of [["left", value.left], ["right", value.right]] as const) {
+        if (!convertibleTo(arm.type, value.type)) {
+          problems.push(`${prefix}the ${what} arm of ?? is a ${typeText(arm.type)}, and the whole is a ${typeText(value.type)}`);
+        }
+      }
       return problems;
+    }
+    case "select": {
+      // A conditional hands back one of its two arms, so both of them have to be
+      // readable as what the whole is written as: the C emitter writes the two
+      // arms into one conditional, and a string beside a number is a
+      // conditional no compiler takes. What decides it is a question the
+      // backends answer, and an array is one of the answers.
+      for (const [what, arm] of [["then", value.then], ["otherwise", value.otherwise]] as const) {
+        if (!convertibleTo(arm.type, value.type)) {
+          problems.push(`${prefix}the ${what} arm of a conditional is a ${typeText(arm.type)}, and the whole is a ${typeText(value.type)}`);
+        }
+      }
+      return problems;
+    }
     case "unary": {
       if (value.op === "not") {
         if (!isBoolean(value.operand.type) || !isBoolean(value.type)) {
@@ -863,7 +906,15 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // slot's own type. Neither of them checks it, so a value written under `=`
     // and a step over a name that is not a number were lowered without a word.
     // `setElement` below holds itself to exactly this, and a step is an
-    // arithmetic move, so it needs a number to move.
+    // arithmetic move, so it needs a number to move. A declaration holds to it
+    // as well: the value it starts as is cast to the slot, so a number declared
+    // where a string is written came out as a pointer cast to a double.
+    if (statement.k === "let") {
+      const declared = slotType(statement.slot);
+      if (!convertibleTo(statement.value.type, declared)) {
+        problems.push(`${prefix}"${statement.slot.name}" holds a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
+      }
+    }
     if (statement.k === "set" && statement.op === "=") {
       const slot = placed.scope.slots.get(statement.name);
       const declared = slot === undefined ? null : slotType(slot);
@@ -889,6 +940,21 @@ function typeProblems(context: Context, tree: Tree): string[] {
         } else {
           problems.push(...compoundProblems(element, statement.value, statement.op, prefix, `${statement.buffer}[...]`));
         }
+      }
+    }
+    // A field written is read back the same way a field read is, so it takes
+    // the same three checks: the layout is one the program lays out, the field
+    // is one of its fields, and what is written is readable as the type that
+    // layout gives it. The object it is written through is a reference, or the
+    // C emitter casts whatever it holds to that layout and writes through it.
+    if (statement.k === "storeField") {
+      problems.push(...layoutProblems(prefix, statement.layout, statement.field, context));
+      if (!isReference(statement.object.type)) {
+        problems.push(`${prefix}${statement.layout}.${statement.field} is written through a ${typeText(statement.object.type)}, which is not a reference`);
+      }
+      const declared = fieldType(statement.layout, statement.field, context);
+      if (declared !== null && !fieldReadsAs(declared, statement.value.type)) {
+        problems.push(`${prefix}${statement.layout}.${statement.field} is a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
       }
     }
 

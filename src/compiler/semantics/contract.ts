@@ -24,6 +24,7 @@ import {
   type PrimitiveTypeName,
   type TypeExpr,
 } from "../core/types.ts";
+import { wholeOf } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
@@ -546,15 +547,16 @@ function comparable(op: string, left: StaticType, right: StaticType): void {
   }
   throw contractError(`${op} requires comparable operands, got ${describeType(left)} and ${describeType(right)}`);
 }
-
+/**
+ * The whole number two whole numbers are computed as, which is the rule the
+ * semantic IR types the same expression with (`core/semantic-ir.ts:wholeOf`).
+ * The evaluator and the backends answer one program, so the two read the rule
+ * from one place rather than each keeping its own.
+ */
 function widerInteger(left: PrimitiveTypeName, right: PrimitiveTypeName): PrimitiveTypeName {
-  if (left === "usize" || right === "usize") return "usize";
-  if (left === "isize" || right === "isize") return "isize";
-  if (integerBits(left) !== integerBits(right)) {
-    return integerBits(left) > integerBits(right) ? left : right;
-  }
-  return isSignedType(left) === isSignedType(right) ? left : isSignedType(left) ? (right as PrimitiveTypeName) : left;
+  return wholeOf(left, right);
 }
+
 
 export function typeOf(expression: Expr, env: TypeEnv): StaticType {
   switch (expression.t) {

@@ -85,14 +85,22 @@ static const char* program_integer_text(long long value) {
   return program_string(text, strlen(text));
 }
 
-/* fmax and fmin answer with the number that is there; the language carries a
-   NaN through, so a value that is not a number is answered with. */
+/* The language carries a NaN through, so a value that is not a number is
+   answered with, and a tie is answered by the sign of the zero it is: a
+   maximum is +0 and a minimum is -0 however the two zeros were written, which
+   is the one thing fmax and fmin do not do. */
 static double program_max(double left, double right) {
-  return isnan(left) || isnan(right) ? left + right : fmax(left, right);
+  if (isnan(left) || isnan(right)) return left + right;
+  if (left > right) return left;
+  if (right > left) return right;
+  return left == 0.0 && (signbit(left) || signbit(right)) ? 0.0 : left;
 }
 
 static double program_min(double left, double right) {
-  return isnan(left) || isnan(right) ? left + right : fmin(left, right);
+  if (isnan(left) || isnan(right)) return left + right;
+  if (left < right) return left;
+  if (right < left) return right;
+  return left == 0.0 && (signbit(left) || signbit(right)) ? -0.0 : left;
 }
 
 /* A half is rounded up, as the language rounds it, and a value that rounds to
@@ -312,12 +320,18 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `${RUNTIME_NAME}_raise(${message});`;
   }
 
-  condition(expression: string, kind: ValueKind): string {
+  condition(expression: string, kind: ValueKind, type: SemanticType | null): string {
     // A string holds when it has text in it, and an object holds when it is
     // there at all: an empty string is false, as it is in the language.
     if (kind === "text") return `(${expression})[0] != '\\0'`;
     if (kind === "reference") return `(${expression}) != NULL`;
     if (kind === "boolean") return `(${expression})`;
+    // A value that is not a number holds nothing, and `NaN != 0` is true in C,
+    // so the test asks for a number that is a number. The value is bound
+    // because it is read twice and a value the IR calls is a call.
+    if (isFloat(type)) {
+      return `({ double blaze_truth = (${expression}); blaze_truth == blaze_truth && blaze_truth != 0; })`;
+    }
     return `(${expression}) != 0`;
   }
 

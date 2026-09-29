@@ -52,12 +52,23 @@ proc programText(value: float64): string =
   discard ${RUNTIME_NAME}_format_number(value, cast[ptr uint8](addr text[0]), 64)
   $cast[cstring](addr text[0])
 
-## The language carries a value that is not a number through max and min.
+## The language carries a value that is not a number through max and min, and
+## a tie between two zeros is answered by the sign: a maximum is +0 and a
+## minimum is -0 however the two zeros were written, which is the one thing
+## Nim's own max and min do not do.
 proc programMax(left, right: float64): float64 =
-  (if left != left or right != right: left + right else: max(left, right))
+  if left != left or right != right: left + right
+  elif left > right: left
+  elif right > left: right
+  elif left == 0.0 and (classify(left) == fcNegZero or classify(right) == fcNegZero): 0.0
+  else: left
 
 proc programMin(left, right: float64): float64 =
-  (if left != left or right != right: left + right else: min(left, right))
+  if left != left or right != right: left + right
+  elif left < right: left
+  elif right < left: right
+  elif left == 0.0 and (classify(left) == fcNegZero or classify(right) == fcNegZero): -0.0
+  else: left
 
 ## A half is rounded up, and a value that rounds to zero from below keeps its
 ## sign, which is what the source prints.
@@ -336,10 +347,13 @@ ${anchor}
     return `${RUNTIME_NAME}_release(cast[pointer](${name}))`;
   }
 
-  condition(expression: string, kind: ValueKind): string {
+  condition(expression: string, kind: ValueKind, type: SemanticType | null): string {
     if (kind === "text") return `(${expression}).len != 0`;
     if (kind === "reference") return `(${expression}) != nil`;
     if (kind === "boolean") return `(${expression})`;
+    // A value that is not a number holds nothing, and `NaN != 0` is true here as
+    // it is in C, so the test asks for a number that is a number.
+    if (isFloat(type)) return `((${expression}) == (${expression}) and (${expression}) != 0.0)`;
     return `(${expression}) != 0`;
   }
 
