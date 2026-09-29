@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyProposal, describeSites, REPAIR_RULES } from "../semantics/repair.ts";
+import { applyProposal, describeSites, REPAIR_RULES, type RepairOutcome } from "../semantics/repair.ts";
 import { printSemanticFunction, parseSemanticFunction } from "../semantics/ir-text.ts";
 import { validateSemanticFunction } from "../semantics/ir-validate.ts";
 import { parseReview, type Proposal } from "../core/proposal.ts";
@@ -337,4 +337,94 @@ test("common-subexpression binds a value under the declaration it reads", () => 
   // And the artifact a build lowers is the one the source is: 4 + 4 + 5.
   const reread = parseSemanticFunction(printSemanticFunction(outcome.applied), own.program);
   assert.equal(validateSemanticFunction(reread, own.program.files[1].functions.squared as FunctionContract), undefined);
+});
+
+/** Resolves one function of its own library and applies one proposal to it. */
+function attemptOn(name: string, lib: string, proposal: string): RepairOutcome | "refused" {
+  const files = { "main.ts": `import { ${name} } from './lib.ts';\nconsole.log(${name}());\n`, "lib.ts": lib };
+  const own = phaseOf("typescript", files, "main.ts");
+  const ownSemantics = semanticsOf(own);
+  const proposalText = proposalsIn(repaired(proposal))[0] as Proposal;
+  const outcome = applyProposal(
+    structuredClone(ownSemantics[name] as SemanticFunction),
+    proposalText,
+    { functions: new Map(Object.entries(ownSemantics)) },
+  );
+  if (!("applied" in outcome)) return "refused";
+  // An applied rule has to leave a function the compiler may still lower, and
+  // it has to leave the program the source wrote.
+  validateSemanticFunction(outcome.applied, own.program.files[1].functions[name] as FunctionContract);
+  return outcome;
+}
+
+test("hoist-invariant refuses a value a write through another name would change", () => {
+  // `a` and `b` are two names for one object, and the loop writes `b`. The IR
+  // carries no alias information, so nothing that reads names can tell that
+  // `a.v + a.v` is a different value on the second turn than on the first: the
+  // value is judged unchanged while the memory it reads is written under the
+  // other name. Hoisted above the loop it is read once, on the first turn, and
+  // the program answers 0 where the source answers 4.
+  const lib = [
+    "export function aliased(): number {",
+    "  const a = { v: 0 };",
+    "  const b = a;",
+    "  let total = 0;",
+    "  for (let i = 0; i < 3; i += 1) {",
+    "    total = a.v + a.v;",
+    "    b.v = i + 1;",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const outcome = attemptOn("aliased", lib, "hoist-invariant b1");
+  assert.equal(outcome, "refused", "a value read through memory is not hoisted out of a loop that writes memory");
+});
+
+test("no rule binds a value that can fault on a turn that did not use to compute it", () => {
+  // A name is computed once, where it is written, and read wherever the value
+  // was. When the value was only computed inside an arm, binding it computes
+  // it on every turn instead. `10 / d` is an integer division, and there is no
+  // division by zero on a whole number on any target: the C backend raises
+  // `SIGFPE` and a module traps. The function is well defined at `d = 0`
+  // because the arm that divides is not taken there.
+  const lib = [
+    "export function guarded(d: bigint, n: bigint): bigint {",
+    "  let total = 0n;",
+    "  if (n > 0n) { total = 10n / d; }",
+    "  if (n > 1n) { total = total + 10n / d; }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.equal(
+    attemptOn("guarded", lib, "common-subexpression entry"),
+    "refused",
+    "a division of whole numbers is not bound out of the arm that guards it",
+  );
+
+  // The same shape with a load instead of a division. There is no bounds check
+  // on an element access at any mode, because the IR holds no length for one,
+  // so binding the read makes the program read past the end of the buffer on
+  // the turns where the arm was not taken. The rule still holds here — `n > 0`
+  // is computed twice and can fault on neither — so what it must not do is
+  // bind the read beside it.
+  const reads = [
+    "export function reads(a: Float64Array, n: number): number {",
+    "  let total = 0;",
+    "  if (n > 0) { total = a[0]; }",
+    "  if (n > 0) { total = total + a[0]; }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const bound = attemptOn("reads", reads, "common-subexpression entry");
+  assert.ok(bound !== "refused" && "applied" in bound, "the comparison is bound: it is computed twice and safe");
+  const ir = printSemanticFunction(bound.applied);
+  const bindings = ir.split("\n").filter((line) => /^\s*let .*shared\d+.*= \[/.test(line));
+  assert.ok(bindings.length > 0, `something was bound: ${ir}`);
+  assert.ok(
+    bindings.every((line) => !line.includes("element")),
+    `a load was bound out of the arm that guards it: ${bindings.join(" | ")}`,
+  );
 });

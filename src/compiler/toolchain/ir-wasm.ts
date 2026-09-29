@@ -278,6 +278,49 @@ const BINARY: Record<number, Record<string, number>> = {
 };
 
 /**
+ * The operators a whole number the module reads as unsigned needs in place of
+ * the signed ones, by the name the IR gives them.
+ *
+ * WebAssembly spells these out rather than reading a flag: `lt_s` and `lt_u`
+ * are different instructions, and a module that emits the signed one over a
+ * `u32` orders `3000000000` below `1`, because the same bits are a negative
+ * number. The arithmetic the two spellings share — addition, multiplication,
+ * a bitwise operator, and the amount of a shift, which is masked either way —
+ * is in `BINARY` and is not repeated here.
+ */
+const UNSIGNED_BINARY: Record<number, Record<string, number>> = {
+  [I32]: { div: 0x6e, mod: 0x70, shr: 0x76, lt: 0x49, gt: 0x4b, le: 0x4d, ge: 0x4f },
+  [I64]: { div: 0x80, mod: 0x82, shr: 0x88, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
+  [F32]: {},
+  [F64]: {},
+};
+
+/**
+ * Converting a whole number to a float, by the carrier the whole number is
+ * held in, the carrier it becomes, and whether it is read as unsigned.
+ *
+ * WebAssembly names these for how the bits read rather than for how the value
+ * was declared, and the two spellings differ on exactly the values over the
+ * signed range: `3000000000` as a `u32` is itself, and sign-extended it is
+ * `-1294967296`. A conversion that always took the signed one turned a whole
+ * number the source wrote into a different number.
+ */
+const TO_FLOAT: Record<number, Record<number, { signed: number; unsigned: number }>> = {
+  [I32]: { [F32]: { signed: 0xb2, unsigned: 0xb3 }, [F64]: { signed: 0xb7, unsigned: 0xb8 } },
+  [I64]: { [F32]: { signed: 0xb4, unsigned: 0xb5 }, [F64]: { signed: 0xb9, unsigned: 0xba } },
+};
+
+/**
+ * Converting a float to a whole number, by the same two carriers. Which of the
+ * two it is here is the destination's own business, because the destination is
+ * the one deciding what it can hold.
+ */
+const TO_WHOLE: Record<number, Record<number, { signed: number; unsigned: number }>> = {
+  [F32]: { [I32]: { signed: 0xa8, unsigned: 0xa9 }, [I64]: { signed: 0xae, unsigned: 0xaf } },
+  [F64]: { [I32]: { signed: 0xaa, unsigned: 0xab }, [I64]: { signed: 0xb0, unsigned: 0xb1 } },
+};
+
+/**
  * The maths builtin each source name is a single instruction of, keyed by the
  * name a callee is contracted under. Every one of them takes and answers a
  * double, so every opcode is an `f64` one: the `f32` opcode of the same name
@@ -292,6 +335,9 @@ const MATH: Record<string, number> = {
 
 /** A byte offset into the memory the host provides, which is the whole width. */
 const USIZE = { kind: "primitive", name: "usize" } as const;
+
+/** The 64 bit whole number a byte offset is widened to before it is scaled. */
+const I64_TYPE = { kind: "primitive", name: "i64" } as const;
 
 const COMPOUND: Record<string, string> = {
   "+=": "add",
@@ -452,34 +498,37 @@ class Body {
   }
 
   /** Converts what is on the stack into the type a use reads it in. */
-  private convert(from: SemanticType, to: number): void {
+  private convert(from: SemanticType, to: SemanticType): void {
     const held = carrier(from);
-    if (held === to) return;
-    if (held === I32 && to === I64) {
+    const wanted = carrier(to);
+    if (held === wanted) return;
+    if (held === I32 && wanted === I64) {
       this.op(unsigned(from) ? 0xad : 0xac);
       return;
     }
-    if (held === I64 && to === I32) {
+    if (held === I64 && wanted === I32) {
       this.op(0xa7);
       return;
     }
-    if (held === F32 && to === F64) {
+    if (held === F32 && wanted === F64) {
       this.op(0xbb);
       return;
     }
-    if (held === F64 && to === F32) {
+    if (held === F64 && wanted === F32) {
       this.op(0xb6);
       return;
     }
-    if (held === I32) {
-      this.op(to === F32 ? 0xb2 : 0xb7);
-      return;
+    // A whole number and a float are the last conversion left, and it is
+    // spelled twice. Which of the two is asked depends on which side is the
+    // whole number: widening reads the source's own spelling and narrowing
+    // reads the destination's.
+    const whole = held === I32 || held === I64;
+    const table = whole ? TO_FLOAT : TO_WHOLE;
+    const pair = table[held]?.[wanted];
+    if (pair === undefined) {
+      unreachable("convert between carriers", this.contract, this.candidate);
     }
-    if (held === I64) {
-      this.op(to === F32 ? 0xb4 : 0xb9);
-      return;
-    }
-    this.op(to === I32 ? (held === F32 ? 0xa8 : 0xaa) : held === F32 ? 0xae : 0xb0);
+    this.op(whole ? (unsigned(from) ? pair.unsigned : pair.signed) : unsigned(to) ? pair.unsigned : pair.signed);
   }
 
   /** The truth of a value, as the language the source was written in reads one. */
@@ -500,19 +549,19 @@ class Body {
     switch (value.k) {
       case "const":
         this.constant(value.text, value.type);
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       case "bool":
         this.i32(value.value ? 1 : 0);
-        this.convert({ kind: "primitive", name: "i32" }, carrier(at));
+        this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "nothing":
         this.i32(0);
-        this.convert({ kind: "primitive", name: "i32" }, carrier(at));
+        this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "local":
         this.get(value.name);
-        this.convert(this.slot(value.name), carrier(at));
+        this.convert(this.slot(value.name), at);
         return;
       case "length": {
         // A module is handed a pointer to the elements of a buffer and no
@@ -531,7 +580,7 @@ class Body {
         this.op(0x29);
         this.code.varuint(3);
         this.code.varuint(0);
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       }
       case "element": {
@@ -545,7 +594,7 @@ class Body {
         this.op(load.code);
         this.code.varuint(load.align);
         this.code.varuint(0);
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       }
       case "loadField": {
@@ -560,7 +609,7 @@ class Body {
         this.op(load.code);
         this.code.varuint(load.align);
         this.code.varuint(field.offset);
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       }
       case "unary": {
@@ -577,7 +626,7 @@ class Body {
         if (value.op === "not") {
           this.condition(value.operand);
           this.op(0x45);
-          this.convert({ kind: "primitive", name: "bool" }, carrier(at));
+          this.convert({ kind: "primitive", name: "bool" }, at);
           return;
         }
         // WebAssembly has no `i32.neg` and no `i64.neg`, and no integer
@@ -611,14 +660,14 @@ class Body {
           this.value(value.operand, value.type);
           this.op(held === F32 ? 0x8c : 0x9a);
         }
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       }
       case "isNull":
         this.value(value.operand, USIZE);
         this.i32(0);
         this.op(value.negate ? 0x47 : 0x46);
-        this.convert({ kind: "primitive", name: "i32" }, carrier(at));
+        this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "select":
         // A `select` reads its condition last: it is the top of the stack, and
@@ -666,16 +715,20 @@ class Body {
         const held = carrier(compared);
         this.value(value.left, compared);
         this.value(value.right, compared);
-        const op = BINARY[held][value.op];
+        // A whole number the module holds as unsigned is divided, ordered and
+        // shifted as unsigned, because the instruction is named for how the
+        // bits read and not for how the value was declared.
+        const unsignedOp = unsigned(compared) ? UNSIGNED_BINARY[held][value.op] : undefined;
+        const op = unsignedOp ?? BINARY[held][value.op];
         if (op === undefined) {
           unreachable(`compute ${value.op}`, this.contract, this.candidate);
         }
         this.op(op);
         if (value.k === "compare") {
-          this.convert({ kind: "primitive", name: "i32" }, carrier(at));
+          this.convert({ kind: "primitive", name: "i32" }, at);
           return;
         }
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       }
       case "call": {
@@ -691,7 +744,7 @@ class Body {
           this.value(argument, value.call.argTypes[position] ?? argument.type);
         }
         this.builtin(value.call.callee);
-        this.convert(value.type, carrier(at));
+        this.convert(value.type, at);
         return;
       }
       default:
@@ -844,7 +897,20 @@ class Body {
         this.loop(statement.loop);
         return;
       case "call":
+        // A call written for its effect is the same instruction as a call read
+        // for its value, so it takes the same arguments off the stack: a maths
+        // builtin is an instruction over its argument, and emitted without one
+        // it is an instruction that pops a value nobody pushed.
+        if (builtinFor(statement.call.callee) === null) {
+          unreachable(`call ${statement.call.callee}`, this.contract, this.candidate);
+        }
+        for (const [position, argument] of statement.call.args.entries()) {
+          this.value(argument, statement.call.argTypes[position] ?? argument.type);
+        }
         this.builtin(statement.call.callee);
+        // Nothing reads the answer, so it is dropped rather than left for the
+        // statement after this one to take as one of its own operands.
+        this.op(0x1a);
         return;
       case "printText":
         unreachable("print text", this.contract, this.candidate);
@@ -946,7 +1012,7 @@ class Body {
       this.op(0x45);
       this.exitTest();
       this.get(loop.of);
-      this.convert(this.slot(loop.of), I64);
+      this.convert(this.slot(loop.of), I64_TYPE);
       this.get(loop.index);
       this.i64(BigInt(elementSize(loop.elementType)));
       this.op(0x7e);
@@ -956,7 +1022,7 @@ class Body {
       this.op(load.code);
       this.code.varuint(load.align);
       this.code.varuint(0);
-      this.convert(loop.elementType, carrier(loop.elementType));
+      this.convert(loop.elementType, loop.elementType);
       this.set(loop.element);
       this.block(loop.body, null);
       this.backToHeader();

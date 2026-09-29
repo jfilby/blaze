@@ -32,7 +32,7 @@ import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, TypeExpr
 import { optimizationOptions } from "../core/target.ts";
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { C_KEYWORDS, cEscape, cHeaderNames, cMacroNames } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName } from "./c-names.ts";
 
 const INTEGER_ARGUMENT_REGISTERS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 const SSE_ARGUMENT_REGISTERS = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
@@ -89,8 +89,6 @@ export function cDeclarationType(type: TypeExpr): string {
  * offset the contract states.
  */
 
-/** What a struct member may not be called: a keyword, or a macro. */
-const MEMBER_RESERVED: Record<string, true> = { ...C_KEYWORDS, ...cMacroNames() };
 
 export function cObjectDeclarations(objects: Record<string, ObjectLayout>): string {
   return Object.values(objects)
@@ -113,15 +111,6 @@ export function cObjectDeclarations(objects: Record<string, ObjectLayout>): stri
     .join("\n");
 }
 
-/**
- * A struct member as C spells it. The declaration above and every access to it
- * have to agree on that name, so both write it down here: a field the source
- * called `long`, or one the headers call `NULL`, is declared under a name C
- * accepts and is read back under it.
- */
-export function cMemberName(name: string): string {
-  return cEscape(name, MEMBER_RESERVED);
-}
 
 /** System V AMD64 argument locations, so the model knows where values arrive. */
 export function sysvArgumentLocations(params: readonly FunctionParam[]): string {

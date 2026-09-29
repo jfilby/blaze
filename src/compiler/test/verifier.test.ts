@@ -289,7 +289,7 @@ test("a record that is present but unreadable is a fault, not a record that is n
   await chmod(store.resolve(path), 0o644);
   await writeFile(store.resolve(path), "{ not json", "utf8");
   assert.equal(await store.readIfValid(path), undefined);
-  assert.deepEqual(await readIncremental(store, path), {});
+  assert.deepEqual(Object.keys(await readIncremental(store, path)), []);
   assert.equal(await store.readIfValid("projects/p/absent.json"), undefined);
 });
 

@@ -23,6 +23,7 @@
 
 import { parseType, preconditionFailures, type ParsedContract, type Value } from "../semantics/contract.ts";
 import type { FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
+import { cMemberName } from "./c-names.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
 
 /** The C statements that build one argument, and the expression the call passes. */
@@ -110,7 +111,7 @@ function buildValue(
     for (const field of object.fields) {
       const fieldType = parseType(field.type);
       statements.push(
-        `${pointer}->${field.name} = (${cType(fieldType)})(${buildValue(fieldType, `${name}_${field.name}`, objects, statements, depth + 1)});`,
+        `${pointer}->${cMemberName(field.name)} = (${cType(fieldType)})(${buildValue(fieldType, `${name}_${field.name}`, objects, statements, depth + 1)});`,
       );
     }
     return pointer;

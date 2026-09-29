@@ -28,6 +28,7 @@
  */
 
 import {
+  isInteger,
   isReference,
   isTextType,
   slotType,
@@ -330,7 +331,12 @@ function hasCall(value: SemanticValue): boolean {
 /**
  * A value a rule may bind to a name: one that is computed rather than read. A
  * call and an allocation are computed too, but running one twice is not the
- * same program as running it once, so neither is ever bound.
+ * same program as running one once, so neither is ever bound.
+ *
+ * This says what a value *is*. Whether it may be computed on a turn that did
+ * not read it is `isSafeToCompute`, which a value that reads memory or divides
+ * whole numbers does not pass — binding one of those moves the computation
+ * somewhere it may not have been.
  */
 function isBindable(value: SemanticValue): boolean {
   switch (value.k) {
@@ -349,6 +355,69 @@ function isBindable(value: SemanticValue): boolean {
       return true;
     default:
       return false;
+  }
+}
+
+/**
+ * Whether a value can be computed on a turn when the turn that used to compute
+ * it did not happen, and on a turn that used to run where this one now runs
+ * instead.
+ *
+ * Both rules bind a value to a name, and a name is computed once where the
+ * value was computed wherever it was read. That is the same program only when
+ * the value can be computed every time: a rule that turns a computation which
+ * ran inside an arm, or on a turn of a loop that had one, into one that runs on
+ * every turn has added an evaluation the source never asked for.
+ *
+ * Two things in the IR can fault, and neither is guarded at any mode:
+ *
+ * - A load. `element`, `loadField` and `length` read memory, the IR holds no
+ *   length and no null test, so nothing here can say the address is one the
+ *   program owns. Hoisting a read out of the arm that guarded it, or out of a
+ *   loop that ran no turns, is an out-of-bounds read or a null dereference the
+ *   source could not perform. This is also what closes the alias case: a value
+ *   is only out of date because something was written through another name for
+ *   the same object, and the only way to read through an object is one of these
+ *   three, so a value that reads none of them is the same value whatever the
+ *   region wrote.
+ * - A division or a remainder of whole numbers. There is no whole-number divide
+ *   by zero on any target: `idiv` raises `SIGFPE` and `i32.div_s` traps. The
+ *   double operation is not this one, and answers an infinity instead of
+ *   stopping, so a divisor that is a whole number is what has to be checked.
+ *
+ * Everything else here is arithmetic on values already in hand, a comparison,
+ * or a choice between two of them, and a choice is as lazy as it was.
+ */
+function isSafeToCompute(value: SemanticValue): boolean {
+  switch (value.k) {
+    case "element":
+    case "loadField":
+    case "length":
+      return false;
+    case "arith": {
+      if (value.op !== "div" && value.op !== "mod") return isSafeToCompute(value.left) && isSafeToCompute(value.right);
+      // A whole number answers a division by zero with a fault and a double
+      // answers it with an infinity, so only the whole number is the hazard. A
+      // divisor written out is a divisor whose value is known.
+      if (!isInteger(value.left.type) || !isInteger(value.right.type)) return true;
+      if (value.right.k === "const") return Number(value.right.text) !== 0;
+      return false;
+    }
+    case "compare":
+      return isSafeToCompute(value.left) && isSafeToCompute(value.right);
+    case "unary":
+    case "isNull":
+      return true;
+    case "logical":
+    case "coalesce":
+      return isSafeToCompute(value.left) && isSafeToCompute(value.right);
+    case "select":
+      return (
+        isSafeToCompute(value.condition) && isSafeToCompute(value.then) && isSafeToCompute(value.otherwise)
+      );
+    default:
+      // A name, a literal, a truth and a null read nothing and compute nothing.
+      return true;
   }
 }
 
@@ -540,8 +609,9 @@ function shadowedIn(blocks: readonly SemanticBlock[]): ReadonlySet<string> {
 /**
  * The values a set of blocks computes more than once, keyed by how they are
  * written, and only where binding one to a name computes it the same number of
- * times: a value that calls, that allocates, or that reads a name these blocks
- * write is not among them.
+ * times: a value that calls, that allocates, that reads a name these blocks
+ * write, or that cannot be computed on a turn that did not use to compute it,
+ * is not among them.
  */
 function repeatedValues(blocks: readonly SemanticBlock[], written: ReadonlySet<string>): Map<string, SemanticValue> {
   const counts = new Map<string, { value: SemanticValue; count: number }>();
@@ -551,6 +621,13 @@ function repeatedValues(blocks: readonly SemanticBlock[], written: ReadonlySet<s
     walkValues(root, (value) => {
       if (!isBindable(value) || hasCall(value)) return;
       if (namesRead(value).some((name) => written.has(name))) return;
+      // A name is computed where it is written, which is above every use and
+      // beside every one of them, so the value it holds has to be one that can
+      // be computed on a turn that did not read it. This is also what keeps a
+      // value that reads through a name the region writes through another one
+      // out: a value is only out of date because of a write, and it can only be
+      // out of date if it reads what was written.
+      if (!isSafeToCompute(value)) return;
       const key = valueKey(value);
       const entry = counts.get(key);
       if (entry === undefined) counts.set(key, { value, count: 1 });

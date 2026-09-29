@@ -149,8 +149,10 @@ test("a record that is not JSON is no record, not a build that cannot start", as
 
   // A cache the compiler cannot read is one it rebuilds. Failing here instead
   // leaves a project with no way back short of deleting the file by hand.
-  assert.deepEqual(await readIncremental(store, "projects/p/incremental.json"), {});
-  assert.deepEqual(await readIncremental(store, "projects/absent.json"), {});
+  // Stated as the keys it holds rather than against a `{}` literal, because
+  // the record is built with no prototype and is not one.
+  assert.deepEqual(Object.keys(await readIncremental(store, "projects/p/incremental.json")), []);
+  assert.deepEqual(Object.keys(await readIncremental(store, "projects/absent.json")), []);
 });
 
 test("two stores writing the same path do not share a temporary name", async () => {
@@ -186,6 +188,26 @@ test("a function the source named __proto__ is a stored implementation like any 
   assert.deepEqual(Object.keys(record).sort(), ["__proto__", "good"]);
   assert.equal(record.good?.key, "k1");
   assert.equal(Object.prototype.hasOwnProperty.call(record, "__proto__"), true);
+});
+
+test("the empty record a first build writes into keeps a function named __proto__", async () => {
+  // A project's first build has no record on disk, so what it writes into is
+  // the empty one this returns. That object is the one the assignment at the
+  // end of a verified function lands on, and on an object carrying the usual
+  // prototype the assignment is the inherited setter: it replaces the
+  // prototype, adds no entry, and the spread that writes the record back
+  // carries the entry nowhere. The function is then never cached, and every
+  // other function name reads the entry's own fields off the prototype.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-proto-empty-"));
+  const record = await readIncremental(createJsonStore(directory), "inc.json");
+  record.__proto__ = entry({ outcomes: [{ candidate: "c1", valid: true }] });
+
+  assert.equal(Object.prototype.hasOwnProperty.call(record, "__proto__"), true, "the entry was not recorded");
+  assert.deepEqual(Object.keys({ ...record }), ["__proto__"], "the written record lost the function");
+  // A second function must not read the first one's entry out of the
+  // prototype: `selected` and `key` are the field names of an entry.
+  assert.equal(record.selected, undefined, "a field name answered from the prototype");
+  assert.equal(record.key, undefined, "a field name answered from the prototype");
 });
 
 test("an edit to any compiler source moves the fingerprint every key is built from", async () => {

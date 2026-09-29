@@ -145,7 +145,12 @@ test("a negation of a 32 bit whole number is a module the engine takes", async (
   // "not enough arguments on the stack for i32.sub (need 2, got 1)". A `u32`
   // element is the only 32 bit whole number a source can negate, so the array
   // is how the case is reached.
-  await compute("a: Uint32Array", ["  return -a[0];"], "run\n1\n7\n", "RESULT -7\n");
+  // The negation is a `u32` one, because that is the type the IR gives it: the
+  // zero it subtracts from is a zero of the element's own type, so `0 - 7` is
+  // `4294967289` and reads back as itself. The C backend has always answered
+  // that, so a module that answered `-7` here was a module the two backends
+  // disagreed about.
+  await compute("a: Uint32Array", ["  return -a[0];"], "run\n1\n7\n", "RESULT 4294967289\n");
   await compute("a: Uint32Array", ["  return -a[0];"], "run\n2\n0 1\n", "RESULT 0\n");
 });
 
@@ -161,6 +166,34 @@ test("a maths builtin is the instruction of its own name", async () => {
   // Used inside an expression rather than returned whole, so the argument and
   // the answer both have to sit on the stack around the instruction.
   await compute("n: number", ["  return Math.abs(n) + 1;"], "run\n-2.5\n\n", "RESULT 3.5\n");
+});
+
+test("a whole number the module holds unsigned is ordered and computed as unsigned", async () => {
+  // WebAssembly names its ordering and dividing instructions after how the bits
+  // read, and `u32` is read unsigned. `3000000000` is over the signed range, so
+  // the same bits are `-1294967296` to a signed instruction: ordered as signed
+  // it sits below 1, divided as signed it halves to `-647483648`, and shifted
+  // as signed it moves the wrong way. Every answer here is the unsigned one.
+  const high = "3000000000";
+  await compute("a: Uint32Array", ["  return a[0] < a[1] ? 1 : 0;"], `run\n2\n${high} 1\n`, "RESULT 0\n");
+  await compute("a: Uint32Array", ["  return a[1] < a[0] ? 1 : 0;"], `run\n2\n${high} 1\n`, "RESULT 1\n");
+  await compute("a: Uint32Array", ["  return a[0] > a[1] ? 1 : 0;"], `run\n2\n${high} 1\n`, "RESULT 1\n");
+  await compute("a: Uint32Array", ["  return a[0] / a[1];"], `run\n3\n${high} 2 0\n`, "RESULT 1500000000\n");
+  await compute("a: Uint32Array", ["  return a[0] % a[1];"], `run\n3\n${high} 3 0\n`, "RESULT 0\n");
+  await compute("a: Uint32Array", ["  return a[0] >> a[1];"], `run\n3\n${high} 1 0\n`, "RESULT 1500000000\n");
+  // The answer of a whole operation is read as a double on the way out, and
+  // `3000000001` is over the signed range of the 32 bit it was held in, so
+  // widening it as a signed value is where a sum that was right becomes
+  // `-1294967295`. The operations the two spellings share must not move.
+  await compute("a: Uint32Array", ["  return a[0] + a[1];"], `run\n2\n${high} 1\n`, "RESULT 3000000001\n");
+});
+
+test("a maths builtin written for its effect is an instruction and not an empty one", async () => {
+  // A call statement is the same instruction as a call read for its value, and
+  // it takes the same arguments. Emitted without them it popped a value nobody
+  // pushed, and the engine refused the whole module.
+  await compute("n: number", ["  Math.floor(n);", "  return 1;"], "run\n1.5\n\n", "RESULT 1\n");
+  await compute("n: number", ["  Math.abs(n);", "  return 2;"], "run\n-3\n\n", "RESULT 2\n");
 });
 
 test("a maths builtin that is not one instruction is refused by name", async () => {

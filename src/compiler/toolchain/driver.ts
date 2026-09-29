@@ -31,7 +31,7 @@ import type { BuildMode, FunctionSignature, Runner } from "../core/types.ts";
 import { optimizationOptions } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
-import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cOperator, cStringLiteral } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral } from "./c-names.ts";
 
 /** The operator C spells for the one the source used. */
 
@@ -283,12 +283,15 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 
   field(object: string, layout: string, field: string): string {
     // A reference is held as a pointer, and a pointer has no fields, so the
-    // layout the access names is what the field is read through.
-    return `((struct ${layout}*)${object})->${field}`;
+    // layout the access names is what the field is read through. The member is
+    // spelled the way `cObjectDeclarations` declared it, because a field the
+    // source called `long` is declared as `long_` and reading it as `long` is
+    // C the compiler refuses.
+    return `((struct ${layout}*)${object})->${cMemberName(field)}`;
   }
 
   assignField(object: string, layout: string, field: string, value: string): string {
-    return `((struct ${layout}*)${object})->${field} = ${value};`;
+    return `((struct ${layout}*)${object})->${cMemberName(field)} = ${value};`;
   }
 
   buildObject(layout: string, fields: { field: string; value: string }[]): string {
@@ -301,7 +304,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // instead writes the arms of such a conditional as control flow and joins
     // them on a name, which is the same program with more lines.
     const name = `blaze_object_${(this.builds += 1)}`;
-    const written = fields.map((one) => `((struct ${layout}*)${name})->${one.field} = ${one.value};`);
+    const written = fields.map((one) => `((struct ${layout}*)${name})->${cMemberName(one.field)} = ${one.value};`);
     return `({ struct ${layout}* ${name} = (struct ${layout}*)${RUNTIME_NAME}_object_new(sizeof(struct ${layout}), _Alignof(struct ${layout})); ${written.join(" ")} ${name}; })`;
   }
 

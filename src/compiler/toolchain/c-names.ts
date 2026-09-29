@@ -180,6 +180,21 @@ export function cEscape(name: string, reserved: Readonly<Record<string, true>>):
 }
 
 /**
+ * A struct member as C spells it: a name that is a C keyword, or one of the
+ * macros the headers the generated C includes define, is written with an
+ * underscore on the end. A field the source called `long` or `NULL` is a field
+ * the C compiler would otherwise refuse.
+ *
+ * The declaration of a member and every access to it have to agree on that
+ * name, so both write it down here rather than one of them escaping and the
+ * other not: that is a driver, a harness and a probe the C compiler refuses,
+ * for a program the source is entitled to write.
+ */
+export function cMemberName(name: string): string {
+  return cEscape(name, { ...C_KEYWORDS, ...cMacroNames() });
+}
+
+/**
  * How C spells what the IR states. The driver that runs a program and the
  * backend that lowers a function to C both write numbers, text and operators
  * this way, so the rules live here rather than being written twice and left to
