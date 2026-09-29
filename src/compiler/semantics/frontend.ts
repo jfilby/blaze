@@ -612,7 +612,16 @@ class BodyAnalysis {
         }
         const value = this.serialize(statement.value, loop, statement.line);
         if (statement.target === "result") {
-          this.result = value;
+          // The postcondition is the oracle the generated code is proved
+          // against, so it has to state what the body computes. `result += x`
+          // folds into the accumulator, and reading it as `result = x` states
+          // a contract the body does not implement -- which silently accepts
+          // any code that returns x. A compound assign before `result` holds
+          // anything reduces from the implicit zero, and the sum is x.
+          this.result =
+            statement.op === "=" || this.result === null
+              ? value
+              : this.withInitial(this.result, value, statement.op[0] === "*" ? "*" : "+");
           return;
         }
         if (!this.bindings.has(statement.target)) {

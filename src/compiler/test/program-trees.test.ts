@@ -20,6 +20,7 @@ import { CompilerError } from "../core/errors.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { generateProgramDriver } from "../toolchain/driver.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
+import { irOf } from "./phase.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { RUNTIME_ABI, RUNTIME_NAME } from "../runtime/abi.ts";
 
@@ -309,5 +310,28 @@ test("the diagnostic for an array used at two element types names the file it is
     });
     resolveProgram(phase.body!, phase.program);
   }, (error: unknown) => error instanceof CompilerError && /line 8 of 1\.ts: allocate the array/.test(error.detail ?? ""));
+});
 
+test("a loop step that is itself a step is written once", () => {
+  // `i += j++` lowers the inner `j++` into a `let` and a `step` of its own,
+  // and typing the step expression a second time to settle the loop's width
+  // emitted that pair twice. The counter then advanced by the value `j` held
+  // after two increments instead of one, and the loop ran a different number
+  // of times than the source wrote.
+  const source = [
+    "function go(n: number): number {",
+    "  let j = 0;",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i += j++) { total += i; }",
+    "  return total;",
+    "}",
+    "",
+    "console.log(go(3));",
+    "",
+  ].join("\n");
+  const ir = irOf("typescript", { "1.ts": source }, "1.ts", "go");
+  // The step of the loop is written once, and the counter it moves by is the
+  // value `j` held before the increment.
+  assert.equal(ir.split("step j ++ pre").length - 1, 1, ir);
+  assert.match(ir, /for\[f64\] i from const\[f64\] 0 to local\[f64\] n exclusive up step local\[f64\] t1/);
 });

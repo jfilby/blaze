@@ -74,6 +74,47 @@ test("a value is what it is, read off the type it states", () => {
   assert.equal(valueKind({ k: "nothing", type: NUMBER }), "null");
 });
 
+test("the fields of an object being built are values the walk reaches", () => {
+  // A field is a value of its own: a name read in one and a call written into
+  // one are what the body reads and makes. The walk did not descend into them,
+  // so a rule built on it — the one that names a local read where it is not
+  // declared, the one that refuses an arm deciding on a call — saw nothing
+  // there and let IR that no compiler takes through to the backends.
+  const read: SemanticValue = { k: "local", type: NUMBER, name: "typoName" };
+  const object: SemanticValue = {
+    k: "newObject",
+    type: { kind: "ref", of: null },
+    layout: "Point",
+    fields: [{ name: "x", value: read }],
+  };
+  assert.deepEqual(localNames(read), ["typoName"]);
+  assert.deepEqual(localNames(object), ["typoName"]);
+
+  const call: SemanticValue = {
+    k: "call",
+    type: NUMBER,
+    call: {
+      callee: "expensive",
+      args: [],
+      signature: { symbol: "expensive", name: "expensive", params: [], returns: "f64" },
+      argTypes: [],
+      returns: NUMBER,
+      effects: [],
+      ownership: "owned",
+      retain: false,
+      builtin: false,
+    },
+  };
+  const inField: SemanticValue = {
+    k: "newObject",
+    type: { kind: "ref", of: null },
+    layout: "Point",
+    fields: [{ name: "x", value: call }],
+  };
+  assert.equal(hasCall(call), true);
+  assert.equal(hasCall(inField), true);
+});
+
 test("a use converts inside a kind and never across kinds", () => {
   assert.equal(convertibleTo(I64, NUMBER), true);
   assert.equal(convertibleTo({ kind: "text" }, { kind: "text" }), true);

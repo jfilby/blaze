@@ -236,15 +236,19 @@ export function reusableFiles(
 ): string[] {
   const paths = candidateFiles(workspace, candidate, output);
   const delivered = output === "ir" ? paths.implementation : paths.lowered;
-  if (output === "machine") {
-    return [
-      delivered,
-      ...(standalone ? [paths.executable] : []),
-      ...(linksObjects ? [paths.object] : []),
-    ];
-  }
   if (output === "wasm") return [delivered, paths.module];
-  return [delivered];
+  // A kind that links a candidate on its own delivers the executable that
+  // links, so the executable is a file the build consumes and one that is not
+  // there is a candidate that has to be rebuilt. The `machine` branch below
+  // always needs it, because nothing else links it; `ir` needs it only when
+  // the candidate is standalone, which is what the call the program holds
+  // decides.
+  if (output === "machine") return [delivered, paths.executable];
+  if (output === "ir" && standalone) return [delivered, paths.executable];
+  // Every kind that assembles produces an object, and a program build links
+  // it. Requiring it only for `machine` let a program build reuse a candidate
+  // whose object was gone, and the driver failed to link it.
+  return [delivered, ...(linksObjects ? [paths.object] : [])];
 }
 
 /**

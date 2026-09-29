@@ -89,6 +89,54 @@ test("a for-of walks a buffer by element and stops at its length", async () => {
   await compute("a: Float64Array", walk, "run\n0\n", "RESULT 0\n");
 });
 
+test("a continue advances a for-of walk instead of re-reading its first element", async () => {
+  // The walk advances at the head of the turn, for the reason a counted loop
+  // does: a `continue` branches to the head, so an advance at the foot is one
+  // a `continue` skips, and a walk that never advances never ends.
+  await compute(
+    "a: Float64Array",
+    ["  let total = 0;", "  for (const value of a) { if (value > 2) continue; total += value; }", "  return total;"],
+    "run\n5\n1 2 3 4 5\n",
+    "RESULT 3\n",
+  );
+});
+
+test("a continue re-tests the condition of a do-while", async () => {
+  // The test is at the foot of the turn, and a `continue` branches to the head
+  // of the loop, so the body sits in a block of its own: branching to a block
+  // runs to its end, which is where the test is. A branch to the body start
+  // would skip the condition, and the loop would never end.
+  await compute(
+    "n: number",
+    ["  let total = 0;", "  let i = 0;", "  do { i += 1; if (i > 2) continue; total += i; } while (i < 5);", "  return total;"],
+    "run\n0\n\n",
+    "RESULT 3\n",
+  );
+});
+
+test("a plain assignment inside an arm leaves nothing on the stack", async () => {
+  // Every block the backend opens is void-typed, so a value left on the stack
+  // fails the `end` check of the arm it was in and the engine refuses the
+  // module. A `=` computes nothing from what the slot holds, so the old value
+  // is never pushed.
+  await compute(
+    "n: number",
+    ["  let t = 0;", "  if (n > 1) { t = 5.5; }", "  return t;"],
+    "run\n3\n\n",
+    "RESULT 5.5\n",
+  );
+});
+
+test("a negation and a complement of a whole number are the arithmetic that is them", async () => {
+  // WebAssembly has no `i64.neg` and no integer complement, so `-x` is `0 - x`
+  // and `~x` is `0 - 1 - x`. Emitting the binary opcodes instead asked for a
+  // second operand that was never pushed, and the engine refused the module.
+  // A complement of a double is refused by the validator, so these are whole
+  // numbers, which is the only place the language allows one.
+  await compute("n: bigint", ["  return -n;"], "run\n5\n\n", "RESULT -5\n");
+  await compute("n: bigint", ["  return ~n;"], "run\n5\n\n", "RESULT -6\n");
+});
+
 test("a walk stops at the count even when the memory past the buffer is not empty", async () => {
   // A module is handed a pointer to the elements and no length beside it, so
   // the host writes the count in the word the pointer sits one before. A

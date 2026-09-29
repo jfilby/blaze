@@ -186,15 +186,28 @@ export function cEscape(name: string, reserved: Readonly<Record<string, true>>):
  * drift.
  */
 
-/** A string as a C string literal, with everything in it escaped. */
+/**
+ * A string as a C string literal, with everything in it escaped.
+ *
+ * `?` is escaped because a C compiler in a strict standard mode replaces the
+ * trigraphs `??=`, `??!`, `??-` and the rest in translation phase 1, before the
+ * source is even tokenised, and the generated C is built with `-std=c11`. A
+ * program printing `really??!` would otherwise deliver a binary printing
+ * `really|`, with no diagnostic: trigraph replacement is silent without
+ * `-Wtrigraphs`.
+ *
+ * NUL is written `\000` and not `\0` because a C escape keeps consuming octal
+ * digits: `\0` followed by `12` is one newline, not a NUL and a `12`.
+ */
 export function cStringLiteral(text: string): string {
   const escaped = text
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
+    .replace(/\?/g, "\\?")
     .replace(/\n/g, "\\n")
     .replace(/\t/g, "\\t")
     .replace(/\r/g, "\\r")
-    .replace(/\0/g, "\\0");
+    .replace(/\0/g, "\\000");
   return `"${escaped}"`;
 }
 

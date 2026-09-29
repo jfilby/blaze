@@ -361,6 +361,12 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
     case "loadField":
       walkValues(value.object, visit);
       return;
+    case "newObject":
+      // The fields of an object being built are values of their own: a name
+      // read in one and a call written into one are both what the body reads
+      // and makes, and a rule that walks a value has to see them.
+      for (const field of value.fields) walkValues(field.value, visit);
+      return;
     case "select":
       walkValues(value.condition, visit);
       walkValues(value.then, visit);

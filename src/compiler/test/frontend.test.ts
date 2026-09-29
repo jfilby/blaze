@@ -208,3 +208,27 @@ test("an accumulator seeded with a compound value folds the seed into the reduct
   assert.deepEqual(contract.ensures, ["result == ((0.0 + k) + sum(i = 0..<n, x[i]))"]);
   parseContract(contract);
 });
+
+test("a compound assignment into result accumulates instead of overwriting", async () => {
+  // The postcondition is the oracle the generated code is proved against. If
+  // `result += x` were read as `result = x`, the contract would state a
+  // constant and every candidate that returned that constant would verify,
+  // however wrong the real body was.
+  const contract = contractOf("nim", `proc scaled(a: openArray[float64], b: openArray[float64]): float64 =
+  result = 0.0
+  result += a[0]
+  result += b[0]
+  result *= 2.0
+`);
+  assert.deepEqual(contract.ensures, ["result == ((a[0] + b[0]) * 2.0)"]);
+  parseContract(contract);
+});
+
+test("a compound assignment into result before any plain one reduces from the implicit zero", async () => {
+  const contract = contractOf("nim", `proc sum(a: openArray[float64], b: openArray[float64]): float64 =
+  result += a[0]
+  result += b[0]
+`);
+  assert.deepEqual(contract.ensures, ["result == (a[0] + b[0])"]);
+  parseContract(contract);
+});

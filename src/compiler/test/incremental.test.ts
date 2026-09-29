@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readIncremental, reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
+import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
 import type { Candidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
 import { mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -214,4 +215,31 @@ test("an edit to any compiler source moves the fingerprint every key is built fr
 
   // The compiler this process is running from fingerprints to something.
   assert.match(await toolchainFingerprint(), /^[0-9a-f]{64}$/);
+});
+
+test("every file a build consumes from a reused candidate is one it asked for", () => {
+  // The list decides whether a stored candidate is reused as an object or only
+  // as the text it was built from, so a file the build goes on to consume and
+  // the list does not name is a reuse that passes and then fails. A build
+  // reusing an `ir` candidate that links on its own still delivers that
+  // executable, and every kind that assembles still links the object when the
+  // deliverable is a program.
+  const workspace: CodegenWorkspace = { workDirectory: "/w", functionName: "dotProduct" };
+  const names = (output: Parameters<typeof reusableFiles>[2], linksObjects: boolean, standalone: boolean): string[] =>
+    reusableFiles(workspace, "c1", output, linksObjects, standalone).map((file) => file.slice("/w/c1".length));
+
+  // A `machine` candidate is always linked on its own, so its executable is
+  // always a file the build consumes.
+  assert.deepEqual(names("machine", false, true), [".s", ""]);
+  // A standalone `ir` candidate delivers the executable it links.
+  assert.deepEqual(names("ir", false, true), [".ir", ""]);
+  // One that calls into the program is never linked on its own, so it has no
+  // executable and demanding one would make it a cache miss for ever.
+  assert.deepEqual(names("ir", false, false), [".ir"]);
+  // Every kind that assembles produces an object, and a program build links it.
+  assert.deepEqual(names("asm", true, true), [".s", ".o"]);
+  assert.deepEqual(names("c", true, true), [".c", ".o"]);
+  assert.deepEqual(names("c", false, true), [".c"]);
+  // A module is the whole deliverable of a wasm build, and it links nothing.
+  assert.deepEqual(names("wasm", false, true), [".s", ".wasm"]);
 });

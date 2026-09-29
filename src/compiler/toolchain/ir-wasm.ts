@@ -361,9 +361,15 @@ class Body {
     this.code.varint(value | 0);
   }
 
+  /**
+   * An i64 constant. The value is wrapped into the signed 64 bit range first,
+   * because a constant is not always written at the width it is read: the
+   * magnitude of `-9223372036854775808` is a number one past the largest i64,
+   * and a LEB128 written for it is an encoding the engine refuses.
+   */
   private i64(value: bigint): void {
     this.op(0x42);
-    this.code.varbig(value);
+    this.code.varbig(BigInt.asIntN(64, value));
   }
 
   private float(value: number, wide: boolean): void {
@@ -560,9 +566,32 @@ class Body {
           this.convert({ kind: "primitive", name: "bool" }, carrier(at));
           return;
         }
-        this.value(value.operand, value.type);
-        if (value.op === "bitNot") this.op(held === I64 ? 0x83 : 0x71);
-        else this.op(held === I64 ? 0x7d : held === I32 ? 0x6b : held === F32 ? 0x8c : 0x9a);
+        // WebAssembly has no `i64.neg` and no integer complement. A 32 bit and
+        // a float width each have a negation of their own, so they use it; an
+        // i64 is written as `0 - x`, and a complement as `0 - 1 - x`, which is
+        // `~x` in two's complement at every width. A sub takes its left operand
+        // first, so the zero goes down before the value: `x - 0` is not a
+        // negation of anything.
+        if (value.op === "bitNot") {
+          if (held === I64) this.i64(0n);
+          else if (held === F64) this.float(0, true);
+          else if (held === F32) this.float(0, false);
+          else this.i32(0);
+          this.value(value.operand, value.type);
+          this.op(BINARY[held].sub as number);
+          if (held === I64) this.i64(1n);
+          else if (held === F64) this.float(1, true);
+          else if (held === F32) this.float(1, false);
+          else this.i32(1);
+          this.op(BINARY[held].sub as number);
+        } else if (held === I64) {
+          this.i64(0n);
+          this.value(value.operand, value.type);
+          this.op(BINARY[held].sub as number);
+        } else {
+          this.value(value.operand, value.type);
+          this.op(held === I32 ? 0x6b : held === F32 ? 0x8c : 0x9a);
+        }
         this.convert(value.type, carrier(at));
         return;
       }
@@ -680,9 +709,18 @@ class Body {
       case "set": {
         const type = this.slot(statement.name);
         const held = carrier(type);
+        // A plain `=` computes nothing from what the slot holds, so the old
+        // value is never pushed. Pushing it and emitting no operator left it
+        // on the stack, and every block this backend opens is void-typed, so
+        // the leftover failed the `end` check of the arm it was in.
+        if (statement.op === "=") {
+          this.value(statement.value, type);
+          this.set(statement.name);
+          return;
+        }
         this.get(statement.name);
         this.value(statement.value, type);
-        if (statement.op !== "=") this.op(BINARY[held][COMPOUND[statement.op] as string] as number);
+        this.op(BINARY[held][COMPOUND[statement.op] as string] as number);
         this.set(statement.name);
         return;
       }
@@ -802,13 +840,17 @@ class Body {
       // loop that never ends. The turn before the first is a turn of its own,
       // so the index starts one step short of the value the source wrote.
       this.value(loop.from, loop.type);
-      this.convert(loop.from.type, carrier(loop.type));
       this.countedStep(loop);
       this.op(BINARY[carrier(loop.type)].sub as number);
       this.set(loop.variable);
     }
     if (loop.kind === "each") {
-      this.i64(0n);
+      // The walk advances at the head of the turn, for the same reason a
+      // counted loop does: a `continue` branches to the head, so an advance at
+      // the foot is one a `continue` skips, and a walk that never advances is a
+      // walk that never ends. The turn before the first is a turn of its own,
+      // so the index starts one step short of the first element.
+      this.i64(-1n);
       this.set(loop.index);
     }
     this.op(0x02);
@@ -816,7 +858,14 @@ class Body {
     this.frames.push(loop.exit);
     this.op(0x03);
     this.code.byte(0x40);
-    this.frames.push(loop.header);
+    // A do-while's `continue` branches to the head of the loop, and for it the
+    // head is the test and not the body: a branch to the body start would skip
+    // the condition, and a loop that never tests its condition is a loop that
+    // never ends. Its body therefore sits in a block of its own, and branching
+    // to a block runs to its end — which is where the test is. The loop the
+    // back edge returns to is a frame of its own, since the header names the
+    // block the continue reaches.
+    this.frames.push(loop.kind === "doWhile" ? this.frame() : loop.header);
     if (loop.kind === "while") {
       this.condition(loop.condition);
       this.op(0x45);
@@ -824,7 +873,12 @@ class Body {
       this.block(loop.body, null);
       this.backToHeader();
     } else if (loop.kind === "doWhile") {
+      this.op(0x02);
+      this.code.byte(0x40);
+      this.frames.push(loop.header);
       this.block(loop.body, null);
+      this.frames.pop();
+      this.op(0x0b);
       this.condition(loop.condition);
       this.op(0x0d);
       this.code.varuint(0);
@@ -837,7 +891,6 @@ class Body {
       this.set(loop.variable);
       this.get(loop.variable);
       this.value(loop.to, loop.type);
-      this.convert(loop.to.type, carrier(loop.type));
       const bound = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
       this.op(BINARY[carrier(loop.type)][bound] as number);
       this.op(0x45);
@@ -848,6 +901,10 @@ class Body {
       // A for-of counts elements from the first to the length. It counts them
       // rather than moving the buffer, because the buffer is a name the body
       // reads elsewhere and the walk does not change what it holds.
+      this.get(loop.index);
+      this.i64(1n);
+      this.op(0x7c);
+      this.set(loop.index);
       this.get(loop.index);
       this.value(loop.length, USIZE);
       this.op(0x53);
@@ -867,10 +924,6 @@ class Body {
       this.convert(loop.elementType, carrier(loop.elementType));
       this.set(loop.element);
       this.block(loop.body, null);
-      this.get(loop.index);
-      this.i64(1n);
-      this.op(0x7c);
-      this.set(loop.index);
       this.backToHeader();
     }
     this.op(0x0b);
@@ -888,7 +941,6 @@ class Body {
   private countedStep(loop: Extract<SemanticLoop, { kind: "counted" }>): void {
     if (loop.step !== null) {
       this.value(loop.step, loop.type);
-      this.convert(loop.step.type, carrier(loop.type));
       return;
     }
     this.value({ k: "const", type: loop.type, text: loop.down ? "-1" : "1" }, loop.type);

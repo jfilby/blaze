@@ -406,13 +406,12 @@ function statementCalls(statement: SemanticStatement): SemanticCall[] {
 /**
  * Every value a statement's values are made of, the fields of an object being
  * built among them: the fields are values of their own and a call written into
- * one is a call the body makes.
+ * one is a call the body makes. `walkValues` descends into them, so this is
+ * the shared walk and nothing more — walking them here as well would report
+ * what is inside a field twice.
  */
 function walked(value: SemanticValue, visit: (value: SemanticValue) => void): void {
-  walkValues(value, (inner) => {
-    visit(inner);
-    if (inner.k === "newObject") for (const field of inner.fields) walked(field.value, visit);
-  });
+  walkValues(value, visit);
 }
 
 /** The type a sequence holds elements of, or null for anything else. */

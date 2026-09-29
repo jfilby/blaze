@@ -185,7 +185,13 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
         `${typeToString(returns)} is returned, and a program holds numbers and strings`,
       );
     }
-    const parameters = signature.params.map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`);
+    // A parameter name is source text that has to survive being a C
+    // identifier, and a program is free to call a parameter `double`. An
+    // extern declaration only needs the names to be well formed, so they are
+    // escaped the same way every other name the driver writes is.
+    const parameters = signature.params.map(
+      (param) => `${cDeclarationType(parseType(param.type))} ${this.escape(param.name)}`,
+    );
     return `extern ${cDeclarationType(returns)} ${signature.symbol}(${parameters.join(", ") || "void"});`;
   }
 

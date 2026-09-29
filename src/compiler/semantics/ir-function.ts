@@ -642,6 +642,11 @@ class FunctionBody {
    */
   private counted(statement: Statement & { kind: "loop" }): void {
     const from = this.typed(statement.from, null, statement.line);
+    // What the loop counts with follows from the start and the step, so the
+    // step is typed once, before the count is settled, and read twice: the
+    // value the IR states is built from it and typing it again would run the
+    // side effects a typed expression has — an `i++` written as the step
+    // becomes a `let` and a `step` of its own — a second time.
     const step = statement.step === null ? null : this.typed(statement.step, null, statement.line);
     // What the loop counts with is the type it starts at and moves by; a bound
     // only says where the loop stops.
@@ -656,6 +661,12 @@ class FunctionBody {
     const starts: SemanticValue =
       from.value.k === "const" && counted.kind === "primitive" ? { ...from.value, type: counted } : from.value;
     const bound = this.typed(statement.to, type, statement.line).value;
+    // A number written as the step is counted in the type the loop counts in,
+    // for the same reason the start is: the IR states the loop in one width.
+    const moves: SemanticValue | null =
+      step === null || step.value.k !== "const" || counted.kind !== "primitive"
+        ? step?.value ?? null
+        : { ...step.value, type: counted };
     this.open();
     this.bind(statement.variable, {
       name: statement.variable,
@@ -674,7 +685,7 @@ class FunctionBody {
         to: bound,
         inclusive: statement.inclusive,
         down: statement.down,
-        step: statement.step === null ? null : this.typed(statement.step, type, statement.line).value,
+        step: moves,
         ...walked,
       },
       line: statement.line,

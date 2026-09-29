@@ -367,6 +367,12 @@ class ProgramEmitter {
     this.loops.push({ header: loop.header, exit: loop.exit });
     // The loop owns the names it counts with, so they are declared here rather
     // than in the body, and a later loop may count with the same name again.
+    // The buffer a `for..of` iterates is read here, in the scope the loop was
+    // entered in, and not in the loop's own. An element declared under the
+    // same name as the buffer shadows it, so reading the buffer after the
+    // declaration made the loop count over the element it had not taken yet.
+    const buffer = loop.kind === "each" ? this.names.read(loop.of) : null;
+    const length = loop.kind === "each" ? this.expression(loop.length) : null;
     this.names.enter();
     if (loop.kind === "counted") this.names.declare(loop.variable);
     if (loop.kind === "each") {
@@ -412,8 +418,8 @@ class ProgramEmitter {
           this.names.read(loop.index),
           this.names.read(loop.element),
           loop.elementType,
-          this.names.read(loop.of),
-          this.expression(loop.length),
+          buffer as string,
+          length as string,
         )) {
           this.write(line);
         }

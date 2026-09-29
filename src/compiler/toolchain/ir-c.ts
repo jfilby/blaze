@@ -39,7 +39,7 @@ import {
   type ValueKind,
 } from "../core/semantic-ir.ts";
 import { cDeclarationType, cMemberName, cObjectDeclarations } from "./linker.ts";
-import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cOperator } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cOperator, cStringLiteral } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
@@ -99,21 +99,6 @@ const COMPARE_OPERATORS: Record<string, string> = {
   ge: ">=",
 };
 
-/**
- * A string, written as a C string literal with everything in it escaped. The
- * runtime's own `string_new` is what builds a string at run time; a literal is
- * for text the program wrote.
- */
-function cTextLiteral(text: string): string {
-  const escaped = text
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\t/g, "\\t")
-    .replace(/\r/g, "\\r")
-    .replace(/\0/g, "\\0");
-  return `"${escaped}"`;
-}
 
 /**
  * The maths builtin each source name lowers to. `Math.round` is a half rounded
@@ -309,6 +294,12 @@ class FunctionEmitter {
   }
 
   private loop(loop: SemanticLoop, depth: number): void {
+    // The buffer a `for..of` iterates is read here, in the scope the loop was
+    // entered in, and not in the loop's own. An element declared under the
+    // same name as the buffer shadows it, so reading the buffer after the
+    // declaration made the loop subscript the element it had not taken yet.
+    const buffer = loop.kind === "each" ? this.names.read(loop.of) : null;
+    const walk = loop.kind === "each" ? this.expression(loop.length, USIZE, depth) : null;
     this.names.enter();
     this.loops.push({ header: loop.header, exit: loop.exit });
     switch (loop.kind) {
@@ -355,10 +346,10 @@ class FunctionEmitter {
         // The length is read once, for the same reason a counted loop's bound
         // is: the walk reads it on every turn.
         const length = this.temporary("blaze_length");
-        this.write([`${pad(depth)}size_t ${length} = ${this.expression(loop.length, USIZE, depth)};`]);
+        this.write([`${pad(depth)}size_t ${length} = ${walk as string};`]);
         this.write([
           `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length}; ${index}++) {`,
-          `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${this.names.read(loop.of)}[${index}];`,
+          `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${buffer as string}[${index}];`,
         ]);
         this.block(loop.body, depth + 1);
         this.write([`${pad(depth)}}`]);
@@ -635,7 +626,7 @@ class FunctionEmitter {
   private text(value: SemanticValue & { k: "text" }, depth: number): string {
     if (value.parts.length === 0) return '""';
     if (value.parts.every((part) => part.k === "text")) {
-      return value.parts.map((part) => cTextLiteral(part.value)).join("");
+      return value.parts.map((part) => cStringLiteral(part.value)).join("");
     }
     // Every part is bound and measured before the string is laid out, so the
     // buffer that holds it is exactly as long as the parts are. A buffer sized
@@ -656,7 +647,7 @@ class FunctionEmitter {
     const total = this.temporary("blaze_text_length");
     const lines = value.parts.flatMap((part, index) => {
       const { text, length } = parts[index];
-      const written = part.k === "text" ? cTextLiteral(part.value) : this.asText(part.value, depth);
+      const written = part.k === "text" ? cStringLiteral(part.value) : this.asText(part.value, depth);
       return [
         `const char* ${text} = ${written};`,
         `size_t ${length} = ${text} == NULL ? 0 : strlen(${text});`,

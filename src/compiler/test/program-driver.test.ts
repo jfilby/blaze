@@ -188,6 +188,35 @@ test("a name the driver's own headers define is declared under another one", asy
   assert.equal(delivered.stdout, original);
 });
 
+test("text a strict C standard would rewrite as a trigraph survives to the binary", async () => {
+  // The generated C is built with `-std=c11`, which replaces `??!`, `??=` and
+  // the other trigraphs in translation phase 1, before the source is tokenised.
+  // An unescaped `?` is therefore silent corruption: the build succeeds with
+  // no diagnostic and the binary prints text the program never said.
+  const { binary, original } = await deliver('console.log("really??!", "a??=b", "x??-??=");\n');
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "really??! a??=b x??-??=\n");
+});
+
+test("a parameter named after a C type or keyword is declared under another name", () => {
+  // The extern declaration is the one place a program's own parameter names
+  // reach the C source, and it is the one place they were not escaped. An
+  // unescaped `double` is a type, so the declaration reads
+  // `double twice(double double)`, which gcc rejects, and the whole program
+  // build dies with a link failure.
+  const files = {
+    "twice.ts": "export function twice(double: number): number {\n  return double * 2;\n}\n",
+    "main.ts": ['import { twice } from "./twice.ts";', "console.log(twice(21));", ""].join("\n"),
+  };
+  const phase = phaseOf("typescript", files, "main.ts");
+  assert.ok(phase.body !== undefined);
+  const written = generateProgramDriver(resolveProgram(phase.body, phase.program));
+  assert.match(written, /extern double twice\(/);
+  assert.doesNotMatch(written, /\bdouble double\b/);
+});
+
 test("a name the driver declares for itself is not given to a program name", () => {
   const written = driver(
     [
@@ -258,4 +287,18 @@ test("a name the emitter writes a temporary under is declared under another", as
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, original);
+});
+
+test("a for-of element that shadows the buffer reads the buffer, not itself", () => {
+  // The buffer is read in the scope the loop was entered in. Read after the
+  // element is declared, an element under the buffer's own name made the
+  // loop subscript the element it had not taken yet, and the initializer
+  // read a variable that was still uninitialized.
+  const written = driver("const a = new Float64Array([1, 2, 3]);\nfor (const a of a) console.log(a);\n");
+  const element = written.match(/const double (a_\d+) = (\w+)\[i\d+\];/);
+  assert.ok(element !== null, written);
+  // The element is written under a name of its own (`a_2`) and the initializer
+  // reads the buffer (`a`). Before the fix the element shadowed the buffer, so
+  // the initializer read the element itself.
+  assert.deepEqual(element.slice(1), ["a_2", "a"]);
 });
