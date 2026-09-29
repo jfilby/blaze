@@ -26,7 +26,7 @@ tests all live there. Run commands from it.
   is lowered on the one path in `codegen.ts:materialize`, and the backend is in
   the reuse key (`incremental.ts`) so an object is never shared across one.
 - A third setting says how hard the toolchain builds. `mode` is `debug`
-  (`-O0 -g`, the default), `release` (`-O3`), or `danger` (release, and the
+  (`-O0 -g`, the default), `release` (`-O2`), or `danger` (release, and the
   generated runtime leaves its guards out). The flags are one list in
   `core/target.ts:optimizationOptions`; every `gcc` call site reads it, and
   `-fno-lto` is on all of them so a candidate's object does not depend on the

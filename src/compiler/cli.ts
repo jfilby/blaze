@@ -124,7 +124,7 @@ Options:
                             compiler encodes itself); defaults to the one the
                             output kind implies
   --mode <name>              how the toolchain builds: debug (-O0 -g, default),
-                            release (-O3), or danger (release, and the runtime's
+                            release (-O2), or danger (release, and the runtime's
                             own guards are left out of the generated program)
   --runtime <name>           host runtime: none or nim (default none)
   --max-candidates <n>      number of candidates to build, each reviewed from

@@ -379,7 +379,7 @@ export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim"];
  *
  *   debug     optimized for reading: `-O0 -g`, so a delivered program is the
  *             one the compiler wrote with nothing folded away
- *   release   optimized for running: `-O3`, the most the C compiler offers
+ *   release   optimized for running: `-O2 -fno-lto`, and nothing past it
  *   danger    release, with the runtime's own guards left out: the
  *             use-after-free check, the allocation overflow check, the size
  *             caps and the null checks are not emitted

@@ -92,7 +92,7 @@ test("the model is named before the work starts, and on failure too", async () =
   const built = blaze(directory, "build");
   // The mode is the first line of a build, and it is the mode the project
   // named, with the flags that mode is built with.
-  assert.equal(built.stdout.split("\n")[0], "· Mode: release (-O3 -fno-lto)");
+  assert.equal(built.stdout.split("\n")[0], "· Mode: release (-O2 -fno-lto)");
 
   assert.match(built.stdout, new RegExp(`^\\u00b7 Model: replay:${REPLAY}`, "m"));
 

@@ -144,11 +144,14 @@ export function archOptions(target: TargetSpec): string[] {
  *
  * `-g` is only in `debug`, and `-O0` with it, because a program to step
  * through is a program the compiler has not rearranged. `release` and
- * `danger` ask for the most optimization the compiler offers.
+ * `danger` ask for `-O2`, which is where the C compiler optimizes without
+ * turning on the loop transformations: those are worth less on a program
+ * whose loops the IR already unrolled, and they cost code size in a runtime
+ * that is measured.
  */
 export function optimizationOptions(mode: BuildMode): string[] {
   if (mode === "debug") return ["-O0", "-g", "-fno-lto"];
-  return ["-O3", "-fno-lto"];
+  return ["-O2", "-fno-lto"];
 }
 
 export function targetSummary(target: TargetSpec): string {
