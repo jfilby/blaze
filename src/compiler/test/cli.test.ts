@@ -90,9 +90,14 @@ test("an unknown command prints the usage and fails", async () => {
 test("the model is named before the work starts, and on failure too", async () => {
   const directory = await projectDirectory();
   const built = blaze(directory, "build");
+  // The mode is the first line of a build, and it is the mode the project
+  // named, with the flags that mode is built with.
+  assert.equal(built.stdout.split("\n")[0], "· Mode: release (-O3 -fno-lto)");
+
   assert.match(built.stdout, new RegExp(`^\\u00b7 Model: replay:${REPLAY}`, "m"));
 
-  // The model is named first, so it is on record even when the build fails.
+  // The model is named before any work starts, so it is on record even when
+  // the build fails.
   const unreachable = await mkdtemp(join(tmpdir(), "blaze-cli-nokey-"));
   await cp(EXAMPLE, unreachable, { recursive: true });
   const failed = run(process.execPath, [CLI, "build", "--model", "openai/gpt-5"], {

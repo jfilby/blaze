@@ -80,7 +80,7 @@ import {
   type IncrementalRecord,
   type ReuseLevel,
 } from "./incremental.ts";
-import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget } from "./core/target.ts";
+import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget, optimizationOptions } from "./core/target.ts";
 import { COMPILER_VERSION, toolchainFingerprint } from "./core/version.ts";
 import {
   type ProgramMismatch,
@@ -875,6 +875,12 @@ export async function runBuild(
   } catch (cause) {
     throw await recordRejected(store, paths, id, previousBuild, cause);
   }
+
+  // The mode is the first thing a build says, before it names the model or
+  // resolves anything: it is the one setting that changes what the generated
+  // program carries, and it is chosen here, so a reader is told what was
+  // selected before anything built can be looked at.
+  reporter.stage("mode", "info", `Mode: ${buildMode} (${optimizationOptions(buildMode).join(" ")})`);
   const input = project.input;
 
   // --model wins over the project file, which wins over AI_MODEL.
