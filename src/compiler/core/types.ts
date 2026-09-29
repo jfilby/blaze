@@ -374,6 +374,35 @@ export type RuntimeKind = "none" | "nim";
 
 export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim"];
 
+/**
+ * How hard the toolchain builds, and how much of itself it checks:
+ *
+ *   debug     optimized for reading: `-O0 -g`, so a delivered program is the
+ *             one the compiler wrote with nothing folded away
+ *   release   optimized for running: `-O3`, the most the C compiler offers
+ *   danger    release, with the runtime's own guards left out: the
+ *             use-after-free check, the allocation overflow check, the size
+ *             caps and the null checks are not emitted
+ *
+ * `danger` is a promise about the program rather than about the build, and it
+ * is the only one of the three that changes what a candidate does when it
+ * runs. Everything the compiler proves about a candidate is proved the same
+ * way in all three: the IR is validated before it is lowered either way, and a
+ * candidate is verified and measured before it is selected. What a `danger`
+ * build stops doing is second-guessing the program at run time.
+ *
+ * The guards `danger` removes are the only run-time safety checks the
+ * generated program carries. There is no bounds check on an element access at
+ * any mode: the IR's `element` value holds no length, and the C backend
+ * lowers an access to a bare subscript, so an out-of-range read is undefined
+ * behaviour on `c`, `asm` and `machine` alike. A `wasm` build traps on one
+ * because the module engine does it, which is the engine's behaviour rather
+ * than this compiler's, and no mode changes that.
+ */
+export type BuildMode = "debug" | "release" | "danger";
+
+export const BUILD_MODES: readonly BuildMode[] = ["debug", "release", "danger"];
+
 /** How a built implementation is executed for verification and benchmarking. */
 export interface Runner {
   command: string;
@@ -403,6 +432,8 @@ export interface SourceInput {
   output?: OutputKind;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
+  /** How the toolchain builds. Defaults to `debug`. */
+  mode?: BuildMode;
   target?: Partial<TargetSpec>;
   runtime?: RuntimeKind;
   optimize?: Partial<OptimizeSpec>;
@@ -556,6 +587,8 @@ export interface BuildStatus {
   outputKind: OutputKind;
   /** What lowered the IR for this build. */
   backend: BackendKind;
+  /** How the toolchain built this. */
+  mode: BuildMode;
   /** The runtime this build links against. */
   runtime: RuntimeKind;
   /** The candidate selected for each compiled function, by function name. */

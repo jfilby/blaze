@@ -14,8 +14,9 @@ import { cDeclarationType } from "./linker.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import type { FunctionContract, TargetSpec } from "../core/types.ts";
+import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
+import { optimizationOptions } from "../core/target.ts";
 
 /** Told to the model verbatim, so the rules live in one place. */
 export const cSourceRules = [
@@ -101,6 +102,8 @@ export function validateCSource(source: string, contract: FunctionContract, cand
 export interface CompileCRequest {
   source: string;
   contract: FunctionContract;
+  /** How the C compiler is asked to build, from the project's mode. */
+  mode: BuildMode;
   target: TargetSpec;
   sourcePath: string;
   objectPath: string;
@@ -127,7 +130,7 @@ export async function compileC(request: CompileCRequest): Promise<CompileCResult
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
   const compiled = run(
     "gcc",
-    ["-std=c11", "-O2", "-fno-lto", "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
+    ["-std=c11", ...optimizationOptions(request.mode), "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
     { timeoutMs: 120_000 },
   );
   if (compiled.spawnError !== undefined) {

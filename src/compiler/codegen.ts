@@ -55,6 +55,7 @@ import type { ParsedContract } from "./semantics/contract.ts";
 import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
   BackendKind,
+  BuildMode,
   Candidate,
   BenchmarkConfig,
   BenchmarkResult,
@@ -356,6 +357,8 @@ export interface CandidateEvaluationRequest {
    * transport, which this request also carries as `backend`.
    */
   lowering: BackendKind;
+  /** How the toolchain builds this candidate, from the project's mode. */
+  mode: BuildMode;
   workspace: CodegenWorkspace;
   test: TestConfig;
   benchmark: BenchmarkConfig;
@@ -382,6 +385,7 @@ export interface CandidateEvaluationRequest {
  */
 export function runtimePreparer(request: {
   lowering: BackendKind;
+  mode: BuildMode;
   runtime: RuntimeKind;
   workspace: CodegenWorkspace;
 }): () => Promise<PreparedRuntime | undefined> {
@@ -389,7 +393,7 @@ export function runtimePreparer(request: {
   return () => {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
       if (request.lowering === "wasm") return undefined;
-      if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory);
+      if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory, request.mode);
       return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
     })();
     return pending;
@@ -498,6 +502,7 @@ async function materialize(
   const lowered = await compileFunctionC({
     fn,
     contract: request.contract,
+    mode: request.mode,
     target: request.target,
     sourcePath: paths.loweredSource,
     objectPath: paths.object,
@@ -521,6 +526,7 @@ async function materialize(
   if (runtime?.objectPath !== undefined) {
     await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? ""), "utf8");
     link({
+      mode: request.mode,
       harnessPath: paths.harness,
       objectPath: paths.object,
       runtimeObjectPath: runtime.objectPath,
@@ -765,6 +771,7 @@ async function probeCandidate(
 
   await writeFile(paths.probeHarness, generateProbeHarness(request.contract, plan), "utf8");
   link({
+    mode: request.mode,
     harnessPath: paths.probeHarness,
     objectPath: paths.object,
     runtimeObjectPath: runtime.objectPath,
@@ -1145,6 +1152,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       target: request.target,
       output: request.output,
       lowering: request.lowering,
+      mode: request.mode,
       runtime: request.runtime,
       workspace: request.workspace,
       test: request.test,

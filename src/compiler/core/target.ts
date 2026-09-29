@@ -8,7 +8,7 @@
  */
 
 import { CompilerError } from "./errors.ts";
-import type { Arch, Abi, OsName, TargetSpec } from "./types.ts";
+import type { Arch, Abi, BuildMode, OsName, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
 const OPERATING_SYSTEMS: readonly OsName[] = ["linux"];
@@ -130,6 +130,25 @@ export const EXECUTABLE_SUFFIX = process.platform === "win32" ? ".exe" : "";
  */
 export function archOptions(target: TargetSpec): string[] {
   return target.cpu === "" ? [] : [`-march=${target.cpu}`];
+}
+
+/**
+ * The C compiler options a build mode asks for.
+ *
+ * `-fno-lto` is on every one of them and not only the release ones: link-time
+ * optimization would make the object a candidate is measured from depend on
+ * every other object beside it, so the assembly a build delivers and the
+ * object it links would no longer be the same program. A build measures
+ * candidates against each other, and that comparison is only a comparison when
+ * each one was made on its own.
+ *
+ * `-g` is only in `debug`, and `-O0` with it, because a program to step
+ * through is a program the compiler has not rearranged. `release` and
+ * `danger` ask for the most optimization the compiler offers.
+ */
+export function optimizationOptions(mode: BuildMode): string[] {
+  if (mode === "debug") return ["-O0", "-g", "-fno-lto"];
+  return ["-O3", "-fno-lto"];
 }
 
 export function targetSummary(target: TargetSpec): string {

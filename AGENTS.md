@@ -25,6 +25,18 @@ tests all live there. Run commands from it.
   so a pair that cannot be built is refused where the input is read. Everything
   is lowered on the one path in `codegen.ts:materialize`, and the backend is in
   the reuse key (`incremental.ts`) so an object is never shared across one.
+- A third setting says how hard the toolchain builds. `mode` is `debug`
+  (`-O0 -g`, the default), `release` (`-O3`), or `danger` (release, and the
+  generated runtime leaves its guards out). The flags are one list in
+  `core/target.ts:optimizationOptions`; every `gcc` call site reads it, and
+  `-fno-lto` is on all of them so a candidate's object does not depend on the
+  objects beside it. `danger` removes the use-after-free check, the allocation
+  overflow check, the size caps and the null checks from `runtime/abi.ts` and
+  its twin in `runtime/nim.ts`, which are the only run-time safety checks a
+  generated program carries: there is no bounds check on an element access at
+  any mode, because the IR holds no length for one. What the compiler *proves*
+  is unchanged — the IR is validated and the candidate verified and measured
+  the same way in all three.
 - A model never writes a program. It is asked twice per function to read an
   artifact the compiler produced — the IR, and the target the IR was lowered
   into — and to answer with a verdict and a list of proposals naming rewrites

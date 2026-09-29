@@ -16,6 +16,8 @@ import { writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "./abi.ts";
+import { optimizationOptions } from "../core/target.ts";
+import type { BuildMode } from "../core/types.ts";
 
 export interface StandaloneRuntime {
   headerPath: string;
@@ -30,14 +32,23 @@ export async function writeRuntimeHeader(workDirectory: string): Promise<string>
   return headerPath;
 }
 
-/** Writes and compiles the runtime the compiler provides on top of libc. */
-export async function buildStandaloneRuntime(workDirectory: string): Promise<StandaloneRuntime> {
+/**
+ * Writes and compiles the runtime the compiler provides on top of libc.
+ *
+ * The guards the runtime carries are its own, and a `danger` build leaves them
+ * out: the use-after-free check, the allocation overflow check and the size
+ * caps are what stand between a released pointer and a second use of it.
+ */
+export async function buildStandaloneRuntime(
+  workDirectory: string,
+  mode: BuildMode = "debug",
+): Promise<StandaloneRuntime> {
   const headerPath = await writeRuntimeHeader(workDirectory);
   const sourcePath = `${workDirectory}/${RUNTIME_NAME}.c`;
   const objectPath = `${workDirectory}/${RUNTIME_NAME}.o`;
-  await writeFile(sourcePath, runtimeSourceSource(), "utf8");
+  await writeFile(sourcePath, runtimeSourceSource(mode), "utf8");
 
-  const compiled = run("gcc", ["-std=c11", "-O2", "-fno-lto", "-c", "-o", objectPath, sourcePath], {
+  const compiled = run("gcc", ["-std=c11", ...optimizationOptions(mode), "-c", "-o", objectPath, sourcePath], {
     timeoutMs: 120_000,
   });
   if (compiled.spawnError !== undefined) {

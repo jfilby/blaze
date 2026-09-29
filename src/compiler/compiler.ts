@@ -94,6 +94,8 @@ import {
   RUNTIME_KINDS,
   BACKENDS,
   type BackendKind,
+  BUILD_MODES,
+  type BuildMode,
   type BuildStatus,
   OUTPUT_KINDS,
   type FunctionContract,
@@ -144,6 +146,8 @@ export interface BuildOptions {
   output?: OutputKind;
   /** What lowers the IR; overrides the input file. */
   backend?: BackendKind;
+  /** How the toolchain builds; overrides the input file. */
+  mode?: BuildMode;
   /** The runtime to link against; overrides the input file. */
   runtime?: RuntimeKind;
   /** Print the prompt sent to the model for every attempt. */
@@ -252,6 +256,24 @@ function resolveBackend(requested: BackendKind | undefined, output: OutputKind):
       stage: "input",
       message: `the "${requested}" backend cannot deliver the "${output}" output kind`,
       detail: `it delivers ${deliverable}; build it without --backend, or name one of ${BACKENDS.filter((backend) => BACKEND_DELIVERS[backend].includes(output)).join(", ")}`,
+    });
+  }
+  return requested;
+}
+
+/**
+ * Normalizes the requested build mode. `debug` is the default: a build that
+ * names none is optimized for reading, which is the mode that shows a reader
+ * what the compiler wrote.
+ */
+function resolveBuildMode(requested: BuildMode | undefined): BuildMode {
+  if (requested === undefined) return "debug";
+  if (!BUILD_MODES.includes(requested)) {
+    throw new CompilerError({
+      category: "InputError",
+      stage: "input",
+      message: `unknown mode "${String(requested)}"`,
+      detail: `expected one of ${BUILD_MODES.join(", ")}`,
     });
   }
   return requested;
@@ -603,6 +625,7 @@ async function recordRejected(
     status: "failed",
     outputKind: previous?.outputKind ?? "machine",
     backend: previous?.backend ?? "c",
+    mode: previous?.mode ?? "debug",
     runtime: previous?.runtime ?? "none",
     createdAt: previous?.createdAt ?? stamp,
     updatedAt: stamp,
@@ -839,6 +862,7 @@ export async function runBuild(
   let outputKind: OutputKind;
   let runtimeKind: RuntimeKind;
   let backendKind: BackendKind;
+  let buildMode: BuildMode;
   try {
     project = readInput(absoluteInput);
     const input = project.input;
@@ -847,6 +871,7 @@ export async function runBuild(
     outputKind = resolveOutputKind(options.output ?? input.output);
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
     backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
+    buildMode = resolveBuildMode(options.mode ?? input.mode);
   } catch (cause) {
     throw await recordRejected(store, paths, id, previousBuild, cause);
   }
@@ -878,6 +903,7 @@ export async function runBuild(
     status: "building",
     outputKind,
     backend: backendKind,
+    mode: buildMode,
     runtime: runtimeKind,
     createdAt,
     updatedAt: createdAt,
@@ -975,6 +1001,7 @@ export async function runBuild(
         target,
         output: outputKind,
         backend: backendKind,
+        mode: buildMode,
         runtime: runtimeKind,
         test,
         benchmark: benchmarkConfig,
@@ -986,6 +1013,7 @@ export async function runBuild(
     // the same one, and the driver that runs the program links it too.
     const prepareRuntime = runtimePreparer({
       lowering: backendKind,
+      mode: buildMode,
       runtime: runtimeKind,
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
@@ -1101,6 +1129,7 @@ export async function runBuild(
       }
 
       const result = await reviewCandidates({
+        mode: buildMode,
         contract: unit.contract,
         unitFile: unit.file,
         parsed: unit.parsed,
@@ -1348,6 +1377,7 @@ export async function runBuild(
       const runner =
         runtimeKind === "none"
           ? await buildProgramDriver({
+              mode: buildMode,
               program: driver,
               workDirectory: base,
               objectPaths,
@@ -1643,6 +1673,7 @@ export async function runStored(
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
   const lowering = build?.backend ?? (output === "wasm" ? "wasm" : "c");
+  const mode = build?.mode ?? "debug";
   const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
   // The contract names no target, so the one the build ran for is what the
   // stored candidate is tested and measured against.
@@ -1650,6 +1681,7 @@ export async function runStored(
   const base = store.resolve(paths.work);
   const prepareRuntime = runtimePreparer({
     lowering,
+    mode,
     runtime,
     workspace: { workDirectory: base, functionName: program.entry.file },
   });
@@ -1681,6 +1713,7 @@ export async function runStored(
     }
     const workspace = { workDirectory: `${base}/${functionName}`, functionName };
     const result = await evaluateStoredCandidate({
+      mode,
       contract: unit.contract,
       parsed: unit.parsed,
       program,

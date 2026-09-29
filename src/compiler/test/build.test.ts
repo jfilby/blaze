@@ -112,6 +112,64 @@ test("a build names the backend it used, and one that names none gets the output
   assert.equal((await inspectProject("input", implied)).backend, "c");
 });
 
+test("a mode nobody has heard of is refused by name", async () => {
+  const directory = await workspace("mode-unknown", { ...INPUT, mode: "turbo" as never });
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /unknown mode "turbo"/,
+  );
+});
+
+test("a build names the mode it built in, and one that names none gets the default", async () => {
+  // The mode decides the flags the artifact was built with, so a record that
+  // does not say which one cannot be re-verified as the same build.
+  const named = await workspace("mode-named", { ...INPUT, mode: "release" });
+  const outcome = await runBuild(
+    "input.toml",
+    { cwd: named, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  assert.equal(outcome.build.mode, "release");
+  assert.equal((await inspectProject("input", named)).mode, "release");
+
+  // `debug` is the default: a build that names no mode is optimized for
+  // reading, which is what a reader who has not asked for speed wants.
+  const implied = await workspace("mode-implied");
+  await runBuild("input.toml", { cwd: implied, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.equal((await inspectProject("input", implied)).mode, "debug");
+});
+
+test("every mode builds a program that prints what the source prints", async () => {
+  // A mode changes the flags the toolchain is driven with, so each one has to
+  // produce a program that still computes the same thing: a build only
+  // checked in one mode has not proved the other two.
+  for (const mode of ["debug", "release", "danger"] as const) {
+    const directory = await exampleWorkspace(`mode-${mode}`);
+    await writeProject(join(directory, "blaze.toml"), {
+      language: "typescript",
+      sourceFile: "main.ts",
+      output: "machine",
+      mode,
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+    });
+    const outcome = await runBuild(
+      join(directory, "blaze.toml"),
+      { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+      quiet,
+      "build",
+    );
+    assert.equal(outcome.build.status, "success", `${mode} did not build: ${outcome.build.error?.message ?? ""}`);
+    const execution = run(outcome.outputPath as string, [], { timeoutMs: 60_000 });
+    assert.equal(execution.code, 0, `${mode} did not run: ${execution.stderr}`);
+    assert.equal(
+      execution.stdout,
+      "starting: dot product of 4 elements\ndone: dot product = 70\n",
+      `${mode} printed something else`,
+    );
+  }
+});
+
 test("a function the source named __proto__ is compiled and recorded like any other", async () => {
   // Every record of a build is keyed by whatever the source called the
   // function, and `__proto__` is a legal name: the contract phase's duplicate
@@ -958,4 +1016,46 @@ test("generate stops at candidate selection and delivers nothing", async () => {
   assert.equal(outcome.outputPath, null);
   assert.equal(outcome.build.status, "success");
   await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/output/input"), "utf8"));
+});
+
+test("the mode decides the flags and the guards, and the artifact shows which", async () => {
+  // A mode that only the build record knows about would be a mode nothing can
+  // tell apart, so each one is checked on the artifact it delivers: `debug`
+  // keeps the debug info and the guards, `release` drops the debug info, and
+  // `danger` drops the guards as well.
+  const built: Record<string, { sections: number; guard: boolean }> = {};
+  for (const mode of ["debug", "release", "danger"] as const) {
+    const directory = await exampleWorkspace(`flags-${mode}`);
+    await writeProject(join(directory, "blaze.toml"), {
+      language: "typescript",
+      sourceFile: "main.ts",
+      output: "machine",
+      mode,
+      generation: { maxCandidates: 1, maxAttempts: 1 },
+    });
+    const outcome = await runBuild(
+      join(directory, "blaze.toml"),
+      { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+      quiet,
+      "build",
+    );
+    assert.equal(outcome.build.status, "success", `${mode} did not build`);
+    const binary = outcome.outputPath as string;
+    const sections = run("readelf", ["-S", binary], { timeoutMs: 30_000 });
+    const runtime = await readFile(
+      join(directory, STATE_DIRECTORY, "projects/hello_world/work", "blaze_rt.c"),
+      "utf8",
+    );
+    built[mode] = {
+      // The compiler emits no warnings, so a build that failed to strip its
+      // debug info would be told by the sections alone.
+      sections: (sections.stdout.match(/debug_\w+/g) ?? []).length,
+      guard: runtime.includes("not a live runtime pointer"),
+    };
+  }
+  assert.ok(built.debug!.sections > 0, "a debug build carries no debug info");
+  assert.equal(built.release!.sections, 0, "a release build still carries debug info");
+  assert.equal(built.danger!.sections, 0, "a danger build still carries debug info");
+  assert.ok(built.debug!.guard && built.release!.guard, "a guarded build lost its guard");
+  assert.equal(built.danger!.guard, false, "a danger build still emits the use-after-free guard");
 });

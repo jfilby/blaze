@@ -38,6 +38,7 @@ import type { TestVector } from "./toolchain/verifier.ts";
 import type {
   Candidate,
   BackendKind,
+  BuildMode,
   BenchmarkConfig,
   CandidateOutcome,
   FunctionContract,
@@ -80,6 +81,7 @@ export interface UnitKeyInput {
   program: ProgramContract;
   target: TargetSpec;
   output: OutputKind;
+  mode: BuildMode;
   backend: BackendKind;
   runtime: RuntimeKind;
   test: TestConfig;
@@ -137,6 +139,7 @@ export function unitKey(input: UnitKeyInput): string {
     file: input.file,
     target: input.target,
     backend: input.backend,
+    mode: input.mode,
     output: input.output,
     runtime: input.runtime,
     test: input.test,

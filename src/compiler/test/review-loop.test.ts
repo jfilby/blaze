@@ -77,6 +77,7 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
     callable: new Set(),
     // The runtime the candidate links against, built once for the whole loop.
     prepareRuntime: runtimePreparer({
+      mode: "debug",
       lowering: "c",
       runtime: "none",
       workspace: { workDirectory: directory, functionName: "square" },

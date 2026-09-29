@@ -33,6 +33,8 @@ import {
 import { targetSummary } from "./core/target.ts";
 import {
   BACKENDS,
+  BUILD_MODES,
+  type BuildMode,
   type BackendKind,
   OUTPUT_KINDS,
   RUNTIME_KINDS,
@@ -121,6 +123,9 @@ Options:
                             which gcc makes an object of) or wasm (a module the
                             compiler encodes itself); defaults to the one the
                             output kind implies
+  --mode <name>              how the toolchain builds: debug (-O0 -g, default),
+                            release (-O3), or danger (release, and the runtime's
+                            own guards are left out of the generated program)
   --runtime <name>           host runtime: none or nim (default none)
   --max-candidates <n>      number of candidates to build, each reviewed from
                             the IR the compiler resolved
@@ -211,6 +216,10 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   if (backend !== undefined && !BACKENDS.includes(backend as BackendKind)) {
     throw new Error(`--backend must be one of ${BACKENDS.join(", ")}, got "${String(backend)}"`);
   }
+  const mode = values.mode;
+  if (mode !== undefined && !BUILD_MODES.includes(mode as BuildMode)) {
+    throw new Error(`--mode must be one of ${BUILD_MODES.join(", ")}, got "${String(mode)}"`);
+  }
   return {
     cwd: process.cwd(),
     reuse: values.reuse === true,
@@ -220,6 +229,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(values.debug === true ? { debug: true } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(output === undefined ? {} : { output: output as OutputKind }),
+    ...(mode === undefined ? {} : { mode: mode as BuildMode }),
     ...(runtime === undefined ? {} : { runtime: runtime as RuntimeKind }),
     ...(backend === undefined ? {} : { backend: backend as BackendKind }),
     ...(optionNumber(values["max-candidates"] as string | undefined, "--max-candidates") === undefined
@@ -278,6 +288,7 @@ async function main(argv: string[]): Promise<number> {
       reuse: { type: "boolean" },
       output: { type: "string" },
       runtime: { type: "string" },
+      mode: { type: "string" },
       backend: { type: "string" },
       debug: { type: "boolean" },
       "max-candidates": { type: "string" },

@@ -18,7 +18,7 @@ import { CompilerError } from "../core/errors.ts";
 import { inspectObject } from "./assembler.ts";
 import { run } from "../core/process.ts";
 import { symbolOf } from "../semantics/contract.ts";
-import type { FunctionContract, TargetSpec } from "../core/types.ts";
+import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
 import { parseType } from "../semantics/contract.ts";
 import { ARGV_LENGTH } from "../semantics/builtins.ts";
 import {
@@ -42,6 +42,7 @@ import { cDeclarationType, cMemberName, cObjectDeclarations } from "./linker.ts"
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cOperator, cStringLiteral } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
+import { optimizationOptions } from "../core/target.ts";
 
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
@@ -706,6 +707,8 @@ export interface CompileFunctionRequest {
   fn: SemanticFunction;
   contract: FunctionContract;
   target: TargetSpec;
+  /** How the C compiler is asked to build, from the project's mode. */
+  mode: BuildMode;
   /** Where the C the compiler wrote is kept, and where its object is built. */
   sourcePath: string;
   objectPath: string;
@@ -745,6 +748,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   await writeFile(request.sourcePath, source, "utf8");
 
   const archFlag = request.target.cpu === "" ? [] : [`-march=${request.target.cpu}`];
+  const optimized = optimizationOptions(request.mode);
   const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or
@@ -753,7 +757,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   if (request.assemblyPath !== undefined) {
     const stopped = run(
       "gcc",
-      ["-std=c11", "-O2", "-fno-lto", "-S", ...archFlag, ...includes, "-o", request.assemblyPath, request.sourcePath],
+      ["-std=c11", ...optimized, "-S", ...archFlag, ...includes, "-o", request.assemblyPath, request.sourcePath],
       { timeoutMs: 120_000 },
     );
     if (stopped.spawnError !== undefined) {
@@ -775,7 +779,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   }
   const compiled = run(
     "gcc",
-    ["-std=c11", "-O2", "-fno-lto", "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
+    ["-std=c11", ...optimized, "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
     { timeoutMs: 120_000 },
   );
   if (compiled.spawnError !== undefined) {

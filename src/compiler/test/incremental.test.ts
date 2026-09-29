@@ -45,6 +45,7 @@ const INPUT: UnitKeyInput = {
   program: programOf(contractOf("main", "f64"), contractOf("helper", "f64")),
   target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
   output: "machine",
+  mode: "debug",
   backend: "c",
   runtime: "none",
   test: { randomCases: 24, maxLength: 1024, seed: 7 },
@@ -68,6 +69,10 @@ test("a key is the same for the same inputs and different for anything else", ()
     // The backend is what wrote the artifact, so an object stored by one is not
     // the object of another even when the output kind is the same.
     { backend: "wasm" as const },
+    // The flags an object was built with are in no contract and no target, so a
+    // mode change has to reach the key or a build reuses an object that was
+    // built to be read rather than one built to run.
+    { mode: "release" as const },
     { runtime: "nim" as const },
     { test: { ...INPUT.test, randomCases: 25 } },
     { benchmark: { iterations: 10 } },

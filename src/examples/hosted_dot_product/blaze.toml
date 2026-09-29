@@ -4,6 +4,7 @@ entry = "dotProduct"
 runtime = "nim"
 output = "machine"
 backend = "c"
+mode = "release"
 
 [target]
 arch = "x86_64"

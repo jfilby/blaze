@@ -27,7 +27,8 @@ import {
   type SemanticType,
   type ValueKind,
 } from "../core/semantic-ir.ts";
-import type { FunctionSignature, Runner } from "../core/types.ts";
+import type { BuildMode, FunctionSignature, Runner } from "../core/types.ts";
+import { optimizationOptions } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cOperator, cStringLiteral } from "./c-names.ts";
@@ -521,6 +522,8 @@ export function generateProgramDriver(program: SemanticProgram): string {
 }
 
 export interface ProgramDriverRequest {
+  /** How the C compiler is asked to build, from the project's mode. */
+  mode: BuildMode;
   program: SemanticProgram;
   /** Directory the driver is written and linked in. */
   workDirectory: string;
@@ -538,7 +541,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   const inputs = [driverPath, ...request.objectPaths];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
   // A program computes with the maths library, so the driver links it.
-  const result = run("gcc", ["-std=c11", "-O2", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", ["-std=c11", ...optimizationOptions(request.mode), "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

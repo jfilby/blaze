@@ -44,6 +44,7 @@ async function deliver(source: string): Promise<{ binary: string; original: stri
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
   runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
   const runner = await buildProgramDriver({
+    mode: "debug",
     program: resolved(source),
     workDirectory: directory,
     objectPaths: [],

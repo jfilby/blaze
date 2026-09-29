@@ -28,7 +28,8 @@
 import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import type { FunctionContract, FunctionParam, ObjectLayout, TypeExpr } from "../core/types.ts";
+import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, TypeExpr } from "../core/types.ts";
+import { optimizationOptions } from "../core/target.ts";
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cMacroNames } from "./c-names.ts";
@@ -584,6 +585,8 @@ ${result}
 /* -------------------------------------------------------------------------- */
 
 export interface LinkRequest {
+  /** How the C compiler is asked to build, from the project's mode. */
+  mode: BuildMode;
   harnessPath: string;
   objectPath: string;
   /** Directories the generated source includes the runtime header from. */
@@ -602,7 +605,7 @@ export function link(request: LinkRequest): void {
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
   // A function the compiler lowered from IR may call the maths library, and a
   // harness or a probe that runs one links it in.
-  const result = run("gcc", ["-O2", ...includes, "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", [...optimizationOptions(request.mode), ...includes, "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }
