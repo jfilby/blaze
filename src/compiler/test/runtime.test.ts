@@ -102,6 +102,51 @@ test("every runtime the ABI describes is implemented on both sides of the bounda
   }
 });
 
+test("a danger runtime still answers the ABI where its own arithmetic would not", async () => {
+  // `danger` leaves out the checks a program makes of itself. Two of the
+  // runtime's own answers are not such a check: `index - 2` underflows to a
+  // pointer before the argument array, and `size - 1` underflows to the
+  // largest size there is, which copied a whole number into a buffer of
+  // nothing and ended the run on a fault. The ABI promises 0 for a missing
+  // argument and 0 for a size of 0, in every mode.
+  const probe = [
+    "#include <stdio.h>",
+    "#include <stddef.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    "  double args[1] = {5.0};",
+    `  ${RUNTIME_NAME}_arguments_set(args, 1);`,
+    `  printf("%f\\n", ${RUNTIME_NAME}_argv(0));`,
+    `  printf("%f\\n", ${RUNTIME_NAME}_argv(1));`,
+    `  printf("%f\\n", ${RUNTIME_NAME}_argv(2));`,
+    `  printf("%f\\n", ${RUNTIME_NAME}_argv(3));`,
+    `  printf("%zu\\n", ${RUNTIME_NAME}_format_number(1.5, (unsigned char*)0, 0));`,
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  for (const mode of ["debug", "danger"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `blaze-argv-${mode}-`));
+    await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+    await writeFile(join(directory, "runtime.c"), runtimeSourceSource(mode), "utf8");
+    await writeFile(join(directory, "probe.c"), probe, "utf8");
+    const binary = join(directory, "probe");
+    const built = run("gcc", ["-std=c11", "-O0", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+      timeoutMs: 120_000,
+    });
+    assert.equal(built.code, 0, built.stderr);
+    const result = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(result.code, 0, `${mode} must answer rather than fault`);
+    assert.deepEqual(
+      result.stdout.trim().split("\n"),
+      ["0.000000", "0.000000", "5.000000", "0.000000", "0"],
+      `${mode}: an index that names no argument is 0, and a buffer of nothing is written nothing`,
+    );
+  }
+});
+
 test("the managed object representation is the same in the header and in the adapter", () => {
   const header = runtimeHeaderSource();
   const adapter = generateRuntimeAdapterSource();

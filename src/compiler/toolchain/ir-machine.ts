@@ -1014,8 +1014,15 @@ class Machine {
   /**
    * A comparison as a number: one when it holds and zero when it does not. The
    * accumulator holds the left side and the slot the right, and every
-   * comparison of a value that is not a number is false, which is what the
-   * ordered comparison of the machine already says.
+   * comparison of a value that is not a number is false.
+   *
+   * `UCOMISD` sets all three of the ordered flags at once when either side is
+   * not a number, so the carry the below conditions read is set on exactly the
+   * comparison that must be false: `CF` fires `b` and `be`, and the two
+   * conditions above it stay false because the same instruction clears their
+   * carry. The parity flag is the one that says a comparison was ordered, so
+   * the two conditions that read the carry are gated on it — the same pair the
+   * equal arms below gate on, for the same reason.
    */
   private compare(type: SemanticType, op: CompareOp, right: Held): void {
     if (isFloat(type)) {
@@ -1024,10 +1031,10 @@ class Machine {
       this.code.sseCompare(XMM0, XMM1, single, true);
       switch (op) {
         case "lt":
-          this.code.setcc("b", RAX);
-          break;
         case "le":
-          this.code.setcc("be", RAX);
+          this.code.setcc(op === "lt" ? "b" : "be", RAX);
+          this.code.setcc("np", RCX);
+          this.code.alu8("and", RAX, RCX);
           break;
         case "gt":
           this.code.setcc("a", RAX);

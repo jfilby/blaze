@@ -483,11 +483,16 @@ size_t blaze_rt_argv_count(void) {
 
 double blaze_rt_argv(size_t index) {
   /* The index is the one process.argv uses: 0 is where the program runs, 1 is
-     the file it runs, and 2 is the first argument it was given. */
-${guarded ? `  if (index < 2) return 0.0;
+     the file it runs, and 2 is the first argument it was given. The two
+     entries the host does not hold arguments for are settled here in every
+     mode, because the index is the runtime's own arithmetic and underflows to
+     a pointer before the array rather than to a missing argument: the ABI
+     promises 0 for an index that names no argument, and a danger build leaves
+     out the checks a program makes of itself, not this. */
+  if (index < 2) return 0.0;
   const size_t argument = index - 2;
-  if (blaze_rt_arguments == NULL || argument >= blaze_rt_argument_count) return 0.0;
-  return blaze_rt_arguments[argument];` : "  return blaze_rt_arguments[index - 2];"}
+${guarded ? "  if (blaze_rt_arguments == NULL || argument >= blaze_rt_argument_count) return 0.0;" : ""}
+  return blaze_rt_arguments[argument];
 }
 
 void blaze_rt_print_text(const char* text) {
@@ -500,7 +505,12 @@ ${guarded ? "  if (text == NULL) return;" : ""}
    so a caller that sizes or walks its buffer by it never steps past the end
    of the buffer it was given. */
 static size_t blaze_rt_write_number(const char* text, size_t length, unsigned char* buffer, size_t size) {
-${guarded ? "  if (size == 0) return 0;" : ""}
+  /* A buffer of nothing holds nothing. The subtraction below underflows at
+     size 0, so the case is settled before it rather than by a guard a danger
+     build leaves out: the ABI promises 0 for a size of 0 in every mode, and
+     the subtraction is the runtime's own arithmetic rather than a check the
+     program makes of itself. */
+  if (size == 0) return 0;
   const size_t written = length < size - 1 ? length : size - 1;
   memcpy(buffer, text, written);
   buffer[written] = '\\0';

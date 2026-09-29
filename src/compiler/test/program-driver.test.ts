@@ -119,6 +119,40 @@ test("a whole index counts in whole numbers against a bound that is not one", as
   assert.equal(delivered.stdout, original);
 });
 
+test("a loop that counts from a value its own index shadows counts from the outer one", () => {
+  // The index is declared before the bounds are read, so a bound written in
+  // the source under the name the index takes resolved to the loop's own
+  // declaration: `for (double n_2 = n_2; ...)` initialises the index from an
+  // indeterminate double and the loop counts from whatever was on the stack.
+  // The IR backend reads its bounds before it declares the index for the same
+  // reason. The C is read rather than run because the same source is a
+  // temporal-dead-zone error in the language it was written in.
+  const written = driver("let n = 3;\nlet total = 0;\nfor (let n = n; n > 0; n -= 1) { total += n; }\nconsole.log(total);\n");
+  assert.match(written, /for \(double n_2 = n; n_2 > 0\.0;/);
+  assert.doesNotMatch(written, /for \(double n_2 = n_2;/);
+});
+
+test("a name the driver binds in a condition is declared under a name of its own", async () => {
+  // A float condition is a statement expression that binds the value it tests
+  // twice, and it binds it under `blaze_truth`. A source name spelled that way
+  // was not escaped, so inside the condition the program read the temporary
+  // rather than its own value, and the loop ran on a double nothing had set.
+  const source = [
+    "const a = new Float64Array([2, 4, 6]);",
+    "let total = 0;",
+    "let i = 0;",
+    "let blaze_truth = 10;",
+    "while (a[i]) { total += blaze_truth; i += 1; }",
+    "console.log(total);",
+    "",
+  ].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "30\n");
+});
+
 test("a whole number the source wrote as a bigint is whole to the width it was resolved at", async () => {
   // `1 << 62` is a shift x86 masks to 5 bits, so a 64 bit whole operator over
   // literals written as bare C ints is evaluated at 32 and the program prints

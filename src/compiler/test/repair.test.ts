@@ -219,12 +219,15 @@ function against(
   return { ir: printSemanticFunction(outcome.applied), note: outcome.note };
 }
 
-test("inline-call refuses a callee that writes its own parameter", () => {
+test("inline-call refuses a callee that writes a name of its own", () => {
   // `bump` writing `x` is state of `bump`. The spliced body carries that write
   // over as a `set` on a bare name, so it lands on `work`'s own `x` and the
   // argument the call was made with is already gone by the time it is read.
-  // `work(5)` is 11; the inlined body returns 12.
-  const outcome = against(
+  // `work(5)` is 11; the inlined body returns 12. A write to the callee's own
+  // local is the same defect with a name the caller happens to share, and it
+  // is refused for the same reason: every write target is a bare string, and
+  // the substitution that renames the callee's reads does not touch one.
+  const parameter = against(
     [
       "export function bump(x: number): number { x = x + 1; return x; }",
       "export function work(x: number): number {",
@@ -235,8 +238,23 @@ test("inline-call refuses a callee that writes its own parameter", () => {
     "work",
     "inline-call entry callee=bump",
   );
-  assert.ok("refused" in outcome, "a private write is not a caller's to inherit");
-  assert.match(outcome.refused, /bump writes the parameter "x"/);
+  assert.ok("refused" in parameter, "a private write is not a caller's to inherit");
+  assert.match(parameter.refused, /bump writes "x"/);
+
+  const local = against(
+    [
+      "export function bump(x: number): number { let acc = x; acc = x + 1; return acc; }",
+      "export function work(x: number): number {",
+      "  let acc = 100;",
+      "  const y = bump(x);",
+      "  return acc + y;",
+      "}",
+    ].join("\n"),
+    "work",
+    "inline-call entry callee=bump",
+  );
+  assert.ok("refused" in local, "a write to the callee's own local is refused too");
+  assert.match(local.refused, /bump writes "acc"/);
 });
 
 test("common-subexpression refuses a value a nested block shadows", () => {
@@ -261,6 +279,30 @@ test("common-subexpression refuses a value a nested block shadows", () => {
   );
   assert.ok("refused" in outcome, "a value a nested block shadows is not one value");
   assert.match(outcome.refused, /nothing to bind/);
+});
+
+test("a value that reads through an object is not bound under a negation", () => {
+  // `-a[i]` is an element read under a negation, and `isSafeToCompute` answered
+  // true for a `unary` without looking at the operand, so the rule bound the
+  // read to a name. Binding it put the read at the top of the block, on every
+  // turn, where the source performed it only on the turns its own code reached:
+  // the same reason an `element` of its own is refused, and the operand is read
+  // on the same turn the whole is.
+  const negated = against(
+    [
+      "export function work(a: Float64Array): number {",
+      "  let total = 0;",
+      "  for (let i = 0; i < 3; i += 1) {",
+      "    total = total - (-a[i]) - (-a[i]);",
+      "  }",
+      "  return total;",
+      "}",
+    ].join("\n"),
+    "work",
+    "common-subexpression b2",
+  );
+  assert.ok("refused" in negated, "a read through an object is not bound under a negation");
+  assert.match(negated.refused, /nothing to bind/);
 });
 
 test("inline-call keeps a call edge a terminator still makes", () => {

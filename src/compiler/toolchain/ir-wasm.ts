@@ -347,6 +347,20 @@ const COMPOUND: Record<string, string> = {
   "%=": "mod",
 };
 
+/**
+ * The operator a compound assignment of one carrier type is, by the name the
+ * IR gives it. A whole number the module reads as unsigned is divided and
+ * taken mod as unsigned, for the reason the `arith` case above gives: the
+ * instruction is named for how the bits read and not for how the value was
+ * declared, so the signed one over a `u32` returns a negative number for a
+ * numerator above the signed range.
+ */
+function compoundCode(held: number, type: SemanticType, op: string): number {
+  const name = COMPOUND[op] as string;
+  const code = unsigned(type) ? UNSIGNED_BINARY[held][name] : undefined;
+  return (code ?? BINARY[held][name]) as number;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The body                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -664,9 +678,17 @@ class Body {
         return;
       }
       case "isNull":
-        this.value(value.operand, USIZE);
-        this.i32(0);
-        this.op(value.negate ? 0x47 : 0x46);
+        // A reference is a byte offset, and the format reads a comparison
+        // against a zero of the operand's own width: an `i64` operand beside
+        // an `i32` zero is a module the engine refuses. So the zero is the
+        // width the operand is held at, and the operator is that width's.
+        this.value(value.operand, value.operand.type);
+        const width = carrier(value.operand.type);
+        if (width === I64) this.i64(0n);
+        else if (width === F64) this.float(0, true);
+        else if (width === F32) this.float(0, false);
+        else this.i32(0);
+        this.op(BINARY[width][value.negate ? "ne" : "eq"] as number);
         this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "select":
@@ -808,7 +830,7 @@ class Body {
         }
         this.get(statement.name);
         this.value(statement.value, type);
-        this.op(BINARY[held][COMPOUND[statement.op] as string] as number);
+        this.op(compoundCode(held, type, statement.op));
         this.set(statement.name);
         return;
       }
@@ -843,7 +865,7 @@ class Body {
         this.op(0x7c);
         this.op(0xa7);
         this.value(statement.value, element);
-        if (statement.op !== "=") this.op(BINARY[carrier(element)][COMPOUND[statement.op] as string] as number);
+        if (statement.op !== "=") this.op(compoundCode(carrier(element), element, statement.op));
         const store = storeCode(element);
         this.op(store.code);
         this.code.varuint(store.align);
@@ -858,8 +880,11 @@ class Body {
         }
         this.value(statement.object, USIZE);
         this.op(0xa7);
-        this.value(statement.value, USIZE);
-        this.op(0xa7);
+        // The address is the only thing narrowed to the 32 bits the format
+        // indexes memory with; the value goes down at the width of its own
+        // type, which is the width the store pops. Wrapping the value as well
+        // handed `i64.store` and `f64.store` an `i32`.
+        this.value(statement.value, statement.value.type);
         const store = storeCode(statement.value.type);
         this.op(store.code);
         this.code.varuint(store.align);
@@ -1166,8 +1191,13 @@ export function moduleBytes(
   const groups = body.localGroups();
   code.counted(groups.length / 2, (locals) => groups.forEach((value) => locals.varuint(value)));
   body.block(fn.entry, null);
-  code.raw(body.finish());
+  // The value a body that falls out of its own end leaves behind is written
+  // before the body is copied, because `finish` takes the bytes as they
+  // stand: an `answer` after it appends to a buffer nothing reads again, and
+  // the `end` that closes the function is left with an empty stack under a
+  // type section that declares a result.
   if (result !== undefined) body.answer();
+  code.raw(body.finish());
   code.byte(0x0b);
   const compiled = code.build();
 

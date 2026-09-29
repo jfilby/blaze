@@ -161,6 +161,17 @@ const RESERVED: Record<string, true> = {
   ...Object.fromEntries(
     [...`${DRIVER_PRELUDE}`.matchAll(/program_[a-z0-9_]+/g)].map((match) => [match[0], true as const]),
   ),
+  // The names the driver's own statement expressions bind. They are written
+  // down here rather than counted from the source, and a program is free to
+  // call a variable either of them: the `blaze_truth` in a float condition
+  // shadows a source `blaze_truth` inside the condition, and the source then
+  // reads the uninitialised temporary instead of its own value.
+  blaze_truth: true,
+  // An object built as a value is named `blaze_object_1` and up, so the whole
+  // family is kept rather than the two the first builds happen to use.
+  ...Object.fromEntries(
+    [...Array(64).keys()].map((index) => [`blaze_object_${index + 1}`, true as const]),
+  ),
   // Every entry point of the runtime the driver links against.
   ...RUNTIME_SYMBOLS,
 };

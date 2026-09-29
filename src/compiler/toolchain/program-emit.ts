@@ -381,8 +381,22 @@ class ProgramEmitter {
     // entered in, and not in the loop's own. An element declared under the
     // same name as the buffer shadows it, so reading the buffer after the
     // declaration made the loop count over the element it had not taken yet.
+    // What a counted loop counts from, over and by is read here, in the scope
+    // the loop was entered in, and not in the loop's own: a loop that counts
+    // from a value of its own variable's name writes
+    // `for (double limit_2 = limit_2; ...)`, and the initializer names the
+    // loop's own index rather than the one around it.
     const buffer = loop.kind === "each" ? this.names.read(loop.of) : null;
     const length = loop.kind === "each" ? this.expression(loop.length) : null;
+    const counted =
+      loop.kind === "counted"
+        ? {
+            type: loop.type,
+            from: this.expression(loop.from, loop.type),
+            to: this.expression(loop.to, loop.type),
+            step: loop.step === null ? null : this.expression(loop.step, loop.type),
+          }
+        : null;
     this.names.enter();
     if (loop.kind === "counted") this.names.declare(loop.variable);
     if (loop.kind === "each") {
@@ -408,15 +422,15 @@ class ProgramEmitter {
         break;
       }
       case "counted": {
-        const type = loop.type;
+        const bounds = counted as { type: SemanticType; from: string; to: string; step: string | null };
         for (const line of this.target.openFor(
           this.names.read(loop.variable),
-          type,
-          this.expression(loop.from, type),
-          this.expression(loop.to, type),
+          bounds.type,
+          bounds.from,
+          bounds.to,
           loop.inclusive,
           loop.down,
-          loop.step === null ? null : this.expression(loop.step, type),
+          bounds.step,
         )) {
           this.write(line);
         }

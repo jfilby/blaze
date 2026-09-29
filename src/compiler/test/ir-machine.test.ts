@@ -507,6 +507,47 @@ test("a truth is a truth: an empty string, an absent reference and a zero are al
   }
 });
 
+test("a comparison of a value that is not a number is false in every ordered way", async () => {
+  // `UCOMISD` sets the carry as well as the zero and the parity flags when
+  // either side is not a number, so `setb` and `setbe` both fired on exactly
+  // the comparison that has to be false: `NaN < 2` and `NaN <= 2` answered
+  // true, and a `while` written on one of them never ended. Every backend and
+  // the language agree that a comparison involving a NaN is false.
+  const ops: { op: "lt" | "le" | "gt" | "ge" | "eq" | "ne"; expected: number }[] = [
+    { op: "lt", expected: 0 },
+    { op: "le", expected: 0 },
+    { op: "gt", expected: 0 },
+    { op: "ge", expected: 0 },
+    { op: "eq", expected: 0 },
+    { op: "ne", expected: 1 },
+  ];
+  for (const entry of ops) {
+    const against = subject(
+      BOOL,
+      handsBack({ k: "compare", type: BOOL, op: entry.op, operand: F64, left: number("NaN"), right: local("v") }),
+      [{ kind: "value", name: "v", mutable: false, type: F64 }],
+    );
+    assert.equal(await lowered(against, (name) => `printf("%d", ${name}(2.0));`), `${entry.expected}`, `NaN ${entry.op} 2`);
+  }
+  // The ordered pairs are unchanged: the parity gate only removes the
+  // unordered case, so a comparison of two numbers still answers its own way.
+  const ordered: { op: "lt" | "le" | "gt" | "ge"; left: string; right: string; expected: number }[] = [
+    { op: "lt", left: "1", right: "2", expected: 1 },
+    { op: "lt", left: "2", right: "1", expected: 0 },
+    { op: "le", left: "1", right: "1", expected: 1 },
+    { op: "gt", left: "2", right: "1", expected: 1 },
+    { op: "ge", left: "1", right: "1", expected: 1 },
+    { op: "ge", left: "1", right: "2", expected: 0 },
+  ];
+  for (const entry of ordered) {
+    const against = subject(
+      BOOL,
+      handsBack({ k: "compare", type: BOOL, op: entry.op, operand: F64, left: number(entry.left), right: number(entry.right) }),
+    );
+    assert.equal(await lowered(against, (name) => `printf("%d", ${name}());`), `${entry.expected}`, `${entry.left} ${entry.op} ${entry.right}`);
+  }
+});
+
 test("an object is allocated, written and read back through its own layout", async () => {
   const fn = subject(
     POINT,

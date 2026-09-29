@@ -17,7 +17,7 @@ import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { CompilerError } from "../core/errors.ts";
-import type { SemanticFunction } from "../core/semantic-ir.ts";
+import type { SemanticFunction, SemanticType } from "../core/semantic-ir.ts";
 
 /** The parts of the engine a case here drives a module with. */
 interface Engine {
@@ -33,6 +33,9 @@ interface Engine {
  */
 const engine = (globalThis as { WebAssembly?: Engine }).WebAssembly;
 assert.ok(engine !== undefined, "the engine the build runs on carries modules");
+
+const F64: SemanticType = { kind: "primitive", name: "f64" };
+const I32: SemanticType = { kind: "primitive", name: "i32" };
 
 /**
  * Contracts a library that declares one function, emits the module for it, and
@@ -419,6 +422,174 @@ test("locals of different carriers are declared in the order they are numbered",
   await compute("", trailing, "run\n\n", "RESULT 4\n");
   // A run of one carrier is still declared once, and the whole is still right.
   await compute("", ["  let a = 1.5;", "  let c = 2.5;", "  return a + c;"], "run\n\n", "RESULT 4\n");
+});
+
+test("a reference is tested for nothing against a zero of its own width", () => {
+  // A reference is a byte offset, which the module holds at the full width of
+  // a 64 bit number. The nothing it is compared against was written as an
+  // `i32`, and `i32.eq` over an `i64` and an `i32` is a module the engine
+  // refuses, so every `x === null` and `!x` failed the build. The reference
+  // arrives as a parameter because this backend has no way to build one.
+  const object: SemanticType = { kind: "ref", of: null, name: "Point" };
+  const fn: SemanticFunction = {
+    name: "r",
+    symbol: "r",
+    params: [{ kind: "object", name: "p", mutable: false, type: object }],
+    returns: F64,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [
+        {
+          k: "let",
+          slot: { kind: "value", name: "absent", mutable: false, type: F64 },
+          value: {
+            k: "select",
+            type: F64,
+            condition: { k: "isNull", type: I32, operand: { k: "local", type: object, name: "p" }, negate: false },
+            then: { k: "const", type: F64, text: "1" },
+            otherwise: { k: "const", type: F64, text: "0" },
+          },
+          line: 1,
+        },
+        {
+          k: "let",
+          slot: { kind: "value", name: "present", mutable: false, type: F64 },
+          value: {
+            k: "select",
+            type: F64,
+            condition: { k: "isNull", type: I32, operand: { k: "local", type: object, name: "p" }, negate: true },
+            then: { k: "const", type: F64, text: "1" },
+            otherwise: { k: "const", type: F64, text: "0" },
+          },
+          line: 2,
+        },
+      ],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: {
+          k: "arith",
+          type: F64,
+          op: "add",
+          left: { k: "local", type: F64, name: "absent" },
+          right: { k: "local", type: F64, name: "present" },
+        },
+      },
+    },
+  };
+  const contract = {
+    version: "1",
+    function: { name: "r", symbol: "r", params: [{ name: "p", type: "ref<Point>" }], returns: "f64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  } as FunctionContract;
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(moduleBytes(fn, contract)), { env: { memory } });
+  const read = instance.exports.r as (p: number) => number;
+  assert.equal(read(0), 1, "nothing is nothing, and an offset is not");
+  assert.equal(read(64), 1, "an offset beside a buffer is not nothing either");
+});
+
+test("a field is stored at the width its type is read at", () => {
+  // The address of an object is the only thing narrowed to the 32 bits the
+  // format indexes memory with. The value went down wrapped to the same
+  // width, and `f64.store` was then handed an `i32`: the engine refused the
+  // module, so every write to a field wider than a word failed the build. The
+  // object arrives as a parameter because this backend cannot build one.
+  const object: SemanticType = { kind: "ref", of: null, name: "Point" };
+  const fn: SemanticFunction = {
+    name: "r",
+    symbol: "r",
+    params: [{ kind: "object", name: "p", mutable: true, type: object }],
+    returns: F64,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {
+      Point: { name: "Point", fields: [{ name: "x", type: "f64", offset: 0 }], size: 8, align: 8 },
+    },
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [
+        {
+          k: "storeField",
+          layout: "Point",
+          field: "x",
+          object: { k: "local", type: object, name: "p" },
+          value: { k: "const", type: F64, text: "7.25" },
+          line: 1,
+        },
+      ],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: { k: "loadField", type: F64, object: { k: "local", type: object, name: "p" }, layout: "Point", field: "x" },
+      },
+    },
+  };
+  const contract = {
+    version: "1",
+    function: { name: "r", symbol: "r", params: [{ name: "p", type: "ref<Point>" }], returns: "f64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  } as FunctionContract;
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(moduleBytes(fn, contract)), { env: { memory } });
+  assert.equal((instance.exports.r as (p: number) => number)(64), 7.25, "a double field holds the double it was written with");
+});
+
+test("a compound division of a whole number above the signed range is unsigned", async () => {
+  // The instruction is named for how the bits read and not for how the value
+  // was declared: `i32.div_s` over a `u32` of 3000000000 answered a negative
+  // number, while the same division written as `n = a / b` was unsigned.
+  const library = [
+    "export function r(n: number): number {",
+    "  let x = 3000000000;",
+    "  x /= n;",
+    "  return x;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
+  const contract: FunctionContract | undefined = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-divu-"));
+  const built = await buildModule({
+    fn: semantics.r as SemanticFunction,
+    contract,
+    modulePath: join(directory, "candidate.wasm"),
+    hostPath: join(directory, "host.mjs"),
+  });
+  const vectors: TestVector[] = [{ id: "only", kind: "fixed", args: { n: "2" } }];
+  const result = run("node", [built.hostPath, built.modulePath], {
+    input: encodeRunRequest(contract, vectors),
+    timeoutMs: 60_000,
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "RESULT 1500000000\n");
 });
 
 test("a construct the module boundary cannot reach is refused by name", async () => {

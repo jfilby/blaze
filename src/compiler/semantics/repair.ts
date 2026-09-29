@@ -405,9 +405,13 @@ function isSafeToCompute(value: SemanticValue): boolean {
     }
     case "compare":
       return isSafeToCompute(value.left) && isSafeToCompute(value.right);
+    // The operand of these is read on the same turn the whole is, so it has to
+    // pass the same test: `-a[i]` is an element read under a negation, and
+    // answering true here bound it to a name, which put the read above the
+    // guard the source performed it under.
     case "unary":
     case "isNull":
-      return true;
+      return isSafeToCompute(value.operand);
     case "logical":
     case "coalesce":
       return isSafeToCompute(value.left) && isSafeToCompute(value.right);
@@ -415,6 +419,12 @@ function isSafeToCompute(value: SemanticValue): boolean {
       return (
         isSafeToCompute(value.condition) && isSafeToCompute(value.then) && isSafeToCompute(value.otherwise)
       );
+    case "toText":
+      return isSafeToCompute(value.of);
+    case "text":
+      // An interpolated part is read on the same turn the whole is, so a part
+      // that reads through an object fails the test the read itself fails.
+      return value.parts.every((part) => part.k !== "value" || isSafeToCompute(part.value));
     default:
       // A name, a literal, a truth and a null read nothing and compute nothing.
       return true;
@@ -935,15 +945,18 @@ function inlineRefusal(callee: SemanticFunction): string | null {
   if (callee.calls.length > 0) return `calls ${callee.calls.map((edge) => edge.callee).join(", ")}, and inlining one call would put two of them there`;
   if (isReference(callee.returns)) return "hands back a reference, whose ownership the caller would have to take over";
   if (callee.entry.releases.length > 0) return "frees what it owns on the way out, which belongs to its own blocks";
-  // A parameter is state of the callee, and the body the rule splices in
-  // carries the callee's writes to it over verbatim: a `set` or a `step` names
-  // its target as a bare string, so it is not rewritten to the argument the
-  // call was made with and lands on the caller's own name instead. Inlining
-  // one would make a private write a visible mutation of the caller's frame,
-  // and every read of the parameter would already have become the argument.
-  const written = writtenParameter(callee);
+  // A write the callee makes names its target as a bare string, and a bare
+  // string is not rewritten by the substitution that renames its reads: a
+  // `set`, a `step` and a `setElement` carry the callee's own name over
+  // verbatim. Inlining one therefore writes the caller's frame — the callee's
+  // local lands on a name the caller has, and the value the caller reads back
+  // is a write it never made. Every write is refused, not only a write to a
+  // parameter: the reads of a parameter already became the arguments, so that
+  // case is incoherent on its own, and a write to a local is the same defect
+  // with a name the caller happens to share.
+  const written = writtenName(callee);
   if (written !== null) {
-    return `writes the parameter "${written}", which is state of its own and would be written into the frame it is put into`;
+    return `writes "${written}", which names its target as a bare string and would be written into the frame it is put into rather than into a name of its own`;
   }
   for (const block of nestedBlocks(callee.entry)) {
     if (block.terminator.k === "jump") return "leaves a block for another one, which is control flow the function it is put into does not own";
@@ -971,9 +984,8 @@ function dropUnusedEdge(fn: SemanticFunction, callee: string): void {
   if (!called) fn.calls = fn.calls.filter((edge) => edge.callee !== callee);
 }
 
-/** The name of a parameter a body writes, or null when it writes none of them. */
-function writtenParameter(fn: SemanticFunction): string | null {
-  const params = new Set(fn.params.map((param) => param.name));
+/** The name a body writes, or null when it writes none. */
+function writtenName(fn: SemanticFunction): string | null {
   for (const block of blocksOf(fn)) {
     for (const statement of block.statements) {
       const target =
@@ -982,7 +994,7 @@ function writtenParameter(fn: SemanticFunction): string | null {
           : statement.k === "setElement"
             ? statement.buffer
             : null;
-      if (target !== null && params.has(target)) return target;
+      if (target !== null) return target;
     }
   }
   return null;
