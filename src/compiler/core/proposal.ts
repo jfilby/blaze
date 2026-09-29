@@ -134,9 +134,15 @@ export function parseReview(text: string): ParsedReview {
  * without one.
  */
 function readProposal(value: string, line: number): { proposal: Proposal } | { unusable: string } {
-  const words = value.trim().split(/\s+/);
+  const trimmed = value.trim();
+  const words = trimmed.split(/\s+/);
   if (words.length < 2) {
-    return { unusable: `line ${line} proposes nothing: a proposal is a rule and the block it applies to` };
+    // A bare rule and an empty line are two different mistakes, and the build
+    // log is the only place a reply is kept, so what the model wrote is part of
+    // the reason rather than something the reader has to have seen.
+    return trimmed === ""
+      ? { unusable: `line ${line} proposes nothing: a proposal is a rule and the block it applies to` }
+      : { unusable: `line ${line} proposes ${JSON.stringify(trimmed)} and no block to apply it to` };
   }
   const [rule, site] = words;
   const args: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -150,5 +156,5 @@ function readProposal(value: string, line: number): { proposal: Proposal } | { u
     if (argumentValue === "") return { unusable: `line ${line} gives ${name} no value` };
     args[name] = argumentValue;
   }
-  return { proposal: { rule, site, args, text: value.trim() } };
+  return { proposal: { rule, site, args, text: trimmed } };
 }
