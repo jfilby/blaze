@@ -75,7 +75,11 @@ import type { IncrementalEntry } from "./incremental.ts";
 const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
   c: "C",
   asm: "assembly",
-  machine: "assembly",
+  // A `machine` build assembles nothing: `as` is never run, and the object is
+  // `gcc -c` making one of the C (ir-c.ts). What it delivers is that object, so
+  // it is named for the object rather than for the assembly, which a `machine`
+  // build only writes as the text a review and a size objective read.
+  machine: "machine code",
   wasm: "WebAssembly",
   ir: "semantic IR",
 };
