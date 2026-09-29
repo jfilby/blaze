@@ -32,6 +32,8 @@ import {
 } from "./compiler.ts";
 import { targetSummary } from "./core/target.ts";
 import {
+  BACKENDS,
+  type BackendKind,
   OUTPUT_KINDS,
   RUNTIME_KINDS,
   type BuildStatus,
@@ -115,6 +117,10 @@ Options:
   --all                      print every function of every file as the IR holds it
   --output <kind>           what is built: ir (semantic IR the compiler lowers),
                             c, asm, machine or wasm (default ir)
+  --backend <name>           what lowers the IR: c (the C the compiler writes,
+                            which gcc makes an object of) or wasm (a module the
+                            compiler encodes itself); defaults to the one the
+                            output kind implies
   --runtime <name>           host runtime: none or nim (default none)
   --max-candidates <n>      number of candidates to build, each reviewed from
                             the IR the compiler resolved
@@ -201,6 +207,10 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   if (runtime !== undefined && !RUNTIME_KINDS.includes(runtime as RuntimeKind)) {
     throw new Error(`--runtime must be one of ${RUNTIME_KINDS.join(", ")}, got "${String(runtime)}"`);
   }
+  const backend = values.backend;
+  if (backend !== undefined && !BACKENDS.includes(backend as BackendKind)) {
+    throw new Error(`--backend must be one of ${BACKENDS.join(", ")}, got "${String(backend)}"`);
+  }
   return {
     cwd: process.cwd(),
     reuse: values.reuse === true,
@@ -211,6 +221,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(output === undefined ? {} : { output: output as OutputKind }),
     ...(runtime === undefined ? {} : { runtime: runtime as RuntimeKind }),
+    ...(backend === undefined ? {} : { backend: backend as BackendKind }),
     ...(optionNumber(values["max-candidates"] as string | undefined, "--max-candidates") === undefined
       ? {}
       : { maxCandidates: optionNumber(values["max-candidates"] as string | undefined, "--max-candidates") }),
@@ -267,6 +278,7 @@ async function main(argv: string[]): Promise<number> {
       reuse: { type: "boolean" },
       output: { type: "string" },
       runtime: { type: "string" },
+      backend: { type: "string" },
       debug: { type: "boolean" },
       "max-candidates": { type: "string" },
       "max-attempts": { type: "string" },

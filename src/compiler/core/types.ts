@@ -346,6 +346,24 @@ export type OutputKind = "c" | "asm" | "machine" | "wasm" | "ir";
 export const OUTPUT_KINDS: readonly OutputKind[] = ["c", "asm", "machine", "wasm", "ir"];
 
 /**
+ * What lowers the semantic IR into the artifact a build delivers. The value
+ * names what the compiler itself writes; everything after that is the
+ * toolchain's:
+ *
+ *   c    the C the compiler wrote, which `gcc -c` makes an object of
+ *   wasm  the module the compiler encoded itself, which needs no toolchain
+ *
+ * A backend is not a distance: how far the build carries the IR is `output`,
+ * and a `c` backend delivers the C, the assembly or an object without becoming
+ * a different backend. A project names none, and gets the one its output kind
+ * implies.
+ */
+export type BackendKind = "c" | "wasm";
+
+export const BACKENDS: readonly BackendKind[] = ["c", "wasm"];
+
+
+/**
  * The runtime a build links against. Generated code reaches runtime services
  * through the blaze runtime ABI, never through a host implementation:
  *
@@ -383,6 +401,8 @@ export interface SourceInput {
   /** Function of the entry module to compile. Absent when the entry is a program. */
   entry?: string;
   output?: OutputKind;
+  /** What lowers the IR. Absent when the output kind implies it. */
+  backend?: BackendKind;
   target?: Partial<TargetSpec>;
   runtime?: RuntimeKind;
   optimize?: Partial<OptimizeSpec>;
@@ -534,6 +554,8 @@ export interface BuildStatus {
   status: "building" | "success" | "failed";
   /** What this build delivers. */
   outputKind: OutputKind;
+  /** What lowered the IR for this build. */
+  backend: BackendKind;
   /** The runtime this build links against. */
   runtime: RuntimeKind;
   /** The candidate selected for each compiled function, by function name. */

@@ -45,6 +45,7 @@ const INPUT: UnitKeyInput = {
   program: programOf(contractOf("main", "f64"), contractOf("helper", "f64")),
   target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
   output: "machine",
+  backend: "c",
   runtime: "none",
   test: { randomCases: 24, maxLength: 1024, seed: 7 },
   benchmark: { iterations: 2000 },
@@ -64,6 +65,9 @@ test("a key is the same for the same inputs and different for anything else", ()
     { file: "other.ts" },
     { target: { ...INPUT.target, arch: "aarch64" as const } },
     { output: "asm" as const },
+    // The backend is what wrote the artifact, so an object stored by one is not
+    // the object of another even when the output kind is the same.
+    { backend: "wasm" as const },
     { runtime: "nim" as const },
     { test: { ...INPUT.test, randomCases: 25 } },
     { benchmark: { iterations: 10 } },
@@ -225,8 +229,13 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   // executable, and every kind that assembles still links the object when the
   // deliverable is a program.
   const workspace: CodegenWorkspace = { workDirectory: "/w", functionName: "dotProduct" };
-  const names = (output: Parameters<typeof reusableFiles>[2], linksObjects: boolean, standalone: boolean): string[] =>
-    reusableFiles(workspace, "c1", output, linksObjects, standalone).map((file) => file.slice("/w/c1".length));
+  const names = (
+    output: Parameters<typeof reusableFiles>[2],
+    linksObjects: boolean,
+    standalone: boolean,
+    lowering: Parameters<typeof reusableFiles>[3] = "c",
+  ): string[] =>
+    reusableFiles(workspace, "c1", output, lowering, linksObjects, standalone).map((file) => file.slice("/w/c1".length));
 
   // A `machine` candidate is always linked on its own, so its executable is
   // always a file the build consumes.
@@ -241,7 +250,7 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("c", true, true), [".c", ".o"]);
   assert.deepEqual(names("c", false, true), [".c"]);
   // A module is the whole deliverable of a wasm build, and it links nothing.
-  assert.deepEqual(names("wasm", false, true), [".s", ".wasm"]);
+  assert.deepEqual(names("wasm", false, true, "wasm"), [".s", ".wasm"]);
   // A program build links the object of every function it holds, whatever the
   // output kind and whether or not the candidate also links on its own. The
   // executable question and the object question are separate: a standalone
@@ -253,5 +262,5 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("machine", true, false), [".s", "", ".o"]);
   assert.deepEqual(names("asm", true, false), [".s", ".o"]);
   // A wasm build links no object at all, whatever the program around it does.
-  assert.deepEqual(names("wasm", true, true), [".s", ".wasm"]);
+  assert.deepEqual(names("wasm", true, true, "wasm"), [".s", ".wasm"]);
 });

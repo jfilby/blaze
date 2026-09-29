@@ -14,11 +14,17 @@ tests all live there. Run commands from it.
   code exists: `semantics/ir-resolve.ts` and `ir-function.ts` write it from the
   source, `ir-validate.ts` checks it, `ir-text.ts` prints and reads it, and
   `blaze ir` shows it.
-- Every output kind lowers that IR: `ir` delivers it as written, `c` emits it
-  as C, `asm` and `machine` as assembly and an object, and `wasm` as a
-  WebAssembly module (`toolchain/ir-wasm.ts`, which encodes the module itself
-  and needs no wasm toolchain). Everything is lowered on the one path in
-  `codegen.ts:materialize`.
+- Two axes say what a build does, and they are separate. `output` is how far
+  the IR is carried: `ir` delivers it as written, `c` emits it as C, `asm` and
+  `machine` as assembly and an object, `wasm` as a WebAssembly module.
+  `backend` is what writes the artifact, named for what the compiler itself
+  emits — `c` for the C that `gcc` finishes, `wasm` for a module
+  (`toolchain/ir-wasm.ts`) the compiler encodes itself and no toolchain
+  touches. A project names neither and gets the pair the output kind implies;
+  what each backend can deliver is the table in `compiler.ts:BACKEND_DELIVERS`,
+  so a pair that cannot be built is refused where the input is read. Everything
+  is lowered on the one path in `codegen.ts:materialize`, and the backend is in
+  the reuse key (`incremental.ts`) so an object is never shared across one.
 - A model never writes a program. It is asked twice per function to read an
   artifact the compiler produced — the IR, and the target the IR was lowered
   into — and to answer with a verdict and a list of proposals naming rewrites

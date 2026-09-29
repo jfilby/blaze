@@ -54,6 +54,7 @@ import type { AiBackend } from "./ai/backend.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
 import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
+  BackendKind,
   Candidate,
   BenchmarkConfig,
   BenchmarkResult,
@@ -246,6 +247,7 @@ export function reusableFiles(
   workspace: CodegenWorkspace,
   candidate: string,
   output: OutputKind,
+  lowering: BackendKind,
   linksObjects: boolean,
   /**
    * Whether the candidate links on its own. A stored one says so by the calls
@@ -255,7 +257,7 @@ export function reusableFiles(
 ): string[] {
   const paths = candidateFiles(workspace, candidate, output);
   const delivered = output === "ir" ? paths.implementation : paths.lowered;
-  if (output === "wasm") return [delivered, paths.module];
+  if (lowering === "wasm") return [delivered, paths.module];
   // A kind that links a candidate on its own delivers the executable that
   // links, so the executable is a file the build consumes and one that is not
   // there is a candidate that has to be rebuilt. The `machine` branch below
@@ -349,6 +351,11 @@ export interface CandidateEvaluationRequest {
   program: ProgramContract;
   target: TargetSpec;
   output: OutputKind;
+  /**
+   * What lowered the IR. Named for the lowering rather than the model
+   * transport, which this request also carries as `backend`.
+   */
+  lowering: BackendKind;
   workspace: CodegenWorkspace;
   test: TestConfig;
   benchmark: BenchmarkConfig;
@@ -374,14 +381,14 @@ export interface CandidateEvaluationRequest {
  * own the result, so nothing is shared but the promise.
  */
 export function runtimePreparer(request: {
-  output: OutputKind;
+  lowering: BackendKind;
   runtime: RuntimeKind;
   workspace: CodegenWorkspace;
 }): () => Promise<PreparedRuntime | undefined> {
   let pending: Promise<PreparedRuntime | undefined> | null = null;
   return () => {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
-      if (request.output === "wasm") return undefined;
+      if (request.lowering === "wasm") return undefined;
       if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory);
       return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
     })();
@@ -464,7 +471,7 @@ async function materialize(
    */
   standalone: boolean,
 ): Promise<Materialized> {
-  if (request.output === "wasm") {
+  if (request.lowering === "wasm") {
     const module = await buildModule({
       fn,
       contract: request.contract,
@@ -748,7 +755,7 @@ async function probeCandidate(
   // kind that produces one, whatever text that object was lowered from. A
   // `wasm` build produces a module instead, and the host that runs a module
   // is what calls it there.
-  if (request.output === "wasm") {
+  if (request.lowering === "wasm") {
     return { called: false, reason: "a wasm candidate is run by its module host, not the native probe", stderr: "" };
   }
   const runtime = await request.prepareRuntime();
@@ -877,7 +884,7 @@ async function targetArtifact(
   candidate: Candidate,
 ): Promise<{ text: string; note: string | null } | null> {
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
-  if (request.output === "wasm") {
+  if (request.lowering === "wasm") {
     const module = await readFile(paths.module);
     return {
       text: describeModule(module),
@@ -1137,6 +1144,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       program: request.program,
       target: request.target,
       output: request.output,
+      lowering: request.lowering,
       runtime: request.runtime,
       workspace: request.workspace,
       test: request.test,

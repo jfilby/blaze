@@ -37,6 +37,7 @@ import { contractsByName, writtenOut } from "./semantics/calls.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
 import type {
   Candidate,
+  BackendKind,
   BenchmarkConfig,
   CandidateOutcome,
   FunctionContract,
@@ -79,6 +80,7 @@ export interface UnitKeyInput {
   program: ProgramContract;
   target: TargetSpec;
   output: OutputKind;
+  backend: BackendKind;
   runtime: RuntimeKind;
   test: TestConfig;
   benchmark: BenchmarkConfig;
@@ -134,6 +136,7 @@ export function unitKey(input: UnitKeyInput): string {
     abi: others,
     file: input.file,
     target: input.target,
+    backend: input.backend,
     output: input.output,
     runtime: input.runtime,
     test: input.test,

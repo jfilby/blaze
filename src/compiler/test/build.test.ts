@@ -68,6 +68,50 @@ async function exampleWorkspace(name: string): Promise<string> {
 
 const quiet = { stage: () => {} };
 
+test("a backend that cannot deliver the output kind asked for is refused", async () => {
+  // The two axes are separate, so the pair is checked rather than either one
+  // winning: a module only comes from the backend that encodes one, and the C
+  // the compiler writes is not one.
+  const directory = await workspace("backend-pair", { ...INPUT, output: "wasm", backend: "c" });
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /the "c" backend cannot deliver the "wasm" output kind/,
+  );
+  const other = await workspace("backend-pair-c", { ...INPUT, output: "machine", backend: "wasm" });
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: other, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /the "wasm" backend cannot deliver the "machine" output kind/,
+  );
+});
+
+test("a backend nobody has heard of is refused by name", async () => {
+  const directory = await workspace("backend-unknown", { ...INPUT, backend: "llvm" as never });
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
+    /unknown backend "llvm"/,
+  );
+});
+
+test("a build names the backend it used, and one that names none gets the output kind's", async () => {
+  // The backend is what wrote the artifact, so a record that does not say
+  // which one cannot be re-verified as the same build.
+  const named = await workspace("backend-recorded", { ...INPUT, backend: "c" });
+  const outcome = await runBuild(
+    "input.toml",
+    { cwd: named, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  const build = await inspectProject("input", named);
+  assert.equal(build.outputKind, "machine");
+  assert.equal(build.backend, "c");
+  assert.equal(outcome.outputKind, "machine");
+
+  const implied = await workspace("backend-implied");
+  await runBuild("input.toml", { cwd: implied, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.equal((await inspectProject("input", implied)).backend, "c");
+});
+
 test("a function the source named __proto__ is compiled and recorded like any other", async () => {
   // Every record of a build is keyed by whatever the source called the
   // function, and `__proto__` is a legal name: the contract phase's duplicate

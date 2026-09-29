@@ -92,6 +92,8 @@ import {
   type CandidateOutcome,
   type RuntimeKind,
   RUNTIME_KINDS,
+  BACKENDS,
+  type BackendKind,
   type BuildStatus,
   OUTPUT_KINDS,
   type FunctionContract,
@@ -140,6 +142,8 @@ export interface BuildOptions {
   maxLength?: number;
   /** What the build delivers; overrides the input file. */
   output?: OutputKind;
+  /** What lowers the IR; overrides the input file. */
+  backend?: BackendKind;
   /** The runtime to link against; overrides the input file. */
   runtime?: RuntimeKind;
   /** Print the prompt sent to the model for every attempt. */
@@ -206,6 +210,48 @@ function resolveOutputKind(requested: OutputKind | undefined): OutputKind {
       stage: "input",
       message: `unknown output kind "${String(requested)}"`,
       detail: `expected one of ${OUTPUT_KINDS.join(", ")}`,
+    });
+  }
+  return requested;
+}
+
+/**
+ * Normalizes the requested lowering. A project that names none gets the one
+ * its output kind implies, because a module can only come from the backend
+ * that encodes one.
+ *
+ * The two axes are separate and both are real: `output` is how far the build
+ * carries the IR and `backend` is what writes the artifact it carries it into.
+ * A `c` backend delivers the C, the assembly or an object without becoming a
+ * different backend, so naming one is not naming the other.
+ *
+ * What each backend can deliver is a table rather than a test per pair, so a
+ * backend added later states its reach once. A module links into nothing this
+ * build links, and a `c` backend writes no module, so the two are each other's
+ * only partner today.
+ */
+const BACKEND_DELIVERS: Record<BackendKind, readonly OutputKind[]> = {
+  c: ["ir", "c", "asm", "machine"],
+  wasm: ["wasm"],
+};
+
+function resolveBackend(requested: BackendKind | undefined, output: OutputKind): BackendKind {
+  if (requested === undefined) return output === "wasm" ? "wasm" : "c";
+  if (!BACKENDS.includes(requested)) {
+    throw new CompilerError({
+      category: "InputError",
+      stage: "input",
+      message: `unknown backend "${String(requested)}"`,
+      detail: `expected one of ${BACKENDS.join(", ")}`,
+    });
+  }
+  if (!BACKEND_DELIVERS[requested].includes(output)) {
+    const deliverable = BACKEND_DELIVERS[requested].join(", ");
+    throw new CompilerError({
+      category: "InputError",
+      stage: "input",
+      message: `the "${requested}" backend cannot deliver the "${output}" output kind`,
+      detail: `it delivers ${deliverable}; build it without --backend, or name one of ${BACKENDS.filter((backend) => BACKEND_DELIVERS[backend].includes(output)).join(", ")}`,
     });
   }
   return requested;
@@ -556,6 +602,7 @@ async function recordRejected(
     target: previous?.target ?? normalizeTarget(undefined),
     status: "failed",
     outputKind: previous?.outputKind ?? "machine",
+    backend: previous?.backend ?? "c",
     runtime: previous?.runtime ?? "none",
     createdAt: previous?.createdAt ?? stamp,
     updatedAt: stamp,
@@ -664,6 +711,7 @@ interface UnitReuseRequest {
   workspace: CodegenWorkspace;
   functionName: string;
   output: OutputKind;
+  lowering: BackendKind;
   linksObjects: boolean;
   /** The contract graph a stored candidate is read against. */
   program: ProgramContract;
@@ -728,6 +776,7 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
     request.workspace,
     entry.selected,
     request.output,
+    request.lowering,
     request.linksObjects,
     stored === undefined || !callsOutOfProgram(stored.text, request.program, request.callable),
   ).filter((file) => !existsSync(file));
@@ -789,6 +838,7 @@ export async function runBuild(
   let target: TargetSpec;
   let outputKind: OutputKind;
   let runtimeKind: RuntimeKind;
+  let backendKind: BackendKind;
   try {
     project = readInput(absoluteInput);
     const input = project.input;
@@ -796,6 +846,7 @@ export async function runBuild(
     target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
     outputKind = resolveOutputKind(options.output ?? input.output);
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
+    backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
   } catch (cause) {
     throw await recordRejected(store, paths, id, previousBuild, cause);
   }
@@ -826,6 +877,7 @@ export async function runBuild(
     target,
     status: "building",
     outputKind,
+    backend: backendKind,
     runtime: runtimeKind,
     createdAt,
     updatedAt: createdAt,
@@ -922,6 +974,7 @@ export async function runBuild(
         program,
         target,
         output: outputKind,
+        backend: backendKind,
         runtime: runtimeKind,
         test,
         benchmark: benchmarkConfig,
@@ -932,7 +985,7 @@ export async function runBuild(
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too.
     const prepareRuntime = runtimePreparer({
-      output: outputKind,
+      lowering: backendKind,
       runtime: runtimeKind,
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
@@ -1020,6 +1073,7 @@ export async function runBuild(
         workspace,
         functionName,
         output: outputKind,
+        lowering: backendKind,
         linksObjects: checksProgram,
         program,
         callable: callableSymbols(unit.contract, contracts),
@@ -1055,6 +1109,7 @@ export async function runBuild(
         semantics,
         target,
         output: outputKind,
+        lowering: backendKind,
         runtime: runtimeKind,
         backend: () => {
           if (options.reuse) {
@@ -1587,13 +1642,14 @@ export async function runStored(
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
+  const lowering = build?.backend ?? (output === "wasm" ? "wasm" : "c");
   const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
   // The contract names no target, so the one the build ran for is what the
   // stored candidate is tested and measured against.
   const target = build?.target ?? normalizeTarget(input.target);
   const base = store.resolve(paths.work);
   const prepareRuntime = runtimePreparer({
-    output,
+    lowering,
     runtime,
     workspace: { workDirectory: base, functionName: program.entry.file },
   });
@@ -1630,6 +1686,7 @@ export async function runStored(
       program,
       target,
       output,
+      lowering,
       runtime,
       candidate,
       workspace,

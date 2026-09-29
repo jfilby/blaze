@@ -1,6 +1,7 @@
 language = "typescript"
 sourceFile = "main.ts"
 output = "machine"
+backend = "c"
 
 [model]
 provider = "openrouter"

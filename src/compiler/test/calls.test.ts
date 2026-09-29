@@ -195,6 +195,7 @@ function keyOf(of: ProgramContract, name: string, file: string): string {
     program: of,
     target: TARGET,
     output: "machine",
+    backend: "c",
     runtime: "none",
     test: { randomCases: 0, maxLength: 0, seed: 0 },
     benchmark: { iterations: 1 },

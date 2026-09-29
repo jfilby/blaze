@@ -3,6 +3,7 @@ sourceFile = "hosted_dot_product.nim"
 entry = "dotProduct"
 runtime = "nim"
 output = "machine"
+backend = "c"
 
 [target]
 arch = "x86_64"
