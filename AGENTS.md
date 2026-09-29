@@ -46,10 +46,26 @@ Make use of:
 
 The compiler's stages are:
 
-<1. original source, e.g. typescript> -->
-<2. ir> --> <3. target low-level, e.g. asm, wasm, machine code> --> <4. binary>
+<1. original source, e.g. TypeScript>
+  -- rule-based transform -->
+
+<2. IR>
+  -- LLM verification and proposed fixes -->
+
+<3. verified/revised IR>
+  -- rule-based transform -->
+
+<4. target low-level code, e.g. ASM, WASM, machine code>
+  -- LLM verification and proposed fixes -->
+
+<5. verified/revised target low-level code, e.g. ASM, WASM, machine code>
+  -- compile -->
+
+<6. binary>
 
 
-1 --> 2  requires LLM generation
-2 --> 3  requires compiler lowering
+LLMs are used to verify both IR and low-level targets. They do not implement
+fixes themselves. Instead, they inspect an artifact and propose fixes. The
+rule-based compiler evaluates those proposals and, when they are valid, applies
+them by regenerating the artifact.
 
