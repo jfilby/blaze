@@ -197,6 +197,7 @@ export interface ProjectPaths {
   outputSource: string;
   outputIr: string;
   outputModule: string;
+  outputObject: string;
   outputProgram: string;
 }
 
@@ -237,10 +238,23 @@ function resolveOutputKind(requested: OutputKind | undefined): OutputKind {
 const BACKEND_DELIVERS: Record<BackendKind, readonly OutputKind[]> = {
   c: ["ir", "c", "asm", "machine"],
   wasm: ["wasm"],
+  machine: ["machine"],
 };
 
+/**
+ * The backend an output kind names when a project names none. Each kind is
+ * delivered by the backend that writes it: a module by the one that encodes a
+ * module, an object by the one that encodes an object, and the text a C
+ * compiler reads by the one that writes it.
+ */
+export function impliedBackend(output: OutputKind): BackendKind {
+  if (output === "wasm") return "wasm";
+  if (output === "machine") return "machine";
+  return "c";
+}
+
 function resolveBackend(requested: BackendKind | undefined, output: OutputKind): BackendKind {
-  if (requested === undefined) return output === "wasm" ? "wasm" : "c";
+  if (requested === undefined) return impliedBackend(output);
   if (!BACKENDS.includes(requested)) {
     throw new CompilerError({
       category: "InputError",
@@ -338,6 +352,7 @@ function projectPaths(id: string): ProjectPaths {
     outputSource: `${root}/output/${id}.c`,
     outputIr: `${root}/output/${id}.ir`,
     outputModule: `${root}/output/${id}.wasm`,
+    outputObject: `${root}/output/${id}.o`,
     outputProgram: `${root}/output/${id}.program`,
   };
 }
@@ -1527,6 +1542,17 @@ export async function runBuild(
         } else if (outputKind === "ir") {
           await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
           outputPath = store.resolve(paths.outputBinary);
+        } else if (backendKind === "machine") {
+          // The object is the artifact the compiler wrote, so it is what the
+          // build delivers beside the IR it was written from. A `machine`
+          // build also delivers the executable, which is what a person runs.
+          await deliver(`${functionName}/${winner}.o`, paths.outputObject);
+          outputAssemblyPath = store.resolve(paths.outputObject);
+          outputPath = store.resolve(paths.outputObject);
+          if (outputKind === "machine") {
+            await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
+            outputPath = store.resolve(paths.outputBinary);
+          }
         } else {
           // The delivered text is the one the object was built from, so it can
           // be fed straight back to the toolchain that reads it.
@@ -1679,7 +1705,7 @@ export async function runStored(
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
-  const lowering = build?.backend ?? (output === "wasm" ? "wasm" : "c");
+  const lowering = build?.backend ?? impliedBackend(output);
   const mode = build?.mode ?? "debug";
   const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
   // The contract names no target, so the one the build ran for is what the

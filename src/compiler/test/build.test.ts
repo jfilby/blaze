@@ -94,7 +94,9 @@ test("a backend nobody has heard of is refused by name", async () => {
 
 test("a build names the backend it used, and one that names none gets the output kind's", async () => {
   // The backend is what wrote the artifact, so a record that does not say
-  // which one cannot be re-verified as the same build.
+  // which one cannot be re-verified as the same build. An output kind names the
+  // backend that writes it: an object is delivered by the one that encodes an
+  // object, and both of those are asked for here.
   const named = await workspace("backend-recorded", { ...INPUT, backend: "c" });
   const outcome = await runBuild(
     "input.toml",
@@ -109,7 +111,7 @@ test("a build names the backend it used, and one that names none gets the output
 
   const implied = await workspace("backend-implied");
   await runBuild("input.toml", { cwd: implied, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
-  assert.equal((await inspectProject("input", implied)).backend, "c");
+  assert.equal((await inspectProject("input", implied)).backend, "machine");
 });
 
 test("a mode nobody has heard of is refused by name", async () => {
@@ -317,24 +319,40 @@ test("the delivered executable computes the contracted function", async () => {
   );
 });
 
-test("the delivered IR is the implementation that was verified, and the assembly is what it was lowered into", async () => {
+test("what a build delivers is the artifact its backend wrote beside the IR it verified", async () => {
   const directory = await workspace("asm");
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.ok(outcome.outputAssemblyPath !== null);
 
   // Every kind answers in the IR, so what a build verified is the IR, and the
-  // text it delivers beside the assembly is that IR itself and not a copy of
+  // text it delivers beside the object is that IR itself and not a copy of
   // something else: what the model wrote is what the contract was checked on.
   const stored = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
   ) as Record<string, { text: string }[]>;
-  const implementation = await readFile(outcome.outputAssemblyPath.replace(/\.s$/, ".ir"), "utf8");
+  const implementation = await readFile(outcome.outputAssemblyPath.replace(/\.o$/, ".ir"), "utf8");
   assert.equal(implementation, stored.dotProduct[0].text);
 
-  // What a machine build delivers is the assembly the toolchain made of the C
-  // the compiler wrote for that IR, so the delivered text is the target the
-  // object was assembled from rather than the IR itself.
-  const delivered = await readFile(outcome.outputAssemblyPath, "utf8");
+  // A build that lowers the IR itself delivers the object it encoded, and what
+  // the object defines is the symbol the program calls.
+  const object = await readFile(outcome.outputAssemblyPath);
+  assert.equal(object.subarray(0, 4).toString("latin1"), "\x7fELF");
+  const defined = run("nm", ["--defined-only", "--extern-only", outcome.outputAssemblyPath], { timeoutMs: 30_000 });
+  assert.equal(defined.code, 0, defined.stderr);
+  assert.deepEqual(defined.stdout.trim().split("\n").map((line) => line.trim().split(/\s+/).pop()), ["dotProduct"]);
+
+  // The `c` backend delivers the assembly the toolchain made of the C the
+  // compiler wrote for that IR, so its text is the target the object was
+  // assembled from rather than the IR itself.
+  const throughC = await workspace("asm-c", { ...INPUT, backend: "c" });
+  const cOutcome = await runBuild(
+    "input.toml",
+    { cwd: throughC, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  assert.ok(cOutcome.outputAssemblyPath !== null);
+  const delivered = await readFile(cOutcome.outputAssemblyPath, "utf8");
   assert.notEqual(delivered, implementation, "the assembly is not the IR it was lowered from");
   assert.match(delivered, /^\s*\.file\s+"c1\.lower\.c"$/m, "the assembly is the compiler's own lowering");
   assert.match(delivered, /^\s*\.globl\s+dotProduct$/m, "the assembly defines the function the IR describes");

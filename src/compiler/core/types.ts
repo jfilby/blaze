@@ -350,17 +350,18 @@ export const OUTPUT_KINDS: readonly OutputKind[] = ["c", "asm", "machine", "wasm
  * names what the compiler itself writes; everything after that is the
  * toolchain's:
  *
- *   c    the C the compiler wrote, which `gcc -c` makes an object of
- *   wasm  the module the compiler encoded itself, which needs no toolchain
+ *   c       the C the compiler wrote, which `gcc -c` makes an object of
+ *   wasm    the module the compiler encoded itself, which needs no toolchain
+ *   machine the object the compiler encoded itself, instructions and all
  *
  * A backend is not a distance: how far the build carries the IR is `output`,
  * and a `c` backend delivers the C, the assembly or an object without becoming
  * a different backend. A project names none, and gets the one its output kind
  * implies.
  */
-export type BackendKind = "c" | "wasm";
+export type BackendKind = "c" | "wasm" | "machine";
 
-export const BACKENDS: readonly BackendKind[] = ["c", "wasm"];
+export const BACKENDS: readonly BackendKind[] = ["c", "wasm", "machine"];
 
 
 /**

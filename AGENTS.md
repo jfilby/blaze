@@ -19,12 +19,15 @@ tests all live there. Run commands from it.
   `machine` as assembly and an object, `wasm` as a WebAssembly module.
   `backend` is what writes the artifact, named for what the compiler itself
   emits — `c` for the C that `gcc` finishes, `wasm` for a module
-  (`toolchain/ir-wasm.ts`) the compiler encodes itself and no toolchain
-  touches. A project names neither and gets the pair the output kind implies;
-  what each backend can deliver is the table in `compiler.ts:BACKEND_DELIVERS`,
-  so a pair that cannot be built is refused where the input is read. Everything
-  is lowered on the one path in `codegen.ts:materialize`, and the backend is in
-  the reuse key (`incremental.ts`) so an object is never shared across one.
+  (`toolchain/ir-wasm.ts`) and `machine` for an object
+  (`toolchain/ir-machine.ts`, over the encoder in `toolchain/x86.ts` and the
+  object writer in `toolchain/elf64.ts`) that the compiler encodes itself and
+  no toolchain touches. A project names neither and gets the pair the output
+  kind implies; what each backend can deliver is the table in
+  `compiler.ts:BACKEND_DELIVERS`, so a pair that cannot be built is refused
+  where the input is read. Everything is lowered on the one path in
+  `codegen.ts:materialize`, and the backend is in the reuse key
+  (`incremental.ts`) so an object is never shared across one.
 - A third setting says how hard the toolchain builds. `mode` is `debug`
   (`-O0 -g`, the default), `release` (`-O2`), or `danger` (release, and the
   generated runtime leaves its guards out). The flags are one list in

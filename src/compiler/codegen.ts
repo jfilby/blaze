@@ -20,6 +20,7 @@
 
 import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
 import { buildModule, describeModule } from "./toolchain/ir-wasm.ts";
+import { buildObject as buildMachineObject, describeMachineObject } from "./toolchain/ir-machine.ts";
 import { compileFunctionC } from "./toolchain/ir-c.ts";
 import { parseSemanticFunction, printSemanticFunction } from "./semantics/ir-text.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
@@ -77,11 +78,10 @@ import type { IncrementalEntry } from "./incremental.ts";
 const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
   c: "C",
   asm: "assembly",
-  // A `machine` build delivers the object, so it is named for that. The
-  // assembly beside it is written by `gcc -S` so a review can read it and a
-  // size objective can weigh it (codegen.ts:500), and is never assembled: the
-  // object is a separate `gcc -c` of the same C (ir-c.ts), because nothing
-  // consumes the `.s`.
+  // A `machine` build delivers an object. The `c` backend writes it with
+  // `gcc -c` and the assembly beside it with `gcc -S`, so a review reads the
+  // assembly and a size objective weighs it, and the assembly is never
+  // assembled. The machine backend writes the object itself and delivers that.
   machine: "machine code",
   wasm: "WebAssembly",
   ir: "semantic IR",
@@ -208,7 +208,8 @@ interface CandidatePaths {
  * Every output kind answers in the IR, so the implementation is the IR on
  * every one of them, and what differs is the text the compiler lowered it
  * into: the C it wrote for a `c` build, the assembly the C compiler made of
- * that C for an `asm` or `machine` build, and the module for a `wasm` one.
+ * that C for an `asm` or `machine` one, the module for a `wasm` one, and
+ * nothing at all for a `machine` backend, which writes the object itself.
  */
 function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: OutputKind): CandidatePaths {
   const base = `${workspace.workDirectory}/${candidate}`;
@@ -257,7 +258,10 @@ export function reusableFiles(
   standalone: boolean,
 ): string[] {
   const paths = candidateFiles(workspace, candidate, output);
-  const delivered = output === "ir" ? paths.implementation : paths.lowered;
+  // What a build delivers is what its backend wrote: an object the compiler
+  // encoded itself is delivered as the object, and everything else is
+  // delivered as the text it was lowered into.
+  const delivered = lowering === "machine" ? paths.object : output === "ir" ? paths.implementation : paths.lowered;
   if (lowering === "wasm") return [delivered, paths.module];
   // A kind that links a candidate on its own delivers the executable that
   // links, so the executable is a file the build consumes and one that is not
@@ -492,28 +496,37 @@ async function materialize(
   }
   // The ABI header exists before the candidate is compiled: the C the compiler
   // wrote includes it, and the harness always does. It is written and compiled
-  // once for the whole build, not once per candidate.
+  // once for the whole build, not once per candidate. The machine backend
+  // links the same runtime object and includes no header of its own, so it
+  // prepares the same runtime and lowers nothing through it.
   const runtime = await request.prepareRuntime();
-  // A `c` build delivers the C the compiler wrote, an `asm` or `machine` one
-  // the assembly the C compiler made of it, and an `ir` one the IR itself.
-  // Only the last is the IR, which is the same for every candidate a review
-  // changed nothing in, so a size objective weighs the text below instead.
-  const deliversAssembly = request.output === "asm" || request.output === "machine";
-  const lowered = await compileFunctionC({
-    fn,
-    contract: request.contract,
-    mode: request.mode,
-    target: request.target,
-    sourcePath: paths.loweredSource,
-    objectPath: paths.object,
-    ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
-    ...(deliversAssembly ? { assemblyPath: paths.lowered } : {}),
-  });
-  // The lowering weighs what the build delivers: the assembly when it asked
-  // for one, the C otherwise. An `ir` build delivers the model-written IR,
-  // which is the same text for every candidate and orders them by nothing.
-  const textSizeBytes =
-    request.output === "ir" ? (await stat(paths.implementation)).size : lowered.textSizeBytes;
+  // What the object is, and the weight the lowering weighs. A `c` build
+  // delivers the C, an `asm` one the assembly the C compiler made of it, a
+  // `machine` one the object the compiler wrote itself, and an `ir` one the
+  // IR: only the last is the same for every candidate a review changed
+  // nothing in, so a size objective weighs the text below instead.
+  const deliversAssembly = request.output === "asm" || (request.output === "machine" && request.lowering === "c");
+  const lowered =
+    request.lowering === "machine"
+      ? await buildMachineObject({
+          fn,
+          contract: request.contract,
+          target: request.target,
+          callable: request.callable,
+          objectPath: paths.object,
+          candidate: candidate.id,
+        })
+      : await compileFunctionC({
+          fn,
+          contract: request.contract,
+          mode: request.mode,
+          target: request.target,
+          sourcePath: paths.loweredSource,
+          objectPath: paths.object,
+          ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
+          ...(deliversAssembly ? { assemblyPath: paths.lowered } : {}),
+        });
+  const textSizeBytes = request.output === "ir" ? (await stat(paths.implementation)).size : lowered.textSizeBytes;
   const object = { objectSizeBytes: lowered.objectSizeBytes };
   if (!standalone) {
     // Assembled, but not linked: the program this candidate is part of is the
@@ -882,10 +895,10 @@ function revise(
 
 /**
  * The target a review of the lowered artifact reads. The C and the assembly are
- * text the compiler wrote, so a review reads them as they stand. A module is
- * not text, so a review of one reads what it holds instead: the sections it is
- * made of and what it exports, which is the whole of what a reader can be told
- * about a module without disassembling it.
+ * text the compiler wrote, so a review reads them as they stand. A module and
+ * an object are not text: a review of a module reads what it holds, and a
+ * review of an object reads the listing a processor would run, which is the
+ * whole of what a reader can be told about either without it.
  */
 async function targetArtifact(
   request: CodegenRequest,
@@ -898,6 +911,9 @@ async function targetArtifact(
       text: describeModule(module),
       note: "A module is binary, so this is what it holds rather than a listing of it. The IR it was built from is the artifact the rules are applied to, and the module is regenerated from it.",
     };
+  }
+  if (request.lowering === "machine") {
+    return describeMachineObject(paths.object, await readFile(paths.object));
   }
   return { text: await readFile(paths.lowered, "utf8"), note: null };
 }

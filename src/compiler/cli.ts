@@ -120,7 +120,8 @@ Options:
   --output <kind>           what is built: ir (semantic IR the compiler lowers),
                             c, asm, machine or wasm (default ir)
   --backend <name>           what lowers the IR: c (the C the compiler writes,
-                            which gcc makes an object of) or wasm (a module the
+                            which gcc makes an object of), wasm (a module the
+                            compiler encodes itself) or machine (an object the
                             compiler encodes itself); defaults to the one the
                             output kind implies
   --mode <name>              how the toolchain builds: debug (-O0 -g, default),

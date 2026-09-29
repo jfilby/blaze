@@ -67,8 +67,11 @@ test("a key is the same for the same inputs and different for anything else", ()
     { target: { ...INPUT.target, arch: "aarch64" as const } },
     { output: "asm" as const },
     // The backend is what wrote the artifact, so an object stored by one is not
-    // the object of another even when the output kind is the same.
+    // the object of another even when the output kind is the same: a `c` object
+    // is what gcc made of the C the compiler wrote, and a `machine` one is what
+    // the compiler encoded.
     { backend: "wasm" as const },
+    { backend: "machine" as const },
     // The flags an object was built with are in no contract and no target, so a
     // mode change has to reach the key or a build reuses an object that was
     // built to be read rather than one built to run.
@@ -278,6 +281,14 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("c", false, true), [".c"]);
   // A module is the whole deliverable of a wasm build, and it links nothing.
   assert.deepEqual(names("wasm", false, true, "wasm"), [".s", ".wasm"]);
+  // A backend that writes the object itself delivers that object, which is also
+  // what a program build links, so the two questions name the same file twice
+  // and the list is still one list.
+  assert.deepEqual(names("machine", true, true, "machine"), [".o", "", ".o"]);
+  assert.deepEqual(names("machine", false, true, "machine"), [".o", ""]);
+  // The same output kind through the `c` backend delivers the assembly the tool
+  // chain made of the C, which is a file of its own beside the object.
+  assert.deepEqual(names("machine", true, true), [".s", "", ".o"]);
   // A program build links the object of every function it holds, whatever the
   // output kind and whether or not the candidate also links on its own. The
   // executable question and the object question are separate: a standalone

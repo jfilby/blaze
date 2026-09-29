@@ -1,0 +1,667 @@
+/**
+ * What the machine code the compiler lowers a function's IR into computes.
+ *
+ * A `machine` build is this file and nothing else: the model wrote the IR, and
+ * the instructions below are what a processor runs. These lower hand-written IR,
+ * link it against a driver, a callee that counts how many times it was called
+ * and the runtime, and run it, so a lowering that does not assemble, that runs
+ * a value twice, or that answers something other than what the IR states fails
+ * here rather than in a candidate's verification.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertMachineTarget, buildObject } from "../toolchain/ir-machine.ts";
+import { buildStandaloneRuntime } from "../runtime/standalone.ts";
+import { cDeclarationType } from "../toolchain/linker.ts";
+import { parseType, symbolOf } from "../semantics/contract.ts";
+import { run } from "../core/process.ts";
+import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
+import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+
+const F64: SemanticType = { kind: "primitive", name: "f64" };
+const F32: SemanticType = { kind: "primitive", name: "f32" };
+const I32: SemanticType = { kind: "primitive", name: "i32" };
+const I8: SemanticType = { kind: "primitive", name: "i8" };
+const U8: SemanticType = { kind: "primitive", name: "u8" };
+const I64: SemanticType = { kind: "primitive", name: "i64" };
+const U64: SemanticType = { kind: "primitive", name: "u64" };
+const USIZE: SemanticType = { kind: "primitive", name: "usize" };
+const BOOL: SemanticType = { kind: "primitive", name: "bool" };
+const TEXT: SemanticType = { kind: "text" };
+const PTR: SemanticType = { kind: "ptr", of: F64 };
+const VOID: SemanticType = { kind: "void" };
+const POINT: SemanticType = { kind: "ref", of: null, name: "Point" };
+
+const TARGET: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
+
+const POINT_LAYOUT: ObjectLayout = {
+  name: "Point",
+  size: 16,
+  align: 8,
+  fields: [
+    { name: "x", type: "f64", offset: 0 },
+    { name: "y", type: "f64", offset: 8 },
+  ],
+};
+
+function subject(returns: SemanticType, entry: SemanticBlock, params: SemanticSlot[] = [], objects: Record<string, ObjectLayout> = {}): SemanticFunction {
+  return {
+    name: "subject",
+    symbol: "subject",
+    params,
+    returns,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects,
+    calls: [],
+    entry,
+  };
+}
+
+/** The contract of a function this file builds by hand, which is all a lowering reads. */
+function contracted(fn: SemanticFunction): FunctionContract {
+  return {
+    version: "1",
+    function: {
+      name: fn.name,
+      symbol: fn.symbol,
+      params: fn.params.map((param) => ({ name: param.name, type: typeTextOf(param) })),
+      returns: typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns }),
+    },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: fn.objects, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+}
+
+function typeTextOf(slot: SemanticSlot): string {
+  const type = slot.kind === "value" || slot.kind === "object" ? slot.type : slot.kind === "text" ? TEXT : F64;
+  // The contract type language has no string, and a string is a C string: a
+  // pointer to the bytes of one.
+  if (type.kind === "text") return "ptr<u8>";
+  if (type.kind === "ref") return type.name === undefined ? "ref<any>" : `ref<${type.name}>`;
+  if (type.kind === "ptr" || type.kind === "slice") return `ptr<${typeTextOf({ kind: "value", name: "", mutable: false, type: type.of })}>`;
+  if (type.kind === "primitive") return type.name;
+  return "f64";
+}
+
+/** A body that hands one value back. */
+function handsBack(value: SemanticValue): SemanticBlock {
+  return { id: "entry", statements: [], releases: [], terminator: { k: "return", value } };
+}
+
+const local = (name: string, type: SemanticType = F64): SemanticValue => ({ k: "local", type, name });
+const number = (text: string, type: SemanticType = F64): SemanticValue => ({ k: "const", type, text });
+const literal = (text: string): SemanticValue => ({ k: "text", type: TEXT, parts: [{ k: "text", value: text }] });
+
+/** A call to `f`, which the driver counts, so a value written twice shows. */
+const counted = (): SemanticValue => ({
+  k: "call",
+  type: F64,
+  call: {
+    callee: "f",
+    builtin: false,
+    signature: { name: "f", symbol: "f", params: [{ name: "v", type: "f64" }], returns: "f64" },
+    args: [local("v")],
+    argTypes: [F64],
+    returns: F64,
+    effects: [],
+    ownership: "none",
+    retain: false,
+  },
+});
+
+/** A call of the compiler's own, which the C library answers. */
+const roundCall = (argument: SemanticValue): SemanticCall => ({
+  callee: "Math.round",
+  builtin: true,
+  signature: { name: "Math.round", symbol: "Math.round", params: [{ name: "v", type: "f64" }], returns: "f64" },
+  args: [argument],
+  argTypes: [F64],
+  returns: F64,
+  effects: [],
+  ownership: "none",
+  retain: false,
+});
+
+const NUMBERS: SemanticSlot[] = [
+  { kind: "value", name: "v", mutable: false, type: F64 },
+  { kind: "value", name: "w", mutable: false, type: F64 },
+];
+
+/**
+ * Lowers one function, links the object beside a driver and a callee that
+ * counts its calls, and answers what the machine code wrote. The callee is a
+ * translation unit of its own so the C compiler cannot fold two calls to one
+ * into one: the count is what the program did, whatever the C compiler could
+ * prove about it.
+ */
+async function lowered(fn: SemanticFunction, driver: (name: string) => string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-machine-"));
+  const contract = contracted(fn);
+  const runtime = await buildStandaloneRuntime(directory);
+  await writeFile(
+    join(directory, "callee.c"),
+    [
+      "int calls = 0;",
+      "double f(double v) { calls++; return v + 1.0; }",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const object = join(directory, `${fn.symbol}.o`);
+  const built = await buildObject({
+    fn,
+    contract,
+    target: TARGET,
+    callable: new Set(["f"]),
+    objectPath: object,
+  });
+  assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdbool.h>",
+      "#include <stdint.h>",
+      "#include <string.h>",
+      "extern int calls;",
+      "extern double f(double v);",
+      `struct Point { double x; double y; };`,
+      `extern ${cDeclarationType(parseType(typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns })))} ${symbolOf(contract)}(${contract.function.params
+        .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
+        .join(", ")});`,
+      `int main(void) { ${driver(symbolOf(contract))} return 0; }`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, fn.symbol);
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "driver.c"), join(directory, "callee.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 120_000 },
+  );
+  assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, `the machine code must run:\n${result.stderr}`);
+  return result.stdout;
+}
+
+test("a value the IR calls is run once, whichever form writes it down", async () => {
+  // Each of these hands an answer back from a call, and a lowering that reads
+  // the value once as the side that decides and once as the answer runs the
+  // callee twice.
+  const shapes: { name: string; value: SemanticValue; returns: SemanticType }[] = [
+    {
+      name: "an interpolated part",
+      returns: TEXT,
+      value: { k: "text", type: TEXT, parts: [{ k: "text", value: "n=" }, { k: "value", value: counted() }] },
+    },
+    {
+      name: "an arm that decides",
+      returns: F64,
+      value: {
+        k: "logical",
+        type: F64,
+        op: "and",
+        left: counted(),
+        right: number("1"),
+      },
+    },
+    {
+      name: "a condition",
+      returns: F64,
+      value: { k: "select", type: F64, condition: { k: "compare", type: BOOL, op: "gt", operand: F64, left: counted(), right: number("0") }, then: number("1"), otherwise: number("0") },
+    },
+    {
+      name: "a side of a sum",
+      returns: F64,
+      value: { k: "arith", type: F64, op: "mul", left: counted(), right: number("2") },
+    },
+  ];
+  for (const shape of shapes) {
+    const fn = subject(shape.returns, handsBack(shape.value), [{ kind: "value", name: "v", mutable: false, type: F64 }]);
+    // The result is bound first: a C compiler may read the counter before it
+    // makes the call, and what is being asked is how many times it ran.
+    const returned = cDeclarationType(parseType(typeTextOf({ kind: "value", name: "", mutable: false, type: shape.returns })));
+    const format = shape.returns === TEXT ? "%s" : "%.17g";
+    const printed = await lowered(fn, (name) => `{ ${returned} r = ${name}(3.0); printf("${format}|%d", r, calls); }`);
+    assert.equal(printed.endsWith("|1"), true, `${shape.name} ran the callee once:\n${printed}`);
+  }
+});
+
+test("a whole number is computed at the width the language promotes it to", async () => {
+  const cases: { name: string; type: SemanticType; op: "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "and" | "or" | "xor"; left: string; right: string; expected: string }[] = [
+    { name: "a byte added to a byte wraps at its own width", type: U8, op: "add", left: "200", right: "100", expected: "44" },
+    { name: "a byte remainder is a whole number of the promoted width", type: U8, op: "mod", left: "200", right: "100", expected: "0" },
+    { name: "a signed byte divides as the number it is", type: I8, op: "div", left: "-7", right: "2", expected: "-3" },
+    { name: "an unsigned division reads both sides as unsigned", type: U64, op: "div", left: "-7", right: "2", expected: "9223372036854775804" },
+    { name: "a shift moves a whole number at its own width", type: I32, op: "shl", left: "3", right: "4", expected: "48" },
+    { name: "a shift right keeps the sign of a signed number", type: I32, op: "shr", left: "-16", right: "2", expected: "-4" },
+    { name: "a shift right of an unsigned number is a logical one", type: U64, op: "shr", left: "-16", right: "2", expected: "4611686018427387900" },
+    { name: "a remainder of a signed number keeps the sign of the left", type: I64, op: "mod", left: "-7", right: "2", expected: "-1" },
+  ];
+  for (const entry of cases) {
+    const fn = subject(entry.type, handsBack({ k: "arith", type: entry.type, op: entry.op, left: number(entry.left, entry.type), right: number(entry.right, entry.type) }));
+    const printed = await lowered(fn, (name) => `printf("%lld", (long long)${name}());`);
+    assert.equal(printed, entry.expected, entry.name);
+  }
+});
+
+test("a float is computed at the precision it is written at", async () => {
+  const single = subject(F32, handsBack({ k: "arith", type: F32, op: "div", left: number("1", F32), right: number("3", F32) }));
+  assert.equal(await lowered(single, (name) => `printf("%.9g", (double)${name}());`), "0.333333343");
+
+  const negated = subject(F64, handsBack({ k: "unary", type: F64, op: "neg", operand: number("0") }));
+  assert.equal(await lowered(negated, (name) => `printf("%.17g", ${name}());`), "-0");
+
+  const smallest = subject(F64, handsBack({ k: "arith", type: F64, op: "min", left: number("2.5"), right: number("-1.5") }));
+  assert.equal(await lowered(smallest, (name) => `printf("%.17g", ${name}());`), "-1.5");
+
+  // `Math.round` is the one maths builtin that is written out: the C library
+  // rounds halves away from zero and the language rounds them up, so a value
+  // that rounds to zero from below keeps its sign.
+  const rounded = subject(F64, handsBack({ k: "call", type: F64, call: roundCall(number("-0.5")) }));
+  assert.equal(await lowered(rounded, (name) => `printf("%.17g", ${name}());`), "-0");
+});
+
+test("a loop counts, walks and repeats as many times as the IR states", async () => {
+  const counted = subject(F64, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("1", I32),
+          to: number("10", I32),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: local("i", I32), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+  });
+  assert.equal(await lowered(counted, (name) => `printf("%.17g", ${name}());`), "45");
+
+  const down = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("5", I32),
+          to: number("1", I32),
+          inclusive: true,
+          down: true,
+          step: null,
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: local("i", I32), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  assert.equal(await lowered(down, (name) => `printf("%d", ${name}());`), "15");
+
+  const whileLoop = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "i", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "while",
+          condition: { k: "compare", type: BOOL, op: "lt", operand: I32, left: local("i", I32), right: number("5", I32) },
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [{ k: "set", name: "i", op: "+=", value: number("1", I32), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("i", I32) },
+  });
+  assert.equal(await lowered(whileLoop, (name) => `printf("%d", ${name}());`), "5");
+
+  const walk = subject(F64, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "each",
+          index: "i",
+          element: "element",
+          elementType: F64,
+          of: "a",
+          length: local("n", USIZE),
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: local("element"), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+  }, [
+    { kind: "value", name: "a", mutable: false, type: { kind: "slice", of: F64 } },
+    { kind: "value", name: "n", mutable: false, type: USIZE },
+  ]);
+  const walked = await lowered(
+    walk,
+    (name) => `double v[3] = {1.5, 2.5, 4.0}; printf("%.17g", ${name}(v, 3));`,
+  );
+  assert.equal(walked, "8");
+});
+
+test("a loop leaves for another block, and the names it declared go with it", async () => {
+  const fn = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "i", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "while",
+          condition: { k: "compare", type: BOOL, op: "lt", operand: I32, left: local("i", I32), right: number("10", I32) },
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [
+              { k: "set", name: "i", op: "+=", value: number("1", I32), line: 4 },
+              {
+                k: "if",
+                line: 5,
+                condition: { k: "compare", type: BOOL, op: "eq", operand: I32, left: local("i", I32), right: number("4", I32) },
+                then: {
+                  id: "leave",
+                  releases: [],
+                  statements: [],
+                  terminator: { k: "jump", target: "out", releases: [] },
+                },
+                otherwise: null,
+              },
+              { k: "set", name: "total", op: "+=", value: number("2", I32), line: 6 },
+            ],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  assert.equal(await lowered(fn, (name) => `printf("%d", ${name}());`), "6");
+});
+
+test("text is written, measured, joined and compared by what it says", async () => {
+  const printed = subject(VOID, {
+    id: "entry",
+    statements: [
+      { k: "printText", line: 1, value: literal("value ") },
+      { k: "printNumber", line: 2, value: local("v") },
+      { k: "printNewline", line: 3 },
+      { k: "printText", line: 4, value: { k: "text", type: TEXT, parts: [{ k: "text", value: "n=" }, { k: "value", value: local("v") }] } },
+      { k: "printNewline", line: 5 },
+      { k: "printText", line: 6, value: { k: "toText", type: TEXT, of: { k: "nothing", type: PTR } } },
+      { k: "printNewline", line: 7 },
+    ],
+    releases: [],
+    terminator: { k: "return", value: null },
+  }, [{ kind: "value", name: "v", mutable: false, type: F64 }]);
+  // An absent reference is the word the source prints, and an absent string
+  // writes nothing at all, which is what the runtime says of a null pointer.
+  assert.equal(await lowered(printed, (name) => `${name}(3.5);`), "value 3.5\nn=3.5\nnull\n");
+
+  const length = subject(USIZE, handsBack({ k: "length", type: USIZE, of: { k: "arith", type: TEXT, op: "concat", left: literal("ab"), right: local("v", TEXT) } }), [
+    { kind: "text", name: "v", mutable: false },
+  ]);
+  assert.equal(await lowered(length, (name) => `printf("%zu", ${name}("cde"));`), "5");
+
+  const joined = subject(TEXT, handsBack({ k: "arith", type: TEXT, op: "concat", left: local("v", TEXT), right: literal(" world") }), [
+    { kind: "text", name: "v", mutable: false },
+  ]);
+  assert.equal(await lowered(joined, (name) => `printf("%s", ${name}("hello"));`), "hello world");
+
+  const equal = subject(BOOL, handsBack({ k: "compare", type: BOOL, op: "eq", operand: TEXT, left: literal("same"), right: { k: "arith", type: TEXT, op: "concat", left: literal("sa"), right: literal("me") } }));
+  assert.equal(await lowered(equal, (name) => `printf("%d", ${name}());`), "1");
+
+  const absent = subject(BOOL, handsBack({ k: "compare", type: BOOL, op: "ne", operand: TEXT, left: { k: "nothing", type: TEXT }, right: literal("") }));
+  assert.equal(await lowered(absent, (name) => `printf("%d", ${name}());`), "1");
+});
+
+test("a truth is a truth: an empty string, an absent reference and a zero are all false", async () => {
+  const cases: { name: string; value: SemanticValue; expected: string; argument?: string }[] = [
+    { name: "an empty string", value: literal(""), expected: "0" },
+    { name: "a string with a letter", value: literal("x"), expected: "1" },
+    { name: "nothing", value: { k: "nothing", type: PTR }, expected: "0" },
+    { name: "a reference", value: local("a", PTR), expected: "1", argument: "(double*)16" },
+    { name: "a zero", value: number("0"), expected: "0" },
+    { name: "a number that is not zero", value: number("0.5"), expected: "1" },
+  ];
+  for (const entry of cases) {
+    const fn = subject(
+      F64,
+      handsBack({ k: "select", type: F64, condition: entry.value, then: number("1"), otherwise: number("0") }),
+      [{ kind: "value", name: "a", mutable: false, type: PTR }],
+    );
+    const printed = await lowered(fn, (name) => `printf("%d", (int)${name}(${entry.argument ?? "(double*)0"}));`);
+    assert.equal(printed, entry.expected, entry.name);
+  }
+});
+
+test("an object is allocated, written and read back through its own layout", async () => {
+  const fn = subject(
+    POINT,
+    {
+      id: "entry",
+      statements: [
+        {
+          k: "let",
+          line: 1,
+          slot: { kind: "object", name: "point", mutable: true, type: POINT },
+          value: {
+            k: "newObject",
+            type: POINT,
+            layout: "Point",
+            fields: [
+              { name: "x", value: local("v") },
+              { name: "y", value: local("w") },
+            ],
+          },
+        },
+        { k: "storeField", line: 2, object: local("point", POINT), layout: "Point", field: "y", value: number("9") },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("point", POINT) },
+    },
+    NUMBERS,
+    { Point: POINT_LAYOUT },
+  );
+  assert.equal(
+    await lowered(fn, (name) => `struct Point* p = ${name}(1.5, 2.5); printf("%.17g %.17g", p->x, p->y);`),
+    "1.5 9",
+  );
+
+  const read = subject(F64, handsBack({ k: "loadField", type: F64, object: local("point", POINT), layout: "Point", field: "y" }), [
+    { kind: "value", name: "point", mutable: false, type: POINT },
+  ], { Point: POINT_LAYOUT });
+  assert.equal(await lowered(read, (name) => `struct Point p = {1.0, 2.0}; printf("%.17g", ${name}(&p));`), "2");
+});
+
+test("an element of an array is written and read at the width the element is", async () => {
+  const fn = subject(F64, {
+    id: "entry",
+    statements: [
+      { k: "setElement", line: 1, buffer: "a", index: number("1", USIZE), op: "=", value: local("v") },
+      { k: "setElement", line: 2, buffer: "a", index: number("2", USIZE), op: "+=", value: local("w") },
+    ],
+    releases: [],
+    terminator: {
+      k: "return",
+      value: { k: "arith", type: F64, op: "add", left: { k: "element", type: F64, of: local("a", PTR), index: number("1", USIZE) }, right: { k: "element", type: F64, of: local("a", PTR), index: number("2", USIZE) } },
+    },
+  }, [{ kind: "value", name: "a", mutable: false, type: PTR }, ...NUMBERS]);
+  assert.equal(await lowered(fn, (name) => `double v[3] = {0, 0, 0}; printf("%.17g", ${name}(v, 1.5, 4.0));`), "5.5");
+});
+
+test("a call carries every argument where the convention puts it, past the registers too", async () => {
+  // Six whole numbers and eight floats arrive in registers; the rest are on the
+  // stack, and a call is made with the stack aligned the way the C library is
+  // compiled to expect it.
+  const names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+  const params = names.map((name) => ({ kind: "value" as const, name, mutable: false, type: F64 }));
+  const sum = names.reduce<SemanticValue>(
+    (left, name) => ({ k: "arith", type: F64, op: "add", left, right: local(name) }),
+    number("0"),
+  );
+  const fn = subject(F64, handsBack(sum), params);
+  const printed = await lowered(fn, (name) => `printf("%.17g", ${name}(1, 2, 3, 4, 5, 6, 7, 8));`);
+  assert.equal(printed, "36");
+
+  // A call with both kinds of argument reads them from two sets of registers,
+  // and a whole number the register holds is the caller's, not the callee's.
+  const numbers = ["i", "j", "k"].map((name) => ({ kind: "value" as const, name, mutable: false, type: I64 }));
+  const mixed = subject(
+    F64,
+    handsBack(
+      names
+        .slice(0, 7)
+        .concat(numbers.map((slot) => slot.name))
+        .reduce<SemanticValue>(
+          (left, name) => ({
+            k: "arith",
+            type: F64,
+            op: "add",
+            left,
+            right: local(name, numbers.some((slot) => slot.name === name) ? I64 : F64),
+          }),
+          number("0"),
+        ),
+    ),
+    names.slice(0, 7).map((name) => ({ kind: "value" as const, name, mutable: false, type: F64 })).concat(numbers) as SemanticSlot[],
+  );
+  assert.equal(await lowered(mixed, (name) => `printf("%.17g", ${name}(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));`), "55");
+
+  // Nine floats: the eighth register is the last one, and the ninth is on the
+  // stack above the return address.
+  const wide = names.concat(["i", "j"]).map((name) => ({ kind: "value" as const, name, mutable: false, type: F64 }));
+  const wideSum = wide.map((slot) => slot.name).reduce<SemanticValue>(
+    (left, name) => ({ k: "arith", type: F64, op: "add", left, right: local(name) }),
+    number("0"),
+  );
+  const wideFn = subject(F64, handsBack(wideSum), wide as SemanticSlot[]);
+  assert.equal(await lowered(wideFn, (name) => `printf("%.17g", ${name}(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));`), "55");
+});
+
+test("a statement moves a name on, and a power is the library's", async () => {
+  const stepped = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "i", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      { k: "step", line: 2, name: "i", op: "++", prefix: true },
+      { k: "step", line: 3, name: "i", op: "++", prefix: false },
+      { k: "step", line: 4, name: "i", op: "--", prefix: false },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("i", I32) },
+  });
+  assert.equal(await lowered(stepped, (name) => `printf("%d", ${name}());`), "1");
+
+  const power = subject(F64, handsBack({ k: "arith", type: F64, op: "pow", left: number("2"), right: local("v") }), [
+    { kind: "value", name: "v", mutable: false, type: F64 },
+  ]);
+  assert.equal(await lowered(power, (name) => `printf("%.17g", ${name}(10.0));`), "1024");
+});
+
+test("a function reads the arguments the program was given from the runtime", async () => {
+  // Nothing set the arguments here, so the runtime answers the count it always
+  // answers: the program and the file it runs.
+  const count = subject(USIZE, handsBack({ k: "argv", type: USIZE, index: null }));
+  assert.equal(await lowered(count, (name) => `printf("%zu", ${name}());`), "2");
+
+  const first = subject(F64, handsBack({ k: "argv", type: F64, index: number("0", USIZE) }));
+  assert.equal(await lowered(first, (name) => `printf("%.17g", ${name}());`), "0");
+});
+
+test("the object defines the symbol the function is called by, and nothing else", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-machine-symbols-"));
+  const fn = subject(F64, handsBack(local("v")), NUMBERS);
+  const objectPath = join(directory, "subject.o");
+  await buildObject({ fn, contract: contracted(fn), target: TARGET, callable: new Set(), objectPath });
+  const defined = run("nm", ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
+  assert.equal(defined.stdout.trim().split(/\s+/).pop(), "subject");
+  assert.equal(defined.stdout.trim().split("\n").length, 1);
+});
+
+test("a target this backend does not encode for is refused rather than answered with code", () => {
+  assert.throws(
+    () => assertMachineTarget({ arch: "aarch64", os: "linux", abi: "sysv", cpu: "", features: [] }),
+    /the machine backend cannot build for aarch64-linux-sysv/,
+  );
+  assert.throws(
+    () => assertMachineTarget({ arch: "x86_64", os: "linux", abi: "aapcs", cpu: "", features: [] } as unknown as TargetSpec),
+    /cannot build for x86_64-linux-aapcs/,
+  );
+  // A processor of that machine is answered rather than refused: what is written
+  // is the instruction set every x86-64 processor runs.
+  assertMachineTarget({ arch: "x86_64", os: "linux", abi: "sysv", cpu: "znver1", features: [] });
+  assertMachineTarget(TARGET);
+});
