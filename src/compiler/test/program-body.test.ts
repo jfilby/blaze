@@ -19,6 +19,7 @@ import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { typeText, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
+import type { BuildMode } from "../core/types.ts";
 import { writeProject } from "./project.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
@@ -266,7 +267,7 @@ const LANGUAGE = [
 ].join("\n");
 
 /** Builds a program of one entry module, and returns the binary it delivers. */
-async function program(source: string, runtime?: "nim"): Promise<{ directory: string; binary: string }> {
+async function program(source: string, runtime?: "nim", mode?: BuildMode): Promise<{ directory: string; binary: string }> {
   const directory = await mkdtemp(join(tmpdir(), "blaze-program-"));
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
@@ -276,7 +277,12 @@ async function program(source: string, runtime?: "nim"): Promise<{ directory: st
     output: "machine",
     ...(runtime === undefined ? {} : { runtime }),
   });
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}`, ...(mode === undefined ? {} : { mode }) },
+    quiet,
+    "build",
+  );
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
   return { directory, binary: outcome.outputPath };
 }
@@ -429,6 +435,23 @@ test("the Nim driver runs a program the way the C driver does", async (t) => {
 
   assert.equal(hostedOutput.code, 0, hostedOutput.stderr);
   assert.equal(hostedOutput.stdout, standaloneOutput.stdout);
+});
+
+test("the Nim driver of a program is compiled at the mode the build was given", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // The delivered program of a hosted build is the Nim driver, so the mode is
+  // the one it has to be built at, whatever the mode the units beside it were.
+  const { directory, binary } = await program(LANGUAGE, "nim", "danger");
+  const source = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  const sections = run("readelf", ["-S", binary], { timeoutMs: 30_000 }).stdout;
+
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, source.stdout);
+  assert.doesNotMatch(sections, /\.debug_info/, "a danger driver must not be built with debug info");
 });
 
 test("a program that prints something else is reported against the line it differs on", async () => {

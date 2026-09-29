@@ -154,6 +154,23 @@ export function optimizationOptions(mode: BuildMode): string[] {
   return ["-O2", "-fno-lto"];
 }
 
+/**
+ * The Nim compiler options a build mode asks for.
+ *
+ * Nim spells its own three build profiles as defines, so the mode is the
+ * define and nothing else is spelled out: `debug` is the profile that leaves
+ * the checks in and adds no optimization, which is what `-O0` is, and
+ * `release` and `danger` are the profiles that optimize without them. `-g` has
+ * no profile, so `debug` asks for `--debuginfo` beside it: a program to step
+ * through is a program the compiler has not rearranged, the same rule the C
+ * options follow.
+ */
+export function nimOptimizationOptions(mode: BuildMode): string[] {
+  if (mode === "debug") return ["-d:debug", "--debuginfo"];
+  if (mode === "danger") return ["-d:danger"];
+  return ["-d:release"];
+}
+
 export function targetSummary(target: TargetSpec): string {
   const features = target.features.length > 0 ? ` features=[${target.features.join(",")}]` : "";
   const cpu = target.cpu === "" ? "toolchain-default" : target.cpu;

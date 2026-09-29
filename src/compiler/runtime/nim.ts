@@ -15,7 +15,7 @@
 import { writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { EXECUTABLE_SUFFIX } from "../core/target.ts";
+import { EXECUTABLE_SUFFIX, nimOptimizationOptions } from "../core/target.ts";
 import { isFloatType, parseType, typeToString } from "../semantics/contract.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, Runner, TypeExpr } from "../core/types.ts";
@@ -603,8 +603,11 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
     );
     // The previous vector's block is released before the next one overwrites
     // the pointer: a reader that runs once per vector would otherwise keep
-    // every block but the last, up to the cap below each time.
-    body.push(`  ${RUNTIME_NAME}_release(cast[pointer](${name}_storage))`);
+    // every block but the last, up to the cap below each time. The storage is
+    // empty on the first header and whenever a vector declares no length, and
+    // the runtime only ignores a null pointer while its guards are in, so the
+    // host never hands it one.
+    body.push(`  if ${name}_storage != nil: ${RUNTIME_NAME}_release(cast[pointer](${name}_storage))`);
     body.push(`  ${name}_storage = nil`);
     body.push(`  if declared_${name} >= 0:`);
     body.push(`    if ${name}_count > (1'u64 shl 28).csize_t: fail("buffer too large")`);
@@ -636,7 +639,11 @@ function dataReader(types: readonly TypeExpr[], names: readonly string[]): strin
 /** Releases every buffer the host allocated for the last vector. */
 function bufferRelease(types: readonly TypeExpr[], names: readonly string[]): string {
   return types
-    .map((type, index) => (isBuffer(type) ? `  ${RUNTIME_NAME}_release(cast[pointer](${names[index]}_storage))` : ""))
+    .map((type, index) =>
+      isBuffer(type)
+        ? `  if ${names[index]}_storage != nil: ${RUNTIME_NAME}_release(cast[pointer](${names[index]}_storage))`
+        : "",
+    )
     .filter((line) => line !== "")
     .join("\n");
 }
@@ -766,6 +773,8 @@ export interface HostRequest {
   objectPath: string;
   /** The example run the program performs when started with no input. */
   demoRequest: string;
+  /** How hard the build goes, which is what the host is compiled at. */
+  mode: BuildMode;
 }
 
 export interface HostResult {
@@ -786,7 +795,7 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
   // standalone build gives its harness.
   const executable = `${base}${EXECUTABLE_SUFFIX}`;
 
-  await writeFile(adapterPath, generateRuntimeAdapterSource(), "utf8");
+  await writeFile(adapterPath, generateRuntimeAdapterSource(request.mode), "utf8");
   await writeFile(hostPath, generateHostSource(request.contract, request.demoRequest), "utf8");
 
   const result = run(
@@ -795,7 +804,7 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
       "c",
       "--hints:off",
       "--warnings:off",
-      "-d:release",
+      ...nimOptimizationOptions(request.mode),
       `--nimcache:${request.workDirectory}/nimcache`,
       `--out:${executable}`,
       `--passL:${request.objectPath}`,

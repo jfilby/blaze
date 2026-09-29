@@ -14,6 +14,7 @@ import { writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { bufferElement, parseType, typeToString } from "../semantics/contract.ts";
 import { run } from "../core/process.ts";
+import { nimOptimizationOptions } from "../core/target.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import { generateProgramSource, type ProgramTarget } from "../toolchain/program-emit.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
@@ -26,7 +27,7 @@ import {
   type SemanticType,
   type ValueKind,
 } from "../core/semantic-ir.ts";
-import type { FunctionSignature, Runner, TypeExpr } from "../core/types.ts";
+import type { BuildMode, FunctionSignature, Runner, TypeExpr } from "../core/types.ts";
 import { RUNTIME_ANCHOR, RUNTIME_NAME } from "./abi.ts";
 import { generateRuntimeAdapterSource, nimName, nimObjectDeclarations, nimType } from "./nim.ts";
 
@@ -598,13 +599,15 @@ export interface ProgramHostRequest {
   /** Object of every function of the program, in the order they compile. */
   objectPaths: string[];
   outputPath: string;
+  /** How hard the build goes, which is what the driver is compiled at. */
+  mode: BuildMode;
 }
 
 /** Compiles the adapter and the driver, and links the program objects in. */
 export async function buildProgramHost(request: ProgramHostRequest): Promise<Runner> {
   const adapterPath = `${request.workDirectory}/${RUNTIME_NAME}.nim`;
   const hostPath = `${request.workDirectory}/program_host.nim`;
-  await writeFile(adapterPath, generateRuntimeAdapterSource(), "utf8");
+  await writeFile(adapterPath, generateRuntimeAdapterSource(request.mode), "utf8");
   await writeFile(hostPath, generateProgramHostSource(request.program), "utf8");
 
   const result = run(
@@ -613,7 +616,7 @@ export async function buildProgramHost(request: ProgramHostRequest): Promise<Run
       "c",
       "--hints:off",
       "--warnings:off",
-      "-d:release",
+      ...nimOptimizationOptions(request.mode),
       `--nimcache:${request.workDirectory}/nimcache`,
       `--out:${request.outputPath}`,
       ...request.objectPaths.map((path) => `--passL:${path}`),

@@ -550,6 +550,7 @@ async function materialize(
     candidate: candidate.id,
     objectPath: paths.object,
     demoRequest: vectors?.demo ?? "",
+    mode: request.mode,
   });
   return {
     runner: host.runner,

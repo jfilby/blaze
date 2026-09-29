@@ -1391,6 +1391,7 @@ export async function runBuild(
               outputPath: programPath,
             })
           : await buildProgramHost({
+              mode: buildMode,
               program: driver,
               workDirectory: base,
               objectPaths,

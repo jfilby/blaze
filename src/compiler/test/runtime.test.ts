@@ -247,6 +247,50 @@ test("a hosted build runs the candidate inside a Nim host program", async (t) =>
   assert.ok(symbols.stdout.includes("NimMain"), "the delivered program must be a Nim program");
 });
 
+test("a hosted build is compiled at the mode the build was given", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // The host is the program a hosted build delivers, so the mode that is
+  // chosen for the toolchain is the mode it has to be compiled at: a `debug`
+  // host carries the debug info `-g` asks of the C side, and a `danger` one is
+  // written without the guards the runtime leaves out at that mode.
+  const debugDirectory = await workspace("runtime-nim-debug");
+  const dangerDirectory = await workspace("runtime-nim-danger");
+  const debug = await runBuild(
+    "input.toml",
+    { cwd: debugDirectory, reuse: false, model: `replay:${REPLAY}`, runtime: "nim", mode: "debug" },
+    quiet,
+    "build",
+  );
+  const danger = await runBuild(
+    "input.toml",
+    { cwd: dangerDirectory, reuse: false, model: `replay:${REPLAY}`, runtime: "nim", mode: "danger" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(debug.build.status, "success");
+  assert.equal(danger.build.status, "success");
+
+  const sections = (path: string): string => run("readelf", ["-S", path], { timeoutMs: 30_000 }).stdout;
+  assert.match(sections(debug.outputPath!), /\.debug_info/, "a debug host must carry the debug info its mode asks for");
+  assert.doesNotMatch(sections(danger.outputPath!), /\.debug_info/, "a danger host must not be built with debug info");
+
+  const guarded = await readFile(join(project(debugDirectory), `work/dotProduct/${RUNTIME_NAME}.nim`), "utf8");
+  assert.match(guarded, /not a live blaze pointer/, "a guarded mode must keep the runtime checks in the adapter");
+  const unguarded = await readFile(join(project(dangerDirectory), `work/dotProduct/${RUNTIME_NAME}.nim`), "utf8");
+  assert.doesNotMatch(unguarded, /not a live blaze pointer/, "danger must leave the runtime checks out of the adapter");
+
+  // Whichever mode it was built at, the host speaks the harness protocol.
+  for (const outcome of [debug, danger]) {
+    const execution = run(outcome.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
+    assert.equal(execution.code, 0, execution.stderr);
+    assert.deepEqual(results(execution.stdout), [6, 8]);
+  }
+});
+
 test("both runtimes answer the harness protocol identically", async (t) => {
   if (!nimAvailable) {
     t.skip("the Nim compiler is not installed");
