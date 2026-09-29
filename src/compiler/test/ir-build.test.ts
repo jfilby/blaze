@@ -223,7 +223,7 @@ test("a refused IR candidate is repaired with the diagnostic that refused it", a
   // behaviour the compiler resolved, in the form a code generator reads it.
   const generated = endpoint.prompts[0];
   assert.match(generated, /Answer with the whole function as semantic IR/);
-  assert.match(generated, /^IR SYNTAX$/m, "the form an answer is written in is stated");
+  assert.match(generated, /^## IR SYNTAX$/m, "the form an answer is written in is stated");
   assert.ok(generated.includes(outline()), "the behaviour the candidate is written from is in the request");
   assert.ok(!generated.includes(resolved()), "the compiler's own IR of the function is not in the request");
 

@@ -43,7 +43,10 @@ function calls(of: ProgramContract, name: string): string[] {
  * call without the WRITE OUT section beside it naming the same functions.
  */
 function callsSection(prompt: string): string {
-  const section = prompt.split("\n\n").find((paragraph) => paragraph.startsWith("CALLS\n"));
+  // The request is a sequence of headers and the body under each, so a section
+  // runs from its header to the next one.
+  const parts = prompt.split(/\n(?=## )/);
+  const section = parts.find((part) => part.startsWith("## CALLS\n"));
   assert.ok(section !== undefined, "the prompt has a CALLS section");
   return section;
 }
@@ -222,7 +225,7 @@ test("the prompt states a written-out callee as a body to implement rather than 
   assert.match(prompt, /leaf\(n: f64\) -> f64/);
   // Nothing is called, so nothing is offered as callable, and a body nothing
   // checks on its own is held to the only oracle it has: the program it is in.
-  assert.doesNotMatch(prompt, /^CALLS$/m);
+  assert.doesNotMatch(prompt, /^## CALLS$/m);
   assert.match(prompt, /Nothing checks this function on its own/);
   assert.match(prompt, /compares what it prints with what the source program prints/);
 });
@@ -244,7 +247,7 @@ test("the prompt offers a called callee as a symbol and does not offer its body"
   };
   const prompt = buildUserPrompt(request);
 
-  assert.match(prompt, /^CALLS$/m);
+  assert.match(prompt, /^## CALLS$/m);
   // The call is offered as a name and the contract it is made under, which is
   // what the IR reader holds a `call` to: the signature, and the postcondition
   // the result is checked against.
@@ -381,7 +384,7 @@ test("the prompt offers the symbol a written-out body calls, and how to call it"
   });
 
   assert.match(prompt, /WRITE OUT/);
-  assert.match(prompt, /^CALLS$/m);
+  assert.match(prompt, /^## CALLS$/m);
   // What the written-out body calls is the whole of what CALLS offers: the
   // body of `leaf` is below, so `leaf` itself is not a name a candidate may
   // put in a `call`, and neither is the function being written.

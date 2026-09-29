@@ -137,6 +137,19 @@ function renderCallable(callee: FunctionContract): string[] {
 }
 
 /**
+ * One part of a prompt, under a markdown header. A request is read as prose
+ * from top to bottom, and prose is instruction, so a part that opens on a bare
+ * line of capitals is a rule like any other: what follows it is something to
+ * do rather than a thing to read. A header is the one line in a prompt that is
+ * unambiguously structure, and it separates a specification from the example
+ * of it that follows.
+ */
+function section(title: string, body: string | readonly string[], level = 2): string {
+  return [`${"#".repeat(level)} ${title}`, "", ...(typeof body === "string" ? body.split("\n") : body)].join("\n");
+}
+
+
+/**
  * What a candidate is held to, which is the same for every output kind: the
  * answer is the IR, and the compiler lowers it to whatever the build asked for.
  * A register, a stack offset, an instruction, an ABI and a calling convention
@@ -166,7 +179,8 @@ export function buildSystemPrompt(): string {
     "not trusted to define correctness, and every candidate you produce is validated",
     "by the compiler, which builds it and runs it against that specification.",
     "",
-    "Rules for the implementation you emit:",
+    "## Rules for the implementation you emit",
+    "",
     "- Write it in the output language named in the request, and follow the rules",
     "  listed there exactly.",
     "- The IR you write is the program: it is what the compiler validates and what",
@@ -178,10 +192,14 @@ export function buildSystemPrompt(): string {
     "  inside the code is fine.",
     "- Return the code and nothing else, and put nothing else beside it.",
     "",
+    "## Reporting a contract you cannot implement",
+    "",
     "If the contract asks for something you cannot implement at all, do not return",
     "code. Answer with this first line:",
     "",
+    "```text",
     "STATUS: failed",
+    "```",
     "",
     "and on the lines after it say what the contract asks for that you cannot do. The",
     "build ends on the first answer like that and asks you nothing further for this",
@@ -229,13 +247,13 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
   lines.push("This is the whole function as the compiler resolved it from the source: the signature it");
   lines.push("is called by, what it does to the world, and the body it runs. Implement this body.");
   lines.push("");
-  lines.push("WHAT IT DOES");
+  lines.push("### WHAT IT DOES", "");
   lines.push(`allocates objects: ${definition.allocates ? "yes" : "no"}`);
   lines.push(`prints: ${definition.prints ? "yes" : "no"}`);
   lines.push(`reads the command line: ${definition.readsArgv ? "yes" : "no"}`);
   if (definition.objects && Object.keys(definition.objects).length > 0) {
     lines.push("");
-    lines.push("OBJECT LAYOUTS");
+    lines.push("### OBJECT LAYOUTS", "");
     for (const object of Object.values(definition.objects)) {
       lines.push(`${object.name}: ${object.size} bytes, align ${object.align}`);
       for (const field of object.fields) {
@@ -266,7 +284,7 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
     lines.push("Read the arguments with blaze_rt_argv_count() and blaze_rt_argv(index); an argument that is missing is 0.");
   }
   lines.push("");
-  lines.push("HOW YOU ARE CHECKED");
+  lines.push("### HOW YOU ARE CHECKED", "");
   if (contract.ensures.length > 0) {
     lines.push("The result is checked against the postcondition below, over test vectors the compiler");
     lines.push("builds from the contract and runs your implementation against. The body above is what");
@@ -293,7 +311,7 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
     lines.push("that is not finite.");
   }
   lines.push("");
-  lines.push("NUMBERS");
+  lines.push("### NUMBERS", "");
   lines.push(
     "A number in the source is a double, as it is in the language it was written in, unless a use fixes",
   );
@@ -311,7 +329,7 @@ function renderDefinition(contract: FunctionContract, semantic: SemanticFunction
     "A logical operator is a value and not a condition: a || b is a when a is not 0, and b otherwise.",
   );
   lines.push("");
-  lines.push("THE FUNCTION, WITH EVERY VALUE IN THE TYPE THE COMPILER RESOLVED IT TO");
+  lines.push("### THE FUNCTION, WITH EVERY VALUE IN THE TYPE THE COMPILER RESOLVED IT TO", "");
   lines.push(
     "This is the whole function as the compiler resolved it from its source: the signature it is",
     "called by, what it is held to, and the body it runs. Every name states the type it is read",
@@ -399,7 +417,7 @@ function renderProgram(request: PromptRequest): string {
   for (const edge of program.edges) {
     lines.push(`${edge.from} imports ${edge.symbols.join(", ")} from ${edge.to}`);
   }
-  return ["PROGRAM", ...lines].join("\n");
+  return section("PROGRAM", lines);
 }
 
 /**
@@ -414,7 +432,7 @@ function renderTarget(target: TargetSpec): string {
     `instruction set: ${target.features.length === 0 ? `the ${target.arch} baseline, and nothing wider` : target.features.join(", ")}`,
     `cpu selector: ${target.cpu === "" ? "none: the compiler supplies the architecture prelude, so do not select one yourself" : target.cpu}`,
   ];
-  return ["TARGET", ...lines].join("\n");
+  return section("TARGET", lines);
 }
 
 /** A diagnostic is a multi-line block; a bullet only covers its first line. */
@@ -436,36 +454,37 @@ function renderRepair(request: PromptRequest, language: string): string {
   // A program that stopped is rejected for stopping: the verdict says so, so
   // the repair does not read a line that agrees as a line that disagrees.
   const stopped = programFailure?.mismatch.failure;
-  const lines = [
+  const verdict =
     programFailure === undefined
-      ? `CANDIDATE ${candidate} WAS REJECTED`
-      : `CANDIDATE ${candidate} WAS REJECTED BY THE PROGRAM IT BELONGS TO`,
-    programFailure === undefined
-      ? `This is repair attempt ${attempt}. The compiler assembled, linked and ran the output below`
-      : `This is repair round ${attempt}. The compiler assembled and linked the output below into the`,
-    programFailure === undefined
-      ? "against its contract, and rejected it because of the diagnostics listed after it."
-      : `program it belongs to, ran that program, and rejected it: ${stopped ?? "the program did not print what the source program prints"}.`,
-    programFailure === undefined ? "" : "Nothing runs this function on its own.",
-    "",
-    "THE OUTPUT BEING REPAIRED",
-    "```",
-    failed.trimEnd(),
-    "```",
-  ];
+      ? [
+          `## CANDIDATE ${candidate} WAS REJECTED`,
+          "",
+          `This is repair attempt ${attempt}. The compiler assembled, linked and ran the output below`,
+          "against its contract, and rejected it because of the diagnostics listed after it.",
+        ]
+      : [
+          `## CANDIDATE ${candidate} WAS REJECTED BY THE PROGRAM IT BELONGS TO`,
+          "",
+          `This is repair round ${attempt}. The compiler assembled and linked the output below into the`,
+          `program it belongs to, ran that program, and rejected it: ${stopped ?? "the program did not print what the source program prints"}.`,
+          "Nothing runs this function on its own.",
+        ];
+  const lines = [...verdict, "", "### THE OUTPUT BEING REPAIRED", "", "```", failed.trimEnd(), "```"];
   if (programFailure !== undefined) {
     const { mismatch } = programFailure;
     lines.push(
       "",
-      "WHAT THE PROGRAM PRINTED",
+      "### WHAT THE PROGRAM PRINTED",
+      "",
       "```",
       mismatch.actualOutput.trimEnd(),
       "```",
       ...(mismatch.failureOutput === undefined
         ? []
-        : ["", "WHAT THE PROGRAM WROTE TO STANDARD ERROR", "```", mismatch.failureOutput.trimEnd(), "```"]),
+        : ["", "### WHAT THE PROGRAM WROTE TO STANDARD ERROR", "", "```", mismatch.failureOutput.trimEnd(), "```"]),
       "",
-      "WHAT THE SOURCE PRINTS",
+      "### WHAT THE SOURCE PRINTS",
+      "",
       "```",
       mismatch.expectedOutput.trimEnd(),
       "```",
@@ -480,7 +499,8 @@ function renderRepair(request: PromptRequest, language: string): string {
 
   lines.push(
     "",
-    "DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST",
+    "### DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST",
+    "",
     ...(feedback === undefined || feedback.length === 0
       ? ["- none were reported for this candidate"]
       : feedback.map(asBullet)),
@@ -502,10 +522,10 @@ export function buildUserPrompt(request: PromptRequest): string {
   const plan = callPlan(contract, request.program);
 
   const sections: string[] = [];
-  sections.push(`CONTRACT\n${renderContract(contract)}`);
+  sections.push(section("CONTRACT", renderContract(contract)));
   sections.push(renderProgram(request));
   sections.push(renderTarget(target));
-  sections.push(["OUTPUT LANGUAGE", `Write ${language.language}.`, ...language.rules.map((rule) => `- ${rule}`)].join("\n"));
+  sections.push(section("OUTPUT LANGUAGE", [`Write ${language.language}.`, "", ...language.rules.map((rule) => `- ${rule}`)]));
   // A candidate has to be told the form it is answering in, on every kind. The
   // compiler keeps the IR of the function being written to itself: a prompt
   // carrying it would be carrying the answer, so what is stated here is the
@@ -517,44 +537,63 @@ export function buildUserPrompt(request: PromptRequest): string {
   const syntax = IR_SYNTAX.map((line) =>
     typeof line === "string" ? line : line.text.split("\n").map((written) => `  ${written}`).join("\n"),
   );
-  sections.push(["IR SYNTAX", ...syntax, "", "A whole function written in it:", "```", IR_EXAMPLE.trimEnd(), "```"].join("\n"));
+  sections.push(
+    section("IR SYNTAX", [
+      "Every form below illustrates one line, written with the values a body is made of. Those",
+      "values are the shape of the line and not what to write: the function to write is the one in",
+      "THE FUNCTION TO IMPLEMENT below.",
+      "",
+      ...syntax,
+      "",
+      "### Example: a whole function written in that syntax",
+      "",
+      "It illustrates the syntax and nothing else. Do not copy it and do not answer with it: write",
+      "the function this request describes.",
+      "",
+      "```text",
+      IR_EXAMPLE.trimEnd(),
+      "```",
+    ]),
+  );
   // Nothing below tells a candidate where an argument is or which register a
   // value lives in. The compiler writes the target code, and the target decides
   // both, so those are facts the prompt does not carry because nothing asks.
   sections.push(
-    ["SIGNATURE", `function to implement: ${symbolOf(contract)}`, "parameter types:", renderTypes(contract)].join("\n"),
+    section("SIGNATURE", [`function to implement: ${symbolOf(contract)}`, "", "parameter types:", "", renderTypes(contract)]),
   );
   if (plan.called.length > 0) {
     sections.push(
-      [
-        "CALLS",
+      section("CALLS", [
         "Each of these is compiled on its own and linked beside yours, so call it by name instead of",
         "writing out what it does. Its contract is:",
+        "",
         ...plan.called.flatMap((callee) => renderCallable(callee)),
+        "",
         "The program you are part of is the only thing that runs a candidate that calls one, so nothing",
         "verifies it here and a call that is wrong shows up as the whole program printing something else.",
-      ].join("\n"),
+      ]),
     );
   }
   if (plan.written.length > 0) {
     sections.push(
-      [
-        "WRITE OUT",
+      section("WRITE OUT", [
         "Your body reaches each of these, and each is implemented here rather than called, so a call to",
         "one is not a call you may make. What each one does:",
+        "",
         ...plan.written.flatMap((callee) => renderWrittenOut(callee, request.semantics[callee.function.name])),
-      ].join("\n"),
+      ]),
     );
   }
   // What the function is, and what it is held to, are two sections: the body is
   // the specification to implement, and the conditions beside it are what the
   // result is checked against afterwards.
-  sections.push(["THE FUNCTION TO IMPLEMENT", renderDefinition(contract, semantic)].join("\n"));
+  sections.push(section("THE FUNCTION TO IMPLEMENT", renderDefinition(contract, semantic)));
   sections.push(
-    [
-      "WHAT THE RESULT MUST SATISFY",
+    section("WHAT THE RESULT MUST SATISFY", [
       "The function must satisfy these preconditions on entry:",
+      "",
       ...contract.requires.map((requirement) => `- ${requirement}`),
+      "",
       ...(contract.ensures.length === 0
         ? [
             "There is no postcondition: the result is not one expression, so what the function",
@@ -563,56 +602,56 @@ export function buildUserPrompt(request: PromptRequest): string {
           ]
         : [
             "and these postconditions on return:",
+            "",
             ...contract.ensures.map((condition) => `- ${condition}`),
             "",
             "The postcondition defines the result mathematically. It does not prescribe an algorithm:",
             "summation order, vector width, unrolling and register allocation are yours to choose.",
           ]),
-    ].join("\n"),
+    ]),
   );
-  sections.push(["MEMORY REQUIREMENTS", renderMemory(contract)].join("\n"));
+  sections.push(section("MEMORY REQUIREMENTS", renderMemory(contract)));
   sections.push(
-    [
-      "NUMERICAL SEMANTICS",
+    section("NUMERICAL SEMANTICS", [
       `floating point: ${contract.numeric.floatingPoint}`,
       `rounding: ${contract.numeric.rounding}`,
       `fast math: ${contract.numeric.fastMath}`,
+      "",
       contract.numeric.fastMath === false
         ? "Reassociation, contraction and value changes are not allowed; results must be bit-reproducible within the accumulated rounding error of a sequential sum."
         : "Rounding changes are permitted, but the result must still satisfy the postconditions.",
-    ].join("\n"),
+    ]),
   );
   sections.push(
-    [
-      "EFFECTS",
+    section("EFFECTS", [
       ...(contract.effects.length === 0
         ? ["none: the source function touches nothing outside its arguments, and neither may yours"]
         : [
             `the source function: ${contract.effects.join(", ")}`,
+            "",
             "The compiler reaches them through the runtime when it lowers your IR, so state the effect in",
             "the body and the compiler writes the call: printing, the command line, the heap.",
           ]),
-    ].join("\n"),
+    ]),
   );
   sections.push(
-    [
-      "OPTIMIZATION OBJECTIVE",
+    section("OPTIMIZATION OBJECTIVE", [
       `primary: ${contract.optimize.primary}`,
       `secondary: ${contract.optimize.secondary ?? "none"}`,
+      "",
       "Optimize for the primary objective while still satisfying every requirement above.",
-    ].join("\n"),
+    ]),
   );
   // Candidates are generated independently and never see each other, so a
   // second one is only worth its request if it takes a different route.
   if (candidate > 1) {
     sections.push(
-      [
-        "CANDIDATE",
-        `This is candidate ${candidate} of ${candidates}. The candidates of a function are generated`,
+      section(`CANDIDATE ${candidate} OF ${candidates}`, [
+        "The candidates of a function are generated",
         "independently and never see each other, so this one is only worth its request if it takes a",
         "different route: an obvious loop is worth writing once, and vectorising, strength reducing,",
         "unrolling or keeping the working set somewhere else are not the same answer.",
-      ].join("\n"),
+      ]),
     );
   }
 
@@ -620,7 +659,7 @@ export function buildUserPrompt(request: PromptRequest): string {
     sections.push(renderRepair(request, language.language));
   }
 
-  sections.push(`OUTPUT\n${language.language} only, starting at the first line.`);
+  sections.push(section("OUTPUT", `${language.language} only, starting at the first line.`));
   return sections.join("\n\n");
 }
 
@@ -635,9 +674,12 @@ export function buildRetryPrompt(user: string, reasons: readonly string[]): stri
   return [
     user,
     "",
-    "THE PREVIOUS ANSWER COULD NOT BE USED",
+    "## THE PREVIOUS ANSWER COULD NOT BE USED",
+    "",
     "The compiler asked the request above and received answers it could not use:",
+    "",
     ...reasons.map(asBullet),
+    "",
     "Nothing was assembled, linked or run, so no diagnostic points at a line of any of them.",
     "",
     "Answer the request above from the beginning: emit the complete implementation as the only",

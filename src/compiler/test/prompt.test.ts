@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { buildSystemPrompt, buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
+import { IR_EXAMPLE } from "../ai/ir-format.ts";
 import { CompilerError } from "../core/errors.ts";
 import { validateAssembly } from "../toolchain/assembler.ts";
 import { programWithSemantics } from "./phase.ts";
@@ -76,10 +77,10 @@ test("the prompt states the calls a candidate may write, and no more names than 
   // as a body. It used to claim the opposite, because the symbols came from a
   // list the caller had to remember to pass rather than from the calls the
   // contract records.
-  assert.match(prompt, /^CALLS$/m);
+  assert.match(prompt, /^## CALLS$/m);
   assert.match(prompt, /^createTree\(depth: f64\) -> ref<Object1>$/m);
   assert.match(prompt, /^checksum\(node: ref<any>\) -> f64$/m);
-  assert.doesNotMatch(prompt, /^WRITE OUT$/m);
+  assert.doesNotMatch(prompt, /^## WRITE OUT$/m);
   // A name outside that list is refused whatever it is called, because the IR
   // is read back against the contract and a callee name is part of it.
   assert.match(prompt, /the callee names are the contract's, and the compiler refuses a candidate that disagrees/);
@@ -98,14 +99,14 @@ test("a candidate is told the functions of the program it may call, and the cont
   // The model is told the call and what it must satisfy, because a `call` in
   // the answer is read back against the callee's contract and none of it can
   // be read off the TypeScript the candidate was given.
-  assert.match(prompt, /^CALLS$/m);
+  assert.match(prompt, /^## CALLS$/m);
   assert.match(prompt, /^createTree\(depth: f64\) -> ref<Object1>$/m);
   assert.match(prompt, /^checksum\(node: ref<any>\) -> f64$/m);
   assert.match(prompt, /call it by name instead of/);
   assert.match(prompt, /writing out what it does\. Its contract is:/);
   // Both are calls: each recurses, and a body that reaches itself is not one a
   // candidate can write out, so each is named as a call rather than a body.
-  assert.doesNotMatch(prompt, /^WRITE OUT$/m);
+  assert.doesNotMatch(prompt, /^## WRITE OUT$/m);
   // The entry is excluded: a candidate is already the implementation of it.
   assert.doesNotMatch(prompt, /^blaze_main\(/m);
 });
@@ -124,8 +125,8 @@ test("a candidate that reaches nothing else is told the program is what it is ch
       sources: [{ path: "1.ts", source: TREES["1.ts"] }],
     }),
   );
-  assert.doesNotMatch(prompt, /^CALLS$/m);
-  assert.doesNotMatch(prompt, /^WRITE OUT$/m);
+  assert.doesNotMatch(prompt, /^## CALLS$/m);
+  assert.doesNotMatch(prompt, /^## WRITE OUT$/m);
   // Nothing checks it on its own, and it is told so rather than left to
   // assume a caller checks the result: the program it belongs to is the oracle.
   assert.match(prompt, /Nothing checks this function on its own/);
@@ -267,7 +268,7 @@ test("a second candidate is told what makes it worth a request", () => {
   );
 
   assert.doesNotMatch(first, /only worth its request/);
-  assert.match(second, /candidate 2 of 2/);
+  assert.match(second, /^## CANDIDATE 2 OF 2$/m);
   assert.match(second, /only worth its request if it takes a/);
 });
 
@@ -325,4 +326,24 @@ test("the system prompt says the same thing to every build", () => {
   assert.match(system, /The IR you write is the program/);
   assert.match(system, /The target code, the build, the harness and the host are compiler/);
   assert.doesNotMatch(system, /WebAssembly|assembly|GAS/);
+});
+
+test("every part of a request is under a header, and the one example in it is labelled", () => {
+  // A request is prose from top to bottom, and prose is instruction: a part
+  // that opens on a bare line of capitals is a rule the model reads as one,
+  // including the parts that only describe something. A header is the one line
+  // that is structure.
+  const prompt = buildUserPrompt(
+    request({ contract: treeMain, unit: { file: "1.ts", function: "main" }, program: treeProgram, semantics: treeSemantics, sources: [{ path: "1.ts", source: TREES["1.ts"] }] }),
+  );
+  const bare = prompt.split("\n").filter((line) => /^[A-Z][A-Z0-9 ,'()<>=/-]{3,}$/.test(line));
+  assert.deepEqual(bare, [], `parts of the request that are not under a header: ${bare.join(" | ")}`);
+
+  // The one worked example in a request is the function the syntax section
+  // illustrates, and it is a body a model could answer with by copying, so it
+  // is labelled as an example and told not to be written back.
+  const example = prompt.indexOf("### Example: a whole function written in that syntax");
+  assert.notEqual(example, -1, "the worked example is labelled as an example");
+  assert.match(prompt.slice(example), /Do not copy it and do not answer with it/);
+  assert.ok(prompt.indexOf(IR_EXAMPLE.trimEnd()) > example, "the label comes before the example it labels");
 });
