@@ -331,7 +331,9 @@ test("a loop step that is itself a step is written once", () => {
   ].join("\n");
   const ir = irOf("typescript", { "1.ts": source }, "1.ts", "go");
   // The step of the loop is written once, and the counter it moves by is the
-  // value `j` held before the increment.
-  assert.equal(ir.split("step j ++ pre").length - 1, 1, ir);
+  // value `j` held before the increment: `j++` is a postfix step, so the
+  // snapshot is taken first and the name is stepped after it.
+  assert.equal(ir.split("step j ++ post").length - 1, 1, ir);
+  assert.match(ir, /let value\[f64\] t\d+ immutable = local\[f64\] j @4\n {4}step j \+\+ post @4/);
   assert.match(ir, /for\[f64\] i from const\[f64\] 0 to local\[f64\] n exclusive up step local\[f64\] t1/);
 });

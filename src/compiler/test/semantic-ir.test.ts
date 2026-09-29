@@ -22,19 +22,27 @@ import {
   slotType,
   typeText,
   valueKind,
+  type SemanticFunction,
   type SemanticProgram,
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { semanticIrProblems, validateSemanticProgram } from "../semantics/ir-validate.ts";
-import { parseSemanticModule, parseSemanticProgram, printSemanticModule, printSemanticProgram } from "../semantics/ir-text.ts";
+import {
+  parseSemanticFunction,
+  parseSemanticModule,
+  parseSemanticProgram,
+  printSemanticFunction,
+  printSemanticModule,
+  printSemanticProgram,
+} from "../semantics/ir-text.ts";
 import { run } from "../core/process.ts";
 import { generateProgramDriver } from "../toolchain/driver.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "../runtime/abi.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import type { ProgramContract } from "../core/types.ts";
-import { phaseOf } from "./phase.ts";
+import { phaseOf, semanticsOf } from "./phase.ts";
 
 /** A program of one entry module and the library it calls, resolved to the IR. */
 function resolved(files: Record<string, string>): { program: SemanticProgram; contract: ProgramContract } {
@@ -254,6 +262,36 @@ test("a function round trips through the text a model may write it in", async ()
   );
 });
 
+test("a short circuit over two texts is a type the text form writes and reads back", () => {
+  // `a && b` hands back one of its arms, so the IR states the type of them,
+  // and two strings make a string. The contract type language has no string
+  // type, so a printer that wrote it and a parser that read it back through
+  // the contract types could not agree: the function was written, reviewed
+  // and then refused on the way back in, which is the one path every revised
+  // IR takes.
+  for (const op of ["&&", "||"]) {
+    const source = [
+      "export function f(n: number): number {",
+      "  if (n <= 0) { return 0; }",
+      "  let a = `x`;",
+      "  let b = `y`;",
+      `  const v = a ${op} b;`,
+      "  return v.length;",
+      "}",
+      "",
+    ].join("\n");
+    const files = { "main.ts": 'import { f } from "./lib.ts";\nconsole.log(f(1));\n', "lib.ts": source };
+    const phase = phaseOf("typescript", files, "main.ts");
+    const printed = printSemanticFunction(semanticsOf(phase).f as SemanticFunction);
+    assert.match(printed, /logical_(?:and|or)\[text\]/, `\`${op}\` over two texts is written as a text`);
+    assert.equal(
+      printSemanticFunction(parseSemanticFunction(printed, phase.program)),
+      printed,
+      `what \`${op}\` prints, the text form reads back`,
+    );
+  }
+});
+
 test("a reference with no layout is a type the text form writes and reads back", () => {
   // `ref<any>` is how a reference whose layout nothing types is written, and a
   // printer that wrote a bare `ref` would print IR the parser cannot read.
@@ -389,6 +427,84 @@ test("an arm a backend writes twice may not carry a call", () => {
     contract,
   );
   assert.match(semanticIrProblems(twice, contract).join("\n"), /logical decides on an arm that calls next/);
+
+  // The same arm in what a block hands back. A block's terminator is not one
+  // of its statements, so this was the one place the rule did not reach, and
+  // for a function whose body is one expression it is the only place the value
+  // lives: the C backend binds the arm to a temporary and runs the call once,
+  // the WebAssembly one writes the arm twice and ran it twice.
+  const returned = parseSemanticProgram(
+    [
+      "ir 1",
+      'file "main.ts"',
+      "function next(n: f64) -> f64",
+      "",
+      "block entry: releases[]",
+      "return [logical_and[f64] [call[f64] next [arg[f64] const[f64] 1] ownership=none retain=no] const[f64] 2]",
+      "",
+    ].join("\n"),
+    contract,
+  );
+  assert.match(semanticIrProblems(returned, contract).join("\n"), /logical decides on an arm that calls next/);
+  // `??` is the one the WebAssembly backend really does write twice, and it
+  // writes the left arm down whatever the value is a statement or a terminator.
+  const coalesced = parseSemanticProgram(
+    [
+      "ir 1",
+      'file "main.ts"',
+      "function next(n: f64) -> f64",
+      "",
+      "block entry: releases[]",
+      "return [coalesce[f64] [call[f64] next [arg[f64] const[f64] 1] ownership=none retain=no] const[f64] 2]",
+      "",
+    ].join("\n"),
+    contract,
+  );
+  assert.match(semanticIrProblems(coalesced, contract).join("\n"), /coalesce decides on an arm that calls next/);
+  // The arm with no call in it is written twice and is still one program.
+  const pure = parseSemanticProgram(
+    [
+      "ir 1",
+      'file "main.ts"',
+      "function next(n: f64) -> f64",
+      "",
+      "block entry: releases[]",
+      "return [logical_and[f64] local[f64] n const[f64] 2]",
+      "",
+    ].join("\n"),
+    contract,
+  );
+  assert.deepEqual(semanticIrProblems(pure, contract), []);
+});
+
+test("a name is written with a value its own declared type takes", () => {
+  // A step is an arithmetic move and a plain assignment writes what the name
+  // already holds. Neither was compared against the slot, and neither backend
+  // checks it: the C emitter casts the value to the declared type and the
+  // WebAssembly one leaves the stack under it, so `p++` over a reference
+  // lowered to pointer arithmetic and an assignment of the wrong type lowered
+  // to a module the engine refuses. `setElement` holds itself to both rules.
+  const { program, contract } = resolved({
+    "main.ts": ["let node = null;", "let total = 0;", "total = 2;", "console.log(total);", ""].join("\n"),
+  });
+  assert.deepEqual(semanticIrProblems(program, contract), [], "what the source writes is what the IR writes");
+
+  const stepped = structuredClone(program);
+  const moved = stepped.entry.statements.find((one) => one.k === "let");
+  if (moved?.k !== "let") throw new Error("expected the object declaration");
+  const held = slotType(moved.slot);
+  moved.value = { k: "nothing", type: held };
+  stepped.entry.statements.push({ k: "step", name: moved.slot.name, op: "++", prefix: false, line: 1 });
+  assert.match(
+    semanticIrProblems(stepped, contract).join("\n"),
+    /"node" is a ref<[^>]+>, which is not a number a step can move/,
+  );
+
+  const assigned = structuredClone(program);
+  const into = assigned.entry.statements.find((one) => one.k === "set");
+  if (into?.k !== "set") throw new Error("expected the assignment");
+  into.value = { k: "text", type: { kind: "text" }, parts: [{ k: "text", value: "nope" }] };
+  assert.match(semanticIrProblems(assigned, contract).join("\n"), /"total" holds a f64, not a text/);
 });
 
 test("a name a target would have to escape is not a name the IR holds", () => {

@@ -422,3 +422,34 @@ test("a callee whose parameter is named after a C keyword still builds", async (
   );
   assert.equal(stdout, "2.000000\n");
 });
+
+test("every operator the IR states is one C can spell", async () => {
+  // The emitter names each operation the IR states and then asks a shared
+  // table for its C spelling. A remainder was named in one table and not the
+  // other, so every function using `%` was refused at the emitter instead of
+  // lowered, and nothing that built exercised the path.
+  for (const op of ["add", "sub", "mul", "div", "mod", "shl", "shr", "and", "or", "xor"]) {
+    const value: SemanticValue = { k: "arith", type: F64, op: op as "add", left: local("a"), right: local("b") };
+    const c = generateFunctionC(
+      subject(F64, handsBack(value), [
+        { kind: "value", name: "a", mutable: false, type: F64 },
+        { kind: "value", name: "b", mutable: false, type: F64 },
+      ]),
+    );
+    assert.doesNotMatch(c, /cannot spell/, `the emitter must lower \`${op}\``);
+  }
+  // And the one that was missing computes what the source computes. A
+  // remainder is over whole numbers, which is what the resolver gives it, and
+  // `12 % 5` is 2.
+  const I64: SemanticType = { kind: "primitive", name: "i64" };
+  const whole = (name: string): SemanticValue => ({ k: "local", type: I64, name });
+  const remainder: SemanticValue = { k: "arith", type: I64, op: "mod", left: whole("a"), right: whole("b") };
+  const stdout = await lowered(
+    subject(I64, handsBack(remainder), [
+      { kind: "value", name: "a", mutable: false, type: I64 },
+      { kind: "value", name: "b", mutable: false, type: I64 },
+    ]),
+    (name) => `printf("%lld\\n", ${name}(12LL, 5LL));`,
+  );
+  assert.equal(stdout, "2\n");
+});

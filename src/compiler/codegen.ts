@@ -257,12 +257,18 @@ export function reusableFiles(
   // always needs it, because nothing else links it; `ir` needs it only when
   // the candidate is standalone, which is what the call the program holds
   // decides.
-  if (output === "machine") return [delivered, paths.executable];
-  if (output === "ir" && standalone) return [delivered, paths.executable];
-  // Every kind that assembles produces an object, and a program build links
-  // it. Requiring it only for `machine` let a program build reuse a candidate
-  // whose object was gone, and the driver failed to link it.
-  return [delivered, ...(linksObjects ? [paths.object] : [])];
+  //
+  // The object is a separate question and the answer does not depend on the
+  // output kind: every kind that assembles writes one, and a program build
+  // links it for every function it holds. Asking the executable question
+  // first and returning its answer is what used to drop the object, so both
+  // files are collected and the list is built once.
+  const executable = output === "machine" || (output === "ir" && standalone);
+  return [
+    delivered,
+    ...(executable ? [paths.executable] : []),
+    ...(linksObjects ? [paths.object] : []),
+  ];
 }
 
 /**

@@ -247,6 +247,10 @@ const HARNESS_RESERVED: Record<string, true> = {
   mode_cursor: true,
   bench_mode: true,
   count_token: true,
+  // Held as a local while a vector is read. It is not named in the prelude,
+  // so a parameter of that name is not moved aside of it: the local shadows the
+  // argument, and the harness stores the parsed value into a `char *`.
+  token: true,
   iterations: true,
   iteration: true,
   calls: true,

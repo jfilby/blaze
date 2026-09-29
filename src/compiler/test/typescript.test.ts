@@ -45,6 +45,49 @@ test("the shipped example compiles to the expected contract", async () => {
   parseContract(contract);
 });
 
+test("a body that reads a buffer at a position the contract cannot name is refused", () => {
+  // The same loop, once bounded by the parameter and once by a local holding
+  // it. Naming the bound in a local used to drop the whole length requirement
+  // and leave `a != null`, so a caller could hand the body a buffer shorter
+  // than the body walks and the read went past the end of it. A contract that
+  // cannot state the length a body reads is not a contract, and the difference
+  // was an accident of how the bound was spelled.
+  const loop = (bound: string, test: string): string =>
+    [
+      "export function total(a: Float64Array, n: number): number {",
+      "  let total = 0;",
+      `  ${bound}`,
+      `  for (let i = 0; i < ${test}; i += 1) { total += a[i]; }`,
+      "  return total;",
+      "}",
+      "",
+    ].join("\n");
+  // A bound the contract can name is stated as the length the caller owes,
+  // whether it is the parameter itself or a computation of it.
+  for (const [test, stated] of [
+    ["n", "len(a) >= n"],
+    ["n - 0", "len(a) >= (n - 0)"],
+  ]) {
+    assert.deepEqual(
+      contractOf("typescript", loop("let m = 0;", test)).requires,
+      ["a != null", stated],
+      `a loop counted to \`${test}\` states the length it reads`,
+    );
+  }
+  // A bound it cannot name is refused, however that bound is written.
+  for (const [bound, test] of [
+    ["let m = n;", "m"],
+    ["let m = 0;", "m"],
+    ["let m = 0;", "m + n"],
+  ]) {
+    assert.throws(
+      () => contractOf("typescript", loop(bound, test)),
+      /cannot be contracted: it reads a at a position the contract cannot name/,
+      `a bound written as \`${bound}\` tested by \`${test}\` is not a length the caller is held to`,
+    );
+  }
+});
+
 test("a block body and an expression body both work", async () => {
   const block = contractOf("typescript", `export function square(x: number): number {\n  return x * x;\n}\n`);
   const expression = contractOf("typescript", `export function square(x: number): number = x * x;\n`);

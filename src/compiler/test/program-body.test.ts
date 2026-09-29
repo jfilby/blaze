@@ -16,7 +16,7 @@ import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
-import type { SemanticValue } from "../core/semantic-ir.ts";
+import { typeText, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
@@ -62,7 +62,7 @@ test("a program's statements are read in the order they run", () => {
   );
 
   assert.deepEqual(body, [
-    { kind: "declare", name: "a", mutable: false, type: null, value: { k: "buffer", values: [{ k: "number", text: "1" }, { k: "number", text: "2" }] }, line: 2 },
+    { kind: "declare", name: "a", mutable: false, type: null, value: { k: "buffer", element: "f64", values: [{ k: "number", text: "1" }, { k: "number", text: "2" }] }, line: 2 },
     {
       kind: "declare",
       name: "total",
@@ -317,6 +317,52 @@ test("a program runs the statements a function body is written in", () => {
     { from: counted.from, to: counted.to, inclusive: counted.inclusive, down: counted.down, step: counted.step },
     { from: { k: "number", text: "1" }, to: { k: "number", text: "10" }, inclusive: true, down: false, step: { k: "number", text: "1" } },
   );
+});
+
+test("a typed array holds the elements its view says it does", async () => {
+  // The view an array is allocated from is what says the width of an element,
+  // and it was dropped on the way in: every view became a run of doubles. An
+  // `Int8Array` then answered 200 where the source answers -56, and a
+  // `Float32Array` answered 16777217 where the source answers 16777216. The
+  // program is run by node and by the binary the build delivers, so the two
+  // are compared by what they print.
+  const source = [
+    "const narrow = new Int8Array([200, -5]);",
+    "console.log(narrow[0]);",
+    "const small = new Float32Array([16777217]);",
+    "console.log(small[0]);",
+    "const wide = new Uint32Array([3000000000]);",
+    "console.log(wide[0]);",
+    "const walked = new Int32Array([1, 2, 3]);",
+    "let total = 0;",
+    "for (const value of walked) { total += value; }",
+    "console.log(total);",
+    "",
+  ].join("\n");
+
+  // The IR says the element each view holds, and a view is what says it.
+  const program = resolved({ "main.ts": source });
+  const views = program.entry.statements
+    .filter((one) => one.k === "let" && one.slot.kind === "buffer")
+    .map((one) => (one.k === "let" && one.slot.kind === "buffer" ? typeText(one.slot.element) : ""));
+  assert.deepEqual(views, ["i8", "f32", "u32", "i32"]);
+
+  const directory = await mkdtemp(join(tmpdir(), "blaze-views-"));
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+  });
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  const source_ = join(directory, "main.ts");
+  const expected = run("node", ["--experimental-strip-types", source_], {});
+  const actual = run(outcome.outputPath, [], {});
+  assert.equal(actual.code, 0, actual.stderr);
+  assert.equal(actual.stdout, expected.stdout, "the built program prints what the source prints");
+  assert.equal(expected.stdout.trim().split("\n").join(","), "-56,16777216,3000000000,6");
 });
 
 test("a name declared in a block is a variable of its own", () => {

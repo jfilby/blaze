@@ -330,6 +330,23 @@ test("a value is left in the type the use reads it in", async () => {
   await compute("c: boolean, n: number", arm, "run\n0 1.5\n", "RESULT 0.5\n");
 });
 
+test("locals of different carriers are declared in the order they are numbered", async () => {
+  // The module numbers the locals in the order the declaration pairs are
+  // written, and the body numbers them in the order it declares them. The
+  // pairs were collected one per distinct carrier, which is the same order
+  // only while one carrier fills one contiguous run: a bigint held between two
+  // numbers permuted the rest, and the module the compiler wrote was rejected
+  // as not valid WebAssembly.
+  const interleaved = ["  let a = 1.5;", "  let b = 2n;", "  let c = 2.5;", "  return a + c;"];
+  await compute("", interleaved, "run\n\n", "RESULT 4\n");
+  const leading = ["  let b = 2n;", "  let a = 1.5;", "  let c = 2.5;", "  return a + c;"];
+  await compute("", leading, "run\n\n", "RESULT 4\n");
+  const trailing = ["  let a = 1.5;", "  let c = 2.5;", "  let b = 2n;", "  return a + c;"];
+  await compute("", trailing, "run\n\n", "RESULT 4\n");
+  // A run of one carrier is still declared once, and the whole is still right.
+  await compute("", ["  let a = 1.5;", "  let c = 2.5;", "  return a + c;"], "run\n\n", "RESULT 4\n");
+});
+
 test("a construct the module boundary cannot reach is refused by name", async () => {
   const files = {
     "main.ts": 'import { r } from "./lib.ts";\nr(0);\n',

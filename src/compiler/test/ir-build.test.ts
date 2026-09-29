@@ -19,10 +19,11 @@ import { join } from "node:path";
 import { STATE_DIRECTORY, runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
+import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
-import { phaseOf } from "./phase.ts";
+import { phaseOf, semanticsOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
 
 const quiet = { stage: () => {} };
@@ -243,4 +244,40 @@ test("a function that states a postcondition is reviewed and verified like any o
   // The result is checked against the postcondition, on vectors of its own,
   // rather than by running a program there is no library of.
   assert.ok((outcome.verification.square?.[0]?.cases ?? 0) > 0, "the postcondition verified the result");
+});
+
+test("an increment used as a value hands back the value its side says it does", () => {
+  // `i++` reads the value the name had and `++i` the value it has after the
+  // step, so the two resolve to the same statements in a different order. A
+  // snapshot taken before the step in both cases compiles, verifies and runs,
+  // and every value the prefix form appears in comes out one step behind.
+  const library = (expr: string): string =>
+    [
+      "export function bump(count: number): number {",
+      "  if (count <= 0) { return 0; }",
+      "  let i = 5;",
+      `  const y = ${expr};`,
+      "  return y;",
+      "}",
+      "",
+    ].join("\n");
+  const entry = ['import { bump } from "./lib.ts";', "console.log(bump(1));", ""].join("\n");
+  const phase = (expr: string) => phaseOf("typescript", { "lib.ts": library(expr), "main.ts": entry }, "main.ts");
+
+  const prefix = printSemanticFunction(semanticsOf(phase("++i")).bump as SemanticFunction);
+  const postfix = printSemanticFunction(semanticsOf(phase("i++")).bump as SemanticFunction);
+  assert.notEqual(prefix, postfix, "the two sides of an increment are not the same program");
+  // The step runs first, so the snapshot the value is read from is the value
+  // the step has already written.
+  assert.match(prefix, /step i \+\+ pre @4\n {4}let value\[f64\] t\d+ immutable = local\[f64\] i @4/);
+  // The snapshot runs first, so it is the value the name had before the step.
+  assert.match(postfix, /let value\[f64\] t\d+ immutable = local\[f64\] i @4\n {4}step i \+\+ post @4/);
+
+  // The C is what computes it, and there `++i` is a statement whose value
+  // nothing reads, so the order of the two lines is the whole of the value.
+  const c = (expr: string): string => generateFunctionC(semanticsOf(phase(expr)).bump as SemanticFunction);
+  assert.match(c("++i"), /\+\+i;\n {2}double t\d+ = i;/);
+  assert.match(c("i++"), /double t\d+ = i;\n {2}i\+\+;/);
+  assert.match(c("--i"), /--i;\n {2}double t\d+ = i;/);
+  assert.match(c("i--"), /double t\d+ = i;\n {2}i--;/);
 });

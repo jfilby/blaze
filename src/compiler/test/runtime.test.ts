@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeProject } from "./project.ts";
@@ -14,11 +14,13 @@ import {
   runtimeSourceSource,
 } from "../runtime/abi.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
-import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
+import { generateHostSource, generateRuntimeAdapterSource } from "../runtime/nim.ts";
+import { generateHarness } from "../toolchain/linker.ts";
+import { body } from "./definition.ts";
 import { buildIrReviewPrompt, type ReviewRequest } from "../ai/review.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { programWithSemantics } from "./phase.ts";
-import type { SourceInput } from "../core/types.ts";
+import type { FunctionContract, SourceInput } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
 const OBJECT_REPLAY = new URL("./fixtures/runtime-object-replay.json", import.meta.url).pathname;
@@ -278,6 +280,81 @@ test("both runtimes answer the harness protocol identically", async (t) => {
     const [, duration, sink] = line.split(" ");
     assert.ok(Number(duration) > 0, "the benchmark must report a positive duration");
     assert.equal(Number(sink), 600, "the sink must accumulate one result per iteration");
+  }
+});
+
+test("a result too small for seventeen decimal places is still the number it is", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // The verifier reads a double off whichever host ran and holds it to the
+  // contract, so a correct result has to survive being printed by either.
+  // Nim's `ffDecimal` counts the digits *after the point*, so a result of
+  // 1e-18 printed as seventeen zeroes and read back as zero, and a correct
+  // candidate was refused on the hosted build and passed on the standalone
+  // one. The C harness prints seventeen significant digits and this now does
+  // the same.
+  const contract: FunctionContract = {
+    version: "1",
+    function: {
+      name: "small",
+      symbol: "small",
+      params: [
+        { name: "x", type: "f64" },
+        { name: "a", type: "ptr<f64>" },
+        { name: "n", type: "usize" },
+      ],
+      returns: "f64",
+    },
+    requires: [],
+    ensures: ["result == (x * 1e-18)"],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "throughput" },
+    definition: body([{ kind: "result", value: { k: "ident", name: "x" }, line: 1 }]),
+  };
+  const candidate = "double small(double x, double* a, unsigned long n) { (void)a; (void)n; return x * 1e-18; }\n";
+  const request = "run\n1 1 1\n1\n";
+  const root = await mkdtemp(join(tmpdir(), "blaze-float-"));
+
+  const plain = join(root, "plain");
+  await mkdir(plain);
+  await writeFile(join(plain, "blaze_rt.h"), runtimeHeaderSource(), "utf8");
+  await writeFile(join(plain, "blaze_rt.c"), runtimeSourceSource(), "utf8");
+  await writeFile(join(plain, "small.c"), candidate, "utf8");
+  await writeFile(join(plain, "harness.c"), generateHarness(contract, request), "utf8");
+  const built = run("gcc", ["-std=c11", "-O2", "-D_POSIX_C_SOURCE=200809L", "-o", "h", "harness.c", "small.c", "blaze_rt.c", "-lm"], {
+    cwd: plain,
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const fromPlain = run(join(plain, "h"), [], { input: request, cwd: plain });
+  assert.equal(fromPlain.code, 0, fromPlain.stderr);
+
+  const hosted = join(root, "hosted");
+  await mkdir(hosted);
+  await writeFile(join(hosted, "blaze_rt.nim"), generateRuntimeAdapterSource(), "utf8");
+  await writeFile(join(hosted, "small.c"), candidate, "utf8");
+  await writeFile(join(hosted, "host.nim"), generateHostSource(contract, request), "utf8");
+  const object = run("gcc", ["-std=c11", "-O2", "-c", "-o", "small.o", "small.c"], { cwd: hosted });
+  assert.equal(object.code, 0, object.stderr);
+  const linked = run("nim", ["c", "--hints:off", "--warnings:off", `--nimcache:${join(hosted, "nimcache")}`, `--passL:${join(hosted, "small.o")}`, `--out:${join(hosted, "h")}`, "host.nim"], {
+    cwd: hosted,
+    timeoutMs: 600_000,
+  });
+  assert.equal(linked.code, 0, linked.stderr);
+  const fromHosted = run(join(hosted, "h"), [], { input: request, cwd: hosted });
+  assert.equal(fromHosted.code, 0, fromHosted.stderr);
+
+  for (const [host, output] of [
+    ["the C harness", fromPlain],
+    ["the Nim host", fromHosted],
+  ] as const) {
+    const line = output.stdout.split("\n").find((entry) => entry.startsWith("RESULT "));
+    assert.ok(line !== undefined, `${host} printed no RESULT: ${JSON.stringify(output.stdout)}`);
+    assert.equal(Number(line.split(" ")[1]), 1e-18, `${host} must print a form that reads back as the double computed`);
   }
 });
 

@@ -857,6 +857,27 @@ function typeProblems(context: Context, tree: Tree): string[] {
         problems.push(`${prefix}a ${typeText(statement.value.type)} is nothing to keep alive`);
       }
     }
+    // A name is written with the type it is declared and read as, and the two
+    // backends take the declared type as the one that wins: the C emitter casts
+    // the value to the slot and the WebAssembly one leaves the stack under the
+    // slot's own type. Neither of them checks it, so a value written under `=`
+    // and a step over a name that is not a number were lowered without a word.
+    // `setElement` below holds itself to exactly this, and a step is an
+    // arithmetic move, so it needs a number to move.
+    if (statement.k === "set" && statement.op === "=") {
+      const slot = placed.scope.slots.get(statement.name);
+      const declared = slot === undefined ? null : slotType(slot);
+      if (declared !== null && !convertibleTo(statement.value.type, declared)) {
+        problems.push(`${prefix}"${statement.name}" holds a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
+      }
+    }
+    if (statement.k === "step") {
+      const slot = placed.scope.slots.get(statement.name);
+      const declared = slot === undefined ? null : slotType(slot);
+      if (declared !== null && !isNumber(declared)) {
+        problems.push(`${prefix}"${statement.name}" is a ${typeText(declared)}, which is not a number a step can move`);
+      }
+    }
     if (statement.k === "setElement") {
       const buffer = placed.scope.slots.get(statement.buffer);
       const element = buffer === undefined ? null : elementTypeOf(slotType(buffer));
@@ -1178,17 +1199,28 @@ function effectAndOwnershipProblems(context: Context, tree: Tree): string[] {
  */
 function evaluatedOnceProblems(tree: Tree): string[] {
   const problems: string[] = [];
+  const decide = (prefix: string, root: SemanticValue): void => {
+    walked(root, (inner) => {
+      if (inner.k !== "logical" && inner.k !== "coalesce") return;
+      if (!hasCall(inner.left)) return;
+      const callee = inner.left.k === "call" ? inner.left.call.callee : "a function";
+      problems.push(`${prefix}${inner.k} decides on an arm that calls ${callee}, which is written twice`);
+    });
+  };
 
   for (const placed of tree.statements) {
     const prefix = label(placed.block.block.id, placed.statement.line);
-    for (const value of statementValues(placed.statement)) {
-      walked(value, (inner) => {
-        if (inner.k !== "logical" && inner.k !== "coalesce") return;
-        if (!hasCall(inner.left)) return;
-        const callee = inner.left.k === "call" ? inner.left.call.callee : "a function";
-        problems.push(`${prefix}${inner.k} decides on an arm that calls ${callee}, which is written twice`);
-      });
-    }
+    for (const value of statementValues(placed.statement)) decide(prefix, value);
+  }
+  // What a block hands back is a value the backends lower like any other, and
+  // for a function whose body is one expression it is the only place the value
+  // lives. A block's terminator is not one of its statements, so an arm written
+  // in a return was decided on by this rule never, and the call the C backend
+  // binds to a temporary ran once where the WebAssembly one ran it twice.
+  for (const placed of tree.blocks) {
+    const terminator = placed.block.terminator;
+    if (terminator.k !== "return" || terminator.value === null) continue;
+    decide(label(placed.block.id, 0), terminator.value);
   }
 
   return problems;

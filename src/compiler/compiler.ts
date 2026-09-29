@@ -1573,7 +1573,17 @@ export async function runStored(
       ].join("\n"),
     });
   }
-  const stored = await store.read<Record<string, Candidate[]>>(paths.candidates);
+  // Every record below is keyed by whatever the source named its functions,
+  // and `__proto__` is a legal identifier. On an object with the usual
+  // prototype, reading that key answers from `Object.prototype` rather than
+  // reporting the function as absent, and writing it replaces the prototype
+  // instead of adding an entry, so the record the build wrote is quietly
+  // missing the one function it kept. A record with no prototype holds what
+  // it holds and nothing else.
+  const stored = Object.create(null) as Record<string, Candidate[]>;
+  for (const [name, candidates] of Object.entries(await store.read<Record<string, Candidate[]>>(paths.candidates))) {
+    if (Array.isArray(candidates)) stored[name] = candidates;
+  }
 
   reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
@@ -1596,13 +1606,11 @@ export async function runStored(
   // the way a build does, so it goes through the same lock.
   const machine = exclusive();
 
-  const verification = (await store.exists(paths.verification))
-    ? await store.read<Record<string, VerificationResult[]>>(paths.verification)
-    : {};
-  const benchmark = (await store.exists(paths.benchmark))
-    ? await store.read<Record<string, BenchmarkResult[]>>(paths.benchmark)
-    : {};
-  const functions: StoredCommandOutcome["functions"] = {};
+  // Both records are collected as entries and written whole, the way a build
+  // writes its own, so a name that is a key of neither is never half written.
+  const verificationEntries: [string, VerificationResult[]][] = [];
+  const benchmarkEntries: [string, BenchmarkResult[]][] = [];
+  const functionEntries: [string, StoredCommandOutcome["functions"][string]][] = [];
   for (const unit of units) {
     const functionName = unit.contract.function.name;
     const candidates = stored[functionName] ?? [];
@@ -1631,13 +1639,16 @@ export async function runStored(
       test: testConfigFor(input, options),
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
     });
-    functions[functionName] = {
-      candidate: candidate.id,
-      ...(result.verification === undefined ? {} : { verification: result.verification }),
-      ...(result.benchmark === undefined ? {} : { benchmark: result.benchmark }),
-    };
-    verification[functionName] = result.verification === undefined ? [] : [result.verification];
-    benchmark[functionName] = result.benchmark === undefined ? [] : [result.benchmark];
+    functionEntries.push([
+      functionName,
+      {
+        candidate: candidate.id,
+        ...(result.verification === undefined ? {} : { verification: result.verification }),
+        ...(result.benchmark === undefined ? {} : { benchmark: result.benchmark }),
+      },
+    ]);
+    verificationEntries.push([functionName, result.verification === undefined ? [] : [result.verification]]);
+    benchmarkEntries.push([functionName, result.benchmark === undefined ? [] : [result.benchmark]]);
 
     // A function that states no postcondition has no vector to run, so there is
     // nothing to report for it here.
@@ -1659,9 +1670,11 @@ export async function runStored(
       );
     }
   }
-  await store.write(paths.verification, verification);
-  await store.write(paths.benchmark, benchmark);
-  return { project, functions };
+  // A record a re-measure rewrites whole, so it never keeps a function this
+  // program no longer compiles, and a name any source may use is a key of it.
+  await store.write(paths.verification, byName(verificationEntries));
+  await store.write(paths.benchmark, byName(benchmarkEntries));
+  return { project, functions: byName(functionEntries) };
 }
 
 export interface SemanticIrOptions {

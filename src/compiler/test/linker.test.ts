@@ -64,7 +64,7 @@ test("a parameter named after the harness's own machinery still builds", async (
   // Each of these is a name the prelude or `main` already holds, so writing
   // the parameter down under it was a redeclaration or a shadowed assignment,
   // and the harness did not compile.
-  for (const params of ["cursor: i32", "input: i32", "input_line: i32", "mode: i32", "fail: i32", "read_header: i32"]) {
+  for (const params of ["cursor: i32", "input: i32", "input_line: i32", "mode: i32", "fail: i32", "read_header: i32", "token: i32"]) {
     assert.equal(await harnessResult(params, "5\n"), "RESULT 5\n", `parameter ${params}`);
   }
 });

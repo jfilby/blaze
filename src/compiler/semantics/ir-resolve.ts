@@ -709,7 +709,7 @@ class ProgramResolver {
         return declare({
           kind: "array",
           mutable,
-          element: annotation === null ? null : elementOf(annotation),
+          element: annotation === null ? value.held.element : elementOf(annotation),
           length: value.held.length,
           values: value.held.values,
         });
@@ -988,11 +988,15 @@ class ProgramResolver {
           kind: "array",
           name: "",
           mutable: false,
-          element: null,
+          // The view the array was allocated from is what says the width of an
+          // element. Left null for a use to fix, every array became a run of
+          // doubles, so an `Int32Array` was lowered as `[f64; N]` and each of
+          // its elements read eight bytes out of a four byte stride.
+          element: value.element,
           length: value.values.length,
           // The elements take the type of the array they are written into,
           // which a use of the array fixes.
-          values: value.values.map((element) => this.value(element, null, line)),
+          values: value.values.map((element) => this.value(element, { kind: "primitive", name: value.element }, line)),
         };
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };

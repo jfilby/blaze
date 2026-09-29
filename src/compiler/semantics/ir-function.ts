@@ -1091,23 +1091,34 @@ class FunctionBody {
   }
 
   /**
-   * `i++` used as a value: the old value of the name, written under a name of
-   * its own, and then the step that changes it. A step is a statement the IR
-   * states and a value is not, so the value it hands back is the one taken
-   * before the step ran.
+   * `i++` and `++i` used as a value: `i++` hands back the value from before
+   * the step and `++i` the one from after it, so the two differ only in the
+   * order the step and the snapshot are written in. A step is a statement and
+   * a value is not, so the value is written under a name of its own either
+   * way, and a snapshot taken after the step is the only difference between
+   * the two forms. Taking it before both is what made `++i` hand back the
+   * value `i` already had.
    */
   private updated(expression: Expression & { k: "update" }, line: number): Typed {
     const held = this.read(expression.name, line);
     const type = slotType(held.slot);
-    const before = this.generated("t");
-    this.pending.push({
+    const snapshot = this.generated("t");
+    const take = (): SemanticStatement => ({
       k: "let",
-      slot: { kind: "value", name: before, mutable: false, type },
+      slot: { kind: "value", name: snapshot, mutable: false, type },
       value: { k: "local", type, name: held.name },
       line,
     });
-    this.pending.push({ k: "step", name: held.name, op: expression.op, prefix: true, line });
-    return { value: { k: "local", type, name: before }, inferred: held.inferred };
+    const step: SemanticStatement = {
+      k: "step",
+      name: held.name,
+      op: expression.op,
+      prefix: expression.prefix,
+      line,
+    };
+    if (expression.prefix) this.pending.push(step, take());
+    else this.pending.push(take(), step);
+    return { value: { k: "local", type, name: snapshot }, inferred: held.inferred };
   }
 
   /* ---------------------------------------------------------------------- */

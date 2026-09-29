@@ -517,6 +517,27 @@ function writtenIn(blocks: readonly SemanticBlock[], declarations: boolean): Set
 }
 
 /**
+ * Every name a block nested inside the first one declares. A binding written at
+ * the top of the first block reads the name that is in scope there, which is
+ * not the one the nested block declares, so a value that reads such a name is
+ * a different value above the nested block than inside it.
+ */
+function shadowedIn(blocks: readonly SemanticBlock[]): ReadonlySet<string> {
+  const shadowed = new Set<string>();
+  for (const block of blocks.slice(1)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let") shadowed.add(statement.slot.name);
+      else if (statement.k === "loop" && statement.loop.kind === "counted") shadowed.add(statement.loop.variable);
+      else if (statement.k === "loop" && statement.loop.kind === "each") {
+        shadowed.add(statement.loop.index);
+        shadowed.add(statement.loop.element);
+      }
+    }
+  }
+  return shadowed;
+}
+
+/**
  * The values a set of blocks computes more than once, keyed by how they are
  * written, and only where binding one to a name computes it the same number of
  * times: a value that calls, that allocates, or that reads a name these blocks
@@ -596,7 +617,16 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
   // A block that ends in a return hands its value back from the statement that
   // wrote it, so the terminator is part of the block this rule reads.
   const scope = nestedBlocks(block);
-  const repeated = repeatedValues(scope, writtenIn(scope, false));
+  // A binding is written at the top of `block`, and a name a block nested
+  // inside it declares shadows the name that binding would be written under:
+  // the same written value read inside the arm and read at the top of the
+  // block are two different values. They share a spelling, which is all the
+  // key compares, so the shadowing names are written names here for the same
+  // reason a loop's counter is: a value that reads one is not the same value
+  // everywhere in the scope.
+  const written = writtenIn(scope, false);
+  for (const name of shadowedIn(scope)) written.add(name);
+  const repeated = repeatedValues(scope, written);
   if (repeated.size === 0) {
     return { refused: `computes nothing more than once, or what it computes twice is not the same value, so there is nothing to bind` };
   }
@@ -817,25 +847,57 @@ function inlineRefusal(callee: SemanticFunction): string | null {
   if (callee.calls.length > 0) return `calls ${callee.calls.map((edge) => edge.callee).join(", ")}, and inlining one call would put two of them there`;
   if (isReference(callee.returns)) return "hands back a reference, whose ownership the caller would have to take over";
   if (callee.entry.releases.length > 0) return "frees what it owns on the way out, which belongs to its own blocks";
+  // A parameter is state of the callee, and the body the rule splices in
+  // carries the callee's writes to it over verbatim: a `set` or a `step` names
+  // its target as a bare string, so it is not rewritten to the argument the
+  // call was made with and lands on the caller's own name instead. Inlining
+  // one would make a private write a visible mutation of the caller's frame,
+  // and every read of the parameter would already have become the argument.
+  const written = writtenParameter(callee);
+  if (written !== null) {
+    return `writes the parameter "${written}", which is state of its own and would be written into the frame it is put into`;
+  }
   for (const block of nestedBlocks(callee.entry)) {
     if (block.terminator.k === "jump") return "leaves a block for another one, which is control flow the function it is put into does not own";
   }
   return null;
 }
 
-/** An edge the body no longer makes is not one, whichever block made it. */
+/**
+ * An edge the body no longer makes is not one, whichever block made it. A call
+ * is a call wherever it is written, and a return terminator is where a
+ * function's own last call usually is: the edges are what the printed artifact
+ * declares its callees from, so an edge dropped while a call is left in a
+ * terminator is a function the compiler can no longer read back, and a rule
+ * that legitimately applied is thrown away along with it.
+ */
 function dropUnusedEdge(fn: SemanticFunction, callee: string): void {
   let called = false;
   for (const block of blocksOf(fn)) {
-    for (const statement of block.statements) {
-      for (const value of statementValues(statement)) {
-        walkValues(value, (inner) => {
-          if (inner.k === "call" && inner.call.callee === callee) called = true;
-        });
-      }
+    for (const value of blockValues([block])) {
+      walkValues(value, (inner) => {
+        if (inner.k === "call" && inner.call.callee === callee) called = true;
+      });
     }
   }
   if (!called) fn.calls = fn.calls.filter((edge) => edge.callee !== callee);
+}
+
+/** The name of a parameter a body writes, or null when it writes none of them. */
+function writtenParameter(fn: SemanticFunction): string | null {
+  const params = new Set(fn.params.map((param) => param.name));
+  for (const block of blocksOf(fn)) {
+    for (const statement of block.statements) {
+      const target =
+        statement.k === "set" || statement.k === "step"
+          ? statement.name
+          : statement.k === "setElement"
+            ? statement.buffer
+            : null;
+      if (target !== null && params.has(target)) return target;
+    }
+  }
+  return null;
 }
 
 /* -------------------------------------------------------------------------- */

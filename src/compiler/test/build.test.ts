@@ -101,6 +101,25 @@ test("a function the source named __proto__ is compiled and recorded like any ot
     ) as Record<string, unknown>;
     assert.deepEqual(Object.keys(record), ["__proto__"], `${file} must record the function`);
   }
+
+  // Re-measuring a stored build reads and writes the same records, and it did
+  // so by assignment into the parsed object, where this name is an inherited
+  // accessor: the entry the build had just written was gone by the time the
+  // re-measure wrote its record back, and the prototype of the record had
+  // become an array.
+  const remeasured = await runStored(
+    "input",
+    { cwd: directory, reuse: false, model: `replay:${PROTO_REPLAY}` },
+    quiet,
+    "test",
+  );
+  assert.deepEqual(Object.keys(remeasured.functions), ["__proto__"], "the re-measure keeps the function it measured");
+  for (const file of ["verification.json", "benchmark.json"]) {
+    const record = JSON.parse(
+      await readFile(join(directory, STATE_DIRECTORY, "projects/input", file), "utf8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(record), ["__proto__"], `${file} must record the function after a re-measure`);
+  }
 });
 
 test("a project that names a target cpu builds against it", async () => {

@@ -12,7 +12,7 @@
  * internal representation.
  */
 
-import type { FunctionContract, SourceInput, TypeExpr } from "../core/types.ts";
+import type { FunctionContract, PrimitiveTypeName, SourceInput, TypeExpr } from "../core/types.ts";
 
 /**
  * One import as the source wrote it. `names` is the list of symbols it binds,
@@ -54,8 +54,13 @@ export type ProgramValue =
   | { k: "null" }
   /** A string, with the values a template string interpolates. */
   | { k: "text"; parts: ProgramText[] }
-  /** A buffer written out element by element, as a typed array literal is. */
-  | { k: "buffer"; values: ProgramValue[] }
+  /**
+   * A buffer written out element by element, as a typed array literal is, and
+   * the element type the view it was allocated from states. The view is what
+   * says the width, so dropping it left an `Int32Array` lowered as a run of
+   * doubles.
+   */
+  | { k: "buffer"; element: PrimitiveTypeName; values: ProgramValue[] }
   | { k: "name"; name: string }
   /** `name.length`, of a buffer or of a string. */
   | { k: "length"; of: string }

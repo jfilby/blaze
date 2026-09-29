@@ -1020,7 +1020,11 @@ class IrScanner {
       return this.closing(bracketed, {
         k: "logical",
         op: LOGICAL_OPS[head],
-        type: this.contractType(),
+        // A logical hands back one of its arms, so its type is the type of
+        // them: two strings make a string, which the contract type language
+        // has no spelling for. Read as a value's own type rather than as a
+        // contract's, the way `coalesce` beside it is read.
+        type: this.typed(),
         left: this.value(),
         right: this.value(),
       });

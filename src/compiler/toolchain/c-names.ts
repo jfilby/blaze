@@ -274,6 +274,10 @@ const C_OPERATORS: Record<string, string> = {
   "-": "-",
   "*": "*",
   "/": "/",
+  // A remainder is the one arithmetic operator the emitter's own table spells
+  // that this one did not, so every function using `%` was refused here rather
+  // than lowered.
+  "%": "%",
   "<<": "<<",
   ">>": ">>",
   "&": "&",

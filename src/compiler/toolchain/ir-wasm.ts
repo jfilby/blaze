@@ -967,15 +967,32 @@ class Body {
     this.op(code);
   }
 
-  /** The declarations of the locals the body added beyond the parameters. */
+  /**
+   * The declarations of the locals the body added beyond the parameters, one
+   * pair per run of them that share a carrier, in the order they were declared.
+   *
+   * The module numbers the locals in the order these pairs are written, and
+   * `bindings` numbered them in the order the body declares them, so the two
+   * have to be the same order. Collecting one pair per distinct carrier instead
+   * permuted every local whose carrier was not already a contiguous run, so a
+   * body holding a bigint between two numbers wrote a `local.set` against a
+   * local of the wrong type and the module was not valid WebAssembly.
+   */
   localGroups(): number[] {
-    const groups: number[] = [];
-    const counts = new Map<number, number>();
+    const types: number[] = [];
     for (let position = this.fn.params.length; position < this.declared.length; position += 1) {
-      const type = carrier(this.declared[position] as SemanticType);
-      counts.set(type, (counts.get(type) ?? 0) + 1);
+      types.push(carrier(this.declared[position] as SemanticType));
     }
-    for (const [type, count] of counts) groups.push(count, type);
+    const groups: number[] = [];
+    let index = 0;
+    while (index < types.length) {
+      const type = types[index];
+      if (type === undefined) break;
+      let run = 1;
+      while (types[index + run] === type) run += 1;
+      groups.push(run, type);
+      index += run;
+    }
     return groups;
   }
 

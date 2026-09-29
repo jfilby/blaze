@@ -535,9 +535,18 @@ function scalarRead(type: TypeExpr, name: string, token: string): string {
   return `${name} = ${nimType(type)}(parseBiggestUInt(${token}))`;
 }
 
-/** Nim that prints one result value, in the form the verifier parses. */
+/**
+ * Nim that prints one result value, in the form the verifier parses.
+ *
+ * `ffDecimal` counts the digits *after the point*, so a correct result of
+ * 1e-18 printed as seventeen zeroes and read back as zero, and one of 1e300
+ * printed three hundred and eighteen characters wide. The C harness prints
+ * seventeen *significant* digits, and the verifier reads a double off
+ * whichever host ran, so this prints those: a form that reads back as the
+ * double the candidate computed.
+ */
 function resultPrint(type: TypeExpr, expression: string): string {
-  if (isFloat(type)) return `stdout.write("RESULT " & formatBiggestFloat(float64(${expression}), ffDecimal, 17) & "\\n")`;
+  if (isFloat(type)) return `stdout.write("RESULT " & formatBiggestFloat(float64(${expression}), ffScientific, 17) & "\\n")`;
   if (type.kind === "primitive" && type.name === "bool") {
     return `stdout.write(if ${expression}: "RESULT 1\\n" else: "RESULT 0\\n")`;
   }
@@ -726,7 +735,7 @@ ${anchor}
       let value = ${invocation}
       sink += ${sinkValue(returns, "value")}
     let elapsed = nowNs() - start
-    stdout.write("BENCH " & $elapsed & " " & formatBiggestFloat(sink, ffDecimal, 17) & "\\n")
+    stdout.write("BENCH " & $elapsed & " " & formatBiggestFloat(sink, ffScientific, 17) & "\\n")
 
 ${bufferRelease(types, names)}
   ${RUNTIME_NAME}_finalize()

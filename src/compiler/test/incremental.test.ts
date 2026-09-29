@@ -242,4 +242,16 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("c", false, true), [".c"]);
   // A module is the whole deliverable of a wasm build, and it links nothing.
   assert.deepEqual(names("wasm", false, true), [".s", ".wasm"]);
+  // A program build links the object of every function it holds, whatever the
+  // output kind and whether or not the candidate also links on its own. The
+  // executable question and the object question are separate: a standalone
+  // `ir` or `machine` candidate delivers an executable AND is linked as an
+  // object, and asking the first question must not swallow the second.
+  assert.deepEqual(names("ir", true, true), [".ir", "", ".o"]);
+  assert.deepEqual(names("ir", true, false), [".ir", ".o"]);
+  assert.deepEqual(names("machine", true, true), [".s", "", ".o"]);
+  assert.deepEqual(names("machine", true, false), [".s", "", ".o"]);
+  assert.deepEqual(names("asm", true, false), [".s", ".o"]);
+  // A wasm build links no object at all, whatever the program around it does.
+  assert.deepEqual(names("wasm", true, true), [".s", ".wasm"]);
 });

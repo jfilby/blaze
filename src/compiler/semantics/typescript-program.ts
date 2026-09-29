@@ -65,9 +65,10 @@ import type {
 import type { Diagnostics, Token } from "./typescript.ts";
 import { ARGV, ARGV_LENGTH, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
 import { BUILTINS, MATH_NAMES } from "./builtins.ts";
+import type { PrimitiveTypeName } from "../core/types.ts";
 
-/** The array views a program can allocate. */
-const VIEWS: Record<string, string> = {
+/** The array views a program can allocate, and the element each one holds. */
+const VIEWS: Record<string, PrimitiveTypeName> = {
   Float32Array: "f32",
   Float64Array: "f64",
   Int8Array: "i8",
@@ -871,7 +872,7 @@ class ProgramParser {
     }
     this.expect("]");
     this.expect(")");
-    return { k: "buffer", values };
+    return { k: "buffer", element: VIEWS[view] as PrimitiveTypeName, values };
   }
 
   /** The text of a string, split where a template string interpolates. */

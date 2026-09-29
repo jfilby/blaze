@@ -1372,13 +1372,18 @@ function usageOf(declaration: TypeScriptFunction): {
             const at = text(value.index);
             // An index the contract language cannot name — one a `while`
             // counter holds, or one a `for..of` iterator carries — leaves the
-            // position unknown, and a position that is unknown is not a
-            // position the body skips. The buffer is read, so the contract
-            // says it is read: the only requirement the compiler can state
-            // honestly is that it is there, and `len(a)` for the upper bound
-            // states exactly that and no length it cannot justify.
+            // position unknown. `a[0:len(a)]` states nothing a caller is held
+            // to, and what is left is `a != null`: a caller may then hand the
+            // body a buffer shorter than the body walks, and the same body
+            // gets a real bound the moment the bound is spelled as a
+            // parameter rather than as a local holding one. A contract that
+            // cannot state the length the body reads is not a contract.
             if (at !== null) access(base.name, at, `(${at} + 1)`);
-            else access(base.name, "0", `len(${base.name})`);
+            else
+              throw frontendError(
+                `${declaration.name} cannot be contracted: it reads ${base.name} at a position the contract cannot name`,
+                "hold the bound in a parameter, so the contract can state the length the body reads",
+              );
           }
         }
         expression(value.base);
