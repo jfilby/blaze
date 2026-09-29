@@ -3,8 +3,8 @@
  *
  * A module of this compiler is either a library of pure functions or a
  * program. `hello_world.ts` is the library: the frontend turns it into a
- * function contract, the model writes an implementation, and the compiler
- * assembles, links, runs and verifies it against the contract. This file is
+ * function contract, the compiler resolves it into the semantic IR, and the
+ * compiler assembles, links, runs and verifies what it lowered. This file is
  * the program: it declares the data, calls `dotProduct` and prints what came
  * back.
  *

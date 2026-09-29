@@ -15,14 +15,15 @@ import {
 } from "../runtime/abi.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
-import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
+import { buildIrReviewPrompt, type ReviewRequest } from "../ai/review.ts";
+import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { programWithSemantics } from "./phase.ts";
 import type { SourceInput } from "../core/types.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
 const OBJECT_REPLAY = new URL("./fixtures/runtime-object-replay.json", import.meta.url).pathname;
 const EXAMPLE = new URL("../../examples/hosted_dot_product", import.meta.url).pathname;
-const EXAMPLE_CANDIDATES = new URL("../../examples/hosted_dot_product/candidates.json", import.meta.url).pathname;
+const EXAMPLE_REVIEWS = new URL("../../examples/hosted_dot_product/reviews.json", import.meta.url).pathname;
 
 const INPUT: SourceInput = {
   language: "nim",
@@ -110,43 +111,39 @@ test("the managed object representation is the same in the header and in the ada
   }
 });
 
-test("the prompt says the compiler writes the runtime calls, not the model", () => {
-  // A candidate no longer writes a runtime call, so the prompt has to say who
-  // does: the source allocates an object, and the answer is the effect in the
-  // body, which the lowering turns into the call the object is built by.
+test("a review of a function that allocates names no runtime symbol", () => {
+  // The source allocates an object, and the IR the compiler resolved carries
+  // that as an effect: the call into the runtime is written by the lowering,
+  // so nothing a model reads names one, and nothing a model is asked for can
+  // put one into the artifact.
   const files = {
     "module.ts":
       "export function make(): any {\n  return { left: null, right: null };\n}\nconst made = make();\n",
   };
   const { program, semantics } = programWithSemantics("typescript", files, "module.ts");
-  const request: PromptRequest = {
+  const request: ReviewRequest = {
+    stage: "ir",
     contract: program.files[0].functions.make,
     unit: { file: "module.ts", function: "make" },
     program,
     semantics,
-    sources: [{ path: "module.ts", source: files["module.ts"] }],
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     output: "machine",
-    runtime: "nim",
     candidate: 1,
     attempt: 1,
     candidates: 1,
+    artifact: printSemanticFunction(semantics.make),
+    artifactNote: null,
+    feedback: [],
+    refusals: [],
   };
 
-  const prompt = buildUserPrompt(request);
-  assert.match(prompt, /Allocate an object with blaze_rt_object_new\(bytes, alignment\)/);
-  assert.match(
-    prompt,
-    /The compiler reaches them through the runtime when it lowers your IR, so state the effect in/,
-  );
-  assert.ok(
-    !/The function is pure/.test(prompt),
-    "a candidate that allocates must not be told the function is pure",
-  );
-  // What the model may write is the IR, and the IR names no runtime symbol, so
-  // the prompt offers it the C prototype of nothing.
-  assert.doesNotMatch(prompt, /void\* blaze_rt_allocate\(size_t bytes\)/);
+  const prompt = buildIrReviewPrompt(request);
+  assert.ok(prompt.includes(printSemanticFunction(semantics.make)), "the review reads the resolved IR");
+  assert.match(prompt, /allocates objects: yes|allocates/);
+  assert.doesNotMatch(prompt, /blaze_rt_object_new/);
   assert.doesNotMatch(prompt, /blaze_rt_release/);
+  assert.doesNotMatch(prompt, /blaze_rt_allocate/);
 });
 
 test("a standalone build links the compiler runtime, and a function that allocates reaches it", async () => {
@@ -296,7 +293,7 @@ test("the shipped hosted example builds against the Nim runtime", async (t) => {
   await cp(EXAMPLE, directory, { recursive: true });
   const outcome = await runBuild(
     join(directory, "blaze.toml"),
-    { cwd: directory, reuse: false, model: `replay:${EXAMPLE_CANDIDATES}`, maxAttempts: 1 },
+    { cwd: directory, reuse: false, model: `replay:${EXAMPLE_REVIEWS}`, maxAttempts: 1 },
     quiet,
     "build",
   );

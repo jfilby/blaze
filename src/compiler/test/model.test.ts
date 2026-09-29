@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ReviewRequest } from "../ai/review.ts";
+import { phaseOf, semanticsOf } from "./phase.ts";
 import { resolveModel, OPENROUTER_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
-import { createBackend, extractImplementation, readFailureStatus, VercelAiBackend } from "../ai/backend.ts";
+import { createBackend, ReplayBackend, VercelAiBackend } from "../ai/backend.ts";
 
 function diagnostic(run: () => unknown): string {
   try {
@@ -87,36 +92,58 @@ test("an openrouter model object is constructible without contacting it", () => 
   assert.equal(backend.id, configuration.id);
 });
 
-test("the implementation is recovered from a fenced or bare response", () => {
-  // Surrounding blank space and fence markers are removed; the instructions
-  // themselves are passed through untouched.
-  const fenced = extractImplementation("Here you go:\n```asm\n\t.globl f\nf:\n\tret\n```\n");
-  assert.equal(fenced, ".globl f\nf:\n\tret\n");
-  assert.equal(extractImplementation("  \t.globl f\n  "), ".globl f\n");
-  assert.match(diagnostic(() => extractImplementation("   ")), /empty response/);
-  assert.match(diagnostic(() => extractImplementation("# just a comment\n")), /only comments/);
+/** The one request the replay backend is asked, which it never reads. */
+function reviewRequest(): ReviewRequest {
+  const files = {
+    "main.ts": "import { dotProduct } from './lib.ts';\nconsole.log(dotProduct(1));\n",
+    "lib.ts": "export function dotProduct(a: Float64Array, n: number): number {\n  return a[0] * n;\n}\n",
+  };
+  const phase = phaseOf("typescript", files, "main.ts");
+  const contract = phase.program.files.find((file) => file.path === "lib.ts")?.functions.dotProduct;
+  assert.ok(contract !== undefined);
+  return {
+    stage: "ir",
+    contract,
+    unit: { file: "lib.ts", function: "dotProduct" },
+    program: phase.program,
+    semantics: semanticsOf(phase),
+    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+    output: "machine",
+    candidate: 1,
+    candidates: 1,
+    attempt: 1,
+    artifact: "",
+    artifactNote: null,
+    feedback: [],
+    refusals: [],
+  };
+}
+
+test("the replay backend serves a recorded review, and refuses a file that holds none", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-replay-"));
+  const file = join(directory, "reviews.json");
+  await writeFile(file, JSON.stringify({ reviews: ["verdict: sound\nreason: nothing to change"] }), "utf8");
+  const backend = createBackend(resolveModel(`replay:${file}`, {}));
+  assert.ok(backend instanceof ReplayBackend);
+
+  const review = await backend.review(reviewRequest(), 1);
+  assert.equal(review.verdict, "sound");
+
+  // A replay file that is not a file of reviews is refused before it is read
+  // for an answer, so a build that meant to replay reviews is not silently
+  // answered with whatever the file happened to hold.
+  await writeFile(file, JSON.stringify({ candidates: ["function dotProduct() {}"] }), "utf8");
+  const other = createBackend(resolveModel(`replay:${file}`, {}));
+  await assert.rejects(() => other.review(reviewRequest(), 1), /must contain a non-empty "reviews" array/);
 });
 
-test("a failure status is read off the first line, with the model's own words", () => {
-  const declared = readFailureStatus("STATUS: failed\nThe contract requires behavior that cannot be implemented\nwith the available information.\n");
-  assert.equal(
-    declared?.message,
-    "The contract requires behavior that cannot be implemented\nwith the available information.",
+test("a replay entry that is not a review fails the build where it was served", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-replay-bad-"));
+  const file = join(directory, "reviews.json");
+  await writeFile(file, "here is the function you asked for\nfunction dotProduct() {}", "utf8");
+  const backend = createBackend(resolveModel(`replay:${file}`, {}));
+  await assert.rejects(
+    () => backend.review(reviewRequest(), 1),
+    /replay entry 1 is not a review of the ir of dotProduct/,
   );
-  // A model that indents its status still means it, and the blank lines it
-  // leaves around the report are not part of what it reported.
-  assert.equal(readFailureStatus("  STATUS: failed  \r\n\r\nI cannot meet this.\r\n")?.message, "I cannot meet this.");
-  // A status with nothing under it reports nothing, and says so by being
-  // empty rather than by being absent.
-  assert.equal(readFailureStatus("STATUS: failed")?.message, "");
-});
-
-test("only a first line that is exactly the status opens a failure", () => {
-  // Everything else is source. A reply that mentions the status later, or
-  // says it beside code, is what the toolchain is there to judge.
-  assert.equal(readFailureStatus("```asm\n\t.globl f\nf:\n\tret\n```"), null);
-  assert.equal(readFailureStatus("STATUS: ok\n\t.globl f"), null);
-  assert.equal(readFailureStatus("I cannot do this.\nSTATUS: failed"), null);
-  assert.equal(readFailureStatus("STATUS: failed to compile\treason"), null);
-  assert.equal(readFailureStatus("Here is the function.\nSTATUS: failed\nbecause"), null);
 });

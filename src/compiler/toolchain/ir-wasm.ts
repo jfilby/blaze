@@ -2,9 +2,9 @@
  * Lowering a function's semantic IR to a WebAssembly module.
  *
  * This is the same boundary the C lowering is, for the target that has no C
- * compiler here: the model writes the IR, the compiler checks it against the
- * contract and is now the one that wrote the module, so nothing the model wrote
- * is ever assembled. The module is emitted as bytes rather than as text,
+ * compiler here: the IR is the compiler's own and has been checked against the
+ * contract, so the compiler is the one that wrote the module. The module is
+ * emitted as bytes rather than as text,
  * because a text form would need an assembler this build does not otherwise
  * depend on, and a module the compiler wrote has no reader to disagree with it.
  *
@@ -1078,6 +1078,93 @@ export function moduleBytes(
     }),
   );
   return module.build();
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading a module back                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** The sections of a module, by the id the format gives them. */
+const SECTIONS: Record<number, string> = {
+  0: "custom",
+  1: "types",
+  2: "imports",
+  3: "functions",
+  4: "tables",
+  5: "memory",
+  6: "globals",
+  7: "exports",
+  8: "start",
+  9: "elements",
+  10: "code",
+  11: "data",
+  12: "data count",
+};
+
+/** Reads the unsigned integer the format writes in `bits` at `at`. */
+function readVaruint(bytes: Uint8Array, at: number, bits: number): { value: number; next: number } {
+  let value = 0;
+  let shift = 0;
+  for (let index = at; index < bytes.length && shift < bits; index += 1) {
+    const byte = bytes[index] ?? 0;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value: value >>> 0, next: index + 1 };
+    shift += 7;
+  }
+  throw new CompilerError({
+    category: "TargetError",
+    stage: "compile",
+    message: "the module ends in the middle of a length",
+    detail: "the bytes read back are not a module the compiler emitted",
+  });
+}
+
+/**
+ * What a module holds, as a reader is told it. A module is binary, so a review
+ * of one is shown its shape rather than a listing of it: every section it is
+ * made of, how large that section is, and what it exports. That is what can be
+ * said about a module without disassembling it, and the rules a review may
+ * propose are applied to the IR the module was built from either way.
+ */
+export function describeModule(bytes: Uint8Array): string {
+  const lines: string[] = [`${bytes.length} bytes`, ""];
+  const header = bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;
+  if (!header) {
+    lines.push("These bytes do not begin with a WebAssembly module header.");
+    return lines.join("\n");
+  }
+  let at = 8;
+  while (at < bytes.length) {
+    const id = bytes[at] ?? 0;
+    const size = readVaruint(bytes, at + 1, 32);
+    const name = SECTIONS[id] ?? `section ${id}`;
+    lines.push(`${name}: ${size.value} bytes`);
+    if (id === 7) {
+      lines.push(...readExports(bodyOf(bytes, size)).map((entry) => `  ${entry}`));
+    }
+    at = size.next + size.value;
+  }
+  return lines.join("\n");
+}
+
+/** The bytes of one section, which is where its own lengths are counted from. */
+function bodyOf(bytes: Uint8Array, size: { value: number; next: number }): Uint8Array {
+  return bytes.subarray(size.next, size.next + size.value);
+}
+
+/** The exports of a module, as one `name (kind)` line each. */
+function readExports(body: Uint8Array): string[] {
+  const count = readVaruint(body, 0, 32);
+  const kinds = ["function", "table", "memory", "global"];
+  const entries: string[] = [];
+  let at = count.next;
+  for (let index = 0; index < count.value && at < body.length; index += 1) {
+    const name = readVaruint(body, at, 32);
+    const kind = kinds[body[name.next + name.value] ?? 0] ?? "unknown";
+    entries.push(`exports ${new TextDecoder().decode(bodyOf(body, name))} (${kind})`);
+    at = name.next + name.value + 1 + readVaruint(body, name.next + name.value + 1, 32).value;
+  }
+  return entries;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -1,36 +1,34 @@
 /**
  * The compiler pipeline.
  *
- *   program -> contract phase -> semantic IR -> target generation -> output
+ *   source -> contract -> semantic IR -> review -> target -> review -> output
  *
- * The IR covers a program body and every function the program declares, each
- * as a whole: its signature, the conditions it is held to, its effects, the
+ * The compiler writes every program. It reads the source, contracts it,
+ * resolves each function into the semantic IR, lowers that IR to whatever the
+ * project asked for, and proves the result by running it. A model is asked
+ * twice along that path — once to read the IR before anything is lowered from
+ * it, once to read the target it was lowered into — and answers with a verdict
+ * and a list of proposals naming rewrites out of `semantics/repair.ts`. The
+ * compiler applies the proposals that hold by rewriting the IR and printing it
+ * again, refuses the ones that do not with a reason, and verifies whatever
+ * came of either. Nothing a model says is compiled.
+ *
+ * The IR covers a program body and every function the program declares, each as
+ * a whole: its signature, the conditions it is held to, its effects, the
  * objects it lays out, the calls it makes, and its body. `blaze ir` prints any
  * of them, and reads IR back from a file for the same validation a resolved
  * program gets.
  *
- * The IR is also where generation starts. A build with `output = "ir"`, which
- * is the default, asks a model for the IR of a function, checks the answer
- * against the contract, and lowers it to a target itself (toolchain/ir-c.ts),
- * so the model never writes a register, an offset or a calling convention. A
- * function whose contract states what it returns rather than what it does has
- * no body to lower — the source states a result, not behaviour — so the model
- * implements it in C, which is still the model writing a function and the
- * compiler compiling it. Machine code is written by a model only when a
- * project asks for it.
- *
  * The contract phase (semantics/program.ts) reads and contracts every file of
- * the program and validates the whole graph. Nothing generates target code
- * until that phase has produced a valid program contract, and every backend is
- * handed the source and that contract.
+ * the program and validates the whole graph. Nothing lowers a target until
+ * that phase has produced a valid program contract, and every backend is
+ * handed that contract.
  *
  * A program body then becomes the semantic IR (core/semantic-ir.ts, written by
  * semantics/ir-resolve.ts): what the program does, with every value typed and
  * every block naming where control goes. It is validated (semantics/
  * ir-validate.ts) before any toolchain is asked for anything, so a program no
- * backend may lower never reaches gcc, nim or a linker. `blaze ir` prints it,
- * and reads back IR that a model or a person wrote, which is the same check
- * applied to text instead of to a source file.
+ * backend may lower never reaches gcc, nim or a linker.
  *
  * Everything the compiler produces lives under `.blaze/` in the directory the
  * compiler was run from: JSON build records, intermediate artifacts and the
@@ -61,11 +59,10 @@ import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assemb
 import {
   evaluateStoredCandidate,
   exclusive,
-  generateCandidates,
-  generationLabel,
   implementationLabel,
   reusableFiles,
   reusedResult,
+  reviewCandidates,
   runtimePreparer,
   type CodegenResult,
   type CodegenWorkspace,
@@ -129,15 +126,15 @@ export interface BuildOptions {
   cwd: string;
   /** Model specification, overriding AI_MODEL. */
   model?: string;
-  /** Reuse previously generated and verified candidates instead of calling the model. */
+  /** Reuse previously built and verified candidates instead of asking the model. */
   reuse: boolean;
   maxCandidates?: number;
   maxAttempts?: number;
   /** Extra model requests one attempt may spend on an answer with no implementation. */
   maxRetries?: number;
-  /** Candidates generated at the same time; 1 generates them one at a time. */
+  /** Candidates reviewed at the same time; 1 reviews them one at a time. */
   candidateConcurrency?: number;
-  /** Functions generated at the same time; 1 generates them one at a time. */
+  /** Functions reviewed at the same time; 1 reviews them one at a time. */
   functionConcurrency?: number;
   randomCases?: number;
   maxLength?: number;
@@ -197,9 +194,9 @@ export interface ProjectPaths {
 
 /**
  * Normalizes the requested deliverable. A project that names none is built
- * through the boundary: the model writes the semantic IR of a function and the
- * compiler writes the target code from it, so no register, offset or calling
- * convention is ever a model's to choose.
+ * through the boundary: the compiler resolves the semantic IR of a function
+ * from the source and writes the target code from it, so no register, offset or
+ * calling convention is ever a model's to choose.
  */
 function resolveOutputKind(requested: OutputKind | undefined): OutputKind {
   if (requested === undefined) return "ir";
@@ -502,7 +499,10 @@ function requestTimeoutMs(input: SourceInput): number | undefined {
 
 /** The prompts a build sends, for `--debug`. Diagnostics belong on stderr. */
 function printPrompt(dump: PromptDump): void {
-  const at = `${dump.candidate}.${dump.attempt}`;
+  // The artifact is named as well as the attempt: a build reviews the IR of
+  // every candidate and then the target of the one it selected, and both are
+  // asked for by the same candidate and round.
+  const at = `${dump.stage} ${dump.candidate}.${dump.attempt}`;
   process.stderr.write(
     `\n-- prompt ${at}: system --\n${dump.system}\n-- prompt ${at}: user --\n${dump.user}\n`,
   );
@@ -582,9 +582,9 @@ interface CompilationUnit {
 
 /**
  * Every function the program declares, as the IR holds it: the signature, the
- * conditions, the effects and the body. The IR is the boundary between what a
- * model reasons about and what the compiler generates, so a function is
- * described here once and everything downstream reads the same description.
+ * conditions, the effects and the body. The IR is what a review reads and what
+ * the compiler lowers, so a function is described here once and everything
+ * downstream reads the same description.
  */
 function functionContext(phase: { program: ProgramContract; objectNames: Record<string, string> }): FunctionContext {
   return {
@@ -697,8 +697,8 @@ function callsOutOfProgram(
 /**
  * How much of what an earlier build stored for a function this build may
  * reuse. That flag is the whole difference between the two: without it a
- * function that cannot be reused is generated, with it the build fails rather
- * than ask a model for anything.
+ * function that cannot be reused is built again, with it the build fails
+ * rather than ask a model for anything.
  */
 function unitReuse(request: UnitReuseRequest): UnitReuse {
   const { entry, key, required } = request;
@@ -713,8 +713,8 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
           : `the stored implementation of ${request.functionName} was built from different inputs`,
       detail:
         entry === undefined
-          ? `nothing is stored for ${request.id}; run blaze build without --reuse to generate it`
-          : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to regenerate it",
+          ? `nothing is stored for ${request.id}; run blaze build without --reuse to build it`
+          : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to build it again",
     });
   }
   // The stored candidate's own IR decides which files it produced: one that
@@ -803,7 +803,7 @@ export async function runBuild(
 
   // --model wins over the project file, which wins over AI_MODEL.
   const requested = options.model ?? modelSpec(input.model, absoluteInput);
-  // A reused build is answered by the model that generated the stored candidate,
+  // A reused build is answered by the model that reviewed the stored candidate,
   // so that is the model to name.
   const modelName = options.reuse ? previousBuild?.model : (requested ?? process.env.AI_MODEL);
   // The model is part of every answer this compiler gives, so it is named
@@ -1046,13 +1046,13 @@ export async function runBuild(
         );
       }
 
-      const result = await generateCandidates({
+      const result = await reviewCandidates({
         contract: unit.contract,
         unitFile: unit.file,
         parsed: unit.parsed,
         program,
+        base: semantics[functionName] as SemanticFunction,
         semantics,
-        sources: phase.modules,
         target,
         output: outputKind,
         runtime: runtimeKind,
@@ -1062,23 +1062,23 @@ export async function runBuild(
               category: "StorageError",
               stage: "reuse",
               message: `the stored implementation of ${functionName} no longer satisfies its contract`,
-              detail: "run blaze build without --reuse to generate a new one",
+              detail: "run blaze build without --reuse to review it again",
             });
           }
           return createBackend(requireModel(), {
             timeoutMs: requestTimeoutMs(input),
             retries: generation.maxRetries,
-            onRetry: ({ candidate, attempt, retry, retries, reason, stop }) => {
-              // An answer with nothing in it is also told how its request
+            onRetry: ({ stage, candidate, attempt, retry, retries, reason, stop }) => {
+              // An answer that could not be read is also told how its request
               // ended and what the request cost: one cut short by the output
               // limit, one a content filter took and one the model finished on
               // its own are not the same failure to wait out, and a gateway
               // that reports the tokens is the only place they are counted.
               const finish = stop === undefined ? "" : `, ${describeProviderStop(stop)}`;
               reporter.stage(
-                "generate",
+                "review",
                 "info",
-                `Asking again: ${functionName}, candidate ${candidate}, attempt ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
+                `Asking again: ${functionName}, ${stage} of candidate ${candidate}, round ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
               );
             },
             ...(options.debug === true ? { onPrompt: printPrompt } : {}),
@@ -1091,20 +1091,23 @@ export async function runBuild(
         workspace,
         callable: callableSymbols(unit.contract, contracts),
         exclusive: machine,
-        // A repair round asks the model again, so what an earlier build
-        // stored is not what it starts from. Otherwise the stored
-        // implementation is tried first, and the model is only asked when it
-        // does not satisfy the contract.
+        // A repair round asks the model again, so what an earlier build stored
+        // is not what it starts from. Otherwise the stored implementation is
+        // tried first, and a model is asked only when it does not satisfy the
+        // contract.
         existing: mismatch === undefined && reuse.level !== null ? (reuse.entry?.candidates ?? []) : [],
         sequenceStart,
         ...(mismatch === undefined || previous === undefined
           ? {}
           : { programFailure: { mismatch, previous } }),
-        onGenerate: ({ candidate, candidates, attempt, attempts, repair }) => {
+        onNote: (note) => {
+          reporter.stage("review", "info", `${functionName}: ${note}`);
+        },
+        onReview: ({ stage, candidate, candidates, attempt, attempts }) => {
           reporter.stage(
-            "generate",
+            "review",
             "info",
-            `${repair ? "Repairing" : "Generating"} ${generationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, attempt ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
+            `Reviewing the ${stage === "ir" ? "semantic IR" : implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, round ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
           );
         },
       });
@@ -1203,7 +1206,7 @@ export async function runBuild(
         ]);
         const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
         reporter.stage(
-          "generate",
+          "review",
           valid > 0 ? "ok" : "fail",
           `${implementationLabel(outputKind)} for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
         );
@@ -1217,7 +1220,7 @@ export async function runBuild(
             )
             .join("\n");
           throw new CompilerError({
-            category: "AiGenerationError",
+            category: "VerificationError",
             stage: "verify",
             message: `no candidate for ${functionName} satisfied the contract`,
             function: functionName,
@@ -1485,7 +1488,7 @@ export async function runBuild(
     };
   } catch (cause) {
     // The project is known from here on, so the CLI can point at the record.
-    const failure = toCompilerError(cause, { category: "AiGenerationError", stage: mode });
+    const failure = toCompilerError(cause, { category: "AiReviewError", stage: mode });
     const error = new CompilerError({ ...failure.toJSON(), project: id });
     build.status = "failed";
     build.error = error.toJSON();

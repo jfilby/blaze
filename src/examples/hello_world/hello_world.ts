@@ -3,8 +3,9 @@
  * compiler.
  *
  * The TypeScript below is the input. The frontend turns it into a function
- * contract, the model writes an implementation, and the compiler assembles,
- * links, runs and verifies it against the contract. Nothing here is a mock:
+ * contract and the compiler resolves it into the semantic IR, a model reviews
+ * that IR and the target it is lowered into, and the compiler assembles, links,
+ * runs and verifies what it wrote. Nothing here is a mock:
  * `blaze build blaze.toml` compiles this file.
  */
 

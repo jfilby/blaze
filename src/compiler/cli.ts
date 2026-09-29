@@ -54,9 +54,15 @@ const PROJECT_FILE = "blaze.toml";
 
 const USAGE = `blaze - AI native compiler
 
+A build resolves the source into the semantic IR, reviews that IR with the
+model, lowers the revised IR to the target the project asked for, reviews the
+target, and compiles what came of that. The model verifies and proposes; the
+compiler writes every program, applies the proposals it accepts and refuses the
+rest with a reason.
+
 Usage:
   blaze build [input.toml] [arguments...] build a function, or a program
-  blaze generate [input.toml] [options]  generate and validate candidates
+  blaze generate [input.toml] [options]  build and validate the candidates
   blaze ir [input.toml] [options] print the semantic IR: the program the
                             project runs, one function, or every function
   blaze test <project> [options]         re-verify the selected candidate
@@ -107,21 +113,20 @@ Options:
   --function <name>          print one function of the project as the IR holds
                             it, rather than the program it runs
   --all                      print every function of every file as the IR holds it
-  --output <kind>           what is generated: ir (semantic IR the compiler lowers),
+  --output <kind>           what is built: ir (semantic IR the compiler lowers),
                             c, asm, machine or wasm (default ir)
   --runtime <name>           host runtime: none or nim (default none)
-  --max-candidates <n>      number of candidates to generate, each generated
-                            from the contract alone
-  --max-attempts <n>        attempts per candidate: the first generates, the
-                            rest repair the output the last one was rejected for
-  --max-retries <n>         extra model requests one attempt spends on an answer
-                            that carries no implementation; they cost no repair
-                            attempt
-  --candidate-concurrency <n> candidates to generate at the same time (default 4);
+  --max-candidates <n>      number of candidates to build, each reviewed from
+                            the IR the compiler resolved
+  --max-attempts <n>        rounds per candidate: the first reviews that IR, the
+                            rest review what the round before it produced
+  --max-retries <n>         extra model requests one review spends on an answer
+                            that could not be read; they cost no round
+  --candidate-concurrency <n> candidates to review at the same time (default 4);
                             verification and benchmarking stay serial
-  --function-concurrency <n> functions to generate at the same time (default 3);
+  --function-concurrency <n> functions to review at the same time (default 3);
                             assembles, verification and benchmarking stay serial
-  --debug                   print the prompt sent to the model for every attempt
+  --debug                   print the prompt sent to the model for every review
   --random-cases <n>        randomized test cases per build
   --max-length <n>          maximum generated buffer length
   -h, --help                show this help

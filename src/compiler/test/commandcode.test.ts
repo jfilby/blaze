@@ -20,12 +20,11 @@ import type { SourceInput } from "../core/types.ts";
 import { z } from "zod";
 import { CompilerError } from "../core/errors.ts";
 import { writeProject } from "./project.ts";
-import { irOf } from "./phase.ts";
 
 const quiet = { stage: () => {} };
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
-/** The IR the compiler resolves for `square`, which is the form every answer now takes. */
-const SQUARE_IR = irOf("typescript", { "module.ts": SQUARE }, "module.ts", "square");
+/** A review, which is the only shape an answer takes now. */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
 
 /** The shape of the request the endpoint was sent, read back out of it. */
 interface RecordedRequest {
@@ -190,7 +189,7 @@ test("a request goes to the generate endpoint as the envelope it takes", async (
 test("the answer is read out of the event stream, and reasoning kept out of it", async (t) => {
   // The answer arrives in pieces, the way a stream carries it, so the provider
   // has to put the whole of it back together.
-  const [signature, ...body] = SQUARE_IR.split("\n");
+  const [signature, ...body] = SQUARE.split("\n");
   const endpoint = await generateEndpoint(t, {
     answers: [
       {
@@ -213,7 +212,7 @@ test("the answer is read out of the event stream, and reasoning kept out of it",
   // Thinking is the model's own account of the answer, and the answer is what
   // the compiler runs: one dropped into the other is an implementation that
   // was never written.
-  assert.equal(result.text, SQUARE_IR);
+  assert.equal(result.text, SQUARE);
   assert.match(result.reasoning.filter((part) => part.type === "reasoning").map((part) => part.text).join(""), /a square/);
   assert.equal(result.finishReason, "stop");
   assert.equal(result.usage.inputTokens, 11);
@@ -330,7 +329,7 @@ async function projectUsing(t: TestContext, endpoint: GenerateEndpoint): Promise
     source: SQUARE,
     entry: "square",
     model: { provider: "commandcode", model: "stealth/pixel-canary" },
-    // The answer this build replays is the IR the compiler resolved.
+    // The answers this build replays are reviews of what it resolved.
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   };
@@ -355,9 +354,9 @@ test("a project built on CommandCode produces the machine it asked for", async (
     answers: [
       {
         events: [
-          { type: "reasoning-delta", text: "the contract asks for a square" },
-          { type: "text-delta", text: "```ir\n" },
-          { type: "text-delta", text: SQUARE_IR },
+          { type: "reasoning-delta", text: "the body is the square the contract states" },
+          { type: "text-delta", text: "```text\n" },
+          { type: "text-delta", text: SOUND },
           { type: "text-delta", text: "```\n" },
         ],
       },

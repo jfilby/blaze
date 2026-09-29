@@ -1,11 +1,11 @@
 /**
  * Lowering a function's semantic IR to C.
  *
- * This is the half of the boundary the model does not work: a build asks for
- * the IR of a function, validates it against the contract, and lowers it here.
+ * This is the half of the boundary a model does not work: a build resolves the
+ * IR of a function, validates it against the contract, and lowers it here.
  * Register allocation, instruction selection, the calling convention and the
- * stack are then the C compiler's, so no register, offset or instruction
- * reaches the model and none is written here either.
+ * stack are then the C compiler's, so no register, offset or instruction is
+ * ever a choice anything else makes, and none is written here either.
  *
  * The C is the compiler's own, not text a model supplied, so it may use what a
  * program needs: the maths library for a power and a floor. What it may not do
@@ -733,12 +733,11 @@ export interface CompileFunctionResult {
  * Builds the object of a function the compiler wrote itself, and the assembly
  * it made on the way there when the build delivers that.
  *
- * The C a model supplies is checked against a subset before the compiler sees
- * it, because it is text the model wrote and nothing else about it can be
- * trusted. The C here is the compiler's own, so there is no subset to check:
- * what is checked is the contract — the object must define exactly the symbol
- * the function is called by, which is the one thing every backend owes the
- * program it is linked into.
+ * The C here is the compiler's own, written from an IR it validated, so there
+ * is no text to trust and no subset to check it against: what is checked is
+ * the contract — the object must define exactly the symbol the function is
+ * called by, which is the one thing every backend owes the program it is
+ * linked into.
  */
 export async function compileFunctionC(request: CompileFunctionRequest): Promise<CompileFunctionResult> {
   const functionName = symbolOf(request.contract);

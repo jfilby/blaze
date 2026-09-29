@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../compiler.ts";
 import { run } from "../core/process.ts";
-import { CompilerError } from "../core/errors.ts";
-import type { BuildStatus, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
+import type { ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
 import { irOf } from "./phase.ts";
@@ -36,36 +35,15 @@ const INPUT: SourceInput = {
   benchmark: { iterations: 200 },
 };
 
-/**
- * The IR the compiler resolves for the function `INPUT` compiles, which is what
- * a model is asked for and what every kind of answer is.
- */
-const DOT_PRODUCT_IR = irOf("nim", { "module.nim": INPUT.source }, "module.nim", "dotProduct");
+/** A review that finds nothing to change, which is what most rounds answer. */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
 
-/**
- * The IR a build refuses, and why: an element of a `f32*` is a `f32`, and a
- * body that adds one to a running total cannot read one as text. Nothing about
- * it is visible until the candidate is read against the contract.
- */
-const MISREAD_ELEMENT_IR = DOT_PRODUCT_IR.replace(
-  "[element[f32] local[f32*] a local[f64] i]",
-  "[element[text] local[f32*] a local[f64] i]",
-);
-
-/**
- * The IR a build refuses a second time, for a different reason: a call to a
- * function the program does not declare, which the text cannot name.
- */
-const UNDECLARED_CALL_IR = DOT_PRODUCT_IR.replace(
-  "  return local[f32] acc",
-  "  return [call[f32] total [arg[f32] local[f32] acc] ownership=none retain=no]",
-);
-
-/**
- * The IR a build refuses a third time: a body that hands back text where the
- * contract states a number is not a function of that function.
- */
-const TEXT_RESULT_IR = DOT_PRODUCT_IR.replace("  return local[f32] acc", "  return [to_text local[f32] acc]");
+/** A review file of its own, so a test can script the answers a build is given. */
+async function reviews(directory: string, ...answers: string[]): Promise<string> {
+  const path = join(directory, "reviews.json");
+  await writeFile(path, JSON.stringify({ reviews: answers }), "utf8");
+  return path;
+}
 
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
@@ -167,7 +145,7 @@ test("a build says that it resolved and validated the IR before it asked for any
   assert.match(reported, /1 postcondition\(s\)/);
   // It is reported before anything is generated, which is the whole of what
   // "inherent to the build" means: the IR exists whether or not it is lowered.
-  assert.ok(stages.indexOf("ir") < stages.indexOf("generate"), stages.join(", "));
+  assert.ok(stages.indexOf("ir") < stages.indexOf("review"), stages.join(", "));
 });
 
 test("a build produces assembly, a native executable and a complete record", async () => {
@@ -243,137 +221,15 @@ test("the delivered IR is the implementation that was verified, and the assembly
 
 test("a C build delivers the C source the compiler verified", async () => {
   const directory = await workspace("c", { ...INPUT, output: "c" });
-  const replay = join(directory, "candidates.json");
-  // A `c` build is answered in the IR like every other kind: the C is the text
-  // the compiler wrote for it, so what a model never sees is a signature.
-  await writeFile(replay, JSON.stringify({ candidates: [DOT_PRODUCT_IR] }), "utf8");
-
+  // The C is the text the compiler wrote for the IR it resolved, so a model
+  // never sees a signature and a `c` build is the same build as any other.
+  const replay = await reviews(directory, SOUND);
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
   assert.equal(outcome.build.outputKind, "c");
   assert.ok(outcome.outputPath?.endsWith("output/input.c"));
 
   const source = await readFile(outcome.outputPath as string, "utf8");
   assert.match(source, /float dotProduct\(float\* a, float\* b, size_t n\)/);
-});
-
-test("a rejected candidate is replaced and its diagnostic is fed back", async () => {
-  const directory = await workspace("retry");
-  const replay = join(directory, "candidates.json");
-  await writeFile(
-    replay,
-    JSON.stringify({
-      candidates: [MISREAD_ELEMENT_IR, DOT_PRODUCT_IR],
-    }),
-    "utf8",
-  );
-
-  const outcome = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 2 },
-    quiet,
-    "build",
-  );
-  assert.equal(outcome.build.status, "success");
-  assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c2" });
-
-  const candidates = Object.values(
-    JSON.parse(await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8")) as Record<
-      string,
-      { id: string; candidate: number; round: number; feedback?: string[] }[]
-    >,
-  ).flat();
-  // The repair is the second attempt of the first candidate, not a new one.
-  assert.deepEqual(
-    candidates.map((entry) => [entry.id, entry.candidate, entry.round]),
-    [["c1", 1, 1], ["c2", 1, 2]],
-  );
-  assert.equal(candidates[0].feedback, undefined);
-  // The diagnostic is the one that refused the candidate, and it says what in
-  // the IR is wrong rather than which line of a model answer it came from.
-  assert.match(candidates[1].feedback?.[0] ?? "", /^\[attempt 1] ir failed: dotProduct is not a function the compiler may lower/);
-  assert.match(candidates[1].feedback?.[0] ?? "", /an element of a f32\* is a f32, not a text/);
-});
-
-test("diagnostics accumulate across repairs and never reach the next candidate", async () => {
-  const directory = await workspace("accumulate");
-  const replay = join(directory, "candidates.json");
-  // Three rejections in a row, then a working answer: the first candidate burns
-  // its attempts, and the second one is generated from a clean prompt. Each
-  // refusal is a different one, so the third repair is shown three reasons
-  // rather than the same one three times.
-  await writeFile(
-    replay,
-    JSON.stringify({
-      candidates: [MISREAD_ELEMENT_IR, UNDECLARED_CALL_IR, TEXT_RESULT_IR, DOT_PRODUCT_IR],
-    }),
-    "utf8",
-  );
-
-  const outcome = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 3, maxCandidates: 2 },
-    quiet,
-    "build",
-  );
-  assert.equal(outcome.build.status, "success");
-  assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c4" });
-
-  const candidates = Object.values(
-    JSON.parse(await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8")) as Record<
-      string,
-      { id: string; candidate: number; round: number; feedback?: string[] }[]
-    >,
-  ).flat();
-  assert.deepEqual(
-    candidates.map((entry) => [entry.id, entry.candidate, entry.round]),
-    [
-      ["c1", 1, 1],
-      ["c2", 1, 2],
-      ["c3", 1, 3],
-      ["c4", 2, 1],
-    ],
-  );
-
-  // Every repair sees what this candidate already collected, oldest first.
-  assert.equal(candidates[0].feedback, undefined);
-  assert.equal(candidates[1].feedback?.length, 1);
-  assert.match(
-    candidates[1].feedback?.[0] ?? "",
-    /^\[attempt 1] ir failed: dotProduct is not a function the compiler may lower.*an element of a f32\* is a f32, not a text/s,
-  );
-  assert.equal(candidates[2].feedback?.length, 2);
-  assert.match(candidates[2].feedback?.[0] ?? "", /^\[attempt 1]/);
-  assert.match(candidates[2].feedback?.[1] ?? "", /^\[attempt 2] ir failed: the IR text is not a program at line \d+/);
-  assert.match(candidates[2].feedback?.[1] ?? "", /found "total"/);
-
-  // The next candidate starts clean: candidate 1's diagnostics stay behind.
-  assert.equal(candidates[3].feedback, undefined);
-});
-
-test("a build where nothing is valid fails with a record that says why", async () => {
-  const directory = await workspace("fail");
-  const replay = join(directory, "candidates.json");
-  // The one answer a build refuses, so nothing here can be selected: the record
-  // has to say so rather than leave a build that delivered nothing unexplained.
-  await writeFile(replay, JSON.stringify({ candidates: [TEXT_RESULT_IR] }), "utf8");
-
-  await assert.rejects(
-    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
-    (error: unknown) => error instanceof CompilerError && /no candidate for dotProduct/.test(error.message),
-  );
-
-  const build = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/build.json"), "utf8"),
-  ) as BuildStatus;
-  assert.equal(build.status, "failed");
-  assert.equal(build.error?.category, "AiGenerationError");
-  // The answer that was refused is what the diagnostic is about, and a build
-  // that ends without it on disk leaves nothing to read the diagnostic
-  // against: the record names a line of a text no one has.
-  assert.equal(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/work/dotProduct/c1.ir"), "utf8"),
-    TEXT_RESULT_IR,
-  );
 });
 
 test("reuse rebuilds from the stored implementation without asking the model", async () => {
@@ -397,58 +253,12 @@ test("reuse rebuilds from the stored implementation without asking the model", a
 /** The same contract, stated as a sum: the object that satisfies it is another. */
 const SUM_SOURCE = INPUT.source.replace("acc += a[i] * b[i]", "acc += a[i] + b[i]");
 
-const SUM_IR = irOf("nim", { "module.nim": SUM_SOURCE }, "module.nim", "dotProduct");
-
 /** A replay file of its own, so a test can leave the model unable to answer. */
 async function writableReplay(directory: string, fixture: string): Promise<string> {
   const replay = join(directory, "candidates.json");
   await writeFile(replay, await readFile(fixture, "utf8"));
   return replay;
 }
-
-/**
- * A program whose only function states no postcondition, which is what a
- * function that is a branch rather than an expression comes to, so the program
- * it is part of is the only oracle that has anything to say about it. It
- * reaches no other function of the program, which is what leaves a candidate
- * for it a candidate the build may call on its own.
- */
-const COUNTING_PROGRAM = [
-  "function down(n: number): number {",
-  "  if (n <= 0) {",
-  "    return 0;",
-  "  }",
-  "  return 1;",
-  "}",
-  "",
-  "console.log(down(3));",
-  "",
-].join("\n");
-
-/** One above zero, one at or below it, which is what counting down comes to. */
-const COUNT_IR = irOf("typescript", { "1.ts": COUNTING_PROGRAM }, "1.ts", "down");
-
-/** Answers zero wherever the source answers one, so the program prints 0 where it prints 1. */
-const WRONG_COUNT_IR = COUNT_IR.replace("  return const[f64] 1", "  return const[f64] 0");
-
-/**
- * Divides by its argument, which the contract states nothing about, so the zero
- * an input built from the contract carries is a legal one and the candidate
- * divides by it. It is the IR the source resolves to with the guard the source
- * wrote dropped: a candidate that divided after the guard would answer the
- * probe's zero with the source's own answer and never divide at all, and the
- * defect this is here for is a division the probe is the first thing to reach.
- * Nothing about it is visible to a static check: the IR is a function of the
- * contract and the division is well formed. This is the class of defect the
- * program round is the only oracle for, and the one faulting a single call is
- * there to catch early.
- */
-const DIVIDING_COUNT_IR = [
-  COUNT_IR.slice(0, COUNT_IR.indexOf("  block entry: releases[]")),
-  "  block entry: releases[]",
-  "  return [div[i32] const[i32] 7 local[f64] n]",
-  "",
-].join("\n");
 
 test("reuse refuses to rebuild a function whose contract changed", async () => {
   const directory = await workspace("changed");
@@ -469,7 +279,6 @@ test("a function whose contract changed is generated again", async () => {
   // The contract now states a sum rather than a product, so the object that
   // satisfied the old one cannot satisfy this one, and the model is asked.
   await writeProject(join(directory, "input.toml"), { ...INPUT, source: SUM_SOURCE });
-  await writeFile(replay, JSON.stringify({ candidates: [SUM_IR] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
@@ -485,7 +294,7 @@ test("a build reuses a function it already proved, and asks no model for it", as
 
   // The model is left able to answer nothing at all: a build that reuses every
   // function it needs never reaches it.
-  await writeFile(replay, JSON.stringify({ candidates: ["not the IR at all"] }), "utf8");
+  await writeFile(replay, JSON.stringify({ reviews: ["this is not a review"] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
@@ -501,7 +310,7 @@ test("a change that leaves a contract alone does not rebuild the function", asyn
   // A comment is not part of what the function is contracted to do, so the
   // object that was verified is still the object this build links.
   await writeProject(join(directory, "input.toml"), { ...INPUT, source: `${INPUT.source}# a comment\n` });
-  await writeFile(replay, JSON.stringify({ candidates: ["not the IR at all"] }), "utf8");
+  await writeFile(replay, JSON.stringify({ reviews: ["this is not a review"] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   assert.equal(second.build.status, "success");
@@ -514,7 +323,7 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
   await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
-  await writeFile(replay, JSON.stringify({ candidates: ["not the IR at all"] }), "utf8");
+  await writeFile(replay, JSON.stringify({ reviews: ["this is not a review"] }), "utf8");
   const log: string[] = [];
   const second = await runBuild(
     "input.toml",
@@ -530,81 +339,6 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   assert.ok(log.some((message) => /is rebuilt from its stored implementation/.test(message)), log.join("\n"));
   assert.ok(second.outputPath !== null);
   assert.equal(run(second.outputPath, [], { input: "run\n5 5 5\n1 2 3 4 5\n1 1 1 1 1\n3 3 3\n2 2 2\n2 2 2\n", timeoutMs: 60_000 }).code, 0);
-});
-
-/** A program project built from recorded candidates, with the generation limits the test needs. */
-async function countedProject(name: string, answers: string[], maxCandidates: number): Promise<string> {
-  const directory = await programProject(name, COUNTING_PROGRAM, answers[0]);
-  await writeProject(join(directory, "input.toml"), {
-    ...INPUT,
-    language: "typescript",
-    entry: "",
-    source: COUNTING_PROGRAM,
-    generation: { maxCandidates, maxAttempts: 1 },
-  });
-  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: answers }), "utf8");
-  return directory;
-}
-
-test("a definition candidate that faults on the call is rejected before it is selected", async () => {
-  const directory = await countedProject("faulting", [DIVIDING_COUNT_IR], 1);
-  // The fault is attributed to the function and to the candidate that caused
-  // it, which is what lets a repair round regenerate one function rather than
-  // every definition in the program.
-  const failure = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
-    quiet,
-    "build",
-  ).then(
-    () => { throw new Error("a candidate that faults must not be selected"); },
-    (error: CompilerError) => error,
-  );
-  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /c1: VerificationError candidate c1: down liveness check failed: the candidate was killed by SIGFPE/);
-  // The diagnostic says the call was made and the result not read, so a model
-  // reading it is not told the probe judged what the function computes.
-  assert.match(failure.detail ?? "", /the result was not read, so this says nothing about what it computes/);
-});
-
-test("a candidate that faults is not selected over one that runs", async () => {
-  const directory = await countedProject("one-good", [DIVIDING_COUNT_IR, COUNT_IR], 2);
-  const outcome = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}` },
-    quiet,
-    "build",
-  );
-
-  assert.equal(outcome.build.status, "success");
-  assert.deepEqual(outcome.build.selectedCandidates, { down: "c2" });
-
-  const generation = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/generation.json"), "utf8"),
-  ) as { functions: Record<string, { outcomes: { candidate: string; valid: boolean; failure?: { message: string } }[] }> };
-  const [first] = generation.functions.down.outcomes;
-  assert.equal(first.valid, false);
-  assert.match(first.failure?.message ?? "", /candidate c1: down liveness check failed/);
-});
-
-test("a function the program never agreed with is not reused", async () => {
-  const directory = await programProject("unproved", COUNTING_PROGRAM, WRONG_COUNT_IR);
-  const replay = join(directory, "candidates.json");
-  await assert.rejects(
-    () => runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 }, quiet, "build"),
-    /the program does not print what the source prints|the program stopped/,
-  );
-
-  // The program is what proves a function it is the only oracle for, so an
-  // implementation the program rejected is regenerated rather than reused.
-  await writeFile(replay, JSON.stringify({ candidates: [COUNT_IR] }), "utf8");
-  const outcome = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${replay}`, maxAttempts: 1 },
-    quiet,
-    "build",
-  );
-  assert.equal(outcome.build.status, "success");
-  assert.deepEqual(outcome.build.reused, {});
 });
 
 test("test and benchmark re-run against the selected candidate", async () => {
@@ -701,21 +435,19 @@ const REFERENCE_PROGRAM = [
   "",
 ].join("\n");
 
-const DEPTH_IR = irOf("typescript", { "1.ts": REFERENCE_PROGRAM }, "1.ts", "depth");
-
-/** A program project, compiled by recorded candidates rather than by a model. */
-async function programProject(name: string, source: string, answer: string): Promise<string> {
+/** A program project, whose reviews are recorded rather than asked for. */
+async function programProject(name: string, source: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeProject(join(directory, "input.toml"), { ...INPUT, language: "typescript", entry: "", source });
-  await writeFile(join(directory, "candidates.json"), JSON.stringify({ candidates: [answer] }), "utf8");
+  await writeFile(join(directory, "reviews.json"), JSON.stringify({ reviews: [SOUND] }), "utf8");
   return directory;
 }
 
 test("a program whose function takes a reference is built, because the program is what checks it", async () => {
-  const directory = await programProject("reference", REFERENCE_PROGRAM, DEPTH_IR);
+  const directory = await programProject("reference", REFERENCE_PROGRAM);
   const outcome = await runBuild(
     "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
+    { cwd: directory, reuse: false, model: `replay:${join(directory, "reviews.json")}`, maxAttempts: 1 },
     quiet,
     "build",
   );
@@ -750,21 +482,12 @@ const CALLING_PROGRAM = [
   "",
 ].join("\n");
 
-/** The callee: returns its argument doubled, as the source says. */
-const TWICE_IR = irOf("typescript", { "main.ts": CALLING_PROGRAM }, "main.ts", "twice");
-
-/** The caller: prints what the callee returns, rather than computing it again. */
-const MAIN_CALLS_TWICE_IR = irOf("typescript", { "main.ts": CALLING_PROGRAM }, "main.ts", "main");
-
 /**
  * A two-function program project, answered per function rather than per
  * request: the two are generated at the same time, so which answer a request
  * gets is decided by the function the prompt is for.
  */
-async function callingProject(
-  name: string,
-  caller: string,
-): Promise<{ directory: string; answer: (prompt: string) => string }> {
+async function callingProject(name: string): Promise<{ directory: string; answer: () => string }> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeFile(join(directory, "main.ts"), CALLING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
@@ -774,11 +497,11 @@ async function callingProject(
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   });
-  return { directory, answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : TWICE_IR) };
+  return { directory, answer: () => SOUND };
 }
 
 test("a function that calls another function of the program is built and checked by it", async (t) => {
-  const { directory, answer } = await callingProject("calls-sibling", MAIN_CALLS_TWICE_IR);
+  const { directory, answer } = await callingProject("calls-sibling");
   await chatEndpoint(t, [], { answer });
 
   const outcome = await runBuild(
@@ -817,39 +540,14 @@ test("a function that calls another function of the program is built and checked
   assert.notEqual(twiceOutcome.verification, undefined);
 });
 
-test("a function that calls another function wrongly is rejected by the program", async (t) => {
-  // The caller doubles what the callee already doubled, so the program prints
-  // 84 where the source prints 42. Nothing is wrong with the candidate on its
-  // own, and the program is the only thing that can see it.
-  const wrong = MAIN_CALLS_TWICE_IR.replace(
-    "print_number [call[f64] twice [arg[f64] const[f64] 21] ownership=none retain=no] @6",
-    "print_number [add[f64] [call[f64] twice [arg[f64] const[f64] 21] ownership=none retain=no] const[f64] 42] @6",
-  );
-  const { directory, answer } = await callingProject("wrong-call", wrong);
-  await chatEndpoint(t, [], { answer });
-
-  const failure = await runBuild(
-    "blaze.toml",
-    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
-    quiet,
-    "build",
-  ).then(
-    () => { throw new Error("a program that prints the wrong thing must not be delivered"); },
-    (error: CompilerError) => error,
-  );
-  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /the program prints "84"/);
-});
-
 /**
- * A program of two functions where the call is one the outline writes out.
- *
- * `step` branches, so its contract states what it does and there are no
- * vectors to check it against: nothing about it is proved but by the program.
- * It allocates nothing, prints nothing, reads no arguments and reaches
- * nothing, so writing it out is what the outline decides, and `report` is
- * written as the body rather than as a call to `step`.
+ * A program of two functions, one of which the other calls. `step` is a single
+ * block that falls out of it, which is what a body has to be for the compiler
+ * to put it where the call was: the IR a function is written in has one block
+ * of its own, so a body that leaves from more than one of them has nowhere to
+ * go in a caller.
  */
-const WRITTEN_OUT_PROGRAM = [
+const BRANCHING_PROGRAM = [
   "function step(n: number): number {",
   "  if (n > 2) {",
   "    return 3;",
@@ -865,61 +563,10 @@ const WRITTEN_OUT_PROGRAM = [
   "",
 ].join("\n");
 
-/** The callee: three above two, and one at or below it. */
-const STEP_IR = irOf("typescript", { "main.ts": WRITTEN_OUT_PROGRAM }, "main.ts", "step");
-
-/** The caller as the source writes it: a call to the callee it was told to write out. */
-const MAIN_CALLS_STEP_IR = irOf("typescript", { "main.ts": WRITTEN_OUT_PROGRAM }, "main.ts", "main");
-
-/**
- * The same program with the callee's own body written into the caller, which is
- * what the outline asks for: the IR the compiler resolves for a caller that
- * computes `step(3)` itself is the answer a candidate that writes the call out
- * is written from, so it is resolved rather than written by hand here. Its line
- * numbers are that program's, which is nothing the contract reads.
- */
-const WRITTEN_OUT_MAIN_PROGRAM = [
-  "function step(n: number): number {",
-  "  if (n > 2) {",
-  "    return 3;",
-  "  }",
-  "  return 1;",
-  "}",
-  "",
-  "function main(): void {",
-  "  const n = 3;",
-  "  if (n > 2) {",
-  "    console.log(3);",
-  "  } else {",
-  "    console.log(1);",
-  "  }",
-  "}",
-  "",
-  "main();",
-  "",
-].join("\n");
-
-/**
- * The caller: it writes out what `step` does rather than calling it, so it
- * declares no call for it, references no other symbol of the program and is
- * linked and probed on its own. The branch is the callee's own, so the program
- * is what says whether the copy agrees with it.
- */
-const MAIN_WRITES_STEP_IR = irOf("typescript", { "main.ts": WRITTEN_OUT_MAIN_PROGRAM }, "main.ts", "main");
-
-/**
- * A two-function program project answered per function rather than per request:
- * the two are generated at the same time, so which answer a request gets is
- * decided by the function the prompt is for.
- */
-async function writtenOutProject(
-  name: string,
-  source: string,
-  caller: string,
-  callee: string,
-): Promise<{ directory: string; answer: (prompt: string) => string }> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
-  await writeFile(join(directory, "main.ts"), source, "utf8");
+test("a review that inlines a call has the callee's body put where the call was", async (t) => {
+  const inline = "verdict: repaired\nreason: the callee is a leaf\nproposal: inline-call entry callee=twice";
+  const directory = await mkdtemp(join(tmpdir(), "blaze-writes-out-"));
+  await writeFile(join(directory, "main.ts"), CALLING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
     sourceFile: "main.ts",
@@ -927,15 +574,47 @@ async function writtenOutProject(
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   });
-  return {
-    directory,
-    answer: (prompt: string) => (prompt.includes("function being written: main") ? caller : callee),
-  };
-}
+  await chatEndpoint(t, [], { answer: (prompt: string) => (prompt.includes("under review: main") ? inline : SOUND) });
 
-test("a caller the outline tells to write a callee out is checked on its own", async (t) => {
-  const { directory, answer } = await writtenOutProject("writes-out", WRITTEN_OUT_PROGRAM, MAIN_WRITES_STEP_IR, STEP_IR);
-  await chatEndpoint(t, [], { answer });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "twice"]);
+  assert.ok(outcome.outputPath !== null);
+  assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "42\n");
+
+  // The whole point of writing the call out: the caller declares no call for
+  // the callee and references no other symbol of the program, so it is linked
+  // on its own and probed. The rule is the compiler's and the artifact is
+  // regenerated from it, so what is delivered is the one the rule produced.
+  const generation = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+  ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
+  const [mainOutcome] = generation.functions.main.outcomes;
+  assert.notEqual(mainOutcome.probe, undefined);
+  assert.equal(mainOutcome.probe?.called, true);
+});
+
+test("a callee that leaves from more than one block is left as a call, and the program still runs", async (t) => {
+  // The outline would write `step` out into `main`, but `step` returns from two
+  // of its blocks, and a body like that has nowhere to go in a caller that has
+  // one. The call stays, both functions are linked, and the program prints what
+  // the source prints.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-writes-transitive-"));
+  await writeFile(join(directory, "main.ts"), BRANCHING_PROGRAM, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  await chatEndpoint(t, [], { answer: () => SOUND });
 
   const outcome = await runBuild(
     "blaze.toml",
@@ -948,118 +627,12 @@ test("a caller the outline tells to write a callee out is checked on its own", a
   assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "step"]);
   assert.ok(outcome.outputPath !== null);
   assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "3\n");
-
-  // The whole point of writing the call out: the caller declares no call for
-  // the callee and references no other symbol of the program, so it is linked
-  // on its own and probed. A candidate that declared the call would be carried
-  // to the program round instead, with no run and no fault of its own.
+  // The caller still reaches the program, which is the only thing that can run
+  // it: the object it calls is the callee's.
   const generation = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
-  const [mainOutcome] = generation.functions.main.outcomes;
-  assert.notEqual(mainOutcome.probe, undefined);
-  assert.equal(mainOutcome.probe?.called, true);
-});
-
-test("a candidate that calls a callee it was told to write out is rejected", async (t) => {
-  // The candidate declares the call the outline refused it, so the program is
-  // linked without the callee it was told to write out and the linker turns the
-  // reference away: the body was already in its prompt, so reaching for the
-  // symbol is a reimplementation behind a call.
-  const { directory, answer } = await writtenOutProject("calls-refused", WRITTEN_OUT_PROGRAM, MAIN_CALLS_STEP_IR, STEP_IR);
-  await chatEndpoint(t, [], { answer });
-
-  const failure = await runBuild(
-    "blaze.toml",
-    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
-    quiet,
-    "build",
-  ).then(
-    () => { throw new Error("a candidate that calls a callee it was told to write out must not be delivered"); },
-    (error: CompilerError) => error,
-  );
-  assert.match(`${failure.message}\n${failure.detail ?? ""}`, /undefined reference to `step'/);
-});
-
-/**
- * A three-function program where the body `main` writes out is itself a caller:
- * `main` writes out `step`, and `step` calls `twice`.
- */
-const TRANSITIVE_PROGRAM = [
-  "function twice(n: number): number {",
-  "  return n * 2;",
-  "}",
-  "",
-  "function step(n: number): number {",
-  "  if (n > 2) {",
-  "    return twice(n);",
-  "  }",
-  "  return twice(n);",
-  "}",
-  "",
-  "function main(): void {",
-  "  console.log(step(3));",
-  "}",
-  "",
-  "main();",
-  "",
-].join("\n");
-
-/**
- * The caller: it writes out what `step` does, and what `step` does is call
- * `twice`. That call is `main`'s to make, so `twice` has to be a symbol this
- * candidate may reference; before it was one, the candidate that named it was
- * rejected and the build failed on a program it should deliver. A candidate
- * handed a callee's body to write out may name the call that body makes, so
- * `twice` is a call this candidate may declare even though the source's own
- * `main` never names it. The answer is the IR the source resolves to with the
- * call in the header changed to the one the written-out body makes, and the
- * body making it: `step(3)` is `twice(3)`.
- */
-const MAIN_WRITES_TRANSITIVE_IR = irOf("typescript", { "main.ts": TRANSITIVE_PROGRAM }, "main.ts", "main")
-  .replace("  call step\n", "  call twice\n")
-  .replace(
-    "print_number [call[f64] step [arg[f64] const[f64] 3] ownership=none retain=no] @13",
-    "print_number [call[f64] twice [arg[f64] const[f64] 3] ownership=none retain=no] @13",
-  );
-
-/** `step` on its own: still a call to `twice`, and still its own object. */
-const STEP_TRANSITIVE_IR = irOf("typescript", { "main.ts": TRANSITIVE_PROGRAM }, "main.ts", "step");
-
-/** The callee of both, which the program records as reachable from either. */
-const TWICE_TRANSITIVE_IR = irOf("typescript", { "main.ts": TRANSITIVE_PROGRAM }, "main.ts", "twice");
-
-test("a call inside a body the outline tells a candidate to write out is a call it may make", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-writes-transitive-"));
-  await writeFile(join(directory, "main.ts"), TRANSITIVE_PROGRAM, "utf8");
-  await writeProject(join(directory, "blaze.toml"), {
-    language: "typescript",
-    sourceFile: "main.ts",
-    model: { provider: "openai-compatible", model: "stub" },
-    output: "machine",
-    generation: { maxCandidates: 1, maxAttempts: 1 },
-  });
-  await chatEndpoint(t, [], {
-    answer: (prompt: string) =>
-      prompt.includes("function being written: main")
-        ? MAIN_WRITES_TRANSITIVE_IR
-        : prompt.includes("function being written: step")
-          ? STEP_TRANSITIVE_IR
-          : TWICE_TRANSITIVE_IR,
-  });
-
-  const outcome = await runBuild(
-    "blaze.toml",
-    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
-    quiet,
-    "build",
-  );
-
-  // `step(3)` is 6: the branch takes the `n > 2` arm, and `twice(3)` doubles it.
-  assert.equal(outcome.build.status, "success");
-  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "step", "twice"]);
-  assert.ok(outcome.outputPath !== null);
-  assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "6\n");
+  assert.match(generation.functions.main.outcomes[0]?.probe?.reason ?? "", /it calls step/);
 });
 
 test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {
@@ -1068,10 +641,10 @@ test("a program entry is accepted under the symbol its contract names, not under
   // candidate answers with is headed `main as blaze_main`.
   const answer = irOf("typescript", { "module.ts": source }, "module.ts", "main");
   assert.match(answer, /^function main as blaze_main\(\) -> f64$/m);
-  const directory = await programProject("entry-symbol", source, answer);
+  const directory = await programProject("entry-symbol", source);
   const outcome = await runBuild(
     "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${join(directory, "candidates.json")}`, maxAttempts: 1 },
+    { cwd: directory, reuse: false, model: `replay:${join(directory, "reviews.json")}`, maxAttempts: 1 },
     quiet,
     "build",
   );

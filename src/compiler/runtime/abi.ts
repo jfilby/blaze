@@ -5,12 +5,12 @@
  * never talks to a host implementation directly: it calls the entry points
  * below, and whichever runtime is linked provides them. `none` gets the C
  * runtime the compiler emits itself, `nim` gets the Nim adapter, and the code
- * the model writes is identical either way.
+ * the compiler writes is identical either way.
  *
  * This module is the single description of that boundary. The C header, the
- * standalone C runtime, the symbol allowlist, the prompt section the model
- * reads and the Nim adapter are all generated from RUNTIME_ABI, so the ABI
- * cannot drift between the sides that implement it.
+ * standalone C runtime, the symbol allowlist and the Nim adapter are all
+ * generated from RUNTIME_ABI, so the ABI cannot drift between the sides that
+ * implement it.
  */
 
 import type { RuntimeKind } from "../core/types.ts";
@@ -36,7 +36,7 @@ export interface RuntimeEntry {
   symbol: string;
   returns: string;
   params: readonly (readonly [name: string, type: string])[];
-  /** What the entry point does, in one line, for the model and for a host. */
+  /** What the entry point does, in one line, for whoever calls it. */
   summary: string;
   /** Who owns what the call returns, or what it frees. */
   ownership: string;
@@ -588,53 +588,3 @@ const char* blaze_rt_last_error(void) {
 `;
 }
 
-/** The rules the model is told about the boundary, whichever runtime is linked. */
-export function runtimeRules(): string[] {
-  return [
-    "Runtime services are reached through the blaze runtime ABI, and through nothing else: no library calls, no syscalls, no inline instructions.",
-    "Every value the runtime returns is managed: release it with blaze_rt_release when the caller owns it, and hold it with blaze_rt_retain while something else may free it.",
-    "A call to an ABI entry point follows the System V AMD64 convention: arguments in the registers the signature lists, the result in rax or xmm0, and rsp 16-byte aligned at the call itself.",
-  ];
-}
-
-/** What a contract can reach of the runtime, by the service it needs. */
-export interface RuntimeNeeds {
-  /** The function allocates something the runtime has to own. */
-  memory?: boolean;
-  /** The function builds or measures the objects its source declares. */
-  object?: boolean;
-  /** The function writes to the output. */
-  output?: boolean;
-  /** The function reads the command line. */
-  arguments?: boolean;
-}
-
-/** The tags a need opens up, and the tag each need is named by. */
-const NEEDS: readonly (readonly [keyof RuntimeNeeds, RuntimeTag])[] = [
-  ["memory", "memory"],
-  ["object", "object"],
-  ["output", "output"],
-  ["arguments", "arguments"],
-];
-
-/**
- * The ABI section of the prompt: which runtime, the rules, then the entry
- * points the function being written can reach. Lifetime and errors are in
- * reach of everything, and a host's own entry points are in reach of nothing
- * the model writes: the host calls those, never the function.
- */
-export function runtimePromptSection(runtime: RuntimeKind, needs: RuntimeNeeds = {}): string {
-  const reachable = new Set<RuntimeTag>(["lifetime", "error"]);
-  for (const [need, tag] of NEEDS) {
-    if (needs[need] === true) reachable.add(tag);
-  }
-  const entryPoints = RUNTIME_ABI.filter(
-    (item) => !item.tags.includes("host") && item.tags.some((tag) => reachable.has(tag)),
-  ).map((item) => {
-    const parameters = item.params.map(([name, type]) => `${type} ${name}`).join(", ");
-    const never = item.noreturn === true ? "  // never returns" : "";
-    return `${item.returns} ${item.symbol}(${parameters || "void"})${never}\n    ${item.summary} ${item.ownership}`;
-  });
-  const listing = entryPoints.length === 0 ? ["This function needs no runtime service."] : entryPoints;
-  return [`The runtime is ${RUNTIME_TITLES[runtime]}.`, ...runtimeRules(), "", ...listing].join("\n");
-}

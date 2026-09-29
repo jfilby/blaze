@@ -1,20 +1,14 @@
 /**
- * Builds through the IR: a project that sets `output = "ir"`, the model answers
- * with the semantic IR of a function, and the compiler parses it, checks it
- * against the contract the function was declared in, and writes the target code
- * itself. No register, offset or instruction is a model's to choose in either
- * direction.
+ * Builds through the IR: a project that sets `output = "ir"`, the compiler
+ * resolves the source into the semantic IR, a review of that IR proposes what
+ * it would change, and the compiler applies the proposals it accepts and
+ * writes the target code itself. No register, offset or instruction is a
+ * model's to choose, and no IR is a model's to write.
  *
  * A program is the only oracle a function whose contract states what it does
  * has, so the program is what these tests check: the source is run with node and
- * the delivered binary is run beside it, and the two are compared line for line.
- * A candidate the compiler may not lower is refused before any toolchain is
- * asked for anything, and the refusal is what the next attempt is given.
- *
- * Both fixtures are what `blaze ir --function total` printed for the library
- * below, copied without a change. The header lines are the contract's and the
- * parser checks every one of them, so a fixture is the printed output verbatim
- * and only the body is the model's to choose.
+ * the delivered binary is run beside it, and the two are compared line for
+ * line.
  */
 
 import assert from "node:assert/strict";
@@ -26,28 +20,22 @@ import { STATE_DIRECTORY, runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
-import { functionOutline } from "../ai/outline.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { phaseOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
 
-/** The answer a build accepts, written out as `blaze ir` printed it. */
-const RESOLVED = new URL("./fixtures/ir-total-replay.json", import.meta.url).pathname;
-/**
- * The same answer with one value read as a type the field does not take: an
- * element of a `[]f64` is a number, and a body that adds one to a running
- * total cannot read it as text.
- */
-const MISREAD = new URL("./fixtures/ir-total-wrong-replay.json", import.meta.url).pathname;
-
 const quiet = { stage: () => {} };
+
+/** A review that finds nothing to change, which is what most rounds answer. */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
 
 /**
  * The library the program calls: a loop over a buffer, accumulating what it
- * reads. The guard at the top is what makes the frontend contract this body as
- * a definition rather than as a postcondition, and a definition is the only
- * kind of function the IR has a body to describe.
+ * reads, with a divisor of a power of two in it so a rule of the catalogue
+ * applies to the body. The guard at the top is what makes the frontend contract
+ * this body as a definition rather than as a postcondition, and a definition is
+ * the only kind of function the IR has a body to describe.
  */
 const LIBRARY = [
   "export function total(values: Float64Array, count: number): number {",
@@ -56,7 +44,7 @@ const LIBRARY = [
   "  }",
   "  let sum = 0;",
   "  for (let index = 0; index < count; index += 1) {",
-  "    sum += values[index];",
+  "    sum += values[index] / 4;",
   "  }",
   "  return sum;",
   "}",
@@ -78,24 +66,7 @@ const ENTRY = [
   "",
 ].join("\n");
 
-/** What the source prints, which is what the delivered program has to print. */
-const PRINTED = [
-  "first 0 of the readings sum to 0",
-  "first 2 of the readings sum to 4",
-  "first 4 of the readings sum to 9",
-  "first 6 of the readings sum to 23",
-  "none 0",
-  "pair 8",
-  "all 31",
-  "",
-].join("\n");
-
-/** The candidate one recorded replay file answers a request with. */
-async function recorded(fixture: string): Promise<string> {
-  return (JSON.parse(await readFile(fixture, "utf8")) as { candidates: string[] }).candidates[0];
-}
-
-/** What the compiler resolved for `total`, which is what a fixture holds. */
+/** What the compiler resolved for `total`, which is what every candidate starts from. */
 function resolvedFunction(): SemanticFunction {
   const phase = phaseOf("typescript", { "main.ts": ENTRY, "lib.ts": LIBRARY }, "main.ts");
   const contract = phase.program.files.find((file) => file.path === "lib.ts")?.functions.total;
@@ -103,20 +74,12 @@ function resolvedFunction(): SemanticFunction {
   return resolveFunction(contract, { objectNames: phase.objectNames, functions: {} });
 }
 
-/** The IR text the compiler prints for it, which is what a fixture holds. */
+/** The IR text the compiler prints for it, which is what a build delivers. */
 function resolved(): string {
   return printSemanticFunction(resolvedFunction());
 }
 
-/** The behaviour of it as a code generator is shown it. */
-function outline(): string {
-  return functionOutline(resolvedFunction());
-}
-
-/**
- * A project of an entry program and the library it calls, written out with a
- * project file that asks for the IR, and the directory the build runs in.
- */
+/** A project of an entry program and the library it calls, with the limits a test needs. */
 async function project(name: string, model: object, attempts = 1): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
   await writeFile(join(directory, "main.ts"), ENTRY, "utf8");
@@ -131,133 +94,123 @@ async function project(name: string, model: object, attempts = 1): Promise<strin
   return directory;
 }
 
-test("a program built from IR runs and prints what its source prints", async () => {
-  const answer = await recorded(RESOLVED);
-  assert.equal(answer, resolved(), "the fixture is the IR the compiler resolved for the function");
+/** The candidates a build recorded for `total`. */
+async function recorded(directory: string): Promise<{ id: string; text: string; proposals?: string[] }[]> {
+  const record = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
+  ) as Record<string, { id: string; text: string; proposals?: string[] }[]>;
+  return record.total ?? [];
+}
 
-  const directory = await project("ir-build", { provider: "replay", file: RESOLVED });
+test("a program is built from the IR the compiler resolved, with no answer from a model", async (t) => {
+  const endpoint = await chatEndpoint(t, [], { answer: () => SOUND });
+  const directory = await project("ir-build", { provider: "openai-compatible", model: "stub" });
+
   const outcome = await runBuild(
     "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${RESOLVED}`, maxAttempts: 1 },
+    { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 1 },
     quiet,
     "build",
   );
 
-  assert.equal(outcome.build.status, "success", "the IR the model answered with is a program the compiler may lower");
+  assert.equal(outcome.build.status, "success", "the resolved IR is a program the compiler may lower");
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
   assert.deepEqual(outcome.build.selectedCandidates, { total: "c1" });
+
+  // The IR the build delivered is the IR the compiler resolved, byte for byte:
+  // a review that proposed nothing left it exactly as the source was written.
+  const candidates = await recorded(directory);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].text, resolved());
+  assert.equal(candidates[0].proposals, undefined, "nothing was proposed, so nothing was rewritten");
+
+  // The review is what the model was asked for, and the IR it read is the
+  // artifact the build delivers.
+  assert.equal(endpoint.prompts.length, 1, "the IR is reviewed once");
+  assert.match(endpoint.prompts[0] ?? "", /THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO/);
+  assert.ok((endpoint.prompts[0] ?? "").includes(resolved()), "the review reads the artifact as it stands");
 
   // The binary is the one the build verified, and the source is the
   // specification: node runs the TypeScript, the compiler's binary runs the
   // object the IR was lowered into, and the two are compared line for line.
   const binary = run(outcome.outputPath as string, [], { timeoutMs: 60_000 });
   assert.equal(binary.code, 0, `the delivered program stopped: ${binary.stderr.trim()}`);
-  assert.equal(binary.stdout, PRINTED, "the delivered program prints what its source prints");
-  assert.equal(run("node", [join(directory, "main.ts")], { timeoutMs: 60_000 }).stdout, PRINTED);
+  assert.equal(binary.stdout, run("node", [join(directory, "main.ts")], { timeoutMs: 60_000 }).stdout);
+  assert.equal(binary.stdout, "first 0 of the readings sum to 0\nfirst 2 of the readings sum to 1\nfirst 4 of the readings sum to 2.25\nfirst 6 of the readings sum to 5.75\nnone 0\npair 2\nall 7.75\n");
 });
 
-test("a candidate that is not a program the compiler may lower is refused, naming the line", async () => {
-  const wrong = await recorded(MISREAD);
-  assert.notEqual(wrong, await recorded(RESOLVED), "the refused candidate differs from the accepted one in one value");
+test("a review that proposes a fix has it applied, and the artifact is regenerated", async (t) => {
+  // The body divides by four, and a power of two is the one division a
+  // multiplication is the same number as, so the proposal is one the catalogue
+  // holds and the compiler can regenerate the whole function from.
+  const answer = "verdict: repaired\nreason: a division by a power of two is a multiplication\nproposal: reciprocal-multiply entry";
+  const endpoint = await chatEndpoint(t, [], { answer: () => answer });
+  const directory = await project("ir-proposal", { provider: "openai-compatible", model: "stub" });
 
-  const directory = await project("ir-refused", { provider: "replay", file: MISREAD });
-  const refused = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${MISREAD}`, maxAttempts: 1 },
-    quiet,
-    "build",
-  ).then(
-    () => null,
-    (cause: unknown) => cause as Error,
-  );
-
-  assert.ok(refused !== null, "a candidate the compiler may not lower fails the build");
-  const reported = `${refused.message} ${"detail" in refused ? String(refused.detail) : ""}`;
-  assert.match(reported, /not a function the compiler may lower/);
-  // The diagnostic names the statement that is wrong and how the value in it was
-  // read, not the file the candidate came from.
-  assert.match(reported, /line 7/, "the diagnostic says which line of the candidate is wrong");
-  assert.match(reported, /an element of a \[\]f64 is a f64, not a text/);
-
-  // The refusal happened before any toolchain was asked for anything: the
-  // object is written by the backend, and the backend is only reached by a
-  // candidate that passed.
-  const work = join(directory, STATE_DIRECTORY, "projects/input/work/total");
-  assert.deepEqual(
-    (await readdir(work).catch(() => [])).filter((name) => name.endsWith(".o") || name.endsWith(".c")),
-    [],
-    "nothing was compiled from a candidate that was refused",
-  );
-
-  // The build record says the build failed, and keeps the reason.
-  const build = JSON.parse(await readFile(join(directory, STATE_DIRECTORY, "projects/input/build.json"), "utf8")) as {
-    status: string;
-    error?: { message: string };
-  };
-  assert.equal(build.status, "failed");
-  assert.match(build.error?.message ?? "", /total/, "the record says which function had no usable candidate");
-});
-
-test("a refused IR candidate is repaired with the diagnostic that refused it", async (t) => {
-  const wrong = await recorded(MISREAD);
-  const right = await recorded(RESOLVED);
-  const endpoint = await chatEndpoint(t, [], { answer: (prompt) => (prompt.includes(wrong) ? right : wrong) });
-
-  const directory = await project("ir-repair", { provider: "openai-compatible", model: "stub" }, 2);
   const outcome = await runBuild(
     "input.toml",
-    { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 2 },
+    { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 1 },
     quiet,
     "build",
   );
 
-  assert.equal(outcome.build.status, "success", "the repaired IR is the one that is delivered");
-  assert.deepEqual(
-    outcome.build.selectedCandidates,
-    { total: "c2" },
-    "the repair replaced the candidate rather than starting a new one",
-  );
-  assert.equal(endpoint.prompts.length, 2, "the IR is generated once, then regenerated");
+  assert.equal(outcome.build.status, "success");
+  const candidates = await recorded(directory);
+  assert.equal(candidates.length, 1);
+  assert.match(candidates[0].text, /set sum \+= \[mul\[f64\] \[element\[f64\] local\[\[\]f64\] values local\[f64\] index\] const\[f64\] 0\.25\]/);
+  assert.doesNotMatch(candidates[0].text, /\[div\[f64\]/);
+  assert.deepEqual(candidates[0].proposals, ["`reciprocal-multiply entry`: turned 1 division(s) in entry into a multiplication by their reciprocal"]);
 
-  // The first request asks for the IR of this function, and hands the model the
-  // behaviour the compiler resolved, in the form a code generator reads it.
-  const generated = endpoint.prompts[0];
-  assert.match(generated, /Answer with the whole function as semantic IR/);
-  assert.match(generated, /^## IR SYNTAX$/m, "the form an answer is written in is stated");
-  assert.ok(generated.includes(outline()), "the behaviour the candidate is written from is in the request");
-  assert.ok(!generated.includes(resolved()), "the compiler's own IR of the function is not in the request");
-
-  // The second is a repair: it carries the IR that was refused and the
-  // diagnostic that refused it, so the next attempt knows what to change.
-  const repair = endpoint.prompts[1];
-  assert.match(repair, /DIAGNOSTICS FOR THIS CANDIDATE, OLDEST FIRST/);
-  assert.match(repair, /\[attempt 1] ir failed: total is not a function the compiler may lower/);
-  assert.match(repair, /an element of a \[\]f64 is a f64, not a text/);
-  assert.ok(repair.includes(wrong), "the repair is handed the IR that was refused");
-
+  // The regenerated function is the one the build verified: the program it is
+  // part of still prints what the source prints.
+  assert.ok(outcome.outputPath !== null);
   const binary = run(outcome.outputPath as string, [], { timeoutMs: 60_000 });
-  assert.equal(binary.stdout, PRINTED, "the program the repair built prints what the source prints");
+  assert.equal(binary.code, 0, binary.stderr);
+  assert.equal(binary.stdout, run("node", [join(directory, "main.ts")], { timeoutMs: 60_000 }).stdout);
+  assert.equal(endpoint.prompts.length, 1);
 });
 
-test("a function that states a postcondition is generated as IR, like any other", async (t) => {
+test("a proposal the compiler refuses leaves the artifact as it was, and says why", async (t) => {
+  // Nothing in this function is a repeated value, and no loop here is one the
+  // catalogue hoists out of, so both proposals are refused with the reason and
+  // the round carries on with what it had.
+  const answer = [
+    "verdict: repaired",
+    "reason: the divisor is read on every iteration",
+    "proposal: hoist-invariant entry",
+    "proposal: inline-call entry callee=total",
+  ].join("\n");
+  await chatEndpoint(t, [], { answer: () => answer });
+  const directory = await project("ir-refused", { provider: "openai-compatible", model: "stub" });
+  const log: string[] = [];
+
+  const outcome = await runBuild(
+    "input.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 1 },
+    { stage: (_stage, _status, message) => log.push(message) },
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  const candidates = await recorded(directory);
+  assert.equal(candidates[0].text, resolved(), "a refused proposal changes nothing");
+  assert.equal(candidates[0].proposals, undefined);
+  assert.ok(
+    log.some((message) => /total: `hoist-invariant entry` was refused: has a body that computes nothing more than once/.test(message)),
+    log.join("\n"),
+  );
+  assert.ok(
+    log.some((message) => /total: `inline-call entry callee=total` was refused: total is not called in block entry/.test(message)),
+    log.join("\n"),
+  );
+});
+
+test("a function that states a postcondition is reviewed and verified like any other", async (t) => {
   // `square` is one expression, so it states a postcondition as well as
   // carrying a body. Both travel: the body is what is implemented, and the
-  // postcondition is what the result is checked against. There is no path
-  // where a postcondition sends the build back to C.
-  const ir = [
-    "function square(count: f64) -> f64",
-    "  requires none",
-    '  ensures "result == (count * count)"',
-    "  allocates no",
-    "  prints no",
-    "  reads_argv no",
-    "  effects none",
-    "  param value[f64] count mutable",
-    "  block entry: releases[]",
-    "  return [mul[f64] local[f64] count local[f64] count]",
-    "",
-  ].join("\n");
-  const endpoint = await chatEndpoint(t, [], { answer: () => ir });
+  // postcondition is what the result is checked against. There is no path where
+  // a postcondition sends the build back to C.
+  const endpoint = await chatEndpoint(t, [], { answer: () => SOUND });
   const directory = await mkdtemp(join(tmpdir(), "blaze-ir-postcondition-"));
   await writeFile(
     join(directory, "main.ts"),
@@ -280,22 +233,14 @@ test("a function that states a postcondition is generated as IR, like any other"
   );
 
   assert.equal(outcome.build.status, "success");
-  assert.equal(endpoint.prompts.length, 1, "the function is asked for once");
-  assert.match(endpoint.prompts[0], /Answer with the whole function as semantic IR/);
-  assert.doesNotMatch(endpoint.prompts[0], /C11/, "a postcondition does not send the build back to C");
-  // The body the compiler resolved is what the model is asked to write from,
-  // and the postcondition is stated beside it as what the result is held to.
-  assert.match(endpoint.prompts[0], /THE FUNCTION TO IMPLEMENT/);
-  assert.match(endpoint.prompts[0], /result == \(count \* count\)/);
+  assert.equal(endpoint.prompts.length, 1, "the function is reviewed once");
+  assert.match(endpoint.prompts[0] ?? "", /result == \(count \* count\)/, "the postcondition is what the result is held to");
+  assert.doesNotMatch(endpoint.prompts[0] ?? "", /C11/, "a postcondition does not send the build back to C");
 
   const work = (await readdir(join(directory, STATE_DIRECTORY, "projects/input/work/square"))).sort();
-  assert.ok(work.includes("c1.ir"), `the IR is what was generated: ${work.join(", ")}`);
+  assert.ok(work.includes("c1.ir"), `the IR is what the build delivered: ${work.join(", ")}`);
   assert.ok(work.includes("c1.o"), `the object the compiler lowered it into is in ${work.join(", ")}`);
   // The result is checked against the postcondition, on vectors of its own,
   // rather than by running a program there is no library of.
   assert.ok((outcome.verification.square?.[0]?.cases ?? 0) > 0, "the postcondition verified the result");
-  const stored = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
-  ) as Record<string, { text: string }[]>;
-  assert.deepEqual(stored.square?.map((entry) => entry.text), [ir], "the IR is what was generated");
 });

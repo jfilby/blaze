@@ -286,13 +286,13 @@ export interface GenerationConfig {
    */
   candidateConcurrency: number;
   /**
-   * Functions generated at the same time. Functions are independent of each
+   * Functions reviewed at the same time. Functions are independent of each
    * other in the same way candidates are, so this is how much of a multi
-   * function program's model latency a build overlaps. 1 generates one
-   * function at a time.
+   * function program's model latency a build overlaps. 1 reviews one function
+   * at a time.
    *
    * It multiplies with `candidateConcurrency`: three functions of four
-   * candidates each are up to twelve requests in flight. Assembly, linking,
+   * candidates each are up to twelve reviews in flight. Assembly, linking,
    * verification and benchmarking stay serial whatever this is, because
    * candidates are compared on measured speed and that comparison is only
    * meaningful when nothing else is competing for the machine.
@@ -327,19 +327,19 @@ export interface BenchmarkConfig {
 }
 
 /**
- * What a build produces. The model is asked for the semantic IR whichever kind
- * is asked for, and the kind is how far the toolchain takes that one answer:
+ * What a build produces. Every kind is the same semantic IR taken a different
+ * distance by the toolchain:
  *
- *   ir       the IR as the model wrote it, checked against the contract
+ *   ir       the IR as the compiler resolved it, checked against the contract
  *   c        the C the compiler wrote for it, compiled and verified
  *   asm      the assembly the C compiler made of that C, assembled and verified
  *   machine  the same object, linked into a program and verified by running it
  *   wasm     the WebAssembly module the compiler encoded from the IR, verified
  *            by running it against the contract's vectors
  *
- * The kind is a delivery choice, not a language the model chooses between, so
- * lowering is the compiler's work on every path and a rule it enforces is
- * never a rule the model has to be told.
+ * The kind is a delivery choice rather than a language anything chooses
+ * between, so lowering is the compiler's work on every path and a rule it
+ * enforces is never a rule anyone has to be told.
  */
 export type OutputKind = "c" | "asm" | "machine" | "wasm" | "ir";
 
@@ -417,9 +417,9 @@ export const DEFAULT_BENCHMARK: BenchmarkConfig = {
 export interface Candidate {
   id: string;
   /**
-   * What the model wrote, which is the semantic IR for every kind, whatever is
-   * later delivered. It is the answer, uncompiled: every backend reads this,
-   * and none of them treats it as anything else.
+   * The artifact, which is the semantic IR for every kind, whatever is later
+   * delivered. It is the program, uncompiled: every backend reads this, and
+   * none of them treats it as anything else.
    */
   text: string;
   model: string;
@@ -427,8 +427,14 @@ export interface Candidate {
   generatedAt: string;
   /** Which candidate this belongs to (1-based). Candidates are independent. */
   candidate: number;
-  /** Attempt within its candidate (1-based). The first generates, later ones repair. */
+  /** Round within its candidate (1-based). The first reviews the resolved IR, later ones what it produced. */
   round: number;
+  /**
+   * What each review of this artifact changed, oldest first, as the rule that
+   * was applied and what it did. Absent for a candidate no proposal changed,
+   * which is the IR the compiler resolved from the source as it stands.
+   */
+  proposals?: string[];
   /** Every diagnostic this candidate collected before this attempt, oldest first. */
   feedback?: string[];
 }
@@ -497,6 +503,19 @@ export interface ProgramMismatch {
   failure?: string;
   /** What the program wrote to standard error on its way down. */
   failureOutput?: string;
+}
+
+/**
+ * A program that did not print what its source prints, together with the
+ * implementation that produced it. A contract that states what a function does
+ * rather than what it returns has no vector of its own, so the program is the
+ * only oracle it has, and this is what a review of that implementation is
+ * given.
+ */
+export interface ProgramFailure {
+  mismatch: ProgramMismatch;
+  /** The IR that produced the output, which is what the next revision starts from. */
+  previous: string;
 }
 
 export interface BenchmarkResult {

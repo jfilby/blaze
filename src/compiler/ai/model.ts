@@ -54,7 +54,7 @@ const ENV_KEYS: Record<ProviderName, readonly string[]> = {
 };
 
 function generationError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "AiGenerationError", stage: "generate", message, detail });
+  return new CompilerError({ category: "AiReviewError", stage: "review", message, detail });
 }
 
 function firstEnvKey(provider: ProviderName, env: NodeJS.ProcessEnv): string | undefined {

@@ -10,8 +10,7 @@ export type ErrorCategory =
   | "InputError"
   | "FrontendError"
   | "ContractError"
-  | "AiGenerationError"
-  | "ModelDeclinedError"
+  | "AiReviewError"
   /** A program that is not one, found before any target saw it. */
   | "SemanticIrError"
   | "AssemblyError"

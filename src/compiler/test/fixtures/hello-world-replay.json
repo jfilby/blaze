@@ -1,1 +1,5 @@
-{"candidates":["function dotProduct(a: []f64, b: []f64, n: f64) -> f64\n  requires \"a != null\"\n  requires \"len(a) >= n\"\n  requires \"b != null\"\n  requires \"len(b) >= n\"\n  ensures \"result == sum(i = 0..<n, (a[i] * b[i]))\"\n  allocates no\n  prints no\n  reads_argv no\n  effects none\n  param value[[]f64] a mutable\n  param value[[]f64] b mutable\n  param value[f64] n mutable\n  block entry: releases[]\n    let value[f64] total mutable = const[f64] 0 @12\n    for[f64] i from const[f64] 0 to local[f64] n exclusive up step default header b1 exit entry @13\n      block b2: releases[]\n        set total += [mul[f64] [element[f64] local[[]f64] a local[f64] i] [element[f64] local[[]f64] b local[f64] i]] @14\n  return local[f64] total\n"]}
+{
+  "reviews": [
+    "verdict: sound\nreason: the body computes what the contract states, and none of the rules applies to it"
+  ]
+}

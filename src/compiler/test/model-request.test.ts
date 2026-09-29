@@ -28,7 +28,7 @@ async function projectWaitingOn(
     source: SOURCE,
     entry: "square",
     model: { provider: "openai-compatible", model: "silent" },
-    // The answer this test waits on is the IR of the entry function.
+    // The answer this test waits on is the review of the entry function's IR.
     output: "machine",
     generation,
   };
@@ -45,15 +45,16 @@ async function projectAnswering(
   answers: readonly string[],
   generation: SourceInput["generation"],
   endpoint: ChatEndpointOptions = {},
+  source = SOURCE,
 ): Promise<{ directory: string; chat: ChatEndpoint }> {
   const chat = await chatEndpoint(t, answers, endpoint);
   const directory = await mkdtemp(join(tmpdir(), "blaze-model-"));
   const input: SourceInput = {
     language: "typescript",
-    source: SOURCE,
+    source,
     entry: "square",
     model: { provider: "openai-compatible", model: "stub" },
-    // The answers this test queues are the IR of the entry function.
+    // The answers this test queues are the reviews of the entry function.
     output: "machine",
     generation,
   };
@@ -61,23 +62,11 @@ async function projectAnswering(
   return { directory, chat };
 }
 
-/**
- * The IR of `square` as the compiler resolves it: every kind answers in it, so
- * this is the only answer a model can give that a build will use.
- */
-const SQUARE_IR = [
-  "function square(x: f64) -> f64",
-  "  requires none",
-  '  ensures "result == (x * x)"',
-  "  allocates no",
-  "  prints no",
-  "  reads_argv no",
-  "  effects none",
-  "  param value[f64] x mutable",
-  "  block entry: releases[]",
-  "  return [mul[f64] local[f64] x local[f64] x]",
-  "",
-].join("\n");
+/** A review that finds nothing to change, which is what most rounds answer. */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
+
+/** A review that fixes something, so a build has a proposal to apply. */
+const HOISTED = "verdict: repaired\nreason: the bound is read on every iteration\nproposal: hoist-invariant b1";
 
 test("a model that has not answered is waited for, not given up on", async (t) => {
   const { directory, received } = await projectWaitingOn(t, { maxCandidates: 1, maxAttempts: 1 });
@@ -124,7 +113,7 @@ test("the build record keeps the model that was asked", async (t) => {
   const build = await inspectProject("input", directory);
   assert.equal(build.status, "failed");
   assert.equal(build.model, "openai-compatible/silent");
-  assert.equal(build.error?.category, "AiGenerationError");
+  assert.equal(build.error?.category, "AiReviewError");
 });
 
 test("the compiler says which model it is waiting for", async (t) => {
@@ -140,19 +129,19 @@ test("the compiler says which model it is waiting for", async (t) => {
   );
 
   assert.ok(lines.includes("Model: openai-compatible/silent"), `no model line in: ${lines.join(" | ")}`);
-  const generating = lines.filter((line) => line.startsWith("Generating "));
-  assert.equal(generating.length, 1, `expected one generating line in: ${lines.join(" | ")}`);
-  assert.match(generating[0], /: square, candidate 1 of 1, attempt 1 of 1, /);
+  const reviewing = lines.filter((line) => line.startsWith("Reviewing the "));
+  assert.equal(reviewing.length, 1, `expected one review line in: ${lines.join(" | ")}`);
+  assert.match(reviewing[0], /: square, candidate 1 of 1, round 1 of 1, /);
   assert.ok(
-    generating[0].endsWith("waiting for openai-compatible/silent"),
-    `the generating line does not name the model: ${generating[0]}`,
+    reviewing[0].endsWith("waiting for openai-compatible/silent"),
+    `the review line does not name the model: ${reviewing[0]}`,
   );
 });
 
-test("an answer with no implementation is asked for again, and costs no repair attempt", async (t) => {
+test("an answer that is not a review is asked for again, and costs no round", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    ["", "   ", SQUARE_IR],
+    ["", "here is the implementation", SOUND],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 2 },
   );
   const lines: string[] = [];
@@ -164,23 +153,25 @@ test("an answer with no implementation is asked for again, and costs no repair a
   );
 
   assert.equal(outcome.build.status, "success");
-  // Three answers, all of them for one attempt: an answer with no
-  // implementation in it never became a candidate, so the candidate kept the
-  // only attempt the project gave it.
-  assert.equal(chat.prompts.length, 3);
+  // Three answers for the IR round and one for the target that was reviewed
+  // afterwards: an answer that could not be read never became a revision, so
+  // the round kept the only attempt the project gave it.
+  assert.equal(chat.prompts.length, 4);
   assert.deepEqual(outcome.candidates.square.map((entry) => entry.round), [1]);
-  // The re-request says what was wrong with the answer before it.
-  assert.match(chat.prompts[2], /THE PREVIOUS ANSWER COULD NOT BE USED/);
-  assert.match(chat.prompts[2], /the model returned an empty response/);
+  assert.match(chat.prompts[3] ?? "", /THE TARGET CODE THE COMPILER LOWERED THE IR INTO/);
+  // The re-request says what was wrong with the answers before it.
+  assert.match(chat.prompts[2] ?? "", /THE PREVIOUS ANSWER COULD NOT BE READ/);
+  assert.match(chat.prompts[2] ?? "", /the answer gives no verdict/);
+  assert.match(chat.prompts[2] ?? "", /line 1 is neither a verdict, a reason nor a proposal/);
   assert.ok(
-    lines.includes(
-      "Asking again: square, candidate 1, attempt 1, the model returned an empty response, finish reason: stop, usage: 1 in, 1 out; request 1 of 2, waiting for openai-compatible/stub",
+    lines.some((line) =>
+      line.includes("Asking again: square, ir of candidate 1, round 1, the answer gives no verdict, finish reason: stop, usage: 1 in, 1 out; request 1 of 2, waiting for openai-compatible/stub"),
     ),
     `no retry line in: ${lines.join(" | ")}`,
   );
 });
 
-test("a model that never answers with an implementation fails with every reason it gave", async (t) => {
+test("a model that never answers with a review fails with every reason it gave", async (t) => {
   const { directory, chat } = await projectAnswering(t, [""], {
     maxCandidates: 1,
     maxAttempts: 2,
@@ -191,7 +182,7 @@ test("a model that never answers with an implementation fails with every reason 
     () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) =>
       error instanceof CompilerError &&
-      error.message === "the model returned an empty response" &&
+      error.message === "the model did not answer with a review the compiler could read" &&
       /asked 2 times/.test(error.detail ?? ""),
   );
   assert.equal(chat.prompts.length, 2, "the re-request is the only request beyond the first");
@@ -217,12 +208,14 @@ test("an answer the provider stopped short of says why it stopped", async (t) =>
     (error: unknown) =>
       error instanceof CompilerError &&
       /asked 2 times/.test(error.detail ?? "") &&
-      /the model returned an empty response \(finish reason: length, usage: 1 in, 1 out\)/.test(error.detail ?? ""),
+      /the answer was cut off at the token limit before it was finished \(finish reason: length, usage: 1 in, 1 out\)/.test(
+        error.detail ?? "",
+      ),
   );
   // The build is told the same thing while it is still waiting on the model.
   assert.ok(
     lines.some((line) =>
-      line.includes("the model returned an empty response, finish reason: length, usage: 1 in, 1 out; request 1 of 1"),
+      line.includes("the answer was cut off at the token limit before it was finished, finish reason: length, usage: 1 in, 1 out; request 1 of 1"),
     ),
     `no retry line in: ${lines.join(" | ")}`,
   );
@@ -230,7 +223,7 @@ test("an answer the provider stopped short of says why it stopped", async (t) =>
   // provider stopped or what it cost: a stop is a fact about the request the
   // model cannot change by being asked again.
   assert.equal(chat.prompts.length, 2);
-  assert.match(chat.prompts[1], /the model returned an empty response/);
+  assert.match(chat.prompts[1], /the answer was cut off at the token limit/);
   assert.doesNotMatch(chat.prompts[1], /finish reason/);
 });
 
@@ -267,33 +260,24 @@ test("a provider that reports no tokens is not said to have spent none", async (
     () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     (error: unknown) =>
       error instanceof CompilerError &&
-      /the model returned an empty response \(finish reason: length\)/.test(error.detail ?? "") &&
+      /the answer was cut off at the token limit before it was finished \(finish reason: length\)/.test(
+        error.detail ?? "",
+      ) &&
       !/usage/.test(error.detail ?? ""),
   );
 });
 
 /**
- * A reply that stops where the limit fell: a whole function that ends
- * mid-expression. This is the shape a token limit produces, and the reason the
- * stop is checked before the text rather than after it.
+ * A reply that stops where the limit fell: a review whose verdict line is
+ * there and whose proposals are cut in half. This is the shape a token limit
+ * produces, and the reason the stop is checked before the text is read.
  */
-const CUT_OFF_IR = [
-  "function square(x: f64) -> f64",
-  "  requires none",
-  '  ensures "result == (x * x)"',
-  "  allocates no",
-  "  prints no",
-  "  reads_argv no",
-  "  effects none",
-  "  param value[f64] x mutable",
-  "  block entry: releases[]",
-  "  return [add[f64] [mul[f64] local[f64] x local[f64] x] const[f64]",
-].join("\n");
+const CUT_OFF_REVIEW = ["verdict: repaired", "reason: the bound is read on every", "proposal: hoist-inv"].join("\n");
 
-test("a reply cut off at the token limit is not an implementation", async (t) => {
+test("a reply cut off at the token limit is not a review", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    [CUT_OFF_IR, SQUARE_IR],
+    [CUT_OFF_REVIEW, SOUND],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
     { finishReasons: ["length", "stop"] },
   );
@@ -306,16 +290,14 @@ test("a reply cut off at the token limit is not an implementation", async (t) =>
     "build",
   );
 
-  // The half-written function is never lowered: what the candidate holds is
-  // the whole answer the re-request came back with, and none of the
-  // expression the limit cut through.
+  // The half-written answer is never read: what the round holds is the whole
+  // answer the re-request came back with, and none of what the limit cut.
   assert.equal(outcome.candidates.square.length, 1);
-  assert.match(outcome.candidates.square[0].text, /\[mul\[f64\] local\[f64\] x local\[f64\] x\]/);
-  assert.doesNotMatch(outcome.candidates.square[0].text, /\[add\[f64\]/);
   assert.equal(outcome.build.status, "success");
-  // It cost a request, not an attempt: a reply that never became an
-  // implementation never became a candidate to repair.
-  assert.equal(chat.prompts.length, 2);
+  // It cost a request, not a round: a reply that was never a review was never
+  // a revision to reject. The third request is the review of the target the
+  // re-request's answer produced.
+  assert.equal(chat.prompts.length, 3);
   assert.deepEqual(outcome.candidates.square.map((entry) => entry.round), [1]);
   assert.ok(
     lines.some((line) =>
@@ -332,7 +314,7 @@ test("a reply cut off at the token limit is not an implementation", async (t) =>
 test("a model that keeps writing past the limit fails saying what it cost", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    [CUT_OFF_IR],
+    [CUT_OFF_REVIEW],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
     { finishReason: "length", usage: { prompt: 900, completion: 4096, total: 4996 } },
   );
@@ -353,58 +335,54 @@ test("a model that keeps writing past the limit fails saying what it cost", asyn
 test("a request the provider failed is asked for again", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,
-    [SQUARE_IR],
+    [SOUND],
     { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 },
     { failFirst: 1 },
   );
 
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
   assert.equal(outcome.build.status, "success");
-  assert.equal(chat.prompts.length, 2);
-  assert.match(chat.prompts[1], /the provider request failed/);
+  assert.equal(chat.prompts.length, 3, "the failed request was asked for again, and the target was reviewed after it");
+  assert.match(chat.prompts[1] ?? "", /the provider request failed/);
 });
 
-const DECLINED = [
-  "STATUS: failed",
-  "The contract requires behavior that cannot be implemented",
-  "with the available information.",
-].join("\n");
-
-test("a model that reports it cannot implement the contract ends the build there", async (t) => {
-  const { directory, chat } = await projectAnswering(t, [DECLINED], { maxCandidates: 1, maxAttempts: 3, maxRetries: 2 });
-
-  await assert.rejects(
-    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
-    (error: unknown) =>
-      error instanceof CompilerError &&
-      error.category === "ModelDeclinedError" &&
-      error.stage === "generate" &&
-      error.functionName === "square" &&
-      error.message === "The contract requires behavior that cannot be implemented\nwith the available information.",
+test("a review of the IR and a review of the target each regenerate the artifact", async (t) => {
+  // One function, two reviews: the IR is reviewed before it is lowered, and
+  // the target the compiler lowered it into is reviewed afterwards. Both are
+  // asked of the same model and both are answered from the same queue, and the
+  // first one is what changed.
+  const reduction = [
+    "export function square(values: Float64Array, n: number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i++) {",
+    "    total += (i * n) / (n * n) + (i * n) / (n * n);",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const { directory, chat } = await projectAnswering(
+    t,
+    [HOISTED],
+    { maxCandidates: 1, maxAttempts: 1 },
+    {},
+    reduction,
   );
-  // One request and no repair: the report is the answer, so nothing asks the
-  // model again for the contract it just said it cannot meet.
-  assert.equal(chat.prompts.length, 1);
-  // The build record keeps the model's own account of why, not a diagnostic
-  // the compiler wrote about it.
-  const build = await inspectProject("input", directory);
-  assert.equal(build.status, "failed");
-  assert.equal(build.error?.category, "ModelDeclinedError");
-  assert.equal(build.error?.message, "The contract requires behavior that cannot be implemented\nwith the available information.");
-});
-
-test("a failure status with nothing under it is asked for again", async (t) => {
-  // A status nobody accounted for is an answer that cannot be used rather
-  // than a failure to believe, so the re-request says the report is missing
-  // and the build carries on when the reason arrives.
-  const { directory, chat } = await projectAnswering(t, ["STATUS: failed", SQUARE_IR], {
-    maxCandidates: 1,
-    maxAttempts: 1,
-    maxRetries: 1,
-  });
 
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+
   assert.equal(outcome.build.status, "success");
-  assert.equal(chat.prompts.length, 2);
-  assert.match(chat.prompts[1], /reported a failure and said nothing about it/);
+  assert.equal(chat.prompts.length, 2, "the IR is reviewed, and then the target it was lowered into");
+  assert.match(chat.prompts[0] ?? "", /THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO/);
+  assert.match(chat.prompts[1] ?? "", /THE TARGET CODE THE COMPILER LOWERED THE IR INTO/);
+
+  const [candidate] = outcome.candidates.square;
+  assert.ok(candidate !== undefined);
+  assert.equal(candidate.proposals?.length, 1, "what the review changed is recorded with the candidate");
+  assert.match(candidate.proposals?.[0] ?? "", /^`hoist-invariant b1`: hoisted 1 value\(s\)/);
+  assert.match(candidate.text, /hoisted1/, "the artifact is the one the rule produced");
+  // The second review proposed the same rule for the same loop, and there was
+  // nothing left for it to hoist, so it changed nothing and the candidate is
+  // the one the first review produced.
+  assert.equal(outcome.candidates.square.length, 1);
 });

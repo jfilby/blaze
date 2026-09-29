@@ -10,10 +10,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { programOf, semanticsOf } from "./phase.ts";
+import { programOf } from "./phase.ts";
 import { callableSymbols } from "../toolchain/assembler.ts";
 import { contractsByName, writtenOut } from "../semantics/calls.ts";
-import { buildUserPrompt, type PromptRequest } from "../ai/prompt.ts";
 import { unitKey, type UnitKeyInput } from "../incremental.ts";
 import type { FunctionContract, ProgramContract, TargetSpec } from "../core/types.ts";
 
@@ -36,19 +35,6 @@ function functionOf(of: ProgramContract, name: string): FunctionContract {
 /** The calls one function makes, as `callee:strategy` pairs. */
 function calls(of: ProgramContract, name: string): string[] {
   return (functionOf(of, name).definition?.calls ?? []).map((edge) => `${edge.callee}:${edge.strategy}`);
-}
-
-/**
- * The CALLS section on its own, so a test can ask what the prompt offers as a
- * call without the WRITE OUT section beside it naming the same functions.
- */
-function callsSection(prompt: string): string {
-  // The request is a sequence of headers and the body under each, so a section
-  // runs from its header to the next one.
-  const parts = prompt.split(/\n(?=## )/);
-  const section = parts.find((part) => part.startsWith("## CALLS\n"));
-  assert.ok(section !== undefined, "the prompt has a CALLS section");
-  return section;
 }
 
 /** A program of one caller over one callee, and the caller's call to it. */
@@ -192,70 +178,13 @@ test("a candidate may reference the symbols of the calls it is told to make, and
     "main.ts",
   );
   const contracts = contractsByName(of.files);
-  // `twice` is called, so its symbol is referenceable. `pick` is written out,
-  // so its symbol is not: the body is already in the prompt, and a reference to
-  // it would be a reimplementation behind a local label.
-  assert.deepEqual([...callableSymbols(functionOf(of, "report"), contracts)].sort(), ["twice"]);
+  // `twice` is called and `pick` is written out, and both are symbols this
+  // function may name: a revision takes either road, and the rewrite that
+  // writes `pick` out is one the compiler can refuse.
+  assert.deepEqual([...callableSymbols(functionOf(of, "report"), contracts)].sort(), ["pick", "twice"]);
   // The same narrowing holds for the callee itself: `twice` is straight-line
   // and states a result, so it calls nothing and may reference nothing.
   assert.deepEqual([...callableSymbols(functionOf(of, "twice"), contracts)], []);
-});
-
-test("the prompt states a written-out callee as a body to implement rather than a symbol to call", () => {
-  const of = overCallee(["  if (n > 2) { return 3; }", "  return 1;"]);
-  const request: PromptRequest = {
-    contract: functionOf(of, "report"),
-    unit: { file: "main.ts", function: "report" },
-    program: of,
-    semantics: semanticsOf({ program: of, objectNames: {} }),
-    sources: [{ path: "main.ts", source: "" }],
-    target: TARGET,
-    output: "machine",
-    runtime: "none",
-    candidate: 1,
-    candidates: 1,
-    attempt: 1,
-  };
-  const prompt = buildUserPrompt(request);
-
-  // The body is carried, because a symbol the candidate may not reference is no
-  // use to it on its own, and the rule that says the symbol is off limits is
-  // stated beside it.
-  assert.match(prompt, /WRITE OUT/);
-  assert.match(prompt, /leaf\(n: f64\) -> f64/);
-  // Nothing is called, so nothing is offered as callable, and a body nothing
-  // checks on its own is held to the only oracle it has: the program it is in.
-  assert.doesNotMatch(prompt, /^## CALLS$/m);
-  assert.match(prompt, /Nothing checks this function on its own/);
-  assert.match(prompt, /compares what it prints with what the source program prints/);
-});
-
-test("the prompt offers a called callee as a symbol and does not offer its body", () => {
-  const of = overCallee(["  return n * 2;"]);
-  const request: PromptRequest = {
-    contract: functionOf(of, "report"),
-    unit: { file: "main.ts", function: "report" },
-    program: of,
-    semantics: semanticsOf({ program: of, objectNames: {} }),
-    sources: [{ path: "main.ts", source: "" }],
-    target: TARGET,
-    output: "machine",
-    runtime: "none",
-    candidate: 1,
-    candidates: 1,
-    attempt: 1,
-  };
-  const prompt = buildUserPrompt(request);
-
-  assert.match(prompt, /^## CALLS$/m);
-  // The call is offered as a name and the contract it is made under, which is
-  // what the IR reader holds a `call` to: the signature, and the postcondition
-  // the result is checked against.
-  assert.match(callsSection(prompt), /^leaf\(n: f64\) -> f64$/m);
-  assert.match(callsSection(prompt), /^ {2}ensures result == \(n \* 2\)$/m);
-  // The body is not carried: it is verified on its own, and a candidate that
-  // wrote it out would be a second body nothing has proved.
-  assert.doesNotMatch(prompt, /WRITE OUT/);
 });
 
 /** The key a build stores one function's object under. */
@@ -361,46 +290,16 @@ test("a call inside a written-out body is a call the candidate still has to make
   assert.deepEqual(calls(of, "report"), ["leaf:inline"]);
   assert.deepEqual(calls(of, "leaf"), ["twice:call"]);
   const contracts = contractsByName(of.files);
-  assert.deepEqual([...callableSymbols(functionOf(of, "report"), contracts)], ["twice"]);
+  assert.deepEqual([...callableSymbols(functionOf(of, "report"), contracts)].sort(), ["leaf", "twice"]);
 });
 
-test("the prompt offers the symbol a written-out body calls, and how to call it", () => {
-  // Both sets follow the bodies written out: the body under WRITE OUT carries
-  // a call, and that call has to be offered under CALLS or the two sections
-  // contradict each other.
-  const of = overTransitiveCallee();
-  const prompt = buildUserPrompt({
-    contract: functionOf(of, "report"),
-    unit: { file: "main.ts", function: "report" },
-    program: of,
-    semantics: semanticsOf({ program: of, objectNames: {} }),
-    sources: [{ path: "main.ts", source: "" }],
-    target: TARGET,
-    output: "machine",
-    runtime: "none",
-    candidate: 1,
-    candidates: 1,
-    attempt: 1,
-  });
-
-  assert.match(prompt, /WRITE OUT/);
-  assert.match(prompt, /^## CALLS$/m);
-  // What the written-out body calls is the whole of what CALLS offers: the
-  // body of `leaf` is below, so `leaf` itself is not a name a candidate may
-  // put in a `call`, and neither is the function being written.
-  const offered = callsSection(prompt);
-  assert.match(offered, /^twice\(n: f64\) -> f64$/m);
-  assert.doesNotMatch(offered, /^leaf\(/m);
-  assert.doesNotMatch(offered, /^report\(/m);
-});
-
-test("a symbol a written-out body reaches is not one the candidate may call by name", () => {
-  // The converse of the rule above, and the reason the two are a pair: `leaf`
-  // is written out, so its symbol is not referenceable even though a body of
-  // it is in the prompt. Only what a written-out body *calls* is added.
+test("a written-out body is referenceable as well as the calls it makes", () => {
+  // `report` writes `leaf` out and `leaf` calls `twice`, so a revision of
+  // `report` may name all three: `leaf` when the rule that writes it out is
+  // refused and the call stays, and `twice` either way.
   const of = overTransitiveCallee();
   const contracts = contractsByName(of.files);
-  assert.ok(![...callableSymbols(functionOf(of, "report"), contracts)].includes("leaf"));
+  assert.deepEqual([...callableSymbols(functionOf(of, "report"), contracts)].sort(), ["leaf", "twice"]);
 });
 
 test("a candidate with no calls is left with its own symbol and the runtime", () => {

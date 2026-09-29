@@ -20,7 +20,7 @@ import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol } from "../runtime/abi.ts";
 import { symbolOf } from "../semantics/contract.ts";
-import { calledOut, type ContractsByName } from "../semantics/calls.ts";
+import { callableFrom, type ContractsByName } from "../semantics/calls.ts";
 import { stackAlignmentProblems } from "./stack-frame.ts";
 import { readAssemblyLines } from "./asm-text.ts";
 
@@ -48,13 +48,13 @@ const ALLOWED_DIRECTIVES = new Set([
  * already in the prompt, and a symbol it names is a reimplementation behind a
  * local label, which is the thing the outline decided against.
  *
- * It follows the bodies written out rather than stopping at the candidate's own
+ * It follows the bodies written out rather than stopping at the function's own
  * edges, because a body written out is part of this object: a call written
- * inside it is a call this candidate makes, and refusing that symbol would turn
- * away the candidate that implemented the body it was given.
+ * inside it is a call this function makes, and refusing that symbol would turn
+ * away the revision that took the outline's road for it.
  */
 export function callableSymbols(contract: FunctionContract, contracts: ContractsByName): Set<string> {
-  return new Set(calledOut(contracts, contract).map(symbolOf));
+  return new Set(callableFrom(contracts, contract).map(symbolOf));
 }
 
 /** Whether a symbol is one a candidate is allowed to call. */

@@ -9,7 +9,6 @@ import { run } from "../core/process.ts";
 import type { SourceInput } from "../core/types.ts";
 import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
-import { irOf } from "./phase.ts";
 
 const SQUARE_SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
 
@@ -18,19 +17,14 @@ const SQUARE: SourceInput = {
   source: SQUARE_SOURCE,
   entry: "square",
   model: { provider: "openai-compatible", model: "stub" },
-  // The answers these tests queue are the IR the compiler resolved.
+  // The answers these tests queue are reviews of what the compiler resolved.
   output: "machine",
   generation: { maxCandidates: 1, maxAttempts: 2 },
   optimize: { primary: "size" },
 };
 
-const SQUARE_IR = irOf("typescript", { "module.ts": SQUARE_SOURCE }, "module.ts", "square");
-
-/** Is a program the compiler will lower, but computes x + x, so verification rejects it. */
-const WRONG_SQUARE_IR = SQUARE_IR.replace(
-  "return [mul[f64] local[f64] x local[f64] x]",
-  "return [add[f64] local[f64] x local[f64] x]",
-);
+/** A review that finds nothing to change, which is what most rounds answer. */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
 
 async function project(t: TestContext, answers: string[]): Promise<string> {
   await chatEndpoint(t, answers);
@@ -57,14 +51,14 @@ async function fanOutProject(
   return { directory, peak: endpoint.peak };
 }
 
-test("candidates are generated at the same time when candidate concurrency allows it", async (t) => {
+test("candidates are reviewed at the same time when candidate concurrency allows it", async (t) => {
   // The endpoint answers only once three requests are in flight, so a client
-  // that generated candidates one at a time could never get past the first.
+  // that reviewed candidates one at a time could never get past the first.
   // The guard timeout is a deadlock escape for that case, not a synchronisation
   // point: it can only turn a real fan-out into a failure, never the reverse.
   const { directory, peak } = await fanOutProject(
     t,
-    [SQUARE_IR],
+    [SOUND],
     { generation: { maxCandidates: 3, maxAttempts: 1, candidateConcurrency: 3 } },
     3,
   );
@@ -74,23 +68,23 @@ test("candidates are generated at the same time when candidate concurrency allow
   assert.equal(peak(), 3, "three candidates should have been in flight together");
 });
 
-test("candidate concurrency of one generates candidates one at a time", async (t) => {
+test("candidate concurrency of one reviews candidates one at a time", async (t) => {
   const { directory, peak } = await fanOutProject(
     t,
-    [SQUARE_IR],
+    [SOUND],
     { generation: { maxCandidates: 3, maxAttempts: 1, candidateConcurrency: 1 } },
   );
 
   const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
   assert.equal(outcome.build.status, "success");
-  assert.equal(peak(), 1, "a candidate must be answered before the next is asked for");
+  assert.equal(peak(), 1, "a candidate must be reviewed before the next is asked for");
   // One record per candidate, whatever order they were produced in.
   assert.deepEqual(outcome.candidates.square.map((entry) => entry.id), ["c1", "c2", "c3"]);
   assert.deepEqual(outcome.candidates.square.map((entry) => entry.candidate), [1, 2, 3]);
 });
 
 test("without --debug the prompts stay out of the way", async (t) => {
-  const endpoint = await chatEndpoint(t, [SQUARE_IR]);
+  const endpoint = await chatEndpoint(t, [SOUND]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
@@ -109,8 +103,8 @@ test("without --debug the prompts stay out of the way", async (t) => {
   assert.equal(written.join(""), "", "a quiet build writes no diagnostics");
 });
 
-test("--debug prints the system and user prompt of every attempt", async (t) => {
-  const directory = await project(t, [WRONG_SQUARE_IR, SQUARE_IR]);
+test("--debug prints the system and user prompt of every review", async (t) => {
+  const directory = await project(t, [SOUND]);
 
   const written: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
@@ -123,45 +117,41 @@ test("--debug prints the system and user prompt of every attempt", async (t) => 
   });
 
   const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
-  assert.equal(outcome.build.status, "success", "the repair should succeed");
-  assert.equal(outcome.build.selectedCandidates?.square, "c2");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.selectedCandidates?.square, "c1");
 
   const debug = written.join("");
-  // One dump per attempt: the rejected one and its repair.
-  assert.equal(debug.match(/-- prompt 1\.1: system --/g)?.length, 1);
-  assert.equal(debug.match(/-- prompt 1\.2: system --/g)?.length, 1);
-  assert.match(debug, /You are a code generation backend/);
+  // One dump per review: the IR, and the target it was lowered into.
+  assert.equal(debug.match(/-- prompt ir 1\.1: system --/g)?.length, 1);
+  assert.equal(debug.match(/-- prompt target 1\.1: system --/g)?.length, 1);
+  assert.match(debug, /You are a verification backend for a compiler/);
   assert.match(debug, /"name": "square"/);
   assert.match(debug, /result == \(x \* x\)/);
   assert.match(debug, /architecture: x86_64/);
-  assert.match(debug, /OUTPUT LANGUAGE/);
-  assert.match(debug, /Write semantic IR\./);
+  assert.match(debug, /WHAT YOU MAY PROPOSE/);
+  assert.match(debug, /- reciprocal-multiply:/);
+  assert.match(debug, /verdict: sound \| repaired \| unsound/);
 
-  // Only the repair names a rejected candidate; the first attempt is generated
-  // from the contract alone and has nothing to repair.
-  assert.equal(debug.match(/CANDIDATE 1 WAS REJECTED/g)?.length, 1);
-
-  // The repair is handed the implementation it is fixing, and why it was rejected.
-  assert.match(debug, /THE OUTPUT BEING REPAIRED/);
-  assert.match(debug, /return \[add\[f64\] local\[f64\] x local\[f64\] x\]/, "the repair prompt carries the rejected body");
-  assert.match(debug, /This is repair attempt 2/);
-  assert.match(debug, /verify failed: \d+ of \d+ test vectors did not match the contract/);
-  assert.match(debug, /\[attempt 1] verify failed:/, "the diagnostic is attributed to the attempt that earned it");
-  assert.match(debug, /expected [\d.e+-]+, got [\d.e+-]+ \(/);
+  // The first review is handed the IR as the compiler wrote it, and the second
+  // is handed the target that IR was lowered into.
+  assert.match(debug, /THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO/);
+  assert.match(debug, /return \[mul\[f64\] local\[f64\] x local\[f64\] x\]/);
+  assert.match(debug, /THE TARGET CODE THE COMPILER LOWERED THE IR INTO/);
 });
 
 test("the prompt reaches the model as the contract and the instructions", async (t) => {
-  const endpoint = await chatEndpoint(t, [SQUARE_IR]);
+  const endpoint = await chatEndpoint(t, [SOUND]);
   const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
   await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
 
-  assert.equal(endpoint.prompts.length, 1);
-  const sent = endpoint.prompts[0];
-  assert.match(sent, /code generation backend/);
+  assert.equal(endpoint.prompts.length, 2, "the IR is reviewed, and then the target it was lowered into");
+  const sent = endpoint.prompts[0] ?? "";
   assert.match(sent, /"name": "square"/);
   assert.match(sent, /architecture: x86_64/);
+  assert.match(sent, /## SITES A PROPOSAL MAY NAME/);
+  assert.match(endpoint.prompts[1] ?? "", /THE TARGET CODE THE COMPILER LOWERED THE IR INTO/);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -181,14 +171,9 @@ const PAIR_SOURCES: Record<string, string> = {
   ].join("\n"),
 };
 
-/** Each function answered with the IR the compiler resolved for it. */
-const TWICE_IR = irOf("typescript", PAIR_SOURCES, "twice.ts", "twice");
-
-const NEGATE_IR = irOf("typescript", PAIR_SOURCES, "negate.ts", "negate");
-
 /**
- * A program of two functions, each answered from the prompt that asked for it:
- * a build that generates both at once cannot say which request is for which
+ * A program of two functions, each answered from the request that asked about
+ * it: a build that reviews both at once cannot say which request is for which
  * function, so an endpoint that answers in arrival order cannot test it.
  */
 async function pairProject(
@@ -196,10 +181,7 @@ async function pairProject(
   generation: Record<string, number>,
   until?: number,
 ): Promise<{ directory: string; endpoint: ChatEndpoint }> {
-  const endpoint = await chatEndpoint(t, [], {
-    until,
-    answer: (prompt) => (prompt.includes('"name": "twice"') ? TWICE_IR : NEGATE_IR),
-  });
+  const endpoint = await chatEndpoint(t, [], { until, answer: () => SOUND });
   const directory = await mkdtemp(join(tmpdir(), "blaze-functions-"));
   for (const [name, source] of Object.entries(PAIR_SOURCES)) {
     await writeFile(join(directory, name), source, "utf8");
@@ -214,7 +196,7 @@ async function pairProject(
   return { directory, endpoint };
 }
 
-test("functions are generated at the same time when function concurrency allows it", async (t) => {
+test("functions are reviewed at the same time when function concurrency allows it", async (t) => {
   // The endpoint answers only once both requests are in flight, so a build
   // that generated one function at a time could never get past the first.
   const { directory, endpoint } = await pairProject(t, { functionConcurrency: 2 }, 2);
@@ -226,7 +208,7 @@ test("functions are generated at the same time when function concurrency allows 
   assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "-8\n");
 });
 
-test("function concurrency of one generates functions one at a time", async (t) => {
+test("function concurrency of one reviews functions one at a time", async (t) => {
   const { directory, endpoint } = await pairProject(t, { functionConcurrency: 1 });
 
   const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
@@ -235,7 +217,7 @@ test("function concurrency of one generates functions one at a time", async (t) 
   assert.equal(endpoint.peak(), 1, "a function must be answered before the next is asked for");
 });
 
-test("the default generates up to three functions at a time", async (t) => {
+test("the default reviews up to three functions at a time", async (t) => {
   // Four functions against a gate of four: a build that never reaches four in
   // flight is capped below it, and the gate opens on its own rather than
   // hanging, so the peak is what the cap is rather than what the gate allowed.
@@ -257,18 +239,13 @@ test("the default generates up to three functions at a time", async (t) => {
     "console.log(a(1) + b(1) + c(1) + d(1));",
     "",
   ].join("\n");
-  const implementations = Object.fromEntries(
-    Object.keys(DOUBLES).map((name) => [name, irOf("typescript", sources, `${name}.ts`, name)]),
-  );
   const endpoint = await chatEndpoint(t, [], {
     until: 4,
     answer: (prompt) => {
-      // The contract is in the prompt, so it says which function is being asked
-      // for however the requests arrive.
-      const name = /"name": "(\w+)"/.exec(prompt)?.[1];
-      const implementation = name === undefined ? undefined : implementations[name];
-      assert.ok(implementation !== undefined, "the prompt names the function it is for");
-      return implementation;
+      // The contract is in the request, so it says which function is being
+      // reviewed however the requests arrive.
+      assert.match(prompt, /"name": "(\w+)"/, "the request names the function it is for");
+      return SOUND;
     },
   });
   const directory = await mkdtemp(join(tmpdir(), "blaze-default-"));

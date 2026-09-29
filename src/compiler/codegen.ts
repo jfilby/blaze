@@ -1,26 +1,35 @@
 /**
  * Code generation.
  *
- * A candidate is generated once and then repaired in place. Assembling,
- * linking, running and verifying it happen in that order, and every diagnostic
- * that rejects it is collected and handed back for the next attempt, so
- * assembler errors and failing test vectors lead to corrected candidates
- * instead of a dead end. Candidates are independent: a repair inherits the
- * history of its own candidate and nothing else.
+ * Every candidate is a program the compiler wrote. The first one is the
+ * semantic IR the compiler resolved from the source, before a model has seen
+ * anything; each later one is that IR regenerated after a review proposed
+ * fixes to it and the rules behind those fixes held. What is left is assembling,
+ * linking, running and verifying, in that order, so every diagnostic that
+ * rejects a candidate is collected and handed to the next review of it, and a
+ * rejected round leads to a regenerated artifact rather than a dead end.
  *
- * The compiler decides which candidate is valid and which one is selected. The
- * model only proposes.
+ * A model never contributes a candidate. It is asked to read an artifact and to
+ * name the rewrites it would make; the compiler applies them to its own tree,
+ * revalidates what came out and lowers it again. The model decides which
+ * candidate wins only in the sense that its review decides what each candidate
+ * is: whether an artifact is correct is settled by running it.
+ *
+ * The compiler decides which candidate is valid and which one is selected.
  */
 
 import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
-import { buildModule } from "./toolchain/ir-wasm.ts";
+import { buildModule, describeModule } from "./toolchain/ir-wasm.ts";
 import { compileFunctionC } from "./toolchain/ir-c.ts";
-import { parseSemanticFunction } from "./semantics/ir-text.ts";
+import { parseSemanticFunction, printSemanticFunction } from "./semantics/ir-text.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
+import { applyProposal, type RepairContext } from "./semantics/repair.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
+import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
+import type { Review } from "./core/proposal.ts";
 
 /**
  * What a build prepared once and then hands to every candidate: the ABI header
@@ -35,14 +44,13 @@ export interface PreparedRuntime {
   /** Absent for a hosted build: the host program links, so there is no C object. */
   objectPath?: string;
 }
-import { stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
-import type { ProgramFailure } from "./ai/prompt.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
 import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
@@ -52,11 +60,11 @@ import type {
   CandidateOutcome,
   FunctionContract,
   ProgramContract,
+  ProgramFailure,
   RuntimeKind,
   GenerationConfig,
   OutputKind,
   Runner,
-  SourceModule,
   TargetSpec,
   TestConfig,
   VerificationResult,
@@ -73,14 +81,22 @@ const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
 };
 
 /**
- * What the generate stage names, which is what the model is writing there: the
- * IR, on every kind. The kind only says how far the toolchain takes that one
- * answer, so the line names the delivery the build asked for and leaves the
- * name of the language itself to the stage that produces it — before one of
- * them, nothing of that language exists.
+ * Where a build stands in the review loop, for progress reporting.
  */
-export function generationLabel(output: OutputKind): string {
-  return output === "ir" ? "semantic IR" : `semantic IR for ${implementationLabel(output)} output`;
+/**
+ * Where a build stands in the review loop, for progress reporting.
+ */
+export interface ReviewProgress {
+  /** The artifact under review. */
+  stage: ReviewStage;
+  /** The candidate being produced, 1-based. */
+  candidate: number;
+  /** How many candidates the build will produce. */
+  candidates: number;
+  /** The round within that candidate, 1-based. The first reviews the resolved IR. */
+  attempt: number;
+  /** How many rounds that candidate is allowed. */
+  attempts: number;
 }
 
 export interface CodegenWorkspace {
@@ -89,19 +105,6 @@ export interface CodegenWorkspace {
   functionName: string;
 }
 
-/** Where a build stands in the candidate/attempt loop, for progress reporting. */
-export interface GenerationProgress {
-  /** The candidate being produced, 1-based. */
-  candidate: number;
-  /** How many candidates the build will produce. */
-  candidates: number;
-  /** The attempt within that candidate, 1-based. The first generates. */
-  attempt: number;
-  /** How many attempts that candidate is allowed. */
-  attempts: number;
-  /** True when this attempt repairs a rejected candidate rather than generating one. */
-  repair: boolean;
-}
 
 export interface CodegenRequest extends CandidateEvaluationRequest {
   contract: FunctionContract;
@@ -111,13 +114,18 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   /** The whole program, contracted: what a backend needs about every file. */
   program: ProgramContract;
   /**
-   * Every function of the program as the IR holds it, by name. The prompt
-   * reads a function from here rather than from its source statements, so what
-   * a model reasons about is the same description a backend is given.
+   * The function the compiler resolved from the source, which is the artifact
+   * every candidate starts from. What the frontend parsed and `ir-resolve.ts`
+   * resolved is already a program every backend can lower, so a build starts
+   * from it and a review may only rewrite it.
+   */
+  base: SemanticFunction;
+  /**
+   * Every function of the program as the IR holds it, by name. A proposal that
+   * inlines a call is applied against these, so a rule reads the same bodies a
+   * backend is given.
    */
   semantics: Record<string, SemanticFunction>;
-  /** Every module of the program, with the source each contract came from. */
-  sources: readonly SourceModule[];
   target: TargetSpec;
   output: OutputKind;
   /**
@@ -148,7 +156,13 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
    * Called just before a request goes out. A model can take minutes, so the
    * compiler says it is waiting rather than looking stuck.
    */
-  onGenerate?: (progress: GenerationProgress) => void;
+  onReview?: (progress: ReviewProgress) => void;
+  /**
+   * Called with what the compiler rewrote and what it refused, so a build says
+   * what it decided on its own and what it would not do, rather than only what
+   * a model asked for.
+   */
+  onNote?: (note: string) => void;
 }
 
 export interface CodegenResult {
@@ -163,7 +177,7 @@ export interface CodegenResult {
 }
 
 interface CandidatePaths {
-  /** The IR the model wrote, which every output kind answers in. */
+  /** The IR the artifact is, which every output kind lowers. */
   implementation: string;
   /** The text the compiler lowered that IR into, which is the deliverable. */
   lowered: string;
@@ -417,22 +431,20 @@ export function readSemanticCandidate(
 }
 
 /**
- * Turns model output into something executable.
+ * Turns a candidate into something executable.
  *
- * Every output kind answers in the same language and is lowered the same way,
- * so this is the only place a candidate becomes an object or a module: the
- * model wrote the IR, the compiler checked it against the contract and is now
- * the one that wrote the target, so nothing the model wrote is ever compiled.
- * What the build delivers is the text that lowering produced, and what a size
- * objective weighs is that text rather than the IR, which is the same for
- * every candidate and so would order them by nothing at all.
+ * Every output kind is the same IR lowered the same way, so this is the only
+ * place a candidate becomes an object or a module. What the build delivers is
+ * the text that lowering produced, and what a size objective weighs is that
+ * text rather than the IR, which is the same for every candidate of a function
+ * that no review changed and so would order them by nothing at all.
  */
 async function materialize(
   request: CandidateEvaluationRequest,
   candidate: Candidate,
   paths: CandidatePaths,
   vectors: PlannedVectors | null,
-  /** The IR the model wrote, which every output kind answers in. */
+  /** The IR the candidate is, which every output kind lowers. */
   fn: SemanticFunction,
   /**
    * Whether the candidate can be linked on its own. One that calls another
@@ -462,8 +474,8 @@ async function materialize(
   const runtime = await request.prepareRuntime();
   // A `c` build delivers the C the compiler wrote, an `asm` or `machine` one
   // the assembly the C compiler made of it, and an `ir` one the IR itself.
-  // Only the last is what the model wrote, and it is the same for every
-  // candidate, so a size objective weighs the text below rather than it.
+  // Only the last is the IR, which is the same for every candidate a review
+  // changed nothing in, so a size objective weighs the text below instead.
   const deliversAssembly = request.output === "asm" || request.output === "machine";
   const lowered = await compileFunctionC({
     fn,
@@ -548,9 +560,9 @@ async function measureCandidate(
 ): Promise<CandidateOutcome> {
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
   try {
-    // The IR is the implementation and is kept beside whatever it lowers
-    // into, because it is what the model wrote, what a later round is shown and
-    // what a build that failed on it leaves behind to be read. It is written
+    // The IR is the artifact and is kept beside whatever it lowers into,
+    // because it is what a later review is shown and what a build that failed
+    // on it leaves behind to be read. It is written
     // before it is read rather than once it has been lowered, so that a
     // candidate the reader refused is on disk beside the ones it accepted: a
     // refusal that names a line of the IR and leaves no copy of the IR is a
@@ -790,7 +802,98 @@ export function selectCandidate(outcomes: readonly CandidateOutcome[], contract:
   }
 }
 
-export async function generateCandidates(request: CodegenRequest): Promise<CodegenResult> {
+/**
+ * What one review of an artifact changed, and what it could not change.
+ *
+ * A proposal is applied one at a time, each against the tree the last one
+ * produced, and each is checked before the next is: a rule that does not hold
+ * where it was aimed is refused and the round carries on with the ones that do,
+ * and a rule that holds but leaves a program the compiler may not lower is
+ * refused for that. What a round produces is therefore always a function the
+ * compiler wrote, and the text it is written back as is the artifact the next
+ * round reviews.
+ */
+export interface Revision {
+  /** The IR as the compiler writes it, revised by every proposal that held. */
+  readonly text: string;
+  /** What each applied proposal did, oldest first. */
+  readonly applied: readonly string[];
+  /** Every proposal that was refused and why, which the next round is given. */
+  readonly refused: readonly string[];
+}
+
+function revise(
+  fn: SemanticFunction,
+  review: Review,
+  request: CodegenRequest,
+  context: RepairContext,
+): Revision {
+  const applied: string[] = [];
+  const refused: string[] = [];
+  let current = fn;
+  for (const proposal of review.proposals) {
+    const outcome = applyProposal(current, proposal, context);
+    if ("refused" in outcome) {
+      const note = `\`${proposal.text}\` was refused: ${outcome.refused}`;
+      refused.push(note);
+      request.onNote?.(note);
+      continue;
+    }
+    try {
+      validateSemanticFunction(outcome.applied, request.contract);
+    } catch (cause) {
+      const error = toCompilerError(cause, { category: "SemanticIrError", stage: "ir" });
+      const note = `\`${proposal.text}\` was refused: the rule applies, but what it produced is not a function the compiler may lower\n${error.detail ?? error.message}`;
+      refused.push(note);
+      request.onNote?.(note);
+      continue;
+    }
+    current = outcome.applied;
+    applied.push(`\`${proposal.text}\`: ${outcome.note}`);
+  }
+  return { text: printSemanticFunction(current), applied, refused };
+}
+
+/**
+ * The target a review of the lowered artifact reads. The C and the assembly are
+ * text the compiler wrote, so a review reads them as they stand. A module is
+ * not text, so a review of one reads what it holds instead: the sections it is
+ * made of and what it exports, which is the whole of what a reader can be told
+ * about a module without disassembling it.
+ */
+async function targetArtifact(
+  request: CodegenRequest,
+  candidate: Candidate,
+): Promise<{ text: string; note: string | null } | null> {
+  const paths = candidateFiles(request.workspace, candidate.id, request.output);
+  if (request.output === "wasm") {
+    const module = await readFile(paths.module);
+    return {
+      text: describeModule(module),
+      note: "A module is binary, so this is what it holds rather than a listing of it. The IR it was built from is the artifact the rules are applied to, and the module is regenerated from it.",
+    };
+  }
+  return { text: await readFile(paths.lowered, "utf8"), note: null };
+}
+
+/**
+ * Reviews the IR and regenerates it, once per candidate and for as many rounds
+ * as the toolchain keeps rejecting what came out.
+ *
+ * Every candidate starts from the same artifact: the IR the compiler resolved
+ * from the source. A round asks a model to read it and name the rewrites it
+ * would make, applies the ones that hold, prints the result and hands it to the
+ * toolchain. A round that proposed nothing leaves the IR as it was, which is a
+ * candidate like any other: it is assembled, verified and measured, and what
+ * that says about it is what the next round is given.
+ *
+ * The winner is then reviewed once more, against the target the compiler
+ * lowered it into. What comes of that is regenerated the same way and verified
+ * as the same way, and it replaces the winner only if it still passes: a review
+ * of the target cannot make a program correct that the IR was not.
+ */
+
+export async function reviewCandidates(request: CodegenRequest): Promise<CodegenResult> {
   const vectors = planVectors(request);
   const candidates: Candidate[] = [];
   const outcomes: CandidateOutcome[] = [];
@@ -799,15 +902,16 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     candidates.push(existing);
     outcomes.push(await evaluateCandidate(request, existing, vectors));
     if (selectCandidate(outcomes, request.contract) !== null) {
-      // Nothing was generated: the stored candidate is reused as it stands.
+      // Nothing was reviewed: the stored candidate is reused as it stands.
       return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
     }
   }
 
   // One backend per run: it carries the state a session needs, such as which
-  // recorded answer to serve next, but is not built until generation happens.
+  // recorded answer to serve next, but is not built until a review happens.
   let backend: AiBackend | null = null;
   const generationBackend = (): AiBackend => (backend ??= request.backend());
+  const context: RepairContext = { functions: new Map(Object.entries(request.semantics)) };
 
   const { maxAttempts, maxCandidates, candidateConcurrency } = request.generation;
   // Candidate records are numbered from the stored ones and from whatever a
@@ -823,14 +927,27 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
     outcomes: [] as CandidateOutcome[],
   }));
 
-  // Candidates are independent chains. One is generated from the contract
-  // alone, or from the implementation a program rejected when the build is
-  // repairing a program, and is then repaired in place for as long as the
-  // toolchain rejects it; a repair receives everything that candidate has
-  // collected so far, not just the last round, and nothing crosses into the
-  // next candidate. A candidate only ever waits on its own previous attempt, so
-  // chains overlap: a repair runs while the candidates that are still
-  // generating keep going.
+  /**
+   * Asks for one review of one artifact and regenerates it from what came back.
+ * The wait is the only part of a round a model is needed for, and it is the
+ * part that is measured: what the compiler spends assembling and running is
+ * its own.
+   */
+  const askFor = async (
+    asked: ReviewRequest,
+    sequence: number,
+  ): Promise<{ review: Review; durationNs: bigint }> => {
+    const startedAt = process.hrtime.bigint();
+    const review = await generationBackend().review(asked, sequence);
+    return { review, durationNs: process.hrtime.bigint() - startedAt };
+  };
+
+  // Candidates are independent chains. Each reviews the same IR independently,
+  // and then its own revisions for as long as the toolchain rejects them: a
+  // round is given everything that candidate has collected so far, not just the
+  // last, and nothing crosses into the next candidate. A candidate only ever
+  // waits on its own previous round, so chains overlap: one runs while the
+  // candidates that are still reviewing keep going.
   let next = 0;
   const worker = async (): Promise<void> => {
     while (next < chains.length) {
@@ -839,49 +956,64 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
       const chain = chains[index];
       const candidate = index + 1;
       const diagnostics: string[] = [];
+      const refusals: string[] = [];
       // A program that printed something other than what its source prints is
       // the only diagnostic a contract of this shape ever earns, so a round
-      // generated after one repairs the implementation that produced it rather
-      // than starting blind from the contract.
-      let previous = request.programFailure?.previous;
+      // that follows one starts from the IR that produced it rather than from
+      // the one the source resolved to.
+      // What every candidate starts from: the IR the compiler resolved from
+      // the source, before anything has been lowered or asked about.
+      let current =
+        request.programFailure === undefined
+          ? request.base
+          : parseSemanticFunction(request.programFailure.previous, request.program);
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        request.onGenerate?.({
-          candidate,
-          candidates: maxCandidates,
-          attempt,
-          attempts: maxAttempts,
-          repair: previous !== undefined,
-        });
-        const startedAt = process.hrtime.bigint();
-        const generated = await generationBackend().generate(
+        const sequence = firstSequence + index * maxAttempts + attempt;
+        request.onReview?.({ stage: "ir", candidate, candidates: maxCandidates, attempt, attempts: maxAttempts });
+        const { review, durationNs } = await askFor(
           {
+            stage: "ir",
             contract: request.contract,
             unit: { file: request.unitFile, function: request.contract.function.name },
             program: request.program,
             semantics: request.semantics,
-            sources: request.sources,
             target: request.target,
             output: request.output,
-            runtime: request.runtime,
             candidate,
             candidates: maxCandidates,
             attempt,
-            ...(previous === undefined ? {} : { previous }),
+            artifact: printSemanticFunction(current),
+            artifactNote: null,
+            feedback: [...diagnostics],
+            refusals: [...refusals],
             ...(request.programFailure === undefined ? {} : { programFailure: request.programFailure }),
-            ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
           },
-          firstSequence + index * maxAttempts + attempt,
+          sequence,
         );
-        modelDurationNs += process.hrtime.bigint() - startedAt;
-        chain.candidates.push(generated);
-        previous = generated.text;
+        modelDurationNs += durationNs;
+        const revision = revise(current, review, request, context);
+        refusals.splice(0, refusals.length, ...revision.refused);
+
+        const regenerated: Candidate = {
+          id: `c${sequence}`,
+          text: revision.text,
+          model: generationBackend().id,
+          modelConfig: generationBackend().id,
+          generatedAt: new Date().toISOString(),
+          candidate,
+          round: attempt,
+          ...(revision.applied.length === 0 ? {} : { proposals: [...revision.applied] }),
+          ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
+        };
+        chain.candidates.push(regenerated);
 
         // Verification and benchmarking are blocking, so candidates are measured
-        // one at a time even though they were generated together.
-        const outcome = await evaluateCandidate(request, generated, vectors);
+        // one at a time even though they were reviewed together.
+        const outcome = await evaluateCandidate(request, regenerated, vectors);
         chain.outcomes.push(outcome);
         if (outcome.valid) break;
+        current = parseSemanticFunction(revision.text, request.program);
         diagnostics.push(diagnosticFor(outcome.failure, attempt));
       }
     }
@@ -902,14 +1034,72 @@ export async function generateCandidates(request: CodegenRequest): Promise<Codeg
 
   if (candidates.length === 0) {
     throw new CompilerError({
-      category: "AiGenerationError",
-      stage: "generate",
+      category: "AiReviewError",
+      stage: "review",
       message: "no candidate was produced",
       function: request.contract.function.name,
     });
   }
 
-  return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+  let selected = selectCandidate(outcomes, request.contract);
+  if (selected === null || request.output === "ir") {
+    return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+  }
+
+  // The winner is reviewed against the target the compiler lowered it into, and
+  // what that review changes is regenerated and verified as any other
+  // candidate. It replaces the winner only by being verified: a proposal the
+  // rules produced and the toolchain rejected leaves the winner standing.
+  const winner = candidates.find((entry) => entry.id === selected);
+  const artifact = winner === undefined ? null : await targetArtifact(request, winner);
+  if (winner === undefined || artifact === null) {
+    return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+  }
+  request.onReview?.({ stage: "target", candidate: winner.candidate, candidates: maxCandidates, attempt: 1, attempts: 1 });
+  const { review, durationNs } = await askFor(
+    {
+      stage: "target",
+      contract: request.contract,
+      unit: { file: request.unitFile, function: request.contract.function.name },
+      program: request.program,
+      semantics: request.semantics,
+      target: request.target,
+      output: request.output,
+      candidate: winner.candidate,
+      candidates: maxCandidates,
+      attempt: 1,
+      artifact: artifact.text,
+      artifactNote: artifact.note,
+      feedback: [],
+      refusals: [],
+    },
+    firstSequence + maxCandidates * maxAttempts,
+  );
+  modelDurationNs += durationNs;
+  const revision = revise(parseSemanticFunction(winner.text, request.program), review, request, context);
+  if (revision.applied.length === 0) {
+    return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+  }
+  const revised: Candidate = {
+    id: `c${firstSequence + maxCandidates * maxAttempts}`,
+    text: revision.text,
+    model: generationBackend().id,
+    modelConfig: generationBackend().id,
+    generatedAt: new Date().toISOString(),
+    candidate: winner.candidate,
+    round: 1,
+    proposals: [...revision.applied],
+  };
+  const outcome = await evaluateCandidate(request, revised, vectors);
+  candidates.push(revised);
+  outcomes.push(outcome);
+  return {
+    candidates,
+    outcomes,
+    selected: outcome.valid ? revised.id : selected,
+    benchmarkVector: vectors?.benchmark ?? null,
+    modelDurationNs,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

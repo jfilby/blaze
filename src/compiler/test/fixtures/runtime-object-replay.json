@@ -1,5 +1,5 @@
 {
-  "candidates": [
-    "function make() -> ref<Object1>\n  requires none\n  ensures none\n  allocates yes\n  prints no\n  reads_argv no\n  effects memory\n  object Object1 size 16 align 8\n    field left: ref<any> at 0\n    field right: ref<any> at 8\n  block entry: releases[]\n  return [new_object[ref<Object1>] Object1 left nothing[ref<any>] right nothing[ref<any>]]\n"
+  "reviews": [
+    "verdict: sound\nreason: the body computes what the contract states, and none of the rules applies to it"
   ]
 }

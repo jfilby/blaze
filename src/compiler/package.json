@@ -1,7 +1,7 @@
 {
   "name": "blaze",
   "version": "0.1.0",
-  "description": "AI native compiler: program -> whole-program contracts -> AI assembly -> native executable",
+  "description": "AI native compiler: source -> contracts -> semantic IR, reviewed by a model -> targets -> native executable",
   "type": "module",
   "private": true,
   "bin": {

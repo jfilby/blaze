@@ -18,8 +18,7 @@ import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
 import type { SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
-import { chatEndpoint } from "./model-endpoint.ts";
-import { diagnostic, irOf, phaseOf } from "./phase.ts";
+import { diagnostic, phaseOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
@@ -691,102 +690,6 @@ test("a program in a language the compiler cannot run is refused", async () => {
       }),
     /a program in nim cannot be checked/,
   );
-});
-
-/**
- * A function whose contract states what it does has no vector of its own, so
- * the program it belongs to is the only thing that can say whether it is right.
- * This is that loop: a program that prints something else is regenerated with
- * the line it differs on, and the build ends on the candidate that agrees.
- */
-const SUM = [
-  "function total(n: number): number {",
-  "  let out = 0;",
-  "  let i = 0;",
-  "  while (i < n) { out += i; i += 1; }",
-  "  return out;",
-  "}",
-  "console.log(total(4));",
-  "",
-].join("\n");
-
-/** `total` as the compiler resolved it, which is the answer every kind returns. */
-const TOTAL_RIGHT = irOf("typescript", { "main.ts": SUM }, "main.ts", "total");
-
-/** Returns n instead of the sum, so the program prints 4 where the source prints 6. */
-const TOTAL_WRONG = TOTAL_RIGHT.replace(
-  /  block entry: releases\[\][\s\S]*\n  return local\[f64\] out/,
-  "  block entry: releases[]\n  return local[f64] n",
-);
-
-test("a program that prints something else is regenerated with the line it differs on", async (t) => {
-  const endpoint = await chatEndpoint(t, [TOTAL_WRONG, TOTAL_RIGHT]);
-  const directory = await mkdtemp(join(tmpdir(), "blaze-repair-"));
-  await writeFile(join(directory, "main.ts"), SUM, "utf8");
-  await writeProject(join(directory, "blaze.toml"), {
-    language: "typescript",
-    sourceFile: "main.ts",
-    model: { provider: "openai-compatible", model: "stub" },
-    output: "machine",
-    generation: { maxCandidates: 1, maxAttempts: 1 },
-  });
-
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
-
-  assert.equal(outcome.build.status, "success", "the repaired program is the one that is delivered");
-  assert.equal(endpoint.prompts.length, 2, "the program is generated once, then regenerated");
-  // The first answer returns n rather than the sum, so the program printed 4
-  // where the source prints 6. That difference is the second request.
-  const repair = endpoint.prompts[1];
-  assert.match(repair, /REJECTED BY THE PROGRAM IT BELONGS TO/);
-  assert.match(repair, /the program prints "4"/);
-  assert.match(repair, /the source prints "6"/);
-  assert.match(repair, /return local\[f64\] n/, "the repair is handed the implementation that printed the wrong thing");
-  assert.match(repair, /A diagnostic listed more than once/);
-  assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
-});
-
-/**
- * Raises rather than answering, so the program it is in stops where the
- * source prints. Only once it is given something other than the zero an input
- * built from the contract carries: a candidate is called once before it is
- * selected, and a stop there is settled there rather than by a round of the
- * program. This one survives that call and stops on the argument the program
- * actually passes it, which is the case the program round is the oracle for.
- */
-const TOTAL_STOPS = TOTAL_RIGHT.replace(
-  "  block entry: releases[]\n",
-  '  block entry: releases[]\n    if [gt[bool] f64 local[f64] n const[f64] 0] @1\n      block b9: releases[]\n        raise [text "total is not implemented"] @1\n',
-);
-
-test("a program that stops is regenerated with why it stopped", async (t) => {
-  const endpoint = await chatEndpoint(t, [TOTAL_STOPS, TOTAL_RIGHT]);
-  const directory = await mkdtemp(join(tmpdir(), "blaze-stopped-repair-"));
-  await writeFile(join(directory, "main.ts"), SUM, "utf8");
-  await writeProject(join(directory, "blaze.toml"), {
-    language: "typescript",
-    sourceFile: "main.ts",
-    model: { provider: "openai-compatible", model: "stub" },
-    output: "machine",
-    generation: { maxCandidates: 1, maxAttempts: 1 },
-  });
-
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: "openai-compatible/stub" }, quiet, "build");
-
-  // A program that never finishes, is killed or fails is a verdict like any
-  // other: the build spends its repair rounds on it instead of stopping at the
-  // first one that does not run.
-  assert.equal(outcome.build.status, "success", "the repaired program is the one that is delivered");
-  assert.equal(endpoint.prompts.length, 2, "the program is generated once, then regenerated");
-  const repair = endpoint.prompts[1];
-  assert.match(repair, /REJECTED BY THE PROGRAM IT BELONGS TO/);
-  assert.match(repair, /the delivered program exited with status 2/);
-  assert.match(repair, /The program stopped before it printed line 1/);
-  assert.match(repair, /raise \[text "total is not implemented"\]/, "the repair is handed the implementation that stopped the program");
-  // The stop says why in words the IR carried, not only as a status the
-  // repair has to guess at.
-  assert.match(repair, /blaze: total is not implemented/);
-  assert.equal(run(outcome.outputPath as string, [], { timeoutMs: 60_000 }).stdout, "6\n");
 });
 
 test("a stepped loop runs the values the source runs, in both drivers", async (t) => {

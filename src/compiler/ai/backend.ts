@@ -1,22 +1,25 @@
 /**
  * AI backends.
  *
- * The backend turns a function contract plus a target into a candidate. A
- * candidate is the semantic IR whichever output kind is being built for.
- * Model output is untrusted: it is recorded verbatim and handed to the IR
- * reader, which validates it against the contract before anything is lowered.
+ * A backend turns one review request into one review. The request names an
+ * artifact the compiler just produced — the semantic IR, or the target code it
+ * lowered that IR into — and the answer is a verdict, a reason and a list of
+ * proposals naming rewrites out of the catalogue in `semantics/repair.ts`. The
+ * compiler applies those rewrites to its own tree and verifies the result; no
+ * model output is ever compiled, so a backend has no path that can put text from
+ * a provider into an object file.
  *
- * A model may also report that it cannot implement a contract at all: a reply
- * that opens with the failure status is a report from the model, not source,
- * and it ends the build rather than being repaired.
+ * An answer the compiler cannot read is not a wrong answer, it is no answer:
+ * nothing was proposed, so the request is made again rather than turning a
+ * malformed reply into a rejected artifact.
  *
  * Two backends implement the same contract:
  *
  *   - VercelAiBackend: the production backend, built on the Vercel AI SDK
- *   - ReplayBackend: an offline backend that returns recorded IR, so the
- *     deterministic part of the pipeline (validating, lowering, verifying,
- *     benchmarking, selection) can be exercised without network access or
- *     credentials
+ *   - ReplayBackend: an offline backend that returns recorded reviews, so the
+ *     deterministic part of the pipeline (resolving, validating, lowering,
+ *     verifying, benchmarking, selection) can be exercised without network
+ *     access or credentials
  */
 
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -29,16 +32,17 @@ import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { CompilerError } from "../core/errors.ts";
 import type { ModelConfiguration } from "./model.ts";
-import { buildRetryPrompt, buildSystemPrompt, buildUserPrompt, type PromptRequest } from "./prompt.ts";
-import { DEFAULT_GENERATION, type Candidate } from "../core/types.ts";
+import { buildRetryPrompt, buildSystemPrompt, buildIrReviewPrompt, buildTargetReviewPrompt, type ReviewRequest } from "./review.ts";
+import { parseReview, type Review } from "../core/proposal.ts";
+import { DEFAULT_GENERATION } from "../core/types.ts";
 
 /**
- * A model call that did not produce an implementation: the provider request
- * failed, or the reply carried no IR. It is not a candidate and not a
- * rejection of one, so the attempt is asked for again in place.
+ * A model call that produced no review: the provider request failed, or the
+ * reply could not be read as one. It is neither a rejection of an artifact nor
+ * a fix, so the attempt is asked for again in place.
  */
 class UnusableAnswer extends Error {
-  /** Why the answer could not be used, told to the model on the re-request. */
+  /** Why the answer could not be read, told to the model on the re-request. */
   readonly reason: string;
   /** Whether asking again can change the outcome. */
   readonly retryable: boolean;
@@ -46,13 +50,12 @@ class UnusableAnswer extends Error {
   readonly failure: CompilerError;
   /**
    * How the request that produced this answer ended, kept for a reply that
-   * carried no implementation: an answer cut off by the output limit, one a
-   * content filter took and one the model finished on its own are a different
-   * failure from each other, and only the provider knows which it was, for
-   * what it cost. Kept out of the reason, which the re-request prompt carries,
-   * because a stop is a fact about the request the model cannot change by
-   * being asked again. Absent for a request that never came back at all,
-   * which is the one answer the provider has no account of.
+   * could not be read: an answer cut off by the output limit, one a content
+   * filter took and one the model finished on its own are a different failure
+   * from each other, and only the provider knows which it was, for what it
+   * cost. Kept out of the reason, which the re-request prompt carries, because a
+   * stop is a fact about the request the model cannot change by being asked
+   * again. Absent for a request that never came back at all.
    */
   readonly stop: ProviderStop | undefined;
 
@@ -69,73 +72,20 @@ export interface AiBackend {
   /** Recorded in build records. */
   readonly id: string;
   /**
-   * Asks for one implementation. `sequence` is the position this answer takes
-   * in the build's candidate record and names it; the request says which
-   * candidate and attempt it belongs to.
+   * Asks for one review. `sequence` is the position this request takes in the
+   * build's record and names the attempt it belongs to; the request itself says
+   * which candidate and attempt that is.
    */
-  generate(request: PromptRequest, sequence: number): Promise<Candidate>;
+  review(request: ReviewRequest, sequence: number): Promise<Review>;
 }
 
-function generationError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "AiGenerationError", stage: "generate", message, detail });
+function reviewError(message: string, detail?: string): CompilerError {
+  return new CompilerError({ category: "AiReviewError", stage: "review", message, detail });
 }
 
-/**
- * Recovers the implementation from a model response: fenced blocks are
- * unwrapped and anything outside the first fence is dropped. The result is
- * still untrusted.
- */
-export function extractImplementation(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed === "") throw generationError("the model returned an empty response");
-  const fence = /```(?:[A-Za-z0-9_+-]*)\n([\s\S]*?)```/.exec(trimmed);
-  const body = fence === null ? trimmed : fence[1];
-  const implementation = body.trim();
-  if (implementation === "") throw generationError("the model returned no implementation", trimmed.slice(0, 400));
-  if (!/\S/.test(implementation.replace(/^\s*[#;].*$/gm, ""))) {
-    throw generationError("the model returned only comments", implementation.slice(0, 400));
-  }
-  return `${implementation}\n`;
-}
-
-/**
- * The first line of a reply that reports the model cannot implement the
- * contract. Everything after it is the report, so it is read before the
- * IR extractor, which would otherwise take the same words for source.
- */
-const FAILED_STATUS = "STATUS: failed";
-
-/** A failure the model reported itself, in place of an implementation. */
-export interface DeclaredFailure {
-  /** What the model said, as it said it, across every line it used. */
-  readonly message: string;
-}
-
-/**
- * Reads the failure status a reply opens with, or null when it opens with
- * anything else. The status is the first line and the whole of the marker: a
- * reply that says it later, or says it beside source, is source, because the
- * toolchain is what judges source and it has never heard of the status.
- *
- * The message may be empty. A failure nobody accounted for says nothing, and
- * whether that is a model declining or a model answering badly is the
- * caller's account to give, so what was there is reported as it was found.
- */
-export function readFailureStatus(text: string): DeclaredFailure | null {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  if ((lines[0] ?? "").trim() !== FAILED_STATUS) return null;
-  return { message: lines.slice(1).join("\n").trim() };
-}
-
-/**
- * A failure the model reported is the build's answer rather than an attempt
- * that failed: it ends the request that carried it, no repair follows it, and
- * it is recorded in the model's own words, which are the only account of why
- * the contract could not be met.
- */
-function declaredFailure(message: string, detail: string): CompilerError {
-  return new CompilerError({ category: "ModelDeclinedError", stage: "generate", message, detail });
-}
+/* -------------------------------------------------------------------------- */
+/* Request accounting                                                          */
+/* -------------------------------------------------------------------------- */
 
 /**
  * Tokens a provider charged one request for. A provider may report none of
@@ -151,8 +101,8 @@ export interface ResponseUsage {
  * How a request that came back ended: the reason the provider gives, the name
  * it gives that reason, and what the request cost. All three are the
  * provider's account of a request rather than anything the compiler decided,
- * and a build that fails on an answer with nothing in it is the one place
- * they can still be read.
+ * and a build that fails on an answer it could not read is the one place they
+ * can still be read.
  */
 export interface ProviderStop {
   /** Why the provider stopped generating, unified across providers. */
@@ -206,8 +156,9 @@ function usageOf(usage: LanguageModelUsage): ResponseUsage | undefined {
 /* Vercel AI SDK backend                                                      */
 /* -------------------------------------------------------------------------- */
 
-/** Exactly what is sent to a model for one attempt. */
+/** Exactly what is sent to a model for one review. */
 export interface PromptDump {
+  stage: ReviewRequest["stage"];
   candidate: number;
   attempt: number;
   system: string;
@@ -220,13 +171,14 @@ export interface PromptDump {
  * nothing.
  */
 export interface ResponseRetry {
+  stage: ReviewRequest["stage"];
   candidate: number;
   attempt: number;
   /** The re-request being made, 1-based. */
   retry: number;
   /** Re-requests this attempt is allowed in total. */
   retries: number;
-  /** Why the answer before it could not be used. */
+  /** Why the answer before it could not be read. */
   reason: string;
   /** How the request behind it ended, when there was a request to end. */
   stop?: ProviderStop;
@@ -257,14 +209,21 @@ export interface BackendOptions {
    */
   timeoutMs?: number;
   /**
-   * Extra requests one attempt may spend on an answer that carries no
-   * implementation. Defaults to `DEFAULT_GENERATION.maxRetries`.
+   * Extra requests one review may spend on an answer that could not be read.
+   * Defaults to `DEFAULT_GENERATION.maxRetries`.
    */
   retries?: number;
   /** Called before an answer is asked for again, with the reason for it. */
   onRetry?: (retry: ResponseRetry) => void;
   /** Called with the prompt before it is sent, for --debug. */
   onPrompt?: (dump: PromptDump) => void;
+}
+
+/** The prompt a review of one artifact is sent as. */
+function reviewPrompts(request: ReviewRequest): { system: string; user: string } {
+  const system = buildSystemPrompt();
+  const user = request.stage === "ir" ? buildIrReviewPrompt(request) : buildTargetReviewPrompt(request);
+  return { system, user };
 }
 
 export class VercelAiBackend implements AiBackend {
@@ -298,7 +257,7 @@ export class VercelAiBackend implements AiBackend {
     if (configuration.provider === "openai") {
       this.model = createOpenAI(apiKey === "" ? undefined : { apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
     } else if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible") {
-      if (baseURL === undefined) throw generationError(`${configuration.provider} has no endpoint`);
+      if (baseURL === undefined) throw reviewError(`${configuration.provider} has no endpoint`);
       this.model = createOpenAICompatible({
         name: configuration.provider,
         baseURL,
@@ -306,7 +265,7 @@ export class VercelAiBackend implements AiBackend {
         ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
       })(configuration.model);
     } else if (configuration.provider === "commandcode") {
-      if (baseURL === undefined) throw generationError("commandcode has no endpoint");
+      if (baseURL === undefined) throw reviewError("commandcode has no endpoint");
       this.model = createCommandCode({
         apiKey,
         baseUrl: baseURL,
@@ -317,57 +276,70 @@ export class VercelAiBackend implements AiBackend {
     } else if (configuration.provider === "google") {
       this.model = createGoogleGenerativeAI({ apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
     } else {
-      throw generationError(`provider "${configuration.provider}" cannot be used for generation`);
+      throw reviewError(`provider "${configuration.provider}" cannot be used for reviews`);
     }
     return this.model;
   }
 
   /**
-   * Asks the model until it answers with an implementation or the re-request
-   * budget is spent.
+   * Asks the model until it answers with a review the compiler can read, or
+   * the re-request budget is spent.
    *
-   * A model that fails to answer, or answers with nothing, has not proposed
-   * anything: there is nothing to assemble, verify, reject or repair, and the
-   * next attempt of the candidate would be a repair of an output that does not
-   * exist. Such an answer is asked for again in place instead, each time told
-   * what was wrong with the one before it, and none of them costs the
-   * candidate one of its repair attempts.
+   * A model that fails to answer, or answers with something that is not a
+   * review, has proposed nothing: there is nothing to apply, verify or reject,
+   * and the next attempt would be a review of a repair that does not exist.
+   * Such an answer is asked for again in place instead, each time told what was
+   * wrong with the one before it, and none of them costs the attempt one of its
+   * review rounds.
    */
-  async generate(request: PromptRequest, sequence: number): Promise<Candidate> {
-    const system = buildSystemPrompt();
-    const user = buildUserPrompt(request);
-    this.onPrompt?.({ candidate: request.candidate, attempt: request.attempt, system, user });
+  async review(request: ReviewRequest, _sequence: number): Promise<Review> {
+    const { system, user } = reviewPrompts(request);
+    this.onPrompt?.({ stage: request.stage, candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
     const answers: { reason: string; stop: ProviderStop | undefined }[] = [];
-    let text: string;
+    let review: Review;
 
     for (let retry = 0; ; retry += 1) {
       try {
-        text = await this.ask(model, system, answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)));
+        const answer = await this.ask(
+          model,
+          system,
+          answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)),
+        );
+        const parsed = parseReview(answer.text);
+        if ("unusable" in parsed) {
+          // The reason the answer could not be read is told to the model, and
+          // how the request ended is told to the build: a reply the provider
+          // cut short is a different failure from one the model finished, and
+          // only the provider knows which it was.
+          throw new UnusableAnswer(
+            parsed.unusable,
+            true,
+            reviewError("the model did not answer with a review the compiler could read"),
+            answer.stop,
+          );
+        }
+        review = parsed.review;
         break;
       } catch (cause) {
-        // A failure the model reported is named for the function it is for
-        // here, where the request is. It is the answer rather than a fault of
-        // the request, so it is neither asked for again nor repaired.
-        if (cause instanceof CompilerError) {
-          throw new CompilerError({ ...cause.toJSON(), function: cause.functionName ?? request.contract.function.name });
-        }
         if (!(cause instanceof UnusableAnswer)) throw cause;
         if (!cause.retryable) throw cause.failure;
         answers.push({ reason: cause.reason, stop: cause.stop });
         if (retry === this.retries) {
           throw new CompilerError({
-            category: "AiGenerationError",
-            stage: "generate",
+            category: "AiReviewError",
+            stage: "review",
             message: cause.failure.message,
+            function: request.contract.function.name,
             detail: [
-              `asked ${this.retries + 1} times, and no answer carried an implementation:`,
+              `asked ${this.retries + 1} times, and no answer carried a review:`,
               ...answers.map((entry) => `- ${entry.reason}${entry.stop === undefined ? "" : ` (${describeProviderStop(entry.stop)})`}`),
               ...(cause.failure.detail === undefined ? [] : [cause.failure.detail]),
             ].join("\n"),
           });
         }
         this.onRetry?.({
+          stage: request.stage,
           candidate: request.candidate,
           attempt: request.attempt,
           retry: retry + 1,
@@ -378,21 +350,15 @@ export class VercelAiBackend implements AiBackend {
         await sleep(Math.min(RETRY_BACKOFF_MS * 2 ** retry, RETRY_BACKOFF_MAX_MS));
       }
     }
-
-    return {
-      id: `c${sequence}`,
-      text,
-      model: this.id,
-      modelConfig: this.id,
-      generatedAt: new Date().toISOString(),
-      candidate: request.candidate,
-      round: request.attempt,
-      ...(request.feedback === undefined ? {} : { feedback: request.feedback }),
-    };
+    return review;
   }
 
-  /** One model call, answered in terms of the compiler: an implementation, or none. */
-  private async ask(model: LanguageModel, system: string, user: string): Promise<string> {
+  /** One model call: what came back, and how the request ended. */
+  private async ask(
+    model: LanguageModel,
+    system: string,
+    user: string,
+  ): Promise<{ text: string; stop: ProviderStop | undefined }> {
     let text: string;
     let stop: ProviderStop | undefined;
     try {
@@ -409,8 +375,8 @@ export class VercelAiBackend implements AiBackend {
       });
       text = result.text;
       // How the request ended and what it cost, kept for a reply that turns
-      // out to carry no implementation: a request that never came back with
-      // one has neither to report.
+      // out to be unreadable: a request that never came back with a review has
+      // neither to report.
       const usage = usageOf(result.usage);
       stop = {
         finishReason: result.finishReason,
@@ -425,7 +391,7 @@ export class VercelAiBackend implements AiBackend {
         throw new UnusableAnswer(
           "it did not answer within the request budget",
           false,
-          generationError(
+          reviewError(
             `the model did not answer within ${Math.round(this.timeoutMs / 1000)}s`,
             "remove generation.timeoutSeconds to wait as long as the model needs",
           ),
@@ -438,65 +404,29 @@ export class VercelAiBackend implements AiBackend {
       throw new UnusableAnswer(
         "the provider request failed",
         true,
-        generationError("the model provider request failed", cause instanceof Error ? cause.message : String(cause)),
+        reviewError("the model provider request failed", cause instanceof Error ? cause.message : String(cause)),
       );
     }
 
-    // A model that cannot implement the contract says so in the first line,
-    // and the rest of the reply is why. That is a report rather than a wrong
-    // answer: there is nothing in it to assemble, and the build ends on it
-    // rather than asking the same model for the same contract again.
-    const declared = readFailureStatus(text);
-    if (declared !== null) {
-      if (declared.message === "") {
-        // A status with nothing under it accounts for nothing. A model that
-        // declined and left no reason behind has not reported a failure, it
-        // has answered unusably, and the re-request says so: the one thing it
-        // can still do about it is say why.
-        throw new UnusableAnswer(
-          "it reported a failure and said nothing about it",
-          true,
-          generationError("the model reported a failure without saying what it was"),
-          stop,
-        );
-      }
-      throw declaredFailure(declared.message, "reported by the model in place of an implementation; the build ends on it");
-    }
-
-    let implementation: string;
-    try {
-      implementation = extractImplementation(text);
-    } catch (cause) {
-      // A reply with no implementation in it is the model not answering, not a
-      // wrong answer: the toolchain never saw anything to judge. The provider
-      // stopped for its own reasons, and saying which is the only account of
-      // why there is nothing here to reject.
-      const failure = cause instanceof CompilerError ? cause : generationError("the model returned no implementation");
-      throw new UnusableAnswer(failure.message, true, failure, stop);
-    }
-
     // A reply the provider cut off at the token limit is the first part of an
-    // implementation, not a smaller one: what came back ends wherever the
-    // limit fell, which is usually mid-instruction, and an implementation that
-    // stops there is a function the model never finished writing. It is asked
-    // for again, which costs the candidate nothing but another request the
-    // same as an answer with nothing in it, and the model can write less and
-    // land inside the limit. This is the one reply that carried something and
-    // is still not one, so it is caught here, where the text would otherwise
-    // become a candidate. Every provider the compiler talks to maps its own
-    // word for a cutoff to `length`.
+    // answer, not a smaller one: what came back ends wherever the limit fell,
+    // which is usually mid-line, and a review that stops there names a verdict
+    // with no reason under it. It is asked for again, which costs the attempt
+    // nothing but another request the same as an answer with nothing in it, and
+    // the model can write less and land inside the limit. Every provider the
+    // compiler talks to maps its own word for a cutoff to `length`.
     if (stop?.finishReason === "length") {
       throw new UnusableAnswer(
         "the answer was cut off at the token limit before it was finished",
         true,
-        generationError(
+        reviewError(
           "the model wrote more than it was allowed to answer",
-          "the reply was cut off before the implementation was finished, so none of it was tried",
+          "the reply was cut off before the review was finished, so none of it was read",
         ),
         stop,
       );
     }
-    return implementation;
+    return { text, stop };
   }
 }
 
@@ -522,7 +452,7 @@ function isTimeout(cause: unknown): boolean {
 interface ReplayFile {
   /** Unvalidated: a replay file is written by hand, and what it holds is
    *  checked where it is read rather than taken on the shape of this. */
-  candidates?: unknown;
+  reviews?: unknown;
 }
 
 export class ReplayBackend implements AiBackend {
@@ -542,7 +472,7 @@ export class ReplayBackend implements AiBackend {
     try {
       text = await readFile(file, "utf8");
     } catch (cause) {
-      throw generationError(
+      throw reviewError(
         `cannot read replay file ${file}`,
         cause instanceof Error ? cause.message : String(cause),
       );
@@ -553,20 +483,20 @@ export class ReplayBackend implements AiBackend {
       try {
         parsed = JSON.parse(trimmed) as ReplayFile;
       } catch (cause) {
-        throw generationError(`replay file ${file} is not valid JSON`, cause instanceof Error ? cause.message : String(cause));
+        throw reviewError(`replay file ${file} is not valid JSON`, cause instanceof Error ? cause.message : String(cause));
       }
-      const recorded: unknown = parsed.candidates;
+      const recorded: unknown = parsed.reviews;
       if (!Array.isArray(recorded) || recorded.length === 0) {
-        throw generationError(`replay file ${file} must contain a non-empty "candidates" array`);
+        throw reviewError(`replay file ${file} must contain a non-empty "reviews" array`);
       }
       // Every entry is what one answer of an offline build is made of, so an
       // entry that is not text is a broken replay file and not a request that
-      // failed: casting it here would carry a number into the assembly
-      // extractor and report the crash as if the model had answered badly.
+      // failed: carrying a number into the review reader would report the crash
+      // as if the model had answered badly.
       const entries: string[] = [];
       for (const [index, entry] of recorded.entries()) {
         if (typeof entry !== "string") {
-          throw generationError(`replay file ${file} has a "candidates" entry ${index} that is not text`);
+          throw reviewError(`replay file ${file} has a "reviews" entry ${index} that is not text`);
         }
         entries.push(entry);
       }
@@ -577,41 +507,27 @@ export class ReplayBackend implements AiBackend {
     return this.entries;
   }
 
-  async generate(request: PromptRequest, sequence: number): Promise<Candidate> {
+  async review(request: ReviewRequest, sequence: number): Promise<Review> {
     const entries = await this.load();
     // A position before the first entry is not a position: a build names its
     // candidates from one, so one below that is a caller that lost count, and
     // serving it an answer from the end of the file would hide that.
     if (!Number.isInteger(sequence) || sequence < 1) {
-      throw generationError(`the replay backend was asked for candidate ${sequence}, which is not a candidate`);
+      throw reviewError(`the replay backend was asked for review ${sequence}, which is not a review`);
     }
     // Answers are served by record position, not by a shared cursor: candidates
-    // are generated at the same time, and a cursor would hand them out in
+    // are reviewed at the same time, and a cursor would hand them out in
     // whatever order they happened to reach the backend.
     const entry = entries[Math.min(sequence - 1, entries.length - 1)];
-    // A recorded failure is served where a recorded implementation would have
-    // been, and ends the build in the words it was recorded in.
-    const declared = readFailureStatus(entry);
-    if (declared !== null) {
-      const file = String(this.configuration.replayFile);
-      if (declared.message === "") {
-        throw generationError(
-          "the replay file records a failure and gives no reason",
-          `entry ${Math.min(sequence - 1, entries.length - 1) + 1} of ${file}`,
-        );
-      }
-      throw declaredFailure(declared.message, `recorded in ${file} in place of an implementation`);
+    const parsed = parseReview(entry);
+    if ("unusable" in parsed) {
+      const at = Math.min(sequence - 1, entries.length - 1) + 1;
+      throw reviewError(
+        `replay entry ${at} is not a review of the ${request.stage} of ${request.contract.function.name}: ${parsed.unusable}`,
+        `recorded in ${String(this.configuration.replayFile)}`,
+      );
     }
-    return {
-      id: `c${sequence}`,
-      text: extractImplementation(entry),
-      model: this.id,
-      modelConfig: this.id,
-      generatedAt: new Date().toISOString(),
-      candidate: request.candidate,
-      round: request.attempt,
-      ...(request.feedback === undefined ? {} : { feedback: request.feedback }),
-    };
+    return parsed.review;
   }
 }
 

@@ -151,23 +151,20 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
 }
 
 /**
- * Every function a candidate for `contract` reaches by a call, following the
- * bodies it is told to write out. A body written out lands inside this
- * candidate's object, so a call written in it is a call this candidate makes:
- * its symbol has to be one the candidate may reference, and the prompt has to
- * say how it is called under. A candidate that is only shown its own edges
- * therefore cannot write out a body that calls anything, and the assembler
- * turns away the candidate that got it right.
+ * Every function a revision of `contract` may name in a call.
+ *
+ * A call stays a call unless the outline writes the callee out, and a revision
+ * is free to take either road: the outline says which road is the better bet,
+ * and the rewrite that takes it is a rule the compiler applies and can refuse.
+ * So every callee of every body the outline may write out is a symbol this
+ * function may reference, along with what those bodies call in turn: a body
+ * written out lands inside this object, so a call written inside it is a call
+ * this function makes.
  */
-export function calledOut(contracts: ContractsByName, contract: FunctionContract): FunctionContract[] {
+export function callableFrom(contracts: ContractsByName, contract: FunctionContract): FunctionContract[] {
   const reached = new Map<string, FunctionContract>();
   for (const body of writtenOut(contracts, contract)) {
     for (const edge of body.definition.calls) {
-      // A body written out is part of this object, so the calls its own
-      // contract records are this candidate's to make. The written-out bodies
-      // are already the whole closure, so an edge marked for writing out is a
-      // body above rather than a symbol.
-      if (edge.strategy !== "call") continue;
       const callee = contracts.get(edge.callee);
       if (callee !== undefined) reached.set(callee.function.name, callee);
     }
