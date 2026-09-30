@@ -180,21 +180,58 @@ function renderCatalogue(): string[] {
   const lines: string[] = [];
   for (const rule of REPAIR_RULES) {
     lines.push(`- ${rule.name}: ${rule.summary}`, `  applies: ${rule.applies}`);
+    // What a rule takes is said either way. Listing only the arguments a rule
+    // has leaves a rule that takes none looking like one whose arguments were
+    // forgotten, and the proposal that follows is refused for carrying one.
+    lines.push(
+      rule.args.length === 0
+        ? "  takes no arguments: a proposal naming it is the rule and the block id, and nothing after them"
+        : `  takes one argument: ${rule.args.map((argument) => argument.name).join(", ")}`,
+    );
     for (const argument of rule.args) lines.push(`  ${argument.name}: ${argument.description}`);
   }
   return lines;
 }
 
-/** The answer, in the only form the compiler reads. */
-function renderAnswerFormat(): string[] {
+/**
+ * The answer, in the only form the compiler reads.
+ *
+ * The shape is shown as whole answers against a block id the artifact really
+ * has, not as a line of placeholders. A format written as `<rule> <block>
+ * [name=value]` is read back as a proposal with a rule called `<rule>` and an
+ * argument called `name`, which is a round trip spent on a question the request
+ * already answered.
+ */
+function renderAnswerFormat(site: string | null, callee: string | null): string[] {
   return [
     "Answer with these lines and nothing else, in this order:",
     "",
     "verdict: sound | repaired | unsound",
     "reason: one line saying what you found",
-    "proposal: <rule> <block> [name=value]",
+    "one `proposal:` line per fix, naming a rule from the catalogue and a block id from the site list",
     "",
-    "One `proposal:` line per fix, each naming a rule from the catalogue above and the block it applies to.",
+    "An answer that finds nothing to change is two lines, and no proposal line at all:",
+    "",
+    "verdict: sound",
+    "reason: the bound is read out of the slice on every iteration",
+    "",
+    ...(site === null
+      ? []
+      : [
+          "An answer that does is those two lines and one proposal line per fix:",
+          "",
+          "verdict: repaired",
+          "reason: the bound is recomputed on every iteration",
+          `proposal: hoist-invariant ${site}`,
+          ...(callee === null ? [] : [`proposal: inline-call ${site} callee=${callee}`]),
+          "",
+        ]),
+    "A proposal is a rule, then a block id, then the arguments that rule takes, written `name=value` with no",
+    `brackets around them: \`callee=${callee ?? "name"}\`, not \`[callee=${callee ?? "name"}]\`. A rule that takes`,
+    "no argument takes none, and `inline-call` is the only rule in the catalogue that takes one. A line reading",
+    "`proposal: none` is not how nothing is proposed: a `sound` or `unsound` answer that has no fix carries no",
+    "`proposal:` line at all.",
+    "",
     "`verdict: sound` takes no proposals, `verdict: repaired` takes at least one, and `verdict: unsound` is",
     "for an artifact that is wrong with no rule in the catalogue that fixes it: say so in the reason and",
     "propose nothing. Nothing else is read: a paragraph, a diff, a rewritten body or a list of instructions",
@@ -291,6 +328,22 @@ function renderDiagnostics(request: ReviewRequest): string[] {
 
 function renderReview(request: ReviewRequest, lead: readonly string[]): string {
   const semantic = request.semantics[request.contract.function.name];
+  // The worked examples in the answer format name a block and a callee this
+  // artifact really has, so a model copying the shape copies an id the IR
+  // prints rather than the name of a placeholder. The callee is one the body
+  // reaches other than itself: an example that inlines a function into itself
+  // is an example of a rule being refused.
+  const callee = semantic === undefined ? null : (semantic.calls.find((edge) => edge.callee !== semantic.name)?.callee ?? null);
+  // The site is a block the IR prints and a proposal may name, taken from the
+  // same list the review is handed, and the last one so the example is a block
+  // inside the body rather than the body itself.
+  const site =
+    semantic === undefined
+      ? null
+      : (describeSites(semantic)
+          .map((entry) => /^block (\S+):/.exec(entry)?.[1])
+          .filter((id): id is string => id !== undefined)
+          .at(-1) ?? semantic.entry.id);
   const artifactTitle =
     request.stage === "ir"
       ? "THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO"
@@ -337,7 +390,7 @@ function renderReview(request: ReviewRequest, lead: readonly string[]): string {
       "",
       ...renderCatalogue(),
     ]),
-    section("YOUR ANSWER", renderAnswerFormat()),
+    section("YOUR ANSWER", renderAnswerFormat(site, callee)),
   ].join("\n\n");
 }
 

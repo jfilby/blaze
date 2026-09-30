@@ -31,7 +31,13 @@
  *
  * The grammar is read strictly. An answer the compiler cannot read is not a
  * wrong answer, it is no answer: nothing was proposed, so the request is made
- * again rather than turning a malformed reply into a rejected artifact.
+ * again rather than turning a malformed reply into a rejected artifact. Two
+ * things are read rather than refused, because a model that means them is not
+ * ambiguous about what it meant: a `proposal:` line whose whole value is the
+ * word for nothing is no proposal, and an argument wrapped in the brackets the
+ * format line is written with is the argument inside them. The verdict beside
+ * a `none` still decides whether the review holds, so nothing is taken on
+ * trust here.
  */
 
 /** What a reader of an artifact concluded about it. */
@@ -108,7 +114,11 @@ export function parseReview(text: string): ParsedReview {
       case "proposal": {
         const proposal = readProposal(value, index + 1);
         if ("unusable" in proposal) return proposal;
-        proposals.push(proposal.proposal);
+        // A line that says it proposes nothing is a review with no proposals,
+        // and the verdict decides whether that is a whole answer: `sound` and
+        // `unsound` are both asked for with no proposal, and `repaired` is
+        // asked for with at least one.
+        if (!("nothing" in proposal)) proposals.push(proposal.proposal);
         break;
       }
       default:
@@ -127,16 +137,20 @@ export function parseReview(text: string): ParsedReview {
   return { review: { verdict, reason, proposals } };
 }
 
-
 /**
- * One `proposal:` line, as `<rule> <site> [name=value ...]`. The site is a
- * block id the IR prints, and a rule that takes no argument may be written
- * without one.
+ * One `proposal:` line: a rule, the block id it applies to, and the arguments
+ * that rule takes. The arguments are the words after the block id, and they
+ * may be written bare as `name=value` or wrapped in the brackets the format
+ * line is written with, which is the shape a model copying that line produces.
  */
-function readProposal(value: string, line: number): { proposal: Proposal } | { unusable: string } {
+function readProposal(
+  value: string,
+  line: number,
+): { proposal: Proposal } | { nothing: true } | { unusable: string } {
   const trimmed = value.trim();
-  const words = trimmed.split(/\s+/);
-  if (words.length < 2) {
+  if (NO_PROPOSAL.test(trimmed)) return { nothing: true };
+  const [head, ...tail] = trimmed.split(/\s+/);
+  if (head === undefined || tail.length === 0) {
     // A bare rule and an empty line are two different mistakes, and the build
     // log is the only place a reply is kept, so what the model wrote is part of
     // the reason rather than something the reader has to have seen.
@@ -144,12 +158,12 @@ function readProposal(value: string, line: number): { proposal: Proposal } | { u
       ? { unusable: `line ${line} proposes nothing: a proposal is a rule and the block it applies to` }
       : { unusable: `line ${line} proposes ${JSON.stringify(trimmed)} and no block to apply it to` };
   }
-  const [rule, site] = words;
+  const [rule, site] = [head, tail[0] as string];
   const args: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const word of words.slice(2)) {
-    const argument = /^([a-z_]+)=(.*)$/.exec(word);
+  for (const written of argumentWords(tail.slice(1).join(" "))) {
+    const argument = /^([a-z_]+)=(.*)$/.exec(written);
     if (argument === null) {
-      return { unusable: `line ${line} proposes ${JSON.stringify(word)}, which is neither a rule nor a name=value argument` };
+      return { unusable: `line ${line} proposes ${JSON.stringify(written)}, which is neither a rule nor a name=value argument` };
     }
     const [, name, argumentValue] = argument;
     if (name in args) return { unusable: `line ${line} gives ${name} twice` };
@@ -157,4 +171,31 @@ function readProposal(value: string, line: number): { proposal: Proposal } | { u
     args[name] = argumentValue;
   }
   return { proposal: { rule, site, args, text: trimmed } };
+}
+
+/**
+ * What a model writes on a `proposal:` line when it is answering `sound` or
+ * `unsound` and has a line left over. It is not a rule and not a block, and
+ * there is nothing in it to apply: the answer that carries one is a review
+ * with no proposals, which is what the verdict above it says.
+ */
+const NO_PROPOSAL = /^(?:none|nothing|n\/a|na|-|\.{3})$/i;
+
+/**
+ * The arguments the tail of a proposal line carries. A bracketed group is the
+ * arguments inside it, one per comma, whether it is written `[name=value]` or
+ * `[a=1, b=2]`; everything outside the brackets is a bare `name=value` word.
+ */
+function argumentWords(tail: string): string[] {
+  const written: string[] = [];
+  for (const [, group, bare] of tail.matchAll(/\[([^\]]*)\]|([^\[\]]+)/g)) {
+    for (const word of (bare ?? "").trim().split(/\s+/)) if (word !== "") written.push(word);
+    if (group !== undefined) {
+      for (const part of group.split(",")) {
+        const argument = part.trim().replace(/,$/, "");
+        if (argument !== "") written.push(argument);
+      }
+    }
+  }
+  return written;
 }

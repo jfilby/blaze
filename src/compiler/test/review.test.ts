@@ -135,7 +135,57 @@ test("the IR review hands over the artifact, the sites a proposal may name and t
     assert.match(prompt, new RegExp(`- ${rule.name}: ${rule.summary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   }
   assert.match(prompt, /verdict: sound \| repaired \| unsound/);
-  assert.match(prompt, /proposal: <rule> <block> \[name=value\]/);
+  assert.doesNotMatch(prompt, /proposal: <rule>/);
+});
+
+test("the answer format is shown as whole answers, naming a block the IR prints and no brackets", () => {
+  const prompt = buildIrReviewPrompt(request());
+  const sites = describeSites(semantics.dotProduct as NonNullable<typeof semantics.dotProduct>);
+  const named = /^proposal: hoist-invariant (\S+)$/m.exec(prompt)?.[1];
+  assert.ok(named !== undefined, "the worked example names a rule and a block id");
+  assert.ok(
+    sites.some((line) => line.startsWith(`block ${named}:`)),
+    `the block the example names, ${named}, is one the site list offers`,
+  );
+  // The bracketed placeholder is what a model copies back verbatim, so the
+  // prompt shows the argument bare and says so.
+  assert.doesNotMatch(prompt, /\[name=value\]/);
+  assert.match(prompt, /written `name=value` with no\nbrackets around them/);
+  // Nothing is proposed by leaving the line out, which the two failure modes
+  // in the wild were a model reaching for a placeholder instead of.
+  assert.match(prompt, /carries no\n`proposal:` line at all/);
+});
+
+test("a rule that takes no argument says so, rather than looking like one whose arguments were left out", () => {
+  const prompt = buildIrReviewPrompt(request());
+  for (const rule of REPAIR_RULES.filter((entry) => entry.args.length === 0)) {
+    assert.match(prompt, new RegExp(`- ${rule.name}:[\\s\\S]*?takes no arguments`));
+  }
+  assert.match(prompt, /takes one argument: callee/);
+});
+
+test("a line that says it proposes nothing is a review with no proposals, not an unreadable answer", () => {
+  for (const word of ["none", "None", "nothing", "n/a", "-"]) {
+    const parsed = parseReview(`verdict: sound\nreason: the body is right\nproposal: ${word}`);
+    assert.ok("review" in parsed, `\`proposal: ${word}\` must be read as a review with no proposals`);
+    assert.deepEqual(parsed.review.proposals, []);
+  }
+});
+
+test("a verdict of repaired still needs a fix, whatever the no-proposal line is written as", () => {
+  const parsed = parseReview("verdict: repaired\nreason: the bound is recomputed\nproposal: none");
+  assert.ok("unusable" in parsed);
+  assert.match(parsed.unusable, /proposes no fix/);
+});
+
+test("an argument written inside the brackets of the format line is the argument inside them", () => {
+  const one = parseReview("verdict: repaired\nreason: inline it\nproposal: inline-call b2 [callee=twice]");
+  assert.ok("review" in one);
+  assert.deepEqual({ ...one.review.proposals[0]?.args }, { callee: "twice" });
+
+  const two = parseReview("verdict: repaired\nreason: inline it\nproposal: inline-call b2 [callee=twice, factor=2]");
+  assert.ok("review" in two);
+  assert.deepEqual({ ...two.review.proposals[0]?.args }, { callee: "twice", factor: "2" });
 });
 
 test("a review of the target says what the target is and how a change to it is made", () => {
