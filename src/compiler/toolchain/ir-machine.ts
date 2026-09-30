@@ -64,10 +64,21 @@ import {
   RSI,
   RSP,
   SSE_ARGUMENTS,
+  type VectorSave,
   type Width,
   XMM0,
   XMM1,
   XMM2,
+  XMM6,
+  XMM7,
+  XMM8,
+  XMM9,
+  XMM10,
+  XMM11,
+  XMM12,
+  XMM13,
+  XMM14,
+  XMM15,
   frame,
   indexed,
   mem,
@@ -151,11 +162,29 @@ const IMMEDIATE_OPERATIONS: Record<string, true> = {
 };
 
 /**
- * The registers a callee leaves as it found them, which are the ones a value
- * that never changes can be kept in across a call. Five is what the convention
- * has: rbx, r12, r13, r14 and r15.
+ * The whole-number registers a callee leaves as it found them, which are the
+ * ones a value that never changes can be kept in across a call. Five is what
+ * the convention has: rbx, r12, r13, r14 and r15.
  */
 const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14, R15];
+
+/**
+ * The vector registers a callee leaves as it found them, which are the ones a
+ * float that never changes can be kept in across a call.
+ *
+ * Ten is what the convention has: xmm6 to xmm15. They are a register file of
+ * their own, so a float pinned here costs nothing a whole number pinned in
+ * `CALLEE_SAVED` would: the two lists are filled independently and neither
+ * takes a register the other wanted. A float left in the frame instead costs a
+ * load on every read and a store on every write, and a loop whose bound and
+ * step are floats reads both on every turn.
+ *
+ * The first two of them are also argument registers. A callee that is handed
+ * seven or eight floats has to save them before it writes to them and restore
+ * them before it returns, so a value kept in one here survives the call the
+ * same way a value kept in rbx does.
+ */
+const VECTOR_CALLEE_SAVED: readonly number[] = [XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15];
 
 /**
  * How often a name has to be read before it is worth a register of its own.
@@ -455,8 +484,10 @@ class Machine {
   private readonly spareSlots: number[] = [];
   /** The register a name that never changes is in, by the name it is declared as. */
   private readonly pinned = new Map<string, number>();
-  /** The registers the prologue pushes and the epilogue pops, in that order. */
+  /** The registers the prologue pushes and the epilogue reads back, in that order. */
   private pinnedRegisters: number[] = [];
+  /** The vector registers spilled to the frame by the prologue and read back by the epilogue. */
+  private pinnedVectors: VectorSave[] = [];
   private lastLiteral = "";
 
   private readonly fn: SemanticFunction;
@@ -590,15 +621,18 @@ class Machine {
    * leaves as it found it, so a value read on both sides of a call survives the
    * call, and no frame is reserved for it at all.
    *
-   * What is left is the cap. Five registers are callee-saved and none of them is
-   * used for anything else here, so five names at a time, taken in the order of
-   * how often they are read: the ones a function reads most are the ones whose
-   * every read was a load out of the frame.
+   * What is left is the cap, and it is two caps rather than one. Five whole
+   * number registers are callee-saved and none of them is used for anything
+   * else here; ten vector registers are, and they are a register file of their
+   * own, so a float and a whole number are pinned out of separate lists and
+   * neither takes a register the other wanted. Each list is taken in the order
+   * of how often the name is read: the ones a function reads most are the ones
+   * whose every read was a load out of the frame.
    *
-   * Only whole numbers are pinned. A float would live in a vector register,
-   * which the convention saves as one hundred and twenty eight bits whether the
-   * program uses eight of them or not, and this is not worth that for the
-   * frames it would save.
+   * A counted loop's counter is left out here and given a register below, and
+   * a float counter is left out there as well: the code that steps a counter
+   * works on a whole number register, and a float loop keeps its counter in
+   * the frame.
    */
   private allocateRegisters(): void {
     const written = new Set<string>();
@@ -639,15 +673,22 @@ class Machine {
       if (statement.k !== "let") continue;
       declared.push({ name: statement.slot.name, type: slotType(statement.slot) });
     }
-    const wanted = declared
-      .filter((entry) => !isFloat(entry.type) && !written.has(entry.name) && (reads.get(entry.name) ?? 0) >= PINNING_READS)
+    const candidates = declared
+      .filter((entry) => !written.has(entry.name) && (reads.get(entry.name) ?? 0) >= PINNING_READS)
       .sort((left, right) => (reads.get(right.name) ?? 0) - (reads.get(left.name) ?? 0));
     this.pinnedRegisters = [];
-    for (const [index, entry] of wanted.entries()) {
+    this.pinnedVectors = [];
+    for (const [index, entry] of candidates.filter((entry) => !isFloat(entry.type)).entries()) {
       const register = CALLEE_SAVED[index];
       if (register === undefined) break;
       this.pinned.set(entry.name, register);
       this.pinnedRegisters.push(register);
+    }
+    for (const [index, entry] of candidates.filter((entry) => isFloat(entry.type)).entries()) {
+      const register = VECTOR_CALLEE_SAVED[index];
+      if (register === undefined) break;
+      this.pinned.set(entry.name, register);
+      this.pinnedVectors.push({ register, offset: 0, single: widthOf(entry.type) === 4 });
     }
     // A counted loop's counter is written and read by the loop itself on every
     // turn, so it is what a register is worth the most on. Left in the frame it
@@ -690,8 +731,13 @@ class Machine {
     }
     // The prologue pushes the registers below the frame pointer, and a slot the
     // lowering binds is reserved from there downwards, so the frame starts
-    // below them rather than over the words they are saved in.
+    // below them rather than over the words they are saved in. A vector
+    // register has no push and is spilled to a slot of the frame instead, so
+    // its slot is reserved here and the pushes are counted as before.
     this.used = this.pinnedRegisters.length * 8;
+    for (const saved of this.pinnedVectors) {
+      saved.offset = this.reserve(8, 8);
+    }
   }
 
   emit(): Uint8Array {
@@ -704,6 +750,7 @@ class Machine {
     // by one more step out of the frame rather than by an instruction of its
     // own.
     for (const register of this.pinnedRegisters) this.code.push(register);
+    for (const saved of this.pinnedVectors) this.code.saveVector(saved.register, saved.offset, saved.single);
     const frameAt = this.code.subRegImmLater(RSP);
     this.parameters();
     // The body opens a scope of its own, and the parameters are read in it, so
@@ -711,7 +758,7 @@ class Machine {
     this.names.enter();
     this.block(this.fn.entry);
     this.code.bind(this.epilogue);
-    this.code.epilogue(this.pinnedRegisters);
+    this.code.epilogue(this.pinnedRegisters, this.pinnedVectors);
     // The frame is a whole number of sixteen byte steps, so the stack is
     // aligned at every call the body makes: a call pushes eight bytes onto a
     // stack the callee reads as sixteen byte aligned.
@@ -748,7 +795,10 @@ class Machine {
         // frame copy it would otherwise be written to is not made. It arrives
         // in an argument register or on the stack, and either is one move into
         // the register it is pinned to.
-        if (register === undefined) this.code.movRegMem(held.register, frame(16 + stack * 8));
+        if (register === undefined) {
+          if (isFloat(type)) this.code.movsLoad(held.register, frame(16 + stack * 8), widthOf(type) === 4);
+          else this.code.movRegMem(held.register, frame(16 + stack * 8));
+        } else if (isFloat(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
         else this.code.movRegReg(held.register, register);
         if (register !== undefined) {
           if (isFloat(type)) floating += 1;
@@ -783,7 +833,8 @@ class Machine {
   /** The accumulator holding the value a slot has. */
   private load(held: Held): void {
     if (held.register !== null) {
-      this.code.movRegReg(RAX, held.register);
+      if (isFloat(held.type)) this.code.movsMove(XMM0, held.register, widthOf(held.type) === 4);
+      else this.code.movRegReg(RAX, held.register);
       return;
     }
     if (isFloat(held.type)) {
@@ -810,7 +861,8 @@ class Machine {
   /** A slot holding the value the accumulator has. */
   private store(held: Held): void {
     if (held.register !== null) {
-      this.code.movRegReg(held.register, RAX);
+      if (isFloat(held.type)) this.code.movsMove(held.register, XMM0, widthOf(held.type) === 4);
+      else this.code.movRegReg(held.register, RAX);
       return;
     }
     if (isFloat(held.type)) {
@@ -889,7 +941,8 @@ class Machine {
    */
   private scratchFrom(held: Held): void {
     if (held.register !== null) {
-      this.code.movRegReg(RCX, held.register);
+      if (isFloat(held.type)) this.code.movsMove(XMM1, held.register, widthOf(held.type) === 4);
+      else this.code.movRegReg(RCX, held.register);
       return;
     }
     if (isFloat(held.type)) {
@@ -2732,7 +2785,8 @@ class Machine {
       // An argument that is pinned is in its register, so it is copied from
       // there rather than read out of the frame.
       if (held.register !== null) {
-        this.code.movRegReg(register, held.register);
+        if (isFloat(held.type)) this.code.movsMove(register, held.register, widthOf(held.type) === 4);
+        else this.code.movRegReg(register, held.register);
         continue;
       }
       // The answer of a call passed straight to this one is in the accumulator

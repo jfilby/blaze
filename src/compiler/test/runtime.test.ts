@@ -187,6 +187,73 @@ test("an argument read before the host gave any is 0 in every mode", async () =>
   }
 });
 
+test("a released block is the next block of its size, and a null release is nothing", async () => {
+  // Two things the small-block pool decides. A block that is released goes back
+  // onto the list of its own class, so the block a program gets next is one it
+  // had before — and it is cleared on the way out, because a block the program
+  // wrote to is not the zeroed block a cleared block promises. And the ABI says
+  // a null pointer is ignored, in every mode: a program releases a name when it
+  // goes out of scope, and a name whose value is nothing is a program that
+  // never made one. Without that, `danger` reads the header of a null pointer
+  // on the first release of a value that was never built.
+  const probe = [
+    "#include <stdio.h>",
+    "#include <string.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    `  ${RUNTIME_NAME}_release(NULL);`,
+    "  /* Two blocks of a class are never the same block, and both are cleared. */",
+    "  for (int round = 0; round < 3; round += 1) {",
+    "    void* held[128];",
+    "    for (int at = 0; at < 128; at += 1) {",
+    "      held[at] = blaze_rt_object_new(16, 8);",
+    "      if (held[at] == NULL) return 1;",
+    "      if (((unsigned long)held[at] % 8) != 0) return 2;",
+    "      if (((unsigned char*)held[at])[0] != 0) return 3;",
+    "      if (((unsigned char*)held[at])[16] != 0) return 4;",
+    "      if (blaze_rt_object_size(held[at]) != 16) return 5;",
+    "      memset(held[at], 0xab, 16);",
+    "    }",
+    "    for (int at = 1; at < 128; at += 1) if (held[at] == held[at - 1]) return 6;",
+    "    for (int at = 0; at < 128; at += 1) blaze_rt_release(held[at]);",
+    "  }",
+    "  /* A reused block is cleared again, which is what a cleared block is. */",
+    "  void* again = blaze_rt_object_new(16, 8);",
+    "  if (again == NULL) return 7;",
+    "  for (int at = 0; at < 17; at += 1) if (((unsigned char*)again)[at] != 0) return 8;",
+    "  /* A block that is held twice is released twice and freed once. */",
+    "  void* shared = blaze_rt_object_new(32, 8);",
+    "  blaze_rt_retain(shared);",
+    "  memset(shared, 0x11, 32);",
+    "  blaze_rt_release(shared);",
+    "  if (((unsigned char*)shared)[0] != 0x11) return 9;",
+    "  blaze_rt_release(shared);",
+    "  /* A block too large for a class is the host's, and comes back from it. */",
+    "  void* large = blaze_rt_object_new(65536, 8);",
+    "  if (large == NULL) return 10;",
+    "  if (((unsigned char*)large)[65536] != 0) return 11;",
+    "  blaze_rt_release(large);",
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  for (const mode of ["debug", "danger"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `blaze-pool-${mode}-`));
+    await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+    await writeFile(join(directory, "runtime.c"), runtimeSourceSource(mode), "utf8");
+    await writeFile(join(directory, "probe.c"), probe, "utf8");
+    const binary = join(directory, "probe");
+    const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+      timeoutMs: 120_000,
+    });
+    assert.equal(built.code, 0, built.stderr);
+    const result = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(result.code, 0, `${mode}: the pool must answer every block rather than fault (status ${String(result.code)})`);
+  }
+});
+
 test("the managed object representation is the same in the header and in the adapter", () => {
   const header = runtimeHeaderSource();
   const adapter = generateRuntimeAdapterSource();

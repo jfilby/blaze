@@ -391,6 +391,21 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 
 static const char* blaze_rt_last_message = "";
 
+/* The small-block pool. A block is put in a class by the total it occupies
+   rounded up to the granularity, and the class is what it is carved as and
+   what it goes back onto when it is released. Sixteen classes of sixteen bytes
+   each reach 256 bytes, which is a header, an alignment and a payload of a
+   hundred and eighty six: every object a program builds out of fields, every
+   short string, and every small buffer. Anything larger is the host's to give
+   and the host's to take back. */
+#define BLAZE_RT_SLAB_GRANULARITY 16u
+#define BLAZE_RT_SLAB_CLASSES 16u
+#define BLAZE_RT_SLAB_LARGEST (BLAZE_RT_SLAB_CLASSES * BLAZE_RT_SLAB_GRANULARITY)
+/* How much is asked for at a time. A program that allocates very little pays
+   for a slab it does not fill, and a program that allocates a great deal
+   reaches the host often enough to matter either way. */
+#define BLAZE_RT_SLAB_BYTES (256u * 1024u)
+
 ${guarded ? `static void blaze_rt_refuse(const char* what) {
   fprintf(stderr, "blaze: %s\\n", what);
   exit(2);
@@ -415,6 +430,41 @@ ${guarded ? `  if (elementSize != 0 && count > BLAZE_RT_MAX_ALLOCATION / element
     exit(2);
   }` : ""}
   return count * elementSize;
+}
+
+/* A small block comes out of a slab, which is one large cleared region the
+   runtime carves blocks from, and a block that is released goes back onto the
+   list of its own class rather than to the host allocator.
+
+   This is where most of the time of a program that builds a lot of values
+   goes. A block of this size is a header, a payload of a few words and the
+   alignment slack below, and asking the host allocator for each one costs more
+   than every instruction the program itself spends on the value. What is left
+   is the first touch of the memory, which no allocator can take away: a block
+   the program asked for is a block the program has to have.
+
+   A block is pooled only when it is cleared and only when its alignment is no
+   wider than the granularity, and both of those make the block's own header
+   sit at a fixed distance from the start of its class. A cleared slab hands
+   out memory that is already zero, so a block carved from one needs nothing
+   written over its payload; a fixed offset means a block taken off a release
+   list is cleared by writing over the whole class rather than over a payload
+   whose place in the class would have to be worked out. A block that is not
+   cleared, or that is aligned more widely than the granularity, or that is
+   larger than the largest class, is the host's to give and the host's to take
+   back — the last of those because a slab is never handed back, and a program
+   that allocates one large block and frees it should get that memory again. */
+static char* blaze_rt_slab_at = NULL;
+static char* blaze_rt_slab_end = NULL;
+static blaze_rt_header* blaze_rt_released[BLAZE_RT_SLAB_CLASSES];
+
+/* The class a block of total bytes at the given alignment belongs to,
+   counting from one, or zero for a block the host is asked for. A class is
+   never zero for a block that can be pooled, because the smallest block is a
+   header and an alignment and no payload at all. */
+static size_t blaze_rt_class_of(size_t total, size_t alignment) {
+  if (total > BLAZE_RT_SLAB_LARGEST || alignment > BLAZE_RT_SLAB_GRANULARITY) return 0;
+  return (total + BLAZE_RT_SLAB_GRANULARITY - 1) / BLAZE_RT_SLAB_GRANULARITY;
 }
 
 /* A block with room for the bytes of payload asked for, and optionally cleared.
@@ -442,6 +492,35 @@ ${guarded ? `  /* The payload is placed with a mask, which only places it for a 
   if (alignment > BLAZE_RT_MAX_ALLOCATION - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("object alignment is too large");
   if (bytes > BLAZE_RT_MAX_ALLOCATION - alignment - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("request too large");` : ""}
   const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
+  const size_t cls = cleared ? blaze_rt_class_of(total, alignment) : 0;
+  if (cls != 0) {
+    /* The header of a pooled block is at the start of its class, so the payload
+       is a fixed distance from it and the class is the whole of what the block
+       occupies. A block taken off a release list is memory the program has
+       already had and written to, so it is cleared here rather than asked for
+       again, and the header goes down in the same pass. */
+    blaze_rt_header* header = blaze_rt_released[cls - 1];
+    if (header != NULL) {
+      blaze_rt_released[cls - 1] = (blaze_rt_header*)header->base;
+      memset(header, 0, cls * BLAZE_RT_SLAB_GRANULARITY);
+    } else {
+      const size_t span = cls * BLAZE_RT_SLAB_GRANULARITY;
+      if ((size_t)(blaze_rt_slab_end - blaze_rt_slab_at) < span) {
+        char* slab = (char*)calloc(1, BLAZE_RT_SLAB_BYTES);
+${guarded ? "        if (slab == NULL) blaze_rt_refuse(\"out of memory\");" : ""}
+        blaze_rt_slab_at = slab;
+        blaze_rt_slab_end = slab + BLAZE_RT_SLAB_BYTES;
+      }
+      header = (blaze_rt_header*)blaze_rt_slab_at;
+      blaze_rt_slab_at += span;
+    }
+    header->length = bytes;
+    header->alignment = alignment;
+    header->references = 1;
+    header->capacity = bytes;
+    header->magic = BLAZE_RT_MAGIC;
+    return (char*)header + BLAZE_RT_HEADER_SIZE;
+  }
   char* base = cleared ? (char*)calloc(1, total) : (char*)malloc(total);
 ${guarded ? "  if (base == NULL) blaze_rt_refuse(\"out of memory\");" : ""}
   const uintptr_t start = (uintptr_t)(base + BLAZE_RT_HEADER_SIZE);
@@ -497,11 +576,32 @@ ${guarded ? "  if (pointer == NULL) return NULL;" : ""}
 }
 
 void blaze_rt_release(void* pointer) {
-${guarded ? "  if (pointer == NULL) return;" : ""}
+  /* The ABI promises that a null pointer is ignored, in every mode. It is the
+     runtime's own answer to a value that is nothing rather than a check the
+     program makes of itself: a program releases a name when it goes out of
+     scope, and a name whose value is nothing is a program that never made one,
+     not a program that has to be told. Dropping this reads the header of a
+     null pointer, which is a fault on the first release of a value that was
+     never built. */
+  if (pointer == NULL) return;
   blaze_rt_header* header = blaze_rt_header_of(pointer);
   if (header->references > 1) {
     header->references -= 1;
     return;
+  }
+  if (header->base == NULL) {
+    /* A block that came from a slab goes back onto the list of its own class
+       rather than to the host, which is the whole of what the slab is for. The
+       class is the size the block occupies, and its capacity and its alignment
+       are the two that size is made of, so a block is put back on the class it
+       was taken off: capacity and alignment do not change under a live block,
+       because the block that grows into a new capacity is a new block. */
+    const size_t cls = blaze_rt_class_of(header->capacity + header->alignment + BLAZE_RT_HEADER_SIZE, header->alignment);
+    if (cls != 0) {
+      header->base = (void*)blaze_rt_released[cls - 1];
+      blaze_rt_released[cls - 1] = header;
+      return;
+    }
   }
 ${guarded ? "  header->magic = 0;" : ""}
   free(header->base);

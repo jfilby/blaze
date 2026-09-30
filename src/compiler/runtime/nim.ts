@@ -244,6 +244,19 @@ const
   BlazeMagic = 0x424C415A45525400'u64
   BlazeFreed = 0'u64
   BlazeHeaderSize = 48'u64
+  ## The small-block pool, the same one the C runtime keeps. A block is put in
+  ## a class by the total it occupies rounded up to the granularity, and the
+  ## class is what it is carved as and what it goes back onto when it is
+  ## released. Sixteen classes of sixteen bytes reach 256 bytes, which covers
+  ## every object a program builds out of fields, every short string and every
+  ## small buffer; anything larger is Nim's allocator to give and to take back.
+  BlazeSlabGranularity = 16'u64
+  BlazeSlabClasses = 16
+  BlazeSlabLargest = uint64(BlazeSlabClasses) * BlazeSlabGranularity
+  ## How much is asked for at a time. A program that allocates very little
+  ## pays for a slab it does not fill, and one that allocates a great deal
+  ## reaches the allocator often enough to matter either way.
+  BlazeSlabBytes = 256 * 1024
   BlazeDefaultAlignment = 16'u64
   BlazeMaxAllocation = 1'u64 shl 40
 
@@ -288,6 +301,26 @@ proc arrayBytes(count, elementSize: csize_t, who: string): csize_t =
 proc arrayBytes(count, elementSize: csize_t, who: string): csize_t =
   result = (count.uint64 * elementSize.uint64).csize_t`}
 
+## The small-block pool, the same one the C runtime keeps: a small cleared
+## block is carved out of a slab, and a block that is released goes back onto
+## the list of its own class rather than to Nim's allocator. This is where
+## most of the time of a program that builds a lot of values goes, and what is
+## left after the carve is the first touch of the memory, which no allocator
+## can take away.
+var
+  blazeSlabAt: pointer = nil
+  blazeSlabEnd: pointer = nil
+  blazeReleased: array[BlazeSlabClasses, ptr BlazeHeader]
+
+## The class a block of total bytes at the given alignment belongs to, counting
+## from one, or zero for a block Nim's allocator is asked for. Pooling needs a
+## cleared block, because a cleared slab hands out memory that is already zero,
+## and an alignment no wider than the granularity, because that is what puts
+## the header at a fixed distance from the start of the class.
+proc blazeClassOf(total, alignment: uint64): int =
+  if total > BlazeSlabLargest or alignment > BlazeSlabGranularity: return 0
+  int((total + BlazeSlabGranularity - 1) div BlazeSlabGranularity)
+
 proc blaze_rt_initialize*() {.exportc, cdecl.} =
   discard
 
@@ -310,6 +343,31 @@ proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
   let total = bytes + align + BlazeHeaderSize
 ${guarded ? `  if total > BlazeMaxAllocation:
     blazeStop("allocation: request too large")` : ""}
+  let cls = if cleared: blazeClassOf(total, align) else: 0
+  if cls != 0:
+    ## The header of a pooled block is at the start of its class, so the
+    ## payload is a fixed distance from it and the class is the whole of what
+    ## the block occupies. A block taken off a release list is memory the
+    ## program has already written to, so it is cleared here rather than asked
+    ## for again, and the header goes down in the same pass.
+    var header = blazeReleased[cls - 1]
+    if header != nil:
+      blazeReleased[cls - 1] = cast[ptr BlazeHeader](header[].base)
+      let span = int(cls) * int(BlazeSlabGranularity)
+      let clear = cast[ptr UncheckedArray[byte]](header)
+      for index in 0 ..< span: clear[index] = 0
+    else:
+      let span = uint64(cls) * BlazeSlabGranularity
+      if (if blazeSlabEnd == nil: 0'u64 else: uint64(cast[uint](blazeSlabEnd) - cast[uint](blazeSlabAt))) < span:
+        blazeSlabAt = alloc0(int(BlazeSlabBytes))
+${guarded ? `        if blazeSlabAt == nil:
+          blazeStop("allocation: out of memory")` : ""}
+        blazeSlabEnd = cast[pointer](cast[uint](blazeSlabAt) + uint(BlazeSlabBytes))
+      header = cast[ptr BlazeHeader](blazeSlabAt)
+      blazeSlabAt = cast[pointer](cast[uint](blazeSlabAt) + uint(span))
+    header[] = BlazeHeader(magic: BlazeMagic, base: nil, length: bytes,
+                           alignment: align, refs: 1, capacity: bytes)
+    return cast[pointer](cast[uint](header) + BlazeHeaderSize)
   let base = if cleared: alloc0(int(total)) else: alloc(int(total))
 ${guarded ? `  if base == nil:
     blazeStop("allocation: out of memory")` : ""}
@@ -352,11 +410,28 @@ ${guarded ? "  if pointer == nil:\n    return nil" : ""}
   pointer
 
 proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
-${guarded ? "  if pointer == nil:\n    return" : ""}
+  ## The ABI promises that a null pointer is ignored, in every mode. It is the
+  ## runtime's own answer to a value that is nothing rather than a check the
+  ## program makes of itself: a program releases a name when it goes out of
+  ## scope, and a name whose value is nothing is a program that never made one.
+  if pointer == nil:
+    return
   let header = check(pointer, "blaze_rt_release")
   if header[].refs > 1:
     dec header[].refs
     return
+  if header[].base == nil:
+    ## A block that came from a slab goes back onto the list of its own class
+    ## rather than to Nim's allocator, which is the whole of what the slab is
+    ## for. The class is the size the block occupies, and its capacity and its
+    ## alignment are the two that size is made of, so a block goes back on the
+    ## class it was taken off: capacity and alignment do not change under a live
+    ## block, because the block that grows into a new capacity is a new block.
+    let cls = blazeClassOf(header[].capacity + header[].alignment + BlazeHeaderSize, header[].alignment)
+    if cls != 0:
+      header[].base = cast[pointer](blazeReleased[cls - 1])
+      blazeReleased[cls - 1] = header
+      return
   let base = header[].base
 ${guarded ? "  header[].magic = BlazeFreed" : ""}
   dealloc(base)

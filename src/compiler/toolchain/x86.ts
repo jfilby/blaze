@@ -47,12 +47,33 @@ export const XMM4 = 4;
 export const XMM5 = 5;
 export const XMM6 = 6;
 export const XMM7 = 7;
+export const XMM8 = 8;
+export const XMM9 = 9;
+export const XMM10 = 10;
+export const XMM11 = 11;
+export const XMM12 = 12;
+export const XMM13 = 13;
+export const XMM14 = 14;
+export const XMM15 = 15;
 
 /** The integer argument registers of the System V AMD64 convention, in order. */
 export const INTEGER_ARGUMENTS: readonly number[] = [RDI, RSI, RDX, RCX, R8, R9];
 
 /** The floating point argument registers of the convention, in order. */
 export const SSE_ARGUMENTS: readonly number[] = [XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7];
+
+/**
+ * A vector register the convention says a callee leaves as it found it, and the
+ * frame slot its value is written to on the way in and read back from on the
+ * way out. There is no push for a vector register, so it is spilled to a slot
+ * of the frame rather than onto the stack the way a whole number is.
+ */
+export interface VectorSave {
+  register: number;
+  offset: number;
+  /** The value is a single, and only the low half of the register is its own. */
+  single: boolean;
+}
 
 /** The width an operand is read and written at. */
 export type Width = 1 | 2 | 4 | 8;
@@ -452,7 +473,6 @@ export class Encoder {
     this.movRegReg(RBP, RSP);
   }
 
-  /** The end of a function, which leaves the frame and the caller as it was. */
   /**
    * The end of a function, which leaves the frame and the caller as it was.
    *
@@ -461,15 +481,24 @@ export class Encoder {
    * from there rather than popped: the prologue pushed them after the frame
    * pointer was taken, so a pop taken once the stack is back at the frame
    * pointer would read the frame pointer's own slot — the caller's return
-   * address — and put that into the register.
+   * address — and put that into the register. `vectors` are the same for a
+   * float, whose register has no push and is spilled to a slot of the frame.
    */
-  epilogue(pinned: readonly number[] = []): void {
+  epilogue(pinned: readonly number[] = [], vectors: readonly VectorSave[] = []): void {
     for (let index = 0; index < pinned.length; index += 1) {
       this.movRegMem(pinned[index], frame(-8 * (index + 1)));
+    }
+    for (const saved of vectors) {
+      this.movsLoad(saved.register, frame(saved.offset), saved.single);
     }
     this.movRegReg(RSP, RBP);
     this.pop(RBP);
     this.ret();
+  }
+
+  /** A vector register a prologue wrote into the frame, and where it put it. */
+  saveVector(register: number, offset: number, single: boolean): void {
+    this.movsStore(frame(offset), register, single);
   }
 
   /* ---------------------------------------------------------------------- */
