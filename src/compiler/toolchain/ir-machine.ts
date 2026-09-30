@@ -26,6 +26,7 @@ import { parseType, symbolOf } from "../semantics/contract.ts";
 import {
   elementTypeOf,
   hasCall,
+  walkValues,
   isBoolean,
   isFloat,
   isNumber,
@@ -51,7 +52,12 @@ import { NameScope } from "./names.ts";
 import {
   Encoder,
   INTEGER_ARGUMENTS,
+  R12,
+  R13,
+  R14,
+  R15,
   RAX,
+  RBX,
   RCX,
   RDI,
   RDX,
@@ -143,6 +149,24 @@ const IMMEDIATE_OPERATIONS: Record<string, true> = {
   or: true,
   xor: true,
 };
+
+/**
+ * The registers a callee leaves as it found them, which are the ones a value
+ * that never changes can be kept in across a call. Five is what the convention
+ * has: rbx, r12, r13, r14 and r15.
+ */
+const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14, R15];
+
+/**
+ * How often a name has to be read before it is worth a register of its own.
+ *
+ * Keeping one costs a push and a read back, which is five bytes against the
+ * one a read saves by not reaching into the frame — so a name read a few times
+ * is a few bytes larger for the same work. It buys a load retired on every
+ * read rather than a smaller object, and the frame it frees is one the next
+ * binding takes anyway.
+ */
+const PINNING_READS = 4;
 
 /**
  * The operations the machine carries out with a literal reached in the
@@ -285,6 +309,59 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
   };
 }
 
+/**
+ * Every block of a body, itself included, which is what a read census over the
+ * whole function is taken across.
+ */
+function everyBlock(block: SemanticBlock, into: SemanticBlock[] = []): SemanticBlock[] {
+  into.push(block);
+  for (const statement of block.statements) {
+    if (statement.k === "if") {
+      everyBlock(statement.then, into);
+      if (statement.otherwise !== null) everyBlock(statement.otherwise, into);
+    } else if (statement.k === "loop") everyBlock(statement.loop.body, into);
+    else if (statement.k === "block") everyBlock(statement.body, into);
+  }
+  return into;
+}
+
+/**
+ * Every value a block computes in its own right, nested blocks included, and
+ * every value inside those. It is the whole of what the body reads, which is
+ * what a value is a candidate to be kept in a register by.
+ */
+function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticValue[] {
+  const add = (value: SemanticValue | null): void => {
+    if (value === null) return;
+    into.push(value);
+    walkValues(value, (one) => into.push(one));
+  };
+  for (const statement of block.statements) {
+    switch (statement.k) {
+      case "let":
+      case "set":
+      case "printText":
+      case "printNumber":
+      case "retain":
+      case "storeField": add(statement.value); break;
+      case "setElement": add(statement.index); add(statement.value); break;
+      case "if": add(statement.condition); break;
+      case "raise": add(statement.message); break;
+      case "call": add({ k: "call", type: statement.call.returns, call: statement.call }); break;
+      case "loop": {
+        const loop = statement.loop;
+        if (loop.kind === "counted") { add(loop.from); add(loop.to); add(loop.step); }
+        else if (loop.kind === "each") add(loop.length);
+        else add(loop.condition);
+        for (const nested of everyBlock(loop.body)) everyValue(nested, into);
+        break;
+      }
+      default: break;
+    }
+  }
+  if (block.terminator.k === "return") add(block.terminator.value);
+  return into;
+}
 /** The object a function's machine code is, and the code it carries. */
 function lowerFunction(
   fn: SemanticFunction,
@@ -342,6 +419,13 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
 interface Held {
   readonly offset: number;
   readonly type: SemanticType;
+  /**
+   * The register a value that never changes lives in, or null where it lives in
+   * the frame. A name that is written once and read after is in a register that
+   * a call cannot take, so a read of it is a move and a frame is not reserved
+   * for it at all.
+   */
+  readonly register: number | null;
 }
 
 class Machine {
@@ -366,6 +450,10 @@ class Machine {
   private readonly borrowed: Held[] = [];
   /** Slots handed back, which the next statement that needs one takes. */
   private readonly spareSlots: number[] = [];
+  /** The register a name that never changes is in, by the name it is declared as. */
+  private readonly pinned = new Map<string, number>();
+  /** The registers the prologue pushes and the epilogue pops, in that order. */
+  private pinnedRegisters: number[] = [];
   private lastLiteral = "";
 
   private readonly fn: SemanticFunction;
@@ -387,11 +475,17 @@ class Machine {
     return -this.used;
   }
 
-  private bind(name: string, type: SemanticType): number {
+  private bind(name: string, type: SemanticType): Held {
     const emitted = this.names.declare(name, type);
-    const offset = this.reserve(widthOf(type));
-    this.slots.set(emitted, { offset, type });
-    return offset;
+    const register = this.pinned.get(emitted) ?? null;
+    // A pinned value is in a register and never in the frame, so the frame slot
+    // that reads and writes go through is not reserved: an offset of zero is
+    // never read, because every use of a held value goes through `load`,
+    // `store` or `scratchFrom`, and those three read the register.
+    const offset = register === null ? this.reserve(widthOf(type)) : 0;
+    const held: Held = { offset, type, register };
+    this.slots.set(emitted, held);
+    return held;
   }
 
   private slot(name: string): Held {
@@ -434,8 +528,9 @@ class Machine {
     this.temporaries += 1;
     const name = this.names.reserve(`${prefix}_${this.temporaries}`);
     const offset = this.spareSlots.pop() ?? this.reserve(Math.max(widthOf(type), 8));
-    this.slots.set(name, { offset, type });
-    return { offset, type };
+    const held: Held = { offset, type, register: null };
+    this.slots.set(name, held);
+    return held;
   }
 
   /**
@@ -482,8 +577,91 @@ class Machine {
   /* The function itself                                                    */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * Puts the values that never change in registers instead of in the frame.
+   *
+   * A name that is written once and read after is the same number at every
+   * read, which is the one case where a register can be better than a slot
+   * without any analysis of where a value is live: there is no second write for
+   * a live range to be cut at. The register is one the convention says a callee
+   * leaves as it found it, so a value read on both sides of a call survives the
+   * call, and no frame is reserved for it at all.
+   *
+   * What is left is the cap. Five registers are callee-saved and none of them is
+   * used for anything else here, so five names at a time, taken in the order of
+   * how often they are read: the ones a function reads most are the ones whose
+   * every read was a load out of the frame.
+   *
+   * Only whole numbers are pinned. A float would live in a vector register,
+   * which the convention saves as one hundred and twenty eight bits whether the
+   * program uses eight of them or not, and this is not worth that for the
+   * frames it would save.
+   */
+  private allocateRegisters(): void {
+    const written = new Set<string>();
+    const reads = new Map<string, number>();
+    const declared: { name: string; type: SemanticType }[] = this.fn.params.map((parameter) => ({
+      name: parameter.name,
+      type: slotType(parameter),
+    }));
+    for (const statement of this.fn.entry.statements) {
+      if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+      if (statement.k === "setElement") written.add(statement.buffer);
+      if (statement.k === "loop") {
+        const loop = statement.loop;
+        if (loop.kind === "counted") written.add(loop.variable);
+        else if (loop.kind === "each") {
+          written.add(loop.index);
+          written.add(loop.element);
+        }
+      }
+    }
+    for (const block of everyBlock(this.fn.entry)) {
+      for (const statement of block.statements) {
+        if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+        if (statement.k === "setElement") {
+          written.add(statement.buffer);
+          // The buffer of a write is named rather than valued, so a census of
+          // the values the body computes never sees it read.
+          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + 1);
+        }
+      }
+      for (const value of everyValue(block)) {
+        if (value.k === "local") reads.set(value.name, (reads.get(value.name) ?? 0) + 1);
+      }
+    }
+    // A name declared inside the body is written again each time its statement
+    // runs, so only the ones the body's own statements declare are candidates.
+    for (const statement of this.fn.entry.statements) {
+      if (statement.k !== "let") continue;
+      declared.push({ name: statement.slot.name, type: slotType(statement.slot) });
+    }
+    const wanted = declared
+      .filter((entry) => !isFloat(entry.type) && !written.has(entry.name) && (reads.get(entry.name) ?? 0) >= PINNING_READS)
+      .sort((left, right) => (reads.get(right.name) ?? 0) - (reads.get(left.name) ?? 0));
+    this.pinnedRegisters = [];
+    for (const [index, entry] of wanted.entries()) {
+      const register = CALLEE_SAVED[index];
+      if (register === undefined) break;
+      this.pinned.set(entry.name, register);
+      this.pinnedRegisters.push(register);
+    }
+    // The prologue pushes the registers below the frame pointer, and a slot the
+    // lowering binds is reserved from there downwards, so the frame starts
+    // below them rather than over the words they are saved in.
+    this.used = this.pinnedRegisters.length * 8;
+  }
+
   emit(): Uint8Array {
+    this.allocateRegisters();
     this.code.prologue();
+    // A pinned value is in a register the convention says a callee leaves as it
+    // found it, so the register is pushed here and popped there. The frame below
+    // them is what the pushes are counted against: a push moves the stack by
+    // half a sixteen byte step, and an odd number of them is made whole again
+    // by one more step out of the frame rather than by an instruction of its
+    // own.
+    for (const register of this.pinnedRegisters) this.code.push(register);
     const frameAt = this.code.subRegImmLater(RSP);
     this.parameters();
     // The body opens a scope of its own, and the parameters are read in it, so
@@ -491,12 +669,21 @@ class Machine {
     this.names.enter();
     this.block(this.fn.entry);
     this.code.bind(this.epilogue);
-    this.code.epilogue();
+    this.code.epilogue(this.pinnedRegisters);
     // The frame is a whole number of sixteen byte steps, so the stack is
     // aligned at every call the body makes: a call pushes eight bytes onto a
     // stack the callee reads as sixteen byte aligned.
-    this.code.patchWord(frameAt, Math.ceil(this.used / 16) * 16);
+    this.code.patchWord(frameAt, this.frameBytes());
     return this.code.finish();
+  }
+
+  /**
+   * The frame, as a whole number of sixteen byte steps and, where the pushes
+   * above left the stack half a step out, one more half.
+   */
+  private frameBytes(): number {
+    const whole = Math.ceil(this.used / 16) * 16;
+    return this.pinnedRegisters.length % 2 === 0 ? whole : whole + 8;
   }
 
   /**
@@ -511,8 +698,24 @@ class Machine {
     let stack = 0;
     for (const parameter of this.fn.params) {
       const type = slotType(parameter);
-      const offset = this.bind(parameter.name, type);
+      const held = this.bind(parameter.name, type);
+      const offset = held.offset;
       const register = stack > 0 ? undefined : isFloat(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+      if (held.register !== null) {
+        // A parameter that is pinned is in a register from here on, so the
+        // frame copy it would otherwise be written to is not made. It arrives
+        // in an argument register or on the stack, and either is one move into
+        // the register it is pinned to.
+        if (register === undefined) this.code.movRegMem(held.register, frame(16 + stack * 8));
+        else this.code.movRegReg(held.register, register);
+        if (register !== undefined) {
+          if (isFloat(type)) floating += 1;
+          else general += 1;
+        } else {
+          stack += 1;
+        }
+        continue;
+      }
       if (register === undefined) {
         // An argument of a class that has run out of registers is on the stack
         // above the return address, and so is every argument after it.
@@ -537,6 +740,10 @@ class Machine {
 
   /** The accumulator holding the value a slot has. */
   private load(held: Held): void {
+    if (held.register !== null) {
+      this.code.movRegReg(RAX, held.register);
+      return;
+    }
     if (isFloat(held.type)) {
       this.code.movsLoad(XMM0, frame(held.offset), widthOf(held.type) === 4);
       return;
@@ -560,6 +767,10 @@ class Machine {
 
   /** A slot holding the value the accumulator has. */
   private store(held: Held): void {
+    if (held.register !== null) {
+      this.code.movRegReg(held.register, RAX);
+      return;
+    }
     if (isFloat(held.type)) {
       this.code.movsStore(frame(held.offset), XMM0, widthOf(held.type) === 4);
       return;
@@ -588,11 +799,6 @@ class Machine {
       return;
     }
     this.code.movRegMemSized(RAX, frame(offset), widthOf(type), signedOf(type));
-  }
-
-  /** The value the accumulator has, at the width its type is stored at. */
-  private storeAt(offset: number, type: SemanticType): void {
-    this.store({ offset, type });
   }
 
   /** The accumulator widened to the width and sign of the type it is read as. */
@@ -640,6 +846,10 @@ class Machine {
    * every operation the value itself is made of.
    */
   private scratchFrom(held: Held): void {
+    if (held.register !== null) {
+      this.code.movRegReg(RCX, held.register);
+      return;
+    }
     if (isFloat(held.type)) {
       this.code.movsLoad(XMM1, frame(held.offset), widthOf(held.type) === 4);
       return;
@@ -674,11 +884,11 @@ class Machine {
         const type = slotType(statement.slot);
         if (statement.slot.kind === "buffer") {
           this.value(statement.value);
-          this.storeAt(this.bind(statement.slot.name, type), type);
+          this.store(this.bind(statement.slot.name, type));
           return;
         }
         this.at(statement.value, type);
-        this.storeAt(this.bind(statement.slot.name, type), type);
+        this.store(this.bind(statement.slot.name, type));
         return;
       }
       case "set":
@@ -791,12 +1001,13 @@ class Machine {
     }
     // Every other operator reads what the name holds, so the value it is given
     // is read into a slot first: it would otherwise be computed once per side of
-    // the operation.
+    // the operation. The target's own value then goes straight into the scratch
+    // the operation takes its other side from, where a load and a move would be
+    // two instructions for the one read.
     const right = this.hold(target.type, "blaze_value");
     this.at(value, target.type);
     this.store(right);
-    this.load(target);
-    this.toScratch(target.type);
+    this.scratchFrom(target);
     this.load(right);
     this.apply(COMPOUND[op.slice(0, -1)], target.type);
     this.normalizeArithmetic(target.type);
@@ -914,7 +1125,7 @@ class Machine {
         this.store(step);
       }
     }
-    const variable = { offset: this.bind(loop.variable, type), type };
+    const variable = this.bind(loop.variable, type);
     this.load(from);
     this.store(variable);
     const test = this.code.label("Ltest");
@@ -965,7 +1176,7 @@ class Machine {
     this.at(loop.length, USIZE);
     const length = this.holdAcross(USIZE, "blaze_length");
     this.store(length);
-    const index = { offset: this.bind(loop.index, USIZE), type: USIZE };
+    const index = this.bind(loop.index, USIZE);
     this.code.movRegImm(RAX, 0n);
     this.store(index);
     const test = this.code.label("Ltest");
@@ -981,7 +1192,7 @@ class Machine {
     this.code.jcc("ae", loop.exit);
     this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType);
     this.readAt(loop.elementType);
-    this.storeAt(this.bind(loop.element, loop.elementType), loop.elementType);
+    this.store(this.bind(loop.element, loop.elementType));
     this.block(loop.body);
     if (loop.body.terminator.k === "next") this.code.jmp(loop.header);
     this.code.bind(loop.exit);
@@ -1235,8 +1446,26 @@ class Machine {
       this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(Number(decimalText(value.text)), single)), single);
       return;
     }
-    this.code.movRegImm(RAX, integerText(value.text));
-    this.normalize(value.type);
+    const whole = integerText(value.text);
+    this.code.movRegImm(RAX, whole);
+    // A literal already the number its type holds needs nothing written after
+    // it: the register already holds it at its own width, and narrowing it is
+    // the same value read back. One instruction per literal, for nothing.
+    if (!this.writtenWhole(whole, value.type)) this.normalize(value.type);
+  }
+
+  /**
+   * Whether a whole number written out is already the number its type holds.
+   *
+   * The test is the literal's own range and not the width of the register it
+   * was written into: a negative literal is sign-extended, and an unsigned
+   * type keeps a top bit the register has already filled with zeros.
+   */
+  private writtenWhole(value: bigint, type: SemanticType): boolean {
+    if (value < 0n) return false;
+    const top = 1n << BigInt(widthOf(type) * 8);
+    if (value >= top) return false;
+    return isUnsigned(type) || value < top / 2n;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -2102,7 +2331,7 @@ class Machine {
       // register the other is holding: the address is two reads and one `lea`,
       // where the general form reserves a slot, writes the index into it and
       // reads it back out again.
-      this.code.movRegMem(RAX, frame(base.offset));
+      this.load(base);
       this.readInto(at, RCX);
       this.code.lea(RAX, indexed(RAX, RCX, scale));
       return;
@@ -2304,6 +2533,12 @@ class Machine {
       });
     }
     for (const { register, held } of registers) {
+      // An argument that is pinned is in its register, so it is copied from
+      // there rather than read out of the frame.
+      if (held.register !== null) {
+        this.code.movRegReg(register, held.register);
+        continue;
+      }
       if (isFloat(held.type)) {
         this.code.movsLoad(register, frame(held.offset), widthOf(held.type) === 4);
         continue;

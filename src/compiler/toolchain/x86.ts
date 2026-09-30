@@ -30,6 +30,13 @@ export const RSI = 6;
 export const RDI = 7;
 export const R8 = 8;
 export const R9 = 9;
+export const R10 = 10;
+export const R11 = 11;
+export const RBX = 3;
+export const R12 = 12;
+export const R13 = 13;
+export const R14 = 14;
+export const R15 = 15;
 
 /** An SSE register, numbered as the encoding numbers them. */
 export const XMM0 = 0;
@@ -411,10 +418,14 @@ export class Encoder {
   /* ---------------------------------------------------------------------- */
 
   push(register: number): void {
+    // The opcode carries the low three bits of the register, so a register above
+    // seven needs the extension prefix to say which one of those eight it is.
+    this.rex(false, 0, { base: register, index: null });
     this.byte(0x50 + (register & 7));
   }
 
   pop(register: number): void {
+    this.rex(false, 0, { base: register, index: null });
     this.byte(0x58 + (register & 7));
   }
 
@@ -428,7 +439,20 @@ export class Encoder {
   }
 
   /** The end of a function, which leaves the frame and the caller as it was. */
-  epilogue(): void {
+  /**
+   * The end of a function, which leaves the frame and the caller as it was.
+   *
+   * `pinned` are the registers the prologue pushed, oldest first, which sit
+   * below the frame pointer at one eight byte step each. They are read back
+   * from there rather than popped: the prologue pushed them after the frame
+   * pointer was taken, so a pop taken once the stack is back at the frame
+   * pointer would read the frame pointer's own slot — the caller's return
+   * address — and put that into the register.
+   */
+  epilogue(pinned: readonly number[] = []): void {
+    for (let index = 0; index < pinned.length; index += 1) {
+      this.movRegMem(pinned[index], frame(-8 * (index + 1)));
+    }
     this.movRegReg(RSP, RBP);
     this.pop(RBP);
     this.ret();
@@ -494,8 +518,18 @@ export class Encoder {
     this.patches.push({ at, value });
   }
 
+  /**
+   * A whole register moved into another: the first is where the value ends up
+   * and the second is what it is copied from, which is the other way round from
+   * what the two names say — the instruction's register field carries the
+   * source and its base field carries the destination.
+   */
   movRegReg(destination: number, source: number): void {
-    this.rex(true, source, { base: null, index: null });
+    // The two extension bits follow the two fields, and a register above seven
+    // is only named by the bit beside its field: the register field is the
+    // source, so the source is what the extension's R bit says, and the base
+    // field is the destination, so the destination is what its B bit says.
+    this.rex(true, source, { base: destination, index: null });
     this.byte(0x89);
     this.modrm(destination, source);
   }
