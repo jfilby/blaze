@@ -421,6 +421,29 @@ function lowerFunction(
   };
 }
 
+
+/**
+ * The argument at which a call runs out of registers, or the number of
+ * arguments when it does not.
+ *
+ * The convention gives every argument a register until a class runs out, and
+ * the first argument with no register is on the stack with every argument after
+ * it, whichever class those are. A caller asks this before it writes its
+ * arguments down, because the ones that go on the stack are written out before
+ * the registers are read and writing them out goes through the very register
+ * an argument left in the accumulator is in.
+ */
+function firstArgumentOnStack(types: readonly SemanticType[]): number {
+  let general = 0;
+  let floating = 0;
+  for (const [at, type] of types.entries()) {
+    if (isFloat(type) ? floating >= SSE_ARGUMENTS.length : general >= INTEGER_ARGUMENTS.length) return at;
+    if (isFloat(type)) floating += 1;
+    else general += 1;
+  }
+  return types.length;
+}
+
 /** What the linker sees in the object that was written. */
 function inspectWrittenObject(objectPath: string, functionName: string): { defined: string[]; undefined: string[] } {
   const definedResult = run("nm", ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
@@ -1928,11 +1951,16 @@ class Machine {
     // than by a slot: an immediate for a whole number, and a literal in the
     // read-only data for a float, so neither is copied into the frame and read
     // back out of it, and the eight bytes the copy lived in are not reserved
-    // at all. The left side is written once whichever form is taken, so the
+    // at all. A sum and a product take their sides either way round, so a
+    // literal on either side is carried by the instruction; a difference and a
+    // quotient may not, and a literal is only the left side of those. The side
+    // that is not the literal is written once whichever form is taken, so the
     // question is settled before it is evaluated.
-    const literal = this.floatOperand(value.right, type, value.op);
+    const commutative = value.op === "add" || value.op === "mul";
+    const onRight = this.floatOperand(value.right, type, value.op);
+    const literal = onRight ?? (commutative ? this.floatOperand(value.left, type, value.op) : null);
     if (literal !== null) {
-      this.at(value.left, type);
+      this.at(onRight === null ? value.right : value.left, type);
       this.code.sseMemLabel(value.op as "add" | "sub" | "mul" | "div", XMM0, literal, widthOf(type) === 4);
       this.normalizeArithmetic(type);
       return;
@@ -2650,12 +2678,17 @@ class Machine {
       if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
       return;
     }
-    // A call passed straight to a call leaves its answer in the accumulator,
-    // which is where the call reads it from. Saving it to a slot first costs a
-    // store and a load for nothing, and the argument is often inside a loop.
+    // An argument left in the accumulator is not written to a slot and then
+    // read back, which is a store and a load for a value that never moved.
+    // Only the last one can be left there: evaluating a later argument takes
+    // the accumulator away again. And only when no argument goes on the stack,
+    // because the ones that do are written out before the registers are read
+    // and writing them out goes through the very register the value is in.
+    const types = call.args.map((argument, at) => call.argTypes[at] ?? argument.type);
+    const spilling = firstArgumentOnStack(types);
     let fresh = -1;
     const args = call.args.map((argument, at) => {
-      const type = call.argTypes[at] ?? argument.type;
+      const type = types[at];
       // An argument that is a name read at the type the parameter takes is the
       // slot itself: the register the call takes it in is filled from there
       // anyway, and the general form copies it into a slot of its own first.
@@ -2669,10 +2702,7 @@ class Machine {
         // types are written differently and are the same word.
         if (isReference(held.type) && isReference(type)) return held;
       }
-      // Only the last one can be left where it is: evaluating a later argument
-      // takes the accumulator away again, and the call reads the arguments into
-      // their registers after the ones with no register left are written out.
-      const untouched = argument.k === "call" && at === call.args.length - 1;
+      const untouched = at === call.args.length - 1 && spilling === call.args.length;
       if (untouched) fresh = at;
       this.at(argument, type);
       const held = this.hold(type, "blaze_argument");

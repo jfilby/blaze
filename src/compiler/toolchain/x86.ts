@@ -438,11 +438,14 @@ export class Encoder {
     if (needsSib) {
       const scale = rm.scale === 1 ? 0 : rm.scale === 2 ? 1 : rm.scale === 4 ? 2 : 3;
       // The scale is in the highest two bits, the index register in the three
-      // below them and the base register in the lowest three. The index was
-      // written into the base's field, which is invisible for every address
-      // whose index is `rax` — the register number zero — and reads the other
-      // way round for every one whose index is not.
-      this.byte((scale << 6) | (((rm.index ?? 0) & 7) << 3) | (low & 7));
+      // below them and the base register in the lowest three. An address with
+      // no index says so with 100 in the index field: 000 is `rax`, the
+      // register number zero, so writing the absent index as its number made
+      // every unindexed address that needs a SIB read one register further than
+      // it was written. Only `rsp` needs a SIB without an index, because its
+      // low three bits are the SIB escape, so this is the stack.
+      const index = rm.index === null ? 4 : rm.index & 7;
+      this.byte((scale << 6) | (index << 3) | (low & 7));
     }
     if (mod === 1) this.byte(rm.disp & 0xff);
     if (mod === 2) this.word(rm.disp);

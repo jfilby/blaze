@@ -186,6 +186,14 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
       "int calls = 0;",
       "double f(double v) { calls++; return v + 1.0; }",
       "double g(struct Point* p) { calls++; return p->x + p->y; }",
+      // Nine floats is past the eight the convention has registers for, so a
+      // call of this one is the shape where the arguments that run out of
+      // registers are written to the stack before the registers are read.
+      "double h9(double a, double b, double c, double d, double e,",
+      "         double f, double g, double h, double i) {",
+      "  calls++; return a + 100 * b + 10000 * c + 1000000 * d + 1e7 * e",
+      "       + 1e8 * f + 1e9 * g + 1e10 * h + 1e11 * i;",
+      "}",
       "",
     ].join("\n"),
     "utf8",
@@ -195,7 +203,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
     fn,
     contract,
     target: TARGET,
-    callable: new Set(["f", "g"]),
+    callable: new Set(["f", "g", "h9"]),
     objectPath: object,
   });
   assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
@@ -209,7 +217,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
       "extern int calls;",
       "extern double f(double v);",
       `struct Point { double x; double y; };`,
-      "extern double g(struct Point* p);",
+      "extern double h9(double, double, double, double, double, double, double, double, double);",
       `extern ${cDeclarationType(parseType(typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns })))} ${symbolOf(contract)}(${contract.function.params
         .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
         .join(", ")});`,
@@ -271,6 +279,51 @@ test("a value the IR calls is run once, whichever form writes it down", async ()
     const printed = await lowered(fn, (name) => `{ ${returned} r = ${name}(3.0); printf("${format}|%d", r, calls); }`);
     assert.equal(printed.endsWith("|1"), true, `${shape.name} ran the callee once:\n${printed}`);
   }
+});
+
+test("a call takes every argument where the convention puts it", async () => {
+  // An argument the lowering has just evaluated is left in the accumulator
+  // rather than written to a slot and read back, which is a store and a load
+  // for a value that never moved. That is only true of the last argument, and
+  // only while no argument has run out of registers: the ones that have are
+  // written to the stack before the registers are read, and writing them goes
+  // through the very register the value is in. These two are the two sides of
+  // that: nine floats run out of registers and one does not.
+  const call = (name: string, args: readonly SemanticValue[]): SemanticValue => ({
+    k: "call",
+    type: F64,
+    call: {
+      callee: name,
+      builtin: false,
+      signature: {
+        name,
+        symbol: name,
+        params: args.map((_, index) => ({ name: `a${String(index)}`, type: "f64" })),
+        returns: "f64",
+      },
+      args: [...args],
+      argTypes: args.map(() => F64),
+      returns: F64,
+      effects: [],
+      ownership: "none",
+      retain: false,
+    },
+  });
+  // 1 + 100*2 + 10000*3 + ... + 1e11*9, which a double holds exactly.
+  const expected = "987654030201";
+  const spills = subject(F64, handsBack(call("h9", [...Array.from({ length: 8 }, (_, at) => number(String(at + 1))), { k: "arith", type: F64, op: "add", left: local("v"), right: number("0") }])), [
+    { kind: "value", name: "v", mutable: false, type: F64 },
+  ]);
+  // The result is bound before the counter is read: a C compiler may read the
+  // second argument of a printf before it makes the call in the first.
+  const callAndCount = (name: string): string => `{ double r = ${name}(9.0); printf("%.17g|%d", r, calls); }`;
+  assert.equal(await lowered(spills, callAndCount), `${expected}|1`, "nine arguments, the last on the stack");
+  // A call with registers to spare: the last argument is the one the driver
+  // passes, and it is left where it lands rather than written down.
+  const spare = subject(F64, handsBack(call("f", [{ k: "arith", type: F64, op: "add", left: local("v"), right: number("1") }])), [
+    { kind: "value", name: "v", mutable: false, type: F64 },
+  ]);
+  assert.equal(await lowered(spare, callAndCount), "11|1", "one argument, left in the accumulator");
 });
 
 test("a jump past an arm that writes nothing is still written", async () => {
