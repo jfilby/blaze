@@ -30,9 +30,22 @@ const U32: SemanticType = { kind: "primitive", name: "u32" };
 const BOOL: SemanticType = { kind: "primitive", name: "bool" };
 
 const constOf = (text: string, type: SemanticType = F64): SemanticValue => ({ k: "const", type, text });
+
 const bin = (op: string, left: SemanticValue, right: SemanticValue, type: SemanticType = F64): SemanticValue => ({
   k: "arith", type, op: op as never, left, right,
 });
+
+/** `Math.abs`, which is the shortest call a hand-written fixture can make. */
+function absOf(argument: SemanticValue): SemanticValue {
+  return {
+    k: "call", type: F64,
+    call: {
+      callee: "Math.abs", builtin: true,
+      signature: { name: "Math.abs", symbol: "Math.abs", params: [{ name: "argument0", type: "f64" }], returns: "f64" },
+      args: [argument], argTypes: [F64], returns: F64, effects: [], ownership: "none", retain: false,
+    },
+  };
+}
 
 function fnOf(entry: SemanticBlock, returns: SemanticType = { kind: "void" }, params: SemanticSlot[] = []): SemanticFunction {
   return {
@@ -160,6 +173,33 @@ test("a binding something reads is kept", () => {
     terminator: { k: "return", value: null },
   });
   assert.match(printed(before), /used/);
+});
+
+test("a binding read only as a call argument is kept", () => {
+  // The name is read inside the call, and a walk that stops at the call counts
+  // it as read by nobody: the binding is dropped and the call is left reading a
+  // name the function no longer declares, which the validator refuses.
+  const before = fnOf({
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "argument", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
+      { k: "printNumber", value: absOf({ k: "local", type: F64, name: "argument" }), line: 2 },
+    ],
+    terminator: { k: "return", value: null },
+  });
+  const after = printed(before);
+  assert.match(after, /let value\[f64\] argument immutable = const\[f64\] 1/);
+  assert.match(after, /Math\.abs \[arg\[f64\] local\[f64\] argument\]/);
+});
+
+test("a number written out inside a call argument is one number", () => {
+  // The argument is a value of its own, so the arithmetic in it is folded the
+  // way the same arithmetic anywhere else in the value is.
+  const before = fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [{ k: "printNumber", value: absOf(bin("mul", constOf("2"), constOf("4"))), line: 1 }],
+  });
+  assert.match(printed(before), /Math\.abs \[arg\[f64\] const\[f64\] 8\]/);
 });
 
 test("a loop bound computed every turn is computed once above the loop", () => {

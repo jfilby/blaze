@@ -175,6 +175,11 @@ export function valueChildren(value: SemanticValue): readonly SemanticValue[] {
       return value.parts.flatMap((part) => (part.k === "value" ? [part.value] : []));
     case "argv":
       return value.index === null ? [] : [value.index];
+    // The arguments of a call are values of their own: a name read in one and a
+    // constant written into one are both what the body reads and computes, and
+    // a walk that stops at the call answers "nothing here" for both.
+    case "call":
+      return value.call.args;
     default:
       return [];
   }
@@ -207,6 +212,9 @@ function withChildren(value: SemanticValue, children: SemanticValue[]): Semantic
     case "element": return { ...value, of: next(), index: next() };
     case "loadField": return { ...value, object: next() };
     case "argv": return value.index === null ? value : { ...value, index: next() };
+    // The types of the arguments are the ones the call was made with, and a
+    // fold never changes a type, so the folded values line up with them.
+    case "call": return { ...value, call: { ...value.call, args: children } };
     case "newObject": return { ...value, fields: value.fields.map((field) => ({ ...field, value: next() })) };
     case "buffer": return { ...value, values: children };
     case "text":
