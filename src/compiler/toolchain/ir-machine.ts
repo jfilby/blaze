@@ -970,9 +970,7 @@ class Machine {
         return;
       }
       case "printText":
-        this.value(statement.value);
-        this.code.movRegReg(RDI, RAX);
-        this.runtime("_print_text");
+        this.printText(statement.value);
         return;
       case "printNumber":
         this.at(statement.value, NUMBER);
@@ -2203,11 +2201,15 @@ class Machine {
         this.store(parts[at].length);
         return;
       }
-      this.asText(part.value);
+      // A part that came back measured is as long as it says, and one that did
+      // not is text to begin with, which is the only shape left to measure.
+      const measured = this.asTextPart(part.value, parts[at].length);
       this.store(parts[at].pointer);
-      this.code.movRegReg(RDI, RAX);
-      this.library("strlen");
-      this.store(parts[at].length);
+      if (!measured) {
+        this.code.movRegReg(RDI, RAX);
+        this.library("strlen");
+        this.store(parts[at].length);
+      }
     });
     const total = this.hold(USIZE, "blaze_total");
     this.code.movRegImm(RAX, 0n);
@@ -2224,11 +2226,10 @@ class Machine {
     const filled = this.hold(USIZE, "blaze_filled");
     this.code.movRegImm(RAX, 0n);
     this.store(filled);
+    // A part of nothing is copied by a copy of nothing, and the guard that
+    // used to skip it was downstream of the measure: a part that is not measured
+    // is measured with `strlen` first, so a null one has already been read.
     for (const part of parts) {
-      const skip = this.code.label("Lskip");
-      this.code.movRegMem(RAX, frame(part.length.offset));
-      this.code.test(RAX);
-      this.code.jcc("e", skip);
       this.code.movRegMem(RAX, frame(filled.offset));
       this.code.movRegMem(RCX, frame(buffer.offset));
       this.code.lea(RCX, indexed(RCX, RAX, 1));
@@ -2239,7 +2240,6 @@ class Machine {
       this.code.movRegMem(RAX, frame(filled.offset));
       this.code.aluRegMem("add", RAX, frame(part.length.offset));
       this.store(filled);
-      this.code.bind(skip);
     }
     // The terminator is the byte after the last one written, and the value the
     // body reads is the buffer itself.
@@ -2253,20 +2253,97 @@ class Machine {
   }
 
   /**
+   * A text written to the output. A template is written a part at a time, which
+   * is what a person reading the output would have done, and it is what the
+   * output is: nothing holds the text but this statement, so laying the parts
+   * out in a buffer to read the whole thing back is a copy, an allocation and a
+   * measure of a string that is already known to be exactly as long as its
+   * parts. The output is buffered by the runtime either way, so a part written
+   * is not a write to the outside.
+   *
+   * A text that is a value rather than a template has nowhere to be written as
+   * a value but the output, so it is written whole.
+   */
+  private printText(value: SemanticValue): void {
+    const parts = value.k === "text" ? value.parts : null;
+    const writes = parts === null ? 0 : parts.filter((part) => part.k !== "text").length;
+    if (parts === null || (parts.length > 0 && writes === 0)) {
+      this.value(value);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_print_text");
+      return;
+    }
+    // One part is kept measured for as long as the statement lasts, and it is
+    // the only one that can need a slot: every other length is written where
+    // the runtime returned it or read as a constant.
+    const length = this.hold(USIZE, "blaze_length");
+    for (const part of parts) {
+      if (part.k === "text") {
+        this.literal(part.value);
+        this.code.leaLabel(RAX, this.lastLiteral);
+        this.code.movRegReg(RDI, RAX);
+        this.code.movRegImm(RSI, BigInt(Buffer.byteLength(part.value, "utf8")));
+      } else {
+        // A part that arrived without a length is text to begin with, and the
+        // only shape left to measure.
+        const measured = this.asTextPart(part.value, length);
+        this.code.movRegReg(RDI, RAX);
+        if (!measured) {
+          this.library("strlen");
+          this.code.movRegReg(RSI, RAX);
+        } else {
+          this.code.movRegMem(RSI, frame(length.offset));
+        }
+      }
+      this.runtime("_print_text_n");
+    }
+  }
+
+  /**
+   * A part of a text as the text it is, with its length where the caller asked
+   * for it. A template writes the conversion around what it interpolates, and
+   * the conversion is unwrapped here rather than lowered: it is text already by
+   * its own type, so handing it to `asText` whole would read it as a string
+   * that arrives without a length and measure the bytes the conversion had
+   * just counted.
+   */
+  private asTextPart(value: SemanticValue, measured: Held | null): boolean {
+    let inner = value;
+    while (inner.k === "toText") inner = inner.of;
+    return this.asText(inner, measured);
+  }
+
+  /**
    * A value as text, as the source language prints one. A number is written by
    * the runtime's own formatter, so it reads the way the source writes it; a
    * truth and an absence are the words the source prints, and a reference that
    * is there is the address the driver prints for one.
+   *
+   * The length of the text is written to `measured` wherever the text is
+   * written already measured: a word is a constant, and the runtime hands back
+   * the count of what it formatted. Only a value that is text to begin with
+   * carries no length, and a caller that needs one measures that itself. The
+   * return says which of the two happened, so the caller reads a part that
+   * arrived measured for nothing and measures the rest.
    */
-  private asText(value: SemanticValue): void {
+  private asText(value: SemanticValue, measured: Held | null = null): boolean {
+    /** A word written in place of a value, which is as long as the word is. */
+    const word = (text: string): void => {
+      if (measured !== null) {
+        this.code.movRegImm(RAX, BigInt(Buffer.byteLength(text, "utf8")));
+        this.store(measured);
+      }
+      this.literal(text);
+      this.code.leaLabel(RAX, this.lastLiteral);
+    };
+
     if (isTextType(value.type)) {
       this.value(value);
-      return;
+      return false;
     }
     if (valueKind(value) === "null") {
-      this.literal("null");
-      this.code.leaLabel(RAX, this.lastLiteral);
-      return;
+      word("null");
+      return true;
     }
     if (isBoolean(value.type)) {
       const otherwise = this.code.label("Lword");
@@ -2274,14 +2351,12 @@ class Machine {
       this.value(value);
       this.code.test(RAX);
       this.code.jcc("e", otherwise);
-      this.literal("true");
-      this.code.leaLabel(RAX, this.lastLiteral);
+      word("true");
       this.code.jmp(end);
       this.code.bind(otherwise);
-      this.literal("false");
-      this.code.leaLabel(RAX, this.lastLiteral);
+      word("false");
       this.code.bind(end);
-      return;
+      return true;
     }
     if (isReference(value.type)) {
       const pointer = this.hold(value.type, "blaze_reference");
@@ -2293,20 +2368,25 @@ class Machine {
       this.code.test(RAX);
       this.code.jcc("e", otherwise);
       this.code.movdXmm(XMM0, RAX);
-      this.formatNumber();
+      this.formatNumber(measured);
       this.code.jmp(end);
       this.code.bind(otherwise);
-      this.literal("null");
-      this.code.leaLabel(RAX, this.lastLiteral);
+      word("null");
       this.code.bind(end);
-      return;
+      return true;
     }
     this.at(value, NUMBER);
-    this.formatNumber();
+    this.formatNumber(measured);
+    return true;
   }
 
-  /** The accumulator holding the text of the number `xmm0` holds. */
-  private formatNumber(): void {
+  /**
+   * The accumulator holding the text of the number `xmm0` holds, and how long
+   * that text is, written to `measured`. The runtime counts what it writes, so
+   * counting it again over the result reads it a second time for an answer the
+   * first read already gave.
+   */
+  private formatNumber(measured: Held | null): void {
     const buffer = this.scratch(64, "blaze_number");
     this.code.lea(RDI, frame(buffer));
     this.code.movRegImm(RSI, 64n);
@@ -2315,6 +2395,7 @@ class Machine {
     // well: the buffer is this function's own, and the length it is given is
     // where the string ends.
     this.code.movRegReg(RCX, RAX);
+    if (measured !== null) this.code.movMemRegSized(frame(measured.offset), RCX, 8);
     this.code.lea(RAX, frame(buffer));
     this.code.alu("xor", RDX, RDX, false);
     this.code.movMemRegSized(indexed(RAX, RCX, 1), RDX, 1);

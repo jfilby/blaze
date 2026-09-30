@@ -179,8 +179,10 @@ const WHOLE_NUMBER_HELPER = `/* A whole number as its digits, which is not what 
    The magnitude is taken unsigned because the most negative i64 negates to
    itself as a signed value and its digits would then never come out. A u64 is
    twenty digits, so twenty are taken and the caller's buffer holds them with
-   room for the sign and the terminator. */
-static const char* blaze_whole_text(int negative, unsigned long long magnitude, char* out) {
+   room for the sign and the terminator. The count of what was written comes
+   back, because a caller that lays a number out beside other text needs the
+   length as much as the digits and has nowhere else to learn it. */
+static size_t blaze_whole_text(int negative, unsigned long long magnitude, char* out) {
   char digits[20];
   int count = 0;
   do {
@@ -191,7 +193,7 @@ static const char* blaze_whole_text(int negative, unsigned long long magnitude, 
   if (negative) out[used++] = '-';
   while (count > 0) out[used++] = digits[--count];
   out[used] = '\\0';
-  return out;
+  return (size_t)used;
 }`;
 
 /**
@@ -344,7 +346,7 @@ class FunctionEmitter {
         ]);
         return;
       case "printText":
-        this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${this.expression(statement.value, TEXT, depth)});`]);
+        this.printText(statement.value, depth);
         return;
       case "printNumber": {
         // A whole number is written as the integer it is. The runtime's
@@ -352,7 +354,7 @@ class FunctionEmitter {
         // 2^53, so a larger one lost its last digits on the way out.
         const value = statement.value;
         if (isNumber(value.type) && isInteger(value.type)) {
-          const text = this.number(this.expression(value, value.type, depth), value.type);
+          const text = this.number(this.expression(value, value.type, depth), value.type).text;
           this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${text});`]);
           return;
         }
@@ -637,8 +639,11 @@ class FunctionEmitter {
         return this.names.read(value.name);
       case "text":
         return this.text(value, depth);
-      case "toText":
-        return this.asText(value.of, depth);
+      case "toText": {
+        const name = this.temporary("blaze_text");
+        this.asText(value.of, depth, name);
+        return name;
+      }
       case "call":
         return this.call(value.call, depth);
       case "newObject":
@@ -810,6 +815,36 @@ class FunctionEmitter {
   }
 
   /**
+   * A text written to the output. A template is written a part at a time, which
+   * is what a person reading the output would have done, and it is what the
+   * output is: nothing holds the text but this statement, so joining the parts
+   * into a managed string first is an allocation and a copy of a string whose
+   * length every part already knows. The output is buffered by the runtime
+   * either way, so a part written is not a write to the outside.
+   *
+   * A text that is a value rather than a template has nowhere to be written as
+   * a value but the output, so it is written whole.
+   */
+  private printText(value: SemanticValue, depth: number): void {
+    const parts = value.k === "text" ? value.parts : null;
+    if (parts === null || parts.length === 0 || parts.every((part) => part.k === "text")) {
+      this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${this.expression(value, TEXT, depth)});`]);
+      return;
+    }
+    for (const part of parts) {
+      if (part.k === "text") {
+        this.write([
+          `${pad(depth)}${RUNTIME_NAME}_print_text_n(${cStringLiteral(part.value)}, ${Buffer.byteLength(part.value, "utf8")});`,
+        ]);
+        continue;
+      }
+      const name = this.temporary("blaze_part");
+      const length = this.asText(part.value, depth, name);
+      this.write([`${pad(depth)}${RUNTIME_NAME}_print_text_n(${name}, ${length});`]);
+    }
+  }
+
+  /**
    * A string, as one C string. Text the program wrote is a literal; a value
    * interpolated into it is written by the runtime, which is what writes a
    * number the way the source language writes one, so a number interpolated
@@ -831,10 +866,11 @@ class FunctionEmitter {
     // number of times rather than a quadratic one.
     const parts: string[] = value.parts.map(() => this.temporary("blaze_part"));
     const joined = this.temporary("blaze_text");
-    const lines = value.parts.map((part, index) => {
-      const written = part.k === "text" ? cStringLiteral(part.value) : this.asText(part.value, depth);
-      return `const char* ${parts[index]} = ${written};`;
-    });
+    for (const [index, part] of value.parts.entries()) {
+      if (part.k === "text") this.pending.push(`const char* ${parts[index]} = ${cStringLiteral(part.value)};`);
+      else this.asText(part.value, depth, parts[index]);
+    }
+    const lines: string[] = [];
     // The first part becomes the string the rest are appended to, and it is
     // handed over rather than copied: the runtime appends in place only when
     // the block carries one reference, which is exactly the case where nothing
@@ -855,14 +891,37 @@ class FunctionEmitter {
   }
 
   /**
-   * A value as text, as a NUL terminated C string. A number is written by the
-   * runtime's formatter, so it reads the way the source language writes it; a
-   * truth and an absence are the words the source prints.
+   * A value as text, bound to `name` as a NUL terminated C string, and the C
+   * expression for how many bytes it is. A number is written by the runtime's
+   * formatter, so it reads the way the source language writes it; a truth and
+   * an absence are the words the source prints.
+   *
+   * The text is bound rather than returned as an expression because the length
+   * is read after it, and two arguments of one call are not ordered against
+   * each other in C: a value the IR calls would run once per copy, or not at
+   * all, depending on which way the compiler read them.
    */
-  private asText(value: SemanticValue, depth: number): string {
-    if (isTextType(value.type)) return this.raw(value, depth);
-    if (valueKind(value) === "null") return '"null"';
-    if (isBoolean(value.type)) return `(${this.raw(value, depth)} ? "true" : "false")`;
+  private asText(value: SemanticValue, depth: number, name: string): string {
+    // A conversion is text by its own type, so handed whole it would be read as
+    // a string that arrives without a length and measured for one. What it
+    // wraps is what knows how long the text is.
+    let inner = value;
+    while (inner.k === "toText") inner = inner.of;
+    value = inner;
+    if (isTextType(value.type)) {
+      this.pending.push(`const char* ${name} = ${this.raw(value, depth)};`);
+      return `strlen(${name})`;
+    }
+    if (valueKind(value) === "null") {
+      this.pending.push(`const char* ${name} = "null";`);
+      return "4";
+    }
+    if (isBoolean(value.type)) {
+      const truth = this.temporary("blaze_truth");
+      this.pending.push(`const bool ${truth} = ${this.raw(value, depth)};`);
+      this.pending.push(`const char* ${name} = ${truth} ? "true" : "false";`);
+      return `(${truth} ? 4 : 5)`;
+    }
     // A reference is no number of its own. An absent one is nothing, and the
     // word for that is what the source prints; the rest are read as the address
     // the driver prints for one, because a pointer is not a double and casting
@@ -875,24 +934,32 @@ class FunctionEmitter {
     // of it were zeros by then.
     if (isReference(value.type)) {
       const pointer = this.temporary("blaze_reference");
-      const read = this.raw(value, depth);
-      return (
-        `({ const void* ${pointer} = ${read}; ` +
-        `${pointer} == NULL ? "null" : ${this.number(`(uintptr_t)${pointer}`, USIZE)}; })`
-      );
+      this.pending.push(`const void* ${pointer} = ${this.raw(value, depth)};`);
+      const address = this.number(`(uintptr_t)${pointer}`, USIZE);
+      this.pending.push(`const char* ${name} = ${pointer} == NULL ? "null" : ${address.text};`);
+      return `(${pointer} == NULL ? 4 : ${address.length})`;
     }
-    return this.number(this.raw(value, depth), value.type);
+    const number = this.number(this.raw(value, depth), value.type);
+    this.pending.push(`const char* ${name} = ${number.text};`);
+    return number.length;
   }
 
   /**
-   * A number as text, written the way the source language writes it. A whole
-   * number is written as the integer it is: the runtime's formatter takes a
-   * double, and a double holds every `i64` only up to 2^53, so
-   * 9223372036854775807 went out as 9223372036854775808 and every `u64` above
-   * 2^53 lost its last digits. A float is the runtime's own.
+   * A number as text, written the way the source language writes it, and the
+   * C expression for how many bytes that text is. A whole number is written as
+   * the integer it is: the runtime's formatter takes a double, and a double
+   * holds every `i64` only up to 2^53, so 9223372036854775807 went out as
+   * 9223372036854775808 and every `u64` above 2^53 lost its last digits. A
+   * float is the runtime's own.
+   *
+   * The length is a variable rather than an expression because both writers
+   * count what they wrote as they write it: a caller that writes the number
+   * out needs the count, and asking for it afterwards means measuring a buffer
+   * the runtime has already been asked to measure once.
    */
-  private number(read: string, type: SemanticType | null): string {
+  private number(read: string, type: SemanticType | null): { text: string; length: string } {
     const buffer = this.temporary("blaze_number");
+    const written = this.temporary("blaze_written");
     if (type !== null && isInteger(type)) {
       // A whole number is written by dividing it by ten, not by handing it to
       // snprintf: a locale-aware printf call is a dozen instructions more than
@@ -908,8 +975,10 @@ class FunctionEmitter {
       // every number too large for a double, which is the case this exists for.
       this.wholeNumbers = true;
       // The declaration carries no indentation of its own: flush adds it when
-      // the line is written.
+      // the line is written. The count is declared beside the buffer rather
+      // than inside the expression, for the same reason the buffer is.
       this.pending.push(`char ${buffer}[24];`);
+      this.pending.push(`size_t ${written};`);
       // The value is bound before it is asked anything of it, because it is
       // asked for its sign and then for its digits, and a value the IR calls is
       // a call that would otherwise run once per copy. The value is declared
@@ -923,13 +992,19 @@ class FunctionEmitter {
       const magnitude = isUnsigned(type)
         ? `(unsigned long long)(${value})`
         : `(unsigned long long)((${value}) < 0 ? 0ULL - (unsigned long long)(${value}) : (unsigned long long)(${value}))`;
-      return `({ ${declaredType(type)} ${value} = ${read}; blaze_whole_text(${negative}, ${magnitude}, ${buffer}); })`;
+      return {
+        text: `({ ${declaredType(type)} ${value} = ${read}; ${written} = blaze_whole_text(${negative}, ${magnitude}, ${buffer}); ${buffer}; })`,
+        length: written,
+      };
     }
-    const written = this.temporary("blaze_written");
-    return (
-      `({ char ${buffer}[64]; size_t ${written} = ${RUNTIME_NAME}_format_number((double)(${read}), ` +
-      `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`
-    );
+    this.pending.push(`char ${buffer}[64];`);
+    this.pending.push(`size_t ${written};`);
+    return {
+      text:
+        `({ ${written} = ${RUNTIME_NAME}_format_number((double)(${read}), ` +
+        `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`,
+      length: written,
+    };
   }
 }
 

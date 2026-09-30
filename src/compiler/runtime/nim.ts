@@ -483,6 +483,11 @@ proc blaze_rt_argv*(index: csize_t): float64 {.exportc, cdecl.} =
 proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
   if text != nil: stdout.write($text)
 
+proc blaze_rt_print_text_n*(text: cstring, length: csize_t) {.exportc, cdecl.} =
+  ## The count is the length rather than where the zero is: a compiler that laid
+  ## the text out knows how long it is, and the text need not be terminated.
+  if text != nil: stdout.write(($text)[0 ..< int(length)])
+
 ## The shortest decimal that reads back as the value, placed the way the source
 ## language places it: in full from 1e-6 up to 1e21, and in exponential form
 ## outside that range. A value that is not finite has no shortest decimal, so

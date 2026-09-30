@@ -248,6 +248,17 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["output"] },
   ),
   entry(
+    "blaze_rt_print_text_n",
+    "void",
+    [
+      ["text", "const char*"],
+      ["length", "size_t"],
+    ],
+    "Writes the bytes of text to the output, of which there are length.",
+    "A null pointer writes nothing, whatever the length says. Bytes of text that are not terminated by a zero are written, which is the whole point: a compiler that laid the text out knows how long it is, and the count is what it knows it by.",
+    { tags: ["output"] },
+  ),
+  entry(
     "blaze_rt_print_number",
     "void",
     [["value", "double"]],
@@ -629,6 +640,14 @@ ${guarded ? "  if (text == NULL) return;" : ""}
      the header in front of one of those is reading memory that is not there.
      blaze_rt_text_length is for a value the compiler knows is a string. */
   fputs(text, stdout);
+}
+
+void blaze_rt_print_text_n(const char* text, size_t length) {
+${guarded ? "  if (text == NULL) return;" : ""}
+  /* fwrite rather than a write: the output is buffered, so a template written
+     a part at a time is still written out once. The count is the length rather
+     than what fputs would find, which is the work this entry exists to save. */
+  fwrite(text, 1, length, stdout);
 }
 
 /* Copies the bytes of a number that fit, NUL terminated, and reports how many
