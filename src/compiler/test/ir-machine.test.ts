@@ -20,7 +20,7 @@ import { cDeclarationType } from "../toolchain/linker.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
-import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const F32: SemanticType = { kind: "primitive", name: "f32" };
@@ -981,4 +981,89 @@ test("a target this backend does not encode for is refused rather than answered 
   // is the instruction set every x86-64 processor runs.
   assertMachineTarget({ arch: "x86_64", os: "linux", abi: "sysv", cpu: "znver1", features: [] });
   assertMachineTarget(TARGET);
+});
+
+test("a name the build pinned into a register is read as an element index", async () => {
+  // A pinned name has no frame slot at all — its offset is zero, which is the
+  // word above the frame pointer where the return address was put. An index
+  // read that reached into the frame for it read that word, and the program read
+  // whatever address it formed.
+  //
+  // `index` is written once and read enough times to be worth a register of its
+  // own, which is what the build does to a parameter it reads often.
+  const index: SemanticSlot = { kind: "value", name: "index", mutable: false, type: USIZE };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const element: SemanticValue = {
+    k: "element", type: F64,
+    of: { k: "local", type: PTR, name: "values" },
+    index: { k: "local", type: USIZE, name: "index" },
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: index, value: { k: "const", type: USIZE, text: "3" }, line: 1 },
+        { k: "let", slot: sum, value: { k: "const", type: F64, text: "0" }, line: 1 },
+        // Four reads of `index` is the census that gives it a register, and a
+        // fifth so the count is above it whichever way the threshold is read.
+        { k: "set", name: "sum", op: "+=", value: element, line: 2 },
+        { k: "set", name: "sum", op: "+=", value: element, line: 3 },
+        { k: "set", name: "sum", op: "+=", value: element, line: 4 },
+        { k: "set", name: "sum", op: "+=", value: element, line: 5 },
+      ],
+      terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
+    },
+    [{ kind: "value", name: "values", mutable: false, type: PTR }],
+  );
+  const printed = await lowered(fn, (name) => `{ double a[5] = {10,20,30,40,50}; printf("%.1f", ${name}(a)); }`);
+  assert.equal(printed, "160.0", "the index is the value the program bound to it");
+});
+
+test("a walk over an array keeps its index in a register", async () => {
+  // The index of a for-of is stepped once per turn and read twice — once for
+  // the address and once for whatever the body does with it. In the frame that
+  // is a load and a store per turn to hold a value the next turn reads straight
+  // back out again; a register the callee leaves alone costs neither.
+  const loop: SemanticStatement = {
+    k: "loop",
+    line: 1,
+    loop: {
+      kind: "each",
+      element: "v",
+      elementType: F64,
+      index: "i",
+      of: "values",
+      length: { k: "local", type: USIZE, name: "n" },
+      body: {
+        id: "b2",
+        releases: [],
+        statements: [{ k: "set", name: "total", op: "+=", value: { k: "local", type: F64, name: "v" }, line: 2 }],
+        terminator: { k: "jump", target: "h", releases: [] },
+      },
+      header: "h",
+      exit: "x",
+    },
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: { k: "const", type: F64, text: "0" }, line: 1 },
+        loop,
+      ],
+      terminator: { k: "return", value: { k: "local", type: F64, name: "total" } },
+    },
+    [
+      { kind: "value", name: "values", mutable: false, type: { kind: "ptr", of: F64 } },
+      { kind: "value", name: "n", mutable: false, type: USIZE },
+    ],
+  );
+  // The sum is the answer either way, and a wrong index is the difference
+  // between 10 and 40 for the array below.
+  const printed = await lowered(fn, (name) => `{ double a[4] = {10,20,30,40}; printf("%.1f", ${name}(a, 4)); }`);
+  assert.equal(printed, "100.0", "every element is walked exactly once");
 });

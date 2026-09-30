@@ -113,12 +113,27 @@ class Bytes {
     return at;
   }
 
+  /**
+   * One byte.
+   *
+   * The room is taken before the buffer is reached for, because taking it is
+   * what widens the buffer: an indexed assignment reads its target before it
+   * reads its right-hand side, so `this.buffer[this.room(1)] = value` writes
+   * into the buffer that was there before the widening and drops everything
+   * past its end.
+   */
   byte(value: number): void {
-    this.buffer[this.room(1)] = value & 0xff;
+    const at = this.room(1);
+    this.buffer[at] = value & 0xff;
   }
 
   raw(values: ArrayLike<number>): void {
-    this.buffer.set(values, this.room(values.length));
+    // The room is taken before the write, because taking it is what widens the
+    // buffer: reaching for `this.buffer` first and asking for room afterwards
+    // would write into the buffer that was there before the widening, and
+    // everything past its end is dropped.
+    const at = this.room(values.length);
+    this.buffer.set(values, at);
   }
 
   /**
@@ -129,7 +144,8 @@ class Bytes {
    */
   absorb(other: Bytes): void {
     if (other.used === 0) return;
-    this.buffer.set(other.buffer.subarray(0, other.used), this.room(other.used));
+    const at = this.room(other.used);
+    this.buffer.set(other.buffer.subarray(0, other.used), at);
   }
 
   /**
@@ -531,6 +547,10 @@ class Body {
   private readLocal = -1;
   /** Where in the body that read began. */
   private readAt = -1;
+  /** A float constant already laid down in a global, by the number and its precision. */
+  private readonly pooled = new Map<string, number>();
+  /** Every float constant the body laid down, in the order the globals are numbered. */
+  readonly pooledFloats: { type: number; opcode: number; bytes: number[] }[] = [];
 
   constructor(fn: SemanticFunction, contract: FunctionContract, returns: SemanticType, candidate: string | undefined) {
     this.fn = fn;
@@ -666,12 +686,38 @@ class Body {
     this.code.varbig(BigInt.asIntN(64, value));
   }
 
+  /**
+   * A float constant, read out of the module's own globals rather than written
+   * out again at every place it appears.
+   *
+   * `f64.const` carries eight raw bytes, so a constant used k times costs 9k
+   * bytes and materialises those eight bytes every time the instruction runs.
+   * The machine backend writes such a constant once into the read-only data and
+   * loads it at each use, which is what a `global` is here as well: the first
+   * use lays the number down in a global of its own and every use reads it.
+   *
+   * The type of the global is the precision the literal was written at, so a
+   * `f32` and an `f64` of the same number are two globals and not one.
+   */
   private float(value: number, wide: boolean): void {
+    const key = `${wide ? "f64" : "f32"}:${value}`;
+    const known = this.pooled.get(key);
+    if (known !== undefined) {
+      this.op(0x23);
+      this.code.varuint(known);
+      return;
+    }
     if (wide) FLOAT_BYTES.setFloat64(0, value, true);
     else FLOAT_BYTES.setFloat32(0, value, true);
-    this.op(wide ? 0x44 : 0x43);
     const size = wide ? 8 : 4;
-    for (let index = 0; index < size; index += 1) this.code.byte(FLOAT_BYTES.getUint8(index));
+    const bytes: number[] = [];
+    for (let at = 0; at < size; at += 1) bytes.push(FLOAT_BYTES.getUint8(at));
+    this.pooled.set(key, this.pooledFloats.length);
+    this.pooledFloats.push({ type: wide ? F64 : F32, opcode: wide ? 0x44 : 0x43, bytes });
+    // A global read is the first use of the number laid down; the number itself
+    // is written once, into the global section, and nowhere in the body.
+    this.op(0x23);
+    this.code.varuint(this.pooledFloats.length - 1);
   }
 
   /**
@@ -1779,6 +1825,27 @@ export function moduleBytes(
     }),
   );
   module.section(3, (functions) => functions.counted(1, (one) => one.byte(0)));
+  // The constants the body pooled, one global each. The section sits between
+  // the function section and the export section because the format numbers the
+  // sections in order, and a global is read by the index the body handed it out
+  // at, so the order they were laid down in is the order they are numbered in.
+  //
+  // A global is a value type, a mutability byte and a constant expression that
+  // initialises it. The expression is the constant itself followed by `end`, and
+  // the mutability is immutable because nothing here can write one.
+  module.section(6, (globals) =>
+    globals.counted(body.pooledFloats.length, (each) => {
+      for (const pooled of body.pooledFloats) {
+        // A global is its value type and its mutability, and nothing else: the
+        // counted form is a table's element type, which is not what this is.
+        each.byte(pooled.type);
+        each.byte(0x00);
+        each.byte(pooled.opcode);
+        each.raw(pooled.bytes);
+        each.byte(0x0b);
+      }
+    }),
+  );
   module.section(7, (exports) =>
     exports.counted(1, (one) => {
       one.name(symbolOf(contract));

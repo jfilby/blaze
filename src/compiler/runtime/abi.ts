@@ -411,7 +411,11 @@ ${guarded ? `static void blaze_rt_refuse(const char* what) {
   exit(2);
 }` : "/* A danger build: this runtime does not check what it is handed, so it has nothing to refuse. */"}
 
-static blaze_rt_header* blaze_rt_header_of(void* pointer) {
+/* One subtraction and, where the guards are in, two comparisons. It is on the
+   path of every retain and every release, and -ffunction-sections makes it a
+   call rather than a few instructions. blaze_rt_class_of below is inlined for
+   the same reason. */
+static inline __attribute__((always_inline)) blaze_rt_header* blaze_rt_header_of(void* pointer) {
   blaze_rt_header* header = (blaze_rt_header*)((char*)pointer - BLAZE_RT_HEADER_SIZE);
 ${guarded ? `  if (header->magic != BLAZE_RT_MAGIC) blaze_rt_refuse("not a live runtime pointer");
   if (header->alignment == 0 || (header->alignment & (header->alignment - 1)) != 0) {
@@ -461,8 +465,17 @@ static blaze_rt_header* blaze_rt_released[BLAZE_RT_SLAB_CLASSES];
 /* The class a block of total bytes at the given alignment belongs to,
    counting from one, or zero for a block the host is asked for. A class is
    never zero for a block that can be pooled, because the smallest block is a
-   header and an alignment and no payload at all. */
-static size_t blaze_rt_class_of(size_t total, size_t alignment) {
+   header and an alignment and no payload at all.
+
+   It is marked always_inline rather than left to the C compiler's own
+   judgement, and the reason is -ffunction-sections: every entry point is
+   given a section of its own so that the link can drop the ones a program never
+   reached, and a function of its own section is a call rather than a few
+   instructions folded into its caller. That is what the flag is for, and this
+   helper is not an entry point — it is three instructions on the path of every
+   allocation, so as a call it costs a frame and a branch per allocation to say
+   something the caller could have worked out for itself. */
+static inline __attribute__((always_inline)) size_t blaze_rt_class_of(size_t total, size_t alignment) {
   if (total > BLAZE_RT_SLAB_LARGEST || alignment > BLAZE_RT_SLAB_GRANULARITY) return 0;
   return (total + BLAZE_RT_SLAB_GRANULARITY - 1) / BLAZE_RT_SLAB_GRANULARITY;
 }
@@ -502,7 +515,14 @@ ${guarded ? `  /* The payload is placed with a mask, which only places it for a 
     blaze_rt_header* header = blaze_rt_released[cls - 1];
     if (header != NULL) {
       blaze_rt_released[cls - 1] = (blaze_rt_header*)header->base;
-      memset(header, 0, cls * BLAZE_RT_SLAB_GRANULARITY);
+      /* Only the payload is cleared. The header is written in full by the five
+         stores below, and the one field of it that is not — the free-list link
+         a release pushes, and the zero that tells a pooled block from one the
+         host gave out — is zeroed here on its own. Clearing the whole class
+         writes those bytes twice, and a program that recycles a block on every
+         allocation writes them twice for every one of them. */
+      header->base = NULL;
+      memset((char*)header + BLAZE_RT_HEADER_SIZE, 0, cls * BLAZE_RT_SLAB_GRANULARITY - BLAZE_RT_HEADER_SIZE);
     } else {
       const size_t span = cls * BLAZE_RT_SLAB_GRANULARITY;
       if ((size_t)(blaze_rt_slab_end - blaze_rt_slab_at) < span) {
@@ -787,6 +807,38 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
   }
   const int negative = signbit(value);
   const double magnitude = negative ? -value : value;
+  /* A whole number below 2^53 is written as its own digits, with no search and
+     no probe.
+
+     The search below finds the shortest decimal that reads back as this value.
+     Below 2^53 that shortest decimal is the number itself: every integer in
+     that range is exactly representable, and no other integer rounds to it,
+     because doubles are at most one apart there and the half-step between two
+     of them is under one. So the digits the search goes on to write are the
+     digits of the integer, and the search found nothing a shorter form did not.
+
+     The bound is load-bearing and is the reason this is not simply "any whole
+     number". Past 2^53 a double no longer holds the integer it was given, and
+     the shortest form that reads back is a shorter decimal of the number the
+     double really holds — which is what the search is for, and what writing the
+     integer's own digits would not be. */
+  if (magnitude < 9007199254740992.0 && magnitude == (double)(long long)magnitude) {
+    unsigned long long whole = (unsigned long long)magnitude;
+    char written[24];
+    int used = 0;
+    if (negative) written[used++] = '-';
+    do {
+      written[used++] = (char)('0' + (int)(whole % 10ULL));
+      whole /= 10ULL;
+    } while (whole != 0ULL && used < (int)sizeof written);
+    for (int left = 0, right = used - (negative ? 1 : 0) - 1; left < right; left += 1, right -= 1) {
+      const char swap = written[negative ? left + 1 : left];
+      written[negative ? left + 1 : left] = written[negative ? right + 1 : right];
+      written[negative ? right + 1 : right] = swap;
+    }
+    written[used] = '\\0';
+    return blaze_rt_write_number(written, (size_t)used, buffer, size);
+  }
   /* The shortest decimal that reads back as this value.
 
      The obvious search for it starts at no digits and adds one at a time, and

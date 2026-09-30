@@ -352,12 +352,15 @@ test("a value a block computes twice is computed once", () => {
 
 test("a value a block computes twice that one of them writes between is not commoned", () => {
   // `a` is written between the two products, so the second one is a different
-  // number and computing the first above the second would be wrong.
+  // number and computing the first above the second would be wrong. The write
+  // has to stay live for this to be the question it is about: a write nothing
+  // reads is removed before anything else runs, and then there is no write
+  // between the two products to read across.
   const a: SemanticSlot = { kind: "value", name: "a", mutable: true, type: F64 };
   const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
   const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
   const after = printed(fnOf({
-    id: "entry", releases: [], terminator: { k: "return", value: null },
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "a" } },
     statements: [
       { k: "set", name: "sum", op: "+=", value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 1 },
       { k: "set", name: "a", op: "=", value: constOf("2"), line: 2 },
@@ -517,4 +520,83 @@ test("the folded C computes what the unfolded C computes", async () => {
       assert.equal(ran.stdout.trimEnd(), one.expected, `${one.name}, ${folded ? "folded" : "unfolded"}`);
     }
   }
+});
+
+test("an arm that returns keeps its return when the branch it selects is taken", () => {
+  // The arm is spliced into the block the `if` was written in, and a return is
+  // a terminator rather than a statement. Splicing the statements and dropping
+  // the terminator turns this into a function that returns 2.
+  const v: SemanticSlot = { kind: "value", name: "v", mutable: false, type: F64 };
+  const fn = fnOf({
+    id: "entry", releases: [],
+    statements: [{
+      k: "if",
+      condition: { k: "bool", type: { kind: "primitive", name: "bool" }, value: true },
+      then: { id: "b1", releases: [], statements: [], terminator: { k: "return", value: constOf("1") } },
+      otherwise: null,
+      line: 1,
+    }],
+    terminator: { k: "return", value: constOf("2") },
+  }, F64, [v]);
+  const after = optimizeSemanticFunction(fn);
+  assert.equal(semanticFunctionProblems(after).length, 0, "the rewritten function must still validate");
+  const arm = after.entry.statements.find((statement) => statement.k === "if");
+  assert.ok(arm !== undefined, "the branch must survive, because its arm returns");
+});
+
+test("a name written again before anything reads it is written once", () => {
+  // `set a = 1; set a = 2;` leaves `a` holding 2 either way, and the first
+  // store is a slot, a value and a store on every target for nothing.
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "a" } },
+    statements: [
+      { k: "set", name: "a", op: "=", value: constOf("1"), line: 1 },
+      { k: "set", name: "a", op: "=", value: constOf("2"), line: 2 },
+    ],
+  }, F64, [a]));
+  assert.equal(after.match(/set a = /g)?.length ?? 0, 1, `the dead store survives:\n${after}`);
+});
+
+test("a compound assignment reads the name it writes", () => {
+  // `s += x` is `s = s + x`, so the name is live whatever a later read says.
+  const s: SemanticSlot = { kind: "value", name: "s", mutable: true, type: F64 };
+  const x: SemanticSlot = { kind: "value", name: "x", mutable: false, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "s" } },
+    statements: [{ k: "set", name: "s", op: "+=", value: { k: "local", type: F64, name: "x" }, line: 1 }],
+  }, F64, [s, x]));
+  assert.match(after, /set s \+=/, `a compound assignment is not a dead store:\n${after}`);
+});
+
+test("a name written as itself is not written at all", () => {
+  // Folding turns `s += 0` into `s = s`, which is a load and a store of a name
+  // into itself.
+  const s: SemanticSlot = { kind: "value", name: "s", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "s" } },
+    statements: [
+      { k: "set", name: "s", op: "+=", value: constOf("0"), line: 1 },
+      { k: "set", name: "s", op: "=", value: { k: "local", type: F64, name: "s" }, line: 2 },
+    ],
+  }, F64, [s]));
+  assert.doesNotMatch(after, /set s =/, `a name written as itself is written:\n${after}`);
+});
+
+test("optimizing a function that is already optimized changes nothing", () => {
+  // The pass runs to a fixed point and reports whether it changed anything by
+  // comparing objects, so a round that rewrites a statement it did not need to
+  // rewrite would keep the loop running for its whole budget.
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: false, type: F64 };
+  const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
+  const once = optimizeSemanticFunction(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "a" } },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "t", mutable: false, type: F64 }, value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 1 },
+      { k: "set", name: "unused", op: "=", value: constOf("3"), line: 2 },
+      { k: "set", name: "unused", op: "=", value: constOf("4"), line: 3 },
+    ],
+  }, F64, [a, b]));
+  const twice = optimizeSemanticFunction(structuredClone(once));
+  assert.equal(printSemanticFunction(twice), printSemanticFunction(once), "the second run is a no-op");
 });

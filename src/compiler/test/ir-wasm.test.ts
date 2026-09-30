@@ -729,3 +729,16 @@ test("the command line is refused by what it is, not by what rounds", async () =
     "a module is handed the vectors and no process, so the command line is named as what it is",
   );
 });
+
+test("a module whose code is larger than one buffer is written whole", async () => {
+  // Every buffer starts at 256 bytes and is widened by asking for room, which
+  // takes a copy. Reaching for the buffer before asking for the room means the
+  // copy happens after the write was aimed at the old one, so everything past
+  // the old end is dropped and the section length no longer matches what is
+  // inside it. A function below that size never reaches it.
+  const lines = ["  let total = 0;"];
+  for (let index = 0; index < 60; index += 1) lines.push(`  total += a[0] * ${index + 1}.5 + a[1] * ${index + 2}.25;`);
+  lines.push("  return total;");
+  const expected = Array.from({ length: 60 }, (_, index) => 1 * (index + 1.5) + 2 * (index + 2.25)).reduce((sum, value) => sum + value, 0);
+  await compute("a: Float64Array, n: number", lines, "run\n2 1\n1 2\n", `RESULT ${expected}\n`);
+});

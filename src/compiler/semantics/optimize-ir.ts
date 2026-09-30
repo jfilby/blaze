@@ -345,17 +345,24 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // not. A signed division is left alone: truncation towards zero and a
       // shift disagree about a negative value, which is why
       // `reciprocal-multiply` is a floating point rule.
+      //
+      // The count is bounded by the width of the type, because that is the
+      // width the count is taken at: a shift of 32 at `i32` wraps to a shift of
+      // zero on the machine, where the multiplication it replaced has already
+      // wrapped the value to nothing at all. `2^32 * x` is zero at `i32` and
+      // `x << 32` is `x << 0`, which is `x`.
       if (isInteger(value.type) && value.right.k === "const" && right !== null && right > 0) {
         const exponent = Number.isInteger(Math.log2(right)) ? Math.log2(right) : null;
-        if (exponent !== null && exponent >= 1 && (isUnsigned(value.type) || value.left.k === "const")) {
-          if (value.op === "div") {
+        if (exponent !== null && exponent >= 1 && exponent < WIDTH[name]) {
+          // A value that cannot be negative divides and shifts alike, and one
+          // that can does not: `-7 / 2` is `-3` and `-7 >> 1` is `-4`.
+          const exact = isUnsigned(value.type) || (literalOf(value.left) ?? -1) >= 0;
+          if (exact && value.op === "div") {
             return { ...value, op: "shr", right: { k: "const", type: value.right.type, text: String(exponent) } };
           }
-          if (value.op === "mod" && (isUnsigned(value.type) || (literalOf(value.left) ?? -1) >= 0)) {
+          if (exact && value.op === "mod") {
             return { ...value, op: "and", right: { k: "const", type: value.right.type, text: String(right - 1) } };
           }
-        }
-        if (exponent !== null && exponent >= 1 && exponent <= 62) {
           if (value.op === "mul") {
             return { ...value, op: "shl", right: { k: "const", type: value.right.type, text: String(exponent) } };
           }
@@ -522,30 +529,66 @@ function foldBlock(block: SemanticBlock): boolean {
   return changed;
 }
 
+/**
+ * A statement with its value folded, or the statement itself when nothing in it
+ * folded.
+ *
+ * The identity of the returned object is what says whether anything changed:
+ * `foldBlock` compares the folded statement against the one it was given, so a
+ * rewrite that rebuilds the statement unconditionally reports a change on every
+ * round and the fixed point above never ends. Rebuilding only when a value came
+ * back a different object makes the report mean what it is written to mean —
+ * `foldSemanticValue` returns the very value it was handed when nothing folded,
+ * so an unchanged value is the signal that this statement is already folded.
+ */
 function foldStatement(statement: SemanticStatement): SemanticStatement {
   switch (statement.k) {
-    case "let": return { ...statement, value: foldSemanticValue(statement.value) };
-    case "set": return { ...statement, value: foldSemanticValue(statement.value) };
-    case "step": return statement;
-    case "printText": return { ...statement, value: foldSemanticValue(statement.value) };
-    case "printNumber": return { ...statement, value: foldSemanticValue(statement.value) };
-    case "retain": return { ...statement, value: foldSemanticValue(statement.value) };
-    case "storeField": return { ...statement, value: foldSemanticValue(statement.value) };
-    case "setElement":
-      return { ...statement, index: foldSemanticValue(statement.index), value: foldSemanticValue(statement.value) };
-    case "if": return { ...statement, condition: foldSemanticValue(statement.condition) };
-    case "raise": return { ...statement, message: foldSemanticValue(statement.message) };
-    case "loop": return { ...statement, loop: foldLoop(statement.loop) };
+    case "step":
+      return statement;
+    case "setElement": {
+      const index = foldSemanticValue(statement.index);
+      const value = foldSemanticValue(statement.value);
+      return index === statement.index && value === statement.value ? statement : { ...statement, index, value };
+    }
+    case "let":
+    case "set":
+    case "printText":
+    case "printNumber":
+    case "retain":
+    case "storeField": {
+      const value = foldSemanticValue(statement.value);
+      return value === statement.value ? statement : { ...statement, value };
+    }
+    case "if": {
+      const condition = foldSemanticValue(statement.condition);
+      return condition === statement.condition ? statement : { ...statement, condition };
+    }
+    case "raise": {
+      const message = foldSemanticValue(statement.message);
+      return message === statement.message ? statement : { ...statement, message };
+    }
+    case "loop": {
+      const loop = foldLoop(statement.loop);
+      return loop === statement.loop ? statement : { ...statement, loop };
+    }
     default: return statement;
   }
 }
 
 function foldLoop(loop: SemanticLoop): SemanticLoop {
   if (loop.kind === "counted") {
-    return { ...loop, from: foldSemanticValue(loop.from), to: foldSemanticValue(loop.to), step: loop.step === null ? null : foldSemanticValue(loop.step) };
+    const from = foldSemanticValue(loop.from);
+    const to = foldSemanticValue(loop.to);
+    const step = loop.step === null ? null : foldSemanticValue(loop.step);
+    if (from === loop.from && to === loop.to && step === loop.step) return loop;
+    return { ...loop, from, to, step };
   }
-  if (loop.kind === "each") return { ...loop, length: foldSemanticValue(loop.length) };
-  return { ...loop, condition: foldSemanticValue(loop.condition) };
+  if (loop.kind === "each") {
+    const length = foldSemanticValue(loop.length);
+    return length === loop.length ? loop : { ...loop, length };
+  }
+  const condition = foldSemanticValue(loop.condition);
+  return condition === loop.condition ? loop : { ...loop, condition };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1173,6 +1216,145 @@ function dropDeadWrites(body: Body): boolean {
 }
 
 /**
+ * Drops a write to a name that is written again before anything reads it.
+ *
+ * `dropDeadWrites` above takes a write nothing reads anywhere. This takes the
+ * other half: a write that something does read, but not between this write and
+ * the next one. `set s = 1; set s = 2;` leaves `s` holding 2 either way, and the
+ * first store is a slot, a value and a store on every target for nothing.
+ *
+ * The walk is backwards within one block, because that is the only place the
+ * question can be answered. A block has its own scope, so within it a name's
+ * only writers are the statements of that block and its only readers are the
+ * values of those statements and the block's terminator. The walk stops at
+ * anything that leaves the block — an `if`, a loop, a `block`, a `raise` —
+ * because past that point a read may happen on a turn this statement did not
+ * run on, and a write in another arm is not a write on this path.
+ *
+ * A write whose value calls something is kept whatever the census says, because
+ * the statement is then also the reason the call runs.
+ */
+function dropOverwrittenStores(body: Body): boolean {
+  let changed = false;
+  const note = (after: Set<string>, value: SemanticValue | null): void => {
+    if (value === null) return;
+    walkSemanticValue(value, (one) => {
+      if (one.k === "local") after.add(one.name);
+    });
+  };
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    // The names read or written after the statement being looked at. A write to
+    // a name that is not among them is a write nothing ever saw.
+    const after = new Set<string>();
+    note(after, block.terminator.k === "return" ? block.terminator.value : null);
+    const kept: SemanticStatement[] = [];
+    for (let at = block.statements.length - 1; at >= 0; at -= 1) {
+      const statement = block.statements[at];
+      if (statement === undefined) continue;
+      // The census has to see inside a statement as well as at its own value: a
+      // name an `if` arm reads is read on a turn this statement may not run on,
+      // and a name a loop body assigns is not assigned on this path either.
+      for (const nested of blocksInside(statement)) {
+        for (const inner of nestedSemanticBlocks(nested)) valuesOf(inner, (value) => note(after, value));
+      }
+      // Only a plain assignment is a candidate. A compound one reads the name
+      // it writes — `s += x` is `s = s + x` — so the name is live whatever the
+      // census says.
+      if (
+        statement.k === "set" &&
+        statement.op === "=" &&
+        !after.has(statement.name) &&
+        !block.releases.includes(statement.name) &&
+        !carriesAValue(statement)
+      ) {
+        changed = true;
+        continue;
+      }
+      // A plain assignment reads nothing and then ends the life of whatever the
+      // name held before it, so the name leaves the census rather than joining
+      // it: what comes earlier is holding a value nothing can reach any more.
+      // A compound assignment and a step both read the name they write, so
+      // those leave it live for whatever comes before.
+      if (statement.k === "set") {
+        if (statement.op === "=") after.delete(statement.name);
+        else after.add(statement.name);
+      } else if (statement.k === "step") {
+        after.add(statement.name);
+      } else if (statement.k === "setElement") {
+        after.add(statement.buffer);
+      } else if (statement.k === "let") {
+        after.add(statement.slot.name);
+      }
+      kept.push(statement);
+    }
+    block.statements = kept.reverse();
+  }
+  return changed;
+}
+
+/**
+ * Every block a statement has a body of, which is where it reads and writes
+ * besides in its own values. Both arms of an `if` are returned: a name one of
+ * them reads is read on a turn the statement may not take, and a name one of
+ * them writes is not written on the path that skipped it.
+ */
+function blocksInside(statement: SemanticStatement): SemanticBlock[] {
+  if (statement.k === "loop" || statement.k === "block") return [statementBlocksOf(statement)[0] as SemanticBlock];
+  if (statement.k === "if") return statement.otherwise === null ? [statement.then] : [statement.then, statement.otherwise];
+  return [];
+}
+
+/** Whether a statement's value is a call, which is the reason the statement is there at all. */
+function carriesAValue(statement: SemanticStatement & { value: SemanticValue }): boolean {
+  let calls = false;
+  walkSemanticValue(statement.value, (one) => {
+    if (one.k === "call") calls = true;
+  });
+  return calls;
+}
+
+/**
+ * Drops a name written as itself.
+ *
+ * `set s = s` is what every compound assignment that changes nothing becomes:
+ * `set s += 0` folds to `s + 0`, which folds to `s`, and what is left is a
+ * load and a store of a name into itself. The source language's own `s = s` is
+ * the same statement.
+ *
+ * The one case where the write is not the identity is a conversion: a slot
+ * declared at one width and written a value of another is a narrowing the
+ * source asked for, and dropping it would drop the narrowing. That is the same
+ * test `inlineSingleUses` runs before it moves a value past its binding.
+ */
+function dropSelfAssignments(body: Body): boolean {
+  const types = new Map<string, SemanticType>();
+  for (const parameter of body.params) types.set(parameter.name, slotType(parameter));
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let") types.set(statement.slot.name, slotType(statement.slot));
+      if (statement.k === "loop") {
+        const loop = statement.loop;
+        if (loop.kind === "counted") types.set(loop.variable, loop.type);
+        if (loop.kind === "each") types.set(loop.element, loop.elementType);
+      }
+    }
+  }
+  let changed = false;
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    block.statements = block.statements.filter((statement) => {
+      if (statement.k !== "set" || statement.op !== "=") return true;
+      if (statement.value.k !== "local" || statement.value.name !== statement.name) return true;
+      if (block.releases.includes(statement.name)) return true;
+      const held = types.get(statement.name);
+      if (held !== undefined && typeLabel(statement.value.type) !== typeLabel(held)) return true;
+      changed = true;
+      return false;
+    });
+  }
+  return changed;
+}
+
+/**
  * Takes the arm an `if` whose condition folded to a truth selects, where that
  * can be done without merging two scopes into one.
  *
@@ -1190,6 +1372,14 @@ function pruneKnownBranches(block: SemanticBlock): boolean {
       return [];
     }
     if (taken.statements.some(claimsAName)) return [statement];
+    // An arm that ends in something other than falling out of the end of it
+    // carries that ending in its terminator, and a terminator belongs to the
+    // block it was written in: the block around an `if` always has a way
+    // through that does not leave, which is what makes the return inside the
+    // arm an early one. Splicing the arm's statements into that block and
+    // dropping the terminator would turn `if (2 > 1) { return 1 } return 2`
+    // into a function that returns 2.
+    if (taken.terminator.k !== "next" || taken.releases.length > 0) return [statement];
     changed = true;
     return taken.statements;
   });
@@ -1268,7 +1458,12 @@ function optimizeBody(body: Body): void {
     if (commonWithin(body)) changed = true;
     if (propagateCopies(body)) changed = true;
     if (inlineSingleUses(body)) changed = true;
+    // The self-assignment goes before the dead stores, because folding is what
+    // turns a compound assignment that changes nothing into one, and the dead
+    // stores below are the ones the self-assignment can then leave behind.
+    if (dropSelfAssignments(body)) changed = true;
     if (dropDeadWrites(body)) changed = true;
+    if (dropOverwrittenStores(body)) changed = true;
     if (dropUnread(body)) changed = true;
     if (!changed) break;
   }

@@ -163,10 +163,30 @@ const IMMEDIATE_OPERATIONS: Record<string, true> = {
 
 /**
  * The whole-number registers a callee leaves as it found them, which are the
- * ones a value that never changes can be kept in across a call. Five is what
- * the convention has: rbx, r12, r13, r14 and r15.
+ * ones a value that never changes can be kept in across a call. Four is what
+ * this backend uses of the five the convention has: rbx, r12, r13 and r14.
+ *
+ * The fifth, r15, is the register an object being filled lives in for the
+ * duration of the statement that fills it. It is not taken from the list of
+ * values a function can pin because it is already spoken for, and it is the
+ * right register for the job: it survives the calls a field value makes, which
+ * is the whole reason the object pointer cannot live in the scratch register
+ * every other part of the lowering uses.
  */
-const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14, R15];
+const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14];
+
+/**
+ * The register an object allocated and filled as one value is held in across
+ * the field stores, which is what stops it being written to the frame and read
+ * back for every field that is a call.
+ *
+ * A call takes the scratch register — it is the fourth argument register — so
+ * an object pointer kept there has to be written down before a field that calls
+ * and read back after it, which is a store and a load per call-valued field. A
+ * register the convention says a callee leaves as it found them needs neither.
+ */
+const OBJECT_POINTER = R15;
+
 
 /**
  * The vector registers a callee leaves as it found them, which are the ones a
@@ -423,6 +443,20 @@ function lowerFunction(
 
 
 /**
+ * The register the last argument of a call that spills nothing is taken in.
+ *
+ * Nothing spills, so every argument before it took a register of its own class
+ * and the count of each is that argument's index among the arguments of its
+ * class.
+ */
+function lastArgumentRegister(types: readonly SemanticType[], last: number): number {
+  let floating = 0;
+  for (const type of types.slice(0, last)) if (isFloat(type)) floating += 1;
+  const type = types[last] as SemanticType;
+  return isFloat(type) ? (SSE_ARGUMENTS[floating] as number) : (INTEGER_ARGUMENTS[last - floating] as number);
+}
+
+/**
  * The argument at which a call runs out of registers, or the number of
  * arguments when it does not.
  *
@@ -511,6 +545,26 @@ class Machine {
   private pinnedRegisters: number[] = [];
   /** The vector registers spilled to the frame by the prologue and read back by the epilogue. */
   private pinnedVectors: VectorSave[] = [];
+  /** The register an object being filled lives in, when this function fills one. */
+  private objectRegister: number | null = null;
+
+  /**
+   * Whether this function allocates an object or writes an array out, which is
+   * what the register above is for.
+   *
+   * A function that never builds one has no use for the register, and taking it
+   * anyway would cost every such function a push and a pop for nothing — which
+   * is the whole of what a name being pinned costs, so a program of small
+   * functions would pay for a change that helps only the few that allocate.
+   */
+  private fillsObjects(): boolean {
+    for (const block of everyBlock(this.fn.entry)) {
+      for (const value of everyValue(block)) {
+        if (value.k === "newObject" || value.k === "buffer") return true;
+      }
+    }
+    return false;
+  }
   private lastLiteral = "";
 
   private readonly fn: SemanticFunction;
@@ -738,6 +792,13 @@ class Machine {
         } else if (loop.kind === "each") {
           declarations.set(loop.index, (declarations.get(loop.index) ?? 0) + 1);
           declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
+          // A walk over an array steps its index once per turn and reads it
+          // twice — once for the address and once for whatever the body does
+          // with it — which is the same shape as a counted loop's counter and is
+          // given a register for the same reason. Only the index is a candidate:
+          // the element is the loop's own value and is written once per turn
+          // from whatever the address produced.
+          counters.set(loop.index, Math.max(counters.get(loop.index) ?? 0, depth));
         }
         walkCounters(loop.body, depth + 1);
       }
@@ -751,6 +812,14 @@ class Machine {
       if (register === undefined) break;
       this.pinned.set(name, register);
       this.pinnedRegisters.push(register);
+    }
+    // The register an object is filled in is claimed after every name that could
+    // be pinned to one, so that a function which builds an object keeps the
+    // registers its names are read most often and takes the object register
+    // from what is left.
+    if (this.fillsObjects()) {
+      this.objectRegister = OBJECT_POINTER;
+      this.pinnedRegisters.push(OBJECT_POINTER);
     }
     // The prologue pushes the registers below the frame pointer, and a slot the
     // lowering binds is reserved from there downwards, so the frame starts
@@ -1038,11 +1107,16 @@ class Machine {
         return;
       }
       case "step": {
+        // A name the build gave a register of its own is stepped where it lies,
+        // the way a counted loop steps its counter. Copying it through the
+        // accumulator to add one and write it back is two instructions that
+        // produce the same register.
         const target = this.slot(statement.name);
-        this.load(target);
-        this.one(target.type, statement.op === "++" ? "add" : "sub");
-        this.normalizeArithmetic(target.type);
-        this.store(target);
+        const register = target.register;
+        if (register === null) this.load(target);
+        this.one(target.type, statement.op === "++" ? "add" : "sub", register ?? RAX);
+        this.normalizeArithmetic(target.type, register ?? RAX);
+        if (register === null) this.store(target);
         return;
       }
       case "printText":
@@ -1115,24 +1189,24 @@ class Machine {
       this.store(target);
       return;
     }
-    // Every other operator reads what the name holds, so the value it is given
-    // is read into a slot first: it would otherwise be computed once per side of
-    // the operation. What the name holds is then either the other side of the
-    // operation, read by the operation itself, or the scratch it takes its other
-    // side from, where a load and a move would be two instructions for one read.
-    const right = this.hold(target.type, "blaze_value");
+    // Every other operator reads what the name holds as well as the value it is
+    // given, so the name's old value is read into the scratch register and the
+    // operation reads the two from where they are.
+    //
+    // The value is evaluated once and left in the accumulator: a copy written to
+    // a slot and read back out of it is a store and a load for a value that has
+    // not moved, and the instruction that reads the name's old value writes
+    // only the scratch register, so the accumulator is untouched by it. The
+    // order is the one the general form above already had — the value is
+    // evaluated before the name is read — so a value that writes the name as a
+    // side of its own evaluation still reads the same thing either way.
     this.at(value, target.type);
-    // The operation reads what the name holds rather than a copy of it, so a
-    // value that answers into the accumulator is never written down and read
-    // back out of the frame it was written into.
     if (this.floatOverFrame(COMPOUND[op.slice(0, -1)], target.type, target)) {
       this.normalizeArithmetic(target.type);
       this.store(target);
       return;
     }
-    this.store(right);
     this.scratchFrom(target);
-    this.load(right);
     this.apply(COMPOUND[op.slice(0, -1)], target.type);
     this.normalizeArithmetic(target.type);
     this.store(target);
@@ -1250,10 +1324,22 @@ class Machine {
    */
   private counted(loop: Extract<SemanticLoop, { kind: "counted" }>): void {
     const type = loop.type;
-    this.at(loop.from, type);
-    const from = this.holdAcross(type, "blaze_from");
-    this.store(from);
-    const writtenTo = this.immediateOf(loop.to, type);
+    // The variable is bound before the loop's own values are read, because
+    // whether it has a register decides whether the value the loop starts from
+    // needs a slot of its own: a counter in a register is written straight from
+    // the value the loop starts at, where a counter in the frame is written from
+    // a slot that holds that value and nothing else ever reads.
+    const variable = this.bind(loop.variable, type);
+    let from: Held | null = null;
+    if (variable.register === null) {
+      this.at(loop.from, type);
+      from = this.holdAcross(type, "blaze_from");
+      this.store(from);
+    } else {
+      this.at(loop.from, type);
+      this.store(variable);
+    }
+    const writtenTo = this.literalOf(loop.to, type);
     const to: Held | number = writtenTo ?? this.heldAt(type, "blaze_to", loop.to);
     let step: Held | number | null = null;
     if (loop.step !== null) {
@@ -1269,9 +1355,14 @@ class Machine {
         this.store(step);
       }
     }
-    const variable = this.bind(loop.variable, type);
-    this.load(from);
-    this.store(variable);
+    // A counter in the frame is started from the slot the loop's first value
+    // was written to, which the step and the bound above were evaluated after
+    // and would otherwise have taken the accumulator away from. A counter in a
+    // register was already given it above and needs nothing here.
+    if (variable.register === null && from !== null) {
+      this.load(from);
+      this.store(variable);
+    }
     const test = this.code.label("Ltest");
     this.code.jmp(test);
     this.code.bind(loop.header);
@@ -1314,7 +1405,7 @@ class Machine {
     this.code.bind(loop.exit);
     // The slots the header was read into are dead now the loop is written, and
     // whatever the statement after this one binds takes them.
-    this.freeSlot(from);
+    if (from !== null) this.freeSlot(from);
     if (typeof to !== "number") this.freeSlot(to);
     if (typeof step !== "number" && step !== null) this.freeSlot(step);
   }
@@ -1329,18 +1420,21 @@ class Machine {
     const length = this.holdAcross(USIZE, "blaze_length");
     this.store(length);
     const index = this.bind(loop.index, USIZE);
-    this.code.movRegImm(RAX, 0n);
-    this.store(index);
+    // The index is stepped where it lies, the way a counted loop steps its
+    // counter: in the frame it costs a store and a load per turn to hold a
+    // value the next turn reads straight back out again, and a register the
+   // callee leaves alone costs neither.
+    const counter = index.register ?? RAX;
+    this.code.movRegImm(counter, 0n);
+    if (index.register === null) this.store(index);
     const test = this.code.label("Ltest");
     this.code.jmp(test);
     this.code.bind(loop.header);
-    this.code.movRegMem(RAX, frame(index.offset));
-    this.code.aluImm("add", RAX, 1);
-    this.store(index);
+    this.code.aluImm("add", counter, 1);
+    if (index.register === null) this.store(index);
     this.code.bind(test);
-    // The same as in a counted loop: the count was just written and the
-    // accumulator still holds it.
-    this.code.aluRegMem("cmp", RAX, frame(length.offset), true);
+    // The count was just written, so the counter is still where it was stepped.
+    this.code.aluRegMem("cmp", counter, frame(length.offset), true);
     this.code.jcc("ae", loop.exit);
     this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType);
     this.readAt(loop.elementType);
@@ -1405,13 +1499,14 @@ class Machine {
     if (value.k === "compare" && !isTextType(value.operand)) {
       const type = value.operand;
       // Which form the comparison takes is settled before either side is
-      // written, so that a side is evaluated once whichever form it is.
-      const immediate = this.immediateOf(value.right, type);
+      // written, so that a side is evaluated once whichever form it is. An
+      // other side the program wrote out is carried by the comparison itself
+      // rather than by a slot, so `left > 0` is a compare against a literal
+      // and not a literal stored in the frame and read back out of it.
+      const immediate = this.literalOf(value.right, type);
       if (immediate !== null) {
-        const condition = COMPARISON[signedOf(type) ? "signed" : "unsigned"][value.op];
         this.at(value.left, type);
-        this.cmpHeld(type, immediate);
-        this.code.jcc(whenTrue ? condition : NEGATED[condition], label);
+        this.comparedBranch(type, value.op, immediate, whenTrue, label);
         return;
       }
       const right = this.hold(type, "blaze_right");
@@ -1869,6 +1964,37 @@ class Machine {
   }
 
   /**
+   * The number a comparison could carry on its other side instead of a
+   * register, or null when what the value is cannot be written as one.
+   *
+   * A whole number is carried by the instruction's own immediate field, and a
+   * float by the read-only data the instruction reads it out of, so neither is
+   * written into a slot of the frame and read back out of it. Every place a
+   * comparison is written already has a form that reads its other side from
+   * one place or the other; this is what decides which.
+   *
+   * A float is only carried where the instruction can read it at the precision
+   * the comparison is made at, and a whole number only where the immediate
+   * fields encode it — a sign-extended byte or a sign-extended word.
+   */
+  private literalOf(value: SemanticValue, type: SemanticType): number | null {
+    if (value.k === "bool") return isFloat(type) ? null : value.value ? 1 : 0;
+    if (value.k !== "const") return null;
+    if (isFloat(type)) {
+      // A float the program wrote out at the other precision is a conversion
+      // the instruction has no form of, so it is left to the frame.
+      if (!isFloat(value.type) || widthOf(value.type) !== widthOf(type)) return null;
+      const parsed = Number(decimalText(value.text));
+      // A value that is not a number has no bits to be laid down, and the
+      // answer it gives is the one the operation would have given anyway.
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    const parsed = integerText(value.text);
+    if (parsed < -0x8000_0000n || parsed > 0x7fff_ffffn) return null;
+    return Number(parsed);
+  }
+
+  /**
    * The number an instruction could carry instead of a register, or null when
    * what the value is cannot be written into one.
    *
@@ -2074,9 +2200,9 @@ class Machine {
       this.textOrder(value.op, left, right);
       return;
     }
-    // A right side the program wrote out is carried by the comparison itself,
+    // An other side the program wrote out is carried by the comparison itself,
     // so it is never written to the frame and read back out of it.
-    const written = this.immediateOf(value.right, type);
+    const written = this.literalOf(value.right, type);
     if (written !== null) {
       this.at(value.left, type);
       this.compare(type, value.op, written);
@@ -2570,17 +2696,32 @@ class Machine {
    * number, so a slot that holds a narrower one is read at its own width and
    * widened, and a float is read as a whole number by a conversion the general
    * form writes. Neither is a plain 64 bit read, so neither takes this path.
+   *
+   * A name the build gave a register of its own takes this path too, and is
+   * read out of that register by `readInto` below. It cannot be read out of the
+   * frame: a pinned name has no slot reserved at all, so its offset is zero,
+   * and zero is the word above the frame pointer where the return address was
+   * put.
    */
   private plainIndex(index: SemanticValue): Held | bigint | null {
     if (index.k === "const") return integerText(index.text);
     if (index.k !== "local") return null;
     const held = this.slot(index.name);
+    if (held.register !== null) return held;
     return isFloat(held.type) || widthOf(held.type) !== 8 ? null : held;
   }
 
+  /** The number an index is, in the register the caller asked for. */
   private readInto(held: Held | bigint, register: number): void {
-    if (typeof held === "bigint") this.code.movRegImm(register, held);
-    else this.code.movRegMem(register, frame(held.offset));
+    if (typeof held === "bigint") {
+      this.code.movRegImm(register, held);
+      return;
+    }
+    if (held.register !== null) {
+      this.code.movRegReg(register, held.register);
+      return;
+    }
+    this.code.movRegMem(register, frame(held.offset));
   }
 
   private addressOf(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): void {
@@ -2612,18 +2753,30 @@ class Machine {
   /**
    * An array the program wrote out, allocated and filled where it was.
    *
-   * The address of the array is held in the scratch register across the
-   * elements, and each element's offset is the displacement of its own store,
-   * so an element costs one instruction rather than three. An element that is
-   * a call takes the register away, because a call is written with the very
-   * argument registers the scratch is one of; that element pays a reload
-   * instead, which is two instructions and still fewer than the three it
-   * replaced.
+   * The address of the array is held in a register across the elements, and
+   * each element's offset is the displacement of its own store, so an element
+   * costs one instruction rather than three. Which register it is held in is
+   * what the rest of this depends on: the scratch register is the fourth
+   * argument register, so an element that is a call takes it away and an
+   * address kept there has to be written down and read back. A register the
+   * convention says a callee leaves alone survives a call, so a function that
+   * was given one does not pay that, and one that was not keeps the register
+   * it already had and reloads the address for a call-valued element.
    */
   private buffer(value: SemanticValue & { k: "buffer" }): void {
     this.code.movRegImm(RDI, BigInt(value.length));
     this.code.movRegImm(RSI, BigInt(widthOf(value.element)));
     this.runtime("_array_new");
+    const held = this.objectRegister;
+    if (held !== null) {
+      this.code.movRegReg(held, RAX);
+      value.values.forEach((element, at) => {
+        this.at(element, value.element);
+        this.storeInto(value.element, held, at * widthOf(value.element));
+      });
+      this.code.movRegReg(RAX, held);
+      return;
+    }
     const array = this.hold(POINTER, "blaze_array");
     this.store(array);
     this.code.movRegMem(RCX, frame(array.offset));
@@ -2655,6 +2808,17 @@ class Machine {
     this.code.movRegImm(RDI, BigInt(layout.size));
     this.code.movRegImm(RSI, BigInt(layout.align));
     this.runtime("_object_new");
+    if (this.objectRegister !== null) {
+      this.code.movRegReg(this.objectRegister, RAX);
+      for (const written of value.fields) {
+        const field = this.field(value.layout, written.name);
+        const type = parseType(field.type);
+        this.at(written.value, type);
+        this.storeInto(type, this.objectRegister, field.offset);
+      }
+      this.code.movRegReg(RAX, this.objectRegister);
+      return;
+    }
     const object = this.hold(POINTER, "blaze_object");
     this.store(object);
     this.code.movRegMem(RCX, frame(object.offset));
@@ -2678,22 +2842,29 @@ class Machine {
       if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
       return;
     }
-    // An argument left in the accumulator is not written to a slot and then
-    // read back, which is a store and a load for a value that never moved.
-    // Only the last one can be left there: evaluating a later argument takes
-    // the accumulator away again. And only when no argument goes on the stack,
-    // because the ones that do are written out before the registers are read
-    // and writing them out goes through the very register the value is in.
+    // An argument left where it is, rather than written to a slot and read back
+    // out of it, is a store and a load saved for a value that never moved.
+    //
+    // Two forms are left where they are. One is the accumulator, which only the
+    // last argument can use because evaluating a later one takes it away. The
+    // other is the argument's own register, which a value that is nothing but a
+    // read can be read into directly — a recursive call's argument is a field of
+    // the parameter, and going through the accumulator for one is a move that
+    // answers nothing. That is the last argument too, because an argument
+    // register is one a later argument's own evaluation may write, and it is
+    // only when nothing goes on the stack, because the arguments that do are
+    // written out through the very registers the rest are read into.
     const types = call.args.map((argument, at) => call.argTypes[at] ?? argument.type);
     const spilling = firstArgumentOnStack(types);
+    const last = call.args.length - 1;
+    const intoLast = spilling === call.args.length ? lastArgumentRegister(types, last) : undefined;
     let fresh = -1;
-    const args = call.args.map((argument, at) => {
+    let placed = -1;
+    const args: (Held | null)[] = call.args.map((argument, at) => {
       const type = types[at];
       // An argument that is a name read at the type the parameter takes is the
       // slot itself: the register the call takes it in is filled from there
       // anyway, and the general form copies it into a slot of its own first.
-      // Anything else is evaluated into one, because evaluating an argument
-      // writes the accumulator and a later argument would take it away again.
       if (argument.k === "local") {
         const held = this.slot(argument.name);
         if (typeEquals(held.type, type)) return held;
@@ -2702,15 +2873,70 @@ class Machine {
         // types are written differently and are the same word.
         if (isReference(held.type) && isReference(type)) return held;
       }
-      const untouched = at === call.args.length - 1 && spilling === call.args.length;
+      if (at === last && intoLast !== undefined && this.readIntoRegister(argument, intoLast, type)) {
+        placed = at;
+        return null;
+      }
+      const untouched = at === last && spilling === call.args.length;
       if (untouched) fresh = at;
       this.at(argument, type);
       const held = this.hold(type, "blaze_argument");
       if (!untouched) this.store(held);
       return held;
     });
-    this.callSymbol(call.signature.symbol, args, call.returns, fresh);
+    this.callSymbol(call.signature.symbol, args, call.returns, fresh, placed);
     if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
+  }
+
+
+  /**
+   * A value that is nothing but reads, read straight into the register the
+   * caller wants it in.
+   *
+   * A name is read out of its slot, and a field of one is a second read at a
+   * displacement. A field whose object is itself a name is the shape every
+   * recursive call on a tree has.
+   *
+   * Anything that computes is refused, because the accumulator is what computes
+   * things; so is a conversion, because the instruction that narrows the value
+   * would have to write the register too and there is no general form here for
+   * that. Only a value already at the type the parameter takes is read, so the
+   * register holds the number the callee is declared to be handed.
+   */
+  private readIntoRegister(value: SemanticValue, register: number, type: SemanticType): boolean {
+    if (value.k === "local") {
+      const held = this.slot(value.name);
+      if (!typeEquals(held.type, type) && !(isReference(held.type) && isReference(type))) return false;
+      if (isFloat(type)) this.code.movsLoad(register, frame(held.offset), widthOf(type) === 4);
+      else this.code.movRegMemSized(register, frame(held.offset), widthOf(held.type), signedOf(held.type));
+      return true;
+    }
+    if (value.k !== "loadField") return false;
+    if (!typeEquals(value.type, type) && !(isReference(value.type) && isReference(type))) return false;
+    const object = value.object;
+    if (object.k !== "local") return false;
+    const base = this.slot(object.name);
+    if (!typeEquals(base.type, object.type)) return false;
+    const displacement = this.field(value.layout, value.field).offset;
+    if (base.register !== null) {
+      const at = mem(base.register, displacement);
+      if (isFloat(type)) this.code.movsLoad(register, at, widthOf(type) === 4);
+      else this.code.movRegMemSized(register, at, widthOf(type), signedOf(type));
+      return true;
+    }
+    // The object is in the frame, so the field is read through it: the name is
+    // read straight into the register the call takes it in and the field is
+    // read through that. Going through the accumulator is a move that answers
+    // nothing, and reading the object into a slot first is a store and a load
+    // for a value that was read exactly once.
+    if (isFloat(type)) {
+      this.code.movsLoad(register, frame(base.offset), widthOf(base.type) === 4);
+      this.code.movsLoad(register, mem(register, displacement), widthOf(type) === 4);
+      return true;
+    }
+    this.code.movRegMemSized(register, frame(base.offset), widthOf(base.type), signedOf(base.type));
+    this.code.movRegMemSized(register, mem(register, displacement), widthOf(type), signedOf(type));
+    return true;
   }
 
   /**
@@ -2776,16 +3002,19 @@ class Machine {
    * are read last, because writing an argument that has no register left goes
    * through the very registers the others are read into.
    */
-  private callSymbol(symbol: string, args: readonly Held[], returns: SemanticType, fresh = -1): void {
+  private callSymbol(symbol: string, args: readonly (Held | null)[], returns: SemanticType, fresh = -1, placed = -1): void {
     this.external(symbol);
     const onStack: Held[] = [];
     const registers: { register: number; held: Held; at: number }[] = [];
     let general = 0;
     let floating = 0;
     for (const [at, argument] of args.entries()) {
+      if (argument === null) continue;
       // The registers are handed out in the order the arguments are written, and
       // an argument that has none left is on the stack with every argument after
-      // it, whichever class those are.
+      // it, whichever class those are. An argument already in its own register
+      // still takes one, so that the counts below are the ones the convention
+      // hands out.
       const register =
         onStack.length > 0 ? undefined : isFloat(argument.type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
       if (register === undefined) {
@@ -2812,6 +3041,10 @@ class Machine {
       });
     }
     for (const { register, held, at } of registers) {
+      // An argument that was read straight into its own register is already
+      // there, and filling it again from the frame is the move the caller
+      // avoided by not writing it there at all.
+      if (at === placed) continue;
       // An argument that is pinned is in its register, so it is copied from
       // there rather than read out of the frame.
       if (held.register !== null) {
