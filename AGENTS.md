@@ -66,6 +66,11 @@ Make use of:
 - Pass data structures instead of using private fields to improve determinism.
 
 
+## List of do's
+
+- Do take care not to cause an oom with benchmarking and testing.
+
+
 ## List of dont's
 
 - Don't try to do anything that would require secrets you don't have.
