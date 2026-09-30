@@ -345,7 +345,7 @@ function slotText(slot: SemanticSlot): string {
 
 /** One piece of a string: text as written, or a value put into it. */
 function partText(part: SemanticTextPart): string {
-  return part.k === "text" ? stringLiteral(part.value) : valueText(part.value);
+  return part.k === "text" ? stringLiteral(part.value) : printSemanticValue(part.value);
 }
 
 /**
@@ -355,14 +355,14 @@ function partText(part: SemanticTextPart): string {
  */
 function callText(call: SemanticCall): string {
   const args = call.args
-    .map((argument, position) => `arg[${typeText(call.argTypes[position])}] ${valueText(argument)}`)
+    .map((argument, position) => `arg[${typeText(call.argTypes[position])}] ${printSemanticValue(argument)}`)
     .join(" ");
   const retain = call.retain ? "yes" : "no";
   return `${call.callee} [${args}] ownership=${call.ownership} retain=${retain}`;
 }
 
 /** A value as the IR states it: the operation, the type, and what it is made of. */
-function valueText(value: SemanticValue): string {
+export function printSemanticValue(value: SemanticValue): string {
   switch (value.k) {
     case "const":
       return `const[${typeText(value.type)}] ${value.text}`;
@@ -375,39 +375,39 @@ function valueText(value: SemanticValue): string {
     case "local":
       return `local[${typeText(value.type)}] ${value.name}`;
     case "length":
-      return `[length[${typeText(value.type)}] ${valueText(value.of)}]`;
+      return `[length[${typeText(value.type)}] ${printSemanticValue(value.of)}]`;
     case "element":
-      return `[element[${typeText(value.type)}] ${valueText(value.of)} ${valueText(value.index)}]`;
+      return `[element[${typeText(value.type)}] ${printSemanticValue(value.of)} ${printSemanticValue(value.index)}]`;
     case "buffer":
-      return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] ${value.length} ${value.values.map(valueText).join(" ")}]`;
+      return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] ${value.length} ${value.values.map(printSemanticValue).join(" ")}]`;
     case "newObject":
-      return `[new_object[${typeText(value.type)}] ${value.layout} ${value.fields.map((field) => `${field.name} ${valueText(field.value)}`).join(" ")}]`;
+      return `[new_object[${typeText(value.type)}] ${value.layout} ${value.fields.map((field) => `${field.name} ${printSemanticValue(field.value)}`).join(" ")}]`;
     case "loadField":
-      return `[load_field[${typeText(value.type)}] ${valueText(value.object)} ${value.layout} ${value.field}]`;
+      return `[load_field[${typeText(value.type)}] ${printSemanticValue(value.object)} ${value.layout} ${value.field}]`;
     case "call":
       return `[call[${typeText(value.type)}] ${callText(value.call)}]`;
     case "arith":
-      return `[${value.op}[${typeText(value.type)}] ${valueText(value.left)} ${valueText(value.right)}]`;
+      return `[${value.op}[${typeText(value.type)}] ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
     case "compare":
-      return `[${value.op}[${typeText(value.type)}] ${typeText(value.operand)} ${valueText(value.left)} ${valueText(value.right)}]`;
+      return `[${value.op}[${typeText(value.type)}] ${typeText(value.operand)} ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
     case "logical": {
       const word = value.op === "and" ? "logical_and" : "logical_or";
-      return `[${word}[${typeText(value.type)}] ${valueText(value.left)} ${valueText(value.right)}]`;
+      return `[${word}[${typeText(value.type)}] ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
     }
     case "coalesce":
-      return `[coalesce[${typeText(value.type)}] ${valueText(value.left)} ${valueText(value.right)}]`;
+      return `[coalesce[${typeText(value.type)}] ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
     case "select":
-      return `[select[${typeText(value.type)}] ${valueText(value.condition)} ${valueText(value.then)} ${valueText(value.otherwise)}]`;
+      return `[select[${typeText(value.type)}] ${printSemanticValue(value.condition)} ${printSemanticValue(value.then)} ${printSemanticValue(value.otherwise)}]`;
     case "unary":
-      return `[unary ${value.op}[${typeText(value.type)}] ${valueText(value.operand)}]`;
+      return `[unary ${value.op}[${typeText(value.type)}] ${printSemanticValue(value.operand)}]`;
     case "isNull":
-      return `[${value.negate ? "is_not_null" : "is_null"}[${typeText(value.type)}] ${valueText(value.operand)}]`;
+      return `[${value.negate ? "is_not_null" : "is_null"}[${typeText(value.type)}] ${printSemanticValue(value.operand)}]`;
     case "toText":
-      return `[to_text ${valueText(value.of)}]`;
+      return `[to_text ${printSemanticValue(value.of)}]`;
     case "argv":
       return value.index === null
         ? `argv[${typeText(value.type)}]`
-        : `[argv[${typeText(value.type)}] ${valueText(value.index)}]`;
+        : `[argv[${typeText(value.type)}] ${printSemanticValue(value.index)}]`;
   }
 }
 
@@ -416,7 +416,7 @@ function terminatorText(terminator: SemanticTerminator, indent: number): string 
   const pad = " ".repeat(indent);
   if (terminator.k === "next") return null;
   if (terminator.k === "return") {
-    return terminator.value === null ? `${pad}return` : `${pad}return ${valueText(terminator.value)}`;
+    return terminator.value === null ? `${pad}return` : `${pad}return ${printSemanticValue(terminator.value)}`;
   }
   const releases = terminator.releases.length === 0 ? "" : ` [${terminator.releases.join(" ")}]`;
   return `${pad}jump ${terminator.target}${releases}`;
@@ -444,20 +444,20 @@ function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
   let head: string;
   switch (loop.kind) {
     case "while":
-      head = `${pad}while ${valueText(loop.condition)}`;
+      head = `${pad}while ${printSemanticValue(loop.condition)}`;
       break;
     case "doWhile":
-      head = `${pad}do_while ${valueText(loop.condition)}`;
+      head = `${pad}do_while ${printSemanticValue(loop.condition)}`;
       break;
     case "counted": {
       const bound = loop.inclusive ? "inclusive" : "exclusive";
       const direction = loop.down ? "down" : "up";
-      const step = loop.step === null ? "default" : valueText(loop.step);
-      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${valueText(loop.from)} to ${valueText(loop.to)} ${bound} ${direction} step ${step}`;
+      const step = loop.step === null ? "default" : printSemanticValue(loop.step);
+      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${printSemanticValue(loop.from)} to ${printSemanticValue(loop.to)} ${bound} ${direction} step ${step}`;
       break;
     }
     case "each":
-      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${valueText(loop.length)}`;
+      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${printSemanticValue(loop.length)}`;
       break;
   }
   return [head + mark, ...blockLines(loop.body, indent + 2, null)];
@@ -469,19 +469,19 @@ function statementText(statement: SemanticStatement, indent: number): string[] {
   const mark = ` @${statement.line}`;
   switch (statement.k) {
     case "let":
-      return [`${pad}let ${slotText(statement.slot)} = ${valueText(statement.value)}${mark}`];
+      return [`${pad}let ${slotText(statement.slot)} = ${printSemanticValue(statement.value)}${mark}`];
     case "set":
-      return [`${pad}set ${statement.name} ${statement.op} ${valueText(statement.value)}${mark}`];
+      return [`${pad}set ${statement.name} ${statement.op} ${printSemanticValue(statement.value)}${mark}`];
     case "setElement":
       return [
-        `${pad}set_element ${statement.buffer} ${valueText(statement.index)} ${statement.op} ${valueText(statement.value)}${mark}`,
+        `${pad}set_element ${statement.buffer} ${printSemanticValue(statement.index)} ${statement.op} ${printSemanticValue(statement.value)}${mark}`,
       ];
     case "step": {
       const side: Side = statement.prefix ? "pre" : "post";
       return [`${pad}step ${statement.name} ${statement.op} ${side}${mark}`];
     }
     case "if": {
-      const lines = [`${pad}if ${valueText(statement.condition)}${mark}`, ...blockLines(statement.then, indent + 2, null)];
+      const lines = [`${pad}if ${printSemanticValue(statement.condition)}${mark}`, ...blockLines(statement.then, indent + 2, null)];
       if (statement.otherwise !== null) {
         lines.push(`${pad}else`, ...blockLines(statement.otherwise, indent + 2, null));
       }
@@ -492,20 +492,20 @@ function statementText(statement: SemanticStatement, indent: number): string[] {
     case "block":
       return blockLines(statement.body, indent, statement.line);
     case "printText":
-      return [`${pad}print_text ${valueText(statement.value)}${mark}`];
+      return [`${pad}print_text ${printSemanticValue(statement.value)}${mark}`];
     case "printNumber":
-      return [`${pad}print_number ${valueText(statement.value)}${mark}`];
+      return [`${pad}print_number ${printSemanticValue(statement.value)}${mark}`];
     case "printNewline":
       return [`${pad}print_newline${mark}`];
     case "retain":
-      return [`${pad}retain ${valueText(statement.value)}${mark}`];
+      return [`${pad}retain ${printSemanticValue(statement.value)}${mark}`];
     case "call":
       return [`${pad}call[${typeText(statement.call.returns)}] ${callText(statement.call)}${mark}`];
     case "raise":
-      return [`${pad}raise ${valueText(statement.message)}${mark}`];
+      return [`${pad}raise ${printSemanticValue(statement.message)}${mark}`];
     case "storeField":
       return [
-        `${pad}store_field ${valueText(statement.object)} ${statement.layout} ${statement.field} ${valueText(statement.value)}${mark}`,
+        `${pad}store_field ${printSemanticValue(statement.object)} ${statement.layout} ${statement.field} ${printSemanticValue(statement.value)}${mark}`,
       ];
   }
 }

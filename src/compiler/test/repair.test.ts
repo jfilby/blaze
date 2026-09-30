@@ -89,6 +89,16 @@ test("the catalogue is the one the prompt offers, and every rule is applied and 
   }
 });
 
+test("the two rules that bind a value say a read of memory is never one", () => {
+  // A model reads `applies` before it proposes and cannot read the rule, so an
+  // exclusion the text leaves out is one it proposes against. A memory read is
+  // the exclusion that actually refuses rules in practice — the IR holds no
+  // length and no null test — and it is not visible in the shape of the value.
+  for (const rule of REPAIR_RULES.filter((entry) => entry.name === "hoist-invariant" || entry.name === "common-subexpression")) {
+    assert.match(rule.applies, /read of memory/, `${rule.name} says a read of memory is excluded`);
+  }
+});
+
 test("a loop is named by the block it leaves for, and the site index says so", () => {
   const sites = describeSites(resolved("work"));
   assert.ok(sites.some((line) => /^loop b\d+:/.test(line)), sites.join("\n"));
@@ -110,7 +120,7 @@ test("hoist-invariant binds a value a loop computes again above the loop", () =>
 test("hoist-invariant refuses a loop that computes nothing twice", () => {
   const outcome = apply("plain", proposalsIn(repaired("hoist-invariant b1"))[0] as Proposal);
   assert.ok("refused" in outcome);
-  assert.match(outcome.refused, /computes nothing more than once/);
+  assert.match(outcome.refused, /nothing more than once/);
 });
 
 test("hoist-invariant refuses a function that has no loop", () => {
@@ -126,10 +136,13 @@ test("common-subexpression binds what a block computes twice", () => {
   assert.match(outcome.note, /bound \d+ repeated value\(s\) in b2/);
 });
 
-test("common-subexpression refuses a block that computes nothing twice", () => {
+test("common-subexpression refuses a block whose only repetition cannot be bound", () => {
+  // `plain` does write a value twice — the `0` its accumulator starts at — so
+  // a refusal that claimed it computed nothing twice was not describing the
+  // body. What it computed twice was a literal, and the refusal says so.
   const outcome = apply("plain", proposalsIn(repaired("common-subexpression entry"))[0] as Proposal);
   assert.ok("refused" in outcome);
-  assert.match(outcome.refused, /computes nothing more than once/);
+  assert.match(outcome.refused, /it is a name or a literal/);
 });
 
 test("reciprocal-multiply turns a division by a power of two into a multiplication", () => {
@@ -286,7 +299,7 @@ test("common-subexpression refuses a value a nested block shadows", () => {
     "common-subexpression entry",
   );
   assert.ok("refused" in outcome, "a value a nested block shadows is not one value");
-  assert.match(outcome.refused, /nothing to bind/);
+  assert.match(outcome.refused, /it reads a name the region writes/);
 });
 
 test("a value that reads through an object is not bound under a negation", () => {
@@ -310,7 +323,66 @@ test("a value that reads through an object is not bound under a negation", () =>
     "common-subexpression b2",
   );
   assert.ok("refused" in negated, "a read through an object is not bound under a negation");
-  assert.match(negated.refused, /nothing to bind/);
+  assert.match(negated.refused, /it reads memory/);
+});
+
+// A refusal is what the next round is handed, so a refusal that does not say
+// which value it refused tells a model that was right about the repetition
+// that it was wrong about it, and it proposes the same thing again. These are
+// the three cases that actually occur: a read of memory, a call, and a name.
+
+test("a refusal names the value it refused and the reason, so the next round can act on it", () => {
+  // The case from a real build: `checksum` reads `node.left` once in the guard
+  // and once in the return, so the repetition is real and the refusal has to be
+  // about the read rather than about the count. The value is quoted the way the
+  // IR prints it, because that is the text the model read to decide it was
+  // repeated in the first place. The object has to be built from a real field
+  // for the read to be one: a parameter typed `any` with no object behind it
+  // resolves to no field at all, and there is nothing to refuse.
+  const outcome = against(
+    [
+      "export function create(depth: number): any {",
+      "  return { left: null, right: null };",
+      "}",
+      "export function checksum(node: any): number {",
+      "  if (!node.left) { return 1; }",
+      "  return 1 + checksum(node.left) + checksum(node.right);",
+      "}",
+    ].join("\n"),
+    "checksum",
+    "common-subexpression entry",
+  );
+  assert.ok("refused" in outcome, "a read of memory is not bound");
+  assert.match(outcome.refused, /computes `\[load_field\[ref<any>\] local\[ref<any>\] node Object1 left\]` 2 times/);
+  assert.match(outcome.refused, /it reads memory/);
+});
+
+test("a refusal says a repeated call is a call, and a repeated name is a name", () => {
+  const called = against(
+    [
+      "export function twice(x: number): number { return x + x; }",
+      "export function work(scale: number): number {",
+      "  return twice(scale) + twice(scale);",
+      "}",
+    ].join("\n"),
+    "work",
+    "common-subexpression entry",
+  );
+  assert.ok("refused" in called, "a call is never bound");
+  assert.match(called.refused, /it calls something/);
+
+  const named = against(
+    [
+      "export function work(scale: number): number {",
+      "  let total = scale + scale;",
+      "  return total * scale + scale;",
+      "}",
+    ].join("\n"),
+    "work",
+    "common-subexpression entry",
+  );
+  assert.ok("refused" in named, "a name is read rather than computed");
+  assert.match(named.refused, /it is a name or a literal/);
 });
 
 test("inline-call keeps a call edge a terminator still makes", () => {

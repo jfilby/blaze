@@ -41,6 +41,7 @@ import {
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
+import { printSemanticValue } from "./ir-text.ts";
 import type { Proposal } from "../core/proposal.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -66,16 +67,26 @@ export const REPAIR_RULES: readonly RepairRule[] = [
     summary: "Bind every value a loop computes more than once and never changes, once, above the loop.",
     applies:
       "A while, do-while, counted or for-of loop whose body computes the same value twice without the loop " +
-      "writing anything that value reads. A call, an allocation and a read of a name the loop writes are never " +
-      "hoisted, because running one once instead of twice is not the same program.",
+      "writing anything that value reads. Three kinds of value are never bound, whatever else they look like: " +
+      "a call and an allocation, because running one once instead of twice is not the same program; a read of " +
+      "memory, which is an element, a field or a length, because the IR holds no length and no null test, so " +
+      "computing it above the test that made it safe is a fault the source could not perform; and a value " +
+      "reading a name the region writes. Two writes are the same value only when the whole of them is " +
+      "identical: a name, a literal, a type and every operation are compared, so `f(x)` written twice is one " +
+      "value and `f(x)` beside `f(y)` is two, which is nothing to bind. A body that repeats only a name or a " +
+      "literal has nothing here either, because a name is read rather than computed.",
     args: [],
   },
   {
     name: "common-subexpression",
     summary: "Bind a value a block computes more than once to a name, and read the name instead.",
     applies:
-      "Any block, named by its own id. The value must be computed at least twice in that block, must not call " +
-      "anything, must not allocate, and must not read a name the block writes.",
+      "Any block, named by its own id, and the blocks nested inside it. The value must be computed at least " +
+      "twice across them, must be written the same way every time, must not call anything, must not allocate, " +
+      "and must not read a name those blocks write or declare. A read of memory is never one of them: an " +
+      "element, a field and a length are all excluded, because the IR holds no length and no null test, so a " +
+      "binding would move the read out from under the test that made it safe. A block whose repeated text is " +
+      "only a call, a literal, a name or a memory read has nothing this rule can bind, and is refused.",
     args: [],
   },
   {
@@ -662,6 +673,65 @@ function repeatedValues(blocks: readonly SemanticBlock[], written: ReadonlySet<s
   return repeated;
 }
 
+/**
+ * Why a set of blocks has nothing a rule may bind, in terms of what it does
+ * compute more than once.
+ *
+ * A refusal that only says there is nothing to bind leaves a model that was not
+ * wrong about the repetition to conclude it was wrong about the repetition, and
+ * to propose it again in the next round. The values counted here are the ones
+ * written more than once and then dropped, each classified by the same
+ * predicate `repeatedValues` drops it on, so a reason stated here and the rule
+ * that refused it cannot come to disagree.
+ */
+function nothingToBind(blocks: readonly SemanticBlock[], written: ReadonlySet<string>, verb: string): string {
+  const counts = new Map<string, { value: SemanticValue; count: number }>();
+  for (const root of blockValues(blocks)) {
+    walkValues(root, (value) => {
+      const key = valueKey(value);
+      const entry = counts.get(key);
+      if (entry === undefined) counts.set(key, { value, count: 1 });
+      else entry.count += 1;
+    });
+  }
+  // The value a reader of the IR would have named comes first. A name and a
+  // literal are written more than once in almost every body and are never what
+  // a proposal is about, so a refusal that led with one would name something
+  // the model never proposed and answer none of the question it asked. What is
+  // left is a computed value, and the outermost of those is the one a reader
+  // would have pointed at: it is the whole of the expression, not a part of it.
+  const computed = (value: SemanticValue): boolean => isBindable(value) && !hasCall(value) && value.k !== "newObject";
+  const repeated = [...counts.values()]
+    .filter((entry) => entry.count > 1)
+    .sort((left, right) => {
+      const byKind = Number(computed(right.value)) - Number(computed(left.value));
+      return byKind !== 0 ? byKind : valueKey(right.value).length - valueKey(left.value).length;
+    });
+  const reason = (value: SemanticValue): string | null => {
+    if (hasCall(value)) return "it calls something, and running a call once instead of twice is not the same program";
+    if (value.k === "newObject") return "it allocates, and allocating once instead of twice is not the same program";
+    if (namesRead(value).some((name) => written.has(name))) {
+      return "it reads a name the region writes, so it is a different value on another pass";
+    }
+    if (!isBindable(value)) return "it is a name or a literal, which is read rather than computed";
+    if (!isSafeToCompute(value)) {
+      return "it reads memory, and the IR holds no length and no null test, so binding it would move the read out from under the test that made it safe";
+    }
+    return null;
+  };
+  const named = repeated
+    .map((entry) => ({ ...entry, reason: reason(entry.value) }))
+    .filter((entry): entry is { value: SemanticValue; count: number; reason: string } => entry.reason !== null);
+  const [first] = named;
+  if (first === undefined) return `computes nothing more than once that can be ${verb}, so there is nothing to do`;
+  return (
+    `computes \`${printSemanticValue(first.value)}\` ${first.count} times, but ${first.reason}` +
+    (named.length === 1
+      ? ""
+      : `; it also computes ${named.length - 1} other repeated value(s), none of which can be ${verb} either`)
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* hoist-invariant                                                            */
 /* -------------------------------------------------------------------------- */
@@ -673,12 +743,11 @@ function hoistInvariant(fn: SemanticFunction, site: string): RepairOutcome {
   // The condition is read once per iteration like the body is, and a value it
   // shares with the body is hoisted above the loop, where both of them read it.
   const region = [...nestedBlocks(target.loop.body), { ...target.owner, statements: [target.statement] }];
-  const repeated = repeatedValues(region, writtenIn(region, true));
+  const written = writtenIn(region, true);
+  const repeated = repeatedValues(region, written);
 
   if (repeated.size === 0) {
-    return {
-      refused: `has a body that computes nothing more than once, or everything it computes twice changes in it, so there is nothing to hoist out of it`,
-    };
+    return { refused: `has a body that ${nothingToBind(region, written, "hoisted")}` };
   }
 
   // The largest first: a value that is part of a bigger repeated value is
@@ -726,7 +795,7 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
   for (const name of shadowedIn(scope)) written.add(name);
   const repeated = repeatedValues(scope, written);
   if (repeated.size === 0) {
-    return { refused: `computes nothing more than once, or what it computes twice is not the same value, so there is nothing to bind` };
+    return { refused: nothingToBind(scope, written, "bound") };
   }
 
   const ordered = [...repeated.values()].sort((left, right) => valueKey(right).length - valueKey(left).length);

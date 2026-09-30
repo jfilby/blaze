@@ -197,7 +197,7 @@ test("a proposal the compiler refuses leaves the artifact as it was, and says wh
   assert.equal(candidates[0].text, resolved(), "a refused proposal changes nothing");
   assert.equal(candidates[0].proposals, undefined);
   assert.ok(
-    log.some((message) => /total: `hoist-invariant entry` was refused: has a body that computes nothing more than once/.test(message)),
+    log.some((message) => /total: `hoist-invariant entry` was refused: has a body that .*nothing more than once/.test(message)),
     log.join("\n"),
   );
   // `total` is not called in `entry` at all, so the second proposal is refused
