@@ -200,22 +200,12 @@ test("a binding nothing reads is dropped", () => {
   assert.doesNotMatch(printed(before), /unused/);
 });
 
-test("a binding something reads is kept", () => {
-  const before = fnOf({
-    id: "entry", releases: [],
-    statements: [
-      { k: "let", slot: { kind: "value", name: "used", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
-      { k: "printNumber", value: { k: "local", type: F64, name: "used" }, line: 2 },
-    ],
-    terminator: { k: "return", value: null },
-  });
-  assert.match(printed(before), /used/);
-});
-
-test("a binding read only as a call argument is kept", () => {
+test("a binding read only as a call argument reaches the call", () => {
   // The name is read inside the call, and a walk that stops at the call counts
   // it as read by nobody: the binding is dropped and the call is left reading a
-  // name the function no longer declares, which the validator refuses.
+  // name the function no longer declares, which the validator refuses. The
+  // name need not survive — a binding read once is put where it is read — but
+  // the value it was bound to has to arrive.
   const before = fnOf({
     id: "entry", releases: [],
     statements: [
@@ -224,9 +214,25 @@ test("a binding read only as a call argument is kept", () => {
     ],
     terminator: { k: "return", value: null },
   });
-  const after = printed(before);
-  assert.match(after, /let value\[f64\] argument immutable = const\[f64\] 1/);
-  assert.match(after, /Math\.abs \[arg\[f64\] local\[f64\] argument\]/);
+  assert.match(printed(before), /Math\.abs \[arg\[f64\] const\[f64\] 1\]/);
+});
+
+test("a binding a statement writes between it and the one read is left alone", () => {
+  // `s += 1` reads nothing as a value — the value it carries is the right-hand
+  // side — and the name on the left is nowhere in it, so a pass that watches the
+  // value's inputs alone puts `"x"` where `s` is read and prints `x` in place of
+  // `x1`.
+  const before = fnOf({
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "s", mutable: true, type: F64 }, value: constOf("1"), line: 1 },
+      { k: "set", name: "s", op: "+=", value: constOf("2"), line: 2 },
+      { k: "printNumber", value: { k: "local", type: F64, name: "s" }, line: 3 },
+    ],
+    terminator: { k: "return", value: null },
+  });
+  assert.match(printed(before), /set s \+= const\[f64\] 2/);
+  assert.match(printed(before), /print_number local\[f64\] s/);
 });
 
 test("a number written out inside a call argument is one number", () => {
@@ -237,6 +243,21 @@ test("a number written out inside a call argument is one number", () => {
     statements: [{ k: "printNumber", value: absOf(bin("mul", constOf("2"), constOf("4"))), line: 1 }],
   });
   assert.match(printed(before), /Math\.abs \[arg\[f64\] const\[f64\] 8\]/);
+});
+
+test("a binding something reads is kept", () => {
+  // The name does not have to survive — a binding read once is put where it is
+  // read — but what it was bound to has to reach the print, which is what
+  // catches a binding dropped as though nothing read it.
+  const before = fnOf({
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "used", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
+      { k: "printNumber", value: { k: "local", type: F64, name: "used" }, line: 2 },
+    ],
+    terminator: { k: "return", value: null },
+  });
+  assert.match(printed(before), /print_number const\[f64\] 1/);
 });
 
 test("a loop bound computed every turn is computed once above the loop", () => {

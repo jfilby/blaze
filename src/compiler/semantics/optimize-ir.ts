@@ -35,7 +35,7 @@ import {
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import { hasCall, isInteger, isUnsigned, slotType } from "../core/semantic-ir.ts";
-import { isBindable, isSafeToCompute, replaceValues, slotFor, valueKey } from "./repair.ts";
+import { isBindable, isSafeToCompute, replaceValues, slotFor, typeLabel, valueKey } from "./repair.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -458,39 +458,45 @@ export function foldSemanticValue(value: SemanticValue): SemanticValue {
 /* Over a function                                                             */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Every value a statement computes, in the order it computes them.
+ *
+ * A call is one value whose own children are its arguments, which is how
+ * `rootsOf` already reads a block, so a name read as an argument is read here
+ * too. A walk that stopped at the call would count a name that is read in one
+ * as a name nothing reads, and a pass that drops unread bindings would then drop
+ * one a call still reads.
+ */
+function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
+  switch (statement.k) {
+    case "let":
+    case "set":
+    case "printText":
+    case "printNumber":
+    case "retain":
+    case "storeField": return [statement.value];
+    case "step": return [];
+    case "setElement": return [statement.index, statement.value];
+    case "if": return [statement.condition];
+    case "raise": return [statement.message];
+    case "call": return [{ k: "call", type: statement.call.returns, call: statement.call }];
+    case "loop": {
+      const loop = statement.loop;
+      if (loop.kind === "counted") return [loop.from, loop.to, ...(loop.step === null ? [] : [loop.step])];
+      return loop.kind === "each" ? [loop.length] : [loop.condition];
+    }
+    default: return [];
+  }
+}
+
 /** Every value a block computes, and every one inside those values. */
 function valuesOf(block: SemanticBlock, visit: (value: SemanticValue) => void): void {
-  const read = (value: SemanticValue | null): void => {
-    if (value !== null) walkSemanticValue(value, visit);
-  };
   for (const statement of block.statements) {
-    switch (statement.k) {
-      case "let":
-      case "set":
-      case "printText":
-      case "printNumber":
-      case "retain":
-      case "storeField": read(statement.value); break;
-      case "step": break;
-      case "setElement": read(statement.index); read(statement.value); break;
-      case "if": read(statement.condition); break;
-      case "raise": read(statement.message); break;
-      case "call": visit({ k: "call", type: statement.call.returns, call: statement.call }); break;
-      case "loop": {
-        const loop = statement.loop;
-        if (loop.kind === "counted") {
-          read(loop.from); read(loop.to); read(loop.step);
-        } else if (loop.kind === "each") {
-          read(loop.length);
-        } else {
-          read(loop.condition);
-        }
-        break;
-      }
-      default: break;
-    }
+    for (const value of statementValues(statement)) walkSemanticValue(value, visit);
   }
-  if (block.terminator.k === "return") read(block.terminator.value);
+  if (block.terminator.k === "return" && block.terminator.value !== null) {
+    walkSemanticValue(block.terminator.value, visit);
+  }
 }
 
 /** A block with every value in it folded, and with its nested blocks folded. */
@@ -974,6 +980,164 @@ function localTypeOf(body: Body, name: string): SemanticType {
 }
 
 /**
+ * Puts the value of a binding into the one place that reads it, and drops the
+ * binding.
+ *
+ * A name read once is a slot, a store and a load wrapped around a value that
+ * had somewhere to go all along. The machine pools those, so what goes is the
+ * store and the load rather than the slot, which is one instruction each — and
+ * in a loop body that is one each on every turn. It is the shape
+ * `let tree = createTree(depth)` followed by one use of `tree` is, which is
+ * what a program written as `sum += checksum(createTree(depth))` becomes by the
+ * time it reaches here.
+ *
+ * Three things bound where the read may be, and all three are about it being
+ * this turn's read rather than another:
+ *
+ * - It is in the same block. A read inside an arm or a loop is a read on a turn
+ *   the binding may not run on, or more than once, and moving the value there
+ *   computes it on turns the source never did.
+ * - Nothing between writes a name the value reads. A program that computes a
+ *   value, counts its own input down and then reads the value is reading the
+ *   number the value was made from.
+ * - The value is safe to compute wherever it is moved to, so no statement in
+ *   between can fault and the move cannot put a fault where the program had
+ *   none. That is `isSafeToCompute`, the same test `hoist-invariant` and
+ *   `common-subexpression` hold a proposal to.
+ *
+ * A name that is written again is not a binding at all and is left to
+ * `propagateCopies`, which reads the copies out rather than the values.
+ */
+function inlineSingleUses(body: Body): boolean {
+  const reads = new Map<string, number>();
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    valuesOf(block, (one) => {
+      if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
+    });
+  }
+  let changed = false;
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    const keep: SemanticStatement[] = [];
+    const replacements = new Map<string, SemanticValue>();
+    for (let at = 0; at < block.statements.length; at += 1) {
+      const statement = block.statements[at];
+      const name = statement !== undefined && statement.k === "let" ? singleUseBinding(statement, at, block, reads) : null;
+      if (statement === undefined || name === null || statement.k !== "let") {
+        if (statement !== undefined) keep.push(statement);
+        continue;
+      }
+      replacements.set(valueKey({ k: "local", type: slotType(statement.slot), name }), statement.value);
+      changed = true;
+    }
+    if (replacements.size === 0) continue;
+    block.statements = keep.map((statement) => replaceValues(statement, replacements) as SemanticStatement);
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, replacements) };
+    }
+  }
+  return changed;
+}
+
+/**
+ * Whether a statement binds a name that is read exactly once, that nothing
+ * writes between the binding and that read, and whose value is safe to compute
+ * where the read is.
+ *
+ * The test walks forward from the statement rather than counting reads alone:
+ * one read says the name is read once, and walking says the read is on this
+ * turn and nothing has changed under it.
+ */
+function singleUseBinding(
+  statement: SemanticStatement,
+  at: number,
+  block: SemanticBlock,
+  reads: ReadonlyMap<string, number>,
+): string | null {
+  if (statement.k !== "let" || statement.value.k === "local") return null;
+  const name = statement.slot.name;
+  if (reads.get(name) !== 1) return null;
+  if (block.releases.includes(name)) return null;
+  if (!isSafeToCompute(statement.value)) return null;
+  // The read is of the binding's own type. A slot declared at one width and
+  // bound to a value of another is a conversion the source asked for, and
+  // putting the value where the name was would drop it.
+  if (typeLabel(statement.value.type) !== typeLabel(slotType(statement.slot))) return null;
+  // Two sets of names, and both have to be clear of everything in between: the
+  // ones the value is made of, which a write would change under it, and the name
+  // the binding itself, which `set s += 1` writes while reading nothing. A
+  // compound assignment is the one that catches the second — the value it
+  // carries is the right-hand side, and the name on the left is nowhere in it.
+  const clobbered = new Set<string>();
+  walkSemanticValue(statement.value, (one) => {
+    if (one.k === "local") clobbered.add(one.name);
+  });
+  clobbered.add(name);
+  // Every statement after the binding is scanned for the one read, and the scan
+  // stops at anything that leaves the block: a loop, an arm or a raise is a turn
+  // this statement's value may not survive to.
+  for (let after = at + 1; after < block.statements.length; after += 1) {
+    const next = block.statements[after];
+    if (next === undefined) return null;
+    if (next.k === "loop" || next.k === "if" || next.k === "block" || next.k === "raise") return null;
+    if (writesAnyOf(next, clobbered)) return null;
+    if (readsNameInStatement(next, name)) return movableInto(next, name);
+    continue;
+  }
+  const returned = block.terminator.k === "return" ? block.terminator.value : null;
+  if (returned === null || !readsName(returned, name)) return null;
+  let underTest = false;
+  walkSemanticValue(returned, (one) => {
+    if (one.k !== "logical" && one.k !== "coalesce") return;
+    if (readsName(one.left, name)) underTest = true;
+  });
+  return underTest ? null : name;
+}
+
+/**
+ * The name, when the values it is read in are written down once each.
+ *
+ * The arm a `&&`, a `||` or a `??` decides on is written as the test and again
+ * as the value that answers when the test says so, so a value moved into it is
+ * computed twice — which `evaluatedOnceProblems` refuses, and which the
+ * resolver hoists a call out of for exactly that reason. Every other position
+ * is written once, so everywhere else the move is the same program.
+ */
+function movableInto(statement: SemanticStatement, name: string): string | null {
+  for (const value of statementValues(statement)) {
+    let underTest = false;
+    walkSemanticValue(value, (one) => {
+      if (one.k !== "logical" && one.k !== "coalesce") return;
+      if (readsName(one.left, name)) underTest = true;
+    });
+    if (underTest) return null;
+  }
+  return name;
+}
+
+/** Whether a statement assigns any of a set of names. */
+function writesAnyOf(statement: SemanticStatement, names: ReadonlySet<string>): boolean {
+  let writes = false;
+  if ((statement.k === "set" || statement.k === "step") && names.has(statement.name)) writes = true;
+  if (statement.k === "setElement" && names.has(statement.buffer)) writes = true;
+  if (statement.k === "let" && names.has(statement.slot.name)) writes = true;
+  return writes;
+}
+
+/** Whether a statement reads a name, anywhere in the values it computes. */
+function readsNameInStatement(statement: SemanticStatement, name: string): boolean {
+  return statementValues(statement).some((value) => readsName(value, name));
+}
+
+/** Whether a value reads a name. */
+function readsName(value: SemanticValue, name: string): boolean {
+  let found = false;
+  walkSemanticValue(value, (one) => {
+    if (one.k === "local" && one.name === name) found = true;
+  });
+  return found;
+}
+
+/**
  * Drops a write nothing reads afterwards.
  *
  * A `set` of a name no other statement of the function reads is a value nothing
@@ -1103,6 +1267,7 @@ function optimizeBody(body: Body): void {
     if (hoistLoopInvariants(body)) changed = true;
     if (commonWithin(body)) changed = true;
     if (propagateCopies(body)) changed = true;
+    if (inlineSingleUses(body)) changed = true;
     if (dropDeadWrites(body)) changed = true;
     if (dropUnread(body)) changed = true;
     if (!changed) break;

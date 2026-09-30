@@ -2516,6 +2516,10 @@ class Machine {
       if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
       return;
     }
+    // A call passed straight to a call leaves its answer in the accumulator,
+    // which is where the call reads it from. Saving it to a slot first costs a
+    // store and a load for nothing, and the argument is often inside a loop.
+    let fresh = -1;
     const args = call.args.map((argument, at) => {
       const type = call.argTypes[at] ?? argument.type;
       // An argument that is a name read at the type the parameter takes is the
@@ -2531,12 +2535,17 @@ class Machine {
         // types are written differently and are the same word.
         if (isReference(held.type) && isReference(type)) return held;
       }
+      // Only the last one can be left where it is: evaluating a later argument
+      // takes the accumulator away again, and the call reads the arguments into
+      // their registers after the ones with no register left are written out.
+      const untouched = argument.k === "call" && at === call.args.length - 1;
+      if (untouched) fresh = at;
       this.at(argument, type);
       const held = this.hold(type, "blaze_argument");
-      this.store(held);
+      if (!untouched) this.store(held);
       return held;
     });
-    this.callSymbol(call.signature.symbol, args, call.returns);
+    this.callSymbol(call.signature.symbol, args, call.returns, fresh);
     if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
   }
 
@@ -2603,13 +2612,13 @@ class Machine {
    * are read last, because writing an argument that has no register left goes
    * through the very registers the others are read into.
    */
-  private callSymbol(symbol: string, args: readonly Held[], returns: SemanticType): void {
+  private callSymbol(symbol: string, args: readonly Held[], returns: SemanticType, fresh = -1): void {
     this.external(symbol);
     const onStack: Held[] = [];
-    const registers: { register: number; held: Held }[] = [];
+    const registers: { register: number; held: Held; at: number }[] = [];
     let general = 0;
     let floating = 0;
-    for (const argument of args) {
+    for (const [at, argument] of args.entries()) {
       // The registers are handed out in the order the arguments are written, and
       // an argument that has none left is on the stack with every argument after
       // it, whichever class those are.
@@ -2621,7 +2630,7 @@ class Machine {
       }
       if (isFloat(argument.type)) floating += 1;
       else general += 1;
-      registers.push({ register, held: argument });
+      registers.push({ register, held: argument, at });
     }
     // The stack a call pushes onto has to leave the stack sixteen byte
     // aligned, which is what every function the C library was compiled for
@@ -2638,11 +2647,21 @@ class Machine {
         this.code.movMemReg(mem(RSP, at * 8), RAX);
       });
     }
-    for (const { register, held } of registers) {
+    for (const { register, held, at } of registers) {
       // An argument that is pinned is in its register, so it is copied from
       // there rather than read out of the frame.
       if (held.register !== null) {
         this.code.movRegReg(register, held.register);
+        continue;
+      }
+      // The answer of a call passed straight to this one is in the accumulator
+      // and was never written down. An argument with no register left is written
+      // through that accumulator, so this holds only when there is none, and it
+      // is read last, so nothing after it takes the accumulator away.
+      if (at === fresh && onStack.length === 0) {
+        if (isFloat(held.type)) {
+          if (register !== XMM0) this.code.movsMove(register, XMM0, widthOf(held.type) === 4);
+        } else if (register !== RAX) this.code.movRegReg(register, RAX);
         continue;
       }
       if (isFloat(held.type)) {

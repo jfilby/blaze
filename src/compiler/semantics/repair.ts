@@ -444,7 +444,7 @@ export function slotFor(value: SemanticValue, name: string): SemanticSlot {
 }
 
 /** A type, as a diagnostic names it. */
-function typeLabel(type: SemanticType): string {
+export function typeLabel(type: SemanticType): string {
   if (type.kind === "primitive") return type.name;
   return type.kind === "text" ? "text" : "a reference";
 }
