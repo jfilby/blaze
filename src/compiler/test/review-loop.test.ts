@@ -80,6 +80,7 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
       mode: "debug",
       lowering: "c",
       runtime: "none",
+      target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
       workspace: { workDirectory: directory, functionName: "square" },
     }),
     exclusive: exclusive(),

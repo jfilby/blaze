@@ -63,6 +63,7 @@ export type Condition =
   | "a"
   | "ae"
   | "s"
+  | "ns"
   | "p"
   | "np";
 
@@ -117,21 +118,37 @@ export function frame(disp: number): Memory {
  * knows until they are placed together.
  */
 export interface Relocation {
-  /** Where the displacement field starts. */
-  readonly offset: number;
+  /**
+   * Where the displacement field starts. It is written against the optimistic
+   * layout and moved to where the field really is by the relaxation sweep, so
+   * a widening jump before it carries it along.
+   */
+  offset: number;
   /** The symbol the address is of. */
   readonly symbol: string;
   readonly kind: "call" | "address";
 }
 
 interface Fixup {
+  /** Where the jump is written, which is the byte its opcode is at. */
   readonly at: number;
   readonly label: string;
+  /** The condition of a conditional jump, or null for an unconditional one. */
+  readonly condition: Condition | null;
+  /** Whether the displacement has been widened out of its short form. */
+  wide: boolean;
+}
+
+/** A word the code is written with a placeholder for and given later. */
+interface Patch {
+  readonly at: number;
+  readonly value: number;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Opcode tables                                                                */
 /* -------------------------------------------------------------------------- */
+
 
 const CONDITION: Record<Condition, number> = {
   e: 0x4,
@@ -145,6 +162,7 @@ const CONDITION: Record<Condition, number> = {
   a: 0x7,
   ae: 0x3,
   s: 0x8,
+  ns: 0x9,
   p: 0xa,
   np: 0xb,
 };
@@ -155,9 +173,10 @@ const BINARY: Record<Binary, number> = { add: 0, or: 1, and: 4, sub: 5, xor: 6, 
 /** The opcode of each operation when it writes a register from an operand. */
 const BINARY_TO_REGISTER: Record<Binary, number> = { add: 0x03, or: 0x0b, and: 0x23, sub: 0x2b, xor: 0x33, cmp: 0x3b };
 
-/** The opcode extension of each shift, which all three take the count in `cl`. */
 /** The opcode of each operation when both of its operands are bytes. */
 const BYTE_BINARY: Record<Binary, number> = { add: 0x00, or: 0x08, and: 0x20, sub: 0x28, xor: 0x30, cmp: 0x38 };
+
+/** The opcode extension of each shift, which all three take the count in `cl`. */
 
 const SHIFT: Record<Shift, number> = { shl: 4, shr: 5, sar: 7 };
 
@@ -185,6 +204,8 @@ export class Encoder {
 
   private readonly labels = new Map<string, number>();
   private readonly fixups: Fixup[] = [];
+  /** The words `patchWord` was given, applied once the layout has settled. */
+  private readonly patches: Patch[] = [];
   private serial = 0;
 
   /** A label name no other label holds, built from the one a caller passed. */
@@ -198,25 +219,109 @@ export class Encoder {
     this.labels.set(name, this.code.length);
   }
 
-  /** The bytes, once every jump has been given the distance it names. */
+  /**
+   * The bytes, once every jump has been given the distance it names.
+   *
+   * A jump is written short — a one byte displacement — and widened here if
+   * the label it names is further away than a signed byte reaches. Widening
+   * makes the jump three bytes longer, which moves everything after it and so
+   * can push a later jump out of range in turn, so the decision is made by
+   * repeating the sweep until nothing more has to widen. That terminates
+   * because a jump only ever widens once, and the code is far shorter than the
+   * two gigabytes a four byte displacement reaches.
+   *
+   * The code is therefore not written where it was written. Everything that
+   * names a place in it — a label, a patch, a relocation — is carried across
+   * by the same map the sweep builds, which is why they are all recorded
+   * against the optimistic layout and resolved here.
+   */
   finish(): Uint8Array {
     for (const fixup of this.fixups) {
-      const target = this.labels.get(fixup.label);
-      if (target === undefined) {
+      if (!this.labels.has(fixup.label)) {
         throw new CompilerError({
           category: "AssemblyError",
           stage: "assemble",
           message: `the machine code jumps to ${fixup.label}, which is never bound`,
         });
       }
-      // A displacement is measured from the end of the field it is written in.
-      const distance = target - (fixup.at + 4);
-      this.code[fixup.at] = distance & 0xff;
-      this.code[fixup.at + 1] = (distance >> 8) & 0xff;
-      this.code[fixup.at + 2] = (distance >> 16) & 0xff;
-      this.code[fixup.at + 3] = (distance >> 24) & 0xff;
     }
-    return Uint8Array.from(this.code);
+    // Widening one jump moves everything after it, which can put a later jump
+    // out of reach in turn, so the decision is repeated until a sweep changes
+    // nothing. It ends because a jump only ever widens once.
+    for (;;) {
+      const shift = this.layout();
+      let widened = false;
+      for (const fixup of this.fixups) {
+        if (fixup.wide) continue;
+        const target = this.labels.get(fixup.label) as number;
+        const distance = shift.at(target) - (shift.at(fixup.at) + 1);
+        if (distance < -128 || distance > 127) {
+          fixup.wide = true;
+          widened = true;
+        }
+      }
+      if (!widened) break;
+    }
+    const shift = this.layout();
+    const code = new Uint8Array(shift.length);
+    for (let at = 0; at < this.code.length; at += 1) code[shift.at(at)] = this.code[at];
+    for (const fixup of this.fixups) {
+      const at = shift.at(fixup.at);
+      // The wide form of a conditional jump carries an extra opcode byte, so
+      // its displacement field starts one byte later than a plain jump's.
+      const field = fixup.wide ? at + (fixup.condition === null ? 0 : 1) : at;
+      if (fixup.wide) {
+        // The short opcode and its one byte field become the long opcode and
+        // a four byte field, which is where the extra bytes came from.
+        if (fixup.condition === null) code[at - 1] = 0xe9;
+        else {
+          code[at - 1] = 0x0f;
+          code[at] = 0x80 + CONDITION[fixup.condition];
+        }
+      }
+      // A displacement is measured from the end of the field it is written in.
+      const distance = shift.at(this.labels.get(fixup.label) as number) - (field + (fixup.wide ? 4 : 1));
+      for (let index = 0; index < (fixup.wide ? 4 : 1); index += 1) {
+        code[field + index] = (distance >> (index * 8)) & 0xff;
+      }
+    }
+    for (const patch of this.patches) {
+      const at = shift.at(patch.at);
+      for (let index = 0; index < 4; index += 1) code[at + index] = (patch.value >> (index * 8)) & 0xff;
+    }
+    for (const relocation of this.relocations) {
+      relocation.offset = shift.at(relocation.offset);
+    }
+    return code;
+  }
+
+
+  /**
+   * Where every byte of the optimistic code ends up once the jumps that have
+   * widened have taken their extra bytes.
+   *
+   * A widened jump replaces its opcode and its one byte field with a longer
+   * instruction, so every byte from the second field onwards moves by the
+   * bytes that were added: three for a jump, four for a conditional one,
+   * which is the extra opcode byte `0F` that comes with the four byte form.
+   */
+  private layout(): { at: (offset: number) => number; length: number } {
+    const widened = this.fixups
+      .filter((fixup) => fixup.wide)
+      .map((fixup) => ({ at: fixup.at, extra: fixup.condition === null ? 3 : 4 }))
+      .sort((a, b) => a.at - b.at);
+    const extra = new Int32Array(this.code.length + 1);
+    let running = 0;
+    let next = 0;
+    for (let at = 0; at <= this.code.length; at += 1) {
+      while (next < widened.length && widened[next].at + 1 <= at) {
+        running += widened[next].extra;
+        next += 1;
+      }
+      extra[at] = running;
+    }
+    const length = this.code.length + widened.reduce((total, entry) => total + entry.extra, 0);
+    return { at: (offset: number) => offset + extra[offset], length };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -326,12 +431,13 @@ export class Encoder {
     return at;
   }
 
-  /** The number a field left for later is given. */
+  /**
+   * The number a field left for later is given. It is held rather than written
+   * straight in, because a widening jump earlier in the code moves the field
+   * this one is in; the relaxation sweep carries it to where it ends up.
+   */
   patchWord(at: number, value: number): void {
-    this.code[at] = value & 0xff;
-    this.code[at + 1] = (value >> 8) & 0xff;
-    this.code[at + 2] = (value >> 16) & 0xff;
-    this.code[at + 3] = (value >> 24) & 0xff;
+    this.patches.push({ at, value });
   }
 
   movRegReg(destination: number, source: number): void {
@@ -414,20 +520,24 @@ export class Encoder {
   /* Jumps and calls                                                         */
   /* ---------------------------------------------------------------------- */
 
-  private displacement(label: string): void {
-    this.fixups.push({ at: this.code.length, label });
-    this.word(0);
+  /**
+   * A jump written short: a one byte displacement, which is the form almost
+   * every jump in a function takes. `finish` rewrites the ones that reach
+   * further than a signed byte goes.
+   */
+  private displacement(label: string, condition: Condition | null): void {
+    this.fixups.push({ at: this.code.length, label, condition, wide: false });
+    this.byte(0);
   }
 
   jmp(label: string): void {
-    this.byte(0xe9);
-    this.displacement(label);
+    this.byte(0xeb);
+    this.displacement(label, null);
   }
 
   jcc(condition: Condition, label: string): void {
-    this.byte(0x0f);
-    this.byte(0x80 + CONDITION[condition]);
-    this.displacement(label);
+    this.byte(0x70 + CONDITION[condition]);
+    this.displacement(label, condition);
   }
 
   /** A call to a symbol, which is whatever object the linker puts it beside. */
@@ -684,4 +794,18 @@ export class Encoder {
     this.byte(0xb6);
     this.modrm(source, destination);
   }
+
+  /**
+   * A conditional move: the destination takes the value of the source when
+   * the condition holds and keeps what it had when it does not. This is a
+   * choice made without a branch, so nothing is guessed and nothing is paid
+   * for guessing wrong.
+   */
+  cmov(condition: Condition, destination: number, source: number | Memory, wide = true): void {
+    this.rex(wide, destination, source);
+    this.byte(0x0f);
+    this.byte(0x40 + CONDITION[condition]);
+    this.modrm(source, destination);
+  }
+
 }

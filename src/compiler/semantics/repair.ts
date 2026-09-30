@@ -432,7 +432,7 @@ function isSafeToCompute(value: SemanticValue): boolean {
 }
 
 /** The slot a computed value is bound to, which is what its own type asks for. */
-function slotFor(value: SemanticValue, name: string): SemanticSlot {
+export function slotFor(value: SemanticValue, name: string): SemanticSlot {
   if (isTextType(value.type)) return { kind: "text", name, mutable: false };
   if (isReference(value.type)) return { kind: "object", name, mutable: false, type: value.type };
   return { kind: "value", name, mutable: false, type: value.type };
@@ -449,7 +449,7 @@ function typeLabel(type: SemanticType): string {
  * canonical, so a value built one way is found wherever an equal one is built
  * another, which is what makes a repeated expression a repeated expression.
  */
-function valueKey(value: SemanticValue): string {
+export function valueKey(value: SemanticValue): string {
   return JSON.stringify(value, (_name, entry: unknown) =>
     entry !== null && typeof entry === "object" && !Array.isArray(entry)
       ? Object.fromEntries(
@@ -468,7 +468,7 @@ function isValueNode(node: unknown): node is SemanticValue {
  * is not looked at again, so a value inside a value that was already replaced
  * is never rewritten into itself.
  */
-function replaceValues<T>(node: T, replacements: ReadonlyMap<string, SemanticValue>): T {
+export function replaceValues<T>(node: T, replacements: ReadonlyMap<string, SemanticValue>): T {
   if (isValueNode(node)) {
     const hit = replacements.get(valueKey(node));
     if (hit !== undefined) return structuredClone(hit) as T;
@@ -483,19 +483,30 @@ function replaceValues<T>(node: T, replacements: ReadonlyMap<string, SemanticVal
 }
 
 /**
- * Replaces what each name a map holds reads, everywhere in a tree. A name that
- * is replaced is not looked at again, so an argument bound to a name is not
- * rewritten through that name.
+ * Replaces what each name a map holds reads, everywhere in a tree, and what
+ * each name it writes is written under.
+ *
+ * A name that is replaced is not looked at again, so an argument bound to a
+ * name is not rewritten through that name.
+ *
+ * The write targets are the reason the second map exists. A `set`, a `step` and
+ * a `setElement` name what they write as a bare string rather than as a value,
+ * so a substitution that only looked for values left the callee's own name
+ * sitting in the caller's frame: the callee's local landed on a name the caller
+ * had, and the value the caller read back was a write it never made. That is
+ * why `inline-call` used to refuse every callee that wrote anything, which is
+ * every accumulator.
  */
-function substituteLocals<T>(node: T, bindings: ReadonlyMap<string, SemanticValue>): T {
+function substituteLocals<T>(node: T, bindings: ReadonlyMap<string, SemanticValue>, writes: ReadonlyMap<string, string> = new Map()): T {
+  if (typeof node === "string") return (writes.get(node) ?? node) as T;
   if (isValueNode(node) && node.k === "local") {
     const bound = bindings.get(node.name);
     if (bound !== undefined) return structuredClone(bound) as T;
   }
-  if (Array.isArray(node)) return node.map((entry) => substituteLocals(entry, bindings)) as T;
+  if (Array.isArray(node)) return node.map((entry) => substituteLocals(entry, bindings, writes)) as T;
   if (node !== null && typeof node === "object") {
     return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, substituteLocals(entry, bindings)]),
+      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, substituteLocals(entry, bindings, writes)]),
     ) as T;
   }
   return node;
@@ -879,22 +890,55 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   // written as can be read here as something of this function's.
   const types = slotTypesOf(callee);
   const bindings = new Map<string, SemanticValue>();
+  // What each name the callee writes is written under here. A local is renamed
+  // like any other name, so its writes follow it. A parameter is a different
+  // matter: a parameter is a *copy* of the argument, so a write to one must
+  // never land on the name the caller passed. `const y = bump(x)` with
+  // `bump` writing `x` leaves the caller's `x` at what it was, and a write that
+  // reached through would answer 12 where the source answers 11. A written
+  // parameter is therefore bound to a temporary of its own, which is the copy
+  // the callee was given.
+  const writes = new Map<string, string>();
+  const before: SemanticStatement[] = [];
   callee.params.forEach((param, index) => {
     const argument = call.args[index];
-    if (argument !== undefined) bindings.set(param.name, structuredClone(argument));
+    if (argument === undefined) return;
+    bindings.set(param.name, structuredClone(argument));
+    if (!writesName(callee, param.name)) return;
+    const name = freshName(taken, "inlined");
+    const slot = slotFor(argument, name);
+    before.push({ k: "let", slot, value: structuredClone(argument), line });
+    bindings.set(param.name, { k: "local", type: slotType(slot), name });
+    writes.set(param.name, name);
   });
   for (const inner of nestedBlocks(callee.entry)) {
     for (const name of declaredNames(inner)) {
       if (bindings.has(name)) continue;
       const renamed = freshName(taken, "inlined");
       bindings.set(name, { k: "local", type: types.get(name) ?? { kind: "primitive", name: "f64" }, name: renamed });
+      writes.set(name, renamed);
     }
   }
 
-  const spliced = callee.entry.statements.map((entry) => substituteLocals(entry, bindings));
+  // A block id is a name like any other, and the callee's are its own: its
+  // loop body is very often also called `b2`, which is the name the caller's
+  // own loop body has. Two blocks under one id is a function the compiler
+  // cannot read back, so the callee's blocks are renamed beside everything
+  // else it brought with it.
+  const blocks = new Map<string, string>();
+  for (const inner of nestedBlocks(callee.entry)) {
+    if (inner.id !== callee.entry.id) blocks.set(inner.id, `inlined_${freshName(taken, "block")}`);
+  }
+  // The block ids are renamed by a walk of the whole statement rather than by
+  // picking the ones a loop names: a jump target, a loop's own header and exit
+  // and the block a nested statement carries are all just strings, and each is
+  // the callee's own spelling.
+  const spliced = callee.entry.statements.map((entry) =>
+    replaceBlockIds(substituteLocals(entry, bindings, writes), blocks) as SemanticStatement,
+  );
   const handsBack = callee.entry.terminator.k === "return" ? callee.entry.terminator.value : null;
-  const result = handsBack === null ? null : substituteLocals(handsBack, bindings);
-  const added: SemanticStatement[] = [...spliced];
+  const result = handsBack === null ? null : substituteLocals(handsBack, bindings, writes);
+  const added: SemanticStatement[] = [...before, ...spliced];
   // The result is bound to a name of its own, so the value that was the call
   // reads that name and the call is gone.
   let temp: SemanticValue | null = null;
@@ -923,6 +967,27 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   };
 }
 
+/**
+ * Renames the block ids inside a spliced statement, at every depth.
+ *
+ * A loop names the block it enters and the one it leaves for, a block statement
+ * carries one, and a terminator that jumps names one: all of them are the
+ * callee's own spelling, and the caller's frame already has names of its own.
+ * A block id left unrenamed is two blocks under one name, which the validator
+ * refuses, so the callee's loop body is very often also called b2 as the
+ * caller's own.
+ */
+function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>): T {
+  if (typeof node === "string") return (blocks.get(node) ?? node) as T;
+  if (Array.isArray(node)) return node.map((entry) => replaceBlockIds(entry, blocks)) as T;
+  if (node !== null && typeof node === "object") {
+    return Object.fromEntries(
+      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, replaceBlockIds(entry, blocks)]),
+    ) as T;
+  }
+  return node;
+}
+
 /** Every slot a function has, by name, as the type it is read as. */
 function slotTypesOf(fn: SemanticFunction): Map<string, SemanticType> {
   const types = new Map<string, SemanticType>();
@@ -945,19 +1010,14 @@ function inlineRefusal(callee: SemanticFunction): string | null {
   if (callee.calls.length > 0) return `calls ${callee.calls.map((edge) => edge.callee).join(", ")}, and inlining one call would put two of them there`;
   if (isReference(callee.returns)) return "hands back a reference, whose ownership the caller would have to take over";
   if (callee.entry.releases.length > 0) return "frees what it owns on the way out, which belongs to its own blocks";
-  // A write the callee makes names its target as a bare string, and a bare
-  // string is not rewritten by the substitution that renames its reads: a
-  // `set`, a `step` and a `setElement` carry the callee's own name over
-  // verbatim. Inlining one therefore writes the caller's frame — the callee's
-  // local lands on a name the caller has, and the value the caller reads back
-  // is a write it never made. Every write is refused, not only a write to a
-  // parameter: the reads of a parameter already became the arguments, so that
-  // case is incoherent on its own, and a write to a local is the same defect
-  // with a name the caller happens to share.
-  const written = writtenName(callee);
-  if (written !== null) {
-    return `writes "${written}", which names its target as a bare string and would be written into the frame it is put into rather than into a name of its own`;
-  }
+  // A write is no longer refused. It used to be, and the reason was a real
+  // defect: a `set`, a `step` and a `setElement` name what they write as a bare
+  // string, and a substitution that only looked for values carried the callee's
+  // own name into the caller's frame — the callee's local landed on a name the
+  // caller had, and the value the caller read back was a write it never made.
+  // The substitution now remaps those names beside the values, so an
+  // accumulator — the commonest callee in a program written this way — is
+  // inlinable rather than refused.
   for (const block of nestedBlocks(callee.entry)) {
     if (block.terminator.k === "jump") return "leaves a block for another one, which is control flow the function it is put into does not own";
   }
@@ -984,8 +1044,8 @@ function dropUnusedEdge(fn: SemanticFunction, callee: string): void {
   if (!called) fn.calls = fn.calls.filter((edge) => edge.callee !== callee);
 }
 
-/** The name a body writes, or null when it writes none. */
-function writtenName(fn: SemanticFunction): string | null {
+/** Whether a body writes the name it was given, which is what a parameter is. */
+function writesName(fn: SemanticFunction, name: string): boolean {
   for (const block of blocksOf(fn)) {
     for (const statement of block.statements) {
       const target =
@@ -994,10 +1054,10 @@ function writtenName(fn: SemanticFunction): string | null {
           : statement.k === "setElement"
             ? statement.buffer
             : null;
-      if (target !== null) return target;
+      if (target === name) return true;
     }
   }
-  return null;
+  return false;
 }
 
 /* -------------------------------------------------------------------------- */

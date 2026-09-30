@@ -238,7 +238,7 @@ type
     length: uint64
     alignment: uint64
     refs: uint64
-    reserved: uint64
+    capacity: uint64 ## payload bytes the block can hold, at least length
 
 const
   BlazeMagic = 0x424C415A45525400'u64
@@ -294,21 +294,40 @@ proc blaze_rt_initialize*() {.exportc, cdecl.} =
 proc blaze_rt_finalize*() {.exportc, cdecl.} =
   discard
 
-proc blaze_rt_allocate*(bytes: csize_t): pointer {.exportc, cdecl.} =
-  let total = bytes.uint64 + BlazeHeaderSize
+## A block with room for the payload asked for, and optionally cleared.
+##
+## The per-thread allocator is used rather than the shared one. The shared heap
+## takes a lock, and nothing in this ABI creates a thread or hands a block to
+## one, so every allocation was paying a lock for a heap nothing contends with.
+proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
+  let align = if alignment == 0: BlazeDefaultAlignment else: alignment
+  ## The payload is placed with a mask, which only places it for a power of two,
+  ## and an alignment past the cap names no block the runtime can give. The
+  ## alignment is added to the size on top of the payload rather than taken out
+  ## of the slack the allocator leaves: those bytes are what a read past the
+  ## end of an array lands on, the program is allowed to make that read, and
+  ## the source language answers it as a zero.
+  let total = bytes + align + BlazeHeaderSize
 ${guarded ? `  if total > BlazeMaxAllocation:
-    blazeStop("blaze_rt_allocate: request too large")` : ""}
-  let base = allocShared0(int(total))
+    blazeStop("allocation: request too large")` : ""}
+  let base = if cleared: alloc0(int(total)) else: alloc(int(total))
 ${guarded ? `  if base == nil:
-    blazeStop("blaze_rt_allocate: out of memory")` : ""}
-  var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes.uint64,
-                           alignment: BlazeDefaultAlignment, refs: 1)
-  cast[ptr BlazeHeader](base)[] = header
-  result = cast[pointer](cast[uint](base) + BlazeHeaderSize)
+    blazeStop("allocation: out of memory")` : ""}
+  let payload = alignUp(cast[uint](base) + BlazeHeaderSize, align)
+  var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes,
+                           alignment: align, refs: 1, capacity: bytes)
+  cast[ptr BlazeHeader](payload - BlazeHeaderSize)[] = header
+  cast[pointer](payload)
+
+proc blaze_rt_allocate*(bytes: csize_t): pointer {.exportc, cdecl.} =
+  blazeBlock(bytes.uint64, BlazeDefaultAlignment, true)
+
+proc blaze_rt_allocate_uninitialized*(bytes: csize_t): pointer {.exportc, cdecl.} =
+  blazeBlock(bytes.uint64, BlazeDefaultAlignment, false)
 
 proc blaze_rt_object_new*(bytes, alignment: csize_t): pointer {.exportc, cdecl.} =
-  let align = if alignment == 0: BlazeDefaultAlignment else: alignment.uint64
-${guarded ? `  if (align and (align - 1)) != 0:
+${guarded ? `  let align = if alignment == 0: BlazeDefaultAlignment else: alignment.uint64
+  if (align and (align - 1)) != 0:
     blazeStop("blaze_rt_object_new: alignment must be a power of two")
   # The payload starts at the first aligned address past the header, so the
   # block has to cover the gap that alignment leaves as well as the bytes it
@@ -321,16 +340,11 @@ ${guarded ? `  if (align and (align - 1)) != 0:
   if align > BlazeMaxAllocation - BlazeHeaderSize:
     blazeStop("blaze_rt_object_new: alignment is too large")
   if bytes.uint64 > BlazeMaxAllocation - align - BlazeHeaderSize:
-    blazeStop("blaze_rt_object_new: request too large")` : ""}
-  let total = bytes.uint64 + align + BlazeHeaderSize
-  let base = allocShared0(int(total))
-${guarded ? `  if base == nil:
-    blazeStop("blaze_rt_object_new: out of memory")` : ""}
-  let payload = alignUp(cast[uint](base) + BlazeHeaderSize, align)
-  var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes.uint64,
-                           alignment: align, refs: 1)
-  cast[ptr BlazeHeader](payload - BlazeHeaderSize)[] = header
-  result = cast[pointer](payload)
+    blazeStop("blaze_rt_object_new: request too large")
+  ## Cleared for the same reason an array is: a program may read a field it
+  ## never wrote, and a zeroed block is what answers that read the way the
+  ## source language does.
+  blazeBlock(bytes.uint64, align, true)` : `  blazeBlock(bytes.uint64, if alignment == 0: BlazeDefaultAlignment else: alignment.uint64, true)`}
 
 proc blaze_rt_retain*(pointer: pointer): pointer {.exportc, cdecl.} =
 ${guarded ? "  if pointer == nil:\n    return nil" : ""}
@@ -345,34 +359,36 @@ ${guarded ? "  if pointer == nil:\n    return" : ""}
     return
   let base = header[].base
 ${guarded ? "  header[].magic = BlazeFreed" : ""}
-  deallocShared(base)
+  dealloc(base)
 
 proc blaze_rt_reallocate*(pointer: pointer, bytes: csize_t): pointer {.exportc, cdecl.} =
 ${guarded ? `  if pointer == nil:
     return blaze_rt_allocate(bytes)` : ""}
   let header = check(pointer, "blaze_rt_reallocate")
   let previous = header[]
-  let total = bytes.uint64 + previous.alignment + BlazeHeaderSize
-${guarded ? `  if total > BlazeMaxAllocation:
-    blazeStop("blaze_rt_reallocate: request too large")` : ""}
-  let grown = allocShared0(int(total))
-${guarded ? `  if grown == nil:
-    blazeStop("blaze_rt_reallocate: out of memory")` : ""}
-  let payload = alignUp(cast[uint](grown) + BlazeHeaderSize, previous.alignment)
-  # A fresh block can align its payload differently, so the bytes travel to
-  # where the new header says they are rather than staying where they were.
-  let kept = if previous.length < bytes.uint64: previous.length else: bytes.uint64
-  if kept > 0:
-    copyMem(cast[pointer](payload), pointer, int(kept))
-  var updated = previous
-  updated.base = grown
-  updated.length = bytes.uint64
-  cast[ptr BlazeHeader](payload - BlazeHeaderSize)[] = updated
+  ## A block asked to grow into room it already has is already that block, which
+  ## is what makes a geometric growth policy free: the first append over a
+  ## literal allocates once and every later one lands here.
+  if bytes.uint64 <= previous.capacity:
+    if bytes.uint64 > previous.length:
+      zeroMem(cast[pointer](cast[uint](pointer) + previous.length), int(bytes.uint64 - previous.length))
+    header[].length = bytes.uint64
+    return pointer
+  ## Doubling is what keeps a loop of appends from being quadratic. The request
+  ## is a floor rather than a target.
+  let wanted = previous.capacity + previous.capacity div 2 + 16
+  let grown = blazeBlock(if bytes.uint64 < wanted: wanted else: bytes.uint64, previous.alignment, true)
+  ## A fresh block can align its payload differently, so the bytes travel to
+  ## where the new header says they are rather than staying where they were.
+  if previous.length > 0:
+    copyMem(grown, pointer, int(previous.length))
   blaze_rt_release(pointer)
-  result = cast[pointer](payload)
+  result = grown
 
 proc blaze_rt_string_new*(bytes: pointer, length: csize_t): cstring {.exportc, cdecl.} =
-  let storage = blaze_rt_allocate(length.csize_t + 1)
+  ## The whole payload is written below, terminator included, so the block is
+  ## not cleared first.
+  let storage = blaze_rt_allocate_uninitialized(length.csize_t + 1)
   if length > 0:
     copyMem(storage, bytes, int(length))
   cast[ptr UncheckedArray[char]](storage)[int(length)] = '\\0'
@@ -382,10 +398,58 @@ proc blaze_rt_string_length*(text: cstring): csize_t {.exportc, cdecl.} =
 ${guarded ? "  if text == nil:\n    return 0" : ""}
   check(cast[pointer](text), "blaze_rt_string_length")[].length - 1
 
+## The length of any string, managed or written out as a literal. A managed
+## string is measured from the header in front of it; a literal has no header,
+## so the magic word is what tells the two apart and a literal is scanned.
+proc blaze_rt_text_length*(text: cstring): csize_t {.exportc, cdecl.} =
+  if text == nil: return 0
+  let header = headerOf(cast[pointer](text))
+  if header[].magic == BlazeMagic: return csize_t(header[].length - 1)
+  ## A literal has no header, so it is scanned, which is what the C runtime
+  ## falls back to as well. The length of a cstring is its len.
+  csize_t(text.len)
+
 proc blaze_rt_string_clone*(text: cstring): cstring {.exportc, cdecl.} =
   blaze_rt_string_new(cast[pointer](text), blaze_rt_string_length(text))
 
+proc blaze_rt_string_append*(left, right: cstring): cstring {.exportc, cdecl.} =
+  ## The left string is a value the program can still be holding, so it is only
+  ## written into when it is a managed block nothing else refers to. A literal
+  ## the compiler wrote out has no block to grow and a shared one has a reader
+  ## that would see the append, so both are copied into a block of their own,
+  ## and it is that copy which the later appends grow. Growing a block in place
+  ## is what makes a loop of appends linear rather than quadratic in the bytes
+  ## copied.
+  if left == nil:
+    return if right == nil: blaze_rt_string_new(nil, 0) else: blaze_rt_string_new(cast[pointer](right), blaze_rt_text_length(right))
+  if right == nil:
+    return blaze_rt_string_new(cast[pointer](left), blaze_rt_text_length(left))
+  let leftLength = blaze_rt_text_length(left)
+  let rightLength = blaze_rt_text_length(right)
+  let wanted = leftLength + rightLength + 1
+  let header = headerOf(cast[pointer](left))
+  var owner: cstring
+  if header[].magic == BlazeMagic and header[].refs == 1:
+    ## This block is the caller's alone, so it can be written into. A resize
+    ## that fits the capacity it has is the same block, and one that does not
+    ## grows it to at least half again as much.
+    owner = cast[cstring](blaze_rt_reallocate(cast[pointer](left), wanted))
+  else:
+    let room = leftLength * 2 + 16
+    owner = cast[cstring](blaze_rt_allocate_uninitialized(if wanted < room: room.csize_t else: wanted))
+    copyMem(cast[pointer](owner), left, int(leftLength))
+  if rightLength > 0:
+    copyMem(cast[pointer](cast[uint](owner) + leftLength), right, int(rightLength))
+  cast[ptr UncheckedArray[char]](owner)[int(wanted - 1)] = '\\0'
+  owner
+
 proc blaze_rt_array_new*(count, elementSize: csize_t): pointer {.exportc, cdecl.} =
+  ## Cleared, and deliberately so. A program is allowed to read past what it
+  ## filled: a while loop over an array runs until the read comes back
+  ## false, and a cleared block is what makes that read false rather than
+  ## whatever the allocator handed back. The source language answers the same
+  ## read as nothing, so zeroing is what agrees with it, and there is no bounds
+  ## check to answer it with: the IR holds no length for an element access.
   blaze_rt_allocate(arrayBytes(count, elementSize, "blaze_rt_array_new"))
 
 proc blaze_rt_array_resize*(pointer: pointer, count, elementSize: csize_t): pointer {.exportc, cdecl.} =

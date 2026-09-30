@@ -8,7 +8,7 @@
  */
 
 import { CompilerError } from "./errors.ts";
-import type { Arch, Abi, BuildMode, OsName, TargetSpec } from "./types.ts";
+import type { Arch, Abi, BuildMode, Objective, OsName, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
 const OPERATING_SYSTEMS: readonly OsName[] = ["linux"];
@@ -133,25 +133,97 @@ export function archOptions(target: TargetSpec): string[] {
 }
 
 /**
- * The C compiler options a build mode asks for.
- *
- * `-fno-lto` is on every one of them and not only the release ones: link-time
- * optimization would make the object a candidate is measured from depend on
- * every other object beside it, so the assembly a build delivers and the
- * object it links would no longer be the same program. A build measures
- * candidates against each other, and that comparison is only a comparison when
- * each one was made on its own.
+ * The C compiler options the C backend asks for, in three parts.
  *
  * `-g` is only in `debug`, and `-O0` with it, because a program to step
- * through is a program the compiler has not rearranged. `release` and
- * `danger` ask for `-O2`, which is where the C compiler optimizes without
- * turning on the loop transformations: those are worth less on a program
- * whose loops the IR already unrolled, and they cost code size in a runtime
- * that is measured.
+ * through is a program the compiler has not rearranged.
+ *
+ * `release` and `danger` ask for `-O3`: the loop transformations, the wider
+ * inlining set and the vectorizer are all on. The comment this replaces held
+ * that `-O2` was chosen because the loop transforms "are worth less on a
+ * program whose loops the IR already unrolled", and no pass unrolls anything —
+ * `REPAIR_RULES` in `semantics/repair.ts` is the four rules that exist. The
+ * cost that comment described is real, though: `-O3` does make code bigger, and
+ * a contract whose primary objective is `size` is asking for the opposite. So
+ * `size` asks for `-O2` instead. The candidates of one function are all built
+ * the same way and so still rank the same; what changes is the program that is
+ * delivered, which is the one the objective names.
+ *
+ * The two floating-point flags are the ones that change no computed value.
+ * `-fno-math-errno` drops the promise that a maths call sets `errno`, and
+ * `-fno-trapping-math` says the program has no floating-point operand that can
+ * trap; between them they let the compiler emit `floor` and `pow` as
+ * instructions rather than calls. `-ffast-math` is deliberately absent: the
+ * generated `min` and `max` propagate NaN and preserve signed zero by hand and
+ * the NaN truth test does the same, so a fast-math build would not deliver the
+ * semantics the IR states.
  */
-export function optimizationOptions(mode: BuildMode): string[] {
-  if (mode === "debug") return ["-O0", "-g", "-fno-lto"];
-  return ["-O2", "-fno-lto"];
+function optimizationLevel(mode: BuildMode, objective?: Objective): string[] {
+  if (mode === "debug") return ["-O0", "-g"];
+  if (objective === "size") return ["-O2"];
+  return ["-O3", "-fno-math-errno", "-fno-trapping-math"];
+}
+
+/**
+ * The options one candidate is compiled with.
+ *
+ * A candidate is measured against the other candidates of the same function,
+ * and that comparison is only a comparison when each object was made on its
+ * own. Plain `-flto` would break it twice over: the object would no longer
+ * carry code at all until something linked it, so a size that weighed
+ * `textSizeBytes` would weigh nothing, and one candidate's result would depend
+ * on the objects beside it.
+ *
+ * `-ffat-lto-objects` is what makes the two goals compatible, and it is a real
+ * option rather than a hope: an object compiled with it is byte-for-byte the
+ * same size in `.text` as one compiled without, and carries the compiler's
+ * intermediate form beside that code for a link that asks to use it. The
+ * candidate stays a self-contained object that can be measured, verified and
+ * delivered on its own, and the delivered program is still linked with
+ * everything in front of it.
+ *
+ * `debug` asks for neither flag. A program to step through is a program the
+ * compiler has not rearranged, and the intermediate form is the compiler's
+ * most rearranged output there is.
+ */
+export function optimizationOptions(mode: BuildMode, objective?: Objective): string[] {
+  const level = optimizationLevel(mode, objective);
+  return mode === "debug" ? level : [...level, "-flto", "-ffat-lto-objects"];
+}
+
+/**
+ * The options the delivered program is linked with.
+ *
+ * The same level, the same floating-point flags, and `-flto`. Each function is
+ * its own object and every callee is declared but not defined, so a program
+ * linked without link-time optimization cannot inline one function into
+ * another at all, and the runtime entry points a candidate calls across that
+ * boundary stay calls. This link runs once, after a candidate has been chosen,
+ * and there is no second candidate to compare it against, which is the whole
+ * reason the flag is off the compile above and on here.
+ */
+export function linkOptions(mode: BuildMode, objective?: Objective): string[] {
+  const level = optimizationLevel(mode, objective);
+  return mode === "debug" ? level : [...level, "-flto"];
+}
+
+/**
+ * The options the C compiler is asked to target.
+ *
+ * A named cpu fixes the instruction set, which is a decision about what the
+ * delivered program may be assumed to run on. An empty one leaves the
+ * instruction set at the toolchain's baseline, so the portable answer is the
+ * one already given, and the one thing still worth asking for is scheduling:
+ * `-mtune` picks the pipelines and the branch costs of the machine the build
+ * runs on and cannot emit an instruction the baseline does not have. It does
+ * make the object specific to that machine's microarchitecture, so a stored
+ * object tuned on one host is tuned for the wrong one on another. That costs
+ * speed and never correctness, which is why it is the default and a named cpu
+ * is not.
+ */
+export function cTargetOptions(target: TargetSpec): string[] {
+  if (target.cpu !== "") return [`-march=${target.cpu}`];
+  return ["-mtune=native"];
 }
 
 /**

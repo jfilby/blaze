@@ -29,7 +29,7 @@ import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, t
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, TypeExpr } from "../core/types.ts";
-import { optimizationOptions } from "../core/target.ts";
+import { linkOptions } from "../core/target.ts";
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName } from "./c-names.ts";
@@ -594,7 +594,7 @@ export function link(request: LinkRequest): void {
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
   // A function the compiler lowered from IR may call the maths library, and a
   // harness or a probe that runs one links it in.
-  const result = run("gcc", [...optimizationOptions(request.mode), ...includes, "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", [...linkOptions(request.mode), ...includes, "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

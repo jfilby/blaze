@@ -261,6 +261,52 @@ test("a whole number is computed at the width the language promotes it to", asyn
   }
 });
 
+test("a minimum and a maximum are the smaller and the larger, numbers and floats alike", async () => {
+  // The whole-number form is a `CMOVcc` on the flags a comparison left, which
+  // is the arm the branch it replaced chose, chosen without a guess.
+  const whole: [string, string][] = [
+    ["1", "2"],
+    ["2", "1"],
+    ["-1", "1"],
+    ["1", "-1"],
+    ["0", "0"],
+    ["-2147483648", "-1"],
+    ["2147483647", "-2147483648"],
+  ];
+  for (const [left, right] of whole) {
+    for (const [op, expected] of [
+      ["min", Math.min(Number(left), Number(right))],
+      ["max", Math.max(Number(left), Number(right))],
+    ] as const) {
+      const fn = subject(I32, handsBack({ k: "arith", op, type: I32, left: number(left, I32), right: number(right, I32) }));
+      assert.equal(await lowered(fn, (name) => `printf("%d", ${name}());`), String(expected), `${left} ${op} ${right}`);
+    }
+  }
+  // A float is not a `MINSD` or a `MAXSD`, and this is why. Those answer with
+  // their source whenever the comparison does not hold, and a comparison against
+  // a value that is not a number never holds, so whichever way round the pair is
+  // encoded the same side comes out: the instruction cannot say which operand
+  // was at fault. The language answers both with the right side, and a signed
+  // zero is equal to a positive one rather than less than it. An instruction
+  // that answers a pair the wrong way is not a faster branch, it is a different
+  // program, so the float keeps the branch. The spelling below is the C
+  // library's rather than the language's, because this is a driver printing
+  // with `%g` and not the runtime's formatter.
+  const floats: [string, string, string, string][] = [
+    ["1.5", "2.5", "1.5", "2.5"],
+    ["2.5", "1.5", "1.5", "2.5"],
+    ["-0.0", "0.0", "0", "0"],
+    ["NaN", "2", "2", "2"],
+    ["2", "NaN", "nan", "nan"],
+  ];
+  for (const [left, right, min, max] of floats) {
+    const smaller = subject(F64, handsBack({ k: "arith", op: "min", type: F64, left: number(left), right: number(right) }));
+    assert.equal(await lowered(smaller, (name) => `printf("%g", ${name}());`), min, `min(${left}, ${right})`);
+    const larger = subject(F64, handsBack({ k: "arith", op: "max", type: F64, left: number(left), right: number(right) }));
+    assert.equal(await lowered(larger, (name) => `printf("%g", ${name}());`), max, `max(${left}, ${right})`);
+  }
+});
+
 test("a float is computed at the precision it is written at", async () => {
   const single = subject(F32, handsBack({ k: "arith", type: F32, op: "div", left: number("1", F32), right: number("3", F32) }));
   assert.equal(await lowered(single, (name) => `printf("%.9g", (double)${name}());`), "0.333333343");
@@ -407,6 +453,80 @@ test("a loop counts, walks and repeats as many times as the IR states", async ()
   assert.equal(walked, "8");
 });
 
+
+test("a loop with a step written out runs its counter the right number of times", async () => {
+  // The loops above step by one, which is a different shape from a step the
+  // program wrote: the counter is then read from the frame, stepped and
+  // written back, and reading it once before that read nothing. This is the
+  // shape a loop over an array has, and the counter is what both turn on.
+  const stepped = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("0", I32),
+          to: number("10", I32),
+          inclusive: false,
+          down: false,
+          step: number("3", I32),
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: local("i", I32), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  // 0, 3, 6 and 9: the counter steps by three and stops at the bound.
+  assert.equal(await lowered(stepped, (name) => `printf("%d", ${name}());`), "18");
+
+  // The same with the step subtracted, so the other way through the update is
+  // walked as well.
+  const down = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("10", I32),
+          to: number("0", I32),
+          inclusive: false,
+          down: true,
+          step: number("3", I32),
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: local("i", I32), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  // 10, 7, 4 and 1.
+  assert.equal(await lowered(down, (name) => `printf("%d", ${name}());`), "22");
+});
 test("a loop leaves for another block, and the names it declared go with it", async () => {
   const fn = subject(I32, {
     id: "entry",

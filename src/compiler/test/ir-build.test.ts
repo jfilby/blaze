@@ -200,11 +200,13 @@ test("a proposal the compiler refuses leaves the artifact as it was, and says wh
     log.some((message) => /total: `hoist-invariant entry` was refused: has a body that computes nothing more than once/.test(message)),
     log.join("\n"),
   );
-  // `total` is refused for writing `sum`, which is the check that runs before
-  // the call is looked for: a body that writes a name of its own cannot be
-  // spliced in, whatever block the call was written in.
+  // `total` is not called in `entry` at all, so the second proposal is refused
+  // for that and not for writing. A callee that writes is inlinable now: the
+  // substitution renames its write targets beside its reads, so a write cannot
+  // land on a name the caller has. What is still refused is the call the block
+  // does not make, and the refusal says which block would hold it.
   assert.ok(
-    log.some((message) => /total: `inline-call entry callee=total` was refused: total writes "sum"/.test(message)),
+    log.some((message) => /total: `inline-call entry callee=total` was refused: total is not called in block entry/.test(message)),
     log.join("\n"),
   );
 });

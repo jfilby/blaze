@@ -219,14 +219,14 @@ function against(
   return { ir: printSemanticFunction(outcome.applied), note: outcome.note };
 }
 
-test("inline-call refuses a callee that writes a name of its own", () => {
-  // `bump` writing `x` is state of `bump`. The spliced body carries that write
-  // over as a `set` on a bare name, so it lands on `work`'s own `x` and the
-  // argument the call was made with is already gone by the time it is read.
-  // `work(5)` is 11; the inlined body returns 12. A write to the callee's own
-  // local is the same defect with a name the caller happens to share, and it
-  // is refused for the same reason: every write target is a bare string, and
-  // the substitution that renames the callee's reads does not touch one.
+test("inline-call writes under a name of the callee's own, not the caller's", () => {
+  // This used to be refused, and the reason was a real defect rather than a
+  // real obstacle: a `set` names what it writes as a bare string, so the
+  // spliced body carried `x = x + 1` over onto `work`'s own `x`, and the value
+  // the caller read back was a write it never made. `work(5)` is 11 and the
+  // spliced body returned 12. A parameter is a copy of its argument, so the
+  // write now lands on a temporary of its own and the caller's `x` is what it
+  // was.
   const parameter = against(
     [
       "export function bump(x: number): number { x = x + 1; return x; }",
@@ -238,8 +238,12 @@ test("inline-call refuses a callee that writes a name of its own", () => {
     "work",
     "inline-call entry callee=bump",
   );
-  assert.ok("refused" in parameter, "a private write is not a caller's to inherit");
-  assert.match(parameter.refused, /bump writes "x"/);
+  assert.ok(!("refused" in parameter), `a callee that writes its parameter is inlinable: ${JSON.stringify(parameter)}`);
+  assert.match(parameter.ir, /inlined\d+ = \[add\[f64\] local\[f64\] inlined\d+/, "the write is on a copy of its own");
+  assert.doesNotMatch(parameter.ir, /^\s*set x = /m, "the write did not land on the caller's parameter");
+  // The caller's own `x` is still read where the caller read it, so the answer
+  // is 5 + 6 rather than 6 + 6.
+  assert.match(parameter.ir, /return \[add\[f64\] local\[f64\] x local\[f64\] y\]/, "the caller reads its own x");
 
   const local = against(
     [
@@ -253,8 +257,12 @@ test("inline-call refuses a callee that writes a name of its own", () => {
     "work",
     "inline-call entry callee=bump",
   );
-  assert.ok("refused" in local, "a write to the callee's own local is refused too");
-  assert.match(local.refused, /bump writes "acc"/);
+  assert.ok(!("refused" in local), `a callee that writes its own local is inlinable: ${JSON.stringify(local)}`);
+  // The callee's `acc` is renamed, so the caller's own `acc = 100` is what the
+  // caller reads back: 100 + 6, not 6 + 6.
+  assert.match(local.ir, /let value\[f64\] inlined\d+ mutable = local\[f64\] x/, "the callee's local was renamed into this function");
+  assert.match(local.ir, /let value\[f64\] acc mutable = const\[f64\] 100/, "the caller's own local is still the one it declared");
+  assert.match(local.ir, /return \[add\[f64\] local\[f64\] acc local\[f64\] y\]/, "the caller reads its own acc");
 });
 
 test("common-subexpression refuses a value a nested block shadows", () => {
@@ -379,6 +387,37 @@ test("common-subexpression binds a value under the declaration it reads", () => 
   // And the artifact a build lowers is the one the source is: 4 + 4 + 5.
   const reread = parseSemanticFunction(printSemanticFunction(outcome.applied), own.program);
   assert.equal(validateSemanticFunction(reread, own.program.files[1].functions.squared as FunctionContract), undefined);
+});
+
+test("an accumulator is inlinable, which is the callee most worth inlining", () => {
+  // A helper that accumulates is the commonest shape in a program written this
+  // way, and it used to be refused for writing at all. It is also the callee
+  // where a call costs the most: the loop inside it is the work, and a call to
+  // it from inside another loop pays for the call and the frame every turn.
+  const outcome = attemptOn(
+    "usesAccumulator",
+    [
+      "export function accumulate(scale: number): number {",
+      "  let total = 0;",
+      "  let i = 0;",
+      "  while (i < 4) { total = total + i * scale; i = i + 1; }",
+      "  return total;",
+      "}",
+      "",
+      "export function usesAccumulator(scale: number): number {",
+      "  let total = 0;",
+      "  let j = 0;",
+      "  while (j < 3) { total = total + accumulate(scale); j = j + 1; }",
+      "  return total;",
+      "}",
+      "",
+    ].join("\n"),
+    "inline-call b2 callee=accumulate",
+  );
+  assert.ok(typeof outcome === "object" && "applied" in outcome, `an accumulator is inlinable: ${JSON.stringify(outcome)}`);
+  const ir = typeof outcome === "object" && "applied" in outcome ? printSemanticFunction(outcome.applied) : "";
+  assert.match(ir, /inlined\d+/, "the callee's names were renamed into this function");
+  assert.doesNotMatch(ir, /accumulate\(/, "the call the body replaced is gone from the caller");
 });
 
 /** Resolves one function of its own library and applies one proposal to it. */

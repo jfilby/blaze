@@ -25,6 +25,7 @@ import { compileFunctionC } from "./toolchain/ir-c.ts";
 import { parseSemanticFunction, printSemanticFunction } from "./semantics/ir-text.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { applyProposal, type RepairContext } from "./semantics/repair.ts";
+import { optimizeSemanticFunction } from "./semantics/optimize-ir.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
@@ -391,13 +392,14 @@ export function runtimePreparer(request: {
   lowering: BackendKind;
   mode: BuildMode;
   runtime: RuntimeKind;
+  target: TargetSpec;
   workspace: CodegenWorkspace;
 }): () => Promise<PreparedRuntime | undefined> {
   let pending: Promise<PreparedRuntime | undefined> | null = null;
   return () => {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
       if (request.lowering === "wasm") return undefined;
-      if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory, request.mode);
+      if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory, request.mode, request.target);
       return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
     })();
     return pending;
@@ -871,6 +873,11 @@ function revise(
   const refused: string[] = [];
   let current = fn;
   for (const proposal of review.proposals) {
+    // The deterministic rewrites run before each proposal, not only at the end:
+    // a fold that makes two values the same one is what lets the rule that
+    // binds a repeated value see them as repeated, and a rule that proposes to
+    // hoist something the last round already hoisted is proposing nothing.
+    current = optimizeSemanticFunction(current);
     const outcome = applyProposal(current, proposal, context);
     if ("refused" in outcome) {
       const note = `\`${proposal.text}\` was refused: ${outcome.refused}`;
@@ -890,6 +897,10 @@ function revise(
     current = outcome.applied;
     applied.push(`\`${proposal.text}\`: ${outcome.note}`);
   }
+  // And once more after the last proposal, so a round that proposed nothing at
+  // all still arrives folded, and so the text a review reads is what the
+  // backends are handed rather than what the model last wrote.
+  current = optimizeSemanticFunction(current);
   return { text: printSemanticFunction(current), applied, refused };
 }
 

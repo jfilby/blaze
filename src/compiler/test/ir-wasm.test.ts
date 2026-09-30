@@ -17,6 +17,7 @@ import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { CompilerError } from "../core/errors.ts";
+import { parseSemanticFunction } from "../semantics/ir-text.ts";
 import type { SemanticFunction, SemanticType } from "../core/semantic-ir.ts";
 
 /** The parts of the engine a case here drives a module with. */
@@ -24,6 +25,7 @@ interface Engine {
   Module: new (bytes: Uint8Array) => object;
   Instance: new (module: object, imports: object) => { exports: Record<string, unknown> };
   Memory: new (shape: { initial: number }) => { buffer: ArrayBuffer };
+  validate(bytes: Uint8Array): boolean;
 }
 
 /**
@@ -610,5 +612,120 @@ test("a construct the module boundary cannot reach is refused by name", async ()
     }),
     /cannot print a number/,
     "a module reaches no runtime service, so printing is refused rather than emitted",
+  );
+});
+
+/**
+ * Emits the module for a function written as the IR text a model writes,
+ * against the contract of the same function written in a source, and answers
+ * whether the engine takes the bytes. The TypeScript path never lowers a
+ * compound element write, so that shape reaches this backend only through the
+ * text form.
+ */
+function throughIr(library: string, text: string): number {
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program } = programWithSemantics("typescript", files, "main.ts");
+  const contract: FunctionContract | undefined = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const bytes = moduleBytes(parseSemanticFunction(text, program), contract);
+  assert.ok(engine !== undefined);
+  return engine.validate(bytes) ? bytes.length : -1;
+}
+
+test("a compound write to an element reads the element it writes over", () => {
+  // `a[i] += v` takes the old element and the new value, and the store that
+  // follows takes the address and one value. Pushing the address and the new
+  // value and emitting the operator left the operator combining those two and
+  // one value on the stack where the store reads two, so `WebAssembly.validate`
+  // said no: every compound element write was a module the engine refused.
+  // The TypeScript path only ever writes an element with `=`, so the shape
+  // reaches this backend through the IR text a model writes.
+  const library = "export function r(a: Float64Array): number {\n  a[1] = 2.5;\n  a[0] = 1.5;\n  return a[0] + a[1];\n}\n";
+  const text = [
+    "function r(a: []f64) -> f64",
+    '  requires "a != null"',
+    '  requires "len(a) >= (1 + 1)"',
+    '  requires "len(a) >= (0 + 1)"',
+    "  ensures none",
+    "  allocates no",
+    "  prints no",
+    "  reads_argv no",
+    "  effects none",
+    "  param value[[]f64] a mutable",
+    "  block entry: releases[]",
+    "    set_element a const[usize] 1 = const[f64] 2.5 @2",
+    "    set_element a const[usize] 1 += const[f64] 1.5 @3",
+    "  return [add[f64] [element[f64] local[[]f64] a const[usize] 0] [element[f64] local[[]f64] a const[usize] 1]]",
+    "",
+  ].join("\n");
+  assert.ok(throughIr(library, text) > 0, "a compound element write is a module the engine takes");
+});
+
+test("two blocks that both declare a name are two values, not one", async () => {
+  // One local for a name across the whole function gave the second block's
+  // declaration its type to the first block's uses, and a `local.set` of a
+  // double against a local of another width is a module the engine refuses.
+  // The resolver refuses a name declared twice in the same block, so this is
+  // two sibling arms of one test.
+  const arms = [
+    "  let total = 0;",
+    "  if (n > 0) { let v = 1.5; total = v; }",
+    "  else { let v = 2n; total = 3; }",
+    "  return total;",
+  ];
+  await compute("n: number", arms, "run\n1\n", "RESULT 1.5\n");
+  await compute("n: number", arms, "run\n-1\n", "RESULT 3\n");
+});
+
+test("a short-circuit operator does not run the arm the source never reaches", () => {
+  // `&&` answers with its left arm when the left one does not hold, and a
+  // `select` over the two arms is handed both of them: the right arm ran
+  // whatever the left one said, so `i < n && a[i] > 0` read the first element
+  // of an empty buffer. The memory past the buffer is filled with positives
+  // here, which is what a walk that read past the count would answer.
+  const library = [
+    "export function r(a: Float64Array, n: number): number {",
+    "  let count = 0;",
+    "  for (let i = 0; i < n; i++) { if (i < n && a[i] > 0) { count += 1; } }",
+    "  return count;",
+    "}",
+  ].join("\n");
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
+  const contract: FunctionContract | undefined = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(moduleBytes(semantics.r as SemanticFunction, contract)), {
+    env: { memory },
+  });
+  const view = new DataView(memory.buffer);
+  view.setBigUint64(1024, 0n, true);
+  for (let address = 1032; address < 1024 + 512; address += 8) view.setFloat64(address, 100, true);
+  const read = instance.exports[contract.function.name] as (offset: number, count: number) => number;
+  assert.equal(read(1032, 0), 0, "an empty buffer is read as an empty buffer, not as the memory past it");
+  view.setBigUint64(1024, 2n, true);
+  view.setFloat64(1032, 5, true);
+  view.setFloat64(1040, -1, true);
+  assert.equal(read(1032, 2), 1, "the right arm runs only for the elements the left arm lets it");
+});
+
+test("a clamp is the two instructions the module has for it", async () => {
+  // `Math.min` and `Math.max` are `f64.min` and `f64.max`, and a clamp is the
+  // two of them. The table named neither, so a clamp was refused with an error
+  // about `Math.round`, which is a different builtin and a different reason.
+  const clamp = ["  return Math.min(Math.max(n, 0), 10);"];
+  await compute("n: number", clamp, "run\n-4\n", "RESULT 0\n");
+  await compute("n: number", clamp, "run\n7\n", "RESULT 7\n");
+  await compute("n: number", clamp, "run\n40\n", "RESULT 10\n");
+});
+
+test("the command line is refused by what it is, not by what rounds", async () => {
+  // Every builtin with no instruction behind it was reported as `Math.round`,
+  // so a read of `process.argv` was refused for a rounding the source never
+  // asked for.
+  await assert.rejects(
+    compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", ""),
+    /cannot read the command line/,
+    "a module is handed the vectors and no process, so the command line is named as what it is",
   );
 });

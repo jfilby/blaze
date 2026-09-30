@@ -47,6 +47,7 @@ async function deliver(source: string): Promise<{ binary: string; original: stri
   runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
   const runner = await buildProgramDriver({
     mode: "debug",
+    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     program: resolved(source),
     workDirectory: directory,
     objectPaths: [],
@@ -410,6 +411,7 @@ test("a string is ordered by what it says, not by whether it matches", async () 
   runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
   const runner = await buildProgramDriver({
     mode: "debug",
+    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
     program: turned,
     workDirectory: directory,
     objectPaths: [],

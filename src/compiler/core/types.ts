@@ -380,11 +380,13 @@ export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim"];
  *
  *   debug     optimized for reading: `-O0 -g`, so a delivered program is the
  *             one the compiler wrote with nothing folded away
- *   release   optimized for running: `-O2 -fno-lto`, and nothing past it
+ *   release   optimized for running: `-O3`, and a contract whose primary
+ *             objective is size gets `-O2` instead. A candidate is compiled
+ *             with `-ffat-lto-objects` so it is still a self-contained object
+ *             to measure, and the delivered program is linked with `-flto`
  *   danger    release, with the runtime's own guards left out: the
  *             use-after-free check, the allocation overflow check, the size
  *             caps and the null checks are not emitted
- *
  * `danger` is a promise about the program rather than about the build, and it
  * is the only one of the three that changes what a candidate does when it
  * runs. Everything the compiler proves about a candidate is proved the same

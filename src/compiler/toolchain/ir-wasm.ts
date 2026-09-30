@@ -27,7 +27,7 @@ import { generateWasmHost, wasmValueType } from "./wasm.ts";
 import type { Runner } from "../core/types.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import type { FunctionContract } from "../core/types.ts";
-import { builtinFor } from "../semantics/builtins.ts";
+import { ARGV, ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   type SemanticBlock,
   type SemanticFunction,
@@ -331,13 +331,40 @@ const MATH: Record<string, number> = {
   "Math.abs": 0x99,
   "Math.floor": 0x9c,
   "Math.trunc": 0x9d,
+  "Math.min": 0xa4,
+  "Math.max": 0xa5,
 };
 
-/** A byte offset into the memory the host provides, which is the whole width. */
-const USIZE = { kind: "primitive", name: "usize" } as const;
+/**
+ * The builtins that read the command line, whose names are the table's own
+ * rather than a source name. The host the build runs is handed the module and
+ * the vectors on standard input, so there is no command line for a module to
+ * read and no process to read it from.
+ */
+const ARGV_NAMES: Record<string, true> = {
+  [ARGV]: true,
+  [ARGV_LENGTH]: true,
+};
 
-/** The 64 bit whole number a byte offset is widened to before it is scaled. */
-const I64_TYPE = { kind: "primitive", name: "i64" } as const;
+/**
+ * The 32 bit whole number a byte offset is counted in. The format indexes
+ * memory with a 32 bit address, and the memory the host provides is a handful
+ * of pages, so the whole of an address fits: a base and an index computed at
+ * the full width and narrowed afterwards are instructions the engine has to
+ * emulate on a 32 bit one for a number that never used the width.
+ */
+const ADDRESS = { kind: "primitive", name: "u32" } as const;
+
+/**
+ * How far one element of a buffer is from the next, as a shift. The width is
+ * one, two, four or eight bytes, so the scale is a shift of zero, one, two or
+ * three: the shift of zero is left out, because moving a number by none of it
+ * is an instruction that does what the address already says.
+ */
+function elementShift(type: SemanticType): number {
+  const width = elementSize(type);
+  return width <= 1 ? -1 : Math.log2(width);
+}
 
 const COMPOUND: Record<string, string> = {
   "+=": "add",
@@ -365,30 +392,67 @@ function compoundCode(held: number, type: SemanticType, op: string): number {
 /* The body                                                                    */
 /* -------------------------------------------------------------------------- */
 
-/** Every name the body reads, with the type it is declared as. */
-function bindings(fn: SemanticFunction): { name: string; type: SemanticType }[] {
-  const names = new Map<string, SemanticType>();
-  for (const param of fn.params) names.set(param.name, slotType(param));
-  const walk = (statements: readonly SemanticStatement[]): void => {
+/** A name the body reads, and the block whose declaration it answers to. */
+interface Binding {
+  /** The block the name is declared in, which is what tells two uses apart. */
+  block: string;
+  name: string;
+  type: SemanticType;
+}
+
+/**
+ * Every name the body reads, with the block that declares it and the type it
+ * is declared as.
+ *
+ * A name is one local per block that declares it rather than one local for the
+ * whole function, because the IR's scoping is what says which declaration a
+ * use answers to: two blocks that both declare `x` of different types are two
+ * values, and one local for the two would give the second one's type to the
+ * first one's uses. The resolver refuses a name declared twice in the same
+ * block, so no two declarations share a block here.
+ */
+function bindings(fn: SemanticFunction): Binding[] {
+  const found: Binding[] = [];
+  const seen = new Set<string>();
+  const declare = (block: string, name: string, type: SemanticType): void => {
+    const key = `${block} ${name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({ block, name, type });
+  };
+  const walk = (statements: readonly SemanticStatement[], block: string): void => {
     for (const statement of statements) {
-      if (statement.k === "let") names.set(statement.slot.name, slotType(statement.slot));
+      if (statement.k === "let") declare(block, statement.slot.name, slotType(statement.slot));
       if (statement.k === "if") {
-        walk(statement.then.statements);
-        if (statement.otherwise !== null) walk(statement.otherwise.statements);
+        walk(statement.then.statements, statement.then.id);
+        if (statement.otherwise !== null) walk(statement.otherwise.statements, statement.otherwise.id);
       }
-      if (statement.k === "block") walk(statement.body.statements);
+      if (statement.k === "block") walk(statement.body.statements, statement.body.id);
       if (statement.k === "loop") {
-        if (statement.loop.kind === "counted") names.set(statement.loop.variable, statement.loop.type);
-        if (statement.loop.kind === "each") {
-          names.set(statement.loop.element, statement.loop.elementType);
-          names.set(statement.loop.index, { kind: "primitive", name: "usize" });
+        // A loop declares its own names in the block its body is, which is
+        // where they stop meaning at the end of it: a `let` of the same name
+        // past the loop is another value, not a second view of this one.
+        if (statement.loop.kind === "counted") {
+          declare(statement.loop.body.id, statement.loop.variable, statement.loop.type);
         }
-        walk(statement.loop.body.statements);
+        if (statement.loop.kind === "each") {
+          declare(statement.loop.body.id, statement.loop.element, statement.loop.elementType);
+          // The index of a walk is a count of elements, and it is held in the
+          // 32 bits an address is counted in: the count the module compares it
+          // against is read out of the same memory the addresses are, so the
+          // two are 32 bit numbers either way. A use that reads it wider is
+          // converted where it is read, which widens the very same count.
+          declare(statement.loop.body.id, statement.loop.index, ADDRESS);
+        }
+        walk(statement.loop.body.statements, statement.loop.body.id);
       }
     }
   };
-  walk(fn.entry.statements);
-  return [...names].map(([name, type]) => ({ name, type }));
+  // A parameter and a `let` of the function's own body are one scope: the
+  // resolver refuses a name the two both give, so neither is the other's.
+  for (const param of fn.params) declare(fn.entry.id, param.name, slotType(param));
+  walk(fn.entry.statements, fn.entry.id);
+  return found;
 }
 
 /**
@@ -396,20 +460,32 @@ function bindings(fn: SemanticFunction): { name: string; type: SemanticType }[] 
  *
  * Every value in the IR is a tree, so each one is emitted where it is used and
  * needs no temporary: the only thing that outlives its own expression is a
- * slot, and a slot is a local. A name is one local for the whole function,
- * which is what the IR's scoping says anyway — telling two blocks' uses of one
- * name apart is the work of a target with real blocks, and this is not one.
+ * slot, and a slot is a local. A name is one local per block that declares it,
+ * so a name two blocks both give is two locals, and the block the body is
+ * emitting is what says which of them a use means.
  */
 class Body {
   private readonly code = new Bytes();
+  /** The local each `block name` pair is, in the order the module numbers them. */
   private readonly index = new Map<string, number>();
-  private readonly declared: SemanticType[] = [];
+  /** The type each `block name` pair is declared as. */
+  private readonly types = new Map<string, SemanticType>();
+  /** The carrier of every local, in the order the module numbers them. */
+  private readonly declared: number[] = [];
   private readonly frames: string[] = [];
-  private readonly slots: Map<string, SemanticType>;
+  /** The blocks the body is inside, outermost first. */
+  private readonly blocks: string[] = [];
   private readonly fn: SemanticFunction;
   private readonly contract: FunctionContract;
   private readonly returns: SemanticType;
   private readonly candidate: string | undefined;
+  /**
+   * The borrowed locals of each carrier that are free to be handed out again,
+   * most recently borrowed first. A borrow nests — the right arm of a `&&`
+   * borrows the same carrier the whole operator borrowed — so a local is only
+   * free once the statement that borrowed it has finished with it.
+   */
+  private readonly spare = new Map<number, number[]>();
   /** How many labels the body has opened that the IR does not name. */
   private anonymous = 0;
 
@@ -418,12 +494,53 @@ class Body {
     this.contract = contract;
     this.returns = returns;
     this.candidate = candidate;
-    const all = bindings(fn);
-    for (const binding of all) {
-      this.index.set(binding.name, this.declared.length);
-      this.declared.push(binding.type);
+    for (const binding of bindings(fn)) {
+      this.index.set(`${binding.block} ${binding.name}`, this.declared.length);
+      this.types.set(`${binding.block} ${binding.name}`, binding.type);
+      this.declared.push(carrier(binding.type));
     }
-    this.slots = new Map(all.map((binding) => [binding.name, binding.type] as const));
+  }
+
+  /**
+   * A local of one carrier to hold a value for the span of a statement. The
+   * format has no way to copy what is on the stack, so a statement that needs
+   * one value twice asks for a local to keep the first in.
+   */
+  private borrow(held: number): number {
+    const free = this.spare.get(held);
+    const at = free?.pop();
+    if (at !== undefined) return at;
+    const index = this.declared.length;
+    this.declared.push(held);
+    return index;
+  }
+
+  /** Hands a borrowed local back, so a later borrow of that carrier takes it. */
+  private release(held: number, at: number): void {
+    const free = this.spare.get(held);
+    if (free === undefined) this.spare.set(held, [at]);
+    else free.push(at);
+  }
+
+  /** Stores what is on the top of the stack in a borrowed local. */
+  private keep(at: number): void {
+    this.op(0x21);
+    this.code.varuint(at);
+  }
+
+  /** Reads a local back onto the top of the stack. */
+  private read(at: number): void {
+    this.op(0x20);
+    this.code.varuint(at);
+  }
+
+  /**
+   * Reads a local back and leaves it where it was, which is what a value that
+   * is both the answer and the test of a branch has to be.
+   */
+  private keepAndRead(at: number): void {
+    this.op(0x22);
+    this.code.varuint(at);
   }
 
   private op(value: number): void {
@@ -455,28 +572,33 @@ class Body {
     for (let index = 0; index < size; index += 1) this.op(view.getUint8(index));
   }
 
-  private slot(name: string): SemanticType {
-    const type = this.slots.get(name);
-    if (type === undefined) {
-      throw new CompilerError({
-        category: "SemanticIrError",
-        stage: "semantic-ir",
-        message: `the body of ${symbolOf(this.contract)} reads "${name}", which it declares nowhere`,
-      });
+  /**
+   * The local a name means where the body is, which is the one the innermost
+   * block that declares it holds. A name is one local per block that declares
+   * it, so the block the body is emitting is what says which of them a use is.
+   */
+  private local(name: string): number {
+    for (let position = this.blocks.length - 1; position >= 0; position -= 1) {
+      const at = this.index.get(`${this.blocks[position]} ${name}`);
+      if (at !== undefined) return at;
     }
-    return type;
+    throw new CompilerError({
+      category: "SemanticIrError",
+      stage: "semantic-ir",
+      message: `the body of ${symbolOf(this.contract)} reads "${name}", which it declares nowhere`,
+    });
   }
 
-  private local(name: string): number {
-    const at = this.index.get(name);
-    if (at === undefined) {
-      throw new CompilerError({
-        category: "SemanticIrError",
-        stage: "semantic-ir",
-        message: `the body of ${symbolOf(this.contract)} reads "${name}", which it declares nowhere`,
-      });
+  private slot(name: string): SemanticType {
+    for (let position = this.blocks.length - 1; position >= 0; position -= 1) {
+      const type = this.types.get(`${this.blocks[position]} ${name}`);
+      if (type !== undefined) return type;
     }
-    return at;
+    throw new CompilerError({
+      category: "SemanticIrError",
+      stage: "semantic-ir",
+      message: `the body of ${symbolOf(this.contract)} reads "${name}", which it declares nowhere`,
+    });
   }
 
   private get(name: string): void {
@@ -558,6 +680,28 @@ class Body {
     this.op(BINARY[held].ne as number);
   }
 
+  /**
+   * The address of one element of a buffer, in the 32 bits the format indexes
+   * memory with.
+   *
+   * The host hands a module a handful of pages, so a whole address fits in 32
+   * bits however wide the arithmetic that counts it is. Computing the base and
+   * the index at the full width and narrowing the sum is a multiply and an
+   * add the engine has to emulate on a 32 bit one; narrowing each on its own
+   * and scaling by a shift is not, and `elementSize` only ever answers one, two,
+   * four or eight, so the scale is a shift of at most three.
+   */
+  private address(of: SemanticValue, index: SemanticValue, type: SemanticType): void {
+    this.value(of, ADDRESS);
+    this.value(index, ADDRESS);
+    const shift = elementShift(type);
+    if (shift > 0) {
+      this.i32(shift);
+      this.op(0x74);
+    }
+    this.op(BINARY[I32].add as number);
+  }
+
   /** One value, as the operations that produce it. */
   private value(value: SemanticValue, at: SemanticType): void {
     switch (value.k) {
@@ -587,10 +731,9 @@ class Body {
         if (held.kind !== "slice" && held.kind !== "array" && held.kind !== "ptr") {
           unreachable("take the length of a value that is not a buffer", this.contract, this.candidate);
         }
-        this.value(value.of, USIZE);
-        this.i64(8n);
-        this.op(0x7d);
-        this.op(0xa7);
+        this.value(value.of, ADDRESS);
+        this.i32(8);
+        this.op(BINARY[I32].sub as number);
         this.op(0x29);
         this.code.varuint(3);
         this.code.varuint(0);
@@ -598,12 +741,7 @@ class Body {
         return;
       }
       case "element": {
-        this.value(value.of, USIZE);
-        this.value(value.index, USIZE);
-        this.i64(BigInt(elementSize(value.type)));
-        this.op(0x7e);
-        this.op(0x7c);
-        this.op(0xa7);
+        this.address(value.of, value.index, value.type);
         const load = loadCode(value.type);
         this.op(load.code);
         this.code.varuint(load.align);
@@ -617,8 +755,7 @@ class Body {
         if (field === undefined) {
           unreachable(`read the field "${value.field}" of the layout "${value.layout}"`, this.contract, this.candidate);
         }
-        this.value(value.object, USIZE);
-        this.op(0xa7);
+        this.value(value.object, ADDRESS);
         const load = loadCode(value.type);
         this.op(load.code);
         this.code.varuint(load.align);
@@ -701,32 +838,73 @@ class Body {
         this.condition(value.condition);
         this.op(0x1b);
         return;
-      case "coalesce":
+      case "coalesce": {
         // `left ?? right` is the right arm when the left one is nothing, and
         // nothing is a zero of the left arm's own type: a zero of another width
         // under a comparison of this one is a module the engine refuses.
-        this.value(value.right, at);
-        this.value(value.left, at);
-        this.value(value.left, at);
+        //
+        // The right arm is behind a branch rather than under a `select`, which
+        // chooses between two values it has already been given. A select
+        // writes the left arm down twice and runs the right one whatever the
+        // left one says, so `a ?? a[0]` read the first element of an empty
+        // buffer — a trap the source language never raises. The left arm is
+        // written once here, into the local the answer is read back out of.
         const held = carrier(value.left.type);
+        const answer = this.borrow(held);
+        this.value(value.left, value.left.type);
+        this.keepAndRead(answer);
         if (held === I64) this.i64(0n);
         else if (held === F64) this.float(0, true);
         else if (held === F32) this.float(0, false);
         else this.i32(0);
         this.op(BINARY[held].eq as number);
-        this.op(0x1b);
+        this.op(0x04);
+        this.code.byte(0x40);
+        this.frames.push(this.frame());
+        this.value(value.right, value.left.type);
+        this.keep(answer);
+        this.frames.pop();
+        this.op(0x0b);
+        this.read(answer);
+        this.convert(value.left.type, at);
+        this.release(held, answer);
         return;
-      case "logical":
+      }
+      case "logical": {
         // A logical operator is a value and not a condition: the arm the truth
-        // of the left one chooses, which is a select over the two. `&&` keeps
-        // the right arm when the left one holds and `||` keeps it when the left
-        // one does not, so one of them turns that truth over first.
-        this.value(value.right, at);
+        // of the left one chooses. `&&` keeps the right arm when the left one
+        // holds and `||` keeps it when the left one does not, so one of them
+        // turns that truth over first.
+        //
+        // The right arm is behind a branch, for the reason the `??` above
+        // gives: a `select` over the two arms runs the right one whatever the
+        // left one says, and writes the left one down twice to do it. The left
+        // arm is written once here, into the local the answer is read back
+        // out of, and the right one only when the operator calls for it.
+        const held = carrier(at);
+        const answer = this.borrow(held);
         this.value(value.left, at);
-        this.condition(value.left);
+        this.keepAndRead(answer);
+        if (held === I64) this.op(0x50);
+        else if (held === F64) {
+          this.float(0, true);
+          this.op(BINARY[F64].ne as number);
+        } else if (held === F32) {
+          this.float(0, false);
+          this.op(BINARY[F32].ne as number);
+        }
         if (value.op === "or") this.op(0x45);
-        this.op(0x1b);
+        this.op(0x04);
+        this.code.byte(0x40);
+        this.frames.push(this.frame());
+        this.value(value.right, at);
+        this.keep(answer);
+        this.frames.pop();
+        this.op(0x0b);
+        this.read(answer);
+        this.release(held, answer);
         return;
+      }
       case "arith":
       case "compare": {
         // A comparison names the type its two sides are compared as, which is
@@ -769,9 +947,33 @@ class Body {
         this.convert(value.type, at);
         return;
       }
+      case "argv":
+        // `process.argv.length` and `process.argv(n)` are the same read of the
+        // command line, and a module is handed the vectors and no process.
+        this.noCommandLine();
+        return;
       default:
         unreachable(`hold a value the IR keeps as "${value.k}"`, this.contract, this.candidate);
     }
+  }
+
+  /**
+   * The refusal a read of the command line gets. The host a module runs under
+   * is handed the test vectors on standard input and starts no process, so
+   * `process.argv` is nothing the module can reach.
+   */
+  private noCommandLine(): never {
+    throw new CompilerError({
+      category: "TargetError",
+      stage: "compile",
+      message: `a WebAssembly module cannot read the command line, in ${symbolOf(this.contract)}`,
+      detail:
+        "the host a module runs under is handed the test vectors on standard input and starts no process, so " +
+        "process.argv is nothing the module can reach. Build this function as the c, asm or machine output " +
+        "kind to read the command line",
+      function: symbolOf(this.contract),
+      candidate: this.candidate,
+    });
   }
 
   /** A literal, in the type the IR resolved it to. */
@@ -793,8 +995,13 @@ class Body {
 
   block(block: SemanticBlock, label: string | null): void {
     if (label !== null) this.frames.push(label);
+    // The block is the scope its own names are declared in, so it is on the
+    // stack for its statements and for the value its terminator hands back:
+    // a name two blocks both give is a different local in each of them.
+    this.blocks.push(block.id);
     for (const statement of block.statements) this.statement(statement);
     this.terminator(block.terminator);
+    this.blocks.pop();
     if (label !== null) this.frames.pop();
   }
 
@@ -858,14 +1065,37 @@ class Body {
         if (element === null) {
           unreachable(`write an element of "${statement.buffer}"`, this.contract, this.candidate);
         }
-        this.value({ k: "local", type: this.slot(statement.buffer), name: statement.buffer }, USIZE);
-        this.value(statement.index, USIZE);
-        this.i64(BigInt(elementSize(element)));
-        this.op(0x7e);
-        this.op(0x7c);
-        this.op(0xa7);
-        this.value(statement.value, element);
-        if (statement.op !== "=") this.op(compoundCode(carrier(element), element, statement.op));
+        this.address({ k: "local", type: this.slot(statement.buffer), name: statement.buffer }, statement.index, element);
+        // A compound operator takes the old element and the new value, while
+        // the store that follows takes the address first and the value on top
+        // of it. Pushing the address and then the new value and emitting the
+        // operator left the operator combining the address and the value, and
+        // one value on the stack where a store reads two — a module the engine
+        // refuses to validate. So the address is kept in a local, the old
+        // element is read at it, the sum is kept in a second one, and the two
+        // are read back in the order the store takes them. The load and the
+        // store are at the width the element is written at, which is the width
+        // the operator works in.
+        if (statement.op !== "=") {
+          const held = carrier(element);
+          const address = this.borrow(I32);
+          this.keep(address);
+          this.read(address);
+          const old = loadCode(element);
+          this.op(old.code);
+          this.code.varuint(0);
+          this.code.varuint(0);
+          this.value(statement.value, element);
+          this.op(compoundCode(held, element, statement.op));
+          const sum = this.borrow(held);
+          this.keep(sum);
+          this.read(address);
+          this.read(sum);
+          this.release(held, sum);
+          this.release(I32, address);
+        } else {
+          this.value(statement.value, element);
+        }
         const store = storeCode(element);
         this.op(store.code);
         this.code.varuint(store.align);
@@ -878,12 +1108,11 @@ class Body {
         if (field === undefined) {
           unreachable(`write the field "${statement.field}" of the layout "${statement.layout}"`, this.contract, this.candidate);
         }
-        this.value(statement.object, USIZE);
-        this.op(0xa7);
         // The address is the only thing narrowed to the 32 bits the format
         // indexes memory with; the value goes down at the width of its own
         // type, which is the width the store pops. Wrapping the value as well
         // handed `i64.store` and `f64.store` an `i32`.
+        this.value(statement.object, ADDRESS);
         this.value(statement.value, statement.value.type);
         const store = storeCode(statement.value.type);
         this.op(store.code);
@@ -908,15 +1137,15 @@ class Body {
         this.op(0x0b);
         return;
       case "block":
-        // A block of its own: the names it declares stop meaning past its end,
-        // and in a module with no scopes the body is emitted either way. It is
-        // a label, so a jump out of it is counted like any other.
-        this.op(0x02);
-        this.code.byte(0x40);
-        this.frames.push(this.frame());
+        // A block of its own is emitted without a `block` around it. The names
+        // it declares stop meaning past its end, which the scope stack in
+        // `block` already says, and the `block` a module opens is a label: a
+        // terminator branches either to a loop's header or out of the block
+        // that holds the loop, never to this one, so the label it opens is one
+        // no jump can name and every branch out of it is a depth deeper than
+        // it has to be. Emitting nothing takes the nesting off every scoped
+        // block in the function.
         this.block(statement.body, null);
-        this.frames.pop();
-        this.op(0x0b);
         return;
       case "loop":
         this.loop(statement.loop);
@@ -959,25 +1188,52 @@ class Body {
    * inside the loop is a counter bound again on every pass.
    */
   private loop(loop: SemanticLoop): void {
+    // A loop declares its index and its element in the block its body is, and
+    // the prologue below is part of that loop: the index it starts is the
+    // body block's own name, so the block is on the scope stack before it runs.
+    this.blocks.push(loop.body.id);
+    // A counted loop's bound and its step are read once, before the loop: the
+    // head of the turn needs both of them on every pass, and a value tree the
+    // source wrote inside the header is the same number on every one of them.
+    // They are borrowed rather than declared, so a body without a counted loop
+    // carries no local for them.
+    let bound = -1;
+    let step = -1;
+    let end = -1;
     if (loop.kind === "counted") {
+      const held = carrier(loop.type);
+      bound = this.borrow(held);
+      this.value(loop.to, loop.type);
+      this.keep(bound);
+      step = this.borrow(held);
+      this.countedStep(loop);
+      this.keep(step);
       // A counted loop moves its index at the head of the turn rather than at
       // the foot, because a `continue` branches to the head: a step at the foot
       // is a step a `continue` skips, and a loop whose index never moves is a
       // loop that never ends. The turn before the first is a turn of its own,
       // so the index starts one step short of the value the source wrote.
       this.value(loop.from, loop.type);
-      this.countedStep(loop);
-      this.op(BINARY[carrier(loop.type)].sub as number);
+      this.read(step);
+      this.op(BINARY[held].sub as number);
       this.set(loop.variable);
     }
     if (loop.kind === "each") {
-      // The walk advances at the head of the turn, for the same reason a
-      // counted loop does: a `continue` branches to the head, so an advance at
-      // the foot is one a `continue` skips, and a walk that never advances is a
-      // walk that never ends. The turn before the first is a turn of its own,
-      // so the index starts one step short of the first element.
-      this.i64(-1n);
+      // A for-of walks a buffer by a cursor: the index of the element the turn
+      // is on, and the count the walk stops at. Both are read out of the same
+      // memory the addresses are, so both are 32 bit numbers, and the head of
+      // the turn is a `+= 1`, a compare and a branch rather than a 64 bit
+      // multiply the engine has to emulate. The walk advances at the head, for
+      // the same reason a counted loop does: a `continue` branches to the head,
+      // so an advance at the foot is one a `continue` skips. The turn before
+      // the first is a turn of its own, so the index starts one short of the
+      // first element, and the count is read once: nothing in the body can
+      // change the count the host wrote beside the elements.
+      this.i32(-1);
       this.set(loop.index);
+      end = this.borrow(I32);
+      this.value(loop.length, ADDRESS);
+      this.keep(end);
     }
     this.op(0x02);
     this.code.byte(0x40);
@@ -1010,39 +1266,40 @@ class Body {
       this.code.varuint(0);
     } else if (loop.kind === "counted") {
       this.get(loop.variable);
-      this.countedStep(loop);
+      this.read(step);
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
       this.op(BINARY[carrier(loop.type)].add as number);
       this.set(loop.variable);
       this.get(loop.variable);
-      this.value(loop.to, loop.type);
-      const bound = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
-      this.op(BINARY[carrier(loop.type)][bound] as number);
+      this.read(bound);
+      const stop = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
+      this.op(BINARY[carrier(loop.type)][stop] as number);
       this.op(0x45);
       this.exitTest();
       this.block(loop.body, null);
       this.backToHeader();
     } else {
-      // A for-of counts elements from the first to the length. It counts them
-      // rather than moving the buffer, because the buffer is a name the body
-      // reads elsewhere and the walk does not change what it holds.
+      // A for-of walks a buffer by a cursor: the index moves on by one, and
+      // the walk ends once the index has reached the count that was read
+      // before the loop. It counts elements rather than moving the buffer,
+      // because the buffer is a name the body reads elsewhere and the walk
+      // does not change what it holds.
       this.get(loop.index);
-      this.i64(1n);
-      this.op(0x7c);
-      this.set(loop.index);
-      this.get(loop.index);
-      this.value(loop.length, USIZE);
-      this.op(0x53);
-      this.op(0x45);
+      this.i32(1);
+      this.op(BINARY[I32].add as number);
+      this.keepAndRead(this.local(loop.index));
+      this.read(end);
+      // The count is read out of the host's memory as a whole number, so it is
+      // ordered as one: a count past the signed range is a count, not a
+      // negative number the walk has already passed.
+      this.op(UNSIGNED_BINARY[I32].ge as number);
       this.exitTest();
-      this.get(loop.of);
-      this.convert(this.slot(loop.of), I64_TYPE);
-      this.get(loop.index);
-      this.i64(BigInt(elementSize(loop.elementType)));
-      this.op(0x7e);
-      this.op(0x7c);
-      this.op(0xa7);
+      this.address(
+        { k: "local", type: this.slot(loop.of), name: loop.of },
+        { k: "local", type: ADDRESS, name: loop.index },
+        loop.elementType,
+      );
       const load = loadCode(loop.elementType);
       this.op(load.code);
       this.code.varuint(load.align);
@@ -1056,6 +1313,16 @@ class Body {
     this.frames.pop();
     this.op(0x0b);
     this.frames.pop();
+    // The borrows of the head go back in the reverse of the order they were
+    // taken, which is the order a stack discipline hands the same local out
+    // again: a loop inside this one borrows the same carriers and is finished
+    // with them by now.
+    if (loop.kind === "counted") {
+      this.release(carrier(loop.type), step);
+      this.release(carrier(loop.type), bound);
+    }
+    if (loop.kind === "each") this.release(I32, end);
+    this.blocks.pop();
   }
 
   /**
@@ -1087,6 +1354,7 @@ class Body {
   private builtin(callee: string): void {
     const code = MATH[callee];
     if (code === undefined) {
+      if (ARGV_NAMES[callee] === true) this.noCommandLine();
       // `Math.round` is the one maths builtin with no instruction of its own:
       // the source language rounds a half up, and the only rounding a module
       // has rounds a half to even, so nothing in it is the same number.
@@ -1096,8 +1364,8 @@ class Body {
         message: `a WebAssembly module cannot round the way the source language does, in ${symbolOf(this.contract)}`,
         detail:
           "Math.round rounds a half up and the module's own rounding rounds a half to even, so the two disagree " +
-          "on every half. Math.abs, Math.floor and Math.trunc are one instruction each and are lowered. Build " +
-          "this function as the c, asm or machine output kind to round as the source does",
+          "on every half. Math.abs, Math.floor, Math.trunc, Math.min and Math.max are one instruction each and " +
+          "are lowered. Build this function as the c, asm or machine output kind to round as the source does",
         function: symbolOf(this.contract),
         candidate: this.candidate,
       });
@@ -1119,7 +1387,7 @@ class Body {
   localGroups(): number[] {
     const types: number[] = [];
     for (let position = this.fn.params.length; position < this.declared.length; position += 1) {
-      types.push(carrier(this.declared[position] as SemanticType));
+      types.push(this.declared[position] as number);
     }
     const groups: number[] = [];
     let index = 0;
@@ -1188,8 +1456,11 @@ export function moduleBytes(
   const parameters = fn.params.map((param) => carrier(slotType(param)));
   const result = returns.kind === "void" ? undefined : carrier(returns);
   const code = new Bytes();
-  const groups = body.localGroups();
-  code.counted(groups.length / 2, (locals) => groups.forEach((value) => locals.varuint(value)));
+  // The body is emitted before the locals are declared, because a statement
+  // that needs a value twice borrows a local for it, and a local borrowed
+  // while the body was emitted was not declared yet. So the body's own bytes
+  // are taken first and the declaration they are numbered against is written
+  // in front of them afterwards.
   body.block(fn.entry, null);
   // The value a body that falls out of its own end leaves behind is written
   // before the body is copied, because `finish` takes the bytes as they
@@ -1197,7 +1468,10 @@ export function moduleBytes(
   // the `end` that closes the function is left with an empty stack under a
   // type section that declares a result.
   if (result !== undefined) body.answer();
-  code.raw(body.finish());
+  const emitted = body.finish();
+  const groups = body.localGroups();
+  code.counted(groups.length / 2, (locals) => groups.forEach((value) => locals.varuint(value)));
+  code.raw(emitted);
   code.byte(0x0b);
   const compiled = code.build();
 

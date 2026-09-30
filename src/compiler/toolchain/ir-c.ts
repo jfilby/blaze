@@ -45,7 +45,7 @@ import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { optimizationOptions } from "../core/target.ts";
+import { cTargetOptions, optimizationOptions } from "../core/target.ts";
 
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
@@ -130,6 +130,36 @@ function builtinExpression(name: string, args: string[]): string {
 }
 
 /**
+ * Writes a whole number as the digits it is, into a buffer the caller owns.
+ *
+ * This is a function and not a statement expression because of what a
+ * statement expression is: everything declared inside one dies when it ends,
+ * so a buffer declared there and handed back out of it is a dangling pointer,
+ * and the C compiler reads it as one from `-O1` upwards. A version written as
+ * an expression printed an empty string for every number above the width of a
+ * double, which is exactly the case this exists for. A function has a frame of
+ * its own, so the buffer it fills is still there when it returns.
+ */
+const WHOLE_NUMBER_HELPER = `/* A whole number as its digits, which is not what a double can hold.
+   The magnitude is taken unsigned because the most negative i64 negates to
+   itself as a signed value and its digits would then never come out. A u64 is
+   twenty digits, so twenty are taken and the caller's buffer holds them with
+   room for the sign and the terminator. */
+static const char* blaze_whole_text(int negative, unsigned long long magnitude, char* out) {
+  char digits[20];
+  int count = 0;
+  do {
+    digits[count++] = (char)('0' + (int)(magnitude % 10));
+    magnitude /= 10;
+  } while (magnitude > 0);
+  int used = 0;
+  if (negative) out[used++] = '-';
+  while (count > 0) out[used++] = digits[--count];
+  out[used] = '\\0';
+  return out;
+}`;
+
+/**
  * Writes one function of the IR as C. The C is a translation unit of its own:
  * the runtime header, the layouts of the objects the function reads and writes,
  * and a declaration of every other function of the program it calls, so the
@@ -150,6 +180,8 @@ class FunctionEmitter {
   private pending: string[] = [];
   private depth = 1;
   private temporaries = 0;
+  /** Set once a whole number is written out, which is what the helper is for. */
+  private wholeNumbers = false;
 
   constructor(fn: SemanticFunction) {
     this.fn = fn;
@@ -175,6 +207,7 @@ class FunctionEmitter {
       `#include "${RUNTIME_NAME}.h"`,
       ...(layouts === "" ? [] : ["", layouts]),
       ...(this.externs.size === 0 ? [] : ["", ...this.externs.values()]),
+      ...(this.wholeNumbers ? ["", WHOLE_NUMBER_HELPER] : []),
       "",
       `${signature} {`,
       ...this.body,
@@ -218,6 +251,13 @@ class FunctionEmitter {
     if (this.pending.length === 0) return;
     this.write(this.pending.map((line) => `${pad(this.depth)}${line}`));
     this.pending = [];
+  }
+
+  /** The declarations waiting to be written, taken rather than left pending. */
+  private takePending(): string[] {
+    const declared = this.pending;
+    this.pending = [];
+    return declared;
   }
 
   private statement(statement: SemanticStatement, depth: number): void {
@@ -264,7 +304,11 @@ class FunctionEmitter {
         // 2^53, so a larger one lost its last digits on the way out.
         const value = statement.value;
         if (isNumber(value.type) && isInteger(value.type)) {
+          // The text is built first because building it declares the buffer it
+          // writes into, and a declaration has to reach the output before the
+          // line that reads it.
           const text = this.number(this.expression(value, value.type, depth), value.type);
+          this.flush();
           this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${text});`]);
           return;
         }
@@ -657,12 +701,13 @@ class FunctionEmitter {
   }
 
   private length(of: SemanticValue, depth: number): string {
-    // A string is as long as its bytes. The runtime counts a string it owns
-    // from the header it installed before it, which a string written out in the
-    // source does not have: it is a C literal, and the header before it is
-    // whatever `.rodata` holds there. Both are NUL terminated, so both are as
-    // long as the C library says they are.
-    if (isTextType(of.type)) return `strlen(${this.raw(of, depth)})`;
+    // A string the runtime allocated is as long as the header in front of it
+    // says, which is two loads. A string the compiler wrote out is a C literal
+    // with no header in front of it, and `blaze_rt_text_length` tells the two
+    // apart by the magic word, falling back to a scan for the literal. Emitting
+    // `strlen` here instead cost a walk of the whole string on every read, and
+    // a read inside a loop walked it once per turn.
+    if (isTextType(of.type)) return `${RUNTIME_NAME}_text_length(${this.raw(of, depth)})`;
     throw backendError(
       `${this.fn.symbol} reads the length of an array, which no C this compiler writes can answer`,
       "an array reaches a function as a pointer to its first element and no length arrives with it",
@@ -680,42 +725,38 @@ class FunctionEmitter {
     if (value.parts.every((part) => part.k === "text")) {
       return value.parts.map((part) => cStringLiteral(part.value)).join("");
     }
-    // Every part is bound and measured before the string is laid out, so the
-    // buffer that holds it is exactly as long as the parts are. A buffer sized
-    // from the literals beside them and a fixed room for each interpolated one
-    // cut the string at the end of it, silently, and counted what a literal
-    // measures in UTF-16 units where the string holds UTF-8 bytes.
-    const parts: { text: string; length: string }[] = value.parts.map(() => ({
-      text: this.temporary("blaze_part"),
-      length: this.temporary("blaze_part_length"),
-    }));
-    // The parts are laid out in a buffer that is the string itself: it is the
-    // runtime's own, because its length is only known here, at run time, and a
-    // runtime allocation carrying its bytes and its terminator is what a string
-    // is. It is a statement expression for the same reason an object is: C
-    // binds no temporary inside an expression.
-    const buffer = this.temporary("blaze_text");
-    const filled = this.temporary("blaze_filled");
-    const total = this.temporary("blaze_text_length");
-    const lines = value.parts.flatMap((part, index) => {
-      const { text, length } = parts[index];
+    // Every part is bound before the string is laid out, and the parts are
+    // joined by the runtime rather than copied into a buffer sized here. A
+    // buffer sized from the literals beside them and a fixed room for each
+    // interpolated one cut the string at the end of it, silently, and counted
+    // what a literal measures in UTF-16 units where the string holds UTF-8
+    // bytes. Letting the runtime join them removes both: it measures every part
+    // in O(1) where the part is a managed string, and it grows a block
+    // geometrically, so a string built in a loop copies its bytes a linear
+    // number of times rather than a quadratic one.
+    const parts: string[] = value.parts.map(() => this.temporary("blaze_part"));
+    const joined = this.temporary("blaze_text");
+    const lines = value.parts.map((part, index) => {
       const written = part.k === "text" ? cStringLiteral(part.value) : this.asText(part.value, depth);
-      return [
-        `const char* ${text} = ${written};`,
-        `size_t ${length} = ${text} == NULL ? 0 : strlen(${text});`,
-      ];
+      return `const char* ${parts[index]} = ${written};`;
     });
-    lines.push(`size_t ${total} = ${parts.map((part) => part.length).join(" + ")};`);
-    lines.push(`char* ${buffer} = (char*)${RUNTIME_NAME}_allocate(${total} + 1);`);
-    lines.push(`size_t ${filled} = 0;`);
-    for (const part of parts) {
-      lines.push(
-        `if (${part.length} != 0) memcpy(${buffer} + ${filled}, ${part.text}, ${part.length}); ${filled} += ${part.length};`,
-      );
+    // The first part becomes the string the rest are appended to, and it is
+    // handed over rather than copied: the runtime appends in place only when
+    // the block carries one reference, which is exactly the case where nothing
+    // else can be looking at it. A part the program still holds a reference to
+    // is copied instead, and the reference it carried is the one the result
+    // takes over.
+    lines.push(`const char* ${joined} = ${parts[0]};`);
+    for (const part of parts.slice(1)) {
+      lines.push(`${joined} = ${RUNTIME_NAME}_string_append(${joined}, ${part});`);
     }
-    lines.push(`${buffer}[${filled}] = '\\0';`);
-    lines.push(`${buffer};`);
-    return `({ ${lines.join(" ")} })`;
+    lines.push(`${joined};`);
+    // A part that is a whole number needed a buffer of its own, and that
+    // declaration belongs inside this expression rather than above the
+    // statement that holds it: the expression is the statement, and a buffer
+    // declared outside it is not part of the value.
+    const declared = this.takePending();
+    return `({ ${[...declared, ...lines].join(" ")} })`;
   }
 
   /**
@@ -752,8 +793,31 @@ class FunctionEmitter {
   private number(read: string, type: SemanticType | null): string {
     const buffer = this.temporary("blaze_number");
     if (type !== null && isInteger(type)) {
-      const signed = isUnsigned(type) ? "unsigned long long" : "long long";
-      return `({ char ${buffer}[32]; snprintf(${buffer}, sizeof ${buffer}, "${isUnsigned(type) ? "%llu" : "%lld"}", (${signed})(${read})); ${buffer}; })`;
+      // A whole number is written by dividing it by ten, not by handing it to
+      // snprintf: a locale-aware printf call is a dozen instructions more than
+      // this loop, and it runs for every whole number a program prints or
+      // interpolates.
+      //
+      // The digits are written by a helper this file emits, into a buffer
+      // declared on the line above rather than inside the expression. That is
+      // not a style choice: everything declared inside a statement expression
+      // dies when it ends, so a buffer declared there and handed back out of
+      // it is a dangling pointer, and the C compiler treats it as one from -O1
+      // upwards. A version written as an expression printed an empty string for
+      // every number too large for a double, which is the case this exists for.
+      this.wholeNumbers = true;
+      // The declaration carries no indentation of its own: flush adds it when
+      // the line is written.
+      this.pending.push(`char ${buffer}[24];`);
+      // An unsigned value has no sign to write. A signed one is passed twice:
+      // once for the sign, and once as an unsigned magnitude, because the most
+      // negative i64 negates to itself as a signed value and its digits would
+      // then never come out.
+      const negative = isUnsigned(type) ? "0" : `((${read}) < 0 ? 1 : 0)`;
+      const magnitude = isUnsigned(type)
+        ? `(unsigned long long)(${read})`
+        : `(unsigned long long)((${read}) < 0 ? 0ULL - (unsigned long long)(${read}) : (unsigned long long)(${read}))`;
+      return `blaze_whole_text(${negative}, ${magnitude}, ${buffer})`;
     }
     const written = this.temporary("blaze_written");
     return (
@@ -808,8 +872,8 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   const source = generateFunctionC(request.fn);
   await writeFile(request.sourcePath, source, "utf8");
 
-  const archFlag = request.target.cpu === "" ? [] : [`-march=${request.target.cpu}`];
-  const optimized = optimizationOptions(request.mode);
+  const archFlag = cTargetOptions(request.target);
+  const optimized = optimizationOptions(request.mode, request.contract.optimize.primary);
   const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or

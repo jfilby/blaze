@@ -27,8 +27,8 @@ import {
   type SemanticType,
   type ValueKind,
 } from "../core/semantic-ir.ts";
-import type { BuildMode, FunctionSignature, Runner } from "../core/types.ts";
-import { optimizationOptions } from "../core/target.ts";
+import type { BuildMode, FunctionSignature, Runner, TargetSpec } from "../core/types.ts";
+import { cTargetOptions, linkOptions } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral } from "./c-names.ts";
@@ -44,19 +44,18 @@ static const char* program_string(const char* text, size_t length) {
 }
 
 static const char* program_concat(const char* left, const char* right) {
-  const size_t left_length = left == NULL ? 0 : strlen(left);
-  const size_t right_length = right == NULL ? 0 : strlen(right);
-  char* joined = (char*)${RUNTIME_NAME}_allocate(left_length + right_length + 1);
+  const char* joined = ${RUNTIME_NAME}_string_append(left, right);
   if (joined == NULL) program_fail("out of memory");
-  if (left_length > 0) memcpy(joined, left, left_length);
-  if (right_length > 0) memcpy(joined + left_length, right, right_length);
-  joined[left_length + right_length] = '\\0';
   return joined;
 }
 
+/* The length of any string, managed or a literal the compiler wrote out. A
+   managed string is measured from the header in front of it in O(1); the
+   runtime measures a literal by scanning it, which is what it has to do. */
 static size_t program_string_length(const char* text) {
-  return text == NULL ? 0 : strlen(text);
+  return ${RUNTIME_NAME}_text_length(text);
 }
+
 
 static bool program_string_equal(const char* left, const char* right) {
   if (left == NULL || right == NULL) return left == right;
@@ -69,20 +68,35 @@ static int program_string_compare(const char* left, const char* right) {
 }
 
 static void program_print_string(const char* text) {
-  if (text != NULL) fputs(text, stdout);
+  if (text != NULL) fwrite(text, 1, ${RUNTIME_NAME}_text_length(text), stdout);
 }
 
 /* A number as the language writes it, which is what a string interpolates. */
 static const char* program_number_text(double value) {
   char text[64];
-  ${RUNTIME_NAME}_format_number(value, (unsigned char*)text, sizeof text);
-  return program_string(text, strlen(text));
+  const size_t written = ${RUNTIME_NAME}_format_number(value, (unsigned char*)text, sizeof text);
+  return program_string(text, written);
 }
 
+/* A whole number written out, without the locale-aware formatting snprintf
+   does for it. A double holds every i64 only up to 2^53, so a 64 bit integer is
+   written by dividing by ten rather than by handing it to a printf. */
 static const char* program_integer_text(long long value) {
-  char text[32];
-  snprintf(text, sizeof text, "%lld", value);
-  return program_string(text, strlen(text));
+  char text[24];
+  char digits[24];
+  int count = 0;
+  unsigned long long magnitude = value < 0
+    ? 0ULL - (unsigned long long)value
+    : (unsigned long long)value;
+  do {
+    digits[count++] = (char)('0' + (int)(magnitude % 10));
+    magnitude /= 10;
+  } while (magnitude > 0);
+  int used = 0;
+  if (value < 0) text[used++] = '-';
+  while (count > 0) text[used++] = digits[--count];
+  text[used] = '\\0';
+  return program_string(text, (size_t)used);
 }
 
 /* The language carries a NaN through, so a value that is not a number is
@@ -111,9 +125,17 @@ static double program_round(double value) {
 }
 
 static const char* program_unsigned_text(unsigned long long value) {
-  char text[32];
-  snprintf(text, sizeof text, "%llu", value);
-  return program_string(text, strlen(text));
+  char text[24];
+  char digits[24];
+  int count = 0;
+  do {
+    digits[count++] = (char)('0' + (int)(value % 10));
+    value /= 10;
+  } while (value > 0);
+  int used = 0;
+  while (count > 0) text[used++] = digits[--count];
+  text[used] = '\\0';
+  return program_string(text, (size_t)used);
 }
 `;
 
@@ -261,6 +283,13 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   allocate(name: string, element: SemanticType, length: number, values: string[]): string[] {
     const written = declaredType(element);
     const bytes = length === 0 ? 1 : length;
+    // The block is cleared, and the program may read past what it filled: a
+    // `while (a[i])` loop over a typed array runs until the read comes back
+    // false, and a cleared block is what makes that read false rather than
+    // whatever the allocator handed back. The source language gives the same
+    // answer because a read past a typed array is undefined and the language
+    // answers it as nothing, and a zeroed block is the one way to agree with
+    // that without a bounds check the IR holds no length to write.
     return [
       `const size_t ${name}_length = ${length};`,
       `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate(${bytes} * sizeof(${written}));`,
@@ -561,6 +590,8 @@ export function generateProgramDriver(program: SemanticProgram): string {
 export interface ProgramDriverRequest {
   /** How the C compiler is asked to build, from the project's mode. */
   mode: BuildMode;
+  /** The machine the program is built for, which every object beside it agrees on. */
+  target: TargetSpec;
   program: SemanticProgram;
   /** Directory the driver is written and linked in. */
   workDirectory: string;
@@ -578,7 +609,10 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   const inputs = [driverPath, ...request.objectPaths];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
   // A program computes with the maths library, so the driver links it.
-  const result = run("gcc", ["-std=c11", ...optimizationOptions(request.mode), "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  // The driver holds the program's own top-level statements, so it is tuned
+  // for the same machine as every function it links, which is what a caller
+  // naming a cpu asked for and what an unnamed one would not get otherwise.
+  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode), ...cTargetOptions(request.target), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

@@ -16,7 +16,7 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
 import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
-import { optimizationOptions } from "../core/target.ts";
+import { cTargetOptions, optimizationOptions } from "../core/target.ts";
 
 /** Told to the model verbatim, so the rules live in one place. */
 export const cSourceRules = [
@@ -124,13 +124,13 @@ export async function compileC(request: CompileCRequest): Promise<CompileCResult
   validateCSource(request.source, request.contract, request.candidate);
   await writeFile(request.sourcePath, request.source, "utf8");
 
-  const archFlag = request.target.cpu === "" ? [] : [`-march=${request.target.cpu}`];
+  const archFlag = cTargetOptions(request.target);
   // A C candidate includes the runtime header by name, and a build keeps the
   // runtime beside the work directory rather than beside every candidate.
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
   const compiled = run(
     "gcc",
-    ["-std=c11", ...optimizationOptions(request.mode), "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
+    ["-std=c11", ...optimizationOptions(request.mode, request.contract.optimize.primary), "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
     { timeoutMs: 120_000 },
   );
   if (compiled.spawnError !== undefined) {

@@ -16,8 +16,8 @@ import { writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "./abi.ts";
-import { optimizationOptions } from "../core/target.ts";
-import type { BuildMode } from "../core/types.ts";
+import { cTargetOptions, optimizationOptions } from "../core/target.ts";
+import type { BuildMode, TargetSpec } from "../core/types.ts";
 
 export interface StandaloneRuntime {
   headerPath: string;
@@ -42,13 +42,19 @@ export async function writeRuntimeHeader(workDirectory: string): Promise<string>
 export async function buildStandaloneRuntime(
   workDirectory: string,
   mode: BuildMode = "debug",
+  target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
 ): Promise<StandaloneRuntime> {
   const headerPath = await writeRuntimeHeader(workDirectory);
   const sourcePath = `${workDirectory}/${RUNTIME_NAME}.c`;
   const objectPath = `${workDirectory}/${RUNTIME_NAME}.o`;
   await writeFile(sourcePath, runtimeSourceSource(mode), "utf8");
 
-  const compiled = run("gcc", ["-std=c11", ...optimizationOptions(mode), "-c", "-o", objectPath, sourcePath], {
+  // The runtime is one object with every entry point in it, and a program that
+  // prints nothing still carried the number formatter and its `snprintf`
+  // machinery. `-ffunction-sections` gives each entry point a section of its
+  // own, and the `-Wl,--gc-sections` at the link then drops the ones this
+  // program never reached. A section is only collectable if it is one.
+  const compiled = run("gcc", ["-std=c11", ...optimizationOptions(mode), ...cTargetOptions(target), "-ffunction-sections", "-fdata-sections", "-c", "-o", objectPath, sourcePath], {
     timeoutMs: 120_000,
   });
   if (compiled.spawnError !== undefined) {

@@ -25,6 +25,7 @@ import { ARGV_LENGTH, BUILTINS } from "../semantics/builtins.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import {
   elementTypeOf,
+  hasCall,
   isBoolean,
   isFloat,
   isNumber,
@@ -92,6 +93,37 @@ const COMPOUND: Record<string, "add" | "sub" | "mul" | "div" | "mod"> = {
   "*": "mul",
   "/": "div",
   "%": "mod",
+};
+
+/**
+ * The condition that fires when the one it names does not. A branch on a
+ * comparison is written as the negation of the condition the comparison
+ * holds under, because the flags a comparison leaves say what the
+ * comparison *is*, and a branch is reached by the arm that is not the one the
+ * comparison chose.
+ */
+const NEGATED: Record<"e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae", "e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae"> = {
+  e: "ne",
+  ne: "e",
+  l: "ge",
+  le: "g",
+  g: "le",
+  ge: "l",
+  b: "ae",
+  be: "a",
+  a: "be",
+  ae: "b",
+};
+
+/**
+ * The condition a comparison of two whole numbers holds under, by whether
+ * the language reads the numbers as signed. A comparison is carried out at
+ * the width the language promotes it to, so the two sides are already
+ * widened the way the conditions below expect them to be.
+ */
+const COMPARISON: Record<"signed" | "unsigned", Record<CompareOp, "e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae">> = {
+  signed: { eq: "e", ne: "ne", lt: "l", le: "le", gt: "g", ge: "ge" },
+  unsigned: { eq: "e", ne: "ne", lt: "b", le: "be", gt: "a", ge: "ae" },
 };
 
 /** The maths builtin each source name is one call of, by the name C gives it. */
@@ -416,13 +448,18 @@ class Machine {
     this.code.movRegMemSized(RAX, frame(held.offset), widthOf(held.type), signedOf(held.type));
   }
 
-  /** The value the accumulator has, written at the address a register holds. */
-  private storeInto(type: SemanticType, address: number): void {
+  /**
+   * The value the accumulator has, written at the address a register holds.
+   * The displacement is the offset of a field in the object that address
+   * points at, so a write to a field is one instruction rather than a move
+   * of the address, an addition to it, and the write.
+   */
+  private storeInto(type: SemanticType, address: number, displacement = 0): void {
     if (isFloat(type)) {
-      this.code.movsStore(mem(address), XMM0, widthOf(type) === 4);
+      this.code.movsStore(mem(address, displacement), XMM0, widthOf(type) === 4);
       return;
     }
-    this.code.movMemRegSized(mem(address), RAX, widthOf(type));
+    this.code.movMemRegSized(mem(address, displacement), RAX, widthOf(type));
   }
 
   /** A slot holding the value the accumulator has. */
@@ -434,13 +471,18 @@ class Machine {
     this.code.movMemRegSized(frame(held.offset), RAX, widthOf(held.type));
   }
 
-  /** The value at the address the accumulator has, read as the type it is. */
-  private readAt(type: SemanticType): void {
+  /**
+   * The value at the address the accumulator has, read as the type it is.
+   * The displacement is the offset of a field in the object that address
+   * points at, which is how a read of a field is one instruction rather than
+   * an addition to the address and then the read.
+   */
+  private readAt(type: SemanticType, displacement = 0): void {
     if (isFloat(type)) {
-      this.code.movsLoad(XMM0, mem(RAX), widthOf(type) === 4);
+      this.code.movsLoad(XMM0, mem(RAX, displacement), widthOf(type) === 4);
       return;
     }
-    this.code.movRegMemSized(RAX, mem(RAX), widthOf(type), signedOf(type));
+    this.code.movRegMemSized(RAX, mem(RAX, displacement), widthOf(type), signedOf(type));
   }
 
   /** The value in a slot of the frame, read as the type it is declared at. */
@@ -460,6 +502,29 @@ class Machine {
   /** The accumulator widened to the width and sign of the type it is read as. */
   private normalize(type: SemanticType): void {
     if (isFloat(type) || widthOf(type) === 8) return;
+    this.code.narrow(RAX, RAX, widthOf(type), signedOf(type));
+  }
+
+  /**
+   * The same widening, for a value that has just come out of an operation
+   * carried out at the width the type is stored at.
+   *
+   * The invariant this rests on: an operation the machine carries out on the
+   * thirty-two bit half of a register writes that half and nothing above it,
+   * so the whole register already holds the value widened the way an unsigned
+   * thirty-two bit type is widened and there is nothing left to do. A signed
+   * type still needs its `movsxd`, because a thirty-two bit operation leaves
+   * the sign in the thirty-first bit rather than copying it upwards, and so
+   * does every type narrower than a word.
+   *
+   * It is only sound where the value provably came from such an operation. A
+   * value a callee handed back is not one: the convention says nothing about
+   * what the upper half of the return register holds, so a call is normalized
+   * the long way.
+   */
+  private normalizeArithmetic(type: SemanticType): void {
+    if (isFloat(type) || widthOf(type) === 8) return;
+    if (widthOf(type) === 4 && !signedOf(type)) return;
     this.code.narrow(RAX, RAX, widthOf(type), signedOf(type));
   }
 
@@ -531,7 +596,7 @@ class Machine {
           this.toScratch(element);
           this.load(read);
           this.apply(COMPOUND[statement.op.slice(0, -1)], element);
-          this.normalize(element);
+          this.normalizeArithmetic(element);
         } else {
           this.load(written);
         }
@@ -543,7 +608,7 @@ class Machine {
         const target = this.slot(statement.name);
         this.load(target);
         this.one(target.type, statement.op === "++" ? "add" : "sub");
-        this.normalize(target.type);
+        this.normalizeArithmetic(target.type);
         this.store(target);
         return;
       }
@@ -578,12 +643,17 @@ class Machine {
       case "if": {
         const otherwise = this.code.label("Lelse");
         const end = this.code.label("Lend");
-        this.truth(statement.condition);
-        this.code.jcc("e", otherwise);
+        // With no other arm there is nothing at `otherwise` to reach: the arm
+        // that is not taken is the end of the statement itself, so the branch
+        // goes there and no jump over the other arm is written at all. What
+        // that jump used to be was five bytes moving zero.
+        this.truthBranch(statement.condition, false, statement.otherwise === null ? end : otherwise);
         this.block(statement.then);
-        this.code.jmp(end);
-        this.code.bind(otherwise);
-        if (statement.otherwise !== null) this.block(statement.otherwise);
+        if (statement.otherwise !== null) {
+          this.code.jmp(end);
+          this.code.bind(otherwise);
+          this.block(statement.otherwise);
+        }
         this.code.bind(end);
         return;
       }
@@ -621,7 +691,7 @@ class Machine {
     this.toScratch(target.type);
     this.load(right);
     this.apply(COMPOUND[op.slice(0, -1)], target.type);
-    this.normalize(target.type);
+    this.normalizeArithmetic(target.type);
     this.store(target);
   }
 
@@ -631,9 +701,11 @@ class Machine {
     this.at(value, type);
     const written = this.hold(type, "blaze_field");
     this.store(written);
+    // The address of the field is one `lea` rather than a copy of the object
+    // and an addition to it: the offset of a field is a displacement the
+    // machine computes for itself, not an arithmetic the lowering writes out.
     this.value(object);
-    this.code.movRegReg(RCX, RAX);
-    this.code.aluImm("add", RCX, found.offset);
+    this.code.lea(RCX, mem(RAX, found.offset));
     this.load(written);
     this.storeInto(written.type, RCX);
   }
@@ -644,8 +716,7 @@ class Machine {
     switch (loop.kind) {
       case "while": {
         this.code.bind(loop.header);
-        this.truth(loop.condition);
-        this.code.jcc("e", loop.exit);
+        this.truthBranch(loop.condition, false, loop.exit);
         this.block(loop.body);
         this.code.jmp(loop.header);
         this.code.bind(loop.exit);
@@ -654,8 +725,7 @@ class Machine {
       case "doWhile": {
         this.code.bind(loop.header);
         this.block(loop.body);
-        this.truth(loop.condition);
-        this.code.jcc("ne", loop.header);
+        this.truthBranch(loop.condition, true, loop.header);
         this.code.bind(loop.exit);
         break;
       }
@@ -697,8 +767,13 @@ class Machine {
     const test = this.code.label("Ltest");
     this.code.jmp(test);
     this.code.bind(loop.header);
-    this.load(variable);
+    // The counter is read here only on the path that reads it from the slot and
+    // steps it there. The path with a written step reads the same slot again
+    // a line later, so loading it here first was a load whose result was
+    // discarded before anything used it — one instruction on every turn of
+    // every counted loop that has a step written out, which is most of them.
     if (step === null) {
+      this.load(variable);
       this.one(type, loop.down ? "sub" : "add");
     } else {
       this.load(step);
@@ -706,13 +781,17 @@ class Machine {
       this.load(variable);
       this.apply(loop.down ? "sub" : "add", type);
     }
-    this.normalize(type);
+    this.normalizeArithmetic(type);
     this.store(variable);
     this.code.bind(test);
     this.load(variable);
-    this.compare(type, loop.inclusive ? (loop.down ? "ge" : "le") : loop.down ? "gt" : "lt", to);
-    this.code.test(RAX);
-    this.code.jcc("e", loop.exit);
+    this.comparedBranch(
+      type,
+      loop.inclusive ? (loop.down ? "ge" : "le") : loop.down ? "gt" : "lt",
+      to,
+      false,
+      loop.exit,
+    );
     this.block(loop.body);
     this.code.jmp(loop.header);
     this.code.bind(loop.exit);
@@ -756,36 +835,56 @@ class Machine {
    */
   private truth(value: SemanticValue): void {
     this.value(value);
-    if (isTextType(value.type)) {
+    this.truthOfAccumulator(value.type);
+  }
+
+  /**
+   * The same truth asked of the value the accumulator already holds, which is
+   * what lets a caller that has just read a value into it branch on it without
+   * reading the value a second time.
+   */
+  private truthOfAccumulator(type: SemanticType): void {
+    if (isTextType(type)) {
       this.code.movRegMemSized(RCX, mem(RAX), 1, false);
       this.code.test(RCX);
       return;
     }
-    if (isFloat(value.type)) {
-      this.floatTruth(value.type);
+    if (isFloat(type)) {
+      this.floatTruth(type);
       return;
     }
     this.code.test(RAX);
   }
 
-  /** The same truth, read out of a slot rather than out of a value. */
-  private truthOfSlot(held: Held): void {
-    this.load(held);
-    if (isTextType(held.type)) {
-      this.code.movRegReg(RCX, RAX);
-      this.code.movRegMemSized(RCX, mem(RCX), 1, false);
-      this.code.test(RCX);
+  /**
+   * A branch on whether a value is true, and nothing else.
+   *
+   * A value that is a comparison is the case this exists for. The comparison
+   * already leaves in the flags the answer every caller of `truth` goes on to
+   * ask about, so the branch reads them where they are: the condition byte is
+   * never widened into the accumulator, and the `test` that asked whether it
+   * was zero never happens. The side that is not a comparison is put in the
+   * accumulator and asked of it as before.
+   */
+  private truthBranch(value: SemanticValue, whenTrue: boolean, label: string): void {
+    if (value.k === "compare" && !isTextType(value.operand)) {
+      const right = this.hold(value.operand, "blaze_right");
+      this.at(value.right, value.operand);
+      this.store(right);
+      this.at(value.left, value.operand);
+      this.comparedBranch(value.operand, value.op, right, whenTrue, label);
       return;
     }
-    if (isFloat(held.type)) {
-      this.floatTruth(held.type);
-      return;
-    }
-    this.code.movRegMem(RAX, frame(held.offset));
-    this.code.test(RAX);
+    this.truth(value);
+    this.code.jcc(whenTrue ? "ne" : "e", label);
   }
 
-  /** A float is true when it is not zero, and a value that is no number is too. */
+  /**
+   * A float is true when it is not zero, and a value that is no number is too.
+   * The `movzx` that turns the two condition bytes into a number sets the
+   * zero flag from that number, so the truth is in the flags once the move is
+   * written and nothing has to ask about it afterwards.
+   */
   private floatTruth(type: SemanticType): void {
     this.code.xorFloat(XMM2, XMM2);
     this.code.sseCompare(XMM0, XMM2, widthOf(type) === 4, false);
@@ -793,7 +892,6 @@ class Machine {
     this.code.setcc("p", RCX);
     this.code.alu8("or", RAX, RCX);
     this.code.movzxReg8(RAX, RAX);
-    this.code.test(RAX);
   }
 
   private terminator(terminator: SemanticTerminator): void {
@@ -860,12 +958,13 @@ class Machine {
       case "newObject":
         this.object(value);
         return;
-      case "loadField": {
+      case "loadField":
+        // The offset of the field is the displacement of the read, so the
+        // address is not adjusted in a register first: the accumulator is
+        // still the object, and the read reaches the field itself.
         this.value(value.object);
-        this.code.aluImm("add", RAX, this.field(value.layout, value.field).offset);
-        this.readAt(value.type);
+        this.readAt(value.type, this.field(value.layout, value.field).offset);
         return;
-      }
       case "length":
         this.length(value.of);
         return;
@@ -1060,17 +1159,40 @@ class Machine {
     }
     this.code.movRegMem(RCX, frame(right.offset));
     this.code.alu("cmp", RAX, RCX);
-    const signed = signedOf(type);
-    const conditions: Record<CompareOp, "e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae"> = {
-      eq: "e",
-      ne: "ne",
-      lt: signed ? "l" : "b",
-      le: signed ? "le" : "be",
-      gt: signed ? "g" : "a",
-      ge: signed ? "ge" : "ae",
-    };
-    this.code.setcc(conditions[op], RAX);
+    this.code.setcc(COMPARISON[signedOf(type) ? "signed" : "unsigned"][op], RAX);
     this.code.movzxReg8(RAX, RAX);
+  }
+  /**
+   * A branch on a comparison: the comparison is left in the flags and the
+   * branch reads them there, so the condition byte the value form would have
+   * widened into the accumulator is never written at all. This is what a
+   * counted loop's test, an `if` and the loops come down to when the IR hands
+   * them a comparison — a `movzx` sets the zero flag from the very byte it
+   * widens, so the `test` that used to follow it was reading a flag the
+   * instruction before it had already set.
+   *
+   * A float is answered the other way, for the reason the value form above
+   * states: the conditions that read the carry a `UCOMISD` leaves have to be
+   * gated on the parity bit, which is two instructions rather than one. The
+   * number the comparison makes is widened by a `movzx`, which sets the zero
+   * flag, so the branch on it is a `jcc` on that flag and not a `test` on it.
+   */
+  private comparedBranch(type: SemanticType, op: CompareOp, right: Held, whenTrue: boolean, label: string): void {
+    if (isFloat(type)) {
+      this.compare(type, op, right);
+      this.code.jcc(whenTrue ? "ne" : "e", label);
+      return;
+    }
+    // Both sides are compared at the width the language promotes them to, and
+    // the operand is read at that width too. Reading it as a full register was
+    // a 64-bit read of a slot a 32-bit store had written, so the compare ran
+    // against whatever the upper half of the frame held: a counted loop whose
+    // bound was a small number never reached it and ran until the counter
+    // overflowed.
+    this.code.movRegMemSized(RCX, frame(right.offset), operationWidth(type), signedOf(type));
+    this.code.alu("cmp", RAX, RCX, operationWidth(type) === 8);
+    const condition = COMPARISON[signedOf(type) ? "signed" : "unsigned"][op];
+    this.code.jcc(whenTrue ? condition : NEGATED[condition], label);
   }
 
   private arithmetic(value: SemanticValue & { k: "arith" }): void {
@@ -1098,14 +1220,29 @@ class Machine {
     this.at(value.left, type);
     this.scratchFrom(right);
     this.apply(value.op, type);
-    this.normalize(type);
+    this.normalizeArithmetic(type);
   }
 
   /**
    * The smaller or the larger of two numbers. Each side answers once, so both
    * are read first: a value the IR calls is a call that would otherwise run
-   * twice. The choice is a branch rather than a conditional move, because a
-   * float has no instruction that moves one on a condition.
+   * twice.
+   *
+   * A whole number is a move on a condition rather than a branch, which is
+   * what the comment here used to say it could not be. It could not be for a
+   * choice between two registers, and it is not for a comparison either:
+   * `CMOVcc` reads the flags `CMP` left, so the answer is the same one the
+   * branch chose, chosen without a guess and without paying for a guess.
+   *
+   * A float is not. `MINSD` and `MAXSD` answer with their source whenever the
+   * comparison does not hold, and a comparison against a value that is not a
+   * number never holds — so the instruction cannot say which side was at
+   * fault, and `min(NaN, 2)` and `min(2, NaN)` come out the same way whichever
+   * way round they are encoded. The language answers both with the right side,
+   * and a signed zero is equal to a positive one rather than less than it, so
+   * `min(-0.0, 0.0)` is a positive zero. An instruction that answers a pair
+   * the wrong way is not a faster branch, it is a different program, so the
+   * float keeps the branch and the whole number takes the move.
    */
   private between(value: SemanticValue & { k: "arith" }, smaller: boolean): void {
     const type = value.type;
@@ -1115,6 +1252,19 @@ class Machine {
     this.store(low);
     this.at(value.right, type);
     this.store(high);
+    if (!isFloat(type)) {
+      this.load(low);
+      this.scratchFrom(high);
+      // The answer is the right side when the comparison does not hold, so the
+      // move is written on the condition that says so. The sides are compared
+      // at the width the language promotes them to, and that comparison is
+      // left in the flags for the move to read.
+      this.code.alu("cmp", RAX, RCX, operationWidth(type) === 8);
+      const away = COMPARISON[signedOf(type) ? "signed" : "unsigned"][smaller ? "lt" : "gt"];
+      this.code.cmov(NEGATED[away], RAX, RCX, operationWidth(type) === 8);
+      this.normalizeArithmetic(type);
+      return;
+    }
     const end = this.code.label("Lpick");
     const keep = this.code.label("Lkeep");
     // The comparison is a value of its own, so the arm it answers with is read
@@ -1189,19 +1339,30 @@ class Machine {
     this.code.movzxReg8(RAX, RAX);
   }
 
+  /**
+   * `&&`, `||` and `??` each answer one of two values, and the left one is
+   * answered by deciding on it. The left arm is left in the accumulator and
+   * the branch reads it there; it is only written down first when the right
+   * arm can take the accumulator away from it, which a call does. A call in
+   * the right arm is the only thing that clobbers the accumulator — every
+   * other operation the IR makes writes through the frame — so a right arm
+   * with no call in it leaves the left one where it is and the frame slot it
+   * used to take is not reserved at all.
+   */
   private logical(value: SemanticValue & { k: "logical" }): void {
-    const arm = this.hold(value.left.type, "blaze_arm");
-    this.value(value.left);
-    this.store(arm);
     const otherwise = this.code.label("Larm");
     const end = this.code.label("Lend");
-    this.truthOfSlot(arm);
+    const keep = hasCall(value.right);
+    const arm = keep ? this.hold(value.left.type, "blaze_arm") : null;
+    this.value(value.left);
+    if (arm !== null) this.store(arm);
+    this.truthOfAccumulator(value.left.type);
     this.code.jcc(value.op === "and" ? "e" : "ne", otherwise);
     this.at(value.right, value.type);
     this.code.jmp(end);
     this.code.bind(otherwise);
-    this.load(arm);
-    this.convert(arm.type, value.type);
+    if (arm !== null) this.load(arm);
+    this.convert(value.left.type, value.type);
     this.code.bind(end);
   }
 
@@ -1211,15 +1372,19 @@ class Machine {
       this.value(value.left);
       return;
     }
-    const arm = this.hold(value.left.type, "blaze_arm");
-    this.value(value.left);
-    this.store(arm);
     const otherwise = this.code.label("Larm");
     const end = this.code.label("Lend");
-    this.code.movRegMem(RAX, frame(arm.offset));
+    // An absent string is an absent pointer and an absent reference is one
+    // too, so the test is the same one the `||` above asks: is the value zero.
+    // It is asked of the accumulator the arm is already in, unless the right
+    // arm is a call and would take the accumulator away from it.
+    const keep = hasCall(value.right);
+    const arm = keep ? this.hold(value.left.type, "blaze_arm") : null;
+    this.value(value.left);
+    if (arm !== null) this.store(arm);
     this.code.test(RAX);
     this.code.jcc("e", otherwise);
-    this.convert(arm.type, value.type);
+    this.convert(value.left.type, value.type);
     this.code.jmp(end);
     this.code.bind(otherwise);
     this.at(value.right, value.type);
@@ -1229,8 +1394,7 @@ class Machine {
   private select(value: SemanticValue & { k: "select" }): void {
     const otherwise = this.code.label("Larm");
     const end = this.code.label("Lend");
-    this.truth(value.condition);
-    this.code.jcc("e", otherwise);
+    this.truthBranch(value.condition, false, otherwise);
     this.at(value.then, value.type);
     this.code.jmp(end);
     this.code.bind(otherwise);
@@ -1244,10 +1408,10 @@ class Machine {
         this.value(value.operand);
         return;
       case "not": {
-        this.value(value.operand);
-        const held = this.hold(value.operand.type, "blaze_truth");
-        this.store(held);
-        this.truthOfSlot(held);
+        // The truth of the operand is asked of the accumulator it is already
+        // in: it does not have to be written down and read back to be asked
+        // about, and `not` is the one operation that changes no bit of it.
+        this.truth(value.operand);
         this.code.setcc("e", RAX);
         this.code.movzxReg8(RAX, RAX);
         return;
@@ -1478,22 +1642,32 @@ class Machine {
     this.code.lea(RAX, indexed(RAX, RCX, widthOf(element)));
   }
 
-  /** An array the program wrote out, allocated and filled where it was. */
+  /**
+   * An array the program wrote out, allocated and filled where it was.
+   *
+   * The address of the array is held in the scratch register across the
+   * elements, and each element's offset is the displacement of its own store,
+   * so an element costs one instruction rather than three. An element that is
+   * a call takes the register away, because a call is written with the very
+   * argument registers the scratch is one of; that element pays a reload
+   * instead, which is two instructions and still fewer than the three it
+   * replaced.
+   */
   private buffer(value: SemanticValue & { k: "buffer" }): void {
     this.code.movRegImm(RDI, BigInt(value.length));
     this.code.movRegImm(RSI, BigInt(widthOf(value.element)));
     this.runtime("_array_new");
     const array = this.hold(POINTER, "blaze_array");
     this.store(array);
+    this.code.movRegMem(RCX, frame(array.offset));
     value.values.forEach((element, at) => {
-      // The element is in the accumulator and the address is built beside it,
-      // so a value that is a call is not run again to find where it goes.
       this.at(element, value.element);
-      this.code.movRegImm(RCX, BigInt(at * widthOf(value.element)));
-      this.code.aluRegMem("add", RCX, frame(array.offset));
-      this.storeInto(value.element, RCX);
+      // The address is the value the accumulator held before the element was
+      // read, so it is rebuilt where the element took it from.
+      if (hasCall(element)) this.code.movRegMem(RCX, frame(array.offset));
+      this.storeInto(value.element, RCX, at * widthOf(value.element));
     });
-    this.code.movRegMem(RAX, frame(array.offset));
+    this.code.movRegReg(RAX, RCX);
   }
 
   private layout(name: string): ObjectLayout {
@@ -1508,7 +1682,7 @@ class Machine {
     return found;
   }
 
-  /** An object, allocated and filled as one value. */
+  /** An object, allocated and filled as one value, on the terms `buffer` above. */
   private object(value: SemanticValue & { k: "newObject" }): void {
     const layout = this.layout(value.layout);
     this.code.movRegImm(RDI, BigInt(layout.size));
@@ -1516,15 +1690,15 @@ class Machine {
     this.runtime("_object_new");
     const object = this.hold(POINTER, "blaze_object");
     this.store(object);
+    this.code.movRegMem(RCX, frame(object.offset));
     for (const written of value.fields) {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
       this.at(written.value, type);
-      this.code.movRegImm(RCX, BigInt(field.offset));
-      this.code.aluRegMem("add", RCX, frame(object.offset));
-      this.storeInto(type, RCX);
+      if (hasCall(written.value)) this.code.movRegMem(RCX, frame(object.offset));
+      this.storeInto(type, RCX, field.offset);
     }
-    this.code.movRegMem(RAX, frame(object.offset));
+    this.code.movRegReg(RAX, RCX);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1693,7 +1867,7 @@ class Machine {
     }
     if (isFloat(from)) {
       this.code.cvtFloatToInt(RAX, XMM0, widthOf(from) === 4, widthOf(to) === 8);
-      this.normalize(to);
+      this.normalizeArithmetic(to);
       return;
     }
     if (isFloat(to)) {

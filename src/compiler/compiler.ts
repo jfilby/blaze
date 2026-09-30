@@ -81,6 +81,7 @@ import {
   type ReuseLevel,
 } from "./incremental.ts";
 import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget, optimizationOptions } from "./core/target.ts";
+import { run } from "./core/process.ts";
 import { COMPILER_VERSION, toolchainFingerprint } from "./core/version.ts";
 import {
   type ProgramMismatch,
@@ -1036,6 +1037,7 @@ export async function runBuild(
       lowering: backendKind,
       mode: buildMode,
       runtime: runtimeKind,
+      target,
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
     // The machine, one candidate at a time however many functions are being
@@ -1399,6 +1401,7 @@ export async function runBuild(
         runtimeKind === "none"
           ? await buildProgramDriver({
               mode: buildMode,
+              target,
               program: driver,
               workDirectory: base,
               objectPaths,
@@ -1520,12 +1523,16 @@ export async function runBuild(
       if (phase.body !== undefined) {
         // The program was linked and run above, by the round that agreed with
         // the source, so what is delivered is what was checked.
+        //
+        // The program beside the project's sources is stripped, and the store's
+        // copy is not. A delivered binary is something a person runs, and a
+        // symbol table, a build id and the unwind tables of a program with no
+        // exceptions are 10-20% of a small binary for nothing. The store's copy
+        // is made before the strip, so it keeps them.
         await deliver(programBinary, paths.outputBinary);
-        await deliver(runtimeKind === "none" ? "program.c" : "program_host.nim", paths.outputProgram);
-        // The build belongs to the project beside its sources, so the program
-        // it produced is named after the project and lands there. The store
-        // keeps its own copy, which is what a later `blaze test` runs.
+        run("strip", ["--strip-unneeded", programPath]);
         await copyFile(programPath, deliveredProgram);
+        await deliver(runtimeKind === "none" ? "program.c" : "program_host.nim", paths.outputProgram);
         delivered.push(deliveredProgram);
         outputPath = store.resolve(paths.outputBinary);
       } else {
@@ -1716,6 +1723,7 @@ export async function runStored(
     lowering,
     mode,
     runtime,
+    target,
     workspace: { workDirectory: base, functionName: program.entry.file },
   });
   // A stored candidate is given the same symbols the build that stored it was
