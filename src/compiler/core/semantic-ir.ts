@@ -399,13 +399,61 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
   }
 }
 
-/** True when writing a value twice would run it twice. */
+/**
+ * True when writing a value twice would not write it twice.
+ *
+ * A backends that keeps a value in a register across the writing of another
+ * one may only do that if writing the other one calls nothing: a call is
+ * written with the very argument registers a held value sits in, so it takes
+ * the register away from whatever was left there.
+ *
+ * `k === "call"` is not enough to answer that. A value that names no call
+ * still makes one on a target that has no instruction for it: a number
+ * written as text is a runtime formatter (`ir-machine.ts:1573`), an array the
+ * program wrote out is a runtime allocation (`:1656`), an object is one too
+ * (`:1686`), a string with anything interpolated in it is an allocation and a
+ * copy (`:1452`), a whole number raised to a power is `pow` (`:1210`), an
+ * argument of the program is read by a runtime call (`:983`), two strings
+ * compared are compared by `strcmp` (`:1324`), and the length of a string is
+ * counted by `strlen` (`:1595`). Each of those takes the registers it is
+ * written with away from a value held beside it, so each of them is a call as
+ * far as this question is concerned.
+ *
+ * The answer is deliberately one target cannot answer cheaply: a length that
+ * one backend reads out of memory with an instruction is a call here all the
+ * same, because the other backend asks the runtime and this predicate is one
+ * answer for both. Over-answering costs a held value and a reload. Under-
+ * answering writes a value into a register a call has taken.
+ */
 export function hasCall(value: SemanticValue): boolean {
   let called = false;
   walkValues(value, (inner) => {
-    if (inner.k === "call") called = true;
+    if (makesCall(inner)) called = true;
   });
   return called;
+ }
+
+/** Whether one value, written on its own, calls anything. */
+function makesCall(value: SemanticValue): boolean {
+  switch (value.k) {
+    case "call":
+    case "argv":
+    case "toText":
+    case "buffer":
+    case "newObject":
+    case "length":
+      return true;
+    case "text":
+      // A string written out in the source is laid down in the object beside
+      // the code; one with anything computed in it is built at run time.
+      return value.parts.some((part) => part.k === "value");
+    case "arith":
+      return value.op === "pow";
+    case "compare":
+      return isTextType(value.operand);
+    default:
+      return false;
+  }
 }
 
 /** The names a value reads, in the order it reads them. */

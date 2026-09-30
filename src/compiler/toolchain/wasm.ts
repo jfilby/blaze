@@ -14,7 +14,7 @@
  * the module reads it at the offsets the contract gives.
  */
 
-import { stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { bufferElement, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
@@ -121,15 +121,16 @@ export async function buildWasm(request: WasmBuildRequest): Promise<WasmBuildRes
     );
   }
 
-  await writeFile(request.hostPath, generateWasmHost(request.contract), "utf8");
-
-  const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, request.modulePath, functionName], {
-    timeoutMs: 60_000,
-  });
-  if (inspection.code !== 0) {
+  // The boundary is asked of the assembled bytes here rather than of the
+  // written file in a child process: `WebAssembly.Module` is the same reader
+  // either way, and the child is still there for a build run whose process has
+  // no WebAssembly of its own.
+  const problems = boundaryProblems(await readFile(request.modulePath), functionName);
+  const detail = problems === null ? await inspectInChild(request.modulePath, functionName) : problems;
+  if (detail.length > 0) {
     throw wasmError(
       `the WebAssembly module for ${functionName} violates the contract`,
-      (inspection.stderr.trim() || inspection.stdout.trim()).slice(0, 2000),
+      detail.join("\n").slice(0, 2000),
       functionName,
       request.candidate,
     );
@@ -141,6 +142,81 @@ export async function buildWasm(request: WasmBuildRequest): Promise<WasmBuildRes
     hostPath: request.hostPath,
     moduleSizeBytes: (await stat(request.modulePath)).size,
   };
+}
+
+/** Asks a child process the boundary questions this process has no engine for. */
+async function inspectInChild(path: string, expected: string): Promise<string[]> {
+  const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, path, expected], {
+    timeoutMs: 60_000,
+  });
+  if (inspection.code === 0) return [];
+  return (inspection.stderr.trim() || inspection.stdout.trim()).split("\n").filter((line) => line !== "");
+}
+
+/**
+ * What a module reaches for and offers that the boundary does not allow, as
+ * one line each, and nothing where it keeps to it.
+ *
+ * The module boundary is the host's linear memory and the contracted export
+ * and nothing else, so the questions are the ones `INSPECT_MODULE` asks of a
+ * candidate: it imports the memory alone, it offers no export the host
+ * provides itself, and it exports the function the contract named. This asks
+ * them here rather than in a child process, on the very bytes the build
+ * emitted, because `WebAssembly.Module` is the same reader either way and a
+ * spawned Node is a second interpreter started to ask a question this process
+ * can answer — which on a build that emits a module per candidate is a process
+ * per candidate. The child is still there for a build run where this process
+ * has no WebAssembly of its own.
+ */
+export function boundaryProblems(bytes: Uint8Array, expected: string): string[] | null {
+  const engine = engineHere();
+  if (engine === null) return null;
+  if (!engine.validate(bytes)) return ["the module is not valid WebAssembly"];
+  const module = new engine.Module(bytes);
+  const problems: string[] = [];
+  const imports = engine.Module.imports(module);
+  const memoryImports = imports.filter((entry) => entry.kind === "memory");
+  if (imports.length !== 1 || memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== "memory") {
+    problems.push('the module must import exactly one memory: (import "env" "memory" ...)');
+  }
+  if (imports.some((entry) => entry.kind !== "memory")) {
+    problems.push("the module must not import functions, tables or globals");
+  }
+  const exports = engine.Module.exports(module).map((entry) => entry.name);
+  if (exports.includes("memory") || exports.includes("_start")) {
+    problems.push("the module must not export memory or _start; the host provides both");
+  }
+  if (!exports.includes(expected)) {
+    problems.push(`the module must export the contracted function "${expected}"`);
+  }
+  return problems;
+}
+
+/**
+ * The part of the engine the boundary check reads a module with. A build runs
+ * under Node, so this is `globalThis.WebAssembly` itself where the runtime has
+ * one; the question asked of it is whether it is there at all, not whether it
+ * has this shape.
+ */
+interface Engine {
+  validate(bytes: Uint8Array): boolean;
+  Module: {
+    new (bytes: Uint8Array): unknown;
+    imports(module: unknown): { module: string; name: string; kind: string }[];
+    exports(module: unknown): { name: string }[];
+  };
+}
+
+/**
+ * The engine this process has, or null where it has none.
+ *
+ * Where there is one the check above is the engine's own answer rather than a
+ * second opinion. Where there is not, `null` says so and the caller asks the
+ * child process instead.
+ */
+function engineHere(): Engine | null {
+  const carrier = globalThis as { WebAssembly?: Engine };
+  return carrier.WebAssembly ?? null;
 }
 
 /** Rejects a module that reaches outside the memory the host provides. */

@@ -270,6 +270,14 @@ export function cLiteral(text: string, type: string): string {
     }
   }
   if (type !== "f32" && type !== "f64") return text;
+  // A value that is not a number has no decimal to write, and the source writes
+  // it as a word: `1 / 0` is `Infinity`, `0 / 0` is `NaN`, and a negative zero
+  // keeps its sign in the text. C spells the three of them differently, and the
+  // word the source used is a bare identifier there.
+  if (text === "Infinity") return `${type === "f32" ? "INFINITY" : "HUGE_VAL"}`;
+  if (text === "-Infinity") return `-${type === "f32" ? "INFINITY" : "HUGE_VAL"}`;
+  if (text === "NaN") return "NAN";
+  if (text === "-0") return "-0.0";
   if (/^[+-]?0[xX]/.test(text)) {
     // BigInt takes the sign of a decimal literal only, so a negative
     // hexadecimal one is negated rather than converted with its sign.

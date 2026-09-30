@@ -18,6 +18,15 @@ import type { BuildMode, RuntimeKind } from "../core/types.ts";
 /** The name of the C header, the Nim adapter module and the object file. */
 export const RUNTIME_NAME = "blaze_rt";
 
+/**
+ * The alignment a block carries when its caller names none, which is the
+ * header's `BLAZE_RT_DEFAULT_ALIGNMENT`. A field of an object is at most a
+ * pointer wide, so this covers every layout the resolver lays out, and a
+ * backend that allocates a block itself has to know the alignment it is
+ * getting rather than assume it.
+ */
+export const DEFAULT_ALIGNMENT = 16;
+
 /** Every runtime the compiler knows about, by the kind that selects it. */
 export const RUNTIME_TITLES: Record<RuntimeKind, string> = {
   none: "the compiler runtime",
@@ -323,7 +332,7 @@ typedef struct blaze_rt_header {
 
 #define BLAZE_RT_MAGIC 0x424C415A45525400ULL
 #define BLAZE_RT_HEADER_SIZE 48u
-#define BLAZE_RT_DEFAULT_ALIGNMENT 16u
+#define BLAZE_RT_DEFAULT_ALIGNMENT ${DEFAULT_ALIGNMENT}u
 /* The largest a request may be, so a product of a count and an element size
    that would wrap is refused rather than answered with a smaller block. */
 #define BLAZE_RT_MAX_ALLOCATION (1ULL << 40)

@@ -22,6 +22,7 @@ import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { run } from "../core/process.ts";
+import { typeText } from "../core/semantic-ir.ts";
 import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
@@ -137,6 +138,42 @@ test("a whole number wraps to the width of the type it is written at", () => {
   assert.match(printed(before), /const\[i32\] 0\b/);
 });
 
+test("a whole number wraps to the width of a type a double cannot hold", () => {
+  // A double holds every integer exactly only up to 2^53, and the sums a 64 bit
+  // wrap forms reach past that: `7 % 3` folded to zero because the sum rounded
+  // on the way back down. Every operation and both signs are asked here, because
+  // the answer is one question and a wrong one in one case is a wrong program.
+  const I64: SemanticType = { kind: "primitive", name: "i64" };
+  const U64: SemanticType = { kind: "primitive", name: "u64" };
+  const cases: { type: SemanticType; op: string; left: string; right: string; expected: string }[] = [
+    { type: I64, op: "mod", left: "7", right: "3", expected: "1" },
+    { type: I64, op: "div", left: "7", right: "3", expected: "2" },
+    { type: I64, op: "mod", left: "-7", right: "2", expected: "-1" },
+    { type: I64, op: "div", left: "-7", right: "2", expected: "-3" },
+    { type: I32, op: "mod", left: "7", right: "3", expected: "1" },
+    { type: I32, op: "mul", left: "65536", right: "65536", expected: "0" },
+  ];
+  for (const entry of cases) {
+    const before = fnOf({
+      id: "entry", releases: [],
+      terminator: { k: "return", value: bin(entry.op, constOf(entry.left, entry.type), constOf(entry.right, entry.type), entry.type) },
+      statements: [],
+    }, entry.type);
+    assert.match(printed(before), new RegExp(`const\\[${typeText(entry.type)}\\] ${entry.expected}\\b`), `${typeText(entry.type)}: ${entry.op} ${entry.left} ${entry.right}`);
+  }
+  // An answer past 2^53 is a number the text cannot carry, so it is left as the
+  // arithmetic it came from: the backend wraps it at the width it is written at
+  // and the fold does not answer a different number.
+  for (const entry of [{ op: "sub", left: "1", right: "2" }, { op: "div", left: "-7", right: "2" }]) {
+    const before = fnOf({
+      id: "entry", releases: [],
+      terminator: { k: "return", value: bin(entry.op, constOf(entry.left, U64), constOf(entry.right, U64), U64) },
+      statements: [],
+    }, U64);
+    assert.match(printed(before), new RegExp(`${entry.op}\\[u64\\]`), `u64: ${entry.op} ${entry.left} ${entry.right}`);
+  }
+});
+
 test("a truth that decides on a literal is the value it decides to", () => {
   // `flag ? 1 : 2` is one of the two, and a select the backends lower to a
   // branch is a branch that was never going to be taken.
@@ -237,6 +274,167 @@ test("a loop bound that reads memory is left where it is", () => {
     statements: [countedLoop(bin("add", length, constOf("1", U32), U32))],
   }, F64, [a, i]);
   assert.doesNotMatch(printed(before), /invariant/);
+});
+
+test("a loop body that computes the same thing every turn computes it once", () => {
+  // `sum += n * 2` recomputes `n * 2` on every turn of the loop. Nothing in
+  // the loop writes `n`, the multiplication reads no memory and cannot fault,
+  // so it is the same number on every turn and is computed once above it.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: false, type: F64 };
+  const i: SemanticSlot = { kind: "value", name: "i", mutable: false, type: I32 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const readN: SemanticValue = { k: "local", type: F64, name: "n" };
+  const loop = countedLoop({ k: "local", type: I32, name: "n" });
+  const body = loop.k === "loop" ? loop.loop.body : { id: "b2", releases: [], statements: [], terminator: { k: "jump" as const, target: "b1", releases: [] } };
+  body.statements = [
+    { k: "set", name: "sum", op: "+=", value: bin("mul", readN, constOf("2")), line: 3 },
+    { k: "set", name: "sum", op: "+=", value: bin("mul", readN, constOf("2")), line: 4 },
+  ];
+  const after = printed(fnOf({ id: "entry", releases: [], terminator: { k: "return", value: null }, statements: [loop] }, F64, [n, i, sum]));
+  assert.match(after, /let value\[f64\] invariant0_\d+ immutable = \[mul\[f64\] local\[f64\] n const\[f64\] 2\]/);
+  // The loop body reads the name rather than computing the product twice.
+  const inside = after.slice(after.indexOf("for["));
+  assert.doesNotMatch(inside, /\[mul\[f64\] local\[f64\] n const\[f64\] 2\]/);
+});
+
+test("a loop body that reads a name the loop writes is left where it is", () => {
+  // `total += i * 2` inside a loop whose counter is `i`: the product changes on
+  // every turn, so binding it above the loop would compute a number the turn
+  // the loop takes on its last iteration does not have.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: false, type: I32 };
+  const total: SemanticSlot = { kind: "value", name: "total", mutable: true, type: F64 };
+  const loop = countedLoop({ k: "local", type: I32, name: "n" });
+  const body = loop.k === "loop" ? loop.loop.body : { id: "b2", releases: [], statements: [], terminator: { k: "jump" as const, target: "b1", releases: [] } };
+  body.statements = [
+    { k: "set", name: "total", op: "+=", value: bin("mul", { k: "local", type: I32, name: "i" }, constOf("2")), line: 3 },
+    { k: "set", name: "total", op: "+=", value: bin("mul", { k: "local", type: I32, name: "i" }, constOf("2")), line: 4 },
+  ];
+  assert.doesNotMatch(printed(fnOf({ id: "entry", releases: [], terminator: { k: "return", value: null }, statements: [loop] }, F64, [n, total])), /invariant/);
+});
+
+test("a value a block computes twice is computed once", () => {
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: false, type: F64 };
+  const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const product: SemanticValue = bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" });
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [
+      { k: "set", name: "sum", op: "+=", value: product, line: 1 },
+      { k: "set", name: "sum", op: "+=", value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 2 },
+    ],
+  }, F64, [a, b, sum]));
+  assert.match(after, /let value\[f64\] common\w+ immutable = \[mul\[f64\] local\[f64\] a local\[f64\] b\]/);
+  const rest = after.slice(after.indexOf("common"));
+  assert.equal(rest.match(/\[mul\[f64\] local\[f64\] a local\[f64\] b\]/g)?.length ?? 0, 1);
+});
+
+test("a value a block computes twice that one of them writes between is not commoned", () => {
+  // `a` is written between the two products, so the second one is a different
+  // number and computing the first above the second would be wrong.
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: true, type: F64 };
+  const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [
+      { k: "set", name: "sum", op: "+=", value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 1 },
+      { k: "set", name: "a", op: "=", value: constOf("2"), line: 2 },
+      { k: "set", name: "sum", op: "+=", value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 3 },
+    ],
+  }, F64, [a, b, sum]));
+  assert.doesNotMatch(after, /common/);
+});
+
+test("a copy of a name nothing writes is read as the name it copies", () => {
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: false, type: F64 };
+  const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "copy", mutable: false, type: F64 }, value: { k: "local", type: F64, name: "a" }, line: 1 },
+      { k: "set", name: "sum", op: "+=", value: { k: "local", type: F64, name: "copy" }, line: 2 },
+      { k: "set", name: "sum", op: "+=", value: { k: "local", type: F64, name: "b" }, line: 3 },
+    ],
+  }, F64, [a, b, sum]));
+  assert.doesNotMatch(after, /copy/);
+  assert.match(after, /set sum \+= local\[f64\] a/);
+});
+
+test("a copy of a name the function writes is kept", () => {
+  // `t` is the number the parameter held before the step, and the program reads
+  // it after the step: reading the parameter instead would read what the
+  // counter holds now, which is a different number.
+  const depth: SemanticSlot = { kind: "value", name: "depth", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: { k: "compare", type: BOOL, op: "gt", operand: F64, left: { k: "local", type: F64, name: "t" }, right: constOf("0") } },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "t", mutable: false, type: F64 }, value: { k: "local", type: F64, name: "depth" }, line: 1 },
+      { k: "step", name: "depth", op: "--", prefix: false, line: 1 },
+    ],
+  }, BOOL, [depth]));
+  assert.match(after, /local\[f64\] t/);
+});
+
+test("a write nothing reads is dropped", () => {
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: true, type: F64 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
+    statements: [
+      { k: "set", name: "a", op: "=", value: constOf("7"), line: 1 },
+      { k: "set", name: "sum", op: "+=", value: constOf("2"), line: 2 },
+    ],
+  }, F64, [a, sum]));
+  assert.doesNotMatch(after, /set a =/);
+  assert.match(after, /set sum \+=/);
+});
+
+test("a write that runs a call is kept whatever reads it", () => {
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [{ k: "set", name: "a", op: "=", value: absOf(constOf("2")), line: 1 }],
+  }, { kind: "void" }, [a]));
+  assert.match(after, /set a = \[call\[f64\] Math\.abs/);
+});
+
+test("an `if` whose condition folded is replaced by the arm it selects", () => {
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
+    statements: [
+      { k: "if", line: 1, condition: { k: "bool", type: BOOL, value: false }, then: { id: "b1", releases: [], statements: [{ k: "set", name: "sum", op: "+=", value: constOf("9"), line: 1 }], terminator: { k: "next" } }, otherwise: { id: "b2", releases: [], statements: [{ k: "set", name: "sum", op: "+=", value: constOf("1"), line: 2 }], terminator: { k: "next" } } },
+    ],
+  }, F64, [sum]));
+  assert.doesNotMatch(after, /if /);
+  assert.match(after, /set sum \+= const\[f64\] 1\b/);
+  assert.doesNotMatch(after, /const\[f64\] 9/);
+});
+
+test("what the new rewrites produce is a function the compiler may lower", () => {
+  // Each rewrite the pass applies on its own, applied together: what they
+  // produce is a function the driver would accept from a model, so it is one
+  // the compiler may lower.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: false, type: F64 };
+  const i: SemanticSlot = { kind: "value", name: "i", mutable: false, type: I32 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const readN: SemanticValue = { k: "local", type: F64, name: "n" };
+  const loop = countedLoop({ k: "local", type: I32, name: "n" });
+  const body = loop.k === "loop" ? loop.loop.body : { id: "b2", releases: [], statements: [], terminator: { k: "jump" as const, target: "b1", releases: [] } };
+  body.statements = [
+    { k: "let", slot: { kind: "value", name: "dead", mutable: false, type: F64 }, value: readN, line: 3 },
+    { k: "set", name: "sum", op: "+=", value: bin("mul", readN, constOf("2")), line: 4 },
+    { k: "set", name: "sum", op: "+=", value: bin("mul", readN, constOf("2")), line: 5 },
+    { k: "if", line: 6, condition: { k: "bool", type: BOOL, value: true }, then: { id: "b3", releases: [], statements: [{ k: "set", name: "sum", op: "+=", value: constOf("3"), line: 6 }], terminator: { k: "next" } }, otherwise: null },
+  ];
+  const before = fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
+    statements: [loop],
+  }, F64, [n, i, sum]);
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before), undefined as never), []);
 });
 
 test("what the pass produces is a function the compiler may lower", () => {

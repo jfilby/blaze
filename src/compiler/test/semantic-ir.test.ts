@@ -151,7 +151,10 @@ test("the index an argument is read at is a value the walk reaches", () => {
   const byName: SemanticValue = { k: "argv", type: NUMBER, index: { k: "local", type: USIZE, name: "i" } };
   const byCall: SemanticValue = { k: "argv", type: NUMBER, index: call };
   assert.deepEqual(localNames(byName), ["i"]);
-  assert.equal(hasCall(byName), false);
+  // Reading an argument of the program asks the runtime for it, so the value is
+  // a call whatever the index is: a backend that keeps a value beside it in a
+  // register has to account for the call, and there is one either way.
+  assert.equal(hasCall(byName), true);
   assert.equal(hasCall(byCall), true);
 
   // The rule the walk exists for: an arm written under a test and again as the
@@ -223,7 +226,10 @@ test("a value is walked whole, an array length among the values it is made of", 
     right: { k: "const", type: NUMBER, text: "1" },
   };
   assert.deepEqual(localNames(expression), ["a"]);
-  assert.equal(hasCall(expression), false);
+  // A length is asked of something rather than read out of the value itself,
+  // and on a target that has no instruction for it that question is a call, so
+  // a value that holds one is not one a backend may leave in a register.
+  assert.equal(hasCall(expression), true);
   assert.equal(
     hasCall({
       k: "arith",

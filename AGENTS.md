@@ -29,13 +29,18 @@ tests all live there. Run commands from it.
   `codegen.ts:materialize`, and the backend is in the reuse key
   (`incremental.ts`) so an object is never shared across one.
 - A third setting says how hard the toolchain builds. `mode` is `debug`
-  (`-O0 -g`, the default), `release` (`-O2`), or `danger` (release, and the
-  generated runtime leaves its guards out). The flags are one list in
-  `core/target.ts:optimizationOptions`; every `gcc` call site reads it, and
-  `-fno-lto` is on all of them so a candidate's object does not depend on the
-  objects beside it. `danger` removes the use-after-free check, the allocation
-  overflow check, the size caps and the null checks from `runtime/abi.ts` and
-  its twin in `runtime/nim.ts`, which are the only run-time safety checks a
+  (`-O0 -g`, the default), `release` (`-O3`, or `-O2` where the contract asks
+  for `size`), or `danger` (release, and the generated runtime leaves its guards
+  out). The flags are one list in `core/target.ts`, split into
+  `optimizationLevel` (the `-O` and the maths), `loweringOptions` (that with
+  `-flto`, which the deterministic lowering and the link both read),
+  `assemblyOptions` (the level alone, because `-flto -S` writes the linker's
+  intermediate form and not assembly) and `linkOptions`; every `gcc` call site
+  reads one of them, and each link site is given the contract's objective and
+  the target cpu, because with `-flto` the link is where the code is generated.
+  `danger` removes the use-after-free check, the allocation overflow check, the
+  size caps and the null checks from `runtime/abi.ts` and its twin in
+  `runtime/nim.ts`, which are the only run-time safety checks a
   generated program carries: there is no bounds check on an element access at
   any mode, because the IR holds no length for one. What the compiler *proves*
   is unchanged — the IR is validated and the candidate verified and measured

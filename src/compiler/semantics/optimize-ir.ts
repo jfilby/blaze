@@ -9,27 +9,33 @@
  * computes once, and dropping what nothing reads are all the same on every
  * build, so waiting for a model to propose one is waiting for luck.
  *
- * The pass here is the deterministic half. It is applied to a whole function,
- * it is applied again after every round a review produced, and it runs to a
- * fixed point, because one of these exposes the next: a fold makes a value
- * hoistable, and a hoist makes two computations the same one.
+ * The pass here is the deterministic half. It is applied to a whole function
+ * and to a whole program's own statements, it is applied again after every
+ * round a review produced, and it runs to a fixed point, because one of these
+ * exposes the next: a fold makes a value hoistable, and a hoist makes two
+ * computations the same one.
  *
- * Every rewrite here is value-preserving by construction. The two places that
- * could have been are guarded and say why: folding a floating-point operation
- * is only exact where IEEE says the result is exact, and hoisting is only the
- * same program where the value reads nothing the region writes.
+ * Every rewrite here is value-preserving by construction, and the two places
+ * that could have been are guarded and say why: folding a floating-point
+ * operation is only exact where IEEE says the result is exact, and moving a
+ * computation is only the same program where the value reads nothing the
+ * region writes and cannot fault. The test a value has to pass is one answer,
+ * in `repair.ts`, whichever rewrite is asking: what `hoist-invariant` and
+ * `common-subexpression` hold a model's proposal to is what this holds itself.
  */
 
 import {
   type SemanticBlock,
   type SemanticFunction,
   type SemanticLoop,
+  type SemanticProgram,
+  type SemanticSlot,
   type SemanticStatement,
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
-import { isInteger, isUnsigned } from "../core/semantic-ir.ts";
-import { replaceValues, slotFor, valueKey } from "./repair.ts";
+import { hasCall, isInteger, isUnsigned, slotType } from "../core/semantic-ir.ts";
+import { isBindable, isSafeToCompute, replaceValues, slotFor, valueKey } from "./repair.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -72,16 +78,29 @@ function numberType(value: SemanticValue): NumericName | null {
   return name in WIDTH || FLOAT_TYPES[name] === true ? (name as NumericName) : null;
 }
 
-/** A whole number wrapped to the range of its type, as the backends wrap it. */
+/**
+ * A whole number wrapped to the range of its type, as the backends wrap it.
+ *
+ * The arithmetic is done in whole numbers of the compiler's own rather than in
+ * doubles, because a double holds every integer exactly only up to 2^53 and a
+ * 64 bit range is wider than that: `7 % 3` at `i64` came out of the double form
+ * as zero, because the sum the signed wrap forms reaches 2.77e19 and rounds on
+ * the way back down. The answer a backend gives is the answer modulo 2^64, and
+ * that is the question this now asks.
+ */
 function wrapWhole(value: number, name: NumericName): number {
   const width = WIDTH[name];
-  if (width === undefined) return value;
+  if (width === undefined || !Number.isFinite(value)) return value;
+  const bits = BigInt(width);
+  const modulus = 2n ** bits;
+  // A double at or above 2^53 has no fractional part, so this is the very
+  // integer the double holds.
+  const whole = BigInt(Math.trunc(value));
   if (isUnsigned({ kind: "primitive", name } as SemanticType)) {
-    const modulus = 2 ** width;
-    return ((value % modulus) + modulus) % modulus;
+    return Number(((whole % modulus) + modulus) % modulus);
   }
-  const bound = 2 ** (width - 1);
-  return (((value + bound) % 2 ** width) + 2 ** width) % 2 ** width - bound;
+  const bound = modulus / 2n;
+  return Number(((((whole + bound) % modulus) + modulus) % modulus) - bound);
 }
 
 /**
@@ -274,6 +293,14 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         if (value.op === "concat") return null;
         const folded = foldArithmetic(value.op, left, right, name);
         if (folded === null) return null;
+        // A whole number the compiler writes back as text is read by a backend
+        // as text, and text carries a number exactly only to 2^53. An answer
+        // past that is written as the shortest thing that reads back as the
+        // same double, which is a different number: `-7` divided by two at
+        // `u64` is 18446744073709551609, and what it was written as was
+        // 18446744073709552000. Such an answer is left as the arithmetic it
+        // came from, which the backend computes at the width it wraps to.
+        if (isInteger(value.type) && !Number.isSafeInteger(folded)) return null;
         return { k: "const", type: value.type, text: asText(folded) };
       }
       // The identities, each of which holds at the type it is written at.
@@ -287,7 +314,15 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       if (value.left.k === "const" && left !== null) {
         if (value.op === "add" && left === 0) return value.right;
         if (value.op === "mul" && left === 1) return value.right;
-        if (value.op === "sub" && left === 0) return value.right;
+        // `0 - x` is the negation of x, and not x: this returned the right
+        // side, so `0 - a.length` printed the length rather than its
+        // negation. A whole number negates by the same wrap the subtraction
+        // does, so it is the negation; a float does not, because `0.0 - 0.0`
+        // is a positive zero and negating a zero is a negative one, so that
+        // form is left as the subtraction it was written as.
+        if (value.op === "sub" && left === 0 && isInteger(value.type)) {
+          return { k: "unary", type: value.type, op: "neg", operand: value.right };
+        }
         if (value.op === "div" && left === 0 && right !== null && right !== 0) {
           return { k: "const", type: value.type, text: asText(0) };
         }
@@ -329,7 +364,7 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       return null;
     }
     case "compare": {
-      const name = numberType(value.left) ?? (value.left.k === "const" ? numberType(value.left) : null);
+      const name = numberType(value.left);
       if (name === null) return null;
       const left = literalOf(value.left);
       const right = literalOf(value.right);
@@ -386,13 +421,6 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // A string of nothing but literals is a literal.
       if (value.parts.every((part) => part.k === "text")) {
         return { k: "text", type: value.type, parts: value.parts };
-      }
-      return null;
-    }
-    case "buffer": {
-      // A buffer of nothing but literals has one number.
-      if (value.values.every((one) => one.k === "const" || one.k === "bool" || one.k === "nothing")) {
-        return null;
       }
       return null;
     }
@@ -527,7 +555,7 @@ function foldLoop(loop: SemanticLoop): SemanticLoop {
  * Both are counted across the whole function, nested blocks included, because a
  * name declared in an arm is read in that arm and nowhere else.
  */
-function readCounts(fn: SemanticFunction): Map<string, number> {
+function readCounts(body: Body): Map<string, number> {
   const counts = new Map<string, number>();
   const count = (name: string): void => {
     counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -548,7 +576,7 @@ function readCounts(fn: SemanticFunction): Map<string, number> {
       }
     }
   };
-  walk(fn.entry);
+  walk(body.entry);
   return counts;
 }
 
@@ -566,8 +594,8 @@ function readCounts(fn: SemanticFunction): Map<string, number> {
  * gone from the statements is still named by that list, so the two have to go
  * together or the validator is right to refuse the function.
  */
-function dropUnread(fn: SemanticFunction): boolean {
-  const counts = readCounts(fn);
+function dropUnread(body: Body): boolean {
+  const counts = readCounts(body);
   const keep = (name: string, released: boolean): boolean => released || (counts.get(name) ?? 0) > 0;
   const walk = (block: SemanticBlock): boolean => {
     let changed = false;
@@ -587,7 +615,7 @@ function dropUnread(fn: SemanticFunction): boolean {
     if (changed) block.releases = block.releases.filter((name) => counts.has(name) || block.releases.includes(name));
     return changed;
   };
-  return walk(fn.entry);
+  return walk(body.entry);
 }
 
 /**
@@ -606,7 +634,7 @@ function dropUnread(fn: SemanticFunction): boolean {
  * memory, because the IR holds no length and no null test and a load hoisted
  * out of a turn that did not read it is a read the source never performed.
  */
-function hoistLoopInvariants(fn: SemanticFunction): boolean {
+function hoistLoopInvariants(body: Body): boolean {
   let changed = false;
   const walk = (block: SemanticBlock): void => {
     // A hoist inserts a statement above the loop it hoisted out of, so the
@@ -621,7 +649,7 @@ function hoistLoopInvariants(fn: SemanticFunction): boolean {
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
   };
-  walk(fn.entry);
+  walk(body.entry);
   return changed;
 }
 
@@ -699,17 +727,326 @@ function hoistOne(owner: SemanticBlock, at: number): boolean {
   const written = namesWrittenBy(statement.loop);
   const bindings: SemanticStatement[] = [];
   const reads = new Map<string, SemanticValue>();
-  loopInvariants(statement.loop).forEach((value, order) => {
-    if (value.k === "local" || value.k === "const") return;
-    if (readsMemoryOrChanges(value, written)) return;
-    const name = `invariant${at}_${order}`;
+  let serial = 0;
+  const bind = (value: SemanticValue): void => {
+    if (reads.has(valueKey(value))) return;
+    const name = `invariant${at}_${serial}`;
+    serial += 1;
     reads.set(valueKey(value), { k: "local", type: value.type, name });
     bindings.push({ k: "let", slot: slotFor(value, name), value, line: statement.line });
+  };
+  loopInvariants(statement.loop).forEach((value) => {
+    if (value.k === "local" || value.k === "const") return;
+    if (readsMemoryOrChanges(value, written)) return;
+    bind(value);
   });
+  // The body is where the value that costs is. A loop's own bound is read once
+  // per turn and is usually a number or a name the loop reads from the frame;
+  // what a body computes every turn is an expression over names nothing in the
+  // loop writes, and that one is hoisted here rather than waiting for a model
+  // to propose it at a site.
+  //
+  // Once per turn is enough, and is the case the rule a review proposes cannot
+  // reach: `hoist-invariant` binds a value computed MORE THAN ONCE, which is
+  // the wrong end of it. A body that computes `n * 2` on every turn of a
+  // hundred-turn loop computes it ninety-nine times more than it needs to.
+  hoistableIn(statement.loop.body, written).forEach(bind);
   if (bindings.length === 0) return false;
   owner.statements[at] = { ...statement, loop: replaceValues(statement.loop, reads) as SemanticLoop };
   owner.statements.splice(at, 0, ...bindings);
   return true;
+}
+
+/**
+ * Every value a block computes that is worth computing once above it, once for
+ * however many turns run.
+ *
+ * Every block of it is read, itself included, and a value is in the answer once
+ * for anywhere it appears: a body that computes the same value twice is the
+ * case the rule a review proposes is for, and one that computes it once is the
+ * case the rule cannot reach and costs the most.
+ */
+function hoistableIn(block: SemanticBlock, written: ReadonlySet<string>): SemanticValue[] {
+  const roots: SemanticValue[] = [];
+  for (const nested of nestedSemanticBlocks(block)) roots.push(...rootsOf(nested));
+  const seen = new Set<string>();
+  const hoistable: SemanticValue[] = [];
+  for (const value of candidates(roots, written)) {
+    const key = valueKey(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hoistable.push(value);
+  }
+  return hoistable;
+}
+
+function repeatedAmong(roots: readonly SemanticValue[], written: ReadonlySet<string>): SemanticValue[] {
+  const counts = new Map<string, number>();
+  for (const value of candidates(roots, written)) {
+    counts.set(valueKey(value), (counts.get(valueKey(value)) ?? 0) + 1);
+  }
+  const all = candidates(roots, written);
+  return all.filter((value) => (counts.get(valueKey(value)) ?? 0) > 1);
+}
+
+/**
+ * Every value a set of roots computes that could be bound to a name: one that
+ * is computed rather than read, none of it calls, none of it reads a name the
+ * region writes, and it can be computed wherever it is moved to.
+ *
+ * The three tests are the ones `hoist-invariant` and `common-subexpression`
+ * hold a proposal to, so a value this binds and a value a rule binds are the
+ * same value. A name and a number are excluded because binding one is a slot
+ * and a store where reading it was already one instruction.
+ */
+function candidates(roots: readonly SemanticValue[], written: ReadonlySet<string>): SemanticValue[] {
+  const found: SemanticValue[] = [];
+  for (const root of roots) {
+    walkSemanticValue(root, (value) => {
+      if (value.k === "local" || value.k === "const") return;
+      if (!isBindable(value) || hasCall(value) || !isSafeToCompute(value)) return;
+      let readsWritten = false;
+      walkSemanticValue(value, (one) => {
+        if (one.k === "local" && written.has(one.name)) readsWritten = true;
+      });
+      if (readsWritten) return;
+      found.push(value);
+    });
+  }
+  return found;
+}
+
+/** Every value a block computes in its own right, without its nested blocks. */
+function rootsOf(block: SemanticBlock): SemanticValue[] {
+  const roots: SemanticValue[] = [];
+  const read = (value: SemanticValue | null): void => {
+    if (value !== null) roots.push(value);
+  };
+  for (const statement of block.statements) {
+    switch (statement.k) {
+      case "let":
+      case "set":
+      case "printText":
+      case "printNumber":
+      case "retain":
+      case "storeField": read(statement.value); break;
+      case "setElement": read(statement.index); read(statement.value); break;
+      case "if": read(statement.condition); break;
+      case "raise": read(statement.message); break;
+      case "call": roots.push({ k: "call", type: statement.call.returns, call: statement.call }); break;
+      case "loop": {
+        const loop = statement.loop;
+        if (loop.kind === "counted") {
+          read(loop.from);
+          read(loop.to);
+          read(loop.step);
+        } else if (loop.kind === "each") read(loop.length);
+        else read(loop.condition);
+        break;
+      }
+      default: break;
+    }
+  }
+  if (block.terminator.k === "return") read(block.terminator.value);
+  return roots;
+}
+
+/**
+ * Commoning every value a block computes more than once, at the top of that
+ * block.
+ *
+ * This is the rewrite a review can only propose at a site it names, so it
+ * happens only when a model happens to name the right block. The values are the
+ * ones `common-subexpression` holds a proposal to, so what this binds and what
+ * that binds are the same values: computed rather than read, nothing in them
+ * calls, and computable wherever they are moved to — which is what makes
+ * computing one on a turn that did not read it the same program.
+ *
+ * The bindings go at the top of the block, which is above every statement that
+ * reads one of them and below every statement that writes a name one of them
+ * reads, so each is computed once and is the same value everywhere it is used.
+ */
+function commonWithin(body: Body): boolean {
+  let changed = false;
+  const walk = (block: SemanticBlock): void => {
+    if (commonOne(block)) changed = true;
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+  };
+  walk(body.entry);
+  return changed;
+}
+
+function commonOne(block: SemanticBlock): boolean {
+  const repeated = repeatedAmong(rootsOf(block), namesWrittenHere(block));
+  if (repeated.length === 0) return false;
+  const line = block.statements[0]?.line ?? 0;
+  const reads = new Map<string, SemanticValue>();
+  const bindings: SemanticStatement[] = [];
+  repeated.forEach((value, order) => {
+    const name = `common${block.id}_${order}`;
+    reads.set(valueKey(value), { k: "local", type: value.type, name });
+    bindings.push({ k: "let", slot: slotFor(value, name), value, line });
+  });
+  block.statements = block.statements.map((statement) => replaceValues(statement, reads) as SemanticStatement);
+  if (block.terminator.k === "return" && block.terminator.value !== null) {
+    block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, reads) };
+  }
+  block.statements.unshift(...bindings);
+  return true;
+}
+
+/** Every name the statements of a block write, which a binding may not read. */
+function namesWrittenHere(block: SemanticBlock): Set<string> {
+  const written = new Set<string>();
+  for (const statement of block.statements) {
+    if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+    if (statement.k === "setElement") written.add(statement.buffer);
+    if (statement.k === "let") written.add(statement.slot.name);
+  }
+  return written;
+}
+
+/**
+ * Replaces every read of a name whose value is another name with a read of
+ * that one, and drops the binding.
+ *
+ * A copy of a name is a slot, a store and a load on every read, for a name the
+ * program already has. It is the same program only where nothing writes the
+ * name it copies between the binding and the reads: a program that counts a
+ * name down and reads the copy afterwards is reading the number it started
+ * with, not the one the counter holds now. Nothing writing that name anywhere
+ * in the function is the test that says so without having to place every read
+ * against every write.
+ */
+function propagateCopies(body: Body): boolean {
+  const writes = new Set<string>();
+  const candidates: { name: string; source: string }[] = [];
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    for (const statement of block.statements) {
+      if (statement.k === "set" || statement.k === "step") writes.add(statement.name);
+      if (statement.k === "let" && statement.value.k === "local") {
+        candidates.push({ name: statement.slot.name, source: statement.value.name });
+      }
+    }
+  }
+  const copied = candidates.filter((copy) => !writes.has(copy.source) && !writes.has(copy.name));
+  if (copied.length === 0) return false;
+  // Keyed by the read of the copy rather than by the read it becomes, because
+  // that is the node `replaceValues` finds.
+  const reads = new Map<string, SemanticValue>();
+  for (const copy of copied) {
+    const type = localTypeOf(body, copy.name);
+    reads.set(valueKey({ k: "local", type, name: copy.name }), { k: "local", type, name: copy.source });
+  }
+  const isCopy = (name: string): boolean => copied.some((copy) => copy.name === name);
+  const walk = (block: SemanticBlock): void => {
+    block.statements = block.statements
+      .filter((statement) => !(statement.k === "let" && isCopy(statement.slot.name)))
+      .map((statement) => replaceValues(statement, reads) as SemanticStatement);
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, reads) };
+    }
+    block.releases = block.releases.filter((name) => !isCopy(name));
+  };
+  walk(body.entry);
+  return true;
+}
+
+/** The type a name is read as, which is the type its own binding declares. */
+function localTypeOf(body: Body, name: string): SemanticType {
+  for (const parameter of body.params) if (parameter.name === name) return slotType(parameter);
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let" && statement.slot.name === name) return slotType(statement.slot);
+      if (statement.k === "loop") {
+        const loop = statement.loop;
+        if (loop.kind === "counted" && loop.variable === name) return loop.type;
+        if (loop.kind === "each" && loop.element === name) return loop.elementType;
+      }
+    }
+  }
+  return { kind: "primitive", name: "bool" };
+}
+
+/**
+ * Drops a write nothing reads afterwards.
+ *
+ * A `set` of a name no other statement of the function reads is a value nothing
+ * ever saw, and on every target it is a slot, a store and the arithmetic that
+ * produced it. One that writes something a call makes is left alone: running
+ * the call is what the statement is for when nothing reads what it wrote.
+ */
+function dropDeadWrites(body: Body): boolean {
+  const reads = new Map<string, number>();
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    valuesOf(block, (value) => {
+      walkSemanticValue(value, (one) => {
+        if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
+      });
+    });
+  }
+  let changed = false;
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    const before = block.statements.length;
+    block.statements = block.statements.filter((statement) => {
+      if (statement.k !== "set" || statement.op !== "=") return true;
+      if (block.releases.includes(statement.name)) return true;
+      if ((reads.get(statement.name) ?? 0) > 0) return true;
+      let calls = false;
+      walkSemanticValue(statement.value, (one) => {
+        if (one.k === "call") calls = true;
+      });
+      return calls;
+    });
+    if (block.statements.length !== before) changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Takes the arm an `if` whose condition folded to a truth selects, where that
+ * can be done without merging two scopes into one.
+ *
+ * The arms are blocks of their own, so a name one of them declares belongs to
+ * it; splicing it into the block the `if` is written in would put that name in
+ * a scope it was not declared in, which is left alone rather than renamed.
+ */
+function pruneKnownBranches(block: SemanticBlock): boolean {
+  let changed = false;
+  block.statements = block.statements.flatMap((statement) => {
+    if (statement.k !== "if" || statement.condition.k !== "bool") return [statement];
+    const taken = statement.condition.value ? statement.then : statement.otherwise;
+    if (taken === null) {
+      changed = true;
+      return [];
+    }
+    if (taken.statements.some(claimsAName)) return [statement];
+    changed = true;
+    return taken.statements;
+  });
+  return changed;
+}
+
+/** Whether a statement declares a name, which is what stops an arm splicing. */
+function claimsAName(statement: SemanticStatement): boolean {
+  if (statement.k === "let") return true;
+  if (statement.k === "loop") return statement.loop.kind !== "while" && statement.loop.kind !== "doWhile";
+  return false;
+}
+
+/**
+ * What the rewrites read of a function: the body they walk and the names that
+ * are already bound in it. A program has the same body and no parameters of its
+ * own, which is why this is one shape rather than two entry points over two.
+ */
+interface Body {
+  readonly params: readonly SemanticSlot[];
+  readonly entry: SemanticBlock;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -723,16 +1060,69 @@ function hoistOne(owner: SemanticBlock, at: number): boolean {
  * one exposed, and a round that changes nothing ends it. A fold that makes two
  * computations the same one is what lets the next round find them, so stopping
  * after one pass would leave most of what there is to find unfound.
+ *
+ * The round is written the way the rewrites are: each one says whether it
+ * changed anything, and a round that none of them did is the round after which
+ * nothing more would be. Comparing the tree against a copy of itself by
+ * writing both out as text is the same answer for far more work.
  */
 export function optimizeSemanticFunction(fn: SemanticFunction): SemanticFunction {
-  let current = fn;
-  for (let round = 0; round < 4; round += 1) {
-    const next = structuredClone(current);
-    foldBlock(next.entry);
-    hoistLoopInvariants(next);
-    dropUnread(next);
-    if (JSON.stringify(next) === JSON.stringify(current)) return current;
-    current = next;
+  optimizeBody(fn);
+  return fn;
+}
+
+/**
+ * The same rewrites over a program's entry, which is a body with no parameters
+ * of its own.
+ *
+ * A program's statements are the same shape a function's are and reach the
+ * same backends, so they are held to the same rewrites: a top-level loop of a
+ * program is a loop like any other, and the value its body computes on every
+ * turn is computed once above it here as it is in a function.
+ */
+export function optimizeSemanticEntry(entry: SemanticBlock): SemanticBlock {
+  optimizeBody({ params: [], entry });
+  return entry;
+}
+
+/**
+ * The same rewrites over a whole program, which is a body under the functions it
+ * calls: the statements of the program itself, with nothing bound in it but what
+ * those statements declare.
+ */
+export function optimizeSemanticProgram(program: SemanticProgram): SemanticProgram {
+  optimizeSemanticEntry(program.entry);
+  return program;
+}
+
+function optimizeBody(body: Body): void {
+  for (let round = 0; round < 8; round += 1) {
+    let changed = false;
+    if (foldAll(body)) changed = true;
+    if (pruneAll(body)) changed = true;
+    if (hoistLoopInvariants(body)) changed = true;
+    if (commonWithin(body)) changed = true;
+    if (propagateCopies(body)) changed = true;
+    if (dropDeadWrites(body)) changed = true;
+    if (dropUnread(body)) changed = true;
+    if (!changed) break;
   }
-  return current;
+}
+
+/** Folds every block of the function, nested ones included. */
+function foldAll(body: Body): boolean {
+  let changed = false;
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    if (foldBlock(block)) changed = true;
+  }
+  return changed;
+}
+
+/** Takes the arm of every `if` whose condition is already a truth. */
+function pruneAll(body: Body): boolean {
+  let changed = false;
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    if (pruneKnownBranches(block)) changed = true;
+  }
+  return changed;
 }

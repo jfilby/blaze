@@ -28,6 +28,7 @@
  */
 
 import {
+  hasCall,
   isInteger,
   isReference,
   isTextType,
@@ -331,13 +332,6 @@ function namesRead(value: SemanticValue): string[] {
   return names;
 }
 
-function hasCall(value: SemanticValue): boolean {
-  let called = false;
-  walkValues(value, (inner) => {
-    if (inner.k === "call") called = true;
-  });
-  return called;
-}
 
 /**
  * A value a rule may bind to a name: one that is computed rather than read. A
@@ -349,7 +343,7 @@ function hasCall(value: SemanticValue): boolean {
  * whole numbers does not pass — binding one of those moves the computation
  * somewhere it may not have been.
  */
-function isBindable(value: SemanticValue): boolean {
+export function isBindable(value: SemanticValue): boolean {
   switch (value.k) {
     case "arith":
     case "compare":
@@ -399,7 +393,7 @@ function isBindable(value: SemanticValue): boolean {
  * Everything else here is arithmetic on values already in hand, a comparison,
  * or a choice between two of them, and a choice is as lazy as it was.
  */
-function isSafeToCompute(value: SemanticValue): boolean {
+export function isSafeToCompute(value: SemanticValue): boolean {
   switch (value.k) {
     case "element":
     case "loadField":

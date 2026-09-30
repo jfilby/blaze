@@ -459,6 +459,32 @@ export function readSemanticCandidate(
 }
 
 /**
+ * The candidate as the compiler lowers it: the same answer with the
+ * deterministic rewrites applied to it.
+ *
+ * Every path from a candidate to an object or a module comes through here — a
+ * candidate this build produced, one an earlier build stored and `blaze test`
+ * or `blaze benchmark` re-measures, and one an incremental build reuses whole —
+ * so each is lowered folded. The text is rewritten and not only the tree,
+ * because the IR a build delivers beside the object is the IR the object was
+ * made from: an artifact that is not what was compiled is one a reader cannot
+ * check anything against.
+ */
+export function foldedCandidate(candidate: Candidate, program: ProgramContract): Candidate {
+  // A candidate whose text does not parse is one the reader refuses, and that
+  // refusal is reported with the reason the parser gave. The fold is left out
+  // rather than failing here, where the reason would be a different one.
+  try {
+    return {
+      ...candidate,
+      text: printSemanticFunction(optimizeSemanticFunction(parseSemanticFunction(candidate.text, program))),
+    };
+  } catch {
+    return candidate;
+  }
+}
+
+/**
  * Turns a candidate into something executable.
  *
  * Every output kind is the same IR lowered the same way, so this is the only
@@ -595,9 +621,10 @@ async function evaluateCandidate(
 
 async function measureCandidate(
   request: CandidateEvaluationRequest,
-  candidate: Candidate,
+  written: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
+  const candidate = foldedCandidate(written, request.program);
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
   try {
     // The IR is the artifact and is kept beside whatever it lowers into,

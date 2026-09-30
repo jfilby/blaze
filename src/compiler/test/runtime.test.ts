@@ -254,10 +254,18 @@ test("the C a build compiles includes the runtime ABI, so a function that alloca
   assert.equal(outcome.build.status, "success");
   // What a `c` build compiles is the C the compiler wrote from the IR, and
   // what it is built from is the header the ABI is declared in: an object the
-  // function allocates cannot be built without one.
+  // function allocates cannot be built without one. Which entry point it asks
+  // for is the emitter's own business — a literal that writes every field of
+  // its layout is given a block nothing cleared, and one that leaves a field
+  // out a cleared block — so what is checked is that what it asks for is an
+  // entry point the ABI declares, and that it asks for something.
   const source = await readFile(join(project(directory), "work/make/c1.c"), "utf8");
   assert.match(source, /#include "blaze_rt\.h"/);
-  assert.match(source, /blaze_rt_object_new/);
+  const asked = [...new Set(source.match(/blaze_rt_[a-z_]+/g) ?? [])];
+  assert.ok(asked.length > 0, "a function that allocates must reach the runtime");
+  for (const symbol of asked) {
+    assert.ok(isRuntimeSymbol(symbol), `${symbol} is not an entry point of the ABI`);
+  }
 });
 
 test("a hosted build runs the candidate inside a Nim host program", async (t) => {

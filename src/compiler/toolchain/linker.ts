@@ -28,8 +28,8 @@
 import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, TypeExpr } from "../core/types.ts";
-import { linkOptions } from "../core/target.ts";
+import type { BuildMode, FunctionContract, FunctionParam, Objective, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
+import { cTargetOptions, linkOptions } from "../core/target.ts";
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName } from "./c-names.ts";
@@ -576,6 +576,19 @@ ${result}
 export interface LinkRequest {
   /** How the C compiler is asked to build, from the project's mode. */
   mode: BuildMode;
+  /**
+   * What the function being linked is built for, which decides the level: with
+   * `-flto` on this command gcc rebuilds every object in front of it with the
+   * options of the link, so a link that dropped it would deliver a program built
+   * at a level no object was compiled at.
+   */
+  objective?: Objective;
+  /**
+   * The machine the object was built for. A link without the target's own
+   * options is a link whose code gcc regenerates for the machine the build runs
+   * on, which is not the machine the objects asked for.
+   */
+  target?: TargetSpec;
   harnessPath: string;
   objectPath: string;
   /** Directories the generated source includes the runtime header from. */
@@ -594,7 +607,13 @@ export function link(request: LinkRequest): void {
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
   // A function the compiler lowered from IR may call the maths library, and a
   // harness or a probe that runs one links it in.
-  const result = run("gcc", [...linkOptions(request.mode), ...includes, "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  //
+  // The link carries the contract's objective and the target's own options
+  // because of `-flto` below: gcc rebuilds every object in front of it with the
+  // options of this command, so the program that comes out is built the way
+  // this line asks and not the way the objects were compiled.
+  const target = request.target === undefined ? [] : cTargetOptions(request.target);
+  const result = run("gcc", [...linkOptions(request.mode, request.objective), ...target, ...includes, "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

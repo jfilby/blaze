@@ -178,6 +178,13 @@ function integerLiteral(text: string): bigint | null {
 function literal(text: string, element: string): string {
   if (element === "bool") return text === "0" ? "false" : "true";
   if (element === "f32" || element === "f64") {
+    // A value that is not a number has no decimal to write, and the source
+    // writes it as a word. Nim spells the three of them its own way, and the
+    // word the source used is an undeclared identifier there.
+    if (text === "Infinity") return "Inf";
+    if (text === "-Infinity") return "-Inf";
+    if (text === "NaN") return "NaN";
+    if (text === "-0") return "-0.0";
     if (/^[+-]?0[xX]/.test(text)) {
       // BigInt takes the sign of a decimal literal only.
       const negative = text.startsWith("-");

@@ -27,7 +27,7 @@ import {
   type SemanticType,
   type ValueKind,
 } from "../core/semantic-ir.ts";
-import type { BuildMode, FunctionSignature, Runner, TargetSpec } from "../core/types.ts";
+import type { BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
 import { cTargetOptions, linkOptions } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
@@ -590,6 +590,13 @@ export function generateProgramDriver(program: SemanticProgram): string {
 export interface ProgramDriverRequest {
   /** How the C compiler is asked to build, from the project's mode. */
   mode: BuildMode;
+  /**
+   * What the program is built for, which decides the level of the link. With
+   * `-flto` on it, gcc rebuilds every object of the program with the options of
+   * this command, so a link that dropped the objective would deliver the
+   * program at a level none of its objects were compiled at.
+   */
+  objective?: Objective;
   /** The machine the program is built for, which every object beside it agrees on. */
   target: TargetSpec;
   program: SemanticProgram;
@@ -612,7 +619,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller
   // naming a cpu asked for and what an unnamed one would not get otherwise.
-  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode), ...cTargetOptions(request.target), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

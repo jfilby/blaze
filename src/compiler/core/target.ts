@@ -192,6 +192,36 @@ export function optimizationOptions(mode: BuildMode, objective?: Objective): str
 }
 
 /**
+ * The options a function the C backend lowered from IR itself is compiled
+ * with, which is the link-grade list and not the candidate one.
+ *
+ * `-ffat-lto-objects` exists so a candidate can be measured on its own, and a
+ * function the compiler lowered is never ranked against a sibling: it is the
+ * one lowering of an IR that was already chosen, and the build links it once
+ * with everything in front of it. The flag buys that measurement nothing here
+ * and costs a copy of the compiler's intermediate form in every object the
+ * build makes — a section the object carries and `sizeBytes` counts, for code
+ * the linker is about to throw away and regenerate.
+ */
+export function loweringOptions(mode: BuildMode, objective?: Objective): string[] {
+  const level = optimizationLevel(mode, objective);
+  return mode === "debug" ? level : [...level, "-flto"];
+}
+
+/**
+ * The options the C compiler is asked to stop at assembly with, which is the
+ * level and the floating-point flags and no `-flto`.
+ *
+ * Under link-time optimization `-S` writes the compiler's intermediate form
+ * rather than machine code, so a build that asked for the assembly under
+ * `-flto` delivered a dump of what was about to be handed to the linker, and
+ * weighed that dump as the size of the program.
+ */
+export function assemblyOptions(mode: BuildMode, objective?: Objective): string[] {
+  return optimizationLevel(mode, objective);
+}
+
+/**
  * The options the delivered program is linked with.
  *
  * The same level, the same floating-point flags, and `-flto`. Each function is
@@ -200,11 +230,16 @@ export function optimizationOptions(mode: BuildMode, objective?: Objective): str
  * another at all, and the runtime entry points a candidate calls across that
  * boundary stay calls. This link runs once, after a candidate has been chosen,
  * and there is no second candidate to compare it against, which is the whole
- * reason the flag is off the compile above and on here.
+ * reason the flag is off a candidate's own compile and on here.
+ *
+ * It is the list `loweringOptions` hands the C backend for the objects it
+ * lowers itself, and the two are the same on purpose: with `-flto` on this
+ * command gcc rebuilds every object in front of it with the options of the
+ * link, so a link at a different level undoes the level the objects were
+ * compiled at.
  */
 export function linkOptions(mode: BuildMode, objective?: Objective): string[] {
-  const level = optimizationLevel(mode, objective);
-  return mode === "debug" ? level : [...level, "-flto"];
+  return loweringOptions(mode, objective);
 }
 
 /**

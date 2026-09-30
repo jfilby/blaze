@@ -52,6 +52,7 @@ import { buildProgramHost } from "./runtime/nim-program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
+import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
 import { parseSemanticFunction, printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
 import { validateSemanticProgram } from "./semantics/ir-validate.ts";
 import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.ts";
@@ -1376,7 +1377,13 @@ export async function runBuild(
     let selected: Record<string, string> = {};
     // Resolving a program and writing out the source the toolchain runs are
     // the same for every round: only the objects it links change.
-    const driver = phase.body === undefined ? undefined : resolveProgram(phase.body, program);
+    // The program's own statements are held to the same deterministic rewrites
+    // a function's are: a top-level loop of a program is a loop like any other,
+    // and what it computes on every turn is computed once above it.
+    const driver =
+      phase.body === undefined
+        ? undefined
+        : optimizeSemanticProgram(resolveProgram(phase.body, program));
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
@@ -1853,7 +1860,9 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
         detail: `it declares ${Object.keys(semantics).join(", ") || "nothing"}`,
       });
     }
-    return printSemanticFunction(wanted);
+    // What the backends are handed is folded, so what is printed here is what
+    // was lowered rather than what the frontend resolved.
+    return printSemanticFunction(optimizeSemanticFunction(structuredClone(wanted)));
   }
   if (phase.body === undefined) {
     throw new CompilerError({
@@ -1868,7 +1877,9 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
       ? resolveProgram(phase.body, phase.program)
       : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
   validateSemanticProgram(program, phase.program);
-  return printSemanticProgram(program);
+  // As for a function: the program the backends lower is folded, so the one
+  // printed here is the one they were handed.
+  return printSemanticProgram(optimizeSemanticProgram(program));
 }
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {

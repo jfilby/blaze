@@ -44,8 +44,8 @@ import {
 import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral } from "./c-names.ts";
 import { NameScope } from "./names.ts";
-import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { cTargetOptions, optimizationOptions } from "../core/target.ts";
+import { DEFAULT_ALIGNMENT, RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
+import { archOptions, assemblyOptions, cTargetOptions, loweringOptions } from "../core/target.ts";
 
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
@@ -55,6 +55,41 @@ const TEXT = { kind: "text" } as const;
 function declaredType(type: SemanticType | null): string {
   if (type === null || isTextType(type)) return "const char*";
   return cDeclarationType(type);
+}
+
+/**
+ * The text a value is written out as, when the emitter is the one writing it:
+ * a constant of the text type, and a text whose parts are all written out,
+ * which `text` below folds into one literal. Null when the program builds the
+ * string while it runs, which is the only case whose length is not a number
+ * the emitter can write down.
+ *
+ * What the C string such a value becomes is its bytes up to a NUL, because
+ * that is where the C string ends: an embedded NUL is written as `\000`, so it
+ * terminates the literal and is not one of the characters counted.
+ */
+function literalText(value: SemanticValue): string | null {
+  if (value.k === "const" && isTextType(value.type)) return value.text;
+  if (value.k === "text" && value.parts.every((part) => part.k === "text")) {
+    return value.parts.map((part) => (part.k === "text" ? part.value : "")).join("");
+  }
+  return null;
+}
+
+/**
+ * Whether a value the `for` of a loop writes down has to be bound to a name of
+ * its own above it.
+ *
+ * A name the IR already bound is what the `for` would read, and a value the IR
+ * wrote out is a literal the `for` would read, so neither is worth a slot and a
+ * copy — the C compiler makes that copy and removes it for itself. A call, a
+ * load or a length is computed again on every turn, and `optimize-ir` has
+ * already lifted the ones it may lift above the loop as names, so what arrives
+ * here is a value it could not lift: a bound that reads something the body
+ * writes, which is not the same value on every turn.
+ */
+function readEveryTurn(value: SemanticValue): boolean {
+  return value.k !== "local" && value.k !== "const";
 }
 
 /**
@@ -201,7 +236,10 @@ class FunctionEmitter {
       "#include <stdbool.h>",
       "#include <stdint.h>",
       "#include <math.h>",
-      "#include <stdio.h>",
+      // No `<stdio.h>`: nothing written below is output, and a header a
+      // translation unit does not use is one more it parses for every function
+      // of the program. The runtime source, which does print, includes it
+      // itself.
       "#include <string.h>",
       "",
       `#include "${RUNTIME_NAME}.h"`,
@@ -221,7 +259,17 @@ class FunctionEmitter {
     return this.names.reserve(`${prefix}_${this.temporaries}`);
   }
 
+  /**
+   * Writes lines, after whatever the value they are written from declared.
+   *
+   * A value a statement writes down can need a declaration of its own — a
+   * whole number is written into a buffer, and the buffer is a local of the
+   * statement rather than of the one before it — so the declarations waiting
+   * reach the output here, before the line that reads them, rather than at the
+   * next statement the block comes to.
+   */
   private write(lines: readonly string[]): void {
+    this.flush();
     this.body.push(...lines);
   }
 
@@ -246,10 +294,10 @@ class FunctionEmitter {
     this.names.leave();
   }
 
-  /** Writes the temporaries a value needed, before the line that reads them. */
+  /** Writes the declarations a value needed, before the line that reads them. */
   private flush(): void {
     if (this.pending.length === 0) return;
-    this.write(this.pending.map((line) => `${pad(this.depth)}${line}`));
+    this.body.push(...this.pending.map((line) => `${pad(this.depth)}${line}`));
     this.pending = [];
   }
 
@@ -304,11 +352,7 @@ class FunctionEmitter {
         // 2^53, so a larger one lost its last digits on the way out.
         const value = statement.value;
         if (isNumber(value.type) && isInteger(value.type)) {
-          // The text is built first because building it declares the buffer it
-          // writes into, and a declaration has to reach the output before the
-          // line that reads it.
           const text = this.number(this.expression(value, value.type, depth), value.type);
-          this.flush();
           this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${text});`]);
           return;
         }
@@ -390,21 +434,23 @@ class FunctionEmitter {
         const variable = this.names.declare(loop.variable, type);
         // What the loop counts over is read once. The `for` reads its bound on
         // every turn and adds its step on every turn, so a bound or a step the
-        // IR calls is a call the loop makes once per turn.
-        const from = this.temporary("blaze_from");
-        const to = this.temporary("blaze_to");
-        const step = by === null ? null : this.temporary("blaze_step");
-        this.write([`${pad(depth)}${written} ${from} = ${start};`]);
-        this.write([`${pad(depth)}${written} ${to} = ${end};`]);
-        if (by !== null && step !== null) {
-          this.write([`${pad(depth)}${written} ${step} = ${by};`]);
-        }
+        // IR calls is a call the loop makes once per turn. One that is a name or
+        // a literal is read as it is, and a temporary for it would be a slot and
+        // a copy the C compiler makes and removes for itself — see
+        // `readEveryTurn` for what is left once the IR pass has had its turn.
+        const from = readEveryTurn(loop.from) ? this.temporary("blaze_from") : null;
+        const to = readEveryTurn(loop.to) ? this.temporary("blaze_to") : null;
+        const step = given !== null && readEveryTurn(given) ? this.temporary("blaze_step") : null;
+        if (from !== null) this.write([`${pad(depth)}${written} ${from} = ${start};`]);
+        if (to !== null) this.write([`${pad(depth)}${written} ${to} = ${end};`]);
+        if (step !== null) this.write([`${pad(depth)}${written} ${step} = ${by as string};`]);
         // The step is the signed amount the index moves by, so a loop that
         // counts down carries a negative one and adds it like any other:
         // subtracting it from a step of -1 moves the index the other way, and
-        // the loop never ends.
-        const move = step === null ? `${variable}${loop.down ? "--" : "++"}` : `${variable} += ${step}`;
-        this.write([`${pad(depth)}for (${written} ${variable} = ${from}; ${variable} ${bound} ${to}; ${move}) {`]);
+        // the loop never ends. A step with a name of its own is added by that
+        // name, whichever of the two it is.
+        const move = by === null ? `${variable}${loop.down ? "--" : "++"}` : `${variable} += ${step ?? (by as string)}`;
+        this.write([`${pad(depth)}for (${written} ${variable} = ${from ?? start}; ${variable} ${bound} ${to ?? end}; ${move}) {`]);
         this.block(loop.body, depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
@@ -413,11 +459,12 @@ class FunctionEmitter {
         const index = this.names.declare(loop.index, USIZE);
         const element = this.names.declare(loop.element, loop.elementType);
         // The length is read once, for the same reason a counted loop's bound
-        // is: the walk reads it on every turn.
-        const length = this.temporary("blaze_length");
-        this.write([`${pad(depth)}size_t ${length} = ${walk as string};`]);
+        // is: the walk reads it on every turn. One the IR already named is the
+        // name the walk would read anyway.
+        const length = readEveryTurn(loop.length) ? this.temporary("blaze_length") : null;
+        if (length !== null) this.write([`${pad(depth)}size_t ${length} = ${walk as string};`]);
         this.write([
-          `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length}; ${index}++) {`,
+          `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length ?? (walk as string)}; ${index}++) {`,
           `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${buffer as string}[${index}];`,
         ]);
         this.block(loop.body, depth + 1);
@@ -527,10 +574,37 @@ class FunctionEmitter {
     const written = value.fields.map(
       (field) => `((${name})->${cMemberName(field.name)} = ${this.expression(field.value, null, 0)});`,
     );
-    return (
-      `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${RUNTIME_NAME}_object_new(` +
-      `sizeof(struct ${value.layout}), _Alignof(struct ${value.layout})); ${written.join(" ")} ${name}; })`
-    );
+    const size = `sizeof(struct ${value.layout})`;
+    const allocation = this.writesEveryField(value)
+      ? `${RUNTIME_NAME}_allocate_uninitialized(${size})`
+      : `${RUNTIME_NAME}_object_new(${size}, _Alignof(struct ${value.layout}))`;
+    return `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${allocation}; ${written.join(" ")} ${name}; })`;
+  }
+
+  /**
+   * Whether an object literal writes every field its layout has, which is what
+   * decides the block it is given.
+   *
+   * One that does is a caller of the runtime's `allocate_uninitialized`, whose
+   * own note names an object literal as what it is for: every field of the
+   * payload is written before any of it is read, so a block cleared first is a
+   * pass over the object the program never asked for. One that leaves a field
+   * out keeps the cleared block — a program is allowed to read a field it never
+   * wrote, the source answers that read as a zero, and the zero is what the
+   * clearing is for.
+   *
+   * Two things answer no on their own. A layout the function does not carry is
+   * a layout the emitter cannot read, so a field it cannot see is not one it
+   * can call written. And the uncleared block carries the runtime's default
+   * alignment rather than the layout's own: a field is at most a pointer wide,
+   * so no layout asks for more than that today, and the check is what keeps
+   * that true rather than what makes it true.
+   */
+  private writesEveryField(value: SemanticValue & { k: "newObject" }): boolean {
+    const layout = this.fn.objects[value.layout];
+    if (layout === undefined || layout.align > DEFAULT_ALIGNMENT) return false;
+    const written = new Set(value.fields.map((field) => field.name));
+    return layout.fields.every((field) => written.has(field.name));
   }
 
   /** A value read as the type a use fixes it at. */
@@ -667,12 +741,22 @@ class FunctionEmitter {
         // source answers NaN), and a zero is answered by its sign — a maximum
         // is `+0` and a minimum is `-0` however the two zeros were written.
         if (isFloat(value.type)) {
+          // The two arms of the order answer the unequal case, and the fixup is
+          // the third: reached only when neither ordered test holds, which with
+          // no NaN in either arm means the two are the same value. Two equal
+          // values of one sign are a tie the fixup leaves alone, so a zero is
+          // the only thing it has to recognise and the sign alone recognises
+          // it: `+0.0 == -0.0`, so a difference of signs is a `+0` of a `-0` and
+          // nothing else. The test for a zero that used to stand in front of
+          // it therefore could not change the answer, and the unequal case does
+          // not reach it.
           const ordered = value.op === "min" ? "<" : ">";
+          const zero = value.op === "min" ? "-0.0" : "0.0";
           return (
             `({ ${type} ${low} = ${left}; ${type} ${high} = ${right}; ` +
             `isnan(${low}) || isnan(${high}) ? ${low} + ${high} : ` +
             `${low} ${ordered} ${high} ? ${low} : ${high} ${ordered} ${low} ? ${high} : ` +
-            `(${low} == 0.0 && (signbit(${low}) || signbit(${high})) ? ${value.op === "min" ? "-0.0" : "0.0"} : ${low}); })`
+            `signbit(${low}) != signbit(${high}) ? ${zero} : ${low}; })`
           );
         }
         return (
@@ -707,7 +791,18 @@ class FunctionEmitter {
     // apart by the magic word, falling back to a scan for the literal. Emitting
     // `strlen` here instead cost a walk of the whole string on every read, and
     // a read inside a loop walked it once per turn.
-    if (isTextType(of.type)) return `${RUNTIME_NAME}_text_length(${this.raw(of, depth)})`;
+    //
+    // A literal is measured here rather than at run time at all: the C string
+    // written for it is a fixed run of bytes, so its length is a number the
+    // emitter can write down, and a whole probe and scan become a literal in
+    // the middle of the program.
+    if (isTextType(of.type)) {
+      const literal = literalText(of);
+      // The C string ends at a NUL, so a literal with one in it is as long as
+      // what is in front of it and no longer.
+      if (literal !== null) return String(Buffer.byteLength(literal.split("\0", 1)[0], "utf8"));
+      return `${RUNTIME_NAME}_text_length(${this.raw(of, depth)})`;
+    }
     throw backendError(
       `${this.fn.symbol} reads the length of an array, which no C this compiler writes can answer`,
       "an array reaches a function as a pointer to its first element and no length arrives with it",
@@ -772,12 +867,18 @@ class FunctionEmitter {
     // word for that is what the source prints; the rest are read as the address
     // the driver prints for one, because a pointer is not a double and casting
     // it to one is not C. It is bound first, since it is read twice.
+    //
+    // The address is written as the whole number it is rather than handed to
+    // the runtime's formatter: an address on a 64 bit machine is above 2^53,
+    // which is where a double stops being able to hold every integer, so the
+    // formatter wrote a number that was not the address held — the low bits
+    // of it were zeros by then.
     if (isReference(value.type)) {
       const pointer = this.temporary("blaze_reference");
       const read = this.raw(value, depth);
       return (
         `({ const void* ${pointer} = ${read}; ` +
-        `${pointer} == NULL ? "null" : ${this.number(`(double)(uintptr_t)${pointer}`, NUMBER)}; })`
+        `${pointer} == NULL ? "null" : ${this.number(`(uintptr_t)${pointer}`, USIZE)}; })`
       );
     }
     return this.number(this.raw(value, depth), value.type);
@@ -809,15 +910,20 @@ class FunctionEmitter {
       // The declaration carries no indentation of its own: flush adds it when
       // the line is written.
       this.pending.push(`char ${buffer}[24];`);
-      // An unsigned value has no sign to write. A signed one is passed twice:
-      // once for the sign, and once as an unsigned magnitude, because the most
-      // negative i64 negates to itself as a signed value and its digits would
-      // then never come out.
-      const negative = isUnsigned(type) ? "0" : `((${read}) < 0 ? 1 : 0)`;
+      // The value is bound before it is asked anything of it, because it is
+      // asked for its sign and then for its digits, and a value the IR calls is
+      // a call that would otherwise run once per copy. The value is declared
+      // inside the statement expression, where a temporary that dies with it
+      // belongs; the buffer is the one thing that stays outside, for the reason
+      // above. An unsigned value has no sign to write, and a signed one takes
+      // its magnitude unsigned because the most negative i64 negates to itself
+      // as a signed value and its digits would then never come out.
+      const value = this.temporary("blaze_whole");
+      const negative = isUnsigned(type) ? "0" : `((${value}) < 0 ? 1 : 0)`;
       const magnitude = isUnsigned(type)
-        ? `(unsigned long long)(${read})`
-        : `(unsigned long long)((${read}) < 0 ? 0ULL - (unsigned long long)(${read}) : (unsigned long long)(${read}))`;
-      return `blaze_whole_text(${negative}, ${magnitude}, ${buffer})`;
+        ? `(unsigned long long)(${value})`
+        : `(unsigned long long)((${value}) < 0 ? 0ULL - (unsigned long long)(${value}) : (unsigned long long)(${value}))`;
+      return `({ ${declaredType(type)} ${value} = ${read}; blaze_whole_text(${negative}, ${magnitude}, ${buffer}); })`;
     }
     const written = this.temporary("blaze_written");
     return (
@@ -841,8 +947,9 @@ export interface CompileFunctionRequest {
   includeDirectories?: string[];
   /**
    * Where the assembly is written, when the assembly is what the build
-   * delivers. The C compiler is asked for it as well as for the object, so
-   * the assembly delivered is the assembly the object was made from.
+   * delivers. The object is then made of that assembly rather than of the C a
+   * second time, so the assembly delivered is the assembly the object was made
+   * from, and the C compiler is asked once rather than twice.
    */
   assemblyPath?: string;
 }
@@ -873,16 +980,33 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   await writeFile(request.sourcePath, source, "utf8");
 
   const archFlag = cTargetOptions(request.target);
-  const optimized = optimizationOptions(request.mode, request.contract.optimize.primary);
   const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or
   // instruction is a model's to choose, on any target. An assembly build
   // delivers what the C compiler decided rather than deciding it again.
+  //
+  // One pipeline runs either way. A build that delivers the assembly asks for
+  // it and assembles the object from it, where the C used to be taken through
+  // the whole of the optimisation twice — once for an assembly that was
+  // written and never read, and once for the object. The assembly is asked for
+  // without `-flto`, because under link-time optimization a `-S` writes the
+  // compiler's intermediate form rather than machine code: what the build
+  // delivered was a dump of what was about to be handed to the linker, and the
+  // size it reported was the size of that dump.
   if (request.assemblyPath !== undefined) {
     const stopped = run(
       "gcc",
-      ["-std=c11", ...optimized, "-S", ...archFlag, ...includes, "-o", request.assemblyPath, request.sourcePath],
+      [
+        "-std=c11",
+        ...assemblyOptions(request.mode, request.contract.optimize.primary),
+        "-S",
+        ...archFlag,
+        ...includes,
+        "-o",
+        request.assemblyPath,
+        request.sourcePath,
+      ],
       { timeoutMs: 120_000 },
     );
     if (stopped.spawnError !== undefined) {
@@ -901,27 +1025,58 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
         detail: `${request.sourcePath}\n${stopped.stderr.trim()}`,
       });
     }
-  }
-  const compiled = run(
-    "gcc",
-    ["-std=c11", ...optimized, "-c", ...archFlag, ...includes, "-o", request.objectPath, request.sourcePath],
-    { timeoutMs: 120_000 },
-  );
-  if (compiled.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "the C compiler is not available",
-      detail: compiled.spawnError,
+    // The object is the assembly assembled, so the object and the delivered
+    // assembly are one compilation rather than two that happen to agree.
+    const assembled = run("as", ["--64", ...archOptions(request.target), "-o", request.objectPath, request.assemblyPath], {
+      timeoutMs: 120_000,
     });
-  }
-  if (compiled.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: `the C compiler rejected the IR of ${functionName}`,
-      detail: `${request.sourcePath}\n${compiled.stderr.trim()}`,
-    });
+    if (assembled.spawnError !== undefined) {
+      throw new CompilerError({
+        category: "TargetError",
+        stage: "compile",
+        message: "the GNU assembler is not available",
+        detail: assembled.spawnError,
+      });
+    }
+    if (assembled.code !== 0) {
+      throw new CompilerError({
+        category: "LinkError",
+        stage: "compile",
+        message: `the assembler could not build the object of ${functionName}`,
+        detail: `${request.assemblyPath}\n${assembled.stderr.trim()}`,
+      });
+    }
+  } else {
+    const compiled = run(
+      "gcc",
+      [
+        "-std=c11",
+        ...loweringOptions(request.mode, request.contract.optimize.primary),
+        "-c",
+        ...archFlag,
+        ...includes,
+        "-o",
+        request.objectPath,
+        request.sourcePath,
+      ],
+      { timeoutMs: 120_000 },
+    );
+    if (compiled.spawnError !== undefined) {
+      throw new CompilerError({
+        category: "TargetError",
+        stage: "compile",
+        message: "the C compiler is not available",
+        detail: compiled.spawnError,
+      });
+    }
+    if (compiled.code !== 0) {
+      throw new CompilerError({
+        category: "LinkError",
+        stage: "compile",
+        message: `the C compiler rejected the IR of ${functionName}`,
+        detail: `${request.sourcePath}\n${compiled.stderr.trim()}`,
+      });
+    }
   }
 
   const info = inspectObject(request.objectPath, functionName);

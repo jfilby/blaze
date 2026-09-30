@@ -214,9 +214,36 @@ export class Encoder {
     return `.L${prefix}${this.serial}`;
   }
 
+  /**
+   * The label of the jump the code ends with, or null when it ends with
+   * anything else. `bind` reads it to take out a jump that lands where it
+   * already is, which is the one jump no reader of the code expects to find.
+   */
+  private pendingJump: string | null = null;
+
   /** Binds a name to the place the code has reached. */
   bind(name: string): void {
+    // A jump to the address this binds is a jump to the instruction after it:
+    // it moves control to where control already is, so it is taken back out
+    // rather than written. This is what ends every function whose last block
+    // returns — the jump to the epilogue lands on the epilogue — and any arm
+    // that leaves for a block bound straight after it.
+    if (this.pendingJump === name) {
+      this.pendingJump = null;
+      this.fixups.pop();
+      this.code.length -= 2;
+    }
     this.labels.set(name, this.code.length);
+  }
+
+  /**
+   * The jump the code ends with is one a block ended with rather than one this
+   * lowering laid out to reach the next thing written. Its label is elsewhere
+   * in the function, so taking it out would let the block fall out of the end
+   * of itself into whatever happened to be written next.
+   */
+  sealJump(): void {
+    this.pendingJump = null;
   }
 
   /**
@@ -329,6 +356,9 @@ export class Encoder {
   /* ---------------------------------------------------------------------- */
 
   private byte(value: number): void {
+    // Anything written at all means the last instruction has ended, so a jump
+    // is no longer the last thing in the code.
+    this.pendingJump = null;
     this.code.push(value & 0xff);
   }
 
@@ -365,7 +395,12 @@ export class Encoder {
     this.byte((mod << 6) | ((reg & 7) << 3) | (needsSib ? 4 : low & 7));
     if (needsSib) {
       const scale = rm.scale === 1 ? 0 : rm.scale === 2 ? 1 : rm.scale === 4 ? 2 : 3;
-      this.byte((scale << 6) | ((rm.index ?? 0) & 7) | (low & 7));
+      // The scale is in the highest two bits, the index register in the three
+      // below them and the base register in the lowest three. The index was
+      // written into the base's field, which is invisible for every address
+      // whose index is `rax` — the register number zero — and reads the other
+      // way round for every one whose index is not.
+      this.byte((scale << 6) | (((rm.index ?? 0) & 7) << 3) | (low & 7));
     }
     if (mod === 1) this.byte(rm.disp & 0xff);
     if (mod === 2) this.word(rm.disp);
@@ -403,8 +438,27 @@ export class Encoder {
   /* Moves                                                                   */
   /* ---------------------------------------------------------------------- */
 
-  /** A value written down, as wide as the value is. */
+  /**
+   * A value written down, as wide as the value is.
+   *
+   * Three forms answer it and the shortest one that holds the value is the one
+   * written. A zero is an exclusive-or of a register with itself, which is two
+   * bytes against the seven the immediate form spends, and every function that
+   * zeroes a counter or a total writes one. A value that fits a 32 bit unsigned
+   * register is the `B8` form, which is five bytes against the seven the
+   * sign-extended immediate spends.
+   */
   movRegImm(register: number, value: bigint): void {
+    if (value === 0n) {
+      this.alu("xor", register, register, false);
+      return;
+    }
+    if (value >= 0n && value <= 0xffff_ffffn) {
+      this.rex(false, 0, { base: null, index: null });
+      this.byte(0xb8 + (register & 7));
+      this.word(Number(value));
+      return;
+    }
     if (value >= -0x8000_0000n && value <= 0x7fff_ffffn) {
       this.rex(true, 0, { base: null, index: null });
       this.byte(0xc7);
@@ -533,6 +587,7 @@ export class Encoder {
   jmp(label: string): void {
     this.byte(0xeb);
     this.displacement(label, null);
+    this.pendingJump = label;
   }
 
   jcc(condition: Condition, label: string): void {
@@ -615,6 +670,24 @@ export class Encoder {
     this.byte(0x0f);
     this.byte(0xaf);
     this.modrm(source, destination);
+  }
+
+  /**
+   * A multiplication by a number written into the instruction, which is what a
+   * literal the program multiplied by becomes. The form above needs the other
+   * operand in a register, and a literal is not one.
+   */
+  imulImm(destination: number, value: number, wide = true): void {
+    this.rex(wide, destination, { base: null, index: null });
+    if (value >= -128 && value <= 127) {
+      this.byte(0x6b);
+      this.modrm(destination, destination);
+      this.byte(value & 0xff);
+      return;
+    }
+    this.byte(0x69);
+    this.modrm(destination, destination);
+    this.word(value);
   }
 
   /** A division of the accumulator by a register, signed or not. */
@@ -748,6 +821,47 @@ export class Encoder {
     this.byte(0x0f);
     this.byte(0x11);
     this.modrm(address, register);
+  }
+
+  /**
+   * A floating point operation whose other side is a literal in the
+   * read-only data, which the instruction reaches without a register being
+   * given up to hold it. A float the program added or multiplied by is the
+   * same float at every use, so it is read once from the object and the
+   * operation that consumes it is a single instruction.
+   */
+  sseMemLabel(operation: Float, destination: number, label: string, single: boolean): void {
+    this.precision(single);
+    this.byte(0x0f);
+    this.byte(FLOAT[operation]);
+    // `mod = 00, rm = 101` is the one address that is relative to the
+    // instruction rather than to a register, which is how a literal in
+    // another section is reached.
+    this.byte(((destination & 7) << 3) | 5);
+    this.relocations.push({ offset: this.code.length, symbol: label, kind: "address" });
+    this.word(0);
+  }
+
+  /**
+   * A float read out of the read-only data, at an address no object knows
+   * until the linker places them together.
+   *
+   * A float the program wrote out is the same float every time it is written,
+   * so it is laid down once beside the code and read from there, the way a
+   * string is. Building one in a register costs two instructions and a
+   * crossing from one register file to the other, and a function that writes
+   * the same constant in a loop pays both on every turn.
+   */
+  movsLoadLabel(register: number, label: string, single: boolean): void {
+    this.precision(single);
+    this.byte(0x0f);
+    this.byte(0x10);
+    // `mod = 00, rm = 101` is the one address that is relative to the
+    // instruction rather than to a register, which is what a literal in
+    // another section is reached through.
+    this.byte(((register & 7) << 3) | 5);
+    this.relocations.push({ offset: this.code.length, symbol: label, kind: "address" });
+    this.word(0);
   }
 
   /** A float kept in a register, which is a move of the whole register. */
