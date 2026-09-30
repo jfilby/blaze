@@ -123,6 +123,33 @@ const counted = (): SemanticValue => ({
   },
 });
 
+/** A reference to no layout in particular, which is how a callee takes one. */
+const ANY_REF: SemanticType = { kind: "ref", of: null };
+
+/**
+ * A call of `g`, which takes a reference and answers with the sum of a point's
+ * two sides, so a caller that hands over the wrong pointer shows.
+ *
+ * The parameter is written `ref<any>` while the argument is a name of a type
+ * that names its layout: the two are the same word, and the call is the shape a
+ * program gets when one function builds what another only reads.
+ */
+const pointCall = (argument: SemanticValue): SemanticValue => ({
+  k: "call",
+  type: F64,
+  call: {
+    callee: "g",
+    builtin: false,
+    signature: { name: "g", symbol: "g", params: [{ name: "p", type: "ref<any>" }], returns: "f64" },
+    args: [argument],
+    argTypes: [ANY_REF],
+    returns: F64,
+    effects: [],
+    ownership: "none",
+    retain: false,
+  },
+});
+
 /** A call of the compiler's own, which the C library answers. */
 const roundCall = (argument: SemanticValue): SemanticCall => ({
   callee: "Math.round",
@@ -155,8 +182,10 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
   await writeFile(
     join(directory, "callee.c"),
     [
+      "struct Point { double x; double y; };",
       "int calls = 0;",
       "double f(double v) { calls++; return v + 1.0; }",
+      "double g(struct Point* p) { calls++; return p->x + p->y; }",
       "",
     ].join("\n"),
     "utf8",
@@ -166,7 +195,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
     fn,
     contract,
     target: TARGET,
-    callable: new Set(["f"]),
+    callable: new Set(["f", "g"]),
     objectPath: object,
   });
   assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
@@ -180,6 +209,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
       "extern int calls;",
       "extern double f(double v);",
       `struct Point { double x; double y; };`,
+      "extern double g(struct Point* p);",
       `extern ${cDeclarationType(parseType(typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns })))} ${symbolOf(contract)}(${contract.function.params
         .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
         .join(", ")});`,
@@ -705,6 +735,50 @@ test("an object is allocated, written and read back through its own layout", asy
     { kind: "value", name: "point", mutable: false, type: POINT },
   ], { Point: POINT_LAYOUT });
   assert.equal(await lowered(read, (name) => `struct Point p = {1.0, 2.0}; printf("%.17g", ${name}(&p));`), "2");
+});
+
+test("a reference reaches a callee that takes one written as a reference to no layout", async () => {
+  // The caller holds a point as a `ref<Point>` and the callee takes a
+  // `ref<any>`. They are one word and the call must pass it, whichever of the
+  // two the compiler reads the argument by: a caller that wrote a copy of the
+  // pointer into a slot of its own would still be right, and one that read the
+  // pointer at the wrong depth would hand over the address of the slot.
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      statements: [
+        {
+          k: "let",
+          line: 1,
+          slot: { kind: "object", name: "point", mutable: true, type: POINT },
+          value: {
+            k: "newObject",
+            type: POINT,
+            layout: "Point",
+            fields: [
+              { name: "x", value: number("1.5") },
+              { name: "y", value: number("2.5") },
+            ],
+          },
+        },
+        {
+          k: "let",
+          line: 2,
+          slot: { kind: "value", name: "total", mutable: true, type: F64 },
+          value: pointCall(local("point", POINT)),
+        },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("total") },
+    },
+    [],
+    { Point: POINT_LAYOUT },
+  );
+  assert.equal(
+    await lowered(fn, (name) => `double answer = ${name}(); printf("%.17g %d", answer, calls);`),
+    "4 1",
+  );
 });
 
 test("an element of an array is written and read at the width the element is", async () => {

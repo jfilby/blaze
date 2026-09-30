@@ -415,6 +415,9 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
 /* The lowering                                                                 */
 /* -------------------------------------------------------------------------- */
 
+/** What a whole number may be combined with, and how. */
+type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "sar" | "and" | "or" | "xor";
+
 /** A value the lowering keeps in the frame while it builds another. */
 interface Held {
   readonly offset: number;
@@ -646,6 +649,45 @@ class Machine {
       this.pinned.set(entry.name, register);
       this.pinnedRegisters.push(register);
     }
+    // A counted loop's counter is written and read by the loop itself on every
+    // turn, so it is what a register is worth the most on. Left in the frame it
+    // costs a load and a store per turn to hold a value that the next turn
+    // reads straight back out again. A float counter is left out: a vector
+    // register is saved in a hundred and twenty eight bits whatever the loop
+    // does with it, which is not worth what it saves for a loop that may turn
+    // twice.
+    //
+    // A name declared more than once is left out too. Two loops both written
+    // `for (let i ...)` share the name and would share the register, and the
+    // inner one would go on stepping the outer one's counter.
+    const counters = new Map<string, number>();
+    const declarations = new Map<string, number>();
+    const walkCounters = (block: SemanticBlock, depth: number): void => {
+      for (const statement of block.statements) {
+        if (statement.k !== "loop") continue;
+        const loop = statement.loop;
+        if (loop.kind === "counted") {
+          declarations.set(loop.variable, (declarations.get(loop.variable) ?? 0) + 1);
+          // The inner loop of a nested pair turns the most, so depth is what
+          // says which counter is worth a register first.
+          if (!isFloat(loop.type)) counters.set(loop.variable, Math.max(counters.get(loop.variable) ?? 0, depth));
+        } else if (loop.kind === "each") {
+          declarations.set(loop.index, (declarations.get(loop.index) ?? 0) + 1);
+          declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
+        }
+        walkCounters(loop.body, depth + 1);
+      }
+    };
+    walkCounters(this.fn.entry, 0);
+    const ordered = [...counters.entries()]
+      .filter(([name]) => (declarations.get(name) ?? 0) === 1 && !declared.some((entry) => entry.name === name))
+      .sort((left, right) => right[1] - left[1]);
+    for (const [index, [name]] of ordered.entries()) {
+      const register = CALLEE_SAVED[this.pinnedRegisters.length + index];
+      if (register === undefined) break;
+      this.pinned.set(name, register);
+      this.pinnedRegisters.push(register);
+    }
     // The prologue pushes the registers below the frame pointer, and a slot the
     // lowering binds is reserved from there downwards, so the frame starts
     // below them rather than over the words they are saved in.
@@ -824,10 +866,10 @@ class Machine {
    * what the upper half of the return register holds, so a call is normalized
    * the long way.
    */
-  private normalizeArithmetic(type: SemanticType): void {
+  private normalizeArithmetic(type: SemanticType, register = RAX): void {
     if (isFloat(type) || widthOf(type) === 8) return;
     if (widthOf(type) === 4 && !signedOf(type)) return;
-    this.code.narrow(RAX, RAX, widthOf(type), signedOf(type));
+    this.code.narrow(register, register, widthOf(type), signedOf(type));
   }
 
   /** The scratch register holding what the accumulator has. */
@@ -1001,17 +1043,45 @@ class Machine {
     }
     // Every other operator reads what the name holds, so the value it is given
     // is read into a slot first: it would otherwise be computed once per side of
-    // the operation. The target's own value then goes straight into the scratch
-    // the operation takes its other side from, where a load and a move would be
-    // two instructions for the one read.
+    // the operation. What the name holds is then either the other side of the
+    // operation, read by the operation itself, or the scratch it takes its other
+    // side from, where a load and a move would be two instructions for one read.
     const right = this.hold(target.type, "blaze_value");
     this.at(value, target.type);
+    // The operation reads what the name holds rather than a copy of it, so a
+    // value that answers into the accumulator is never written down and read
+    // back out of the frame it was written into.
+    if (this.floatOverFrame(COMPOUND[op.slice(0, -1)], target.type, target)) {
+      this.normalizeArithmetic(target.type);
+      this.store(target);
+      return;
+    }
     this.store(right);
     this.scratchFrom(target);
     this.load(right);
     this.apply(COMPOUND[op.slice(0, -1)], target.type);
     this.normalizeArithmetic(target.type);
     this.store(target);
+  }
+
+  /**
+   * A float operation over a side that is already in the frame, answered by
+   * the instruction reading it rather than by a move in front of one.
+   *
+   * A sum and a product take their sides either way round, so the value the
+   * accumulator holds and the one the frame holds may be given over in
+   * whichever order is convenient and the answer is the same. A difference
+   * and a quotient do not, and are left the way they were.
+   *
+   * It answers whether it did, so a side that is in a register rather than in
+   * the frame — which is where a value the build gave a register of its own
+   * lives — goes the other way.
+   */
+  private floatOverFrame(operation: Arithmetic, type: SemanticType, other: Held): boolean {
+    if (!isFloat(type) || (operation !== "add" && operation !== "mul")) return false;
+    if (other.register !== null) return false;
+    this.code.sseMem(operation, XMM0, frame(other.offset), widthOf(type) === 4);
+    return true;
   }
 
   private storeField(object: SemanticValue, layoutName: string, name: string, value: SemanticValue): void {
@@ -1132,20 +1202,27 @@ class Machine {
     this.code.jmp(test);
     this.code.bind(loop.header);
     // The counter is stepped once per turn and then tested, and both of those
-    // read the accumulator the step leaves the counter in.
+    // work on it where it is: the accumulator the step leaves it in, or the
+    // register of its own when the loop was given one. A counter in a
+    // register is stepped and compared where it lies, so a turn costs no
+    // traffic through the frame at all.
+    const counter = variable.register ?? RAX;
     if (step === null) {
-      this.load(variable);
-      this.one(type, loop.down ? "sub" : "add");
+      if (variable.register === null) this.load(variable);
+      this.one(type, loop.down ? "sub" : "add", counter);
     } else if (typeof step === "number") {
-      this.load(variable);
-      this.code.aluImm(loop.down ? "sub" : "add", RAX, step, operationWidth(type) === 8);
+      if (variable.register === null) this.load(variable);
+      this.code.aluImm(loop.down ? "sub" : "add", counter, step, operationWidth(type) === 8);
     } else {
       this.scratchFrom(step);
-      this.load(variable);
+      if (variable.register === null) this.load(variable);
+      else this.code.movRegReg(RAX, variable.register);
       this.apply(loop.down ? "sub" : "add", type);
     }
-    this.normalizeArithmetic(type);
-    this.store(variable);
+    this.normalizeArithmetic(type, counter);
+    // A counter in a register of its own is stored where it lies, and writing
+    // the accumulator into it would step it with whatever the step left behind.
+    if (variable.register === null) this.store(variable);
     this.code.bind(test);
     // Nothing is written between the store above and the test, so the counter
     // is still in the accumulator and reading the slot it was just written to
@@ -1156,6 +1233,7 @@ class Machine {
       to,
       false,
       loop.exit,
+      counter,
     );
     this.block(loop.body);
     if (loop.body.terminator.k === "next") this.code.jmp(loop.header);
@@ -1478,7 +1556,7 @@ class Machine {
    * written in place, because the machine divides the accumulator widened to
    * twice its width and answers in two registers.
    */
-  private apply(operation: "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "sar" | "and" | "or" | "xor", type: SemanticType): void {
+  private apply(operation: Arithmetic, type: SemanticType): void {
     if (isFloat(type)) {
       const names = { add: "add", sub: "sub", mul: "mul", div: "div" } as const;
       if (operation in names) this.code.sse(names[operation as "add" | "sub" | "mul" | "div"], XMM0, XMM1, widthOf(type) === 4);
@@ -1523,13 +1601,13 @@ class Machine {
   }
 
   /** One, added to or taken from the value the accumulator has. */
-  private one(type: SemanticType, operation: "add" | "sub"): void {
+  private one(type: SemanticType, operation: "add" | "sub", register = RAX): void {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
       this.code.sseMemLabel(operation, XMM0, this.floatLiteral(floatBits(1, single)), single);
       return;
     }
-    this.code.aluImm(operation, RAX, 1, operationWidth(type) === 8);
+    this.code.aluImm(operation, register, 1, operationWidth(type) === 8);
   }
 
   /**
@@ -1635,7 +1713,7 @@ class Machine {
    * number the comparison makes is widened by a `movzx`, which sets the zero
    * flag, so the branch on it is a `jcc` on that flag and not a `test` on it.
    */
-  private comparedBranch(type: SemanticType, op: CompareOp, right: Held | number, whenTrue: boolean, label: string): void {
+  private comparedBranch(type: SemanticType, op: CompareOp, right: Held | number, whenTrue: boolean, label: string, left = RAX): void {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
@@ -1652,17 +1730,17 @@ class Machine {
     // bound was a small number never reached it and ran until the counter
     // overflowed.
     if (typeof right === "number") {
-      this.code.aluImm("cmp", RAX, right, width === 8);
+      this.code.aluImm("cmp", left, right, width === 8);
     } else if (width === 8) {
       // A whole register wide, so the read fills the register and the
       // comparison can read it where it lies rather than through a copy of it
       // in the scratch.
-      this.code.aluRegMem("cmp", RAX, frame(right.offset), true);
+      this.code.aluRegMem("cmp", left, frame(right.offset), true);
     } else {
       // Narrower, so the read has to widen the number the way the language
       // reads it before it can be compared as one.
       this.code.movRegMemSized(RCX, frame(right.offset), width, signedOf(type));
-      this.code.alu("cmp", RAX, RCX, false);
+      this.code.alu("cmp", left, RCX, false);
     }
     this.code.jcc(whenTrue ? condition : NEGATED[condition], label);
   }
@@ -1742,7 +1820,7 @@ class Machine {
    * the end of this is the assertion that neither of them ever arrives.
    */
   private applyImmediate(
-    operation: "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "sar" | "and" | "or" | "xor",
+    operation: Arithmetic,
     type: SemanticType,
     value: number,
   ): void {
@@ -1812,6 +1890,30 @@ class Machine {
     if (immediate !== null && IMMEDIATE_OPERATIONS[value.op] === true) {
       this.at(value.left, type);
       this.applyImmediate(value.op, type, immediate);
+      this.normalizeArithmetic(type);
+      return;
+    }
+    // A float operation reads its other side out of the frame itself, so the
+    // side that is not in the accumulator when the operation is written is
+    // stored once and the instruction does the reading, which is one
+    // instruction instead of the pair that reads a value out and then
+    // operates on it. A sum and a product take their sides either way round,
+    // which also means the right side is never written down: a call that
+    // answers into the accumulator is consumed where it lands. A difference
+    // and a quotient may not, so they keep the order they had.
+    if (isFloat(type)) {
+      const commutative = value.op === "add" || value.op === "mul";
+      this.at(commutative ? value.left : value.right, type);
+      const memory = this.hold(type, commutative ? "blaze_left" : "blaze_right");
+      this.store(memory);
+      this.at(commutative ? value.right : value.left, type);
+      if (memory.register === null) {
+        this.code.sseMem(value.op as "add" | "sub" | "mul" | "div", XMM0, frame(memory.offset), widthOf(type) === 4);
+        this.normalizeArithmetic(type);
+        return;
+      }
+      this.scratchFrom(memory);
+      this.apply(value.op, type);
       this.normalizeArithmetic(type);
       return;
     }
@@ -2424,6 +2526,10 @@ class Machine {
       if (argument.k === "local") {
         const held = this.slot(argument.name);
         if (typeEquals(held.type, type)) return held;
+        // A reference is a pointer whatever it points at, so a slot holding
+        // one is already the register the call takes a reference in — the two
+        // types are written differently and are the same word.
+        if (isReference(held.type) && isReference(type)) return held;
       }
       this.at(argument, type);
       const held = this.hold(type, "blaze_argument");

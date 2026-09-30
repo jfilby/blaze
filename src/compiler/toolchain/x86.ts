@@ -799,6 +799,21 @@ export class Encoder {
   }
 
   /**
+   * A floating point operation with one side in memory.
+   *
+   * The instruction reads its second operand itself, so an operation over a
+   * value that is already in the frame is one instruction rather than the
+   * pair that reads the value out and then operates on it.
+   */
+  sseMem(operation: Float, destination: number, address: Memory, single: boolean): void {
+    this.precision(single);
+    this.rex(false, destination, address);
+    this.byte(0x0f);
+    this.byte(FLOAT[operation]);
+    this.modrm(address, destination);
+  }
+
+  /**
    * A comparison that leaves the condition codes the way `cmp` leaves them. An
    * ordered one raises the parity bit on operands that are not numbers, which
    * is what keeps every comparison of a NaN false.
