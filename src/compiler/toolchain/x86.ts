@@ -227,6 +227,16 @@ export class Encoder {
    * already is, which is the one jump no reader of the code expects to find.
    */
   private pendingJump: string | null = null;
+  /**
+   * How many labels were bound when that jump was written. Taking the jump out
+   * moves every address after it down by two, which is safe only while no
+   * label has been bound since: a label bound in between has already been
+   * given the address the jump is still occupying the start of, so dropping
+   * the jump leaves that label pointing two bytes into the instruction it was
+   * meant to begin.
+   */
+  private pendingBinds = 0;
+  private binds = 0;
 
   /** Binds a name to the place the code has reached. */
   bind(name: string): void {
@@ -234,12 +244,16 @@ export class Encoder {
     // it moves control to where control already is, so it is taken back out
     // rather than written. This is what ends every function whose last block
     // returns — the jump to the epilogue lands on the epilogue — and any arm
-    // that leaves for a block bound straight after it.
-    if (this.pendingJump === name) {
+    // that leaves for a block bound straight after it. An arm that binds a
+    // label of its own and then falls out of itself into the end is the one
+    // case where the two are not the same place: the jump skips that arm, so
+    // it is written even though nothing follows it.
+    if (this.pendingJump === name && this.binds === this.pendingBinds) {
       this.pendingJump = null;
       this.fixups.pop();
       this.code.length -= 2;
     }
+    this.binds += 1;
     this.labels.set(name, this.code.length);
   }
 
@@ -622,6 +636,7 @@ export class Encoder {
     this.byte(0xeb);
     this.displacement(label, null);
     this.pendingJump = label;
+    this.pendingBinds = this.binds;
   }
 
   jcc(condition: Condition, label: string): void {

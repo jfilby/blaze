@@ -621,15 +621,18 @@ size_t blaze_rt_argv_count(void) {
 
 double blaze_rt_argv(size_t index) {
   /* The index is the one process.argv uses: 0 is where the program runs, 1 is
-     the file it runs, and 2 is the first argument it was given. The two
-     entries the host does not hold arguments for are settled here in every
-     mode, because the index is the runtime's own arithmetic and underflows to
-     a pointer before the array rather than to a missing argument: the ABI
-     promises 0 for an index that names no argument, and a danger build leaves
-     out the checks a program makes of itself, not this. */
+     the file it runs, and 2 is the first argument it was given. Both the two
+     entries the host does not hold arguments for and the read past the end of
+     the array are settled here in every mode, because the index is the
+     runtime's own arithmetic rather than a check a program makes of itself:
+     the ABI promises 0 for an index that names no argument, and a danger
+     build leaves out the checks a program makes of itself, not this. Without
+     it a program that reads an argument it was not given reads a pointer
+     before the array, or off the end of a VLA the host sized for the
+     arguments that exist. */
   if (index < 2) return 0.0;
   const size_t argument = index - 2;
-${guarded ? "  if (blaze_rt_arguments == NULL || argument >= blaze_rt_argument_count) return 0.0;" : ""}
+  if (blaze_rt_arguments == NULL || argument >= blaze_rt_argument_count) return 0.0;
   return blaze_rt_arguments[argument];
 }
 

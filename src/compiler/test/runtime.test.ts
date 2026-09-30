@@ -147,6 +147,46 @@ test("a danger runtime still answers the ABI where its own arithmetic would not"
   }
 });
 
+test("an argument read before the host gave any is 0 in every mode", async () => {
+  // The probe harness a candidate is checked by calls the function without
+  // giving the runtime any arguments, so `blaze_rt_arguments` is still the null
+  // it starts as. A read of index 2 is the first argument, which is one the host
+  // never gave, and answering it means reading a null pointer: the check that
+  // decides it is the runtime's own arithmetic over an index the program built,
+  // not a check a program makes of itself, so `danger` keeps it. Without it a
+  // candidate of any program that reads `process.argv` is killed by the probe
+  // before it is ever run.
+  const probe = [
+    "#include <stdio.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    `  printf("%f\\n", ${RUNTIME_NAME}_argv(2));`,
+    `  printf("%f\\n", ${RUNTIME_NAME}_argv(3));`,
+    `  printf("%zu\\n", ${RUNTIME_NAME}_argv_count());`,
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  for (const mode of ["debug", "danger"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `blaze-argv-none-${mode}-`));
+    await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+    await writeFile(join(directory, "runtime.c"), runtimeSourceSource(mode), "utf8");
+    await writeFile(join(directory, "probe.c"), probe, "utf8");
+    const binary = join(directory, "probe");
+    const built = run("gcc", ["-std=c11", "-O0", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+      timeoutMs: 120_000,
+    });
+    assert.equal(built.code, 0, built.stderr);
+    const result = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(result.code, 0, `${mode} must answer rather than fault`);
+    // No arguments were given, so the count is the program and the file it runs
+    // and every argument the program asked for is the 0 the ABI promises.
+    assert.deepEqual(result.stdout.trim().split("\n"), ["0.000000", "0.000000", "2"], `${mode}: no argument is 0, and two entries are always there`);
+  }
+});
+
 test("the managed object representation is the same in the header and in the adapter", () => {
   const header = runtimeHeaderSource();
   const adapter = generateRuntimeAdapterSource();

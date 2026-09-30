@@ -273,6 +273,35 @@ test("a value the IR calls is run once, whichever form writes it down", async ()
   }
 });
 
+test("a jump past an arm that writes nothing is still written", async () => {
+  // A jump that lands where control already is is taken back out rather than
+  // written, which is what ends a function whose last block returns. The test
+  // is the case where the two are not the same place: the arm between the jump
+  // and its label binds a label of its own and then writes nothing at all, so
+  // taking the jump out moves the label the arm was bound to and the branch
+  // into it lands inside an instruction. `x || 0` is that shape — the arm is a
+  // conversion of a float to a float, which is no instruction. An arm that
+  // hands back a zero of its own is what makes the two sides differ in what
+  // they answer: `||` keeps a true left and `&&` keeps a false one, so at a
+  // left of 3 the first answers 3 and the second 0, and at a left of 0 both
+  // answer the arm.
+  const shapes: { name: string; value: SemanticValue; atThree: string; atZero: string }[] = [
+    { name: "an or over a float arm", value: { k: "logical", type: F64, op: "or", left: local("v"), right: number("0") }, atThree: "3", atZero: "0" },
+    { name: "an and over a float arm", value: { k: "logical", type: F64, op: "and", left: local("v"), right: number("0") }, atThree: "0", atZero: "0" },
+    { name: "a coalesce over a float arm", value: { k: "coalesce", type: F64, left: local("v"), right: number("0") }, atThree: "3", atZero: "0" },
+  ];
+  for (const shape of shapes) {
+    for (const [argument, expected] of [
+      ["3", shape.atThree],
+      ["0", shape.atZero],
+    ] as const) {
+      const fn = subject(F64, handsBack(shape.value), [{ kind: "value", name: "v", mutable: false, type: F64 }]);
+      const printed = await lowered(fn, (name) => `printf("%g", ${name}(${argument}));`);
+      assert.equal(printed, expected, `${shape.name} at ${argument}`);
+    }
+  }
+});
+
 test("a whole number is computed at the width the language promotes it to", async () => {
   const cases: { name: string; type: SemanticType; op: "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "and" | "or" | "xor"; left: string; right: string; expected: string }[] = [
     { name: "a byte added to a byte wraps at its own width", type: U8, op: "add", left: "200", right: "100", expected: "44" },
