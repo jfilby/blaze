@@ -64,6 +64,7 @@ import {
   RSI,
   RSP,
   SSE_ARGUMENTS,
+  type Memory,
   type VectorSave,
   type Width,
   XMM0,
@@ -506,6 +507,7 @@ type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "sar" 
 
 /** A value the lowering keeps in the frame while it builds another. */
 interface Held {
+  /** Where in the frame it is: a distance up from the bottom of it. */
   readonly offset: number;
   readonly type: SemanticType;
   /**
@@ -547,6 +549,15 @@ class Machine {
   private pinnedVectors: VectorSave[] = [];
   /** The register an object being filled lives in, when this function fills one. */
   private objectRegister: number | null = null;
+  /** Whether the body calls anything, which is what the frame's size answers for. */
+  private mayCall = false;
+  /** The arguments that arrived on the stack, and where each one's address is written. */
+  private readonly incoming: { index: number; at: number }[] = [];
+  /**
+   * The slot whose value the accumulator holds, and where the code stood when
+   * it last did — which is what `load` reads, and what nothing else may.
+   */
+  private accumulator: { offset: number; at: number } | null = null;
 
   /**
    * Whether this function allocates an object or writes an array out, which is
@@ -580,19 +591,30 @@ class Machine {
   /* The frame                                                              */
   /* ---------------------------------------------------------------------- */
 
-  /** Room in the frame, which grows downwards from the frame pointer. */
+  /**
+   * Room in the frame for `bytes`, and where in the frame it is: a distance up
+   * from the bottom of it, which is where the prologue left the stack pointer.
+   *
+   * A slot's address is settled here rather than at the end of the body,
+   * because the frame grows upwards from a stack pointer the prologue has
+   * already moved: a slot reserved now keeps the address it is given however
+   * much the frame grows around it afterwards. That is what the body and the
+   * epilogue are both written against, and it is why the frame's own size is
+   * the one number in a prologue that has to be left a field for.
+   */
   private reserve(bytes: number, alignment = 8): number {
     this.used = Math.ceil((this.used + bytes) / alignment) * alignment;
-    return -this.used;
+    return this.used - bytes;
   }
 
   private bind(name: string, type: SemanticType): Held {
     const emitted = this.names.declare(name, type);
     const register = this.pinned.get(emitted) ?? null;
     // A pinned value is in a register and never in the frame, so the frame slot
-    // that reads and writes go through is not reserved: an offset of zero is
-    // never read, because every use of a held value goes through `load`,
-    // `store` or `scratchFrom`, and those three read the register.
+    // that reads and writes go through is not reserved: its distance is zero,
+    // which is the first slot's own address, and it is never read — every use of
+    // a held value goes through `load`, `store` or `scratchFrom`, and those
+    // three read the register.
     const offset = register === null ? this.reserve(widthOf(type)) : 0;
     const held: Held = { offset, type, register };
     this.slots.set(emitted, held);
@@ -663,6 +685,10 @@ class Machine {
       this.spareSlots.push(this.borrowed[at].offset);
     }
     this.borrowed.length = mark;
+    // A slot handed back here goes to whatever needs one next, and no
+    // instruction written says so: what says which value a slot holds is where
+    // it sits in the frame, and the next slot to take this one holds another.
+    this.accumulator = null;
   }
 
   private scratch(bytes: number, prefix: string): number {
@@ -821,50 +847,104 @@ class Machine {
       this.objectRegister = OBJECT_POINTER;
       this.pinnedRegisters.push(OBJECT_POINTER);
     }
-    // The prologue pushes the registers below the frame pointer, and a slot the
-    // lowering binds is reserved from there downwards, so the frame starts
-    // below them rather than over the words they are saved in. A vector
-    // register has no push and is spilled to a slot of the frame instead, so
-    // its slot is reserved here and the pushes are counted as before.
+    // The prologue pushes the registers above the frame and the lowering binds
+    // its slots from there downwards, so a slot's address does not depend on
+    // whether a register was pinned. A vector register has no push and is
+    // spilled to a slot of the frame instead, so its slot is reserved here and
+    // the pushes are counted as before.
     this.used = this.pinnedRegisters.length * 8;
     for (const saved of this.pinnedVectors) {
       saved.offset = this.reserve(8, 8);
     }
+    this.mayCall = this.callsAnything();
+  }
+
+  /**
+   * Whether the body calls anything, which is what makes the frame's own size
+   * the stack's alignment business: a call pushes a return address and every
+   * callee assumes the stack it is entered on is sixteen byte aligned, so a
+   * frame is a whole number of boundaries out of place. A function that calls
+   * nothing has nothing to keep straight.
+   */
+  private callsAnything(): boolean {
+    if (this.fn.allocates || this.fn.prints || this.fn.readsArgv) return true;
+    for (const block of everyBlock(this.fn.entry)) {
+      for (const value of everyValue(block)) {
+        if (hasCall(value)) return true;
+      }
+    }
+    return false;
   }
 
   emit(): Uint8Array {
     this.allocateRegisters();
-    this.code.prologue();
     // A pinned value is in a register the convention says a callee leaves as it
-    // found it, so the register is pushed here and popped there. The frame below
-    // them is what the pushes are counted against: a push moves the stack by
-    // half a sixteen byte step, and an odd number of them is made whole again
-    // by one more step out of the frame rather than by an instruction of its
-    // own.
+    // found it, so the register is pushed here and popped there. The pushes are
+    // above the frame rather than in it, which is what leaves a slot at the
+    // same distance from the stack pointer whatever was pinned.
     for (const register of this.pinnedRegisters) this.code.push(register);
-    for (const saved of this.pinnedVectors) this.code.saveVector(saved.register, saved.offset, saved.single);
     const frameAt = this.code.subRegImmLater(RSP);
+    // A vector register has no push and is spilled into the frame, which is
+    // written after the frame is taken because that is the stack pointer the
+    // slot's address is written against.
+    for (const saved of this.pinnedVectors) this.code.saveVector(saved.register, saved.offset, saved.single);
     this.parameters();
     // The body opens a scope of its own, and the parameters are read in it, so
     // they are declared one scope further out.
     this.names.enter();
     this.block(this.fn.entry);
     this.code.bind(this.epilogue);
-    this.code.epilogue(this.pinnedRegisters, this.pinnedVectors);
-    // The frame is a whole number of sixteen byte steps, so the stack is
-    // aligned at every call the body makes: a call pushes eight bytes onto a
-    // stack the callee reads as sixteen byte aligned.
-    this.code.patchWord(frameAt, this.frameBytes());
+    const bytes = this.frameBytes();
+    this.code.epilogue(this.pinnedRegisters, this.pinnedVectors, bytes);
+    // An argument that arrived on the stack is above the return address, which
+    // is above the pushes, which are above the frame: how far above the stack
+    // pointer it is is a function of a frame nothing had read when the address
+    // was written, so it is filled in now the frame is settled.
+    for (const argument of this.incoming) {
+      this.code.patchDisp(argument.index, bytes + this.pinnedRegisters.length * 8 + argument.at);
+    }
+    if (bytes > 0) this.code.patchWord(frameAt, bytes);
+    // A function the body turned out to give no frame to writes no `sub` for
+    // it: the instruction was written before the body was read, because the
+    // frame is as large as what the body reserved.
+    else this.code.unwriteSub(frameAt);
     return this.code.finish();
   }
 
   /**
-   * The frame, as a whole number of sixteen byte steps and, where the pushes
-   * above left the stack half a step out, one more half.
+   * The frame, in eight byte steps and, where a call is made, with the stack
+   * left the sixteen byte aligned every callee is assumed to be entered on.
+   *
+   * A function is entered eight bytes off a boundary, because the call that
+   * reached it pushed a return address, and a call inside it wants that back.
+   * So what the prologue moves the stack down by — the pushes and the frame
+   * together — is a number eight bytes off a whole number of boundaries, and
+   * the frame is what is left of that number once the pushes are spoken for.
+   * Which costs up to eight bytes a function whose frame lands on a boundary,
+   * against the four instructions a frame pointer costs every call of it.
    */
   private frameBytes(): number {
-    const whole = Math.ceil(this.used / 16) * 16;
-    return this.pinnedRegisters.length % 2 === 0 ? whole : whole + 8;
+    const pushed = this.pinnedRegisters.length * 8;
+    const below = pushed + this.used;
+    if (!this.mayCall) return Math.ceil(below / 8) * 8;
+    return 8 + 16 * Math.ceil((below - 8) / 16) - pushed;
+  }
+
+  /**
+   * The address `at` bytes above the return address, which is where an argument
+   * that arrived on the stack sits: the return address is the first word above
+   * where the stack pointer stood on entry, so the first argument past the
+   * registers is eight bytes above it.
+   *
+   * It is the one address in a function that cannot be written as it is
+   * written: what is above the return address is a function of how large a
+   * frame the body goes on to reserve, and nothing has read that yet. So the
+   * displacement is written as the four byte form and left for `emit` to fill
+   * in, and the index recorded here is what that patch is given by.
+   */
+  private stackArgument(at: number): Memory {
+    this.incoming.push({ index: this.code.deferDisp(), at });
+    return mem(RSP, 0);
   }
 
   /**
@@ -888,8 +968,9 @@ class Machine {
         // in an argument register or on the stack, and either is one move into
         // the register it is pinned to.
         if (register === undefined) {
-          if (isFloat(type)) this.code.movsLoad(held.register, frame(16 + stack * 8), widthOf(type) === 4);
-          else this.code.movRegMem(held.register, frame(16 + stack * 8));
+          const argument = this.stackArgument(8 + stack * 8);
+          if (isFloat(type)) this.code.movsLoad(held.register, argument, widthOf(type) === 4);
+          else this.code.movRegMem(held.register, argument);
         } else if (isFloat(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
         else this.code.movRegReg(held.register, register);
         if (register !== undefined) {
@@ -903,7 +984,7 @@ class Machine {
       if (register === undefined) {
         // An argument of a class that has run out of registers is on the stack
         // above the return address, and so is every argument after it.
-        this.code.movRegMem(RAX, frame(16 + stack * 8));
+        this.code.movRegMem(RAX, this.stackArgument(8 + stack * 8));
         this.code.movMemRegSized(frame(offset), RAX, widthOf(type));
         stack += 1;
         continue;
@@ -911,6 +992,10 @@ class Machine {
       if (isFloat(type)) {
         floating += 1;
         this.code.movsStore(frame(offset), register, widthOf(type) === 4);
+        // The first float argument arrives in the accumulator itself, so writing
+        // it down leaves the accumulator holding what the slot holds — which is
+        // what the first read of that parameter is answered by.
+        if (register === XMM0) this.accumulator = { offset, at: this.code.written };
         continue;
       }
       general += 1;
@@ -922,18 +1007,33 @@ class Machine {
   /* The accumulator and the frame                                          */
   /* ---------------------------------------------------------------------- */
 
-  /** The accumulator holding the value a slot has. */
+  /**
+   * The accumulator holding the value a slot has — or already holding it, which
+   * is a load this answers without writing one.
+   *
+   * Every value the body computes passes through the accumulator, and nothing
+   * between a store and the load that reads the same slot moves it: a store
+   * writes the accumulator down without taking it away. So the slot whose value
+   * the accumulator holds is kept beside where the code was when it last did,
+   * and a load is one instruction shorter whenever the slot is the one asked
+   * for and no instruction has been written since. What says the accumulator
+   * still holds it is that second half: an instruction that took the
+   * accumulator moved the code on, so a fact recorded against a place in the
+   * code cannot be read at a later one.
+   */
   private load(held: Held): void {
     if (held.register !== null) {
       if (isFloat(held.type)) this.code.movsMove(XMM0, held.register, widthOf(held.type) === 4);
       else this.code.movRegReg(RAX, held.register);
       return;
     }
+    if (this.accumulator?.offset === held.offset && this.accumulator.at === this.code.written) return;
     if (isFloat(held.type)) {
       this.code.movsLoad(XMM0, frame(held.offset), widthOf(held.type) === 4);
-      return;
+    } else {
+      this.code.movRegMemSized(RAX, frame(held.offset), widthOf(held.type), signedOf(held.type));
     }
-    this.code.movRegMemSized(RAX, frame(held.offset), widthOf(held.type), signedOf(held.type));
+    this.accumulator = { offset: held.offset, at: this.code.written };
   }
 
   /**
@@ -950,7 +1050,13 @@ class Machine {
     this.code.movMemRegSized(mem(address, displacement), RAX, widthOf(type));
   }
 
-  /** A slot holding the value the accumulator has. */
+  /**
+   * A slot holding the value the accumulator has.
+   *
+   * Writing the accumulator down does not take it away, so what it holds is
+   * still what it held — which is what lets the load of that same slot after it
+   * be answered rather than written.
+   */
   private store(held: Held): void {
     if (held.register !== null) {
       if (isFloat(held.type)) this.code.movsMove(held.register, XMM0, widthOf(held.type) === 4);
@@ -2699,9 +2805,8 @@ class Machine {
    *
    * A name the build gave a register of its own takes this path too, and is
    * read out of that register by `readInto` below. It cannot be read out of the
-   * frame: a pinned name has no slot reserved at all, so its offset is zero,
-   * and zero is the word above the frame pointer where the return address was
-   * put.
+   * frame: a pinned name has no slot reserved at all, so its distance into the
+   * frame is zero, which is the first slot's own address.
    */
   private plainIndex(index: SemanticValue): Held | bigint | null {
     if (index.k === "const") return integerText(index.text);
@@ -3025,21 +3130,26 @@ class Machine {
       else general += 1;
       registers.push({ register, held: argument, at });
     }
-    // The stack a call pushes onto has to leave the stack sixteen byte
-    // aligned, which is what every function the C library was compiled for
-    // assumes of the call it is entered by.
+    // An argument that has run out of registers goes on the stack below where
+    // the return address is pushed, which is below the frame — so it is written
+    // before the stack is moved down past it, because the frame is addressed
+    // from the stack pointer and every slot the registers below are read from
+    // has to still be where the prologue left it when they are read.
+    //
+    // The move itself is a whole number of sixteen byte steps, so the stack is
+    // the same alignment at the call as it is everywhere else in the body, which
+    // is what every function the C library was compiled for assumes of the call
+    // it is entered by.
     const slots = Math.ceil(onStack.length / 2) * 2;
-    if (slots > 0) {
-      this.code.aluImm("sub", RSP, slots * 8);
-      onStack.forEach((argument, at) => {
-        this.load(argument);
-        if (isFloat(argument.type)) {
-          this.code.movsStore(mem(RSP, at * 8), XMM0, widthOf(argument.type) === 4);
-          return;
-        }
-        this.code.movMemReg(mem(RSP, at * 8), RAX);
-      });
-    }
+    onStack.forEach((argument, at) => {
+      this.load(argument);
+      const address = mem(RSP, at * 8 - slots * 8);
+      if (isFloat(argument.type)) {
+        this.code.movsStore(address, XMM0, widthOf(argument.type) === 4);
+        return;
+      }
+      this.code.movMemReg(address, RAX);
+    });
     for (const { register, held, at } of registers) {
       // An argument that was read straight into its own register is already
       // there, and filling it again from the frame is the move the caller
@@ -3068,6 +3178,11 @@ class Machine {
       }
       this.code.movRegMemSized(register, frame(held.offset), widthOf(held.type), signedOf(held.type));
     }
+    // The stack a call pushes onto has to leave the stack sixteen byte aligned,
+    // which is what every function the C library was compiled for assumes of the
+    // call it is entered by, so the arguments written above are given the room
+    // they are read from only here.
+    if (slots > 0) this.code.aluImm("sub", RSP, slots * 8);
     this.code.call(symbol);
     if (slots > 0) this.code.aluImm("add", RSP, slots * 8);
     if (returns.kind !== "void" && !isFloat(returns)) this.normalize(returns);

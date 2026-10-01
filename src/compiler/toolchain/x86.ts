@@ -131,9 +131,21 @@ export function indexed(base: number, index: number, scale: 1 | 2 | 4 | 8, disp 
   return { base, index, scale, disp };
 }
 
-/** What a slot in the frame is addressed as. */
+/**
+ * What a slot in the frame is addressed as: its distance up from the stack
+ * pointer, which the prologue has already moved down past the frame.
+ *
+ * The frame is laid out upwards from the stack pointer rather than downwards
+ * from a frame pointer, so a slot's address is settled when the slot is
+ * reserved and does not move when the frame goes on to grow around it. That is
+ * what lets the prologue write its `sub` before the body has decided how large
+ * the frame is, and so what lets a function have no frame pointer at all: the
+ * push, the move and the two that undo them are four instructions paid on
+ * every call, which a function the program calls fifteen million times pays
+ * fifteen million times over.
+ */
 export function frame(disp: number): Memory {
-  return mem(RBP, disp);
+  return mem(RSP, disp);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -227,14 +239,27 @@ const DIVIDE: Record<"idiv" | "div", number> = { idiv: 7, div: 6 };
 export class Encoder {
   /** The code written so far. */
   readonly code: number[] = [];
+
   /** Every address the object writer has to fill in. */
   readonly relocations: Relocation[] = [];
 
   private readonly labels = new Map<string, number>();
+  /** The sites `deferDisp` is holding, one for each address it was asked for. */
+  private readonly deferred: number[] = [];
+  /** The one `deferDisp` asked for that has not been written yet, or -1. */
+  private awaitingDisp = -1;
   private readonly fixups: Fixup[] = [];
   /** The words `patchWord` was given, applied once the layout has settled. */
   private readonly patches: Patch[] = [];
   private serial = 0;
+
+  /**
+   * How much code is written, which is what a caller records a fact about the
+   * instructions before it against: anything written since moves this on.
+   */
+  get written(): number {
+    return this.code.length;
+  }
 
   /** A label name no other label holds, built from the one a caller passed. */
   label(prefix: string): string {
@@ -434,6 +459,15 @@ export class Encoder {
     if (rm.disp !== 0 || (rm.base !== null && (rm.base & 7) === RBP)) {
       mod = rm.disp >= -128 && rm.disp <= 127 ? 1 : 2;
     }
+    // An address whose displacement is a function of a frame size the body has
+    // not filled yet is written as the four byte form whatever its value is
+    // now, and the displacement itself is written by `word` below with the
+    // place it was written kept for `patchDisp` to fill in.
+    const deferred = this.awaitingDisp;
+    if (deferred !== -1) {
+      this.awaitingDisp = -1;
+      mod = 2;
+    }
     this.byte((mod << 6) | ((reg & 7) << 3) | (needsSib ? 4 : low & 7));
     if (needsSib) {
       const scale = rm.scale === 1 ? 0 : rm.scale === 2 ? 1 : rm.scale === 4 ? 2 : 3;
@@ -448,7 +482,10 @@ export class Encoder {
       this.byte((scale << 6) | (index << 3) | (low & 7));
     }
     if (mod === 1) this.byte(rm.disp & 0xff);
-    if (mod === 2) this.word(rm.disp);
+    if (mod === 2) {
+      if (deferred !== -1) this.deferred[deferred] = this.code.length;
+      this.word(rm.disp);
+    }
   }
 
   /* ---------------------------------------------------------------------- */
@@ -468,34 +505,22 @@ export class Encoder {
   }
 
   /**
-   * The start of a function: a frame pointer, so every slot in the frame is at
-   * a fixed distance from a register that survives every call the body makes.
-   */
-  prologue(): void {
-    this.push(RBP);
-    this.movRegReg(RBP, RSP);
-  }
-
-  /**
    * The end of a function, which leaves the frame and the caller as it was.
    *
-   * `pinned` are the registers the prologue pushed, oldest first, which sit
-   * below the frame pointer at one eight byte step each. They are read back
-   * from there rather than popped: the prologue pushed them after the frame
-   * pointer was taken, so a pop taken once the stack is back at the frame
-   * pointer would read the frame pointer's own slot — the caller's return
-   * address — and put that into the register. `vectors` are the same for a
-   * float, whose register has no push and is spilled to a slot of the frame.
+   * `frameBytes` is what the stack pointer was moved down by for the frame, so
+   * giving the frame back and popping the registers the prologue pushed are the
+   * two halves of one return to where the caller was: the last register pushed
+   * is the word the stack is on once the frame is gone, so the pops come back
+   * in the order the pushes went on. `vectors` are a float's own — a vector
+   * register has no push, so the prologue spilled it into the frame and it is
+   * read back from there before the frame is given up.
    */
-  epilogue(pinned: readonly number[] = [], vectors: readonly VectorSave[] = []): void {
-    for (let index = 0; index < pinned.length; index += 1) {
-      this.movRegMem(pinned[index], frame(-8 * (index + 1)));
-    }
+  epilogue(pinned: readonly number[], vectors: readonly VectorSave[], frameBytes: number): void {
     for (const saved of vectors) {
       this.movsLoad(saved.register, frame(saved.offset), saved.single);
     }
-    this.movRegReg(RSP, RBP);
-    this.pop(RBP);
+    if (frameBytes > 0) this.aluImm("add", RSP, frameBytes);
+    for (let index = pinned.length - 1; index >= 0; index -= 1) this.pop(pinned[index]);
     this.ret();
   }
 
@@ -556,12 +581,62 @@ export class Encoder {
   }
 
   /**
+   * Takes the `sub` of `subRegImmLater` back out, for a frame the body turned
+   * out to need none of: what that method wrote is the extension prefix, the
+   * opcode and the modrm byte before the field it handed back, and the
+   * immediate after it, so seven bytes go.
+   *
+   * Every place the code is recorded at is written against where the
+   * instruction was, and what follows it moves down by those seven: a label, a
+   * jump, a field left for a later patch and a relocation. One of them left
+   * where it was would name a place in the middle of another instruction, so
+   * whatever new kind of place this class records is carried across here too.
+   */
+  unwriteSub(at: number): void {
+    const from = at - 3;
+    const bytes = 7;
+    this.code.splice(from, bytes);
+    for (const [name, where] of this.labels) this.labels.set(name, where > from ? where - bytes : where);
+    for (const [index, fixup] of this.fixups.entries()) {
+      if (fixup.at > from) this.fixups[index] = { ...fixup, at: fixup.at - bytes };
+    }
+    for (const [index, patch] of this.patches.entries()) {
+      if (patch.at > from) this.patches[index] = { ...patch, at: patch.at - bytes };
+    }
+    for (const [index, relocation] of this.relocations.entries()) {
+      if (relocation.offset > from) this.relocations[index] = { ...relocation, offset: relocation.offset - bytes };
+    }
+  }
+
+  /**
    * The number a field left for later is given. It is held rather than written
    * straight in, because a widening jump earlier in the code moves the field
    * this one is in; the relaxation sweep carries it to where it ends up.
    */
   patchWord(at: number, value: number): void {
     this.patches.push({ at, value });
+  }
+
+  /**
+   * Leaves the displacement of the next address written to a later patch, and
+   * hands back the index that patch is given by.
+   *
+   * An argument that arrived on the stack sits above the return address, and
+   * how far above the stack pointer is a function of the frame the body went
+   * on to reserve — a size nothing has read when the address is written. The
+   * four byte form is written now and the displacement is filled in by
+   * `patchDisp` once the frame is settled, the same way the frame's own `sub`
+   * is.
+   */
+  deferDisp(): number {
+    this.deferred.push(-1);
+    this.awaitingDisp = this.deferred.length - 1;
+    return this.awaitingDisp;
+  }
+
+  /** The displacement an address left for later is given. */
+  patchDisp(index: number, disp: number): void {
+    this.patchWord(this.deferred[index], disp);
   }
 
   /**
