@@ -280,9 +280,16 @@ export interface GenerationConfig {
    * Candidates generated at the same time. Candidates never wait on each
    * other, only on their own previous attempt, so this is how much of the
    * model latency a build overlaps. 1 generates one candidate at a time.
-   * Verification and benchmarking are never overlapped: candidates are
+   * Measurement is never overlapped, whatever this is: candidates are
    * compared on measured speed, and that comparison is only meaningful when
    * nothing else is competing for the machine.
+   *
+   * What it does not serialise is the work ahead of the measurement — writing
+   * the C, assembling it, linking it, running the candidate against its
+   * vectors — which has no number in it and so nothing to be measured against.
+   * That runs alongside the same work for the other candidates however this is
+   * set: a build at 1 is slow because it asks the model once at a time, not
+   * because it waits its turn to run gcc.
    */
   candidateConcurrency: number;
   /**
@@ -292,10 +299,11 @@ export interface GenerationConfig {
    * at a time.
    *
    * It multiplies with `candidateConcurrency`: three functions of four
-   * candidates each are up to twelve reviews in flight. Assembly, linking,
-   * verification and benchmarking stay serial whatever this is, because
-   * candidates are compared on measured speed and that comparison is only
-   * meaningful when nothing else is competing for the machine.
+   * candidates each are up to twelve reviews in flight, and as many sets of
+   * candidates being built and verified at the same time. Measurement stays
+   * one at a time whatever this is, because candidates are compared on
+   * measured speed and that comparison is only meaningful when nothing else is
+   * competing for the machine.
    */
   functionConcurrency: number;
   /**

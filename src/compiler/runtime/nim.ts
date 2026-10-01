@@ -12,7 +12,7 @@
  * and the benchmark never learn which runtime a candidate was built against.
  */
 
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { EXECUTABLE_SUFFIX, nimOptimizationOptions } from "../core/target.ts";
@@ -928,17 +928,37 @@ export interface HostResult {
   adapterPath: string;
 }
 
-/** Compiles the adapter and the host, and links the candidate object in. */
+/**
+ * Compiles the adapter and the host, and links the candidate object in.
+ *
+ * Everything this writes goes in a directory of the candidate's own, because
+ * candidates are built alongside each other now and a shared one is a race
+ * rather than a saving. The adapter is the case that looks harmless and is
+ * not: every candidate writes the same bytes to the same path, so one of them
+ * truncating the file while another's compiler is halfway through reading it
+ * is a build that fails on a module that was complete a moment before. The
+ * cache is the other: a nimcache shared by two compilers writing two different
+ * programs into it is a cache neither of them can rely on.
+ *
+ * Per-candidate caches are not free — the second candidate of a build used to
+ * reuse the first one's, and now compiles the Nim standard library again — but
+ * the reuse was worth less than the compiling it was serialised behind, and
+ * this is the only way a candidate can be built at the same time as another.
+ */
 export async function buildHostProgram(request: HostRequest): Promise<HostResult> {
   const functionName = request.contract.function.name;
   const base = `${request.workDirectory}/${request.candidate}`;
-  const adapterPath = `${request.workDirectory}/${RUNTIME_NAME}.nim`;
-  // A Nim module name may not contain a dot, so the host is `<candidate>_host.nim`.
-  const hostPath = `${base}_host.nim`;
+  // The adapter is imported by its module name, so the file has to be named
+  // after it, and a module is looked for beside the file that imports it: the
+  // two of them share a directory for that reason and nothing else.
+  const directory = `${base}_host`;
+  const adapterPath = `${directory}/${RUNTIME_NAME}.nim`;
+  const hostPath = `${directory}/host.nim`;
   // A hosted build delivers the host program, so it takes the executable path a
   // standalone build gives its harness.
   const executable = `${base}${EXECUTABLE_SUFFIX}`;
 
+  await mkdir(directory, { recursive: true });
   await writeFile(adapterPath, generateRuntimeAdapterSource(request.mode), "utf8");
   await writeFile(hostPath, generateHostSource(request.contract, request.demoRequest), "utf8");
 
@@ -949,7 +969,7 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
       "--hints:off",
       "--warnings:off",
       ...nimOptimizationOptions(request.mode),
-      `--nimcache:${request.workDirectory}/nimcache`,
+      `--nimcache:${directory}/nimcache`,
       `--out:${executable}`,
       `--passL:${request.objectPath}`,
       hostPath,

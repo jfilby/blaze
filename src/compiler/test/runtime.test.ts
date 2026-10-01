@@ -393,10 +393,12 @@ test("a hosted build runs the candidate inside a Nim host program", async (t) =>
   assert.equal(outcome.build.status, "success");
 
   // The host program and the adapter are compiler output, and the adapter
-  // implements the whole ABI on Nim's allocator.
-  const adapter = await readFile(join(project(directory), `work/dotProduct/${RUNTIME_NAME}.nim`), "utf8");
+  // implements the whole ABI on Nim's allocator. They sit in a directory of
+  // the candidate's own, because candidates are built alongside each other
+  // and a shared adapter is a file one of them truncates under the other.
+  const adapter = await readFile(join(project(directory), `work/dotProduct/c1_host/${RUNTIME_NAME}.nim`), "utf8");
   assert.match(adapter, /proc blaze_rt_allocate\*/);
-  const host = await readFile(join(project(directory), "work/dotProduct/c1_host.nim"), "utf8");
+  const host = await readFile(join(project(directory), "work/dotProduct/c1_host/host.nim"), "utf8");
   assert.match(host, /import blaze_rt/);
   assert.match(host, /proc dotProduct\(/);
 
@@ -438,9 +440,9 @@ test("a hosted build is compiled at the mode the build was given", async (t) => 
   assert.match(sections(debug.outputPath!), /\.debug_info/, "a debug host must carry the debug info its mode asks for");
   assert.doesNotMatch(sections(danger.outputPath!), /\.debug_info/, "a danger host must not be built with debug info");
 
-  const guarded = await readFile(join(project(debugDirectory), `work/dotProduct/${RUNTIME_NAME}.nim`), "utf8");
+  const guarded = await readFile(join(project(debugDirectory), `work/dotProduct/c1_host/${RUNTIME_NAME}.nim`), "utf8");
   assert.match(guarded, /not a live blaze pointer/, "a guarded mode must keep the runtime checks in the adapter");
-  const unguarded = await readFile(join(project(dangerDirectory), `work/dotProduct/${RUNTIME_NAME}.nim`), "utf8");
+  const unguarded = await readFile(join(project(dangerDirectory), `work/dotProduct/c1_host/${RUNTIME_NAME}.nim`), "utf8");
   assert.doesNotMatch(unguarded, /not a live blaze pointer/, "danger must leave the runtime checks out of the adapter");
 
   // Whichever mode it was built at, the host speaks the harness protocol.

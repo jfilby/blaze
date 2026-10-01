@@ -15,7 +15,7 @@ import { test, type TestContext } from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exclusive, reviewCandidates, runtimePreparer, type CodegenRequest } from "../codegen.ts";
+import { machine, reviewCandidates, runtimePreparer, type CodegenRequest } from "../codegen.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
@@ -83,7 +83,7 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
       target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
       workspace: { workDirectory: directory, functionName: "square" },
     }),
-    exclusive: exclusive(),
+    machine: machine(),
     ...over,
     __endpoint: endpoint,
   } as CodegenRequest & { __endpoint: ChatEndpoint };
@@ -133,6 +133,43 @@ test("a program that printed something else is handed to the review beside what 
   assert.match(prompts[0] ?? "", /WHAT THE SOURCE PRINTS/);
   assert.match(prompts[0] ?? "", /The outputs are the same until line 1, where they differ/);
   assert.ok((prompts[0] ?? "").includes(printSemanticFunction(wrong)), "the artifact that printed it is handed back");
+});
+
+test("a build reports its candidates in the order it numbered them, whichever finished first", async (t) => {
+  // Candidates are compiled and verified alongside each other now and measured
+  // one at a time, so they finish in an order the build does not choose and one
+  // run of this is not the next. What the record is assembled in is the order
+  // the chains were numbered in, and that is what keeps the winner a function
+  // of the measurements: were the outcomes collected as they arrived, the
+  // pairing of a candidate with its own duration would be a race, and two
+  // builds of the same source would pick their winner differently.
+  const looped = await request(t, resolved, {
+    output: "machine",
+    lowering: "machine",
+    mode: "debug",
+    generation: { maxCandidates: 3, maxAttempts: 1, maxRetries: 0, candidateConcurrency: 3, functionConcurrency: 1 },
+  });
+
+  const result = await reviewCandidates(looped);
+
+  const ids = result.candidates.map((candidate) => candidate.id);
+  const numbers = ids.map((id) => Number(id.slice(1)));
+  assert.equal(ids.length, 3, "every candidate was generated");
+  assert.deepEqual(numbers, [...numbers].sort((left, right) => left - right), "candidates are reported in the order they were numbered");
+  assert.deepEqual(
+    result.outcomes.map((outcome) => outcome.candidate),
+    ids,
+    "every outcome is the candidate it was measured for, and not one that finished nearer",
+  );
+  // The winner is the fastest of the candidates the build says it measured,
+  // which is the whole of what a selection is: the same outcomes in the same
+  // order give the same winner whatever order the work behind them took.
+  const valid = result.outcomes.filter((outcome) => outcome.valid);
+  assert.equal(valid.length, 3, "every candidate satisfied its contract");
+  const fastest = [...valid].sort(
+    (left, right) => (left.benchmark?.durationNs ?? Number.POSITIVE_INFINITY) - (right.benchmark?.durationNs ?? Number.POSITIVE_INFINITY),
+  )[0];
+  assert.equal(result.selected, fastest.candidate, "the winner is the fastest candidate in the record");
 });
 
 /** What a project of this shape is, for the record the compiler writes. */

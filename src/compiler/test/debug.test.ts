@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
-import { exclusive } from "../codegen.ts";
+import { machine } from "../codegen.ts";
 import { run } from "../core/process.ts";
 import type { SourceInput } from "../core/types.ts";
 import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
@@ -266,13 +266,13 @@ test("the default reviews up to three functions at a time", async (t) => {
   assert.equal(endpoint.peak(), 3, "three functions at a time is the default");
 });
 
-test("the machine lock admits one measurement at a time and survives a failure", async () => {
+test("the machine admits one measurement at a time and builds candidates alongside each other", async () => {
   // The property a build leans on: a measurement runs with nothing else on the
   // machine, and a candidate that cannot be measured releases the machine for
   // the candidates queued behind it instead of stranding them. The tasks here
   // hand control back and forth explicitly, so the test proves the ordering
   // rather than racing a clock against it.
-  const machine = exclusive();
+  const machines = machine();
   const events: string[] = [];
   let live = 0;
   let peakLive = 0;
@@ -293,9 +293,9 @@ test("the machine lock admits one measurement at a time and survives a failure",
   };
 
   const measured = Promise.allSettled([
-    machine.run(() => measure("first", 0, false)),
-    machine.run(() => measure("second", 1, true)),
-    machine.run(() => measure("third", 2, false)),
+    machines.measure(() => measure("first", 0, false)),
+    machines.measure(() => measure("second", 1, true)),
+    machines.measure(() => measure("third", 2, false)),
   ]);
   // The first task holds the machine, so the two queued behind it cannot have
   // started: nothing is running that has not been let on purpose.
@@ -316,5 +316,105 @@ test("the machine lock admits one measurement at a time and survives a failure",
     events,
     ["enter first", "leave first", "enter second", "leave second", "enter third", "leave third"],
     "the queue is served in order, and a failure hands the machine on",
+  );
+});
+
+test("a build compiles and verifies candidates alongside each other, and still times one at a time", async () => {
+  // The serialisation used to wrap the whole of a candidate's evaluation, so a
+  // build of five candidates ran five copies of gcc one after another to choose
+  // between five answers, and the copies are what the timing was competing with
+  // for the machine over. Only the timing needs the machine to itself: the work
+  // ahead of it produces a yes or a no, and nothing is measured against it.
+  const machines = machine();
+  const events: string[] = [];
+  const gates = [0, 1].map(() => Promise.withResolvers<void>());
+  let measuring = 0;
+  let shared = 0;
+  let peakShared = 0;
+
+  // What a build does, per candidate: compile and verify, then time.
+  const build = async (name: string, index: number): Promise<string> => {
+    await machines.run(async () => {
+      shared += 1;
+      peakShared = Math.max(peakShared, shared);
+      events.push(`build ${name}`);
+      await gates[index].promise;
+      shared -= 1;
+    });
+    return await machines.measure(async () => {
+      measuring += 1;
+      events.push(`measure ${name}`);
+      // The machine is what a measurement is supposed to have to itself, so
+      // anything on it here is a build measuring while something else was.
+      assert.equal(shared, 0, "a measurement must not run beside a build");
+      await Promise.resolve();
+      measuring -= 1;
+      return name;
+    });
+  };
+
+  const built = Promise.all([build("first", 0), build("second", 1)]);
+  await Promise.resolve();
+  // Both candidates are compiling at once, which is the whole of the change.
+  assert.deepEqual(events, ["build first", "build second"], "candidates are built alongside each other");
+  gates[0].resolve();
+  gates[1].resolve();
+
+  const names = await built;
+  assert.equal(peakShared, 2, "the builds of two candidates overlap");
+  assert.equal(measuring, 0, "both measurements finished");
+  assert.deepEqual(names, ["first", "second"], "a candidate is measured and answered with in its own order");
+});
+
+test("a measurement is not kept behind the builds that keep arriving", async () => {
+  // A build with a candidate per function produces shared work continuously, so
+  // admitting it whenever the machine happens to be free would push a
+  // measurement to the back of all of it and a build would measure nothing at
+  // all. The queue stops admitting shared work as soon as a measurement is
+  // waiting for it.
+  const machines = machine();
+  const events: string[] = [];
+  const building = Promise.withResolvers<void>();
+  const firstIsBuilding = Promise.withResolvers<void>();
+
+  const first = machines.run(async () => {
+    events.push("enter first build");
+    firstIsBuilding.resolve();
+    await building.promise;
+    events.push("leave first build");
+  });
+  await firstIsBuilding.promise;
+
+  // A measurement arrives, and only then more shared work, then another
+  // measurement. This is the order a build produces them in: a candidate is
+  // measured, and the functions still compiling queue up behind it.
+  let buildingDone = 0;
+  const time = (name: string) =>
+    machines.measure(async () => {
+      events.push(`measure ${name}`);
+    });
+  const measurements = time("first");
+  const second = machines.run(async () => {
+    buildingDone += 1;
+    events.push("enter second build");
+  });
+  const third = machines.run(async () => {
+    buildingDone += 1;
+    events.push("enter third build");
+  });
+  const secondMeasurement = time("second");
+
+  await Promise.resolve();
+  // The measurement is still waiting for the build ahead of it, and the two
+  // builds queued behind it have not been let on in its place.
+  assert.deepEqual(events, ["enter first build"], "the measurement is still waiting for the build ahead of it");
+  building.resolve();
+  await Promise.all([first, second, third, measurements, secondMeasurement]);
+
+  assert.equal(buildingDone, 2, "both builds queued behind the measurement still ran");
+  assert.deepEqual(
+    events,
+    ["enter first build", "leave first build", "measure first", "enter second build", "enter third build", "measure second"],
+    "a measurement is taken before the builds queued behind it, and the two measurements keep apart",
   );
 });

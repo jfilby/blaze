@@ -18,7 +18,7 @@
  * The compiler decides which candidate is valid and which one is selected.
  */
 
-import { benchmarkCandidate, selectBenchmarkVector } from "./toolchain/benchmark.ts";
+import { benchmarkCandidate, selectBenchmarkVector, type BenchmarkRequest } from "./toolchain/benchmark.ts";
 import { buildModule, describeModule } from "./toolchain/ir-wasm.ts";
 import { buildObject as buildMachineObject, describeMachineObject } from "./toolchain/ir-machine.ts";
 import { compileFunctionC } from "./toolchain/ir-c.ts";
@@ -306,34 +306,101 @@ function diagnosticFor(failure: CandidateOutcome["failure"], attempt: number): s
 }
 
 /**
- * Runs one task at a time, in the order the tasks arrive.
+ * The machine a build runs on, and the two ways work is admitted to it.
  *
- * Candidates are compared on measured speed, and a measurement only means
- * something when nothing else is competing for the machine. So assembly,
- * linking, verification and benchmarking never overlap: not between the
- * candidates of one function, and not between the functions a build generates
- * at the same time. What overlaps is the waiting, which is where the time goes.
+ * A measurement only means something when nothing else is competing for the
+ * machine, so a timed run is given the machine to itself: `measure` is a
+ * measurement, and there is one of those at a time. Everything else a
+ * candidate needs — writing its C, assembling it, linking it, running it
+ * against its vectors — is work whose result is not a number, so nothing about
+ * it is a measurement and `run` admits it alongside other such work. That is
+ * the whole of what the serialisation was for, and a build that compiles five
+ * candidates one after another spends most of its time on the part of the work
+ * that was never timed.
+ *
+ * The two are one queue and not two locks: a measurement waits for whatever
+ * shared work is on the machine, and shared work queues up behind a
+ * measurement rather than pushing it to the back of everything. Neither phase
+ * takes the machine and then asks for the other, which is what would make a
+ * build wait for itself: the measurement is taken after the shared work has
+ * given the machine back, not inside it.
  */
-export interface Exclusive {
-  run<T>(task: () => Promise<T>): Promise<T>;
+export interface Machine {
+  /** Work whose result is not a number, run alongside other such work. */
+  run<T>(task: () => T | Promise<T>): Promise<T>;
+  /** A timed run, alone on the machine. */
+  measure<T>(task: () => T | Promise<T>): Promise<T>;
+}
+
+/** Work that has asked for the machine and not been given it yet. */
+interface Waiting {
+  /** Whether it is a measurement, which is what the machine is held for. */
+  readonly timed: boolean;
+  /** Lets it on and counts it against the machine. */
+  readonly admit: () => void;
 }
 
 /**
- * A lock the tasks queue on. A task that fails releases it for the next one: a
- * function that could not be built must not strand every function queued
- * behind it.
+ * The queue the two phases of a candidate share. A task that fails gives the
+ * machine back for the next one: a candidate that could not be built must not
+ * strand every candidate queued behind it.
  */
-export function exclusive(): Exclusive {
-  let tail: Promise<unknown> = Promise.resolve();
+export function machine(): Machine {
+  const waiting: Waiting[] = [];
+  let shared = 0;
+  let timed = 0;
+
+  /**
+   * Lets on as much of the queue as the machine can carry, in the order it
+   * arrived.
+   *
+   * Shared work ahead of a measurement is let on, because it is ahead of it
+   * and running it is what lets the measurement be reached at all: refusing it
+   * for the sake of a measurement queued behind it would leave that
+   * measurement waiting for work that was itself waiting for it, and a build
+   * would deadlock on its own queue. Shared work *behind* a measurement is
+   * never let on ahead of it, so a build that keeps producing work cannot push
+   * a measurement to the back of all of it. Because the queue is finite and
+   * ordered, that is starvation-free: everything ahead of a measurement runs
+   * once, and the measurement runs after it.
+   */
+  const drain = (): void => {
+    while (waiting.length > 0 && timed === 0) {
+      const next = waiting[0];
+      // A measurement wants the machine to itself, so it waits for the shared
+      // work already on it.
+      if (next.timed && shared > 0) return;
+      waiting.shift();
+      next.admit();
+      // Nothing behind a measurement runs until it has been taken and given
+      // back, which `timed` already says.
+      if (next.timed) return;
+    }
+  };
+
+  const take = <T>(isTimed: boolean, task: () => T | Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      waiting.push({
+        timed: isTimed,
+        admit: () => {
+          if (isTimed) timed += 1;
+          else shared += 1;
+          Promise.resolve()
+            .then(task)
+            .then(resolve, reject)
+            .finally(() => {
+              if (isTimed) timed -= 1;
+              else shared -= 1;
+              drain();
+            });
+        },
+      });
+      drain();
+    });
+
   return {
-    run<T>(task: () => Promise<T>): Promise<T> {
-      const result = tail.then(task, task);
-      tail = result.then(
-        () => undefined,
-        () => undefined,
-      );
-      return result;
-    },
+    run: <T>(task: () => T | Promise<T>) => take(false, task),
+    measure: <T>(task: () => T | Promise<T>) => take(true, task),
   };
 }
 
@@ -377,12 +444,14 @@ export interface CandidateEvaluationRequest {
    */
   prepareRuntime: () => Promise<PreparedRuntime | undefined>;
   /**
-   * The machine, one user at a time. Every candidate of every function of a
-   * build is measured through this one, so a build may generate as many
-   * functions at a time as it likes without two candidates being timed against
-   * each other.
+   * The machine every candidate of every function of a build is built and
+   * measured on, so a build may generate as many functions at a time as it
+   * likes without two candidates being timed against each other. What is not
+   * measured is not serialised: the compiling and verifying of a candidate
+   * runs alongside the compiling and verifying of the others, and only the
+   * timing is given the machine to itself.
    */
-  exclusive: Exclusive;
+  machine: Machine;
 }
 
 /**
@@ -620,23 +689,48 @@ export function implementationLabel(output: OutputKind): string {
 }
 
 /**
- * A candidate built, verified and measured, with the machine to itself. Every
- * path that measures a candidate comes through here, so no candidate is ever
- * timed while another one is being measured.
+ * A candidate built and verified, and the measurement it is still owed.
+ *
+ * The two are separate because only one of them needs the machine to itself.
+ * Compiling a candidate and running it against its vectors produce a yes or a
+ * no, which is worth nothing less for having been produced beside the ones
+ * being produced for the candidates it is compared with, and a build that
+ * waited for the machine to compile five candidates one at a time waited for
+ * the part of the work that is not a measurement at all. What is left is the
+ * timing, and that is taken on its own.
+ */
+interface Built {
+  /** What the candidate is, with the measurement it is owed left out. */
+  readonly outcome: CandidateOutcome;
+  /** What to time, or null for a candidate the build does not time. */
+  readonly timing: BenchmarkRequest | null;
+}
+
+/**
+ * Builds, verifies and measures one candidate. Every path that measures a
+ * candidate comes through here, so no candidate is ever timed while another one
+ * is being measured or while anything else is on the machine.
  */
 async function evaluateCandidate(
   request: CandidateEvaluationRequest,
   candidate: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
-  return request.exclusive.run(() => measureCandidate(request, candidate, vectors));
+  const built = await request.machine.run(() => buildCandidate(request, candidate, vectors));
+  if (built.timing === null) return built.outcome;
+  const timing = built.timing;
+  // The machine was given back when the build finished, and is taken again
+  // here: a task that asked for the machine and then for the machine alone
+  // would be waiting for a slot it was itself holding.
+  const benchmark = await request.machine.measure(() => benchmarkCandidate(timing));
+  return { ...built.outcome, benchmark };
 }
 
-async function measureCandidate(
+async function buildCandidate(
   request: CandidateEvaluationRequest,
   written: Candidate,
   vectors: PlannedVectors | null,
-): Promise<CandidateOutcome> {
+): Promise<Built> {
   const candidate = foldedCandidate(written, request.program, request.functions);
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
   try {
@@ -666,11 +760,14 @@ async function measureCandidate(
     // no vector to run it against, so it is carried to the program round.
     if (calls.length > 0) {
       return {
-        candidate: candidate.id,
-        valid: true,
-        probe: { called: false, reason: `it calls ${calls.join(", ")}, so the program it belongs to is what runs it` },
-        textSizeBytes: built.textSizeBytes,
-        objectSizeBytes: built.sizeBytes,
+        outcome: {
+          candidate: candidate.id,
+          valid: true,
+          probe: { called: false, reason: `it calls ${calls.join(", ")}, so the program it belongs to is what runs it` },
+          textSizeBytes: built.textSizeBytes,
+          objectSizeBytes: built.sizeBytes,
+        },
+        timing: null,
       };
     }
 
@@ -683,29 +780,35 @@ async function measureCandidate(
       const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed));
       if (probe.reason !== null && probe.called) {
         return {
-          candidate: candidate.id,
-          valid: false,
-          failure: {
-            category: "VerificationError",
-            stage: "verify",
-            message: `candidate ${candidate.id}: ${request.contract.function.name} liveness check failed: ${probe.reason}`,
-            detail: [
-              "The candidate was called once on an input built from its contract and the result was not read, so this says nothing about what it computes.",
-              `The program ${request.contract.function.name} belongs to is what says whether the two agree.`,
-              ...(probe.stderr.trim() === "" ? [] : [`the candidate wrote to standard error:\n${probe.stderr.trim()}`]),
-            ].join("\n"),
+          outcome: {
+            candidate: candidate.id,
+            valid: false,
+            failure: {
+              category: "VerificationError",
+              stage: "verify",
+              message: `candidate ${candidate.id}: ${request.contract.function.name} liveness check failed: ${probe.reason}`,
+              detail: [
+                "The candidate was called once on an input built from its contract and the result was not read, so this says nothing about what it computes.",
+                `The program ${request.contract.function.name} belongs to is what says whether the two agree.`,
+                ...(probe.stderr.trim() === "" ? [] : [`the candidate wrote to standard error:\n${probe.stderr.trim()}`]),
+              ].join("\n"),
+            },
+            probe: { called: probe.called, reason: probe.reason },
+            textSizeBytes: built.textSizeBytes,
+            objectSizeBytes: built.sizeBytes,
           },
-          probe: { called: probe.called, reason: probe.reason },
-          textSizeBytes: built.textSizeBytes,
-          objectSizeBytes: built.sizeBytes,
+          timing: null,
         };
       }
       return {
-        candidate: candidate.id,
-        valid: true,
-        probe: { called: probe.called, reason: probe.reason },
-        textSizeBytes: built.textSizeBytes,
-        objectSizeBytes: built.sizeBytes,
+        outcome: {
+          candidate: candidate.id,
+          valid: true,
+          probe: { called: probe.called, reason: probe.reason },
+          textSizeBytes: built.textSizeBytes,
+          objectSizeBytes: built.sizeBytes,
+        },
+        timing: null,
       };
     }
 
@@ -731,37 +834,44 @@ async function measureCandidate(
     });
     if (!verification.passed) {
       return {
-        candidate: candidate.id,
-        valid: false,
-        failure: {
-          category: "VerificationError",
-          stage: "verify",
-          message: `${verification.failures.length} of ${verification.cases} test vectors did not match the contract`,
-          detail: verification.failures
-            .map((failure) => `${failure.vector}: expected ${failure.expected}, got ${failure.actual} (${failure.reason})`)
-            .join("\n"),
+        outcome: {
+          candidate: candidate.id,
+          valid: false,
+          failure: {
+            category: "VerificationError",
+            stage: "verify",
+            message: `${verification.failures.length} of ${verification.cases} test vectors did not match the contract`,
+            detail: verification.failures
+              .map((failure) => `${failure.vector}: expected ${failure.expected}, got ${failure.actual} (${failure.reason})`)
+              .join("\n"),
+          },
+          textSizeBytes: built.textSizeBytes,
+          objectSizeBytes: built.sizeBytes,
+          verification,
         },
-        textSizeBytes: built.textSizeBytes,
-        objectSizeBytes: built.sizeBytes,
-        verification,
+        timing: null,
       };
     }
 
-    const benchmark = benchmarkCandidate({
-      contract: request.contract,
-      runner: built.runner,
-      candidate: candidate.id,
-      iterations: request.benchmark.iterations,
-      vector: vectors.benchmark,
-    });
-
+    // The only work a candidate is timed for. It is handed back to the caller
+    // rather than taken here, because taking it here would mean measuring
+    // while still holding the machine for the building — the machine a
+    // measurement is supposed to have to itself.
     return {
-      candidate: candidate.id,
-      valid: true,
-      textSizeBytes: built.textSizeBytes,
-      objectSizeBytes: built.sizeBytes,
-      verification,
-      benchmark,
+      outcome: {
+        candidate: candidate.id,
+        valid: true,
+        textSizeBytes: built.textSizeBytes,
+        objectSizeBytes: built.sizeBytes,
+        verification,
+      },
+      timing: {
+        contract: request.contract,
+        runner: built.runner,
+        candidate: candidate.id,
+        iterations: request.benchmark.iterations,
+        vector: vectors.benchmark,
+      },
     };
   } catch (cause) {
     const error = toCompilerError(cause, {
@@ -771,14 +881,17 @@ async function measureCandidate(
       candidate: candidate.id,
     });
     return {
-      candidate: candidate.id,
-      valid: false,
-      failure: {
-        category: error.category,
-        stage: error.stage,
-        message: error.message,
-        ...(error.detail === undefined ? {} : { detail: error.detail }),
+      outcome: {
+        candidate: candidate.id,
+        valid: false,
+        failure: {
+          category: error.category,
+          stage: error.stage,
+          message: error.message,
+          ...(error.detail === undefined ? {} : { detail: error.detail }),
+        },
       },
+      timing: null,
     };
   }
 }
@@ -1103,8 +1216,10 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
         };
         chain.candidates.push(regenerated);
 
-        // Verification and benchmarking are blocking, so candidates are measured
-        // one at a time even though they were reviewed together.
+        // Candidates are measured one at a time even though they were
+        // reviewed together, and what this waits for is the measurement
+        // rather than the whole of the build: the compiling and verifying
+        // ahead of it runs alongside the same work for the other candidates.
         const outcome = await evaluateCandidate(request, regenerated, vectors);
         chain.outcomes.push(outcome);
         if (outcome.valid) break;
@@ -1230,7 +1345,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       benchmark: request.benchmark,
       prepareRuntime: request.prepareRuntime,
       callable: request.callable,
-      exclusive: request.exclusive,
+      machine: request.machine,
     },
     request.candidate,
     vectors,

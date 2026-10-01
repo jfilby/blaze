@@ -60,7 +60,7 @@ import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.
 import { assertAssemblerSupportsArch, callableSymbols } from "./toolchain/assembler.ts";
 import {
   evaluateStoredCandidate,
-  exclusive,
+  machine,
   implementationLabel,
   reusableFiles,
   reusedResult,
@@ -1042,11 +1042,11 @@ export async function runBuild(
       target,
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
-    // The machine, one candidate at a time however many functions are being
+    // The machine, one measurement at a time however many functions are being
     // generated, and the incremental record, one writer at a time. Both are
     // shared by everything a build does, so both live here.
-    const machine = exclusive();
-    const records = exclusive();
+    const machines = machine();
+    const records = machine();
     const generation = generationConfigFor(input, options);
     /** The functions this build took from an earlier one, by function name. */
     const reusedByFunction = new Map<string, string>();
@@ -1199,7 +1199,7 @@ export async function runBuild(
         prepareRuntime,
         workspace,
         callable: callableSymbols(unit.contract, contracts),
-        exclusive: machine,
+        machine: machines,
         // A repair round asks the model again, so what an earlier build stored
         // is not what it starts from. Otherwise the stored implementation is
         // tried first, and a model is asked only when it does not satisfy the
@@ -1740,9 +1740,9 @@ export async function runStored(
   // happened to compile: the outline decided which of them is a call, and a
   // candidate is measured against the same rule it was checked under.
   const contracts = contractsByName(program.files);
-  // `blaze test` measures one stored candidate at a time, but it measures them
-  // the way a build does, so it goes through the same lock.
-  const machine = exclusive();
+  // `blaze test` measures stored candidates one at a time, but it measures
+  // them the way a build does, so it goes through the same machine.
+  const machines = machine();
   // A stored candidate is folded against the whole program too, so the bodies
   // it may inline are resolved here exactly as the build resolved them. The
   // object layouts are a property of the contracted files and nothing else, so
@@ -1781,7 +1781,7 @@ export async function runStored(
       workspace,
       callable: callableSymbols(unit.contract, contracts),
       prepareRuntime,
-      exclusive: machine,
+      machine: machines,
       test: testConfigFor(input, options),
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
     });
