@@ -77,14 +77,15 @@ import { resolveModel, type ModelConfiguration } from "./ai/model.ts";
 import {
   readIncremental,
   reusable,
-  unitKey,
+  unitKeys,
   type IncrementalEntry,
   type IncrementalRecord,
   type ReuseLevel,
+  type UnitKeys,
 } from "./incremental.ts";
 import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget, optimizationOptions } from "./core/target.ts";
 import { run } from "./core/process.ts";
-import { COMPILER_VERSION, toolchainFingerprint } from "./core/version.ts";
+import { COMPILER_VERSION, toolchainFingerprints } from "./core/version.ts";
 import {
   type ProgramMismatch,
   DEFAULT_BENCHMARK,
@@ -748,7 +749,7 @@ interface UnitReuse {
 
 interface UnitReuseRequest {
   entry: IncrementalEntry | undefined;
-  key: string;
+  keys: UnitKeys;
   workspace: CodegenWorkspace;
   functionName: string;
   output: OutputKind;
@@ -790,8 +791,8 @@ function callsOutOfProgram(
  * rather than ask a model for anything.
  */
 function unitReuse(request: UnitReuseRequest): UnitReuse {
-  const { entry, key, required } = request;
-  if (entry === undefined || entry.key !== key) {
+  const { entry, keys, required } = request;
+  if (entry === undefined || entry.reviewKey !== keys.review) {
     if (!required) return { level: null, entry: undefined, missing: [] };
     throw new CompilerError({
       category: "StorageError",
@@ -799,11 +800,11 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
       message:
         entry === undefined
           ? `no stored implementation to reuse for ${request.functionName}`
-          : `the stored implementation of ${request.functionName} was built from different inputs`,
+          : `the stored implementation of ${request.functionName} was reviewed from different inputs`,
       detail:
         entry === undefined
           ? `nothing is stored for ${request.id}; run blaze build without --reuse to build it`
-          : "its contract, the functions it is linked against, the target, the options or the model changed; run blaze build without --reuse to build it again",
+          : "its contract, the functions it is linked against, the target, the options, the model or the compiler's own review of a function changed; run blaze build without --reuse to build it again",
     });
   }
   // The stored candidate's own IR decides which files it produced: one that
@@ -821,7 +822,7 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
     request.linksObjects,
     stored === undefined || !callsOutOfProgram(stored.text, request.program, request.callable),
   ).filter((file) => !existsSync(file));
-  return { level: reusable(entry, key, missing.length === 0), entry, missing };
+  return { level: reusable(entry, keys, missing.length === 0), entry, missing };
 }
 
 
@@ -1015,10 +1016,15 @@ export async function runBuild(
     // is proved, and it is in the key so that editing the prompt, the runtime
     // or the assembler rules rebuilds rather than reuses an object that the
     // build would then be reporting as freshly proved by rules that no longer
-    // exist.
-    const toolchain = await toolchainFingerprint();
-    const keyOf = (unit: CompilationUnit): string =>
-      unitKey({
+    // exist. It is two hashes and not one because it decides two things: the
+    // review key covers everything that decides what a function is or what a
+    // model said about it, and the object key the sources that decide what it
+    // is lowered into. An edit to the second leaves the first standing, so the
+    // candidates an earlier build reviewed are put through the toolchain as it
+    // is now rather than asked for again.
+    const toolchain = await toolchainFingerprints();
+    const keyOf = (unit: CompilationUnit): UnitKeys =>
+      unitKeys({
         contract: unit.contract,
         file: unit.file,
         program,
@@ -1031,7 +1037,8 @@ export async function runBuild(
         benchmark: benchmarkConfig,
         model: modelKey,
         compilerVersion: COMPILER_VERSION,
-        toolchain,
+        review: toolchain.review,
+        lowering: toolchain.lowering,
       });
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too.
@@ -1119,10 +1126,10 @@ export async function runBuild(
       if (mismatch !== undefined && (unit.contract.ensures.length > 0 || previous === undefined)) return;
       const workspace = { workDirectory: `${base}/${functionName}`, functionName };
       await mkdir(workspace.workDirectory, { recursive: true });
-      const key = keyOf(unit);
+      const keys = keyOf(unit);
       const reuse = unitReuse({
         entry: incremental[functionName],
-        key,
+        keys,
         workspace,
         functionName,
         output: outputKind,
@@ -1229,7 +1236,8 @@ export async function runBuild(
       const selected = result.selected;
       if (selected === null) return;
       const entry: IncrementalEntry = {
-        key,
+        reviewKey: keys.review,
+        objectKey: keys.object,
         file: unit.file,
         selected,
         candidates: result.candidates,

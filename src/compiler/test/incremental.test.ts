@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readIncremental, reusable, unitKey, type IncrementalEntry, type UnitKeyInput } from "../incremental.ts";
+import { readIncremental, reusable, unitKeys, type IncrementalEntry, type UnitKeyInput, type UnitKeys } from "../incremental.ts";
 import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
 import type { Candidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
-import { mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";
-import { fingerprintSources, toolchainFingerprint } from "../core/version.ts";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { fingerprintSources, toolchainFingerprints } from "../core/version.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { returns as returnsValue } from "./definition.ts";
@@ -52,15 +52,16 @@ const INPUT: UnitKeyInput = {
   benchmark: { iterations: 2000 },
   model: "openai/gpt-5",
   compilerVersion: "0.1.0",
-  toolchain: "fingerprint-of-the-sources",
+  review: "fingerprint-of-the-sources",
+  lowering: "fingerprint-of-the-sources",
 };
 
-function keyOf(overrides: Partial<UnitKeyInput>): string {
-  return unitKey({ ...INPUT, ...overrides });
+function keyOf(overrides: Partial<UnitKeyInput>): UnitKeys {
+  return unitKeys({ ...INPUT, ...overrides });
 }
 
 test("a key is the same for the same inputs and different for anything else", () => {
-  assert.equal(keyOf({}), keyOf({}));
+  assert.equal(keyOf({}).review, keyOf({}).review);
   for (const change of [
     { contract: contractOf("main", "f32") },
     { file: "other.ts" },
@@ -84,10 +85,29 @@ test("a key is the same for the same inputs and different for anything else", ()
     // The compiler's own sources decide the prompt, the runtime and the
     // assembler rules, none of which a contract or a target names, so an edit
     // to any of them has to reach every key.
-    { toolchain: "a-fingerprint-of-different-sources" },
+    { review: "a-fingerprint-of-different-sources" },
   ]) {
-    assert.notEqual(keyOf(change), keyOf({}), JSON.stringify(change));
+    assert.notDeepEqual(keyOf(change).review, keyOf({}).review, JSON.stringify(change));
   }
+});
+
+test("an edit to the lowering leaves the review standing and the object behind", () => {
+  // The point of the split: what a model said was about the IR, and a change to
+  // the assembler, the encoder or the runtime cannot change the IR. So the
+  // review key is the one that holds, and the candidates a previous build
+  // produced are still what it reviewed — while the object they were lowered
+  // into is not what this build would produce, and must not be linked.
+  const before = keyOf({});
+  const after = keyOf({ lowering: "a-fingerprint-of-different-lowering" });
+  assert.equal(after.review, before.review, "an edit to the lowering moved the review key");
+  assert.notEqual(after.object, before.object, "an edit to the lowering left the object key alone");
+
+  // The other direction has to hold too, or the object key would be a second
+  // review key that happened to be checked too: an edit to the review has to
+  // invalidate the object, because the object was built from what was reviewed.
+  const reviewed = keyOf({ review: "a-fingerprint-of-different-sources" });
+  assert.notEqual(reviewed.review, before.review);
+  assert.notEqual(reviewed.object, before.object, "an edit to the review left the object key alone");
 });
 
 test("a callee whose body changed does not invalidate the caller", () => {
@@ -95,19 +115,19 @@ test("a callee whose body changed does not invalidate the caller", () => {
   // it: the callee is regenerated, and the object that calls it still is right.
   const before = programOf(contractOf("main", "f64"), contractOf("helper", "f64"));
   const after = programOf(contractOf("main", "f64"), { ...contractOf("helper", "f64"), ensures: ["result == (x + 1)"] });
-  assert.equal(keyOf({ program: after }), keyOf({ program: before }));
+  assert.equal(keyOf({ program: after }).review, keyOf({ program: before }).review);
 });
 
 test("a callee whose signature or object layout changed invalidates the caller", () => {
   // These are the two changes that can break an object that is not rebuilt.
   const signature = programOf(contractOf("main", "f64"), contractOf("helper", "i32"));
-  assert.notEqual(keyOf({ program: signature }), keyOf({}));
+  assert.notEqual(keyOf({ program: signature }).review, keyOf({}).review);
 
   const layout = programOf(
     contractOf("main", "f64"),
     contractOf("helper", "f64", { node: { name: "node", size: 8, align: 8, fields: [] } }),
   );
-  assert.notEqual(keyOf({ program: layout }), keyOf({}));
+  assert.notEqual(keyOf({ program: layout }).review, keyOf({}).review);
 });
 
 function entry(overrides: Partial<IncrementalEntry> = {}): IncrementalEntry {
@@ -122,7 +142,8 @@ function entry(overrides: Partial<IncrementalEntry> = {}): IncrementalEntry {
   };
   const outcome: CandidateOutcome = { candidate: "c1", valid: true, verification: { candidate: "c1", passed: true, cases: 4, tolerance: null, failures: [], durationNs: 1 } };
   return {
-    key: "k",
+    reviewKey: "r",
+    objectKey: "o",
     file: "main.ts",
     selected: "c1",
     candidates: [candidate],
@@ -133,16 +154,34 @@ function entry(overrides: Partial<IncrementalEntry> = {}): IncrementalEntry {
 }
 
 test("only what a build proved, and only from the same inputs, may be reused", () => {
-  assert.equal(reusable(entry(), "k", true), "object");
+  const keys: UnitKeys = { review: "r", object: "o" };
+  assert.equal(reusable(entry(), keys, true), "object");
   // Files that are gone leave the implementation, which the toolchain rebuilds.
-  assert.equal(reusable(entry(), "k", false), "assembly");
+  assert.equal(reusable(entry(), keys, false), "assembly");
   // A key from different inputs is not this object.
-  assert.equal(reusable(entry(), "other", true), null);
-  assert.equal(reusable(undefined, "k", true), null);
+  assert.equal(reusable(entry(), { review: "other", object: "o" }, true), null);
+  assert.equal(reusable(undefined, keys, true), null);
   // A candidate the toolchain rejected is not a proof of anything.
   const rejected = entry({ outcomes: [{ candidate: "c1", valid: false, failure: { category: "AssemblyError", stage: "assemble", message: "no" } }] });
-  assert.equal(reusable(rejected, "k", true), null);
-  assert.equal(reusable(entry({ selected: "c2" }), "k", true), null);
+  assert.equal(reusable(rejected, keys, true), null);
+  assert.equal(reusable(entry({ selected: "c2" }), keys, true), null);
+});
+
+test("an object from another lowering is rebuilt and an object from this one is linked", () => {
+  // The whole point of the second key. An edit to the assembler or the runtime
+  // leaves what a model reviewed standing, so the candidates are reused — but
+  // the object was written by rules this build no longer has, so it is put
+  // through the toolchain again rather than linked as freshly proved.
+  const built = keyOf({});
+  const stored = entry({ reviewKey: built.review, objectKey: built.object });
+  const relowered = keyOf({ lowering: "a-different-lowering" });
+  assert.equal(reusable(stored, relowered, true), "assembly", "an object from another lowering was linked as-is");
+  // And the other way: once this build has lowered it, its own object key is the
+  // one that matches, so a rebuild with no further edit links it.
+  assert.equal(reusable(entry({ reviewKey: built.review, objectKey: relowered.object }), relowered, true), "object");
+  // A review that does not match is no reuse at either level, however complete
+  // the object beside it is.
+  assert.equal(reusable(stored, { review: "a-different-review", object: built.object }, true), null);
 });
 
 test("a record that is not JSON is no record, not a build that cannot start", async () => {
@@ -183,13 +222,13 @@ test("a function the source named __proto__ is a stored implementation like any 
   // implementation is dropped on the way in and never read on the way out.
   const directory = await mkdtemp(join(tmpdir(), "blaze-proto-"));
   const entry = (key: string) =>
-    `{"key":"${key}","file":"f","selected":"c1","candidates":[],"outcomes":[{"candidate":"c1","valid":true}]}`;
+    `{"reviewKey":"${key}","objectKey":"${key}","file":"f","selected":"c1","candidates":[],"outcomes":[{"candidate":"c1","valid":true}]}`;
   // Written as text: `__proto__` in an object literal is the prototype setter,
   // so a record built in memory would never have carried the key at all.
   await writeFile(join(directory, "inc.json"), `{"good":${entry("k1")},"__proto__":${entry("k2")}}`);
   const record = await readIncremental(createJsonStore(directory), "inc.json");
   assert.deepEqual(Object.keys(record).sort(), ["__proto__", "good"]);
-  assert.equal(record.good?.key, "k1");
+  assert.equal(record.good?.reviewKey, "k1");
   assert.equal(Object.prototype.hasOwnProperty.call(record, "__proto__"), true);
 });
 
@@ -208,47 +247,105 @@ test("the empty record a first build writes into keeps a function named __proto_
   assert.equal(Object.prototype.hasOwnProperty.call(record, "__proto__"), true, "the entry was not recorded");
   assert.deepEqual(Object.keys({ ...record }), ["__proto__"], "the written record lost the function");
   // A second function must not read the first one's entry out of the
-  // prototype: `selected` and `key` are the field names of an entry.
+  // prototype: these are the field names of an entry.
   assert.equal(record.selected, undefined, "a field name answered from the prototype");
-  assert.equal(record.key, undefined, "a field name answered from the prototype");
+  assert.equal(record.reviewKey, undefined, "a field name answered from the prototype");
+  assert.equal(record.objectKey, undefined, "a field name answered from the prototype");
 });
 
-test("an edit to any compiler source moves the fingerprint every key is built from", async () => {
+test("an edit to a compiler source moves the fingerprint that decides it", async () => {
   const root = await mkdtemp(join(tmpdir(), "blaze-fingerprint-"));
   await mkdir(join(root, "toolchain"), { recursive: true });
+  await mkdir(join(root, "runtime"), { recursive: true });
   await mkdir(join(root, "test"), { recursive: true });
+  // One source on each side of the line, and one on neither: `codegen.ts` is
+  // the orchestrator and `toolchain/assembler.ts` is on `LOWERING_ONLY`, while
+  // `toolchain/verifier.ts` is in the same directory and is not.
   await writeFile(join(root, "codegen.ts"), "export const one = 1;\n", "utf8");
   await writeFile(join(root, "toolchain/assembler.ts"), "export const as = 'as';\n", "utf8");
-  // Neither of these is compiled into a build, so neither may reach the key.
+  await writeFile(join(root, "toolchain/verifier.ts"), "export const ve = 've';\n", "utf8");
+  // Neither of these is compiled into a build, so neither may reach a key.
   await writeFile(join(root, "test/cases.test.ts"), "export const noise = 1;\n", "utf8");
   await writeFile(join(root, "README.md"), "one = 1\n", "utf8");
 
   const before = await fingerprintSources(root);
-  assert.equal(before, await fingerprintSources(root), "the same tree fingerprinted twice");
-  assert.match(before, /^[0-9a-f]{64}$/);
+  assert.deepEqual(before, await fingerprintSources(root), "the same tree fingerprinted twice");
+  assert.match(before.review, /^[0-9a-f]{64}$/);
+  assert.match(before.lowering, /^[0-9a-f]{64}$/);
+  assert.notEqual(before.review, before.lowering, "the two fingerprints cover the same sources");
 
-  // The parts of the compiler that decide what an implementation is, without
-  // one of which a key would keep matching across the edit.
-  for (const file of ["codegen.ts", join("toolchain", "assembler.ts")]) {
+  const edit = async (file: string, body: string): Promise<void> => {
+    await writeFile(join(root, file), body, "utf8");
+  };
+
+  // The whole point of the split, stated as the two hashes: an edit to a
+  // lowering-only source moves the object and leaves the review, which is what
+  // lets a build keep the candidates a model already reviewed.
+  {
+    const file = join("toolchain", "assembler.ts");
     const original = await readFile(join(root, file), "utf8");
-    await writeFile(join(root, file), `${original}export const extra = 2;\n`, "utf8");
-    const edited = await fingerprintSources(root);
-    assert.notEqual(edited, before, `an edit to ${file} left the fingerprint alone`);
-    await writeFile(join(root, file), original, "utf8");
+    await edit(file, `${original}export const extra = 2;\n`);
+    const after = await fingerprintSources(root);
+    assert.notEqual(after.lowering, before.lowering, `an edit to ${file} left the lowering alone`);
+    assert.equal(after.review, before.review, `an edit to ${file} moved the review it cannot affect`);
+    await edit(file, original);
   }
-  assert.equal(await fingerprintSources(root), before, "an edit that was undone still moved the fingerprint");
+
+  // A source on the review side moves the review, and has to move the object
+  // too: the object was built from what was reviewed.
+  for (const file of ["codegen.ts", join("toolchain", "verifier.ts")]) {
+    const original = await readFile(join(root, file), "utf8");
+    await edit(file, `${original}export const extra = 2;\n`);
+    const after = await fingerprintSources(root);
+    assert.notEqual(after.review, before.review, `an edit to ${file} left the review alone`);
+    assert.equal(after.lowering, before.lowering, `an edit to ${file} moved the lowering it cannot affect`);
+    await edit(file, original);
+  }
+
+  // A source that is on neither list is on the review side, which is the safe
+  // direction: an edit to it discards work the build could have kept rather
+  // than keeping work the edit invalidated. This is why a new source starts
+  // there and is moved across only with a reason.
+  {
+    const file = join("toolchain", "not-listed-yet.ts");
+    await edit(file, "export const fresh = 1;\n");
+    const added = await fingerprintSources(root);
+    assert.notEqual(added.review, before.review, "a new source did not reach the review fingerprint");
+    assert.equal(added.lowering, before.lowering, "a source that is on no list moved the lowering");
+    await edit(file, `${await readFile(join(root, file), "utf8")}export const more = 2;\n`);
+    assert.notEqual((await fingerprintSources(root)).review, added.review, "an edit to a new source went unnoticed");
+    await rm(join(root, file));
+
+  }
+
+  assert.deepEqual(await fingerprintSources(root), before, "an edit that was undone still moved the fingerprint");
 
   // What is not compiled into a build cannot change what is compiled into it.
-  await writeFile(join(root, "test/cases.test.ts"), "export const noise = 2;\n", "utf8");
-  await writeFile(join(root, "README.md"), "one = 2\n", "utf8");
-  assert.equal(await fingerprintSources(root), before, "a test or a readme reached the fingerprint");
+  await edit(join("test", "cases.test.ts"), "export const noise = 2;\n");
+  await edit("README.md", "one = 2\n");
+  assert.deepEqual(await fingerprintSources(root), before, "a test or a readme reached a fingerprint");
 
-  // The path is part of what is hashed, so moving a file is an edit.
+  // The path is part of what is hashed, so moving a file is an edit. Moving one
+  // across the line moves both fingerprints, because it lands on the other
+  // side of it.
+  // The path is part of what is hashed, so moving a file is an edit. Both of
+  // these names are on the lowering side, so a move between them stays there:
+  // the object it produces is a different one, and what a model reviewed is not.
   await rename(join(root, "toolchain/assembler.ts"), join(root, "toolchain/linker.ts"));
-  assert.notEqual(await fingerprintSources(root), before, "a renamed file left the fingerprint alone");
+  const moved = await fingerprintSources(root);
+  assert.equal(moved.review, before.review, "a rename within the lowering side moved the review");
+  assert.notEqual(moved.lowering, before.lowering, "a renamed file left the lowering alone");
+
+  // A tree that cannot be read is not one whose caches may be trusted, and says
+  // so for both halves rather than for only the one it is asked about.
+  const unreadable = await fingerprintSources(join(root, "no-such-directory"));
+  assert.notEqual(unreadable.review, before.review);
+  assert.equal(unreadable.review, unreadable.lowering, "an unreadable tree fingerprinted as two different things");
 
   // The compiler this process is running from fingerprints to something.
-  assert.match(await toolchainFingerprint(), /^[0-9a-f]{64}$/);
+  const here = await toolchainFingerprints();
+  assert.match(here.review, /^[0-9a-f]{64}$/);
+  assert.match(here.lowering, /^[0-9a-f]{64}$/);
 });
 
 test("every file a build consumes from a reused candidate is one it asked for", () => {

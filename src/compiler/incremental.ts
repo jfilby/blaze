@@ -51,8 +51,18 @@ import type {
 
 /** What a stored function was built from, and what it produced. */
 export interface IncrementalEntry {
-  /** sha256 of everything the implementation depends on. */
-  key: string;
+  /**
+   * sha256 of everything the *review* depends on: the inputs, and every source
+   * that decides what the IR is or what a model said about it.
+   */
+  reviewKey: string;
+  /**
+   * sha256 of the review key and the sources that decide what the IR is
+   * lowered into, so a match on this one is a match on the other by
+   * construction: an object is only relinked when the review that chose it
+   * still holds.
+   */
+  objectKey: string;
   /** The file that declares the function, as the contract names it. */
   file: string;
   /** The candidate the build selected, and the only one that may be reused. */
@@ -90,13 +100,30 @@ export interface UnitKeyInput {
   model: string;
   compilerVersion: string;
   /**
-   * A hash of the compiler's own sources. The prompt, the runtime, the
-   * assembler rules and the driver decide what an implementation is and how it
-   * is proved, and none of them is named by a contract or a target, so a key
-   * that left them out would keep matching across an edit to any of them and
-   * hand back an object built by a compiler that no longer exists.
+   * The hashes of the compiler's own sources, split by what each decides. The
+   * prompt, the resolver, the optimizer and the rules that decide whether a
+   * candidate is valid are named by neither a contract nor a target and decide
+   * the review, so `review` is over them. The assembler, the encoder and the
+   * runtime decide the object and nothing that came before it, so `lowering` is
+   * over those, and a build that edited one of them can still reuse the
+   * candidates an earlier build reviewed.
    */
-  toolchain: string;
+  review: string;
+  /** The sources that decide what the IR is lowered into. */
+  lowering: string;
+}
+
+/**
+ * The two keys of one compiled function.
+ *
+ * `review` answers whether what a model said still holds, and `object` whether
+ * what the toolchain built from it is still the toolchain's to link. They are
+ * one key and a second key over the first, so agreeing on the second is
+ * agreeing on the first.
+ */
+export interface UnitKeys {
+  readonly review: string;
+  readonly object: string;
 }
 
 /**
@@ -116,10 +143,11 @@ function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
 }
 
 /**
- * The key of one compiled function. Two builds that agree on it can share the
- * object, and two that do not must not.
+ * The keys of one compiled function. Two builds that agree on the review key
+ * can share the candidates a model produced and the verdicts recorded against
+ * them, and two that also agree on the object key can share the object itself.
  */
-export function unitKey(input: UnitKeyInput): string {
+export function unitKeys(input: UnitKeyInput): UnitKeys {
   const own = input.contract.function.name;
   // The whole closure, not the direct callees: a body written out carries the
   // calls it made, so what ends up inside this object is everything below it.
@@ -133,7 +161,7 @@ export function unitKey(input: UnitKeyInput): string {
     .filter(([name]) => name !== own)
     .map(([name, contract]): readonly [string, unknown] => [name, abiOf(contract, written.has(name))])
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-  return hashValue({
+  const review = hashValue({
     contract: input.contract,
     abi: others,
     file: input.file,
@@ -146,22 +174,34 @@ export function unitKey(input: UnitKeyInput): string {
     benchmark: input.benchmark,
     model: input.model,
     compilerVersion: input.compilerVersion,
-    toolchain: input.toolchain,
+    toolchain: input.review,
   });
+  return { review, object: hashValue({ review, lowering: input.lowering }) };
 }
 
 /**
- * How much of a stored entry a build may reuse, or null for none of it. Only
- * the selected candidate counts, and only when the record says it was valid:
- * an entry is written when a function is verified, so a stored entry is a
- * stored proof, and a build that trusts a candidate the toolchain rejected
- * would be trusting a failure.
+ * How much of a stored entry a build may reuse, or null for none of it.
+ *
+ * The two levels answer two questions. `object` is the whole artifact: it is
+ * linked as it stands and is not verified again, which needs the object key to
+ * match, because an object built by an assembler this build no longer has is
+ * not this build's to link. `assembly` is the source of it: the candidates are
+ * taken as they stand and put through the toolchain as it is now, which is
+ * what an edit to the lowering is for, and needs only the review key to match.
+ * Every level needs the review to match, and only the selected candidate counts,
+ * and only when the record says it was valid: an entry is written when a
+ * function is verified, so a stored entry is a stored proof, and a build that
+ * trusts a candidate the toolchain rejected would be trusting a failure.
  */
-export function reusable(entry: IncrementalEntry | undefined, key: string, objectBuilt: boolean): ReuseLevel | null {
-  if (entry === undefined || entry.key !== key || entry.selected === "") return null;
+export function reusable(
+  entry: IncrementalEntry | undefined,
+  keys: UnitKeys,
+  objectBuilt: boolean,
+): ReuseLevel | null {
+  if (entry === undefined || entry.reviewKey !== keys.review || entry.selected === "") return null;
   const outcome = entry.outcomes.find((candidate) => candidate.candidate === entry.selected);
   if (outcome === undefined || !outcome.valid) return null;
-  return objectBuilt ? "object" : "assembly";
+  return objectBuilt && entry.objectKey === keys.object ? "object" : "assembly";
 }
 
 /**
@@ -187,7 +227,8 @@ export async function readIncremental(store: JsonStore, path: string): Promise<I
     if (typeof entry !== "object" || entry === null) continue;
     const candidate = entry as Partial<IncrementalEntry>;
     if (
-      typeof candidate.key !== "string" ||
+      typeof candidate.reviewKey !== "string" ||
+      typeof candidate.objectKey !== "string" ||
       typeof candidate.file !== "string" ||
       typeof candidate.selected !== "string" ||
       !Array.isArray(candidate.candidates) ||
@@ -196,7 +237,8 @@ export async function readIncremental(store: JsonStore, path: string): Promise<I
       continue;
     }
     record[functionName] = {
-      key: candidate.key,
+      reviewKey: candidate.reviewKey,
+      objectKey: candidate.objectKey,
       file: candidate.file,
       selected: candidate.selected,
       candidates: candidate.candidates as Candidate[],

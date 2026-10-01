@@ -1106,13 +1106,21 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   const candidates: Candidate[] = [];
   const outcomes: CandidateOutcome[] = [];
 
+  // Every stored candidate goes through the toolchain as it is now, and the
+  // same selection runs over all of them. Stopping at the first one that
+  // verified would pick whichever the record happened to store first, and a
+  // stored order is not a ranking: three candidates that all verify with the
+  // second the fastest would be settled for the third, because it was written
+  // first. A build that reuses this way is a build that is choosing again, and
+  // the only thing it saves is the asking.
   for (const existing of request.existing) {
     candidates.push(existing);
     outcomes.push(await evaluateCandidate(request, existing, vectors));
-    if (selectCandidate(outcomes, request.contract) !== null) {
-      // Nothing was reviewed: the stored candidate is reused as it stands.
-      return { candidates, outcomes, selected: selectCandidate(outcomes, request.contract), benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
-    }
+  }
+  const reused = selectCandidate(outcomes, request.contract);
+  if (reused !== null) {
+    // Nothing was reviewed: the stored candidates are reused as they stand.
+    return { candidates, outcomes, selected: reused, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
   }
 
   // One backend per run: it carries the state a session needs, such as which

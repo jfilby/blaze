@@ -406,7 +406,7 @@ test("reuse refuses to rebuild a function whose contract changed", async () => {
 
   await assert.rejects(
     () => runBuild("input.toml", { cwd: directory, reuse: true, model: `replay:${REPLAY}` }, quiet, "build"),
-    /the stored implementation of dotProduct was built from different inputs/,
+    /the stored implementation of dotProduct was reviewed from different inputs/,
   );
 });
 
@@ -478,6 +478,37 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   assert.ok(log.some((message) => /is rebuilt from its stored implementation/.test(message)), log.join("\n"));
   assert.ok(second.outputPath !== null);
   assert.equal(run(second.outputPath, [], { input: "run\n5 5 5\n1 2 3 4 5\n1 1 1 1 1\n3 3 3\n2 2 2\n2 2 2\n", timeoutMs: 60_000 }).code, 0);
+});
+
+test("a rebuild from stored implementations chooses among all of them, not the first", async () => {
+  // An edit to the lowering reaches this path with the whole record intact, so
+  // the choice is made again over every candidate the build stored. Stopping at
+  // the first one that verified would ship whichever the record happened to
+  // hold first, and a stored order is not a ranking.
+  const directory = await workspace("incremental-choose", {
+    ...INPUT,
+    generation: { maxCandidates: 3, maxAttempts: 1 },
+  });
+  const replay = await reviews(directory, SOUND, SOUND, SOUND);
+  const first = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  assert.equal(first.build.status, "success");
+  const stored = first.candidates?.dotProduct ?? [];
+  assert.equal(stored.length, 3, `the build stored ${stored.length} candidate(s)`);
+
+  // The same path an edit to the assembler takes: the objects are gone, so the
+  // stored implementations are put through the toolchain again.
+  await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
+  await writeFile(replay, JSON.stringify({ reviews: ["this is not a review"] }), "utf8");
+  const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+
+  assert.equal(second.build.status, "success");
+  assert.deepEqual(second.build.reused, {});
+  // Every stored candidate was re-measured, so every one is in the record the
+  // build wrote. One of them means the build stopped at the first that verified.
+  const rebuilt = second.candidates?.dotProduct ?? [];
+  assert.equal(rebuilt.length, 3, `the rebuild kept ${rebuilt.length} of 3 stored candidate(s)`);
+  // And the candidate that was selected is one this build chose, not a default.
+  assert.ok(second.build.selectedCandidates?.dotProduct?.startsWith("c"), JSON.stringify(second.build.selectedCandidates));
 });
 
 test("test and benchmark re-run against the selected candidate", async () => {

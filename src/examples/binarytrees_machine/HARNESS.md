@@ -8,11 +8,26 @@ how a change to the compiler gets measured against one.
 `node relower.mjs` rebuilds this project from the candidates an earlier build
 stored, lowering them through the compiler as it is now.
 
-`blaze build --reuse` cannot do this: the incremental key hashes the compiler's
-own sources, so editing the compiler invalidates every stored object, which is
-exactly the edit being measured. This reads the stored IR instead, so a change
-to `optimize-ir.ts`, `ir-machine.ts`, `ir-wasm.ts` or the runtime is in the
-built program within a second and no model is asked for anything.
+`blaze build` does this for an edit to the lowering and does not do it for an
+edit to the review. The incremental key is two hashes: what decides the IR a
+function is, and what decides the object that IR is lowered into. An edit to
+`ir-machine.ts`, `ir-wasm.ts`, the assembler, the encoder or the runtime moves
+only the second, so the candidates an earlier build reviewed are still what a
+model reviewed, and the build puts them through the toolchain as it is now
+instead of asking for them again — re-verified, re-benchmarked and re-selected,
+and the choice is made afresh over every stored candidate rather than over
+whichever the record held first.
+
+An edit to `optimize-ir.ts` is on the other side of that line, and has to be. The
+optimizer rewrites the IR the model is handed, so what a review said was said
+about a function that no longer exists, and the record is thrown away. So is an
+edit to `verifier.ts` or to the prompt: those decide whether a candidate is
+valid and what a verdict is. A source is on the lowering side only when nothing
+it does reaches back into the IR; a new one starts on the review side, which is
+the direction that discards work rather than keeping work an edit invalidated.
+
+`relower.mjs` is still the faster of the two, and `blaze build` is the one that
+checks what it produced.
 
 It is a harness, not a build: it links what it is given and does not verify,
 benchmark or review. `blaze build` is for that.

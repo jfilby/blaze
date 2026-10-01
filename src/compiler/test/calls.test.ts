@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { programOf } from "./phase.ts";
 import { callableSymbols } from "../toolchain/assembler.ts";
 import { contractsByName, writtenOut } from "../semantics/calls.ts";
-import { unitKey, type UnitKeyInput } from "../incremental.ts";
+import { unitKeys, type UnitKeyInput } from "../incremental.ts";
 import type { FunctionContract, ProgramContract, TargetSpec } from "../core/types.ts";
 
 const TARGET: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
@@ -202,9 +202,10 @@ function keyOf(of: ProgramContract, name: string, file: string): string {
     benchmark: { iterations: 1 },
     model: "test",
     compilerVersion: "0.0.0",
-    toolchain: "test",
+    review: "test",
+    lowering: "test",
   };
-  return unitKey(input);
+  return unitKeys(input).review;
 }
 
 test("a caller's stored object is keyed on the body of a callee it writes out", () => {
