@@ -1539,3 +1539,43 @@ test("a second array under the addition is refused, because the lanes would not 
   assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
 });
 
+
+test("a whole number accumulator is refused, because the additions are of doubles", async () => {
+  const entry: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: { k: "local", type: I64, name: "total" } },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I64 }, value: { k: "const", type: I64, text: "0" }, line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "set", name: "total", op: "+=", line: 3, value: at("a", local("i")) },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  const fn = subject(I64, entry, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: F64 },
+  ]);
+  assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
+});

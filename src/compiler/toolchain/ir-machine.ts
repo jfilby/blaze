@@ -29,7 +29,6 @@ import {
   walkValues,
   isBoolean,
   isFloat,
-  isInteger,
   isNumber,
   isReference,
   isTextType,
@@ -698,6 +697,12 @@ class Census {
         // The counter is the pair itself. Any other name is loop-invariant,
         // because a counted loop here writes nothing but its counter and the
         // name it adds into, and the name it adds into is refused above.
+        //
+        // No test is made here of what type the name has: the array a lane
+        // reads its two elements out of is reached through one of these, and it
+        // is not a double. What a name is read *as* is settled where it is
+        // used, by the sides of the operation around it having to be at that
+        // operation's own type.
         return value.name !== this.accumulator;
       case "element":
         return this.fitsElement(value);
@@ -744,14 +749,21 @@ class Census {
    * would have to refuse multiplication feeding an addition, because it rounds
    * once where the loop rounds twice.
    *
-   * **Integer arithmetic** is allowed for a sum and a difference and nothing
-   * else. A packed sum wraps each lane at the width of the type, which is what
-   * a scalar sum wraps at, so overflow is per lane and agrees. A product is
-   * refused: SSE2 has no packed multiply at these widths (`PMULLD` is SSE4.1
-   * and `PMULLQ` is AVX-512), and every packed form that does exist computes a
-   * wider answer than the scalar one truncates to, which is an overflow the two
-   * would not agree on. A quotient is refused for the same reason, and harder:
-   * there is no packed integer divide to agree with in the first place.
+   * **Integer arithmetic** is refused outright, for a reason that is about this
+   * backend rather than about the mathematics: every packed instruction the
+   * emitter below writes is a double one, so a whole number carried in a lane
+   * would be a whole number carried as a double, and a loop that adds one would
+   * be handed the answer to a different loop. A packed integer form is a thing
+   * to add with the encoder, not one to admit ahead of it.
+   *
+   * Were there one, a sum and a difference would be the only safe operations.
+   * A packed sum wraps each lane at the width of the type, which is what a
+   * scalar sum wraps at, so overflow would be per lane and would agree. A
+   * product would not: SSE2 has no packed multiply at these widths (`PMULLD` is
+   * SSE4.1 and `PMULLQ` is AVX-512), and every packed form that does exist
+   * computes a wider answer than the scalar one truncates to — an overflow the
+   * two would not agree on. A quotient has no packed integer divide to agree
+   * with at all.
    *
    * **Shifts** are refused. A packed shift takes its count at five bits for a
    * double-word lane and six for a quad-word one, where the scalar shift masks
@@ -770,15 +782,16 @@ class Census {
    * one value: which lane a value lands in is not something this may decide.
    */
   private fitsArithmetic(value: SemanticValue & { k: "arith" }): boolean {
-    if (isFloat(value.type)) {
-      if (value.op !== "add" && value.op !== "sub" && value.op !== "mul" && value.op !== "div") return false;
-    } else if (isInteger(value.type)) {
-      if (value.op !== "add" && value.op !== "sub") return false;
-    } else {
-      return false;
-    }
+    // A double, and one of the four operations a double pair has. Every packed
+    // instruction written below reads its lanes as doubles, so a lane of any
+    // other type is a lane carrying a different number than the one written.
+    if (!isFloat(value.type)) return false;
+    if (value.op !== "add" && value.op !== "sub" && value.op !== "mul" && value.op !== "div") return false;
     // Every side at the type of the answer, so that a lane is one value of that
-    // type rather than one of some other width the pair load did not bring.
+    // type rather than one of some other width the pair load did not bring. This
+    // is also what refuses a whole number read where a double is: the two sides
+    // are not at the answer's type, and reading one is the conversion the rule
+    // above refuses.
     if (!typeEquals(value.left.type, value.type)) return false;
     if (!typeEquals(value.right.type, value.type)) return false;
     // The right side is built with the register the left side is standing in as
@@ -2266,7 +2279,9 @@ class Machine {
     // loop is about to declare alone.
     const counter = this.pinned.get(this.names.read(sum.counter));
     const accumulator = this.slot(sum.accumulator);
-    if (counter === undefined || accumulator.register === null) return false;
+    // The additions below are a double added into a double, so an accumulator of
+    // another type is not one this can make at all.
+    if (counter === undefined || accumulator.register === null || !isFloat(accumulator.type)) return false;
     const total = accumulator.register;
     // Three more: where a turn's value lands, the one its other side is built
     // in, and the one the other side borrows in turn. None of them is the
