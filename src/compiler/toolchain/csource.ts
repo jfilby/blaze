@@ -12,6 +12,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { inspectObject } from "./assembler.ts";
 import { cDeclarationType } from "./linker.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
+import { cSymbolLabel, cSymbolName } from "./c-names.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
@@ -61,7 +62,7 @@ export function cSignature(contract: FunctionContract): string {
   const parameters = contract.function.params
     .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
     .join(", ");
-  return `${cDeclarationType(parseType(contract.function.returns))} ${symbolOf(contract)}(${parameters})`;
+  return `${cDeclarationType(parseType(contract.function.returns))} ${cSymbolName(symbolOf(contract))}(${parameters})${cSymbolLabel(symbolOf(contract))}`;
 }
 
 /** Rejects anything outside the pure subset before the compiler is invoked. */

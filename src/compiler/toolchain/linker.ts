@@ -32,7 +32,7 @@ import type { BuildMode, FunctionContract, FunctionParam, Objective, ObjectLayou
 import { cTargetOptions, linkOptions } from "../core/target.ts";
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName, cSymbolLabel, cSymbolName } from "./c-names.ts";
 
 const INTEGER_ARGUMENT_REGISTERS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 const SSE_ARGUMENT_REGISTERS = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
@@ -398,11 +398,11 @@ export function generateHarness(contract: FunctionContract, demoRequest: string)
   const callArguments = names.join(", ");
   const invocation =
     contract.function.params.length === 0
-      ? `${cDeclarationType(returns)} value = ${name}();`
-      : `${cDeclarationType(returns)} value = ${name}(${callArguments});`;
+      ? `${cDeclarationType(returns)} value = ${cSymbolName(name)}();`
+      : `${cDeclarationType(returns)} value = ${cSymbolName(name)}(${callArguments});`;
 
   return `${HARNESS_PRELUDE}
-extern ${cDeclarationType(returns)} ${name}(${types.map((type, index) => `${cDeclarationType(type)} ${names[index]}`).join(", ")});
+extern ${cDeclarationType(returns)} ${cSymbolName(name)}(${types.map((type, index) => `${cDeclarationType(type)} ${names[index]}`).join(", ")})${cSymbolLabel(name)};
 
 ${types.map((type, index) => `static ${cDeclarationType(type)} ${names[index]};`).join("\n")}
 ${vectorCounters(types, names)}
@@ -509,7 +509,7 @@ function generateDefinitionHarness(contract: FunctionContract): string {
 
 ${declarations}
 
-extern ${cDeclarationType(parseType(contract.function.returns))} ${name}(${parameters || "void"});
+extern ${cDeclarationType(parseType(contract.function.returns))} ${cSymbolName(name)}(${parameters || "void"})${cSymbolLabel(name)};
 
 int main(void) {
   blaze_rt_initialize();
@@ -539,7 +539,7 @@ export function generateProbeHarness(contract: FunctionContract, plan: ProbePlan
     .join(", ");
   const declarations = cObjectDeclarations(objects);
   const returns = cDeclarationType(parseType(contract.function.returns));
-  const call = `${name}(${plan.callArguments.join(", ")})`;
+  const call = `${cSymbolName(name)}(${plan.callArguments.join(", ")})`;
   // A function that returns nothing has nothing to hold, and a variable of
   // type void is not C.
   const result =
@@ -557,7 +557,7 @@ export function generateProbeHarness(contract: FunctionContract, plan: ProbePlan
 
 ${declarations}
 
-extern ${returns} ${name}(${parameters || "void"});
+extern ${returns} ${cSymbolName(name)}(${parameters || "void"})${cSymbolLabel(name)};
 
 int main(void) {
   ${RUNTIME_NAME}_initialize();

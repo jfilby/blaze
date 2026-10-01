@@ -337,3 +337,37 @@ test("a loop step that is itself a step is written once", () => {
   assert.match(ir, /let value\[f64\] t\d+ immutable = local\[f64\] j @4\n {4}step j \+\+ post @4/);
   assert.match(ir, /for\[f64\] i from const\[f64\] 0 to local\[f64\] n exclusive up step local\[f64\] t1/);
 });
+
+test("a function named after a C keyword is declared under another name and bound to its symbol", async () => {
+  // A function's symbol is its own name, and an object file may define a symbol
+  // called `short`: `extern double short(double)` is not C, so the driver, the
+  // harness and the probe all wrote a declaration that named nothing and the
+  // link failed on a name the source was free to choose. The declaration is
+  // written under a name C takes and carries the symbol beside it, which leaves
+  // the object defining the symbol the source gave it.
+  const source = [
+    "function short(n: number): number {",
+    "  let total = 0;",
+    "  let i = 0;",
+    "  while (i < n) { total += i; i += 1; }",
+    "  return total;",
+    "}",
+    "function main(): void {",
+    "  console.log(short(10));",
+    "}",
+    "main();",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  assert.match(driver, /extern double short_\(double n\) __asm__\("short"\);/);
+  // Nothing anywhere in the driver calls it under the name C cannot spell: the
+  // declaration is the only place the symbol is written, and it writes the name
+  // the declaration took.
+  assert.doesNotMatch(driver, /[^_\w]short\(/);
+});

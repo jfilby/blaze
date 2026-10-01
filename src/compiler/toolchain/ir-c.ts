@@ -42,7 +42,7 @@ import {
   type ValueKind,
 } from "../core/semantic-ir.ts";
 import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
-import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { DEFAULT_ALIGNMENT, RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { archOptions, assemblyOptions, cTargetOptions, loweringOptions } from "../core/target.ts";
@@ -557,7 +557,7 @@ class FunctionEmitter {
       .join(", ");
     this.externs.set(
       symbol,
-      `/* defined by another function of this program, and linked beside this one */\nextern ${declaredType(parseType(call.signature.returns))} ${symbol}(${parameters || "void"});`,
+      `/* defined by another function of this program, and linked beside this one */\nextern ${declaredType(parseType(call.signature.returns))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
     );
   }
 

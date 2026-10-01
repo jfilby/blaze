@@ -173,6 +173,33 @@ export function cMacroNames(): Record<string, true> {
  * source readable and keeps a name that is legal C a name that is legal C,
  * which a prefix of the compiler's own choosing would not.
  */
+/**
+ * How a symbol is spelled in a C declaration, and the assembler label that binds
+ * that spelling back to the symbol the object defines.
+ *
+ * A function called `short` has a symbol an object file may legally define and a
+ * C compiler will not accept spelled, so `extern double short(double)` is not a
+ * declaration of anything and the link fails on a name the source chose. The
+ * declaration is written under a name C will take and carries the symbol beside
+ * it, which leaves the object alone: the symbol is still `short`, and the
+ * contract that is hashed and cached is unchanged.
+ *
+ * The two halves are written in two places because that is where C wants them —
+ * the name before the parameter list and the label after it — so a declaration is
+ * `extern double ${cSymbolName(s)}(double n)${cSymbolLabel(s)};`.
+ *
+ * A symbol C can already spell is written as it is and carries no label, so the
+ * text of a declaration is byte for byte what it was.
+ */
+export function cSymbolName(symbol: string): string {
+  return cEscape(symbol, C_KEYWORDS);
+}
+
+/** The label binding a spelled symbol to the symbol itself, or nothing. */
+export function cSymbolLabel(symbol: string): string {
+  return cSymbolName(symbol) === symbol ? "" : ` __asm__("${symbol}")`;
+}
+
 export function cEscape(name: string, reserved: Readonly<Record<string, true>>): string {
   let escaped = name;
   while (reserved[escaped] === true) escaped += "_";

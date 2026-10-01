@@ -31,7 +31,7 @@ import type { BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from
 import { cTargetOptions, linkOptions } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
-import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral } from "./c-names.ts";
+import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
 
 /** The operator C spells for the one the source used. */
 
@@ -239,7 +239,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     const parameters = signature.params.map(
       (param) => `${cDeclarationType(parseType(param.type))} ${this.escape(param.name)}`,
     );
-    return `extern ${cDeclarationType(returns)} ${signature.symbol}(${parameters.join(", ") || "void"});`;
+    return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}(${parameters.join(", ") || "void"})${cSymbolLabel(signature.symbol)};`;
   }
 
   openProgram(): string[] {
@@ -461,7 +461,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
   call(call: SemanticCall, argumentsText: string[]): string {
-    return `${call.signature.symbol}(${argumentsText.join(", ")})`;
+    return `${cSymbolName(call.signature.symbol)}(${argumentsText.join(", ")})`;
   }
 
   builtin(call: SemanticCall, argumentsText: string[]): string {

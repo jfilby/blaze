@@ -16,6 +16,7 @@ import { bufferElement, parseType, typeToString } from "../semantics/contract.ts
 import { run } from "../core/process.ts";
 import { nimOptimizationOptions } from "../core/target.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
+import { cSymbolLabel, cSymbolName } from "../toolchain/c-names.ts";
 import { generateProgramSource, type ProgramTarget } from "../toolchain/program-emit.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import {
@@ -292,7 +293,7 @@ ${anchor}
       );
     }
     const parameters = signature.params.map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`);
-    return `extern ${cDeclarationType(returns)} ${signature.symbol}(${parameters.join(", ") || "void"});`;
+    return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}(${parameters.join(", ") || "void"})${cSymbolLabel(signature.symbol)};`;
   }
 
   private importc(signature: FunctionSignature): string {
