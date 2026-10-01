@@ -138,6 +138,45 @@ test("the IR review hands over the artifact, the sites a proposal may name and t
   assert.doesNotMatch(prompt, /proposal: <rule>/);
 });
 
+test("two candidates of one build are never asked the same question", () => {
+  // A build pays for a review per candidate, so five candidates that render the
+  // same prompt are five calls that learn one thing: `renderReview` read
+  // neither the candidate nor the attempt, and every chain starts from the same
+  // base IR, so the first round of every function was byte-identical across all
+  // of them. What differs is a reading — where to start looking — not a rule:
+  // narrowing the catalogue per candidate would make a build worse at whatever
+  // the candidate was not sent to look for.
+  const prompts = [1, 2, 3, 4, 5].map((candidate) => buildIrReviewPrompt(request({ candidate, candidates: 5 })));
+  assert.equal(new Set(prompts).size, 5, "each candidate of a build is asked something of its own");
+  const readings = prompts.map((prompt) => /## WHERE THIS READING STARTS[\s\S]*?\.\n\n([\s\S]*?)\n\nThat is where/.exec(prompt)?.[1]);
+  assert.equal(new Set(readings).size, 5, "and the reading each was given is its own");
+  for (const prompt of prompts) {
+    for (const rule of REPAIR_RULES) {
+      assert.ok(prompt.includes(`- ${rule.name}:`), `every rule stays open to a candidate told to read elsewhere: ${rule.name}`);
+    }
+    assert.match(prompt, /not what you are allowed to propose/, "a reading is a place to start, not a restriction");
+  }
+  // More candidates than there are readings must still differ: the number the
+  // prompt states is part of what tells them apart, not only the reading.
+  const many = [1, 2, 3, 4, 5, 6, 7, 8].map((candidate) => buildIrReviewPrompt(request({ candidate, candidates: 8 })));
+  assert.equal(new Set(many).size, 8, "a build with more candidates than readings still asks each its own question");
+});
+
+test("a build that asked for one candidate is not told it is one of several", () => {
+  // There is no other reading to differ from, so the section is a statement
+  // about a build that is not happening.
+  const prompt = buildIrReviewPrompt(request({ candidate: 1, candidates: 1 }));
+  assert.doesNotMatch(prompt, /WHERE THIS READING STARTS/);
+  assert.doesNotMatch(prompt, /candidate 1 of 1/);
+});
+
+test("the target review diverges as the IR review does", () => {
+  const target = (candidate: number) =>
+    buildTargetReviewPrompt(request({ stage: "target", candidate, candidates: 5, artifact: "dotProduct:\n  ret\n" }));
+  assert.notEqual(target(1), target(2), "the winner's target review is still one reading of several");
+  assert.match(target(2), /candidate 2 of 5/);
+});
+
 test("the answer format is shown as whole answers, naming a block the IR prints and no brackets", () => {
   const prompt = buildIrReviewPrompt(request());
   const sites = describeSites(semantics.dotProduct as NonNullable<typeof semantics.dotProduct>);

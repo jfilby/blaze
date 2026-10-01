@@ -326,6 +326,77 @@ function renderDiagnostics(request: ReviewRequest): string[] {
   return lines;
 }
 
+/**
+ * What one candidate of a build is told to read for, chosen by which candidate
+ * it is so that two candidates are never asked the same question.
+ *
+ * A build asks for several candidates because one reading of an artifact is not
+ * the only reading: the same question asked twice is the same answer twice, and
+ * the build would pay for the same review N times and learn from it once. What
+ * each candidate is given here is a *place to start looking*, not a rule it may
+ * propose and not a rule it may not: every rule in the catalogue stays open to
+ * every candidate, and a candidate that finds nothing where it was sent says
+ * `sound` and the build moves on. The order is fixed so that the candidates of a
+ * build cover the catalogue between them rather than all landing on the first
+ * rule, and the last entry is the catch-all for a build with more candidates
+ * than there are places to start.
+ */
+const CANDIDATE_READINGS: readonly string[] = [
+  [
+    "Start with the loops. Read the body of each one for a value it computes on",
+    "every turn that does not change from one turn to the next, and propose the",
+    "rule that binds it once above the loop.",
+  ].join("\n"),
+  [
+    "Start with the blocks rather than the loops. Read each one for a value it",
+    "computes more than once, in itself or in a block nested inside it, written",
+    "the same way every time, and propose the rule that binds it to a name.",
+  ].join("\n"),
+  [
+    "Start with the arithmetic. Read every operation the body performs for one",
+    "another form of itself that costs the machine less, and propose the rule",
+    "that writes it.",
+  ].join("\n"),
+  [
+    "Start with the calls. Read each one for a callee that computes a result and",
+    "does nothing else, whose body could stand where the call is, and propose",
+    "the rule that puts it there.",
+  ].join("\n"),
+  [
+    "Read the whole body before proposing anything, and take the change that most",
+    "reduces the work the objective above names, whichever rule it turns out to",
+    "be. If the rules above cover several readings of the same place, propose the",
+    "one that helps most.",
+  ].join("\n"),
+  [
+    "Read for what the objective above asks of this function, and for nothing",
+    "else: a change that does not move that number is not one of the fixes to",
+    "propose here, however correct it would be.",
+  ].join("\n"),
+];
+
+/**
+ * The reading this candidate is given, or nothing when the build asked for one
+ * candidate and there is no second reading to differ from.
+ */
+function renderReading(request: ReviewRequest): readonly string[] {
+  if (request.candidates < 2) return [];
+  const reading = CANDIDATE_READINGS[(request.candidate - 1) % CANDIDATE_READINGS.length];
+  return [
+    section("WHERE THIS READING STARTS", [
+      `This is candidate ${request.candidate} of ${request.candidates}. The others are reading the same artifact`,
+      "independently and none of them can see this one, so nothing here has been said to you before and nothing",
+      "you find is expected to match.",
+      "",
+      reading,
+      "",
+      "That is where to start reading, not what you are allowed to propose: every rule in the catalogue below is",
+      "open to this candidate, including the ones this reading does not mention. An artifact with nothing to fix",
+      "is `sound` and no proposals, and that is an answer the build acts on.",
+    ]),
+  ];
+}
+
 function renderReview(request: ReviewRequest, lead: readonly string[]): string {
   const semantic = request.semantics[request.contract.function.name];
   // The worked examples in the answer format name a block and a callee this
@@ -383,6 +454,7 @@ function renderReview(request: ReviewRequest, lead: readonly string[]): string {
     section("NUMERICAL SEMANTICS", renderNumerical(request.contract)),
     section("OPTIMIZATION OBJECTIVE", renderObjective(request.contract)),
     section("WHAT THIS REVIEW IS FOR", lead),
+    ...renderReading(request),
     ...(renderDiagnostics(request).length === 0 ? [] : [section("WHAT THE COMPILER ALREADY FOUND", renderDiagnostics(request))]),
     section("WHAT YOU MAY PROPOSE", [
       "Every fix is one of these rewrites, applied by the compiler to its own tree. There is nothing else a",

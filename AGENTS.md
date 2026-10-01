@@ -52,6 +52,18 @@ tests all live there. Run commands from it.
   the prompts, `ai/backend.ts` the transports). A proposal the rules hold is
   applied by rewriting the IR and printing it again; one they do not is refused
   with a reason, which the build log and the next review both carry.
+- `maxCandidates` reads are one reading, not several copies of it. Every chain
+  starts from the same base IR, so without something to tell them apart the
+  first round of every candidate rendered the same prompt and a build paid for
+  N calls to learn one thing. What differs is a *reading* — where to start
+  looking, one per rule in the catalogue and then a catch-all, assigned by
+  candidate number — not a rule: every rule stays open to every candidate, so a
+  candidate sent to look at the loops may still propose an inline, and one that
+  finds nothing where it was sent answers `sound` and the build moves on. The
+  prompt states which candidate of how many it is, which is what keeps a build
+  with more candidates than readings from repeating one; a build that asked for
+  a single candidate is told nothing, there being no other reading to differ
+  from.
 
 
 ## Libraries
