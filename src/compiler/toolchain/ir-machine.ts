@@ -593,8 +593,16 @@ interface PackedSum {
   readonly from: number;
   /** The value the counter is compared against on every turn. */
   readonly bound: SemanticValue;
-  /** The one array the value reads elements of, which is what a pair load is of. */
-  readonly array: string;
+  /**
+   * The arrays the value reads elements of, in the order it first reads each.
+   *
+   * Every one of them is read at the counter, so a pair of turns reads a pair of
+   * elements of each that stand beside each other — one load of sixteen bytes
+   * apiece. Each is therefore given a register of its own to hold the first
+   * element, since the loads are written against different bases and there is
+   * no one register that addresses all of them.
+   */
+  readonly arrays: readonly string[];
 }
 
 /**
@@ -621,17 +629,36 @@ function packedSumOf(loop: SemanticLoop): PackedSum | null {
   if (namesIn(loop.to).some((name) => name === statement.name || name === loop.variable)) return null;
   const census = new Census(statement.value, loop.variable, statement.name);
   if (census.calls || !census.packable) return null;
-  if (census.arrays.length > 1) return null;
-  const array = census.arrays[0];
-  if (array === undefined) return null;
   return {
     counter: loop.variable,
     accumulator: statement.name,
     added: statement.value,
     from,
     bound: loop.to,
-    array,
+    arrays: census.arrays,
   };
+}
+
+/**
+ * The registers one turn of a packed sum is written with: where the pair of
+ * counters it is for stands, how far along the arrays it reads has come, and
+ * which register holds the first element of each of them.
+ *
+ * These are the loop's own, gathered once so that every value under the addition
+ * is written against the same registers rather than each being handed its own
+ * copy of them.
+ */
+interface PackedTurn {
+  /** The register holding the pair of counters this turn is for, one in each lane. */
+  readonly counter: number;
+  /** The name that pair is of, which is the loop's own counter. */
+  readonly counterName: string;
+  /** The register holding how many bytes of the arrays the pairs have read. */
+  readonly cursor: number;
+  /** The arrays a turn reads, in the order the census first read each. */
+  readonly arrays: readonly string[];
+  /** The register holding the first element of each, in the same order. */
+  readonly bases: readonly number[];
 }
 
 /**
@@ -2288,10 +2315,19 @@ class Machine {
     // accumulator's, which the build gave a name this loop adds into a register
     // of its own and which is therefore not free to write through.
     const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED], 3);
-    const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 2);
+    // One register for the cursor the pair load is written against, and one for
+    // each array's first element: a load is written against a base and a
+    // displacement, so two arrays cannot share one register however little they
+    // are read. A value reading more arrays than there are registers free is left
+    // to be written the way every other loop is.
+    const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 1 + sum.arrays.length);
     if (vectors === null || registers === null) return false;
     const [result, other, third] = vectors;
-    const [cursor, base] = registers;
+    const [cursor, ...bases] = registers;
+
+    // What one turn is written with, gathered once so that every value under the
+    // addition is written against the same registers.
+    const turn: PackedTurn = { counter, counterName: sum.counter, cursor, arrays: sum.arrays, bases };
 
     // Declared before anything is written, because the scalar tail at the end
     // reads the counter as the index the leftover turn is at. It is the one
@@ -2323,7 +2359,10 @@ class Machine {
     this.code.movsLoadLabel(other, this.floatLiteral(floatBits(sum.from + 1, false)), false);
     this.code.unpackLow(counter, other);
 
-    this.readInto(this.slot(sum.array), base);
+    // Each array's first element, read once for the whole loop: a pair of turns
+    // reads a pair of elements that stand beside each other in every one of them,
+    // so the base of each is the same on every turn.
+    for (const [at, name] of sum.arrays.entries()) this.readInto(this.slot(name), bases[at]);
     this.code.movRegImm(cursor, BigInt(sum.from * 8));
     // A sum taken one turn at a time starts at nothing, in the register the
     // additions will be made into.
@@ -2334,7 +2373,7 @@ class Machine {
     this.code.movRegMemSized(RAX, frame(limit.offset), 8, true);
     this.code.alu("cmp", RAX, cursor, true);
     this.code.jcc("l", paired);
-    this.packedValue(sum.added, result, other, third, counter, sum.counter, base, cursor);
+    this.packedValue(sum.added, result, other, third, turn);
     // The low lane is this turn and the high lane is the next, and they are
     // added in that order because that is the order the scalar loop added in.
     // Nothing under the addition is a vector addition, so the only pair of turns
@@ -2403,10 +2442,7 @@ class Machine {
     into: number,
     other: number,
     third: number,
-    counter: number,
-    counterName: string,
-    base: number,
-    cursor: number,
+    turn: PackedTurn,
   ): void {
     switch (value.k) {
       case "const": {
@@ -2415,8 +2451,8 @@ class Machine {
         return;
       }
       case "local": {
-        if (value.name === counterName) {
-          this.code.packedMove(into, counter);
+        if (value.name === turn.counterName) {
+          this.code.packedMove(into, turn.counter);
           return;
         }
         this.code.movsLoad(into, frame(this.slot(value.name).offset), false);
@@ -2425,9 +2461,13 @@ class Machine {
       }
       case "element": {
         // Two turns read two doubles that stand beside each other, which is one
-        // load of sixteen bytes: the base of the array and the cursor of the
-        // pairs, both of which are in registers for the whole loop.
-        this.code.packedLoad(into, indexed(base, cursor, 1));
+        // load of sixteen bytes: the base of the array the read names and the
+        // cursor of the pairs, both of which are in registers for the whole loop.
+        const of = value.of.k === "local" ? value.of.name : "";
+        const at = turn.arrays.indexOf(of);
+        const base = turn.bases[at];
+        if (base === undefined) throw machineError("a pair load was written for an array no base register was read for");
+        this.code.packedLoad(into, indexed(base, turn.cursor, 1));
         return;
       }
       case "arith": {
@@ -2435,8 +2475,8 @@ class Machine {
         // is built with the register it is standing in as its third and writes
         // over it, and the answer is the instruction that joins the two. That is
         // what a census bounds the height of the right side for.
-        this.packedValue(value.left, into, other, third, counter, counterName, base, cursor);
-        this.packedValue(value.right, other, third, into, counter, counterName, base, cursor);
+        this.packedValue(value.left, into, other, third, turn);
+        this.packedValue(value.right, other, third, into, turn);
         this.code.packed(value.op as "add" | "sub" | "mul" | "div", into, other);
         return;
       }

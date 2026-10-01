@@ -1370,6 +1370,8 @@ const add = (left: SemanticValue, right: SemanticValue): SemanticValue =>
   ({ k: "arith", type: F64, op: "add", left, right });
 const divide = (left: SemanticValue, right: SemanticValue): SemanticValue =>
   ({ k: "arith", type: F64, op: "div", left, right });
+const subtract = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: F64, op: "sub", left, right });
 const at = (array: string, index: SemanticValue): SemanticValue => ({
   k: "element",
   type: F64,
@@ -1418,20 +1420,47 @@ function sumLoop(added: (counter: SemanticValue) => SemanticValue): SemanticBloc
   };
 }
 
-function sumSubject(added: (counter: SemanticValue) => SemanticValue): SemanticFunction {
-  return subject(F64, sumLoop(added), [
-    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
-    { kind: "value", name: "n", mutable: false, type: F64 },
-  ]);
+function sumSubject(added: (counter: SemanticValue) => SemanticValue, second = false): SemanticFunction {
+  const params: SemanticSlot[] = [{ kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 }];
+  if (second) params.push({ kind: "value", name: "b", mutable: false, type: ARRAY_OF_F64 });
+  params.push({ kind: "value", name: "n", mutable: false, type: F64 });
+  return subject(F64, sumLoop(added), params);
 }
 
 /** Lays an array down, calls the function and prints what it answered in full. */
-function sumDriver(turns: number, a: readonly number[]): (name: string) => string {
+function sumDriver(turns: number, a: readonly number[], b?: readonly number[]): (name: string) => string {
   return (name) => [
     `  double a[${Math.max(turns, 1)}];`,
     ...a.map((value, at_) => `  a[${at_}] = ${value};`),
-    `  printf("%.17g", ${name}(a, ${turns}));`,
+    ...(b === undefined ? [] : [`  double b[${Math.max(turns, 1)}];`, ...b.map((value, at_) => `  b[${at_}] = ${value};`)]),
+    `  printf("%.17g", ${name}(a${b === undefined ? "" : ", b"}, ${turns}));`,
   ].join("\n");
+}
+
+/**
+ * `total += f(i)`, summed in the order the loop wrote it.
+ *
+ * A `stride` of two sums the turns in pairs first, which is the grouping a
+ * vector accumulator would give. It is only here so that a test can show the two
+ * answers differ on the data it chose; nothing here writes it.
+ */
+function sumOf(
+  a: readonly number[],
+  b: readonly number[] | undefined,
+  turns: number,
+  f: (i: number) => number,
+  stride = 1,
+): number {
+  const terms: number[] = [];
+  for (let i = 0; i < turns; i += 1) terms.push(b === undefined ? f(i) : (a[i] - b[i]) / f(i));
+  if (stride === 1) return terms.reduce((total, one) => total + one, 0);
+  let total = 0;
+  for (let at = 0; at < turns; at += stride) {
+    let pair = 0;
+    for (let step = 0; step < stride && at + step < turns; step += 1) pair += terms[at + step];
+    total += pair;
+  }
+  return total;
 }
 
 /** A call of the shape a census refuses, over a name this function does have. */
@@ -1534,9 +1563,37 @@ test("a conversion under the addition is refused, because a packed one answers a
   assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
 });
 
-test("a second array under the addition is refused, because the lanes would not read beside each other", async () => {
+test("an element read anywhere but the counter is refused, because the pair load reads this turn and the next", async () => {
   const fn = sumSubject((i) => divide(at("a", i), at("a", add(i, number("1")))));
   assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
+});
+
+test("a value reading two arrays is written a pair of counters at a time, each array its own load", async () => {
+  // The shape neither vector path took before: a turn is a difference of two
+  // arrays over a weight built from the counter, which is neither the single
+  // product a dot product is nor a turn reading one array.
+  const turns = 7;
+  const a = [1e16, 1, -1e16, 1, 1e16, 1, -1e16];
+  const b = [0, 0, 0, 0, 0, 0, 0];
+  const fn = sumSubject((i) => divide(subtract(at("a", i), at("b", i)), add(mul(i, i), number("7"))), true);
+  const text = await emitted(fn);
+  assert.match(text, /\bmovups\b/, "a pair of counters is one load of two doubles");
+  assert.equal(
+    (text.match(/\bmovups\b/g) ?? []).length,
+    2,
+    "one pair load per array: each is read against a base of its own",
+  );
+  // The data is chosen so that pairing the turns changes the answer, which is
+  // what makes the comparison below a test of the order rather than a test of
+  // the arithmetic.
+  const ordered = sumOf(a, b, turns, (i) => i * i + 7);
+  const paired = sumOf(a, b, turns, (i) => i * i + 7, 2);
+  assert.notEqual(ordered, paired, "this data tells a re-grouping of the sum apart at all");
+  assert.equal(
+    Number(await lowered(fn, sumDriver(turns, a, b))),
+    ordered,
+    "the two arrays are read beside each other, and the sum is the one the loop wrote",
+  );
 });
 
 
