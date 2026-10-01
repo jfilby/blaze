@@ -23,7 +23,7 @@ import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { run } from "../core/process.ts";
 import { typeText } from "../core/semantic-ir.ts";
-import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const I32: SemanticType = { kind: "primitive", name: "i32" };
@@ -700,4 +700,209 @@ test("optimizing a function that is already optimized changes nothing", () => {
   }, F64, [a, b]));
   const twice = optimizeSemanticFunction(structuredClone(once));
   assert.equal(printSemanticFunction(twice), printSemanticFunction(once), "the second run is a no-op");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Unrolling                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** A counted loop with the ends a test writes down and a body of its own. */
+function counting(
+  to: SemanticValue,
+  statements: SemanticBlock["statements"],
+  over: Partial<Extract<SemanticStatement, { k: "loop" }>["loop"]> = {},
+): SemanticStatement {
+  return {
+    k: "loop",
+    line: 3,
+    loop: {
+      kind: "counted", variable: "i", type: I32,
+      from: constOf("0", I32), to, step: constOf("1", I32),
+      inclusive: false, down: false, header: "b1", exit: "entry",
+      ...(over as object),
+      body: { id: "b2", releases: [], statements, terminator: { k: "next" } },
+    },
+  };
+}
+
+/** `total += i`, which is what a body here mostly does. */
+const addTheCounter = (total: string): SemanticStatement => ({
+  k: "set", name: total, op: "+=", line: 3,
+  value: { k: "local", type: I32, name: "i" },
+});
+
+/** A function that sums the counter, with the loop the test is about. */
+function countingTo(to: SemanticValue, body: SemanticBlock["statements"], over?: Partial<Extract<SemanticStatement, { k: "loop" }>["loop"]>): SemanticFunction {
+  const total: SemanticSlot = { kind: "value", name: "total", mutable: true, type: I32 };
+  return fnOf({
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: total, value: constOf("0", I32), line: 1 },
+      counting(to, body, over),
+    ],
+    terminator: { k: "return", value: { k: "local", type: I32, name: "total" } },
+  }, I32, [total]);
+}
+
+test("a loop that never turns is not a loop", () => {
+  // `for (i = 0; i < 0; i++)` runs no turn at all, and the body of it is code
+  // the source never reached — a counter that starts past its own bound.
+  const after = printed(countingTo(constOf("0", I32), [addTheCounter("total")]));
+  assert.doesNotMatch(after, /for\[/, `a loop with no turns is gone:\n${after}`);
+  assert.doesNotMatch(after, /set total/, `and so is the body it never ran:\n${after}`);
+});
+
+test("a loop of a few turns is written out, each turn reading the number it is on", () => {
+  // Three turns of `total += i` are 0, 1 and 2, and a counter read as the loop's
+  // own name would be a name no block declares any more — the turn leaves the
+  // loop, and the counter was declared in it.
+  const after = printed(countingTo(constOf("3", I32), [addTheCounter("total")]));
+  assert.doesNotMatch(after, /for\[/, `a loop of three turns is written out:\n${after}`);
+  assert.match(after, /set total \+= const\[i32\] 0/, `the first turn reads zero:\n${after}`);
+  assert.match(after, /set total \+= const\[i32\] 1/, `the second reads one:\n${after}`);
+  assert.match(after, /set total \+= const\[i32\] 2/, `the third reads two:\n${after}`);
+});
+
+test("a loop of a few turns gives each turn the names it declares of its own", () => {
+  // Two turns that both declare `t` are two turns writing the same slot, and the
+  // second turn answers what the first one left there. The copy is renamed
+  // beside the one it had, so the two are two names.
+  const body: SemanticBlock["statements"] = [
+    {
+      k: "let", line: 3,
+      slot: { kind: "value", name: "t", mutable: false, type: I32 },
+      value: bin("add", { k: "local", type: I32, name: "total" }, { k: "local", type: I32, name: "i" }, I32),
+    },
+    { k: "set", name: "total", op: "+=", value: { k: "local", type: I32, name: "t" }, line: 3 },
+  ];
+  const fn = fnOf({
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: constOf("0", I32), line: 1 },
+      counting(constOf("2", I32), body),
+    ],
+    terminator: { k: "return", value: { k: "local", type: I32, name: "total" } },
+  }, I32, [{ kind: "value", name: "total", mutable: true, type: I32 }]);
+  const after = printed(fn);
+  const declared = [...after.matchAll(/let value\[i32\] (unrolled\d+) immutable/g)].map((one) => one[1]);
+  assert.equal(declared.length, 2, `each turn declares a name of its own:\n${after}`);
+  assert.equal(new Set(declared).size, 2, `and the two are not one name written twice:\n${after}`);
+  assert.match(after, /unrolled\d+ immutable = \[add\[i32\] local\[i32\] total const\[i32\] 1\]/,
+    `the second turn reads one, not zero:\n${after}`);
+});
+
+test("a loop of many turns is left as a loop, because writing it out is more code than it saves", () => {
+  // Twenty turns of `total += i` is not twenty statements. Writing them all out
+  // makes the loop twenty times the size for a loop that was one: the count is
+  // taken when it is small enough to write down and the loop is left alone when
+  // it is not. This is measured rather than assumed — unrolling a sixty-four
+  // turn loop by copies instead measured four percent slower on the machine
+  // backend, because every copy after the first has to work out its own number
+  // off a counter that is still moving.
+  const after = printed(countingTo(constOf("20", I32), [addTheCounter("total")]));
+  assert.match(after, /for\[/, `a long loop is still a loop:\n${after}`);
+  assert.match(after, /step const\[i32\] 1/, `with the step it was written with:\n${after}`);
+  assert.equal((after.match(/set total \+= /g) ?? []).length, 1, `and one turn of it:\n${after}`);
+});
+
+test("a loop whose turns are too many statements together is left as it is written", () => {
+  // Two turns of a body of forty statements is eighty statements of code where
+  // the loop was forty and a jump. The cap is what stops a pass that makes the
+  // code smaller from making it larger.
+  const body: SemanticBlock["statements"] = Array.from({ length: 40 }, (_one, at) => ({
+    k: "set", name: "total", op: "+=", line: 3,
+    value: constOf(String(at), I32),
+  }));
+  const after = printed(countingTo(constOf("2", I32), body));
+  assert.match(after, /for\[/, `a body too large to write out stays a loop:\n${after}`);
+  assert.equal((after.match(/set total \+= /g) ?? []).length, 40, `with its body as it was:\n${after}`);
+});
+
+test("a loop that counts down is written out the same way it counts up", () => {
+  // `for (i = 3; i >= 1; i--)` is three turns reading 3, 2 and 1, and the
+  // second turn reads one less than the first — which is what the direction of
+  // the step is for, and a turn that added the offset would read 4.
+  const fn = countingTo(constOf("1", I32), [addTheCounter("total")], {
+    variable: "i", type: I32,
+    from: constOf("3", I32), to: constOf("1", I32), step: null,
+    inclusive: true, down: true, header: "b1", exit: "entry",
+  });
+  const after = printed(fn);
+  assert.doesNotMatch(after, /for\[/, `three turns are written out:\n${after}`);
+  assert.match(after, /set total \+= const\[i32\] 3/, `the first turn reads three:\n${after}`);
+  assert.match(after, /set total \+= const\[i32\] 2/, `the second reads two:\n${after}`);
+  assert.match(after, /set total \+= const\[i32\] 1/, `the last reads one:\n${after}`);
+});
+
+test("a loop whose turn leaves the loop is left as it is written", () => {
+  // A `continue` in the body would restart the unrolled loop rather than skip
+  // the copy beside it, so the loop stays a loop. What the counter reads after
+  // the loop is not asked about here either: the point is that the loop is one
+  // the source wrote.
+  const after = printed(countingTo(constOf("4", I32), [
+    {
+      k: "if", line: 3,
+      condition: {
+        k: "compare", type: BOOL, op: "lt", operand: I32,
+        left: { k: "local", type: I32, name: "total" }, right: constOf("5", I32),
+      },
+      then: { id: "b3", releases: [], statements: [], terminator: { k: "jump", target: "b1", releases: [] } },
+      otherwise: null,
+    },
+    addTheCounter("total"),
+  ]));
+  assert.match(after, /jump b1/, `the continue is still there:\n${after}`);
+  assert.match(after, /for\[/, `and so is the loop it continues:\n${after}`);
+});
+
+test("a loop whose turn moves the counter is left as it is written", () => {
+  // Which number a turn is on is what an unrolled turn is written against, so
+  // a body that moves the counter itself has a turn that cannot be told from
+  // the one beside it.
+  const after = printed(countingTo(constOf("4", I32), [
+    addTheCounter("total"),
+    { k: "set", name: "i", op: "+=", value: constOf("0", I32), line: 3 },
+  ]));
+  assert.match(after, /set i \+= const\[i32\] 0/, `the body still moves the counter:\n${after}`);
+  assert.equal((after.match(/set total \+= /g) ?? []).length, 1, `and it is still one turn:\n${after}`);
+});
+
+test("a counter that does not move toward its bound is left as it is written", () => {
+  // `for (i = 0; i < 4; i--)`: the counter walks away from the bound it counts
+  // to. Counting its turns means counting for ever, which is why this stops.
+  const fn = countingTo(constOf("4", I32), [addTheCounter("total")], {
+    variable: "i", type: I32,
+    from: constOf("0", I32), to: constOf("4", I32), step: constOf("-1", I32),
+    inclusive: false, down: false, header: "b1", exit: "entry",
+  });
+  const after = printed(fn);
+  assert.match(after, /for\[/, `a loop that never ends is left alone:\n${after}`);
+  assert.match(after, /step const\[i32\] -1/, `with the step it was written with:\n${after}`);
+});
+
+test("a loop over a buffer is not unrolled, because its length is not a number written out", () => {
+  // The counter of a `for ... of` is a whole number too, but the loop counts
+  // to a length read at run time, so there is no count to work out here.
+  const values: SemanticSlot = { kind: "value", name: "values", mutable: false, type: { kind: "primitive", name: "u8" } };
+  const fn = fnOf({
+    id: "entry",
+    releases: [],
+    statements: [{
+      k: "loop", line: 2,
+      loop: {
+        kind: "each", index: "k", element: "v", elementType: I32, of: "values",
+        length: { k: "length", type: I32, of: { k: "local", type: { kind: "primitive", name: "u8" }, name: "values" } },
+        header: "b1", exit: "entry",
+        body: {
+          id: "b2", releases: [], terminator: { k: "next" },
+          statements: [{ k: "set", name: "k", op: "+=", value: constOf("0", I32), line: 2 }],
+        },
+      },
+    }],
+    terminator: { k: "return", value: null },
+  }, { kind: "void" }, [values, { kind: "value", name: "k", mutable: true, type: I32 }]);
+  const after = printed(fn);
+  assert.match(after, /for_of\[/, `a walk over a buffer stays a walk:\n${after}`);
 });

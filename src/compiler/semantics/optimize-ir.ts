@@ -35,7 +35,7 @@ import {
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import { hasCall, isInteger, isUnsigned, slotType } from "../core/semantic-ir.ts";
-import { isBindable, isSafeToCompute, replaceValues, slotFor, typeLabel, valueKey } from "./repair.ts";
+import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -702,6 +702,197 @@ function hoistLoopInvariants(body: Body): boolean {
   return changed;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Unrolling                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How many turns of a counted loop are counted before the loop is left as the
+ * source wrote it. Counting is what decides whether the loop can be unrolled,
+ * and a loop that turns a hundred million times is worth more standing still
+ * than is worth counting.
+ */
+const MAX_COUNTED_TURNS = 1024;
+
+/** As many turns as are written out whole before a loop is left as it is. */
+const MAX_UNROLLED_TURNS = 4;
+
+/** As many statements as the turns of one body may add up to. */
+const MAX_UNROLLED_STATEMENTS = 64;
+
+/**
+ * A number a loop counts in, as the compiler's own, or null when it is not one
+ * this can count in.
+ *
+ * Both have to be whole, and for the same reason: a turn of an unrolled body
+ * reads its own number off the counter by an addition, and an addition over a
+ * number that is not whole — or that is whole but too large to be exact — is a
+ * turn that ran on a number the source never wrote.
+ */
+function countedNumber(value: SemanticValue): number | null {
+  if (value.k !== "const") return null;
+  if (numberType(value) === null) return null;
+  const number = asNumber(value.text);
+  return number !== null && Number.isSafeInteger(number) ? number : null;
+}
+
+/** A whole number written out at a type, which is what a bound and a step become. */
+function integerAt(type: SemanticType, value: number): SemanticValue {
+  return { k: "const", type, text: asText(value) };
+}
+
+/**
+ * Unrolls the loops whose turn is already settled, and drops the ones that never
+ * turn.
+ *
+ * The rules a review proposes here are `hoist-invariant` and nothing else: this
+ * is not a rule of the catalogue but a property of the IR, decided the same way
+ * every time and asked about no model. A loop whose ends are all written out
+ * runs a number of turns the compiler can work out for itself, and a number of
+ * turns it knows is a number of turns it does not have to ask about: the count
+ * and the compare go, and what is left is the body, several times over.
+ *
+ * The counter is what makes it safe. A turn that leaves the loop, or that moves
+ * the counter itself, is a turn this cannot write twice, and a body either has
+ * those or has not — which is the whole of what is decided before anything is
+ * rewritten.
+ */
+function unrollCountedLoops(body: Body): boolean {
+  let changed = false;
+  // A copy of a body brings names and block ids with it, and neither may be one
+  // the function already has, so what they are taken from grows as the walk
+  // goes and a later loop cannot mint what an earlier one took.
+  const taken = new Set<string>();
+  for (const param of body.params) taken.add(param.name);
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    taken.add(block.id);
+    for (const statement of block.statements) {
+      if (statement.k === "let") taken.add(statement.slot.name);
+    }
+  }
+  const walk = (block: SemanticBlock): void => {
+    block.statements = block.statements.flatMap((statement) => {
+      if (statement.k !== "loop") return [statement];
+      const rewritten = unrollOne(statement, taken);
+      if (rewritten === null) return [statement];
+      changed = true;
+      return rewritten;
+    });
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+  };
+  walk(body.entry);
+  return changed;
+}
+
+/**
+ * What a counted loop turns into, or null when it is left as it was written.
+ *
+ * Nothing here is asked of the loop's body beyond what a turn may and may not
+ * do: it may not leave the loop, and it may not move the counter. Everything
+ * else — the counter's type, whether it wraps, whether the turns divide evenly
+ * — is arithmetic, and it is done in the loop's own type because that is where
+ * the counter lives.
+ */
+function unrollOne(
+  statement: Extract<SemanticStatement, { k: "loop" }>,
+  taken: Set<string>,
+): SemanticStatement[] | null {
+  const loop = statement.loop;
+  if (loop.kind !== "counted") return null;
+  if (loop.type.kind !== "primitive") return null;
+  if (WIDTH[loop.type.name] === undefined && FLOAT_TYPES[loop.type.name] !== true) return null;
+  const name = loop.type.name as NumericName;
+  // A whole number of a whole-number type counts in that type's range, because
+  // that is where the counter lives: a `u8` counting to ten runs two hundred
+  // and eighty-one times, wrapping round, and a count done in the compiler's own
+  // numbers would call that one turn. A float counts as a double, which is what
+  // the machine adds with.
+  const whole = WIDTH[loop.type.name] !== undefined;
+
+  const from = countedNumber(loop.from);
+  const to = countedNumber(loop.to);
+  const step = loop.step === null ? (loop.down ? -1 : 1) : countedNumber(loop.step);
+  if (from === null || to === null || step === null || step === 0) return null;
+  // A counter that does not move toward the bound it counts to is a loop the
+  // source wrote, and this pass does not second-guess one.
+  if (loop.down ? step > 0 : step < 0) return null;
+
+  // A turn that leaves the loop cannot be written twice: a `continue` would
+  // restart the unrolled loop rather than skip the copy beside it, and a
+  // `break` — of this loop or of one inside it — would leave the whole of it.
+  if (nestedSemanticBlocks(loop.body).some((block) => block.terminator.k === "jump")) return null;
+  // A turn that moves the counter cannot be told from the turn beside it, since
+  // which number it is on is what the copy is written against.
+  if (namesWrittenIn(loop.body).has(loop.variable)) return null;
+
+  const keepsGoing = (counter: number): boolean =>
+    loop.inclusive
+      ? loop.down
+        ? counter >= to
+        : counter <= to
+      : loop.down
+        ? counter > to
+        : counter < to;
+  let turns = 0;
+  let counter = from;
+  while (keepsGoing(counter)) {
+    counter = whole ? wrapWhole(counter + step, name) : counter + step;
+    if (!Number.isSafeInteger(counter)) return null;
+    turns += 1;
+    if (turns > MAX_COUNTED_TURNS) return null;
+  }
+
+  // A loop that never turns is a loop that is not there.
+  if (turns === 0) return [];
+  // A loop of a few turns is written out whole, and that is the whole of what
+  // this does. Writing out every turn takes the counter away altogether: the
+  // number a turn is on is a number written out, so the arithmetic over it
+  // folds, and what is left is the body with no step, no compare and no branch
+  // around it. A loop of three turns over four statements measured eight percent
+  // faster that way and the same function with sixty-four turns measured four
+  // percent SLOWER when it was unrolled by copies instead, because a copy after
+  // the first has to work out its own number off a counter that is still
+  // moving. So the count is taken when it is small enough to write down and the
+  // loop is left alone when it is not.
+  if (turns > MAX_UNROLLED_TURNS || turns * loop.body.statements.length > MAX_UNROLLED_STATEMENTS) return null;
+  return Array.from({ length: turns }, (_one, turn) => ({
+    k: "block" as const,
+    body: copyOfBody(loop, taken, integerAt(loop.type, wrapWhole(from + turn * step, name))),
+    line: statement.line,
+  }));
+}
+
+/**
+ * One turn of a counted loop, written out.
+ *
+ * The turn is a block of its own, which is where the names it declares are kept
+ * apart: two turns that both declare `sum` are two turns writing the same slot,
+ * so every name a turn declares is renamed beside the one it had, and its blocks
+ * are renamed for the same reason.
+ *
+ * `counter` is the number this turn is on. It is not a name read: the turn
+ * leaves the loop, and the counter was declared in it, so the one number it
+ * held is written into the turn in full.
+ */
+function copyOfBody(
+  loop: Extract<SemanticLoop, { kind: "counted" }>,
+  taken: Set<string>,
+  counter: SemanticValue,
+): SemanticBlock {
+  const writes = new Map<string, string>();
+  for (const block of nestedSemanticBlocks(loop.body)) {
+    for (const name of declaredNames(block)) writes.set(name, freshName(taken, "unrolled"));
+  }
+  const blocks = new Map<string, string>();
+  for (const block of nestedSemanticBlocks(loop.body)) {
+    blocks.set(block.id, freshName(taken, "unrolledBlock"));
+  }
+  const bindings = new Map<string, SemanticValue>([[loop.variable, counter]]);
+  return replaceBlockIds(substituteLocals(loop.body, bindings, writes), blocks) as SemanticBlock;
+}
+
 /**
  * The values a loop statement carries that do not change between turns.
  *
@@ -716,32 +907,33 @@ function loopInvariants(loop: SemanticLoop): SemanticValue[] {
   return [loop.condition];
 }
 
-/** Every name a loop and its body write, which an invariant may not read. */
+/** Every name a loop and the blocks inside it write, which an invariant may not read. */
 function namesWrittenBy(loop: SemanticLoop): Set<string> {
-  const written = new Set<string>();
+  const written = namesWrittenIn(loop.body);
   if (loop.kind === "counted") written.add(loop.variable);
   else if (loop.kind === "each") {
     written.add(loop.index);
     written.add(loop.element);
   }
-  const walk = (block: SemanticBlock): void => {
-    for (const statement of block.statements) {
+  return written;
+}
+
+/** Every name the statements of a block and the blocks inside it write. */
+function namesWrittenIn(block: SemanticBlock): Set<string> {
+  const written = new Set<string>();
+  const walk = (one: SemanticBlock): void => {
+    for (const statement of one.statements) {
       switch (statement.k) {
         case "set":
         case "step": written.add(statement.name); break;
         case "setElement": written.add(statement.buffer); break;
         case "let": written.add(statement.slot.name); break;
-        case "loop": {
-          const inner = namesWrittenBy(statement.loop);
-          for (const name of inner) written.add(name);
-          break;
-        }
         default: break;
       }
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
   };
-  walk(loop.body);
+  walk(block);
   return written;
 }
 
@@ -1499,6 +1691,9 @@ function optimizeBody(body: Body): void {
     if (foldAll(body)) changed = true;
     if (pruneAll(body)) changed = true;
     if (hoistLoopInvariants(body)) changed = true;
+    // Unrolling reads the loop's ends, so it goes after the fold has made them
+    // written out and before the round decides the IR has stopped changing.
+    if (unrollCountedLoops(body)) changed = true;
     if (commonWithin(body)) changed = true;
     if (propagateCopies(body)) changed = true;
     if (inlineSingleUses(body)) changed = true;

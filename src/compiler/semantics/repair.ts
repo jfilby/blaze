@@ -266,7 +266,7 @@ function slotNames(fn: SemanticFunction): Set<string> {
 }
 
 /** A name no slot of the function has, so a rewrite cannot shadow one. */
-function freshName(taken: Set<string>, prefix: string): string {
+export function freshName(taken: Set<string>, prefix: string): string {
   for (let index = 1; ; index += 1) {
     const name = `${prefix}${index}`;
     if (!taken.has(name)) {
@@ -276,7 +276,8 @@ function freshName(taken: Set<string>, prefix: string): string {
   }
 }
 
-function declaredNames(block: SemanticBlock): string[] {
+/** Every name a block declares of its own, which a rewrite renames beside it. */
+export function declaredNames(block: SemanticBlock): string[] {
   return block.statements.flatMap((statement) => (statement.k === "let" ? [statement.slot.name] : []));
 }
 
@@ -502,7 +503,7 @@ export function replaceValues<T>(node: T, replacements: ReadonlyMap<string, Sema
  * why `inline-call` used to refuse every callee that wrote anything, which is
  * every accumulator.
  */
-function substituteLocals<T>(node: T, bindings: ReadonlyMap<string, SemanticValue>, writes: ReadonlyMap<string, string> = new Map()): T {
+export function substituteLocals<T>(node: T, bindings: ReadonlyMap<string, SemanticValue>, writes: ReadonlyMap<string, string> = new Map()): T {
   if (typeof node === "string") return (writes.get(node) ?? node) as T;
   if (isValueNode(node) && node.k === "local") {
     const bound = bindings.get(node.name);
@@ -1045,7 +1046,7 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
  * refuses, so the callee's loop body is very often also called b2 as the
  * caller's own.
  */
-function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>): T {
+export function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>): T {
   if (typeof node === "string") return (blocks.get(node) ?? node) as T;
   if (Array.isArray(node)) return node.map((entry) => replaceBlockIds(entry, blocks)) as T;
   if (node !== null && typeof node === "object") {
