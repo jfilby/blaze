@@ -29,6 +29,7 @@ import {
   walkValues,
   isBoolean,
   isFloat,
+  isInteger,
   isNumber,
   isReference,
   isTextType,
@@ -564,6 +565,228 @@ function namesIn(value: SemanticValue): string[] {
     if (one.k === "local") found.push(one.name);
   });
   return found;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Packed sum: the independent part of a loop turn, a vector at a time        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A counted loop whose one turn adds into a name a value the counter decides,
+ * where that value can be computed for a pair of counters at once.
+ *
+ * This is `PackedDot` for the loops a dot product is not. A dot product folds
+ * the whole of its turn into a vector accumulator and therefore reorders the
+ * additions, which is only sound because the IR says nothing about the order
+ * the sum is taken in. Here the addition stays exactly where the source wrote
+ * it — one `addsd` per turn, in the order the turns came — and only the
+ * arithmetic *underneath* it is done two counters at a time, because that part
+ * reads nothing the addition writes.
+ */
+interface PackedSum {
+  /** The counter the loop counts on, which the value under the addition reads. */
+  readonly counter: string;
+  /** The name the products are added into, and the value the loop answers. */
+  readonly accumulator: string;
+  /** What is added each turn: a function of the counter and of nothing written. */
+  readonly added: SemanticValue;
+  /** The element the counter starts at, which is a whole number written out. */
+  readonly from: number;
+  /** The value the counter is compared against on every turn. */
+  readonly bound: SemanticValue;
+  /** The one array the value reads elements of, which is what a pair load is of. */
+  readonly array: string;
+}
+
+/**
+ * Whether a counted loop is a `PackedSum`, and which one it is.
+ *
+ * Every condition here is a refusal rather than a promise, and they are the
+ * same ones `packedDotOf` refuses on: the loop has to count up by one from a
+ * whole number written out, and its body has to be one statement that adds into
+ * a name and holds nothing else. What is added must be a function of the
+ * counter alone — a value that reads the name it is added into is one whose
+ * lanes are not two turns of the same computation, and one that calls is one
+ * this backend will not run twice to answer one turn.
+ */
+function packedSumOf(loop: SemanticLoop): PackedSum | null {
+  if (loop.kind !== "counted") return null;
+  if (loop.inclusive || loop.down || loop.step !== null) return null;
+  if (loop.body.statements.length !== 1) return null;
+  if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
+  const statement = loop.body.statements[0];
+  if (statement.k !== "set" || statement.op !== "+=") return null;
+  if (statement.name === loop.variable) return null;
+  const from = wholeConst(loop.from);
+  if (from === null || from < 0) return null;
+  if (namesIn(loop.to).some((name) => name === statement.name || name === loop.variable)) return null;
+  const census = new Census(statement.value, loop.variable, statement.name);
+  if (census.calls || !census.packable) return null;
+  if (census.arrays.length > 1) return null;
+  const array = census.arrays[0];
+  if (array === undefined) return null;
+  return {
+    counter: loop.variable,
+    accumulator: statement.name,
+    added: statement.value,
+    from,
+    bound: loop.to,
+    array,
+  };
+}
+
+/**
+ * How deep the right side of an operation may be built.
+ *
+ * Three registers carry the work, and the right side is built with the register
+ * the left side is standing in as its third. Two operations deep is what that
+ * affords: at the third the register the left is in is wanted by something the
+ * right is still holding, and there is no fourth register to spill it to.
+ */
+const PACKED_RIGHT_DEPTH = 2;
+
+/**
+ * Whether a value is a tree of operations no deeper than `PACKED_RIGHT_DEPTH`,
+ * which is what the register discipline in `packedValue` can build while the
+ * register its neighbour is standing in is the one it borrows.
+ */
+function shallow(value: SemanticValue, depth = PACKED_RIGHT_DEPTH): boolean {
+  if (value.k !== "arith") return true;
+  if (depth === 0) return false;
+  return shallow(value.left, depth - 1) && shallow(value.right, depth - 1);
+}
+
+/**
+ * What a value reads that a packed turn cannot carry: whether any of it calls,
+ * whether it can be computed a lane at a time, and which arrays it reads.
+ *
+ * The two refusals that matter are the ones that would change the number the
+ * program answers rather than the speed it answers it at, and each of them is
+ * stated in the place that makes it.
+ */
+class Census {
+  /** Whether anything under the addition calls, which a lane cannot do once. */
+  calls = false;
+  /** Whether every operation in the value has a packed form of the same value. */
+  packable = true;
+  /** The arrays the value reads elements of, which a pair load reads beside. */
+  readonly arrays: string[] = [];
+
+  /** The counter the value under the addition reads, which is the loop's own. */
+  readonly counter: string;
+
+  /** The name the value is added into, which no lane may read. */
+  readonly accumulator: string;
+
+  constructor(value: SemanticValue, counter: string, accumulator: string) {
+    this.counter = counter;
+    this.accumulator = accumulator;
+    walkValues(value, (one) => {
+      if (one.k === "call" || one.k === "newObject") this.calls = true;
+      if (!this.fits(one)) this.packable = false;
+    });
+  }
+
+  /** Whether one value under the addition has a packed form of itself. */
+  private fits(value: SemanticValue): boolean {
+    switch (value.k) {
+      case "const":
+        // A literal is the same number in both lanes, which is what a pair of
+        // copies of it is.
+        return isFloat(value.type);
+      case "local":
+        // The counter is the pair itself. Any other name is loop-invariant,
+        // because a counted loop here writes nothing but its counter and the
+        // name it adds into, and the name it adds into is refused above.
+        return value.name !== this.accumulator;
+      case "element":
+        return this.fitsElement(value);
+      case "arith":
+        return this.fitsArithmetic(value);
+      default:
+        // A field, a length, a piece of text, a cast: none of them is a number
+        // a lane can be handed, and each would have to be computed twice for
+        // the two lanes that are wanted from it.
+        return false;
+    }
+  }
+
+  /**
+   * An element read at the counter, of a whole double.
+   *
+   * Two turns read two doubles that stand beside each other, which is one
+   * sixteen-byte load and not two eight-byte ones. That is only true of a
+   * double: a narrower element is two or four to a register, so the pair the
+   * instruction would read is not the pair the loop wants.
+   */
+  private fitsElement(value: SemanticValue & { k: "element" }): boolean {
+    if (value.of.k !== "local") return false;
+    if (value.index.k !== "local" || value.index.name !== this.counter) return false;
+    if (value.type.kind !== "primitive" || value.type.name !== "f64") return false;
+    if (!this.arrays.includes(value.of.name)) this.arrays.push(value.of.name);
+    return true;
+  }
+
+  /**
+   * An operation, and the whole of what it refuses.
+   *
+   * A packed instruction and the scalar one it stands for have to be the same
+   * computation on every input, not on the ones a test happens to try. Four
+   * families are refused here because that is not true of them.
+   *
+   * **Floating point arithmetic** — add, subtract, multiply, divide — is
+   * allowed, and is the same number: each lane is the same IEEE-754 operation
+   * on the same operands at the same rounding mode, and a packed
+   * instruction raises its exceptions on a lane without touching its
+   * neighbour. What makes this a multiply and *not* a fused multiply-add is
+   * that SSE2 has no fused form: the two are written as two instructions and
+   * rounded twice, exactly as the scalar pair is. Were a fused form added, this
+   * would have to refuse multiplication feeding an addition, because it rounds
+   * once where the loop rounds twice.
+   *
+   * **Integer arithmetic** is allowed for a sum and a difference and nothing
+   * else. A packed sum wraps each lane at the width of the type, which is what
+   * a scalar sum wraps at, so overflow is per lane and agrees. A product is
+   * refused: SSE2 has no packed multiply at these widths (`PMULLD` is SSE4.1
+   * and `PMULLQ` is AVX-512), and every packed form that does exist computes a
+   * wider answer than the scalar one truncates to, which is an overflow the two
+   * would not agree on. A quotient is refused for the same reason, and harder:
+   * there is no packed integer divide to agree with in the first place.
+   *
+   * **Shifts** are refused. A packed shift takes its count at five bits for a
+   * double-word lane and six for a quad-word one, where the scalar shift masks
+   * it at thirty-one or sixty-three — the width of the type. The two agree for
+   * every count a program would write below the width and disagree at the top
+   * of it, which is a difference the language would see.
+   *
+   * **Conversions** are refused, and this is the one that keeps this loop the
+   * shape it is written. The scalar conversion of a float to a whole number
+   * branches on the range for an unsigned target and answers the value the
+   * language means; the packed conversion (`CVTTPD2DQ`) has no such branch and
+   * answers one indefinite value instead, so the two agree on a signed target
+   * inside its range and on nothing else. The other direction is refused
+   * because widening two thirty-two bit values to two doubles moves them, and
+   * narrowing a double to a single leaves one lane where the scalar form has
+   * one value: which lane a value lands in is not something this may decide.
+   */
+  private fitsArithmetic(value: SemanticValue & { k: "arith" }): boolean {
+    if (isFloat(value.type)) {
+      if (value.op !== "add" && value.op !== "sub" && value.op !== "mul" && value.op !== "div") return false;
+    } else if (isInteger(value.type)) {
+      if (value.op !== "add" && value.op !== "sub") return false;
+    } else {
+      return false;
+    }
+    // Every side at the type of the answer, so that a lane is one value of that
+    // type rather than one of some other width the pair load did not bring.
+    if (!typeEquals(value.left.type, value.type)) return false;
+    if (!typeEquals(value.right.type, value.type)) return false;
+    // The right side is built with the register the left side is standing in as
+    // its third, which is why its height is bounded and the left side's is not:
+    // the left is finished with before the right begins, so nothing is lost by
+    // the right writing over it, while the right is built across it.
+    return shallow(value.right);
+  }
 }
 
 /**
@@ -2002,6 +2225,212 @@ class Machine {
   }
 
   /**
+   * A loop that adds a value the counter decides, where that value is computed
+   * a pair of counters at a time and the additions are not.
+   *
+   * A turn below is two turns of the loop the source wrote. What is under the
+   * addition — the element read, the weight built from the counter, the division
+   * of one by the other — is the same arithmetic on two different counters, and
+   * nothing in it reads the accumulator, so both turns' worth of it is computed
+   * in one register. What is *not* done a pair at a time is the addition: the low
+   * lane is added into the accumulator, then the high one, by the same scalar
+   * instruction and in the same order the scalar loop would have added them in.
+   *
+   * That order is the whole reason this loop is not folded into a vector
+   * accumulator the way a dot product is. A sum of floats is not the same number
+   * however it is grouped, so a loop that adds may not have its additions
+   * reordered — and this one computes everything else in the order the source
+   * wrote and adds in that order too, which is what makes the pair the same
+   * answer rather than merely a faster one.
+   *
+   * An odd number of turns leaves one over, and it is written by the body this
+   * would otherwise have written for every turn, at the counter the pairs
+   * reached. So the sum the loop answers is the sum of every turn whether the
+   * bound was an even number or not.
+   *
+   * Returns false when the registers this needs are not free, which leaves the
+   * loop to be written the way every other one is.
+   */
+  private packedSum(
+    sum: PackedSum,
+    loop: Extract<SemanticLoop, { kind: "counted" }>,
+    labels: LoopLabels,
+  ): boolean {
+    const type: SemanticType = { kind: "primitive", name: "f64" };
+    const whole: SemanticType = { kind: "primitive", name: "i64" };
+    // The pair of counters lives in the loop counter's own register, and the
+    // additions are made into the accumulator's, so a loop either of which was
+    // given no register of its own is left to be written the way every other one
+    // is. Both are asked for before the counter is bound, because binding is
+    // what declares a name: a refusal here has to leave the names the scalar
+    // loop is about to declare alone.
+    const counter = this.pinned.get(this.names.read(sum.counter));
+    const accumulator = this.slot(sum.accumulator);
+    if (counter === undefined || accumulator.register === null) return false;
+    const total = accumulator.register;
+    // Three more: where a turn's value lands, the one its other side is built
+    // in, and the one the other side borrows in turn. None of them is the
+    // accumulator's, which the build gave a name this loop adds into a register
+    // of its own and which is therefore not free to write through.
+    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED], 3);
+    const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 2);
+    if (vectors === null || registers === null) return false;
+    const [result, other, third] = vectors;
+    const [cursor, base] = registers;
+
+    // Declared before anything is written, because the scalar tail at the end
+    // reads the counter as the index the leftover turn is at. It is the one
+    // register the work below never writes through, because every read of a
+    // counter is a move out of it.
+    const variable = this.bind(sum.counter, type);
+    const to = this.heldAt(type, "blaze_bound", sum.bound);
+    const limit = this.holdAcross(whole, "blaze_limit");
+
+    // Where the pairs stop: the bound as a byte offset, less the sixteen bytes
+    // one pair is. A bound under two elements leaves this negative, which is what
+    // the signed comparison in the loop reads as "no pairs at all".
+    this.at(sum.bound, type);
+    this.code.cvtFloatToInt(RAX, XMM0, false, true);
+    this.code.shiftImm("shl", RAX, 3, true);
+    this.code.aluImm("sub", RAX, 16, true);
+    this.code.movMemRegSized(frame(limit.offset), RAX, 8);
+
+    // The counter as the pair of counters one turn answers for: this one and the
+    // next. Laying one literal over the other puts them in the two lanes, and
+    // each turn moves the pair on by one in both of them.
+    // The counter is written by `store`, which puts the accumulator into the
+    // register the loop counts in, so the value it starts from is the value the
+    // accumulator is holding at this point. It is loaded into the accumulator
+    // for that reason rather than into the counter: the pair is laid over it
+    // afterwards, and a counter written first would have its low half replaced.
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(sum.from, false)), false);
+    this.store(variable);
+    this.code.movsLoadLabel(other, this.floatLiteral(floatBits(sum.from + 1, false)), false);
+    this.code.unpackLow(counter, other);
+
+    this.readInto(this.slot(sum.array), base);
+    this.code.movRegImm(cursor, BigInt(sum.from * 8));
+    // A sum taken one turn at a time starts at nothing, in the register the
+    // additions will be made into.
+    this.code.xorFloat(total, total);
+
+    const paired = this.code.label("Lsummed");
+    this.code.bind(labels.header);
+    this.code.movRegMemSized(RAX, frame(limit.offset), 8, true);
+    this.code.alu("cmp", RAX, cursor, true);
+    this.code.jcc("l", paired);
+    this.packedValue(sum.added, result, other, third, counter, sum.counter, base, cursor);
+    // The low lane is this turn and the high lane is the next, and they are
+    // added in that order because that is the order the scalar loop added in.
+    // Nothing under the addition is a vector addition, so the only pair of turns
+    // this folds is the pair of loads and the pair of counters.
+    this.code.sse("add", total, result, false);
+    this.code.packedMove(other, result);
+    this.code.unpackHigh(other, result);
+    this.code.movsMove(XMM0, other, false);
+    this.code.sse("add", total, XMM0, false);
+    // The pair moves on by the two counters one pair of turns stands for, in
+    // both lanes: the low one is the turn the pair starts at and the high one is
+    // the turn after it, so moving both by two leaves them a turn apart.
+    this.code.movsLoadLabel(third, this.floatLiteral(floatBits(2, false)), false);
+    this.code.unpackLow(third, third);
+    this.code.packed("add", counter, third);
+    this.code.aluImm("add", cursor, 16, true);
+    this.code.jmp(labels.header);
+    this.code.bind(paired);
+
+    // The counter where the pairs left it, which is where a scalar loop stepping
+    // by one per turn would have left it too.
+    this.code.movRegReg(RAX, cursor);
+    this.code.shiftImm("shr", RAX, 3, true);
+    this.code.cvtIntToFloat(other, RAX, false);
+    // `store` writes what the accumulator holds, and the index is in the
+    // register the conversion put it in rather than in the accumulator.
+    this.code.movsMove(XMM0, other, false);
+    this.store(variable);
+
+    // The sum the pairs added is already where a scalar loop leaves it: the
+    // register the build gave the name, which every read of it below is taken
+    // from and every write to it is made to. Writing it into the frame as well
+    // would say nothing and would land in a slot the bound was given.
+    // What one turn leaves over is written by the body the loop was written
+    // with, at the counter the pairs reached, and the counter is stepped past it
+    // so that the value left behind is the one a scalar loop leaves.
+    this.load(variable);
+    this.comparedBranch(type, "lt", to, false, labels.exit);
+    this.block(loop.body);
+    this.load(variable);
+    this.one(type, "add");
+    this.store(variable);
+
+    this.code.bind(labels.exit);
+    this.freeSlot(to);
+    this.freeSlot(limit);
+    return true;
+  }
+
+  /**
+   * One value under the addition, in both lanes of a register at once.
+   *
+   * Every name this may meet is one a census has already said has a packed form
+   * of itself, so each case here is how that form is written rather than whether
+   * it may be. The counter is the pair the loop is counting; any other name is
+   * loop-invariant and is copied into both lanes; a literal is broadcast the
+   * same way; an element is the one sixteen-byte load that reads this turn and
+   * the next; and an operation is its scalar form with a `d` on the opcode.
+   *
+   * Two registers carry the work and one carries the counters, at any depth:
+   * each side is built into the register the other is not in, so neither is
+   * still standing when the instruction that joins them is written.
+   */
+  private packedValue(
+    value: SemanticValue,
+    into: number,
+    other: number,
+    third: number,
+    counter: number,
+    counterName: string,
+    base: number,
+    cursor: number,
+  ): void {
+    switch (value.k) {
+      case "const": {
+        this.code.movsLoadLabel(into, this.floatLiteral(floatBits(Number(decimalText(value.text)), false)), false);
+        this.code.unpackLow(into, into);
+        return;
+      }
+      case "local": {
+        if (value.name === counterName) {
+          this.code.packedMove(into, counter);
+          return;
+        }
+        this.code.movsLoad(into, frame(this.slot(value.name).offset), false);
+        this.code.unpackLow(into, into);
+        return;
+      }
+      case "element": {
+        // Two turns read two doubles that stand beside each other, which is one
+        // load of sixteen bytes: the base of the array and the cursor of the
+        // pairs, both of which are in registers for the whole loop.
+        this.code.packedLoad(into, indexed(base, cursor, 1));
+        return;
+      }
+      case "arith": {
+        // The left side is finished with before the right begins, so the right
+        // is built with the register it is standing in as its third and writes
+        // over it, and the answer is the instruction that joins the two. That is
+        // what a census bounds the height of the right side for.
+        this.packedValue(value.left, into, other, third, counter, counterName, base, cursor);
+        this.packedValue(value.right, other, third, into, counter, counterName, base, cursor);
+        this.code.packed(value.op as "add" | "sub" | "mul" | "div", into, other);
+        return;
+      }
+      default:
+        throw machineError("a value was packed that the census said has no packed form of itself");
+    }
+  }
+
+  /**
    * A loop that counts from one number to another. The bound and the step are
    * read once, because a `for` reads its bound on every turn and adds its step
    * on every turn, so a bound or a step the IR calls is a call the loop would
@@ -2017,6 +2446,11 @@ class Machine {
     // two rewrites of one loop have to be kept from meeting.
     const dot = packedDotOf(loop);
     if (dot !== null && this.packedDot(dot, loop, labels)) return;
+    // A loop that adds a value the counter decides is written the same way, with
+    // everything under the addition a pair of counters at a time and the
+    // addition itself one turn at a time.
+    const sum = packedSumOf(loop);
+    if (sum !== null && this.packedSum(sum, loop, labels)) return;
     // The variable is bound before the loop's own values are read, because
     // whether it has a register decides whether the value the loop starts from
     // needs a slot of its own: a counter in a register is written straight from

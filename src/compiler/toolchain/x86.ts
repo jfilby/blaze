@@ -1064,6 +1064,26 @@ export class Encoder {
   }
 
   /**
+   * The low half of a vector laid over the low half of another, which is the
+   * mirror of `unpackHigh` and the instruction that puts a pair of numbers side
+   * by side: a counter and the turn after it, or a number and a copy of itself
+   * when the two lanes are to hold the same one.
+   *
+   * As with `unpackHigh` the destination must already hold the source, and what
+   * is left is the low half of each in the low and high halves of the
+   * destination. Unlike that one, the destination's low half is replaced rather
+   * than kept, so a copy is not needed for the result to be right — only the
+   * source's high half is ignored.
+   */
+  unpackLow(destination: number, source: number): void {
+    this.byte(0x66);
+    this.rex(false, destination, source);
+    this.byte(0x0f);
+    this.byte(0x14);
+    this.modrm(source, destination);
+  }
+
+  /**
    * A comparison that leaves the condition codes the way `cmp` leaves them. An
    * ordered one raises the parity bit on operands that are not numbers, which
    * is what keeps every comparison of a NaN false.

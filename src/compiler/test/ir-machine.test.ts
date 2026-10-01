@@ -1357,3 +1357,185 @@ test("a compound assignment puts the name on the left of the operation", async (
   const fn = subject(F64, count(), [{ kind: "value", name: "v", mutable: false, type: F64 }]);
   assert.equal(await lowered(fn, (name) => `{ double r = ${name}(10.0); printf("%g", r); }`), "55", "ten, counted down");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Packed sum: the independent part of a turn, a pair of counters at a time    */
+/* -------------------------------------------------------------------------- */
+
+const U32: SemanticType = { kind: "primitive", name: "u32" };
+
+const mul = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: F64, op: "mul", left, right });
+const add = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: F64, op: "add", left, right });
+const divide = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: F64, op: "div", left, right });
+const at = (array: string, index: SemanticValue): SemanticValue => ({
+  k: "element",
+  type: F64,
+  of: local(array, ARRAY_OF_F64),
+  index,
+});
+
+/**
+ * A loop that adds `added` into a total, once for every counter from zero.
+ *
+ * The shape is the one the backend is asked about: one statement, one addition
+ * into a name, and everything under that addition a function of the counter.
+ */
+function sumLoop(added: (counter: SemanticValue) => SemanticValue): SemanticBlock {
+  return {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "set", name: "total", op: "+=", line: 4, value: added(local("i")) },
+            ],
+          },
+        },
+      },
+    ],
+  };
+}
+
+function sumSubject(added: (counter: SemanticValue) => SemanticValue): SemanticFunction {
+  return subject(F64, sumLoop(added), [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: F64 },
+  ]);
+}
+
+/** Lays an array down, calls the function and prints what it answered in full. */
+function sumDriver(turns: number, a: readonly number[]): (name: string) => string {
+  return (name) => [
+    `  double a[${Math.max(turns, 1)}];`,
+    ...a.map((value, at_) => `  a[${at_}] = ${value};`),
+    `  printf("%.17g", ${name}(a, ${turns}));`,
+  ].join("\n");
+}
+
+/** A call of the shape a census refuses, over a name this function does have. */
+const callUnder = (): SemanticValue => ({
+  k: "call",
+  type: F64,
+  call: {
+    callee: "f",
+    builtin: false,
+    signature: { name: "f", symbol: "f", params: [{ name: "v", type: "f64" }], returns: "f64" },
+    args: [local("n")],
+    argTypes: [F64],
+    returns: F64,
+    effects: [],
+    ownership: "none",
+    retain: false,
+  },
+});
+
+/** The sum the loop the source wrote answers, added in the order it wrote it. */
+function reference(a: readonly number[], turns: number, weight: (i: number) => number): number {
+  let total = 0;
+  for (let i = 0; i < turns; i += 1) total += a[i] / weight(i);
+  return total;
+}
+
+/** What the instructions say, so a test can see which path the lowering took. */
+async function emitted(fn: SemanticFunction, callable: readonly string[] = ["f", "g", "h9"]): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-census-"));
+  const objectPath = join(directory, "subject.o");
+  await buildObject({ fn, contract: contracted(fn), target: TARGET, callable: new Set(callable), objectPath });
+  return run("objdump", ["-d", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 }).stdout;
+}
+
+test("the arithmetic under an addition is written a pair of counters at a time", async () => {
+  const turns = 6;
+  const a = [1, 2, 3, 4, 5, 6];
+  const c = 7;
+  const fn = sumSubject((i) => divide(at("a", i), add(mul(i, i), number(String(c)))));
+  assert.match(await emitted(fn), /\bmovups\b/, "a pair of counters is one load of two doubles");
+  // The two are compared as numbers, which is bit for bit: a driver that printed
+  // the answer to fewer digits than a double has would hide a lane that rounded
+  // where the scalar one did not.
+  assert.equal(
+    Number(await lowered(fn, sumDriver(turns, a))),
+    reference(a, turns, (i) => i * i + c),
+    "the pair of turns answers what the two scalar turns would have",
+  );
+});
+
+test("an addition taken a turn at a time is the sum the loop wrote, not a re-grouping of it", async () => {
+  // The terms here cancel: a large one and a small one, over and over. Adding
+  // them in any other order gives a different number, so the answer below is the
+  // proof that the loop still adds in the order the source wrote it.
+  const turns = 8;
+  const a = [1e16, 1, -1e16, 1, 1e16, 1, -1e16, 1];
+  const c = 3;
+  const ordered = reference(a, turns, (i) => i * i + c);
+  const regrouped = reference([...a].reverse(), turns, (i) => i * i + c);
+  assert.notEqual(ordered, regrouped, "this data tells a reordering apart at all");
+  const fn = sumSubject((i) => divide(at("a", i), add(mul(i, i), number(String(c)))));
+  assert.equal(
+    Number(await lowered(fn, sumDriver(turns, a))),
+    ordered,
+    "the sum is the one the loop wrote, term by term",
+  );
+});
+
+test("a leftover turn is written by the body the loop was written with", async () => {
+  const turns = 5;
+  const a = [1, 2, 3, 4, 5];
+  const c = 7;
+  const fn = sumSubject((i) => divide(at("a", i), add(mul(i, i), number(String(c)))));
+  assert.equal(
+    Number(await lowered(fn, sumDriver(turns, a))),
+    reference(a, turns, (i) => i * i + c),
+    "two pairs and one turn the pairs did not reach",
+  );
+});
+
+test("a call under the addition is refused, because a lane would run it once for two turns", async () => {
+  const fn = sumSubject((i) => divide(at("a", i), callUnder()));
+  assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
+});
+
+test("a conversion under the addition is refused, because a packed one answers a different number", async () => {
+  // This is the shape `spectral_norm` has: a triangular number read back out of
+  // a float as an unsigned whole number and shifted. The scalar conversion
+  // branches on the range and answers the value the language means; `CVTTPD2DQ`
+  // answers one indefinite value instead, so a packed conversion is not the same
+  // conversion and the loop is left as it was written.
+  const triangular = (i: SemanticValue): SemanticValue => ({
+    k: "arith",
+    type: U32,
+    op: "ushr",
+    left: mul(i, add(i, number("1"))),
+    right: { k: "const", type: U32, text: "1" },
+  });
+  const fn = sumSubject((i) => divide(at("a", i), add(triangular(i), number("1"))));
+  assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
+});
+
+test("a second array under the addition is refused, because the lanes would not read beside each other", async () => {
+  const fn = sumSubject((i) => divide(at("a", i), at("a", add(i, number("1")))));
+  assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
+});
+
