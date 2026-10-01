@@ -1416,11 +1416,20 @@ function layoutOf(type: SemanticType): SemanticType | null {
   return type.kind === "ref" && type.name !== undefined ? type : null;
 }
 
-/** Whether a layout holds the fields of a shape, in the order they are written. */
+/**
+ * Whether a layout holds the fields of a shape.
+ *
+ * The fields are compared by name rather than by position, because a layout
+ * lays them out in the order the program reads them and not in the order a
+ * literal writes them. The length is checked because a shape cannot be held by
+ * a layout with a field more than it has: every field of the shape must be one
+ * the layout declares, and every field the layout declares one of the shape's.
+ */
 function holdsShape(shape: Shape, layout: ObjectLayout): boolean {
-  return shape.fields.every((field, at) => {
-    const declared = layout.fields[at];
-    return declared !== undefined && declared.name === field.name && holds(declared.type, field.value);
+  if (shape.fields.length !== layout.fields.length) return false;
+  return shape.fields.every((field) => {
+    const declared = layout.fields.find((entry) => entry.name === field.name);
+    return declared !== undefined && holds(declared.type, field.value);
   });
 }
 

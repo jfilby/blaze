@@ -318,12 +318,27 @@ class BodyTypes {
     return key;
   }
 
-  /** The value a field of a known object holds, or a reference when it is not one. */
+  /**
+   * The value a field of a known object holds, or a reference when it is not
+   * one.
+   *
+   * A field of a shape this body can name is counted as it is read. A field of
+   * an `any` is not: nothing says which object an `any` refers to, so the read
+   * is counted against no shape and the field stays where the source wrote it.
+   */
   private field(key: string, name: string): Inferred {
     const shape = this.registered.get(key);
     const field = shape?.fields.find((entry) => entry.name === name);
+    if (field !== undefined) {
+      const read = this.reads.get(key);
+      if (read === undefined) this.reads.set(key, new Map([[name, 1]]));
+      else read.set(name, (read.get(name) ?? 0) + 1);
+    }
     return field?.value ?? { kind: "type", type: ANY_REF };
   }
+
+  /** How often each field of each object this body reads was read. */
+  readonly reads = new Map<string, Map<string, number>>();
 
   /**
    * What a field holds once the body has written it. A layout is what the
@@ -476,8 +491,9 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
   const layouts = new Map<string, ObjectLayout>();
   for (const shape of ordered) {
     const name = names.get(shape.key) as string;
-    layouts.set(name, layOut(name, shape, names));
+    layouts.set(name, layOut(name, shape, names, programReads(bodies)));
   }
+
 
   for (const caller of callers.values()) {
     const definition = caller.contract.definition;
@@ -501,12 +517,60 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
   return names;
 }
 
-/** The bytes of one object: every field at its own alignment, the object at its own. */
-function layOut(name: string, shape: Shape, names: Map<string, string>): ObjectLayout {
+
+/**
+ * How often the program reads each field of each object, counted over every
+ * body the contract pass walked.
+ */
+function programReads(bodies: ReadonlyMap<string, BodyTypes>): Map<string, Map<string, number>> {
+  const totals = new Map<string, Map<string, number>>();
+  for (const body of bodies.values()) {
+    for (const [key, counts] of body.reads) {
+      const total = totals.get(key);
+      if (total === undefined) {
+        totals.set(key, new Map(counts));
+        continue;
+      }
+      for (const [field, count] of counts) total.set(field, (total.get(field) ?? 0) + count);
+    }
+  }
+  return totals;
+}
+
+/**
+ * The bytes of one object: every field at its own alignment, the object at its own.
+ *
+ * The fields are laid out in the order the program reads them, most read first.
+ * An object the program walks touches the cache lines its read fields fall in and
+ * no others, so the fields it reads share the line at the front of the object and
+ * the fields it never reads are the ones that cost a line each. Reading a field
+ * is counted, not writing one: a write brings in the line the field is on, but
+ * every field of a constructed object is written once and only the fields read
+ * again are the ones a traversal comes back for.
+ *
+ * The order is stable, so fields read equally often keep the order the source
+ * wrote them in. Every object whose fields are all read, or all unread, is
+ * therefore laid out exactly as it was, and this changes nothing for them.
+ *
+ * Offsets are assigned in this order and not before it, which is what keeps the
+ * offsets ascending and the C and Nim struct declarations, whose members gcc
+ * lays out in the order they are written, agreeing with what is stated here.
+ */
+function layOut(
+  name: string,
+  shape: Shape,
+  names: Map<string, string>,
+  reads: Map<string, Map<string, number>>,
+): ObjectLayout {
+  const counts = reads.get(shape.key) ?? new Map<string, number>();
+  const ordered = shape.fields
+    .map((field, at) => ({ field, at, count: counts.get(field.name) ?? 0 }))
+    .sort((left, right) => right.count - left.count || left.at - right.at)
+    .map((entry) => entry.field);
   const fields: { name: string; type: string; offset: number }[] = [];
   let offset = 0;
   let align = 1;
-  for (const field of shape.fields) {
+  for (const field of ordered) {
     const type: TypeExpr =
       field.value.kind === "object" ? { kind: "ref", of: null, name: names.get(field.value.key) } : field.value.type;
     const size = fieldSize(type);

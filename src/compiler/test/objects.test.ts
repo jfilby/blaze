@@ -360,3 +360,101 @@ test("a call named after an Object.prototype member is refused as an unknown cal
     assert.match(refused, new RegExp(`calls "${name}", which the program does not compile`));
   }
 });
+
+/**
+ * A node the body reads unevenly: `hot` three times, `link` once, the rest never.
+ *
+ * The reads are inside the function that writes the node, which is what counts
+ * them: a field is counted against an object the body can name, and a name the
+ * source annotated `any` names no object.
+ */
+const SKEWED = [
+  "function run(count: number): number {",
+  "  let head = { link: null, hot: 0, cold: 0, colder: 0 };",
+  "  let i = 0;",
+  "  while (i < count) {",
+  "    head = { link: head, hot: i, cold: 0, colder: 0 };",
+  "    i += 1;",
+  "  }",
+  "  let sum = 0;",
+  "  let cur = head;",
+  "  while (cur !== null) {",
+  "    sum += cur.hot + cur.hot + cur.hot;",
+  "    cur = cur.link;",
+  "  }",
+  "  return sum;",
+  "}",
+  "main();",
+  "",
+].join("\n");
+
+/** The same node, walked by a function the source could only type `any`. */
+const BLIND = [
+  "function walk(cur: any): number {",
+  "  let sum = 0;",
+  "  while (cur !== null) {",
+  "    sum += cur.hot + cur.hot + cur.hot;",
+  "    cur = cur.link;",
+  "  }",
+  "  return sum;",
+  "}",
+  "function make(count: number): any {",
+  "  let head: any = null;",
+  "  let i = 0;",
+  "  while (i < count) {",
+  "    head = { link: head, hot: i, cold: 0, colder: 0 };",
+  "    i += 1;",
+  "  }",
+  "  return walk(head);",
+  "}",
+  "main();",
+  "",
+].join("\n");
+
+test("a field the program reads more often is laid out nearer the front of its object", () => {
+  const contracts = contractsOf({ "1.ts": SKEWED }, "1.ts");
+  const run = contracts.run;
+  assert.ok(run !== undefined);
+  const layout = run.definition?.objects?.Object1;
+  assert.ok(layout !== undefined, "the program lays out the node it walks");
+
+  // `hot` is read three times where every other field is read at most once, so
+  // it takes the offset the source wrote it second in and the fields nobody
+  // reads are pushed past it. The size does not move: a layout is the same size
+  // whatever order it lays its fields out in.
+  assert.deepEqual(
+    layout.fields.map((field) => [field.name, field.offset]),
+    [["hot", 0], ["link", 8], ["cold", 16], ["colder", 24]],
+  );
+  assert.equal(layout.size, 32);
+});
+
+test("a field only an `any` reads is not counted, so the layout is left as the source wrote it", () => {
+  // The reads that order a layout are counted against an object the body can
+  // name. `cur` is an `any` here, so `cur.hot` is counted against no object and
+  // every field counts zero: the order the source wrote is the order kept.
+  const contracts = contractsOf({ "1.ts": BLIND }, "1.ts");
+  const make = contracts.make;
+  assert.ok(make !== undefined);
+  const layout = make.definition?.objects?.Object1;
+  assert.ok(layout !== undefined);
+  assert.deepEqual(
+    layout.fields.map((field) => [field.name, field.offset]),
+    [["link", 0], ["hot", 8], ["cold", 16], ["colder", 24]],
+  );
+  assert.equal(layout.size, 32);
+});
+
+test("fields read equally often keep the order the source wrote them in", () => {
+  // Stability is what keeps every other layout in the program byte for byte
+  // what it was: the tree of `binarytrees` reads `left` and `right` once each,
+  // and a program that writes a node and never reads it back counts nothing.
+  const contracts = contractsOf({ "1.ts": TREE }, "1.ts");
+  const layout = contracts.createTree?.definition?.objects?.Object1;
+  assert.ok(layout !== undefined);
+  assert.deepEqual(
+    layout.fields.map((field) => [field.name, field.offset]),
+    [["left", 0], ["right", 8]],
+  );
+  assert.equal(layout.size, 16);
+});
