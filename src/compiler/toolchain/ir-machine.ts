@@ -445,6 +445,115 @@ function everyBlockAtDepth(
 }
 
 /**
+ * A counted loop that adds up what two arrays hold element by element, which is
+ * the one loop shape this backend does with a whole vector of doubles at a time.
+ *
+ * `total += a[i] * b[i]` over `i` is the dot product, and it is the shape every
+ * numeric kernel over a typed array is written as. It is also the one loop whose
+ * arithmetic is a serial dependency: every turn adds into the value the turn
+ * before it left, so the sum takes as long as the array is long however fast the
+ * multiplication beside it retires. Writing the loop out into copies of its body
+ * did not shorten that chain, and measured slower. A vector accumulator is a
+ * different chain — one add per two elements, two lanes deep — and that is the
+ * whole of what this buys.
+ */
+interface PackedDot {
+  /** The counter the loop counts on, which is what both arrays are read at. */
+  readonly counter: string;
+  /** The name the products are added into, and the value the loop answers. */
+  readonly accumulator: string;
+  /** The name of the array read on the left of the product, and on the right. */
+  readonly left: string;
+  readonly right: string;
+  /** The element the counter starts at, which is a whole number written out. */
+  readonly from: number;
+  /** The value the counter is compared against on every turn. */
+  readonly bound: SemanticValue;
+}
+
+/** The whole number a `const` writes, or null where it is not one. */
+function wholeConst(value: SemanticValue): number | null {
+  if (value.k !== "const") return null;
+  if (!/^-?[0-9]+$/.test(value.text)) return null;
+  const read = Number(value.text);
+  return Number.isSafeInteger(read) ? read : null;
+}
+
+/**
+ * Whether a counted loop is a `PackedDot`, and which one it is.
+ *
+ * Every condition here is a refusal rather than a promise. The loop has to count
+ * up by one from a whole number written out; its body has to be one statement
+ * that adds a product of two element reads at the counter into a name, and it
+ * has to hold nothing — a body that breaks out of the loop, continues it,
+ * declares a name or writes the counter is one whose turns cannot be folded into
+ * pairs. The product has to be a product: a loop that sums the difference of two
+ * arrays, or divides them, is one the arithmetic below would compute wrongly
+ * rather than slowly.
+ *
+ * The counter is usually a float, because the frontend gives a loop counter the
+ * type of the numbers around it. That does not stop a turn being paired with the
+ * next one: the pairing is decided by whole numbers of bytes, and every element
+ * the counter names is one turn apart, so the same elements are read in the
+ * same order as the scalar loop read them in.
+ */
+function packedDotOf(loop: SemanticLoop): PackedDot | null {
+  if (loop.kind !== "counted") return null;
+  if (loop.inclusive || loop.down || loop.step !== null) return null;
+  if (loop.body.statements.length !== 1) return null;
+  if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
+  const statement = loop.body.statements[0];
+  if (statement.k !== "set" || statement.op !== "+=") return null;
+  if (statement.name === loop.variable) return null;
+  const product = statement.value;
+  if (product.k !== "arith" || product.op !== "mul") return null;
+  const left = readOf(product.left, loop.variable);
+  const right = readOf(product.right, loop.variable);
+  if (left === null || right === null) return null;
+  if (left.element !== "f64" || right.element !== "f64") return null;
+  if (left.of === right.of) return null;
+  const from = wholeConst(loop.from);
+  // A negative start makes the byte cursor a negative number of bytes, which the
+  // shift that turns it back into an index would read as a very large one.
+  if (from === null || from < 0) return null;
+  // A bound that is the accumulator or the counter is a value the turns change,
+  // and one read before the loop would be read once where the loop reads it
+  // again.
+  if (namesIn(loop.to).some((name) => name === statement.name || name === loop.variable)) return null;
+  return {
+    counter: loop.variable,
+    accumulator: statement.name,
+    left: left.of,
+    right: right.of,
+    from,
+    bound: loop.to,
+  };
+}
+
+/**
+ * One side of a product that reads one element of an array of doubles at the
+ * loop's own counter, or null where it is anything else.
+ */
+function readOf(
+  value: SemanticValue,
+  counter: string,
+): { readonly of: string; readonly element: string } | null {
+  if (value.k !== "element" || value.of.k !== "local") return null;
+  if (value.index.k !== "local" || value.index.name !== counter) return null;
+  if (value.type.kind !== "primitive") return null;
+  return { of: value.of.name, element: value.type.name };
+}
+
+/** The names a value reads. */
+function namesIn(value: SemanticValue): string[] {
+  const found: string[] = [];
+  walkValues(value, (one) => {
+    if (one.k === "local") found.push(one.name);
+  });
+  return found;
+}
+
+/**
  * Every block of a body, itself included, which is what a read census over the
  * whole function is taken across.
  */
@@ -1735,6 +1844,134 @@ class Machine {
   }
 
   /**
+   * Registers of a kind this loop writes, or null when the program has pinned so
+   * many that there are not enough left.
+   *
+   * Nothing in this loop calls, so borrowing the ones a caller does not ask to
+   * be preserved is free: the convention only obliges a callee to hand back what
+   * it was given, and this function has been handed nothing by the time it gets
+   * here. A pinned register is one the allocator gave to a name, and writing
+   * over it would be writing over that name's value, so they are the ones left
+   * out.
+   */
+  private borrow(pool: readonly number[], howMany: number): number[] | null {
+    const spoken = new Set(this.pinned.values());
+    const free = pool.filter((register) => !spoken.has(register));
+    return free.length >= howMany ? free.slice(0, howMany) : null;
+  }
+
+  /**
+   * A counted loop that adds up what two arrays hold, written a vector at a time.
+   *
+   * A turn of the loop below is two turns of the loop the source wrote: it reads
+   * two elements of each array, multiplies them and adds the pair into an
+   * accumulator that holds two sums at once, in three instructions where the
+   * scalar turn took two loads, a multiply, an add, and the two conversions that
+   * turn a float counter into the index either array is read at. Nothing here
+   * calls, so none of the registers it borrows has to survive anything.
+   *
+   * The counter is stepped once, at the end, rather than on every turn. The
+   * cursor is a count of bytes, and dividing it by the sixteen a pair is brings
+   * back the index of the element the pairs stopped at — which is the counter
+   * the scalar loop would have left there, because it stepped by one per turn and
+   * two turns are one pair.
+   *
+   * An odd number of elements leaves one over, and it is written by the body this
+   * would otherwise have written for every element, at the counter the pairs
+   * reached. So the sum the loop answers is the sum of every element whether the
+   * array held an odd number of them or not.
+   *
+   * Returns false when the registers this needs are not free, which leaves the
+   * loop to be written the way every other one is.
+   */
+  private packedDot(
+    dot: PackedDot,
+    loop: Extract<SemanticLoop, { kind: "counted" }>,
+    labels: LoopLabels,
+  ): boolean {
+    const type: SemanticType = { kind: "primitive", name: "f64" };
+    const whole: SemanticType = { kind: "primitive", name: "i64" };
+    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED], 3);
+    const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 3);
+    if (vectors === null || registers === null) return false;
+    const [sum, lane, spare] = vectors;
+    const [cursor, left, right] = registers;
+
+    // The counter is declared before anything is written, because the scalar tail
+    // at the end reads it as the index the leftover element is at.
+    const variable = this.bind(dot.counter, type);
+    const to = this.heldAt(type, "blaze_bound", dot.bound);
+    const limit = this.holdAcross(whole, "blaze_limit");
+
+    // Where the pairs stop: the bound as a byte offset, less the sixteen bytes
+    // one pair is. A bound under two elements leaves this negative, which is what
+    // the signed comparison in the loop reads as "no pairs at all".
+    this.at(dot.bound, type);
+    this.code.cvtFloatToInt(RAX, XMM0, false, true);
+    this.code.shiftImm("shl", RAX, 3, true);
+    this.code.aluImm("sub", RAX, 16, true);
+    this.code.movMemRegSized(frame(limit.offset), RAX, 8);
+
+    this.readInto(this.slot(dot.left), left);
+    this.readInto(this.slot(dot.right), right);
+    this.code.movRegImm(cursor, BigInt(dot.from * 8));
+    // The accumulator of a vector of two sums starts at zero in both its halves.
+    this.code.xorFloat(sum, sum);
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(dot.from, false)), false);
+    this.store(variable);
+
+    const paired = this.code.label("Lpaired");
+    this.code.bind(labels.header);
+    this.code.movRegMemSized(RAX, frame(limit.offset), 8, true);
+    this.code.alu("cmp", RAX, cursor, true);
+    this.code.jcc("l", paired);
+    // The cursor is a count of bytes and not of elements, so the address it
+    // names is the array's own plus the cursor: the scale of the index is one,
+    // and a turn reads the sixteen bytes at it.
+    this.code.packedLoad(lane, indexed(left, cursor, 1));
+    this.code.packedMem("mul", lane, indexed(right, cursor, 1));
+    this.code.packed("add", sum, lane);
+    this.code.aluImm("add", cursor, 16, true);
+    this.code.jmp(labels.header);
+    this.code.bind(paired);
+
+    // The sum of a vector of two is one number, and it is its halves added to
+    // each other: the shuffle leaves the high double in both halves, the add
+    // leaves their sum in the low one, and the low one is a whole double.
+    this.code.packedMove(spare, sum);
+    this.code.unpackHigh(spare, sum);
+    this.code.packed("add", sum, spare);
+    const accumulator = this.slot(dot.accumulator);
+    if (accumulator.register !== null) this.code.movsMove(accumulator.register, sum, false);
+    else this.code.movsStore(frame(accumulator.offset), sum, false);
+
+    // The counter where the pairs left it, which is where a scalar loop stepping
+    // by one per turn would have left it too.
+    this.code.movRegReg(RAX, cursor);
+    this.code.shiftImm("shr", RAX, 3, true);
+    this.code.cvtIntToFloat(spare, RAX, false);
+    // `store` writes what the accumulator holds, and the index is in the
+    // register the conversion put it in rather than in the accumulator.
+    this.code.movsMove(XMM0, spare, false);
+    this.store(variable);
+
+    // What one element is left over is written by the body the loop was written
+    // with, at the counter the pairs reached, and the counter is stepped past it
+    // so that the value left behind is the one a scalar loop leaves.
+    this.load(variable);
+    this.comparedBranch(type, "lt", to, false, labels.exit);
+    this.block(loop.body);
+    this.load(variable);
+    this.one(type, "add");
+    this.store(variable);
+
+    this.code.bind(labels.exit);
+    this.freeSlot(to);
+    this.freeSlot(limit);
+    return true;
+  }
+
+  /**
    * A loop that counts from one number to another. The bound and the step are
    * read once, because a `for` reads its bound on every turn and adds its step
    * on every turn, so a bound or a step the IR calls is a call the loop would
@@ -1743,6 +1980,13 @@ class Machine {
    */
   private counted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels): void {
     const type = loop.type;
+    // A loop that adds up two arrays element by element is written a whole
+    // vector at a time. It is recognised here rather than in a pass over the IR
+    // because the arithmetic is the machine's: `optimize-ir.ts` runs before any
+    // backend and would write this loop out into copies of its body first, and
+    // two rewrites of one loop have to be kept from meeting.
+    const dot = packedDotOf(loop);
+    if (dot !== null && this.packedDot(dot, loop, labels)) return;
     // The variable is bound before the loop's own values are read, because
     // whether it has a register decides whether the value the loop starts from
     // needs a slot of its own: a counter in a register is written straight from

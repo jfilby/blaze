@@ -92,7 +92,9 @@ function typeTextOf(slot: SemanticSlot): string {
   // pointer to the bytes of one.
   if (type.kind === "text") return "ptr<u8>";
   if (type.kind === "ref") return type.name === undefined ? "ref<any>" : `ref<${type.name}>`;
-  if (type.kind === "ptr" || type.kind === "slice") return `ptr<${typeTextOf({ kind: "value", name: "", mutable: false, type: type.of })}>`;
+  // An array reaches a function as a pointer to its first element: the C
+  // compiler has no array parameter, and no length arrives with it.
+  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") return `ptr<${typeTextOf({ kind: "value", name: "", mutable: false, type: type.of })}>`;
   if (type.kind === "primitive") return type.name;
   return "f64";
 }
@@ -1221,3 +1223,97 @@ test("a walk over an array keeps its index in a register", async () => {
   const printed = await lowered(fn, (name) => `{ double a[4] = {10,20,30,40}; printf("%.1f", ${name}(a, 4)); }`);
   assert.equal(printed, "100.0", "every element is walked exactly once");
 });
+
+/** `[]f64`, the type an array of doubles reaches a function as. */
+const ARRAY_OF_F64: SemanticType = { kind: "array", of: F64, length: null };
+
+/**
+ * `total += a[i] * b[i]` over `i` from zero to `n`, which is the loop this
+ * backend writes a vector at a time.
+ */
+function dotBody(): SemanticBlock {
+  const element = (buffer: string): SemanticValue => ({
+    k: "element",
+    type: F64,
+    of: local(buffer, ARRAY_OF_F64),
+    index: local("i"),
+  });
+  return {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              {
+                k: "set",
+                name: "total",
+                op: "+=",
+                line: 4,
+                value: { k: "arith", type: F64, op: "mul", left: element("a"), right: element("b") },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+}
+
+function dotSubject(): SemanticFunction {
+  return subject(F64, dotBody(), [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "b", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: F64 },
+  ]);
+}
+
+/** A driver that lays down two arrays, calls the function, and prints the sum. */
+function dotDriver(turns: number): (name: string) => string {
+  const a = Array.from({ length: turns }, (_one, at) => at + 1);
+  const b = Array.from({ length: turns }, () => 1);
+  return (name) => [
+    `  double a[${turns}], b[${turns}];`,
+    ...a.map((value, at) => `  a[${at}] = ${value}; b[${at}] = ${b[at]};`),
+    `  printf("%g", ${name}(a, b, ${turns}));`,
+  ].join("\n");
+}
+
+test("a loop that adds up two arrays is written a vector at a time", async () => {
+  // An even number of elements is all pairs, so the sum is one whole vector.
+  assert.equal(await lowered(dotSubject(), dotDriver(8)), "36", "eight elements, four pairs");
+});
+
+test("an array of an odd number of elements leaves one over for the scalar body", async () => {
+  // The pairs stop one element short and the turn the source wrote is written
+  // for that one element, at the counter the pairs reached. Seven elements is
+  // three pairs and one leftover, and five is two pairs and one leftover.
+  assert.equal(await lowered(dotSubject(), dotDriver(7)), "28", "seven elements, three pairs and a leftover");
+  assert.equal(await lowered(dotSubject(), dotDriver(5)), "15", "five elements, two pairs and a leftover");
+});
+
+test("an array of fewer elements than a pair holds is written the loop it was written as", async () => {
+  // There is no pair in a single element, so every element is the one the body
+  // was written for.
+  assert.equal(await lowered(dotSubject(), dotDriver(1)), "1", "one element, no pair");
+  assert.equal(await lowered(dotSubject(), dotDriver(0)), "0", "no elements at all");
+});
+

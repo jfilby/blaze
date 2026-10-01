@@ -975,6 +975,95 @@ export class Encoder {
   }
 
   /**
+   * A floating point operation over a whole vector of doubles at once.
+   *
+   * The packed operation is the scalar one with the operand size prefix in front
+   * of it, reading the same opcode: `addpd` is `addsd` with the `0x66` that says
+   * the operand is a pair of them. There is no `single` here because a vector of
+   * single precision values is twice as wide again and this backend has no use
+   * for one.
+   */
+  packed(operation: Float, destination: number, source: number): void {
+    this.byte(0x66);
+    this.rex(false, destination, source);
+    this.byte(0x0f);
+    this.byte(FLOAT[operation]);
+    this.modrm(source, destination);
+  }
+
+  /**
+   * A floating point operation over a whole vector of doubles with one side of
+   * it in memory, which is the instruction a vectorised loop is built out of: the
+   * product of a row of one array and a row of another is one multiply reading
+   * memory, so the lanes need no register of their own before the arithmetic
+   * that consumes them.
+   */
+  packedMem(operation: Float, destination: number, address: Memory): void {
+    this.byte(0x66);
+    this.rex(false, destination, address);
+    this.byte(0x0f);
+    this.byte(FLOAT[operation]);
+    this.modrm(address, destination);
+  }
+
+  /**
+   * A whole vector of doubles read out of memory, unaligned.
+   *
+   * The unaligned form carries no prefix at all, which is what tells it apart
+   * from the scalar load of a double in the same place: `movupd` is `movsd`
+   * without the `0xf2`, and moves sixteen bytes where the scalar moves eight.
+   * Nothing has to be aligned for it, so an array is read at whatever address its
+   * first element is at.
+   */
+  packedLoad(register: number, address: Memory): void {
+    this.rex(false, register, address);
+    this.byte(0x0f);
+    this.byte(0x10);
+    this.modrm(address, register);
+  }
+
+  /**
+   * A whole vector of doubles moved from one register into another.
+   *
+   * The aligned form, which is the one for registers: every vector register is
+   * sixteen-byte aligned whether it holds anything or not, and this is what the
+   * C compiler writes for the same move. There is no vector-to-vector form of
+   * `MOVD`, which is what the `0x6e` opcode is whichever way the prefix in
+   * front of it goes — that one moves a whole number.
+   */
+  packedMove(destination: number, source: number): void {
+    this.rex(false, destination, source);
+    this.byte(0x0f);
+    this.byte(0x28);
+    this.modrm(source, destination);
+  }
+
+  /**
+   * The high half of a vector laid over the other half of another, which is the
+   * first half of adding a vector of two to one number.
+   *
+   * The destination must already hold the source. What the instruction leaves is
+   * the high half of the source in both halves of the destination — and only in
+   * both halves when the low one was already that number. Read on its own it
+   * writes the high half and leaves the low one as it found it, which is what a
+   * shuffle that also needed the low half would be for. So the caller copies
+   * first, which is what every compiler that reduces a vector this way does.
+   *
+   * It is the high half that is wanted here: the low one would leave the low
+   * half of the sum doubled rather than summed.
+   */
+  unpackHigh(destination: number, source: number): void {
+    // The operand size prefix, not the one the scalar loads carry: these two
+    // take a whole vector whatever the operand size prefix would say of them,
+    // and there is no form of the instruction without it.
+    this.byte(0x66);
+    this.rex(false, destination, source);
+    this.byte(0x0f);
+    this.byte(0x15);
+    this.modrm(source, destination);
+  }
+
+  /**
    * A comparison that leaves the condition codes the way `cmp` leaves them. An
    * ordered one raises the parity bit on operands that are not numbers, which
    * is what keeps every comparison of a NaN false.
