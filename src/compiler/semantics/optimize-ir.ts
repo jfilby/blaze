@@ -1226,14 +1226,28 @@ function dropDeadWrites(body: Body): boolean {
  * The walk is backwards within one block, because that is the only place the
  * question can be answered. A block has its own scope, so within it a name's
  * only writers are the statements of that block and its only readers are the
- * values of those statements and the block's terminator. The walk stops at
- * anything that leaves the block — an `if`, a loop, a `block`, a `raise` —
- * because past that point a read may happen on a turn this statement did not
- * run on, and a write in another arm is not a write on this path.
+ * values of those statements and the block's terminator.
+ *
+ * A block is not an island, though, and that is what this walk has to carry: a
+ * block that ends by falling through continues into the block around it, so
+ * the names that are live after the statement the block sits inside are live
+ * inside it too, and whatever it leaves live is live after that statement. A
+ * loop body counted on its own starts from nothing and concludes that a store
+ * at the end of it is one nothing ever saw, which deletes the store and every
+ * binding the store read.
  *
  * A write whose value calls something is kept whatever the census says, because
  * the statement is then also the reason the call runs.
  */
+
+/** Whether a value reads the name it is being asked about. */
+function readsLocal(value: SemanticValue, name: string): boolean {
+  let found = false;
+  walkSemanticValue(value, (one) => {
+    if (one.k === "local" && one.name === name) found = true;
+  });
+  return found;
+}
 function dropOverwrittenStores(body: Body): boolean {
   let changed = false;
   const note = (after: Set<string>, value: SemanticValue | null): void => {
@@ -1242,10 +1256,10 @@ function dropOverwrittenStores(body: Body): boolean {
       if (one.k === "local") after.add(one.name);
     });
   };
-  for (const block of nestedSemanticBlocks(body.entry)) {
-    // The names read or written after the statement being looked at. A write to
-    // a name that is not among them is a write nothing ever saw.
-    const after = new Set<string>();
+  // The names still live once the block has run, which is what the block hands
+  // back to the one that contains it.
+  const walk = (block: SemanticBlock, liveAfter: ReadonlySet<string>): Set<string> => {
+    const after = new Set(liveAfter);
     note(after, block.terminator.k === "return" ? block.terminator.value : null);
     const kept: SemanticStatement[] = [];
     for (let at = block.statements.length - 1; at >= 0; at -= 1) {
@@ -1254,15 +1268,40 @@ function dropOverwrittenStores(body: Body): boolean {
       // The census has to see inside a statement as well as at its own value: a
       // name an `if` arm reads is read on a turn this statement may not run on,
       // and a name a loop body assigns is not assigned on this path either.
+      // The block is walked as well as counted, because what it leaves live
+      // flows out of it when the block ends by falling through.
       for (const nested of blocksInside(statement)) {
-        for (const inner of nestedSemanticBlocks(nested)) valuesOf(inner, (value) => note(after, value));
+        if (walked.has(nested)) continue;
+        walked.add(nested);
+        // What the loop reads on every turn is read inside the body as well,
+        // so the names that read walks over are live there: a body that writes
+        // the loop's own bound has written something the next turn reads, and
+        // a walk that does not know that concludes the write was one nothing
+        // ever saw.
+        const seeded = new Set(after);
+        if (statement.k === "loop") {
+          for (const value of loopInvariants(statement.loop)) note(seeded, value);
+        }
+        const leaving = walk(nested, seeded);
+        // A block that ends by falling through continues into what follows the
+        // statement it sits inside, so whatever it leaves live is live there.
+        if (nested.terminator.k === "next") {
+          for (const name of leaving) after.add(name);
+        }
       }
-      // Only a plain assignment is a candidate. A compound one reads the name
-      // it writes — `s += x` is `s = s + x` — so the name is live whatever the
-      // census says.
+      // Every name this statement reads is read here, so it is live for
+      // whatever comes before it: `s = s + x` reads the very name it writes,
+      // and a name only a later print reads is read by that print.
+      for (const value of statementValues(statement)) note(after, value);
+      // Only an assignment that reads nothing is a candidate. A compound one
+      // reads the name it writes — `s += x` is `s = s + x` — so the name is live
+      // whatever the census says, and so is one whose value names it.
+      const readsItself =
+        statement.k === "set" && readsLocal(statement.value, statement.name);
       if (
         statement.k === "set" &&
         statement.op === "=" &&
+        !readsItself &&
         !after.has(statement.name) &&
         !block.releases.includes(statement.name) &&
         !carriesAValue(statement)
@@ -1270,13 +1309,13 @@ function dropOverwrittenStores(body: Body): boolean {
         changed = true;
         continue;
       }
-      // A plain assignment reads nothing and then ends the life of whatever the
-      // name held before it, so the name leaves the census rather than joining
-      // it: what comes earlier is holding a value nothing can reach any more.
-      // A compound assignment and a step both read the name they write, so
+      // An assignment that reads nothing ends the life of whatever the name held
+      // before it, so the name leaves the census rather than joining it: what
+      // comes earlier is holding a value nothing can reach any more. One that
+      // reads the name, a compound one and a step all read what they write, so
       // those leave it live for whatever comes before.
       if (statement.k === "set") {
-        if (statement.op === "=") after.delete(statement.name);
+        if (statement.op === "=" && !readsItself) after.delete(statement.name);
         else after.add(statement.name);
       } else if (statement.k === "step") {
         after.add(statement.name);
@@ -1288,7 +1327,12 @@ function dropOverwrittenStores(body: Body): boolean {
       kept.push(statement);
     }
     block.statements = kept.reverse();
-  }
+    // A block that ends by returning or by jumping for another one hands back
+    // nothing: whatever was live where it left is the other block's business.
+    return block.terminator.k === "next" ? after : new Set<string>();
+  };
+  const walked = new Set<SemanticBlock>();
+  walk(body.entry, new Set<string>());
   return changed;
 }
 

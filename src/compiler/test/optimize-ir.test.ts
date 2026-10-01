@@ -583,6 +583,107 @@ test("a name written as itself is not written at all", () => {
   assert.doesNotMatch(after, /set s =/, `a name written as itself is written:\n${after}`);
 });
 
+test("a store inside a loop body is not a store nothing saw", () => {
+  // A loop body is a block of its own, but the block ends by falling through
+  // into the one around the loop: `total = total + small + b` writes a name the
+  // loop's own condition and the code after the loop both read, so nothing about
+  // the body makes it a store nothing ever saw. Counting the block on its own
+  // started the count from an empty set, found nothing after the assignment,
+  // and deleted the assignment — and with it the binding it read.
+  const total: SemanticSlot = { kind: "value", name: "total", mutable: true, type: F64 };
+  const small: SemanticSlot = { kind: "value", name: "small", mutable: false, type: F64 };
+  const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
+  const read = (name: string): SemanticValue => ({ k: "local", type: F64, name });
+  const after = printed(fnOf({
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: small, value: bin("mul", read("a"), constOf("3.0")), line: 2 },
+      { k: "let", slot: total, value: constOf("0"), line: 3 },
+      {
+        k: "loop",
+        line: 4,
+        loop: {
+          kind: "counted", variable: "i", type: I32,
+          from: constOf("0", I32), to: constOf("8", I32), step: constOf("1", I32),
+          inclusive: false, down: false, header: "b1", exit: "out",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "set", name: "total", op: "=", value: bin("add", bin("add", read("total"), read("small")), read("b")), line: 5 },
+            ],
+          },
+        },
+      },
+    ],
+    terminator: { k: "return", value: read("total") },
+  }, F64, [
+    { kind: "value", name: "a", mutable: false, type: F64 },
+    total,
+    b,
+  ]));
+  assert.match(after, /set total = /, `the store inside the loop body is deleted:\n${after}`);
+  assert.match(after, /let value\[f64\] small/, `the binding the store read is deleted with it:\n${after}`);
+});
+
+test("a plain assignment whose value reads the name is not a dead store", () => {
+  // `s = s + x` is `s += x` written out, so the value the name held before is
+  // read here and the store is live. Treating every plain assignment as reading
+  // nothing concluded that `s = 1` above it was one nothing ever saw.
+  const s: SemanticSlot = { kind: "value", name: "s", mutable: true, type: F64 };
+  const x: SemanticSlot = { kind: "value", name: "x", mutable: false, type: F64 };
+  const read = (name: string): SemanticValue => ({ k: "local", type: F64, name });
+  const after = printed(fnOf({
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "set", name: "s", op: "=", value: constOf("1"), line: 1 },
+      { k: "set", name: "s", op: "=", value: bin("add", read("s"), read("x")), line: 2 },
+    ],
+    terminator: { k: "return", value: read("s") },
+  }, F64, [s, x]));
+  assert.match(after, /set s = const\[f64\] 1/, `a store the next one reads is deleted:\n${after}`);
+});
+
+test("a store of a loop's own bound survives, because the loop reads it again", () => {
+  // The bound of a counted loop is read on every turn, so a body that writes
+  // it has written something the next turn reads. A walk that knows only what
+  // follows the body concludes the write was one nothing ever saw, and the loop
+  // then counts to the bound it started with.
+  const limit: SemanticSlot = { kind: "value", name: "limit", mutable: true, type: I32 };
+  const total: SemanticSlot = { kind: "value", name: "total", mutable: true, type: I32 };
+  const after = printed(fnOf({
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: limit, value: constOf("4", I32), line: 1 },
+      { k: "let", slot: total, value: constOf("0", I32), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted", variable: "i", type: I32,
+          from: constOf("0", I32), to: { k: "local", type: I32, name: "limit" }, step: constOf("1", I32),
+          inclusive: false, down: false, header: "b1", exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "set", name: "total", op: "+=", value: constOf("1", I32), line: 3 },
+              { k: "set", name: "limit", op: "=", value: constOf("9", I32), line: 3 },
+            ],
+          },
+        },
+      },
+    ],
+    terminator: { k: "return", value: { k: "local", type: I32, name: "total" } },
+  }, I32, [total]));
+  assert.match(after, /set limit = const\[i32\] 9/, `a store the loop reads again is deleted:\n${after}`);
+});
+
 test("optimizing a function that is already optimized changes nothing", () => {
   // The pass runs to a fixed point and reports whether it changed anything by
   // comparing objects, so a round that rewrites a statement it did not need to

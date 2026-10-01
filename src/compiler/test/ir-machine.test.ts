@@ -604,8 +604,8 @@ test("a loop with a step written out runs its counter the right number of times"
   // 0, 3, 6 and 9: the counter steps by three and stops at the bound.
   assert.equal(await lowered(stepped, (name) => `printf("%d", ${name}());`), "18");
 
-  // The same with the step subtracted, so the other way through the update is
-  // walked as well.
+  // The same loop counting the other way, so a written-out step is walked in
+  // both directions rather than only the one the loops above happen to use.
   const down = subject(I32, {
     id: "entry",
     statements: [
@@ -621,7 +621,10 @@ test("a loop with a step written out runs its counter the right number of times"
           to: number("0", I32),
           inclusive: false,
           down: true,
-          step: number("3", I32),
+          // The step is the signed amount the index moves by, so a loop that
+          // counts down carries a negative one: that is what `i -= 3` resolves
+          // to, and it is added like any other step.
+          step: number("-3", I32),
           header: "head",
           exit: "out",
           body: {
@@ -639,6 +642,157 @@ test("a loop with a step written out runs its counter the right number of times"
   // 10, 7, 4 and 1.
   assert.equal(await lowered(down, (name) => `printf("%d", ${name}());`), "22");
 });
+
+test("a loop that counts down counts down", async () => {
+  // The step is the signed amount the index moves by, so the direction of a
+  // written-out step is already in it and it is added like any other. Taking
+  // the direction from `down` as well moved a descending index the other way,
+  // and a loop like this one never came back.
+  const descending = (step: string | null, from: string, to: string, inclusive: boolean): SemanticFunction =>
+    subject(I32, {
+      id: "entry",
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted",
+            variable: "i",
+            type: I32,
+            from: number(from, I32),
+            to: number(to, I32),
+            inclusive,
+            down: true,
+            step: step === null ? null : number(step, I32),
+            header: "head",
+            exit: "out",
+            body: {
+              id: "body",
+              releases: [],
+              statements: [{ k: "set", name: "total", op: "+=", value: local("i", I32), line: 3 }],
+              terminator: { k: "next" },
+            },
+          },
+        },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("total", I32) },
+    });
+  const sum = async (fn: SemanticFunction): Promise<string> => lowered(fn, (name) => `printf("%d", ${name}());`);
+
+  // 10 down to 1, one turn at a time.
+  assert.equal(await sum(descending(null, "10", "0", false)), "55");
+  // 10, 7, 4 and 1.
+  assert.equal(await sum(descending("-3", "10", "0", false)), "22");
+  // 10 down to 0, both ends counted.
+  assert.equal(await sum(descending("-1", "10", "0", true)), "55");
+});
+
+test("two loops one after another each leave into the block they sit in", async () => {
+  // A loop that sits in the entry block leaves for the entry block, so two of
+  // them leave for the same id. The label that id names is bound twice, and the
+  // second binding is the one every jump resolves to, so the first loop's exit
+  // jumps past the second loop to the end of the function and everything after
+  // the first loop never runs.
+  const twoLoops = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("0", I32),
+          to: number("3", I32),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: local("i", I32), line: 2 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("0", I32),
+          to: number("4", I32),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b3",
+          exit: "entry",
+          body: {
+            id: "b4",
+            releases: [],
+            statements: [{ k: "set", name: "total", op: "+=", value: number("1", I32), line: 3 }],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  // 0 + 1 + 2 from the first loop, then four more from the second.
+  assert.equal(await lowered(twoLoops, (name) => `printf("%d", ${name}());`), "7");
+});
+
+test("a bound the body writes is read again on the next turn", async () => {
+  // `for (let i = 0; i < limit; i++) { ... limit = 9; }` counts to a different
+  // bound from the second turn, because the body wrote it. Reading the bound
+  // once and holding it for the loop counts to the one it started with.
+  const rewrittenBound = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "limit", mutable: true, type: I32 }, value: number("4", I32), line: 1 },
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("0", I32),
+          to: local("limit", I32),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            statements: [
+              { k: "set", name: "total", op: "+=", value: number("1", I32), line: 3 },
+              { k: "set", name: "limit", op: "=", value: number("9", I32), line: 3 },
+            ],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  // Nine turns, counting i = 0 through 8.
+  assert.equal(await lowered(rewrittenBound, (name) => `printf("%d", ${name}());`), "9");
+});
+
 test("a loop leaves for another block, and the names it declared go with it", async () => {
   const fn = subject(I32, {
     id: "entry",

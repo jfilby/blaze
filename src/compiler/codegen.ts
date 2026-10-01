@@ -567,6 +567,12 @@ async function materialize(
   if (runtime?.objectPath !== undefined) {
     await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? ""), "utf8");
     link({
+      // The link carries the objective and the target because `-flto` makes
+      // this command the one that decides the code: gcc rebuilds every object
+      // in front of it with these options, so a link without them delivers and
+      // verifies a program built at a level and a machine nothing asked for.
+      objective: request.contract.optimize.primary,
+      target: request.target,
       mode: request.mode,
       harnessPath: paths.harness,
       objectPath: paths.object,
@@ -814,6 +820,8 @@ async function probeCandidate(
 
   await writeFile(paths.probeHarness, generateProbeHarness(request.contract, plan), "utf8");
   link({
+    objective: request.contract.optimize.primary,
+    target: request.target,
     mode: request.mode,
     harnessPath: paths.probeHarness,
     objectPath: paths.object,

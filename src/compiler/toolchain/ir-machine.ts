@@ -505,6 +505,19 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
 /** What a whole number may be combined with, and how. */
 type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "sar" | "and" | "or" | "xor";
 
+/**
+ * The labels one loop's header and its exit are written under, and the ids the
+ * IR named them by. The ids are what a `break` and a `continue` name; the
+ * labels are what a jump is written to, and they are the lowering's own because
+ * one block id can stand for more than one place in the code — a loop that sits
+ * in the entry block leaves for that block, and so does the next loop after it.
+ */
+interface LoopLabels {
+  readonly header: string;
+  readonly exit: string;
+  readonly names: { readonly header: string; readonly exit: string };
+}
+
 /** A value the lowering keeps in the frame while it builds another. */
 interface Held {
   /** Where in the frame it is: a distance up from the bottom of it. */
@@ -532,9 +545,27 @@ class Machine {
 
   private readonly names = new NameScope((name) => name);
   private readonly slots = new Map<string, Held>();
-  private readonly loops: { header: string; exit: string }[] = [];
+  private readonly loops: { header: string; exit: string; names: { header: string; exit: string } }[] = [];
   private readonly layouts: Record<string, ObjectLayout>;
   private readonly epilogue = this.code.label("Lepilogue");
+  /** How many labels the lowering has minted, one pair per loop. */
+  private mintedLabels = 0;
+  /**
+   * The labels a loop's header and its exit are written under.
+   *
+   * The IR names both by the id of the block they belong to, and a loop whose
+   * exit is the block around it names the very block the function starts in:
+   * two `for` loops one after another both leave for `entry`. Binding that id
+   * twice makes the second binding the one every jump resolves to, so the first
+   * loop's exit jumps past the second loop to the end of the function. A label
+   * the lowering mints is named once and means one place.
+   */
+  private loopLabels(loop: SemanticLoop): LoopLabels {
+    const at = this.mintedLabels++;
+    const header = `Lhead${at}`;
+    const exit = `Lexit${at}`;
+    return { header, exit, names: { header: loop.header, exit: loop.exit } };
+  }
   private used = 0;
   private temporaries = 0;
   /** Slots bound for the statements being written and not yet handed back. */
@@ -1391,34 +1422,66 @@ class Machine {
 
   private loop(loop: SemanticLoop): void {
     this.names.enter();
-    this.loops.push({ header: loop.header, exit: loop.exit });
+    const labels = this.loopLabels(loop);
+    this.loops.push({ header: labels.header, exit: labels.exit, names: { header: loop.header, exit: loop.exit } });
     switch (loop.kind) {
       case "while": {
-        this.code.bind(loop.header);
-        this.truthBranch(loop.condition, false, loop.exit);
+        this.code.bind(labels.header);
+        this.truthBranch(loop.condition, false, labels.exit);
         this.block(loop.body);
         // The same, for the edge back to the header: a body that returns or
         // breaks never reaches the test again, so the jump is not written.
-        if (loop.body.terminator.k === "next") this.code.jmp(loop.header);
-        this.code.bind(loop.exit);
+        if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+        this.code.bind(labels.exit);
         break;
       }
       case "doWhile": {
-        this.code.bind(loop.header);
+        this.code.bind(labels.header);
         this.block(loop.body);
-        this.truthBranch(loop.condition, true, loop.header);
-        this.code.bind(loop.exit);
+        this.truthBranch(loop.condition, true, labels.header);
+        this.code.bind(labels.exit);
         break;
       }
       case "counted":
-        this.counted(loop);
+        this.counted(loop, labels);
         break;
       case "each":
-        this.each(loop);
+        this.each(loop, labels);
         break;
     }
     this.loops.pop();
     this.names.leave();
+  }
+
+  /**
+   * Every name a loop and the blocks inside it write, which is what a bound
+   * read once may not read: a value naming one of them is a value the loop has
+   * to look at again on each turn rather than hold for the whole loop.
+   */
+  private loopWrites(loop: SemanticLoop): Set<string> {
+    const written = new Set<string>();
+    if (loop.kind === "counted") written.add(loop.variable);
+    else if (loop.kind === "each") {
+      written.add(loop.index);
+      written.add(loop.element);
+    }
+    const visit = (block: SemanticBlock): void => {
+      for (const statement of block.statements) {
+        if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+        else if (statement.k === "setElement") written.add(statement.buffer);
+        else if (statement.k === "let") written.add(statement.slot.name);
+        else if (statement.k === "loop") {
+          for (const name of this.loopWrites(statement.loop)) written.add(name);
+        }
+        if (statement.k === "loop") visit(statement.loop.body);
+        else if (statement.k === "if") {
+          visit(statement.then);
+          if (statement.otherwise !== null) visit(statement.otherwise);
+        } else if (statement.k === "block") visit(statement.body);
+      }
+    };
+    visit(loop.body);
+    return written;
   }
 
   /**
@@ -1428,7 +1491,7 @@ class Machine {
    * otherwise make once per turn. The header label sits on the step, which is
    * where a `continue` belongs, and the first turn is entered at the test.
    */
-  private counted(loop: Extract<SemanticLoop, { kind: "counted" }>): void {
+  private counted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels): void {
     const type = loop.type;
     // The variable is bound before the loop's own values are read, because
     // whether it has a register decides whether the value the loop starts from
@@ -1445,14 +1508,30 @@ class Machine {
       this.at(loop.from, type);
       this.store(variable);
     }
-    const writtenTo = this.literalOf(loop.to, type);
+    // A bound and a step are read once and held, which is what a `for` costs
+    // when nothing writes them: the value the loop counts to is the same number
+    // on every turn. A body that writes one of them is the other case, and
+    // `for (i = 0; i < limit; i++) { limit = 9; }` reads a different bound on
+    // the second turn, so a value the body writes is read again at the header
+    // instead of being held for the whole loop.
+    const written = this.loopWrites(loop);
+    const reread = (value: SemanticValue): boolean => {
+      let seen = false;
+      walkValues(value, (one) => {
+        if (one.k === "local" && written.has(one.name)) seen = true;
+      });
+      return seen;
+    };
+    const boundReread = reread(loop.to);
+    const stepReread = loop.step !== null && reread(loop.step);
+    const writtenTo = boundReread ? null : this.literalOf(loop.to, type);
     const to: Held | number = writtenTo ?? this.heldAt(type, "blaze_to", loop.to);
     let step: Held | number | null = null;
     if (loop.step !== null) {
       // A step the program wrote out is the same number on every turn, so it
       // is carried by the instruction that adds it rather than by a slot it is
       // read out of on each of them.
-      const number = this.immediateOf(loop.step, type);
+      const number = stepReread ? null : this.immediateOf(loop.step, type);
       if (number !== null) {
         step = number;
       } else {
@@ -1471,7 +1550,18 @@ class Machine {
     }
     const test = this.code.label("Ltest");
     this.code.jmp(test);
-    this.code.bind(loop.header);
+    this.code.bind(labels.header);
+    // A bound the body writes is read again here, before the test reads it, so
+    // the turn after the write compares against the value that was written.
+    if (boundReread && typeof to !== "number") {
+      this.at(loop.to, type);
+      this.store(to);
+    }
+    const stepSlot = step !== null && typeof step !== "number" ? step : null;
+    if (stepReread && loop.step !== null && stepSlot !== null) {
+      this.at(loop.step, type);
+      this.store(stepSlot);
+    }
     // The counter is stepped once per turn and then tested, and both of those
     // work on it where it is: the accumulator the step leaves it in, or the
     // register of its own when the loop was given one. A counter in a
@@ -1479,16 +1569,22 @@ class Machine {
     // traffic through the frame at all.
     const counter = variable.register ?? RAX;
     if (step === null) {
+      // No step written out is one turn's worth in the direction the loop
+      // counts, which is the only place `down` decides the arithmetic.
       if (variable.register === null) this.load(variable);
       this.one(type, loop.down ? "sub" : "add", counter);
     } else if (typeof step === "number") {
+      // A step that is written down is the signed amount the index moves by,
+      // so it is added whatever its sign is: the direction is already in it,
+      // and subtracting a step of minus one moved the index the other way and
+      // ran a descending loop for ever.
       if (variable.register === null) this.load(variable);
-      this.code.aluImm(loop.down ? "sub" : "add", counter, step, operationWidth(type) === 8);
+      this.code.aluImm("add", counter, step, operationWidth(type) === 8);
     } else {
       this.scratchFrom(step);
       if (variable.register === null) this.load(variable);
       else this.code.movRegReg(RAX, variable.register);
-      this.apply(loop.down ? "sub" : "add", type);
+      this.apply("add", type);
     }
     this.normalizeArithmetic(type, counter);
     // A counter in a register of its own is stored where it lies, and writing
@@ -1503,12 +1599,12 @@ class Machine {
       loop.inclusive ? (loop.down ? "ge" : "le") : loop.down ? "gt" : "lt",
       to,
       false,
-      loop.exit,
+      labels.exit,
       counter,
     );
     this.block(loop.body);
-    if (loop.body.terminator.k === "next") this.code.jmp(loop.header);
-    this.code.bind(loop.exit);
+    if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+    this.code.bind(labels.exit);
     // The slots the header was read into are dead now the loop is written, and
     // whatever the statement after this one binds takes them.
     if (from !== null) this.freeSlot(from);
@@ -1521,7 +1617,7 @@ class Machine {
    * entered in, and its length is read once, for the same reason a counted
    * loop's bound is.
    */
-  private each(loop: Extract<SemanticLoop, { kind: "each" }>): void {
+  private each(loop: Extract<SemanticLoop, { kind: "each" }>, labels: LoopLabels): void {
     this.at(loop.length, USIZE);
     const length = this.holdAcross(USIZE, "blaze_length");
     this.store(length);
@@ -1535,19 +1631,19 @@ class Machine {
     if (index.register === null) this.store(index);
     const test = this.code.label("Ltest");
     this.code.jmp(test);
-    this.code.bind(loop.header);
+    this.code.bind(labels.header);
     this.code.aluImm("add", counter, 1);
     if (index.register === null) this.store(index);
     this.code.bind(test);
     // The count was just written, so the counter is still where it was stepped.
     this.code.aluRegMem("cmp", counter, frame(length.offset), true);
-    this.code.jcc("ae", loop.exit);
+    this.code.jcc("ae", labels.exit);
     this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType);
     this.readAt(loop.elementType);
     this.store(this.bind(loop.element, loop.elementType));
     this.block(loop.body);
-    if (loop.body.terminator.k === "next") this.code.jmp(loop.header);
-    this.code.bind(loop.exit);
+    if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+    this.code.bind(labels.exit);
     // The length was read before the body and is dead now the loop is written.
     this.freeSlot(length);
   }
@@ -1671,10 +1767,13 @@ class Machine {
     }
     for (const name of terminator.releases) this.release(name);
     const open = this.loops[this.loops.length - 1];
-    if (open === undefined || (terminator.target !== open.header && terminator.target !== open.exit)) {
+    // The target is the id of a block the IR names, and what the jump is
+    // written under is the label the lowering minted for that place, which is
+    // not the block's id: a block named by two loops is two places.
+    if (open === undefined || (terminator.target !== open.names.header && terminator.target !== open.names.exit)) {
       throw machineError(`${this.fn.symbol} jumps for a block no loop around it names`, terminator.target);
     }
-    this.code.jmp(terminator.target);
+    this.code.jmp(terminator.target === open.names.header ? open.header : open.exit);
   }
 
   private release(name: string): void {
@@ -3218,7 +3317,9 @@ class Machine {
     if (isTextType(from) || isTextType(to) || isReference(from) || isReference(to)) return;
     if (!isNumber(from) || !isNumber(to)) return;
     if (isFloat(from) && isFloat(to)) {
-      if (widthOf(from) !== widthOf(to)) this.code.cvtFloatPrecision(XMM0, XMM0, widthOf(to) === 4);
+      // The opcode's prefix names the precision the value is read at, so it is
+      // the source's width and not the destination's.
+      if (widthOf(from) !== widthOf(to)) this.code.cvtFloatPrecision(XMM0, XMM0, widthOf(from) === 4);
       return;
     }
     if (isFloat(from)) {

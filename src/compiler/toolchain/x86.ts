@@ -447,6 +447,21 @@ export class Encoder {
     if (bits !== 0) this.byte(0x40 | bits);
   }
 
+  /**
+   * The extension prefix for an instruction that names a byte register.
+   *
+   * Four of the byte registers below eight share their number with a word
+   * register, and which of the two is meant is decided by the prefix alone:
+   * without it, register six is `dh` and never `sil`, register four is `spl`
+   * and never `ah`. A prefix carrying no bits is still a prefix, and writing
+   * it is what says a byte register is what is named.
+   */
+  private rexByte(reg: number, rm: number | { base: number | null; index: number | null }): void {
+    const before = this.code.length;
+    this.rex(false, reg, rm);
+    if (this.code.length === before) this.byte(0x40);
+  }
+
   /** The modrm byte, and the SIB byte an indexed address needs. */
   private modrm(rm: number | Memory, reg: number): void {
     if (typeof rm === "number") {
@@ -549,19 +564,21 @@ export class Encoder {
       return;
     }
     if (value >= 0n && value <= 0xffff_ffffn) {
-      this.rex(false, 0, { base: null, index: null });
+      // The `B8` form carries the destination in the opcode's low three bits,
+      // which the extension's B bit is what lifts above seven.
+      this.rex(false, 0, register);
       this.byte(0xb8 + (register & 7));
       this.word(Number(value));
       return;
     }
     if (value >= -0x8000_0000n && value <= 0x7fff_ffffn) {
-      this.rex(true, 0, { base: null, index: null });
+      this.rex(true, 0, register);
       this.byte(0xc7);
       this.modrm(register, 0);
       this.word(Number(value));
       return;
     }
-    this.rex(true, 0, { base: null, index: null });
+    this.rex(true, 0, register);
     this.byte(0xb8 + (register & 7));
     for (let index = 0; index < 8; index += 1) this.byte(Number((value >> BigInt(index * 8)) & 0xffn));
   }
@@ -572,7 +589,7 @@ export class Encoder {
    * has been read, so the field is left for `patchWord` to fill in.
    */
   subRegImmLater(register: number): number {
-    this.rex(true, 0, { base: null, index: null });
+    this.rex(true, 0, register);
     this.byte(0x81);
     this.modrm(register, BINARY.sub);
     const at = this.code.length;
@@ -657,7 +674,7 @@ export class Encoder {
 
   /** A move at half the width, which reads as clearing the whole register. */
   movRegReg32(destination: number, source: number): void {
-    this.rex(false, source, { base: null, index: null });
+    this.rex(false, source, destination);
     this.byte(0x89);
     this.modrm(destination, source);
   }
@@ -681,7 +698,10 @@ export class Encoder {
    * wider.
    */
   movRegMemSized(register: number, address: Memory | number, width: Width, signed: boolean): void {
-    this.rex(width === 8, register, address);
+    // Every widening form needs the extension's W bit: without it `MOVSXD` and
+    // `MOVSX` name a 32 bit destination, which clears the upper half instead of
+    // filling it with the sign, and a negative `i32` reads back as a positive.
+    this.rex(width === 8 || (width === 4 && signed), register, address);
     if (width === 8) {
       this.byte(0x8b);
     } else if (width === 4) {
@@ -696,13 +716,17 @@ export class Encoder {
   }
 
   movMemRegSized(address: Memory, register: number, width: Width): void {
-    this.rex(width === 8, register, address);
     if (width === 1) {
+      this.rexByte(register, address);
       this.byte(0x88);
       this.modrm(address, register);
       return;
     }
+    // The operand size prefix is a legacy prefix and the extension is not, so
+    // the extension has to be written after it: REX before 0x66 leaves the 0x66
+    // to be read as the opcode, which is a fault rather than a half width move.
     if (width === 2) this.byte(0x66);
+    this.rex(width === 8, register, address);
     this.byte(0x89);
     this.modrm(address, register);
   }
@@ -772,13 +796,17 @@ export class Encoder {
    * register and the source the one it calls the operand.
    */
   alu(operation: Binary, destination: number, source: number, wide = true): void {
-    this.rex(wide, destination, { base: null, index: null });
+    this.rex(wide, destination, source);
     this.byte(BINARY_TO_REGISTER[operation]);
     this.modrm(source, destination);
   }
 
   /** An operation of a byte register into a byte register. */
   alu8(operation: Binary, destination: number, source: number): void {
+    // This form writes the operand and reads the register, so the register
+    // field is the source and the operand field is the destination — the
+    // opposite of `alu` above, and the extension bits follow those fields.
+    this.rexByte(source, destination);
     this.byte(BYTE_BINARY[operation]);
     this.modrm(destination, source);
   }
@@ -788,10 +816,20 @@ export class Encoder {
    * is how a whole number comes back to the width its type names.
    */
   narrow(destination: number, source: number, width: Width, signed: boolean): void {
-    this.rex(false, destination, source);
     if (width === 8) {
+      // `89` is the one form here that writes the operand rather than reading
+      // it, so its register field is the source and its operand field is the
+      // destination — the opposite of every form below.
+      this.rex(true, source, destination);
       this.byte(0x89);
-    } else if (width === 4) {
+      this.modrm(destination, source);
+      return;
+    }
+    // Every form below widens into the register field, and each of them names a
+    // 32 bit destination without the extension's W bit, which clears the upper
+    // half rather than filling it with the sign of the narrow value it read.
+    this.rex(width === 4 && signed, destination, source);
+    if (width === 4) {
       this.byte(signed ? 0x63 : 0x8b);
     } else {
       this.byte(0x0f);
@@ -809,7 +847,7 @@ export class Encoder {
 
   /** An operation against a number written into the instruction. */
   aluImm(operation: Binary, register: number, value: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, register);
     if (value >= -128 && value <= 127) {
       this.byte(0x83);
       this.modrm(register, BINARY[operation]);
@@ -822,7 +860,7 @@ export class Encoder {
   }
 
   imul(destination: number, source: number, wide = true): void {
-    this.rex(wide, destination, { base: null, index: null });
+    this.rex(wide, destination, source);
     this.byte(0x0f);
     this.byte(0xaf);
     this.modrm(source, destination);
@@ -834,7 +872,7 @@ export class Encoder {
    * operand in a register, and a literal is not one.
    */
   imulImm(destination: number, value: number, wide = true): void {
-    this.rex(wide, destination, { base: null, index: null });
+    this.rex(wide, destination, destination);
     if (value >= -128 && value <= 127) {
       this.byte(0x6b);
       this.modrm(destination, destination);
@@ -848,7 +886,7 @@ export class Encoder {
 
   /** A division of the accumulator by a register, signed or not. */
   divide(kind: "idiv" | "div", source: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, source);
     this.byte(0xf7);
     this.modrm(source, DIVIDE[kind]);
   }
@@ -860,39 +898,39 @@ export class Encoder {
   }
 
   shift(operation: Shift, register: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, register);
     this.byte(0xd3);
     this.modrm(register, SHIFT[operation]);
   }
 
   /** A shift by a number written into the instruction. */
   shiftImm(operation: Shift, register: number, amount: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, register);
     this.byte(0xc1);
     this.modrm(register, SHIFT[operation]);
     this.byte(amount & 0xff);
   }
 
   neg(register: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, register);
     this.byte(0xf7);
     this.modrm(register, 3);
   }
 
   not(register: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, register);
     this.byte(0xf7);
     this.modrm(register, 2);
   }
 
   test(register: number, wide = true): void {
-    this.rex(wide, register, { base: null, index: null });
+    this.rex(wide, register, register);
     this.byte(0x85);
     this.modrm(register, register);
   }
 
   testImm(register: number, value: number, wide = true): void {
-    this.rex(wide, 0, { base: null, index: null });
+    this.rex(wide, 0, register);
     if (value >= -128 && value <= 127) {
       this.byte(0xf6);
       this.modrm(register, 0);
@@ -915,6 +953,7 @@ export class Encoder {
   /** A floating point operation of two registers, at one precision. */
   sse(operation: Float, destination: number, source: number, single: boolean): void {
     this.precision(single);
+    this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(FLOAT[operation]);
     this.modrm(source, destination);
@@ -945,6 +984,7 @@ export class Encoder {
     // prefix; the comparison of two single precision values is the one that
     // does not.
     if (!single) this.byte(0x66);
+    this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(ordered ? 0x2e : 0x2f);
     this.modrm(source, destination);
@@ -953,7 +993,7 @@ export class Encoder {
   /** A whole number read as a float, which is a signed conversion. */
   cvtIntToFloat(destination: number, source: number, single: boolean): void {
     this.precision(single);
-    this.rex(true, destination, { base: null, index: null });
+    this.rex(true, destination, source);
     this.byte(0x0f);
     this.byte(0x2a);
     this.modrm(source, destination);
@@ -962,15 +1002,22 @@ export class Encoder {
   /** A float read as a whole number, at the width it is read at. */
   cvtFloatToInt(destination: number, source: number, single: boolean, wide: boolean): void {
     this.precision(single);
-    this.rex(wide, destination, { base: null, index: null });
+    this.rex(wide, destination, source);
     this.byte(0x0f);
     this.byte(0x2c);
     this.modrm(source, destination);
   }
 
-  /** A float read at the other precision. */
+  /**
+   * A float read at the other precision. The prefix is the one the *source* is
+   * read at, which is what the two forms of this opcode mean: `F3 0F 5A`
+   * widens a single into a double and `F2 0F 5A` narrows a double into a
+   * single. Taking it from the destination reads the value's bits as the other
+   * precision entirely and answers a number nothing asked for.
+   */
   cvtFloatPrecision(destination: number, source: number, single: boolean): void {
     this.precision(single);
+    this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(0x5a);
     this.modrm(source, destination);
@@ -1003,6 +1050,7 @@ export class Encoder {
    */
   sseMemLabel(operation: Float, destination: number, label: string, single: boolean): void {
     this.precision(single);
+    this.rex(false, destination, { base: null, index: null });
     this.byte(0x0f);
     this.byte(FLOAT[operation]);
     // `mod = 00, rm = 101` is the one address that is relative to the
@@ -1025,6 +1073,7 @@ export class Encoder {
    */
   movsLoadLabel(register: number, label: string, single: boolean): void {
     this.precision(single);
+    this.rex(false, register, { base: null, index: null });
     this.byte(0x0f);
     this.byte(0x10);
     // `mod = 00, rm = 101` is the one address that is relative to the
@@ -1038,7 +1087,7 @@ export class Encoder {
   /** A float kept in a register, which is a move of the whole register. */
   movsMove(destination: number, source: number, single: boolean): void {
     this.precision(single);
-    this.rex(false, source, { base: null, index: null });
+    this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(0x10);
     this.modrm(source, destination);
@@ -1047,7 +1096,7 @@ export class Encoder {
   /** A whole number moved into a float register, which is how a bit is turned. */
   movdXmm(destination: number, source: number): void {
     this.byte(0x66);
-    this.rex(true, destination, { base: null, index: null });
+    this.rex(true, destination, source);
     this.byte(0x0f);
     this.byte(0x6e);
     this.modrm(source, destination);
@@ -1056,6 +1105,7 @@ export class Encoder {
   /** A sign bit turned over, which is a negation of a float. */
   xorFloat(destination: number, source: number): void {
     this.byte(0x66);
+    this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(0x57);
     this.modrm(source, destination);
@@ -1067,6 +1117,7 @@ export class Encoder {
 
   /** A condition written into one of the low byte registers. */
   setcc(condition: Condition, register: number): void {
+    this.rexByte(0, register);
     this.byte(0x0f);
     this.byte(0x90 + CONDITION[condition]);
     this.modrm(register, 0);
@@ -1074,7 +1125,7 @@ export class Encoder {
 
   /** A byte register widened into a whole one, so a condition is a number. */
   movzxReg8(destination: number, source: number): void {
-    this.rex(false, destination, { base: null, index: null });
+    this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(0xb6);
     this.modrm(source, destination);

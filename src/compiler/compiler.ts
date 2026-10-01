@@ -41,7 +41,7 @@ import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
-import { parseContract, type ParsedContract } from "./semantics/contract.ts";
+import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
@@ -1407,6 +1407,7 @@ export async function runBuild(
       const runner =
         runtimeKind === "none"
           ? await buildProgramDriver({
+              objective: normalizeOptimize(input.optimize).primary,
               mode: buildMode,
               target,
               program: driver,
