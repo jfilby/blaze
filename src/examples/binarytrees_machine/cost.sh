@@ -40,12 +40,23 @@ cd "$(dirname "$0")"
 # `readelf` and not `objdump -h`: the section headers objdump prints are the
 # allocatable ones, and a symbol table is not one of those, so a stripped
 # binary and an unstripped one list the same sections through it.
-if ! readelf -S "$BINARY" | grep -q '\.symtab'; then
+# The section list is written out before it is searched rather than piped into
+# `grep -q`: a `grep -q` that has found what it was asked for exits at once,
+# `readelf` takes SIGPIPE writing the rest, and `pipefail` — which is on above —
+# turns that into a failure. The guard then reported a binary with a symbol
+# table as having none.
+if ! readelf -S "$BINARY" > /tmp/cost-sections.$$ ; then
+  rm -f /tmp/cost-sections.$$
+  printf 'cost.sh: %s could not be read by readelf.\n' "$BINARY" >&2
+  exit 2
+fi
+if ! grep -q '\.symtab' /tmp/cost-sections.$$ ; then
+  rm -f /tmp/cost-sections.$$
   printf 'cost.sh: %s carries no symbol table, so every per-function count below is 0.\n' "$BINARY" >&2
   printf "The binary delivered beside the sources is stripped; the build store's copy is not.\n" >&2
   exit 2
 fi
-
+rm -f /tmp/cost-sections.$$
 listing=$(objdump -d --no-show-raw-insn "$BINARY")
 
 # One function's instructions: its address, mnemonic and operands. The alignment

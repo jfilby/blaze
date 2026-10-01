@@ -47,11 +47,16 @@ import {
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
+import { nameLiveness, overlaps } from "../semantics/liveness.ts";
 import { describeObject, writeObject, type DataLabel } from "./elf64.ts";
 import { NameScope } from "./names.ts";
 import {
   Encoder,
   INTEGER_ARGUMENTS,
+  R8,
+  R9,
+  R10,
+  R11,
   R12,
   R13,
   R14,
@@ -70,6 +75,9 @@ import {
   XMM0,
   XMM1,
   XMM2,
+  XMM3,
+  XMM4,
+  XMM5,
   XMM6,
   XMM7,
   XMM8,
@@ -214,6 +222,34 @@ const OBJECT_POINTER = R15;
  * same way a value kept in rbx does.
  */
 const VECTOR_CALLEE_SAVED: readonly number[] = [XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15];
+
+/**
+ * The whole-number registers the convention does not ask a callee to preserve,
+ * which are the ones a value that no call reaches can be kept in for nothing.
+ *
+ * A callee-saved register costs the function a push and a pop and sixteen bytes
+ * of stack, and buys the same thing a caller-saved one buys for free over the
+ * stretch of the body where nothing calls: the value is in a register rather
+ * than in the frame. A name that has to survive a call cannot be kept in one
+ * of these — the call writes its arguments into them — so the two lists answer
+ * different questions and a name is given the one its live range fits.
+ *
+ * `rax` is the accumulator and `rcx` the scratch, which every value the body
+ * computes passes through, and `rdx` is what a division and a one-byte write
+ * go through, so none of the three is a place a name can be kept.
+ */
+const CALLER_SAVED: readonly number[] = [RDI, RSI, R8, R9, R10, R11];
+
+/**
+ * The vector registers the convention does not ask a callee to preserve, which
+ * answer the same question as `CALLER_SAVED` does for a whole number.
+ *
+ * `xmm0` is the accumulator and `xmm1` the scratch, so the four left are the
+ * ones a name can be kept in. They are also the fourth to eighth of the
+ * argument registers, which is the same fact as for the whole numbers: a value
+ * kept here does not survive the call that writes them.
+ */
+const VECTOR_CALLER_SAVED: readonly number[] = [XMM2, XMM3, XMM4, XMM5];
 
 /**
  * How often a name has to be read before it is worth a register of its own.
@@ -791,65 +827,46 @@ class Machine {
   /**
    * Puts the values a body reaches for again in registers instead of in the frame.
    *
-   * A name that is written once and read after is the same number at every
-   * read, which is the one case where a register can be better than a slot
-   * without any analysis of where a value is live: there is no second write for
-   * a live range to be cut at. A name a loop writes is the other case, and it is
-   * the commoner one: an accumulator is read and written on every turn of the
-   * loop, and both of those are a store and a load out of the frame until one of
-   * them is not. The register is one the convention says a callee leaves as it
-   * found it, so a value read on both sides of a call survives the call, and no
-   * frame is reserved for it at all.
+   * Which names those are, and which register each one gets, is answered by
+   * `liveness.ts` and not by counting: a census of reads says how often a name
+   * is reached for and nothing about *when*, and where a value is live is what
+   * says whether two names can share a register and whether a call takes it
+   * away. So each name is given the runs of the body it is live over, and two
+   * names whose runs never meet are put in the same register — which is what
+   * lifts the cap a fixed list puts on how many names a function can hold.
    *
-   * How many times a name is read is the wrong question on its own, because a
-   * read in a loop body is carried out once for every turn of that loop and a
-   * read at the top of the body is carried out once however many turns it turns.
-   * So a read is weighed by how many loops enclose the block it is in: a name
-   * read once inside a loop that turns a million times is worth far more than
-   * one read five times on a path nothing repeats, and counting them alike is
-   * what left every hot value here in the frame.
+   * Which register depends on what a call does to the name. One that has to
+   * still be there after a call can only be kept in a register the convention
+   * says a callee leaves as it found it, and that costs the function a push and
+   * a pop and sixteen bytes of stack. One no call reaches can be kept in a
+   * register that costs nothing, because nothing is written over it between the
+   * two places the value is read. So the two lists are filled independently —
+   * `CALLER_SAVED` first for a name nothing calls, `CALLEE_SAVED` for one
+   * something does — and a float is pinned out of the vector file rather than
+   * the general one, which is a register file of its own.
    *
-   * What is left is the cap, and it is two caps rather than one. Five whole
-   * number registers are callee-saved and none of them is used for anything
-   * else here; ten vector registers are, and they are a register file of their
-   * own, so a float and a whole number are pinned out of separate lists and
-   * neither takes a register the other wanted. Each list is taken in the order
-   * of the score below: the ones a function reaches for most are the ones whose
-   * every reach was a load out of the frame.
+   * How many times a name is read still decides which name gets a register
+   * first, but only as a weight: a read in a loop body is carried out once for
+   * every turn of that loop and a read at the top of the body once however many
+   * turns it turns, so a read is weighed by how many loops enclose the block it
+   * is in. A name the weight says is worth more than the register costs is
+   * given one; the ones that are not stay in the frame, where a load or a
+   * store is what the lowering says they cost.
    *
-   * A counted loop's counter is left out here and given a register below, in
-   * either list — a float counter takes a vector register, which is saved to
-   * the frame by the prologue for the eight bytes it costs there and read back
-   * by the epilogue, and a turn of the loop then costs no traffic through the
-   * frame at all.
+   * A counted loop's counter is decided below rather than here: it is written
+   * and read by the loop itself on every turn, so it is the one name whose
+   * weight is not in question.
    */
   private allocateRegisters(): void {
-    const written = new Set<string>();
     const reads = new Map<string, number>();
     const writes = new Map<string, number>();
-    /** Whether every write to a name was one a loop made on a turn of its own. */
-    const turnedByLoop = new Map<string, boolean>();
     const declared: { name: string; type: SemanticType }[] = this.fn.params.map((parameter) => ({
       name: parameter.name,
       type: slotType(parameter),
     }));
     const write = (name: string, weight: number): void => {
-      written.add(name);
       writes.set(name, (writes.get(name) ?? 0) + weight);
-      turnedByLoop.set(name, (turnedByLoop.get(name) ?? true) && weight > 1);
     };
-    for (const statement of this.fn.entry.statements) {
-      if (statement.k === "set" || statement.k === "step") write(statement.name, 1);
-      if (statement.k === "setElement") write(statement.buffer, 1);
-      if (statement.k === "loop") {
-        const loop = statement.loop;
-        if (loop.kind === "counted") write(loop.variable, 1);
-        else if (loop.kind === "each") {
-          write(loop.index, 1);
-          write(loop.element, 1);
-        }
-      }
-    }
     // A function that calls itself runs its own body once per level of the
     // recursion, so a read on a straight line through it is still a read
     // carried out many times — worth here what a read inside a loop is worth
@@ -862,9 +879,10 @@ class Machine {
       for (const statement of block.statements) {
         if (statement.k === "set" || statement.k === "step") write(statement.name, weight);
         if (statement.k === "setElement") {
-          write(statement.buffer, weight);
           // The buffer of a write is named rather than valued, so a census of
-          // the values the body computes never sees it read.
+          // the values the body computes never sees it read. Writing an element
+          // changes what the pointer reaches and not the pointer itself, so it
+          // is a read of the name rather than a write of it.
           reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
         }
       }
@@ -912,47 +930,139 @@ class Machine {
         declared.push({ name: statement.slot.name, type: slotType(statement.slot) });
       }
     }
-    const score = (name: string): number => {
-      const read = reads.get(name) ?? 0;
-      // A name a loop writes and the body reads is an accumulator, and it is
-      // reached for on both sides of every turn: the write counts as much as
-      // the read, because both were a frame access. One written on a straight
-      // line is not one of these — it is a name whose live range a register
-      // would have to be cut at, which is the analysis this pass is not.
-      if (turnedByLoop.get(name) === true && read > 0) return read + (writes.get(name) ?? 0);
-      return written.has(name) ? 0 : read;
-    };
+    // What a name is worth a register for is what it costs the frame: every
+    // read and every write it is reached for is a memory operand, and a
+    // register turns each of them into a move between registers instead.
+    //
+    // A name a loop writes counts its writes as well as its reads, because an
+    // accumulator is read and written on every turn and both were frame
+    // accesses. One written on a straight line counts too: what it used to be
+    // given instead of a register was the answer that where a value is live
+    // cannot be said without solving for it, which `liveness.ts` does.
+    const score = (name: string): number => (reads.get(name) ?? 0) + (writes.get(name) ?? 0);
     const candidates = declared
       .map((entry) => ({ entry, score: score(entry.name) }))
-      .filter((candidate) => candidate.score >= PINNING_READS && declarationCount.get(candidate.entry.name) === 1)
+      .filter((candidate) => candidate.score > 0 && declarationCount.get(candidate.entry.name) === 1)
       .sort((left, right) => right.score - left.score);
+
     this.pinnedRegisters = [];
     this.pinnedVectors = [];
-    const byScore = candidates.map((candidate) => candidate.entry);
-    for (const [index, entry] of byScore.filter((entry) => !isFloat(entry.type)).entries()) {
-      const register = CALLEE_SAVED[index];
-      if (register === undefined) break;
-      this.pinned.set(entry.name, register);
-      this.pinnedRegisters.push(register);
+    // Where every name is live, and what a call does to it. A name no call
+    // reaches can be kept in a register the convention does not ask a callee to
+    // preserve, which costs the function nothing; one that has to survive a
+    // call has to be in one that does, which costs a push and a pop.
+    const liveness = nameLiveness(
+      this.fn.entry,
+      this.fn.params.map((parameter) => parameter.name),
+    );
+    // The register each parameter arrives in, and the ones the parameters after
+    // it arrive in. The prologue moves a parameter out of the register it
+    // arrives in and into the one it was allocated, one parameter after another,
+    // so a parameter may not be given a register another parameter has not been
+    // read out of yet: the move that reads it would read what the first move
+    // wrote. A parameter's own arrival register is the exception, because it is
+    // where its value already is and nothing is moved at all.
+    const arrivals = this.arrivals();
+    const arrivalOf = new Map<string, number | null>();
+    const laterArrivals = new Map<string, Set<number>>();
+    for (const [at, parameter] of this.fn.params.entries()) {
+      arrivalOf.set(parameter.name, arrivals[at]?.register ?? null);
+      const after = new Set<number>();
+      for (let later = at + 1; later < arrivals.length; later += 1) {
+        const register = arrivals[later]?.register ?? null;
+        if (register !== null) after.add(register);
+      }
+      laterArrivals.set(parameter.name, after);
     }
-    for (const [index, entry] of byScore.filter((entry) => isFloat(entry.type)).entries()) {
-      const register = VECTOR_CALLEE_SAVED[index];
-      if (register === undefined) break;
-      this.pinned.set(entry.name, register);
-      this.pinnedVectors.push({ register, offset: 0, single: widthOf(entry.type) === 4 });
+    const taken = new Map<number, (readonly [number, number])[]>();
+    const claim = (register: number, live: readonly (readonly [number, number])[]): void => {
+      const found = taken.get(register);
+      if (found === undefined) taken.set(register, [...live]);
+      else found.push(...live);
+    };
+    // The first register of a pool that is free over every place the name is
+    // live, or null when every one of them is spoken for. Two names whose runs
+    // never meet are never both live, so either register will do.
+    //
+    // A parameter is also kept out of the registers the parameters after it
+    // arrive in, and given its own arrival register in preference to any other:
+    // that one is where its value already is, so nothing is moved and nothing
+    // can be moved over.
+    const free = (
+      pool: readonly number[],
+      live: readonly (readonly [number, number])[],
+      name: string,
+    ): number | null => {
+      const own = arrivalOf.get(name) ?? null;
+      const later = laterArrivals.get(name);
+      for (const pass of [own === null ? -1 : 0, 1]) {
+        for (const register of pool) {
+          const wanted = pass === 0 ? register === own : register !== own;
+          if (!wanted) continue;
+          if (later?.has(register) === true) continue;
+          const held = taken.get(register);
+          if (held === undefined || !overlaps(held, live)) return register;
+        }
+      }
+      return null;
+    };
+    /**
+     * A name in a register, or null when neither pool has one free over the
+     * places it is live.
+     *
+     * A name a call reaches can only be kept where the callee leaves it alone,
+     * because the call writes its arguments into every other one. A name no
+     * call reaches is given one of those first, which is free, and only falls
+     * back to a preserved one when the free file is spoken for where it is
+     * live — a name whose live range is disjoint from that of the names ahead
+     * of it shares their register and neither pays for it.
+     */
+    const assign = (name: string, type: SemanticType): void => {
+      const facts = liveness.get(name);
+      if (facts === undefined || facts.live.length === 0) return;
+      const live = facts.live;
+      const float = isFloat(type);
+      const preserved = float ? VECTOR_CALLEE_SAVED : CALLEE_SAVED;
+      const given = float ? VECTOR_CALLER_SAVED : CALLER_SAVED;
+      const register = facts.acrossCall
+        ? free(preserved, live, name)
+        : (free(given, live, name) ?? free(preserved, live, name));
+      if (register === null) return;
+      this.pinned.set(name, register);
+      claim(register, live);
+      // Only a register the convention asks a callee to preserve is one the
+      // prologue has to put somewhere and the epilogue read back. The two files
+      // are numbered apart, so which one a register came from is what says it,
+      // and not whether its number is in the preserved list.
+      if (!preserved.includes(register)) return;
+      if (float) this.pinnedVectors.push({ register, offset: 0, single: widthOf(type) === 4 });
+      else this.pinnedRegisters.push(register);
+    };
+    // What a name is worth is what it costs the frame, but what it costs the
+    // function is what the register it is put in costs to save: two memory
+    // operands of prologue and epilogue for a preserved one, and none at all
+    // for one the convention does not ask a callee to preserve. So a preserved
+    // register has to be earned and a free one has not.
+    const worth = (name: string): number => {
+      const facts = liveness.get(name);
+      return facts?.acrossCall === true ? PINNING_READS + 1 : 1;
+    };
+    for (const candidate of candidates) {
+      if (candidate.score < worth(candidate.entry.name)) continue;
+      assign(candidate.entry.name, candidate.entry.type);
     }
     // A counted loop's counter is written and read by the loop itself on every
     // turn, so it is what a register is worth the most on. Left in the frame it
     // costs a load and a store per turn to hold a value that the next turn
     // reads straight back out again.
     //
-    // A float counter is no longer left out. It takes a vector register, and a
-    // vector register has no push, so the prologue writes the eight bytes it
-    // holds into the frame and the epilogue reads them back: two instructions
-    // once for the function, against a load and a store on every turn of the
-    // loop. A loop that turns twice never pays that back, which is why it used
-    // to be left in the frame, and why a loop that turns a million times was
-    // paying for it on every turn instead.
+    // A float counter is not left out. It takes a vector register, and a
+    // preserved vector register is spilled to the frame by the prologue for the
+    // eight bytes it costs there and read back by the epilogue: two
+    // instructions once for the function, against a load and a store on every
+    // turn of the loop. A loop that turns twice never pays that back, which is
+    // why it used to be left in the frame, and why a loop that turns a million
+    // times was paying for it on every turn instead.
     //
     // A name declared more than once is left out too. Two loops both written
     // `for (let i ...)` share the name and would share the register, and the
@@ -986,18 +1096,7 @@ class Machine {
     const ordered = [...counters.entries()]
       .filter(([name]) => (declarations.get(name) ?? 0) === 1 && declarationCount.get(name) === 1)
       .sort((left, right) => right[1].depth - left[1].depth);
-    for (const [index, [name]] of ordered.filter(([, entry]) => !isFloat(entry.type)).entries()) {
-      const register = CALLEE_SAVED[this.pinnedRegisters.length + index];
-      if (register === undefined) break;
-      this.pinned.set(name, register);
-      this.pinnedRegisters.push(register);
-    }
-    for (const [index, [name, counter]] of ordered.filter(([, entry]) => isFloat(entry.type)).entries()) {
-      const register = VECTOR_CALLEE_SAVED[this.pinnedVectors.length + index];
-      if (register === undefined) break;
-      this.pinned.set(name, register);
-      this.pinnedVectors.push({ register, offset: 0, single: widthOf(counter.type) === 4 });
-    }
+    for (const [name, counter] of ordered) assign(name, counter.type);
     // The register an object is filled in is claimed after every name that could
     // be pinned to one, so that a function which builds an object keeps the
     // registers its names are read most often and takes the object register
@@ -1107,58 +1206,81 @@ class Machine {
   }
 
   /**
-   * The arguments as they arrive: the first six whole numbers and the first
-   * eight floats come in registers, and the rest are on the stack above the
-   * return address. An argument of a class that has run out of registers goes on
-   * the stack, and so does every argument after it.
+   * Where each parameter arrives: the register it is handed in, or null where it
+   * is handed on the stack above the return address.
+   *
+   * The register allocation needs this before the prologue is written, because
+   * a parameter given a register is moved there from the one it arrives in —
+   * and a move into a register another parameter has not been read out of yet
+   * destroys that argument.
    */
-  private parameters(): void {
+  private arrivals(): { register: number | null; stack: number }[] {
     let general = 0;
     let floating = 0;
     let stack = 0;
-    for (const parameter of this.fn.params) {
+    return this.fn.params.map((parameter) => {
+      const type = slotType(parameter);
+      const register = stack > 0 ? undefined : isFloat(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+      if (register === undefined) {
+        const here = stack;
+        stack += 1;
+        return { register: null, stack: here };
+      }
+      if (isFloat(type)) floating += 1;
+      else general += 1;
+      return { register, stack: -1 };
+    });
+  }
+
+  /**
+   * The arguments as they arrive: the first six whole numbers and the first
+   * eight floats come in registers, and the rest are on the stack above the
+   * return address.
+   */
+  private parameters(): void {
+    const arrivals = this.arrivals();
+    for (const [at, parameter] of this.fn.params.entries()) {
+      const arrival = arrivals[at];
+      if (arrival === undefined) {
+        throw machineError(`${this.fn.symbol} has an argument the convention hands in nowhere`);
+      }
       const type = slotType(parameter);
       const held = this.bind(parameter.name, type);
       const offset = held.offset;
-      const register = stack > 0 ? undefined : isFloat(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+      const register = arrival.register;
       if (held.register !== null) {
-        // A parameter that is pinned is in a register from here on, so the
-        // frame copy it would otherwise be written to is not made. It arrives
-        // in an argument register or on the stack, and either is one move into
-        // the register it is pinned to.
-        if (register === undefined) {
-          const argument = this.stackArgument(8 + stack * 8);
+        // A parameter that is pinned is in a register from here on, so the frame
+        // copy it would otherwise be written to is not made. It arrives in an
+        // argument register or on the stack, and either is one move into the
+        // register it is pinned to — which is no move at all where it was given
+        // the register it arrived in, which is what it is given whenever that
+        // register is one the allocation was free to use.
+        if (register === null) {
+          const argument = this.stackArgument(8 + arrival.stack * 8);
           if (isFloat(type)) this.code.movsLoad(held.register, argument, widthOf(type) === 4);
           else this.code.movRegMem(held.register, argument);
-        } else if (isFloat(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
-        else this.code.movRegReg(held.register, register);
-        if (register !== undefined) {
-          if (isFloat(type)) floating += 1;
-          else general += 1;
-        } else {
-          stack += 1;
+          continue;
         }
+        if (held.register === register) continue;
+        if (isFloat(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
+        else this.code.movRegReg(held.register, register);
         continue;
       }
-      if (register === undefined) {
+      if (register === null) {
         // An argument of a class that has run out of registers is on the stack
         // above the return address, and so is every argument after it.
-        this.code.movRegMem(RAX, this.stackArgument(8 + stack * 8));
+        this.code.movRegMem(RAX, this.stackArgument(8 + arrival.stack * 8));
         this.code.movMemRegSized(frame(offset), RAX, widthOf(type));
-        stack += 1;
         continue;
       }
-      if (isFloat(type)) {
-        floating += 1;
-        this.code.movsStore(frame(offset), register, widthOf(type) === 4);
-        // The first float argument arrives in the accumulator itself, so writing
-        // it down leaves the accumulator holding what the slot holds — which is
-        // what the first read of that parameter is answered by.
-        if (register === XMM0) this.accumulator = { offset, at: this.code.written };
-        continue;
-      }
-      general += 1;
       this.code.movMemRegSized(frame(offset), register, widthOf(type));
+      // The first float argument arrives in the accumulator itself, so writing
+      // it down leaves the accumulator holding what the slot holds — which is
+      // what the first read of that parameter is answered by.
+      if (isFloat(type)) {
+        this.code.movsStore(frame(offset), register, widthOf(type) === 4);
+        if (register === XMM0) this.accumulator = { offset, at: this.code.written };
+      }
     }
   }
 
