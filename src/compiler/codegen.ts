@@ -54,7 +54,7 @@ import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import type { ParsedContract } from "./semantics/contract.ts";
-import { encodeRunRequest, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
+import { encodeRunRequest, planTestVectors, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
   BackendKind,
   BuildMode,
@@ -491,6 +491,8 @@ export interface Materialized {
 
 /** The vectors a candidate is verified and measured with. */
 interface PlannedVectors {
+  /** Every case the contract is checked against, planned once for the whole unit. */
+  cases: TestVector[];
   /** The vector the benchmark runs, and the example run the harness carries. */
   benchmark: TestVector;
   demo: string;
@@ -506,8 +508,10 @@ interface PlannedVectors {
  */
 function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null {
   if (request.parsed.resultDefinition === null) return null;
+  const vectors = planTestVectors(request.parsed, request.test);
   return {
-    benchmark: selectBenchmarkVector(request.contract, request.parsed, request.test),
+    cases: vectors,
+    benchmark: selectBenchmarkVector(request.contract, request.parsed, vectors),
     demo: encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]),
   };
 }
@@ -830,7 +834,7 @@ async function buildCandidate(
       parsed: request.parsed,
       runner: built.runner,
       candidate: candidate.id,
-      config: request.test,
+      vectors: vectors.cases,
     });
     if (!verification.passed) {
       return {

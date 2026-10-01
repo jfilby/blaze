@@ -175,11 +175,15 @@ function optimizationLevel(mode: BuildMode, objective?: Objective): string[] {
  * on the objects beside it.
  *
  * `-ffat-lto-objects` is what makes the two goals compatible, and it is a real
- * option rather than a hope: an object compiled with it is byte-for-byte the
- * same size in `.text` as one compiled without, and carries the compiler's
- * intermediate form beside that code for a link that asks to use it. The
- * candidate stays a self-contained object that can be measured, verified and
- * delivered on its own, and the delivered program is still linked with
+ * option rather than a hope: an object compiled with it carries the compiler's
+ * intermediate form *beside* the machine code, where an object compiled without
+ * it under `-flto` carries no machine code at all. Measured on one candidate
+ * each, three functions of 101, 338 and 404 bytes of code measure 48 bytes of
+ * `.text` without the flag and 101, 338 and 404 with it — 48 being the fixed
+ * plumbing of an object that holds none. A candidate stays a self-contained
+ * object that can be measured, verified and delivered on its own, the size a
+ * `size` objective ranks on is the size of the code rather than of the
+ * compiler's description of it, and the delivered program is still linked with
  * everything in front of it.
  *
  * `debug` asks for neither flag. A program to step through is a program the

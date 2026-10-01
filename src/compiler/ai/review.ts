@@ -405,13 +405,15 @@ function renderReview(request: ReviewRequest, lead: readonly string[]): string {
   // reaches other than itself: an example that inlines a function into itself
   // is an example of a rule being refused.
   const callee = semantic === undefined ? null : (semantic.calls.find((edge) => edge.callee !== semantic.name)?.callee ?? null);
-  // The site is a block the IR prints and a proposal may name, taken from the
-  // same list the review is handed, and the last one so the example is a block
-  // inside the body rather than the body itself.
+  // The sites are the whole list the review is handed, walked once: the worked
+  // example names a block out of it and the section further down prints it. The
+  // block named is the last one, so the example is a block inside the body
+  // rather than the body itself.
+  const sites = semantic === undefined ? null : describeSites(semantic);
   const site =
-    semantic === undefined
+    sites === null
       ? null
-      : (describeSites(semantic)
+      : (sites
           .map((entry) => /^block (\S+):/.exec(entry)?.[1])
           .filter((id): id is string => id !== undefined)
           .at(-1) ?? semantic.entry.id);
@@ -430,7 +432,7 @@ function renderReview(request: ReviewRequest, lead: readonly string[]): string {
       "",
       renderTypes(request.contract),
     ]),
-    ...(semantic === undefined ? [] : [section("SITES A PROPOSAL MAY NAME", describeSites(semantic))]),
+    ...(sites === null ? [] : [section("SITES A PROPOSAL MAY NAME", sites)]),
     section(artifactTitle, [
       "```",
       request.artifact.trimEnd(),

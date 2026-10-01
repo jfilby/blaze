@@ -8,15 +8,14 @@
 
 import { CompilerError } from "../core/errors.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
-import { encodeBenchRequest, planTestVectors, vectorValues, type TestVector } from "./verifier.ts";
+import { encodeBenchRequest, vectorValues, type TestVector } from "./verifier.ts";
 import { preconditionFailures, type ParsedContract } from "../semantics/contract.ts";
-import type { BenchmarkResult, FunctionContract, Runner, TestConfig } from "../core/types.ts";
+import type { BenchmarkResult, FunctionContract, Runner } from "../core/types.ts";
 
 const REPEATS = 3;
 
 /** The longest generated vector: the most representative workload. */
-export function selectBenchmarkVector(contract: FunctionContract, parsed: ParsedContract, config: TestConfig): TestVector {
-  const vectors = planTestVectors(parsed, config);
+export function selectBenchmarkVector(contract: FunctionContract, parsed: ParsedContract, vectors: readonly TestVector[]): TestVector {
   let best = vectors[0];
   let bestLength = -1;
   for (const vector of vectors) {

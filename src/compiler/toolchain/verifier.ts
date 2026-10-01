@@ -427,12 +427,13 @@ export interface VerifyRequest {
   parsed: ParsedContract;
   runner: Runner;
   candidate: string;
-  config: TestConfig;
+  /** The vectors planned once for the whole unit, the same every candidate is checked against. */
+  vectors: readonly TestVector[];
 }
 
 export function verifyCandidate(request: VerifyRequest): VerificationResult {
   const started = process.hrtime.bigint();
-  const vectors = planTestVectors(request.parsed, request.config);
+  const { vectors } = request;
   const expected = vectors.map((vector) => {
     const values = vectorValues(request.contract, vector);
     return { vector, values, result: referenceResult(request.parsed, values) };
