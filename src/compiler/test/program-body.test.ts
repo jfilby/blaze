@@ -107,6 +107,60 @@ test("a number the source negated is read as the value it negates", () => {
   ]);
 });
 
+test("the width of a view is a number a program reads", () => {
+  // `BYTES_PER_ELEMENT` belongs to the language rather than to the program, so
+  // it is read as the number written out and a program counts bytes with it.
+  assert.deepEqual(bodyOf("const bytes = Float64Array.BYTES_PER_ELEMENT;\n"), [
+    { kind: "declare", name: "bytes", mutable: false, type: null, value: { k: "number", text: "8" }, line: 1 },
+  ]);
+  assert.deepEqual(bodyOf("const bytes = Int8Array.BYTES_PER_ELEMENT;\n"), [
+    { kind: "declare", name: "bytes", mutable: false, type: null, value: { k: "number", text: "1" }, line: 1 },
+  ]);
+  // A property of a view that is not its width is not a value, and the
+  // diagnostic names the one that is.
+  assert.match(
+    diagnostic(() => bodyOf("console.log(Float64Array.MAX_VALUE);\n")),
+    /Float64Array\.MAX_VALUE is not part of a program/,
+  );
+});
+
+test("Deno names the command line node names", () => {
+  // Deno hands a program the arguments alone, where node counts the program
+  // and the file it runs before them, so `Deno.args[0]` is the argument
+  // `process.argv[2]` is and not the one `process.argv[0]` would be.
+  assert.deepEqual(bodyOf("const n = Deno.args[0];\n"), [
+    {
+      kind: "declare",
+      name: "n",
+      mutable: false,
+      type: null,
+      value: {
+        k: "call",
+        function: "argv",
+        args: [{ k: "binary", op: "+", left: { k: "number", text: "2" }, right: { k: "number", text: "0" } }],
+      },
+      line: 1,
+    },
+  ]);
+  // The length is the count of the arguments, and node's count carries the two
+  // entries the source does not see.
+  assert.deepEqual(bodyOf("const given = Deno.args.length;\n"), [
+    {
+      kind: "declare",
+      name: "given",
+      mutable: false,
+      type: null,
+      value: {
+        k: "binary",
+        op: "-",
+        left: { k: "call", function: "argvLength", args: [] },
+        right: { k: "number", text: "2" },
+      },
+      line: 1,
+    },
+  ]);
+});
+
 test("a statement a program cannot run is refused", () => {
   assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
   const refused = diagnostic(() => bodyOf("switch (total) {\n}\n"));

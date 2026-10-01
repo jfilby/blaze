@@ -37,8 +37,8 @@ function driver(source: string): string {
   return generateProgramDriver(resolved(source));
 }
 
-/** The program written to disk, its source run by node and its binary linked. */
-async function deliver(source: string): Promise<{ binary: string; original: string }> {
+/** The program written to disk and the binary it was linked into. */
+async function linked(source: string): Promise<{ directory: string; binary: string }> {
   const directory = await mkdtemp(join(tmpdir(), "blaze-program-"));
   await writeFile(join(directory, "main.ts"), source, "utf8");
   // The driver includes the runtime header by name, as a build keeps the
@@ -54,9 +54,15 @@ async function deliver(source: string): Promise<{ binary: string; original: stri
     runtimeObjectPath: await runtime,
     outputPath: join(directory, "program"),
   });
+  return { directory, binary: runner.command };
+}
+
+/** The binary the program was linked into, and what the source printed. */
+async function deliver(source: string): Promise<{ binary: string; original: string }> {
+  const { directory, binary } = await linked(source);
   const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
   assert.equal(original.code, 0, original.stderr);
-  return { binary: runner.command, original: original.stdout };
+  return { binary, original: original.stdout };
 }
 
 test("a compound assignment a whole operator needs is refused on a double", () => {
@@ -152,6 +158,27 @@ test("a name the driver binds in a condition is declared under a name of its own
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, original);
   assert.equal(delivered.stdout, "30\n");
+});
+
+test("Deno.args reads the arguments the program was given", async () => {
+  // Deno hands a program the arguments alone, where node counts the program
+  // and the file it runs before them. A benchmark written for one host is run
+  // by this one without being rewritten, so the argument it reads has to be
+  // the one it was started with: `Deno.args[0]` is what node writes at
+  // `process.argv[2]`, and reading it as `process.argv[0]` handed the program
+  // a zero and the benchmark answered nothing at all.
+  const source = [
+    "const n = +Deno.args[0];",
+    "console.log(`n: ${n}`);",
+    "console.log(`given: ${Deno.args.length}`);",
+    "",
+  ].join("\n");
+  // Node is not the oracle here: it has no `Deno` to read, and what the two
+  // print is what the source means rather than what node would have run.
+  const { binary } = await linked(source);
+  const delivered = run(binary, ["7"], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "n: 7\ngiven: 1\n");
 });
 
 test("a whole number the source wrote as a bigint is whole to the width it was resolved at", async () => {

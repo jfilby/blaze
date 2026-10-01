@@ -41,8 +41,8 @@
  * a program reads neither as a value. What a value is on its own: a
  * number, a bigint as `12n`, a string or a template string, `true`, `false`,
  * `null` and `undefined`, a name, `( expr )`, `new Float64Array([1, 2])`,
- * `process.argv` with `[i]` and `.length`, and `Math.max` and the five other
- * builtins.
+ * `Float64Array.BYTES_PER_ELEMENT`, `process.argv` and `Deno.args` with `[i]`
+ * and `.length`, and `Math.max` and the five other builtins.
  *
  * A template string interpolates values; its text is taken as written, with the
  * escapes in ESCAPES resolved and any other escape left as written. A negative
@@ -80,6 +80,24 @@ const VIEWS: Record<string, PrimitiveTypeName> = {
   Uint32Array: "u32",
   BigInt64Array: "i64",
   BigUint64Array: "u64",
+};
+
+/**
+ * How wide one element of a view is, in bytes. `BYTES_PER_ELEMENT` is the
+ * number the language holds for a view, and a program reads it to count the
+ * bytes of a buffer it lays out itself.
+ */
+const VIEW_BYTES: Record<string, number> = {
+  i8: 1,
+  u8: 1,
+  i16: 2,
+  u16: 2,
+  i32: 4,
+  u32: 4,
+  i64: 8,
+  u64: 8,
+  f32: 4,
+  f64: 8,
 };
 
 const VIEWS_LIST = Object.keys(VIEWS).join(", ");
@@ -188,7 +206,7 @@ class ProgramParser {
   private fail(message: string, token: Token = this.peek()): void {
     this.diagnostics.report(
       message,
-      `near "${token.text}"; a program runs declarations, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math and process.argv`,
+      `near "${token.text}"; a program runs declarations, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math, process.argv and Deno.args`,
       token.line,
     );
   }
@@ -764,9 +782,18 @@ class ProgramParser {
         this.next();
         this.next();
         this.next();
-        return this.argv();
+        return this.argv("process.argv");
+      }
+      // Deno names the same command line as node does, and a benchmark written
+      // for one is run by the other without being rewritten.
+      if (token.text === "Deno" && this.peek(1).text === "." && this.peek(2).text === "args") {
+        this.next();
+        this.next();
+        this.next();
+        return this.argv("Deno.args");
       }
       if (token.text === "Math" && this.peek(1).text === ".") return this.math();
+      if (token.text in VIEWS && this.peek(1).text === ".") return this.viewWidth(token);
       this.next();
       return { k: "name", name: token.text };
     }
@@ -782,6 +809,26 @@ class ProgramParser {
     }
     this.fail(`"${token.text}" is not a value a program can read`, token);
     return this.nothing();
+  }
+
+  /**
+   * `Float64Array.BYTES_PER_ELEMENT`: how wide one element of a view is. The
+   * width belongs to the language rather than to the program, so it is read
+   * here as a number written out, and a program counts the bytes of a buffer
+   * with it rather than writing the count down.
+   */
+  private viewWidth(view: Token): ProgramValue {
+    this.next();
+    this.next();
+    const member = this.identifier("the property of a view");
+    if (member !== "BYTES_PER_ELEMENT") {
+      this.fail(
+        `${view.text}.${member} is not part of a program; a program reads ${view.text}.BYTES_PER_ELEMENT`,
+        view,
+      );
+      return this.nothing();
+    }
+    return { k: "number", text: String(VIEW_BYTES[VIEWS[view.text] as string]) };
   }
 
   /** `Math.max(a, b)` and the five other functions of a program. */
@@ -821,25 +868,33 @@ class ProgramParser {
   }
 
   /**
-   * `process.argv` as a program sees it: `argv[0]` is 0, and `argv[i]` for
-   * i >= 1 is the (i - 1)th argument the program was given. The path node runs
-   * the source with is not an argument of the program.
+   * The command line a program was given, as `process.argv` and `Deno.args`
+   * both name it. Node counts the program and the file it runs before the
+   * arguments, and Deno hands over the arguments alone: `Deno.args[i]` is the
+   * argument `process.argv[i + 2]` is, and `Deno.args.length` is two shorter
+   * than the length node reports. A benchmark written for one host is run by
+   * this one without being rewritten, and it reads the argument it was given.
    */
-  private argv(): ProgramValue {
+  private argv(written: string): ProgramValue {
+    const shift = written === "Deno.args" ? 2 : 0;
     if (this.accept("[")) {
       const index = this.value();
       this.expect("]");
-      if (index.k === "number" && Number(index.text) === 0) return { k: "number", text: "0" };
-      return { k: "call", function: ARGV, args: [index] };
+      if (shift === 0 && index.k === "number" && Number(index.text) === 0) return { k: "number", text: "0" };
+      const shifted: ProgramValue =
+        shift === 0 ? index : { k: "binary", op: "+", left: { k: "number", text: String(shift) }, right: index };
+      return { k: "call", function: ARGV, args: [shifted] };
     }
     if (this.accept(".")) {
       const member = this.identifier("the property of a value");
       if (member !== "length") {
-        this.fail(`process.argv.${member} is not part of a program; a program reads argv.length`, this.peek());
+        this.fail(`${written}.${member} is not part of a program; a program reads argv.length`, this.peek());
         return { k: "number", text: "0" };
       }
     }
-    return { k: "call", function: ARGV_LENGTH, args: [] };
+    const length: ProgramValue = { k: "call", function: ARGV_LENGTH, args: [] };
+    if (shift === 0) return length;
+    return { k: "binary", op: "-", left: length, right: { k: "number", text: String(shift) } };
   }
 
   /** `new Float64Array([1, x, 3])`: the values are the elements of the buffer. */
