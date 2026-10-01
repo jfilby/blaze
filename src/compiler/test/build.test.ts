@@ -607,8 +607,35 @@ test("a program whose function takes a reference is built, because the program i
  * candidate of the callee it is has not been settled when the caller is built.
  * So the call is linked by the program, and the program is what says whether
  * the two agree.
+ *
+ * `twice` calls `scale2`, so the body the compiler would put where the call
+ * was is a body that calls something itself, and inlining it would put two
+ * calls in the caller. A callee like that stays a call, which is what leaves
+ * the caller here with something it cannot be checked against on its own.
  */
 const CALLING_PROGRAM = [
+  "function scale2(n: number): number {",
+  "  return n + n;",
+  "}",
+  "",
+  "function twice(n: number): number {",
+  "  return scale2(n) + scale2(n);",
+  "}",
+  "",
+  "function main(): void {",
+  "  console.log(twice(21));",
+  "}",
+  "",
+  "main();",
+  "",
+].join("\n");
+
+/**
+ * The same shape with a callee that calls nothing: its body is a single block
+ * the compiler is free to put where the call was, so a caller that calls it can
+ * be verified against its own contract after all.
+ */
+const LEAF_CALLING_PROGRAM = [
   "function twice(n: number): number {",
   "  return n * 2;",
   "}",
@@ -651,12 +678,13 @@ test("a function that calls another function of the program is built and checked
   );
 
   assert.equal(outcome.build.status, "success");
-  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "twice"]);
+  assert.deepEqual(Object.keys(outcome.contracts).sort(), ["main", "scale2", "twice"]);
 
   assert.ok(outcome.outputPath !== null);
   const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
   assert.equal(execution.code, 0, execution.stderr);
-  assert.equal(execution.stdout, "42\n");
+  // 21 doubled twice over: `twice` is two calls to `scale2` and nothing else.
+  assert.equal(execution.stdout, "84\n");
 
   // The caller is not probed and carries no vector: the object it calls is the
   // callee's, so the program is the only thing that can run it. What proved it
@@ -672,11 +700,16 @@ test("a function that calls another function of the program is built and checked
   const [mainOutcome] = generation.functions.main.outcomes;
   assert.equal(mainOutcome.probe?.called, false);
   assert.match(mainOutcome.probe?.reason ?? "", /it calls twice, so the program it belongs to is what runs it/);
-  // The callee is a function of its own contract, so it is still verified and
-  // measured on its own vectors: being called does not cost it that.
+  // `twice` calls `scale2`, and `scale2` is a leaf, so the fold puts its body
+  // where each of its calls was. What is left of `twice` is a function of its
+  // own, and being called by `main` no longer costs it the probe.
   const [twiceOutcome] = generation.functions.twice.outcomes;
-  assert.equal(twiceOutcome.probe, undefined);
-  assert.notEqual(twiceOutcome.verification, undefined);
+  assert.equal(twiceOutcome.probe?.called, true);
+  // `scale2` is the callee the frontend could write a postcondition for, and it
+  // is a function of its own: being called by `twice` does not cost it the
+  // vectors it is checked against.
+  const [scale2Outcome] = generation.functions.scale2.outcomes;
+  assert.notEqual(scale2Outcome.verification, undefined);
 });
 
 /**
@@ -705,7 +738,7 @@ const BRANCHING_PROGRAM = [
 test("a review that inlines a call has the callee's body put where the call was", async (t) => {
   const inline = "verdict: repaired\nreason: the callee is a leaf\nproposal: inline-call entry callee=twice";
   const directory = await mkdtemp(join(tmpdir(), "blaze-writes-out-"));
-  await writeFile(join(directory, "main.ts"), CALLING_PROGRAM, "utf8");
+  await writeFile(join(directory, "main.ts"), LEAF_CALLING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
     sourceFile: "main.ts",
@@ -727,10 +760,11 @@ test("a review that inlines a call has the callee's body put where the call was"
   assert.ok(outcome.outputPath !== null);
   assert.equal(run(outcome.outputPath, [], { timeoutMs: 60_000 }).stdout, "42\n");
 
-  // The whole point of writing the call out: the caller declares no call for
+  // The whole point of putting the body there: the caller declares no call for
   // the callee and references no other symbol of the program, so it is linked
-  // on its own and probed. The rule is the compiler's and the artifact is
-  // regenerated from it, so what is delivered is the one the rule produced.
+  // on its own and probed. A leaf is inlined whether a review asked for it or
+  // the fold did, and what is delivered is the artifact that produced the
+  // object either way.
   const generation = JSON.parse(
     await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
@@ -772,6 +806,43 @@ test("a callee that leaves from more than one block is left as a call, and the p
     await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
   assert.match(generation.functions.main.outcomes[0]?.probe?.reason ?? "", /it calls step/);
+});
+
+test("a caller of a leaf is built as a function of its own, with no review asking for it", async (t) => {
+  // Nothing proposes this rewrite. The fold asks the compiler's own question
+  // about every call on the way to every object, and a callee that is a single
+  // block has a body that can be put where the call was. What the caller gains
+  // is the thing it did not have: with no call left in it, the object stands
+  // on its own and is checked against its contract instead of by the program.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-inline-leaf-"));
+  await writeFile(join(directory, "main.ts"), LEAF_CALLING_PROGRAM, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  await chatEndpoint(t, [], { answer: () => SOUND });
+
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "42\n", "and it prints what the source prints");
+
+  const generation = JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+  ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
+  assert.notEqual(generation.functions.main.outcomes[0]?.probe, undefined, "the caller is probed on its own");
+  assert.equal(generation.functions.main.outcomes[0]?.probe?.called, true);
 });
 
 test("a program entry is accepted under the symbol its contract names, not under its function name", async () => {

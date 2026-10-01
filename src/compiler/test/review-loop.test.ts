@@ -64,7 +64,7 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
     unitFile: "main.ts",
     program: phase.program,
     base,
-    semantics,
+    functions: semantics,
     target: TARGET,
     output: "ir",
     runtime: "none",

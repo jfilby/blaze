@@ -21,9 +21,10 @@ const COMPILER = resolve(import.meta.dirname, "../../compiler");
 const load = async (path) => import(join(COMPILER, path));
 
 const { parseSemanticFunction } = await load("semantics/ir-text.ts");
-const { optimizeSemanticFunction, optimizeSemanticProgram } = await load("semantics/optimize-ir.ts");
-const { resolveProgram } = await load("semantics/ir-resolve.ts");
+const { optimizeSemanticProgram } = await load("semantics/optimize-ir.ts");
 const { validateSemanticProgram } = await load("semantics/ir-validate.ts");
+const { resolveProgram } = await load("semantics/ir-resolve.ts");
+const { foldedCandidate } = await load("codegen.ts");
 const { buildObject } = await load("toolchain/ir-machine.ts");
 const { buildProgramDriver } = await load("toolchain/driver.ts");
 const { frontendFor } = await load("semantics/frontend.ts");
@@ -43,11 +44,31 @@ const callable = new Set(Object.values(contract.files).flatMap((file) => Object.
 const selected = Object.fromEntries(Object.entries(generation.functions).map(([name, entry]) => [name, entry.selected]));
 const work = await mkdtemp(join(projectDirectory, ".relower-"));
 
+// Each function's stored artifact is the IR the build resolved from the source,
+// so the program to fold against is read off disk rather than resolved again.
+// The fold is `codegen.ts:measureCandidate`'s: inlined against those bodies,
+// then through the deterministic rewrites. Optimizing the stored text on its own
+// would measure a build that is not the one `blaze build` makes.
+const stored = {};
+for (const file of contract.files) {
+  for (const name of Object.keys(file.functions)) {
+    stored[name] = await readFile(join(base, "work", name, `${selected[name] ?? "c1"}.ir`), "utf8");
+  }
+}
+const functions = Object.fromEntries(
+  Object.entries(stored).map(([name, text]) => [name, parseSemanticFunction(text, program)]),
+);
+
 const objectPaths = [];
 for (const file of contract.files) {
   for (const [name, fnContract] of Object.entries(file.functions)) {
-    const text = await readFile(join(base, "work", name, `${selected[name] ?? "c1"}.ir`), "utf8");
-    const fn = optimizeSemanticFunction(parseSemanticFunction(text, program));
+    const id = selected[name] ?? "c1";
+    const folded = foldedCandidate(
+      { id, text: stored[name], model: "stored", modelConfig: "stored", generatedAt: "1970-01-01T00:00:00.000Z", candidate: 1, round: 1 },
+      program,
+      functions,
+    );
+    const fn = parseSemanticFunction(folded.text, program);
     const objectPath = join(work, `${name}.o`);
     await buildObject({ fn, contract: fnContract, target, callable, objectPath });
     objectPaths.push(objectPath);

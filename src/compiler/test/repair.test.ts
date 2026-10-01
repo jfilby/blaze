@@ -11,13 +11,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyProposal, describeSites, REPAIR_RULES, type RepairOutcome } from "../semantics/repair.ts";
+import { applyProposal, describeSites, inlineCalls, REPAIR_RULES, type RepairOutcome } from "../semantics/repair.ts";
 import { printSemanticFunction, parseSemanticFunction } from "../semantics/ir-text.ts";
 import { validateSemanticFunction } from "../semantics/ir-validate.ts";
+import { foldedCandidate } from "../codegen.ts";
 import { parseReview, type Proposal } from "../core/proposal.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
-import type { FunctionContract, ProgramContract } from "../core/types.ts";
+import type { Candidate, FunctionContract, ProgramContract } from "../core/types.ts";
 
 /** The proposals a review of `answer` carries, or nothing if it cannot be read. */
 function proposalsIn(answer: string): Proposal[] {
@@ -580,4 +581,122 @@ test("no rule binds a value that can fault on a turn that did not use to compute
     bindings.every((line) => !line.includes("element")),
     `a load was bound out of the arm that guards it: ${bindings.join(" | ")}`,
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/* inlineCalls                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Contracts a library, resolves it, and inlines into one of its functions
+ * without a proposal naming anything — which is how the compiler now asks.
+ */
+function inlined(lib: string, name: string): { ir: string; fn: SemanticFunction } | { refused: string } {
+  const files = { "main.ts": `import { ${name} } from './lib.ts';\nconsole.log(${name}(2));\n`, "lib.ts": lib };
+  const own = phaseOf("typescript", files, "main.ts");
+  const ownSemantics = semanticsOf(own);
+  const contracts: Record<string, FunctionContract> = Object.fromEntries(
+    own.program.files.flatMap((file) => Object.entries(file.functions)),
+  );
+  const fn = inlineCalls(structuredClone(ownSemantics[name] as SemanticFunction), {
+    functions: new Map(Object.entries(ownSemantics)),
+  });
+  // What the compiler does on its own has to leave a function it may still
+  // lower, exactly as a proposal it applied has to.
+  validateSemanticFunction(fn, contracts[name] as FunctionContract);
+  return { ir: printSemanticFunction(fn), fn };
+}
+
+test("a callee that calls nothing is put where its call was", () => {
+  const result = inlined(
+    [
+      "export function twice(x: number): number {",
+      "  return x + x;",
+      "}",
+      "",
+      "export function work(x: number): number {",
+      "  return twice(x);",
+      "}",
+      "",
+    ].join("\n"),
+    "work",
+  );
+  assert.ok("ir" in result);
+  assert.doesNotMatch(result.ir, /call twice/, "the call is gone");
+  assert.deepEqual(result.fn.calls, [], "and the edge the body no longer makes is gone with it");
+});
+
+test("a callee that writes its parameter does not write the caller's name", () => {
+  // A parameter is a copy of the argument, so `bump(x)` leaving `x` alone is
+  // what the source says: `work(5)` is 11 and a write that reached through
+  // would answer 12. Nothing proposes this rewrite now — the compiler asks for
+  // it on every candidate of every build — so the copy has to hold without one.
+  const result = inlined(
+    [
+      "export function bump(x: number): number {",
+      "  x = x + 1;",
+      "  return x;",
+      "}",
+      "",
+      "export function work(x: number): number {",
+      "  const y = bump(x);",
+      "  return x + y;",
+      "}",
+      "",
+    ].join("\n"),
+    "work",
+  );
+  assert.ok("ir" in result);
+  assert.doesNotMatch(result.ir, /call bump/);
+  assert.match(result.ir, /let value\[f64\] inlined\d+ immutable = local\[f64\] x/, "the argument is copied to a temporary of its own");
+  assert.match(result.ir, /return \[add\[f64\] local\[f64\] x local\[f64\] y\]/, "and the caller still reads its own x");
+});
+
+test("a callee that calls something is left alone, however deep the recursion", () => {
+  // `twice` calls itself, so `work` calling `twice` cannot be spliced: the
+  // body would hold the call that has to be put into it. A pass that cannot
+  // see the end of that has to be bounded by the calls the function was
+  // written with, which is what `inlineCalls` rounds on.
+  const result = inlined(
+    [
+      "export function countdown(n: number): number {",
+      "  if (n <= 0) { return 0; }",
+      "  return countdown(n - 1);",
+      "}",
+      "",
+      "export function work(n: number): number {",
+      "  return countdown(n);",
+      "}",
+      "",
+    ].join("\n"),
+    "work",
+  );
+  assert.ok("ir" in result);
+  assert.match(result.ir, /call countdown/, "the call the compiler cannot remove is still there");
+});
+
+test("the fold inlines, and every path to an object goes through the fold", () => {
+  // The compiler does not ask for the rewrite; the fold does, on the way to
+  // every object and module. This is what says so: a candidate folded with the
+  // program's functions has no call left in it, and the same candidate folded
+  // without them is handed back untouched rather than half rewritten.
+  const files = {
+    "main.ts": "import { work } from './lib.ts';\nconsole.log(work(2));\n",
+    "lib.ts": ["export function twice(x: number): number {", "  return x + x;", "}", "", "export function work(x: number): number {", "  return twice(x);", "}", ""].join("\n"),
+  };
+  const phase = phaseOf("typescript", files, "main.ts");
+  const semantics = semanticsOf(phase);
+  const candidate: Candidate = {
+    id: "c1",
+    text: printSemanticFunction(semantics.work as SemanticFunction),
+    model: "the test",
+    modelConfig: "none",
+    generatedAt: "1970-01-01T00:00:00.000Z",
+    candidate: 1,
+    round: 1,
+  };
+  const withFunctions = foldedCandidate(candidate, phase.program, semantics);
+  assert.doesNotMatch(withFunctions.text, /call twice/, `the fold inlined it: ${withFunctions.text}`);
+  const alone = foldedCandidate(candidate, phase.program, {});
+  assert.match(alone.text, /call twice/, "and it rewrites nothing it was not given the bodies for");
 });

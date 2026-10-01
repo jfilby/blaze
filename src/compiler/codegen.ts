@@ -24,7 +24,7 @@ import { buildObject as buildMachineObject, describeMachineObject } from "./tool
 import { compileFunctionC } from "./toolchain/ir-c.ts";
 import { parseSemanticFunction, printSemanticFunction } from "./semantics/ir-text.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
-import { applyProposal, type RepairContext } from "./semantics/repair.ts";
+import { applyProposal, inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { optimizeSemanticFunction } from "./semantics/optimize-ir.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
@@ -128,12 +128,6 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
    * from it and a review may only rewrite it.
    */
   base: SemanticFunction;
-  /**
-   * Every function of the program as the IR holds it, by name. A proposal that
-   * inlines a call is applied against these, so a rule reads the same bodies a
-   * backend is given.
-   */
-  semantics: Record<string, SemanticFunction>;
   target: TargetSpec;
   output: OutputKind;
   /**
@@ -356,6 +350,13 @@ export interface CandidateEvaluationRequest {
   /** The whole program, contracted: what an IR candidate is bound to. */
   program: ProgramContract;
   target: TargetSpec;
+  /**
+   * Every function of the program as the IR holds it, by name. A candidate is
+   * folded against these, so a callee whose body may be put where its call was
+   * is one the fold already has rather than one a backend would have to go and
+   * resolve.
+   */
+  functions: Readonly<Record<string, SemanticFunction>>;
   output: OutputKind;
   /**
    * What lowered the IR. Named for the lowering rather than the model
@@ -470,15 +471,21 @@ export function readSemanticCandidate(
  * made from: an artifact that is not what was compiled is one a reader cannot
  * check anything against.
  */
-export function foldedCandidate(candidate: Candidate, program: ProgramContract): Candidate {
+export function foldedCandidate(
+  candidate: Candidate,
+  program: ProgramContract,
+  functions: Readonly<Record<string, SemanticFunction>>,
+): Candidate {
   // A candidate whose text does not parse is one the reader refuses, and that
   // refusal is reported with the reason the parser gave. The fold is left out
   // rather than failing here, where the reason would be a different one.
   try {
-    return {
-      ...candidate,
-      text: printSemanticFunction(optimizeSemanticFunction(parseSemanticFunction(candidate.text, program))),
-    };
+    // Inlining comes before the rewrites, because the callee spliced in was
+    // resolved from the source and has not been through them yet.
+    const inlined = inlineCalls(parseSemanticFunction(candidate.text, program), {
+      functions: new Map(Object.entries(functions)),
+    });
+    return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined)) };
   } catch {
     return candidate;
   }
@@ -630,7 +637,7 @@ async function measureCandidate(
   written: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
-  const candidate = foldedCandidate(written, request.program);
+  const candidate = foldedCandidate(written, request.program, request.functions);
   const paths = candidateFiles(request.workspace, candidate.id, request.output);
   try {
     // The IR is the artifact and is kept beside whatever it lowers into,
@@ -999,7 +1006,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // recorded answer to serve next, but is not built until a review happens.
   let backend: AiBackend | null = null;
   const generationBackend = (): AiBackend => (backend ??= request.backend());
-  const context: RepairContext = { functions: new Map(Object.entries(request.semantics)) };
+  const context: RepairContext = { functions: new Map(Object.entries(request.functions)) };
 
   const { maxAttempts, maxCandidates, candidateConcurrency } = request.generation;
   // Candidate records are numbered from the stored ones and from whatever a
@@ -1065,7 +1072,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
             contract: request.contract,
             unit: { file: request.unitFile, function: request.contract.function.name },
             program: request.program,
-            semantics: request.semantics,
+            semantics: request.functions,
             target: request.target,
             output: request.output,
             candidate,
@@ -1150,7 +1157,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
       contract: request.contract,
       unit: { file: request.unitFile, function: request.contract.function.name },
       program: request.program,
-      semantics: request.semantics,
+      semantics: request.functions,
       target: request.target,
       output: request.output,
       candidate: winner.candidate,
@@ -1212,6 +1219,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
       contract: request.contract,
       parsed: request.parsed,
       program: request.program,
+      functions: request.functions,
       target: request.target,
       output: request.output,
       lowering: request.lowering,

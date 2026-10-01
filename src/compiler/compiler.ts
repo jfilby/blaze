@@ -46,6 +46,7 @@ import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
+import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
@@ -1159,7 +1160,7 @@ export async function runBuild(
         parsed: unit.parsed,
         program,
         base: semantics[functionName] as SemanticFunction,
-        semantics,
+        functions: semantics,
         target,
         output: outputKind,
         lowering: backendKind,
@@ -1742,6 +1743,11 @@ export async function runStored(
   // `blaze test` measures one stored candidate at a time, but it measures them
   // the way a build does, so it goes through the same lock.
   const machine = exclusive();
+  // A stored candidate is folded against the whole program too, so the bodies
+  // it may inline are resolved here exactly as the build resolved them. The
+  // object layouts are a property of the contracted files and nothing else, so
+  // the same program answers the same names without the phase being run again.
+  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files)));
 
   // Both records are collected as entries and written whole, the way a build
   // writes its own, so a name that is a key of neither is never half written.
@@ -1766,6 +1772,7 @@ export async function runStored(
       contract: unit.contract,
       parsed: unit.parsed,
       program,
+      functions,
       target,
       output,
       lowering,

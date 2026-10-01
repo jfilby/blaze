@@ -923,11 +923,12 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
     return { refused: `${calleeName} is not a function of this program: the program has ${names}` };
   }
 
-  const refusal = inlineRefusal(callee);
-  if (refusal !== null) return { refused: `${calleeName} ${refusal}` };
-
   // A block hands its value back from its terminator as often as from a
-  // statement, so the call this rule inlines may be written in either.
+  // statement, so the call this rule inlines may be written in either. The
+  // site is read before the callee is judged: a block that does not make the
+  // call at all is the more useful thing to say, and it names the block, so a
+  // proposal aimed at the wrong one is corrected rather than told its callee
+  // is the problem.
   const written = block.statements
     .map((statement) => callIn(statement, calleeName))
     .filter((entry): entry is FoundCall => entry !== null);
@@ -936,6 +937,10 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   if (written.length + (returned === null ? 0 : 1) > 1) {
     return { refused: `${calleeName} is called more than once in block ${site}, so no single one of them is named` };
   }
+
+  const refusal = inlineRefusal(callee);
+  if (refusal !== null) return { refused: `${calleeName} ${refusal}` };
+
 
   const call = written[0]?.call ?? (returned as SemanticCall);
   const statement = written[0]?.statement ?? null;
@@ -1081,7 +1086,17 @@ function inlineRefusal(callee: SemanticFunction): string | null {
   // The substitution now remaps those names beside the values, so an
   // accumulator — the commonest callee in a program written this way — is
   // inlinable rather than refused.
+  // Only the entry block may end the function. A block nested inside the
+  // callee that returns would return from the *caller* once its body is
+  // spliced in, handing back the callee's value where the caller returns
+  // nothing or returns something else — so `if (n > 2) { return 3; }` is a
+  // body with nowhere to go, and a jump is control flow the caller does not
+  // own for the same reason.
   for (const block of nestedBlocks(callee.entry)) {
+    if (block === callee.entry) continue;
+    if (block.terminator.k === "return") {
+      return "returns from a block of its own, which would return from the function it is put into";
+    }
     if (block.terminator.k === "jump") return "leaves a block for another one, which is control flow the function it is put into does not own";
   }
   return null;
@@ -1121,6 +1136,71 @@ function writesName(fn: SemanticFunction, name: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * The callees a block calls, in the order they are first written in.
+ *
+ * A block is what decides whether a call may be put there — `inlineCall`
+ * refuses a block that calls the same callee twice, because then no single
+ * one of them is the call to name — so the calls are collected per block
+ * rather than per function.
+ */
+function calleesInBlock(block: SemanticBlock): string[] {
+  const names: string[] = [];
+  for (const value of blockValues([block])) {
+    walkValues(value, (inner) => {
+      if (inner.k === "call" && !names.includes(inner.call.callee)) names.push(inner.call.callee);
+    });
+  }
+  return names;
+}
+
+/**
+ * Puts the body of every callee this function may inline where its call was.
+ *
+ * `inline-call` is the rule a review proposes, so it is written for a model to
+ * name one site and read back a reason when that site does not hold. Here the
+ * compiler asks the same question about every block on its own, and applies
+ * the rewrite wherever the answer is yes — the callee's names renamed, its
+ * blocks renamed beside them, and the call bound to what the callee hands
+ * back. Nothing about the rewrite is different; what differs is who decided.
+ *
+ * This runs after a review and not inside one, so what a model is shown is the
+ * IR the source resolved to and not an already-inlined rewrite of it. The
+ * object is lowered from the inlined tree, and the text beside it is printed
+ * from the same tree, so the artifact and the code are one thing.
+ *
+ * Only a callee that calls nothing itself is inlinable — `inlineRefusal`
+ * refuses one that does, which is what keeps a recursive pair from being
+ * spliced into itself — so a spliced body holds no call and each round
+ * strictly removes one. The rounds are bounded by the calls the function was
+ * written with, and the bound is here so a tree that breaks that assumption
+ * costs a round instead of a build.
+ */
+export function inlineCalls(fn: SemanticFunction, context: RepairContext): SemanticFunction {
+  let current = fn;
+  for (let round = 0; round <= fn.calls.length; round += 1) {
+    const inlined = inlineOnce(current, context);
+    if (inlined === null) return current;
+    current = inlined;
+  }
+  return current;
+}
+
+/**
+ * The first call in the body whose callee may be put where it was written, as
+ * a tree that call has been applied to, or null when the body has none.
+ */
+function inlineOnce(fn: SemanticFunction, context: RepairContext): SemanticFunction | null {
+  for (const block of blocksOf(fn)) {
+    for (const callee of calleesInBlock(block)) {
+      const attempt = structuredClone(fn);
+      const outcome = inlineCall(attempt, block.id, callee, context);
+      if ("applied" in outcome) return outcome.applied;
+    }
+  }
+  return null;
 }
 
 /* -------------------------------------------------------------------------- */
