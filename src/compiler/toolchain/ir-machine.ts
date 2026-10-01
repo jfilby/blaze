@@ -94,6 +94,14 @@ const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 const TEXT = { kind: "text" } as const;
 const POINTER: SemanticType = { kind: "primitive", name: "usize" };
 
+/**
+ * The type a walk's index is held at. The IR does not name one: counting over
+ * an array is a whole number whatever the elements are, and what the pinning
+ * pass weighs here is the type of the register the counter is given, which is
+ * this whenever the loop states no type of its own.
+ */
+const INDEX: SemanticType = { kind: "primitive", name: "u64" };
+
 /** The C library a lowered function calls, which the linker resolves. */
 const LIBRARY: Record<string, true> = {
   strlen: true,
@@ -217,6 +225,21 @@ const VECTOR_CALLEE_SAVED: readonly number[] = [XMM6, XMM7, XMM8, XMM9, XMM10, X
  * binding takes anyway.
  */
 const PINNING_READS = 4;
+
+/**
+ * What a read is worth by the number of loops it is nested in: the first entry
+ * is a read on a path nothing repeats, the second one inside a loop, the third
+ * inside a loop inside a loop, and the last for anything deeper.
+ *
+ * It is a doubling rather than the turn count of the loop, which is not known
+ * here and is not the point: what says a read is hot is that the block holding
+ * it is carried out again, and how much again grows with how many loops are
+ * around it. The list stops at eight because the difference between a hundred
+ * turns of a loop and a thousand changes which name is pinned first not at all,
+ * and a name pinned on a turn count it cannot be held to is a name pinned for
+ * the wrong reason.
+ */
+const READ_WEIGHT: readonly number[] = [1, 2, 4, 8];
 
 /**
  * The operations the machine carries out with a literal reached in the
@@ -360,20 +383,40 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
 }
 
 /**
+ * Every block of a body with how many loops it is nested in, itself included.
+ *
+ * The depth is what a census over the whole function weighs a read by: a read
+ * in a block two loops deep is carried out once for every turn of both of them,
+ * and a read at the top of the body is carried out once whatever the loops turn.
+ * Counting them alike says a value read once per turn of a hot loop is worth
+ * the same as one read once in the whole run, which is the difference between
+ * the two being in a register.
+ */
+function everyBlockAtDepth(
+  block: SemanticBlock,
+  depth = 0,
+  into: { block: SemanticBlock; depth: number }[] = [],
+): { block: SemanticBlock; depth: number }[] {
+  into.push({ block, depth });
+  for (const statement of block.statements) {
+    if (statement.k === "if") {
+      everyBlockAtDepth(statement.then, depth, into);
+      if (statement.otherwise !== null) everyBlockAtDepth(statement.otherwise, depth, into);
+    } else if (statement.k === "loop") everyBlockAtDepth(statement.loop.body, depth + 1, into);
+    else if (statement.k === "block") everyBlockAtDepth(statement.body, depth, into);
+  }
+  return into;
+}
+
+/**
  * Every block of a body, itself included, which is what a read census over the
  * whole function is taken across.
  */
 function everyBlock(block: SemanticBlock, into: SemanticBlock[] = []): SemanticBlock[] {
-  into.push(block);
-  for (const statement of block.statements) {
-    if (statement.k === "if") {
-      everyBlock(statement.then, into);
-      if (statement.otherwise !== null) everyBlock(statement.otherwise, into);
-    } else if (statement.k === "loop") everyBlock(statement.loop.body, into);
-    else if (statement.k === "block") everyBlock(statement.body, into);
-  }
+  for (const entry of everyBlockAtDepth(block)) into.push(entry.block);
   return into;
 }
+
 
 /**
  * Every value a block computes in its own right, nested blocks included, and
@@ -746,79 +789,153 @@ class Machine {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * Puts the values that never change in registers instead of in the frame.
+   * Puts the values a body reaches for again in registers instead of in the frame.
    *
    * A name that is written once and read after is the same number at every
    * read, which is the one case where a register can be better than a slot
    * without any analysis of where a value is live: there is no second write for
-   * a live range to be cut at. The register is one the convention says a callee
-   * leaves as it found it, so a value read on both sides of a call survives the
-   * call, and no frame is reserved for it at all.
+   * a live range to be cut at. A name a loop writes is the other case, and it is
+   * the commoner one: an accumulator is read and written on every turn of the
+   * loop, and both of those are a store and a load out of the frame until one of
+   * them is not. The register is one the convention says a callee leaves as it
+   * found it, so a value read on both sides of a call survives the call, and no
+   * frame is reserved for it at all.
+   *
+   * How many times a name is read is the wrong question on its own, because a
+   * read in a loop body is carried out once for every turn of that loop and a
+   * read at the top of the body is carried out once however many turns it turns.
+   * So a read is weighed by how many loops enclose the block it is in: a name
+   * read once inside a loop that turns a million times is worth far more than
+   * one read five times on a path nothing repeats, and counting them alike is
+   * what left every hot value here in the frame.
    *
    * What is left is the cap, and it is two caps rather than one. Five whole
    * number registers are callee-saved and none of them is used for anything
    * else here; ten vector registers are, and they are a register file of their
    * own, so a float and a whole number are pinned out of separate lists and
    * neither takes a register the other wanted. Each list is taken in the order
-   * of how often the name is read: the ones a function reads most are the ones
-   * whose every read was a load out of the frame.
+   * of the score below: the ones a function reaches for most are the ones whose
+   * every reach was a load out of the frame.
    *
-   * A counted loop's counter is left out here and given a register below, and
-   * a float counter is left out there as well: the code that steps a counter
-   * works on a whole number register, and a float loop keeps its counter in
-   * the frame.
+   * A counted loop's counter is left out here and given a register below, in
+   * either list — a float counter takes a vector register, which is saved to
+   * the frame by the prologue for the eight bytes it costs there and read back
+   * by the epilogue, and a turn of the loop then costs no traffic through the
+   * frame at all.
    */
   private allocateRegisters(): void {
     const written = new Set<string>();
     const reads = new Map<string, number>();
+    const writes = new Map<string, number>();
+    /** Whether every write to a name was one a loop made on a turn of its own. */
+    const turnedByLoop = new Map<string, boolean>();
     const declared: { name: string; type: SemanticType }[] = this.fn.params.map((parameter) => ({
       name: parameter.name,
       type: slotType(parameter),
     }));
+    const write = (name: string, weight: number): void => {
+      written.add(name);
+      writes.set(name, (writes.get(name) ?? 0) + weight);
+      turnedByLoop.set(name, (turnedByLoop.get(name) ?? true) && weight > 1);
+    };
     for (const statement of this.fn.entry.statements) {
-      if (statement.k === "set" || statement.k === "step") written.add(statement.name);
-      if (statement.k === "setElement") written.add(statement.buffer);
+      if (statement.k === "set" || statement.k === "step") write(statement.name, 1);
+      if (statement.k === "setElement") write(statement.buffer, 1);
       if (statement.k === "loop") {
         const loop = statement.loop;
-        if (loop.kind === "counted") written.add(loop.variable);
+        if (loop.kind === "counted") write(loop.variable, 1);
         else if (loop.kind === "each") {
-          written.add(loop.index);
-          written.add(loop.element);
+          write(loop.index, 1);
+          write(loop.element, 1);
         }
       }
     }
-    for (const block of everyBlock(this.fn.entry)) {
+    // A function that calls itself runs its own body once per level of the
+    // recursion, so a read on a straight line through it is still a read
+    // carried out many times — worth here what a read inside a loop is worth
+    // in a function that calls nothing. `checksum` reads its one parameter
+    // three times, which is below the threshold on a straight line and above
+    // it in the function that is called once per node of the tree it walks.
+    const recursed = this.fn.calls.some((edge) => edge.callee === this.fn.name) ? 1 : 0;
+    for (const { block, depth } of everyBlockAtDepth(this.fn.entry)) {
+      const weight = READ_WEIGHT[Math.min(depth + recursed, READ_WEIGHT.length - 1)];
       for (const statement of block.statements) {
-        if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+        if (statement.k === "set" || statement.k === "step") write(statement.name, weight);
         if (statement.k === "setElement") {
-          written.add(statement.buffer);
+          write(statement.buffer, weight);
           // The buffer of a write is named rather than valued, so a census of
           // the values the body computes never sees it read.
-          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + 1);
+          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
         }
       }
       for (const value of everyValue(block)) {
-        if (value.k === "local") reads.set(value.name, (reads.get(value.name) ?? 0) + 1);
+        if (value.k === "local") reads.set(value.name, (reads.get(value.name) ?? 0) + weight);
       }
     }
-    // A name declared inside the body is written again each time its statement
-    // runs, so only the ones the body's own statements declare are candidates.
-    for (const statement of this.fn.entry.statements) {
-      if (statement.k !== "let") continue;
-      declared.push({ name: statement.slot.name, type: slotType(statement.slot) });
+    // Every name the body declares, and how many declarations spell it. A name
+    // declared once is bound once and read under the spelling the source gave
+    // it, so the register this pass gives it is the register the lowering reads
+    // it by. A name declared twice is two names under one spelling — the second
+    // escaping to another — so which register either is in cannot be said from
+    // here, and neither of them is a candidate.
+    const declarationCount = new Map<string, number>();
+    const loopDeclared = new Set<string>();
+    const declare = (name: string): void => {
+      declarationCount.set(name, (declarationCount.get(name) ?? 0) + 1);
+    };
+    for (const parameter of this.fn.params) declare(parameter.name);
+    for (const { block } of everyBlockAtDepth(this.fn.entry)) {
+      for (const statement of block.statements) {
+        if (statement.k === "let") declare(statement.slot.name);
+        else if (statement.k === "loop") {
+          const loop = statement.loop;
+          if (loop.kind === "counted") {
+            declare(loop.variable);
+            loopDeclared.add(loop.variable);
+          } else if (loop.kind === "each") {
+            declare(loop.index);
+            declare(loop.element);
+            loopDeclared.add(loop.index);
+            loopDeclared.add(loop.element);
+          }
+        }
+      }
     }
+    // A name a loop declares is the counter path's to decide about, and a name
+    // declared inside a loop body is an accumulator as often as anything else:
+    // `let sum = 0` written inside a loop and added to on every turn of it is
+    // the commonest one there is, and it was left in the frame because only the
+    // top of the body was looked at.
+    for (const { block } of everyBlockAtDepth(this.fn.entry)) {
+      for (const statement of block.statements) {
+        if (statement.k !== "let" || loopDeclared.has(statement.slot.name)) continue;
+        declared.push({ name: statement.slot.name, type: slotType(statement.slot) });
+      }
+    }
+    const score = (name: string): number => {
+      const read = reads.get(name) ?? 0;
+      // A name a loop writes and the body reads is an accumulator, and it is
+      // reached for on both sides of every turn: the write counts as much as
+      // the read, because both were a frame access. One written on a straight
+      // line is not one of these — it is a name whose live range a register
+      // would have to be cut at, which is the analysis this pass is not.
+      if (turnedByLoop.get(name) === true && read > 0) return read + (writes.get(name) ?? 0);
+      return written.has(name) ? 0 : read;
+    };
     const candidates = declared
-      .filter((entry) => !written.has(entry.name) && (reads.get(entry.name) ?? 0) >= PINNING_READS)
-      .sort((left, right) => (reads.get(right.name) ?? 0) - (reads.get(left.name) ?? 0));
+      .map((entry) => ({ entry, score: score(entry.name) }))
+      .filter((candidate) => candidate.score >= PINNING_READS && declarationCount.get(candidate.entry.name) === 1)
+      .sort((left, right) => right.score - left.score);
     this.pinnedRegisters = [];
     this.pinnedVectors = [];
-    for (const [index, entry] of candidates.filter((entry) => !isFloat(entry.type)).entries()) {
+    const byScore = candidates.map((candidate) => candidate.entry);
+    for (const [index, entry] of byScore.filter((entry) => !isFloat(entry.type)).entries()) {
       const register = CALLEE_SAVED[index];
       if (register === undefined) break;
       this.pinned.set(entry.name, register);
       this.pinnedRegisters.push(register);
     }
-    for (const [index, entry] of candidates.filter((entry) => isFloat(entry.type)).entries()) {
+    for (const [index, entry] of byScore.filter((entry) => isFloat(entry.type)).entries()) {
       const register = VECTOR_CALLEE_SAVED[index];
       if (register === undefined) break;
       this.pinned.set(entry.name, register);
@@ -827,15 +944,20 @@ class Machine {
     // A counted loop's counter is written and read by the loop itself on every
     // turn, so it is what a register is worth the most on. Left in the frame it
     // costs a load and a store per turn to hold a value that the next turn
-    // reads straight back out again. A float counter is left out: a vector
-    // register is saved in a hundred and twenty eight bits whatever the loop
-    // does with it, which is not worth what it saves for a loop that may turn
-    // twice.
+    // reads straight back out again.
+    //
+    // A float counter is no longer left out. It takes a vector register, and a
+    // vector register has no push, so the prologue writes the eight bytes it
+    // holds into the frame and the epilogue reads them back: two instructions
+    // once for the function, against a load and a store on every turn of the
+    // loop. A loop that turns twice never pays that back, which is why it used
+    // to be left in the frame, and why a loop that turns a million times was
+    // paying for it on every turn instead.
     //
     // A name declared more than once is left out too. Two loops both written
     // `for (let i ...)` share the name and would share the register, and the
     // inner one would go on stepping the outer one's counter.
-    const counters = new Map<string, number>();
+    const counters = new Map<string, { depth: number; type: SemanticType }>();
     const declarations = new Map<string, number>();
     const walkCounters = (block: SemanticBlock, depth: number): void => {
       for (const statement of block.statements) {
@@ -845,7 +967,7 @@ class Machine {
           declarations.set(loop.variable, (declarations.get(loop.variable) ?? 0) + 1);
           // The inner loop of a nested pair turns the most, so depth is what
           // says which counter is worth a register first.
-          if (!isFloat(loop.type)) counters.set(loop.variable, Math.max(counters.get(loop.variable) ?? 0, depth));
+          counters.set(loop.variable, { depth: Math.max(counters.get(loop.variable)?.depth ?? 0, depth), type: loop.type });
         } else if (loop.kind === "each") {
           declarations.set(loop.index, (declarations.get(loop.index) ?? 0) + 1);
           declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
@@ -855,20 +977,26 @@ class Machine {
           // given a register for the same reason. Only the index is a candidate:
           // the element is the loop's own value and is written once per turn
           // from whatever the address produced.
-          counters.set(loop.index, Math.max(counters.get(loop.index) ?? 0, depth));
+          counters.set(loop.index, { depth: Math.max(counters.get(loop.index)?.depth ?? 0, depth), type: INDEX });
         }
         walkCounters(loop.body, depth + 1);
       }
     };
     walkCounters(this.fn.entry, 0);
     const ordered = [...counters.entries()]
-      .filter(([name]) => (declarations.get(name) ?? 0) === 1 && !declared.some((entry) => entry.name === name))
-      .sort((left, right) => right[1] - left[1]);
-    for (const [index, [name]] of ordered.entries()) {
+      .filter(([name]) => (declarations.get(name) ?? 0) === 1 && declarationCount.get(name) === 1)
+      .sort((left, right) => right[1].depth - left[1].depth);
+    for (const [index, [name]] of ordered.filter(([, entry]) => !isFloat(entry.type)).entries()) {
       const register = CALLEE_SAVED[this.pinnedRegisters.length + index];
       if (register === undefined) break;
       this.pinned.set(name, register);
       this.pinnedRegisters.push(register);
+    }
+    for (const [index, [name, counter]] of ordered.filter(([, entry]) => isFloat(entry.type)).entries()) {
+      const register = VECTOR_CALLEE_SAVED[this.pinnedVectors.length + index];
+      if (register === undefined) break;
+      this.pinned.set(name, register);
+      this.pinnedVectors.push({ register, offset: 0, single: widthOf(counter.type) === 4 });
     }
     // The register an object is filled in is claimed after every name that could
     // be pinned to one, so that a function which builds an object keeps the
@@ -1579,16 +1707,31 @@ class Machine {
       // and subtracting a step of minus one moved the index the other way and
       // ran a descending loop for ever.
       if (variable.register === null) this.load(variable);
-      this.code.aluImm("add", counter, step, operationWidth(type) === 8);
+      if (isFloat(type)) {
+        // A float has no add-with-the-amount-inside form, so the step is written
+        // into the scratch and the counter is advanced in the register it lies in.
+        this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(step, widthOf(type) === 4)), widthOf(type) === 4);
+        this.code.sse("add", counter, XMM1, widthOf(type) === 4);
+      } else this.code.aluImm("add", counter, step, operationWidth(type) === 8);
     } else {
       this.scratchFrom(step);
       if (variable.register === null) this.load(variable);
+      else if (isFloat(type)) this.code.movsMove(XMM0, variable.register, widthOf(type) === 4);
       else this.code.movRegReg(RAX, variable.register);
       this.apply("add", type);
+      // A step that had to be read leaves the sum in the accumulator rather than
+      // in the register the counter is in, because the scratch the step was read
+      // into is the other side of the addition and the counter cannot be both.
+      // The counter is read back out of the accumulator here, which is what a
+      // counter in the frame gets from the store below instead.
+      if (variable.register !== null) {
+        if (isFloat(type)) this.code.movsMove(variable.register, XMM0, widthOf(type) === 4);
+        else this.code.movRegReg(variable.register, RAX);
+      }
     }
     this.normalizeArithmetic(type, counter);
-    // A counter in a register of its own is stored where it lies, and writing
-    // the accumulator into it would step it with whatever the step left behind.
+    // A counter stepped where it lies is not stored: writing the accumulator
+    // into it would step it with whatever the step left behind.
     if (variable.register === null) this.store(variable);
     this.code.bind(test);
     // Nothing is written between the store above and the test, so the counter
@@ -1978,7 +2121,11 @@ class Machine {
   private one(type: SemanticType, operation: "add" | "sub", register = RAX): void {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
-      this.code.sseMemLabel(operation, XMM0, this.floatLiteral(floatBits(1, single)), single);
+      // The destination is named by the caller because a float counter the loop
+      // was given a register for is stepped where it lies, and the accumulator a
+      // counter with no register of its own is stepped in is XMM0 — which is
+      // what the whole-number default is, the two being numbered from one zero.
+      this.code.sseMemLabel(operation, register, this.floatLiteral(floatBits(1, single)), single);
       return;
     }
     this.code.aluImm(operation, register, 1, operationWidth(type) === 8);
@@ -2090,7 +2237,13 @@ class Machine {
   private comparedBranch(type: SemanticType, op: CompareOp, right: Held | number, whenTrue: boolean, label: string, left = RAX): void {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
+      // The comparison reads XMM0 and XMM1, so a side the build gave a register
+      // of its own is moved into one of those rather than read out of the frame
+      // it is not in. `left` is XMM0 already whenever it is the accumulator,
+      // which is what the whole-number default register is.
+      if (left !== XMM0) this.code.movsMove(XMM0, left, single);
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
+      else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
       else this.code.movsLoad(XMM1, frame(right.offset), single);
       this.floatBranch(op, single, whenTrue, label);
       return;
@@ -2911,8 +3064,14 @@ class Machine {
     if (index.k === "const") return integerText(index.text);
     if (index.k !== "local") return null;
     const held = this.slot(index.name);
+    // A float is not a plain index however it is held. The register a float is
+    // pinned to is numbered out of the vector file, so handing it to a whole
+    // number register the way a frame slot is handed over reads a different
+    // register altogether — number seven being rdi and not xmm7. A float index
+    // takes the general form, which converts it into the accumulator first.
+    if (isFloat(held.type)) return null;
     if (held.register !== null) return held;
-    return isFloat(held.type) || widthOf(held.type) !== 8 ? null : held;
+    return widthOf(held.type) !== 8 ? null : held;
   }
 
   /** The number an index is, in the register the caller asked for. */
@@ -3111,6 +3270,14 @@ class Machine {
     if (value.k === "local") {
       const held = this.slot(value.name);
       if (!typeEquals(held.type, type) && !(isReference(held.type) && isReference(type))) return false;
+      // A value the build gave a register of its own has no slot to read out
+      // of: its distance into the frame is zero, which is the first slot's own
+      // address, so it is copied from the register it is in.
+      if (held.register !== null) {
+        if (isFloat(held.type)) this.code.movsMove(register, held.register, widthOf(held.type) === 4);
+        else this.code.movRegReg(register, held.register);
+        return true;
+      }
       if (isFloat(type)) this.code.movsLoad(register, frame(held.offset), widthOf(type) === 4);
       else this.code.movRegMemSized(register, frame(held.offset), widthOf(held.type), signedOf(held.type));
       return true;
@@ -3145,8 +3312,6 @@ class Machine {
 
   /**
    * A call the compiler itself provides. Each is what the C library has by the
-   * same name, and `Math.round` is the one written out, because the library
-   * rounds halves away from zero and the language rounds them up.
    */
   private builtin(call: SemanticCall): void {
     const argument = call.args[0];
