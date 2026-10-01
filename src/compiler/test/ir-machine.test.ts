@@ -1317,3 +1317,42 @@ test("an array of fewer elements than a pair holds is written the loop it was wr
   assert.equal(await lowered(dotSubject(), dotDriver(0)), "0", "no elements at all");
 });
 
+
+test("a compound assignment puts the name on the left of the operation", async () => {
+  // `i -= 1` is i less one. Reading the value into the accumulator and the name
+  // into the scratch computes one less i instead, which for a loop that counts
+  // down runs one turn and stops: `sum` over ten was 10 rather than 55, and
+  // `x /= 2` was two over x, so five halvings of 64 added up to 128.09 rather
+  // than 62. An addition and a multiplication are the two operations whose
+  // answer does not say which side was which; every other one needs the name.
+  const count = (): SemanticBlock => ({
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      { k: "let", slot: { kind: "value", name: "i", mutable: true, type: F64 }, value: local("v"), line: 3 },
+      {
+        k: "loop",
+        line: 4,
+        loop: {
+          kind: "while",
+          condition: { k: "compare", type: BOOL, op: "gt", operand: F64, left: local("i"), right: number("0") },
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "set", name: "total", op: "+=", line: 5, value: local("i") },
+              { k: "set", name: "i", op: "-=", line: 6, value: number("1") },
+            ],
+          },
+        },
+      },
+    ],
+  });
+  const fn = subject(F64, count(), [{ kind: "value", name: "v", mutable: false, type: F64 }]);
+  assert.equal(await lowered(fn, (name) => `{ double r = ${name}(10.0); printf("%g", r); }`), "55", "ten, counted down");
+});

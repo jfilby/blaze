@@ -1686,24 +1686,41 @@ class Machine {
       return;
     }
     // Every other operator reads what the name holds as well as the value it is
-    // given, so the name's old value is read into the scratch register and the
-    // operation reads the two from where they are.
+    // given, and which of the two is the left side of it is the whole of what a
+    // compound assignment is: `i -= 1` is `i` less one and `1 - i` is a number
+    // of its own, and for `n /= 2` the difference is two divided by n.
     //
-    // The value is evaluated once and left in the accumulator: a copy written to
-    // a slot and read back out of it is a store and a load for a value that has
-    // not moved, and the instruction that reads the name's old value writes
-    // only the scratch register, so the accumulator is untouched by it. The
-    // order is the one the general form above already had — the value is
-    // evaluated before the name is read — so a value that writes the name as a
-    // side of its own evaluation still reads the same thing either way.
+    // An addition and a multiplication are the two operations whose answer does
+    // not say which side was which, so for those the value is evaluated once
+    // into the accumulator and the name's old value is read into the scratch
+    // register, which is one instruction fewer than the general form below and
+    // the same answer.
+    const operation = COMPOUND[op.slice(0, -1)];
     this.at(value, target.type);
-    if (this.floatOverFrame(COMPOUND[op.slice(0, -1)], target.type, target)) {
+    if (operation === "add" || operation === "mul") {
+      if (this.floatOverFrame(operation, target.type, target)) {
+        this.normalizeArithmetic(target.type);
+        this.store(target);
+        return;
+      }
+      this.scratchFrom(target);
+      this.apply(operation, target.type);
       this.normalizeArithmetic(target.type);
       this.store(target);
       return;
     }
-    this.scratchFrom(target);
-    this.apply(COMPOUND[op.slice(0, -1)], target.type);
+    // Anything else needs the name on the left, and the accumulator holds the
+    // value rather than the name. The value is written down before the name is
+    // read rather than after, so an expression that writes the name as a side
+    // of its own evaluation still reads the same thing it would have: the order
+    // is the one the addition above has.
+    const right = this.hold(target.type, "blaze_right");
+    this.store(right);
+    this.load(target);
+    if (isFloat(target.type)) {
+      this.code.movsLoad(XMM1, frame(right.offset), widthOf(target.type) === 4);
+    } else this.readInto(right, RCX);
+    this.apply(operation, target.type);
     this.normalizeArithmetic(target.type);
     this.store(target);
   }

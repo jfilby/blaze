@@ -356,6 +356,30 @@ class BodyTypes {
 
   /** Every object this function wrote, for the program to name. */
   readonly registered = new Map<string, Shape>();
+
+  /**
+   * Every key this body holds an object under, folded onto the key the object is
+   * now the same as. A name bound to a value holds the key in the binding, in
+   * the shape the literal was registered under and in what the function answers,
+   * and a field that says nothing about what it points at is what made two keys
+   * one object in the first place.
+   */
+  renameObjects(remapped: ReadonlyMap<string, string>): void {
+    const key = (was: string): string => remapped.get(was) ?? was;
+    const value = (inferred: Inferred): Inferred =>
+      inferred.kind === "object" ? { kind: "object", key: key(inferred.key) } : inferred;
+    const shapes = new Map<string, Shape>();
+    for (const [was, shape] of this.registered) {
+      shapes.set(key(was), {
+        key: key(was),
+        fields: shape.fields.map((field) => ({ name: field.name, value: value(field.value) })),
+      });
+    }
+    this.registered.clear();
+    for (const [at, shape] of shapes) this.registered.set(at, shape);
+    for (const [name, bound] of this.environment) this.environment.set(name, value(bound));
+    for (const [at, result] of this.results.entries()) this.results[at] = value(result);
+  }
   /**
    * Every program function this body calls, in the order it first calls each.
    * A builtin is not one: the driver answers it, so it is not a symbol this
@@ -407,6 +431,84 @@ export function coalesce(left: Inferred, right: Inferred): Inferred {
   if (left.kind === "object") return left;
   if (left.type.kind === "ref" && left.type.of === null && left.type.name === undefined) return right;
   return left;
+}
+
+/** A reference that says nothing about what it points at: `null`, or an `any`. */
+function unshapedReference(value: Inferred): boolean {
+  return value.kind === "type" && value.type.kind === "ref" && value.type.of === null;
+}
+
+/**
+ * Whether two shapes are the same object, one of which was written with a
+ * reference where the other was written with the null that stands for one.
+ *
+ * A list is built out of two literals: the head, whose link is `null` because
+ * there is nothing to point at yet, and every element after it, whose link is
+ * the element before. They are the same object — one node type, one link, one
+ * value — but the first writes the link as a reference to nothing and the second
+ * writes it as a reference to the object the first describes, so the two keys
+ * differ and the program lays out two node types where the source wrote one. The
+ * traversal is typed against the first and reads the second, and it reads
+ * whichever field happens to sit at the offset it took from the first.
+ *
+ * Nothing else is the same object. Two shaped references to two different
+ * objects are two fields of two types and must stay apart: merging them would
+ * give one field a type that describes a layout neither of the two has.
+ */
+function sameShape(left: Shape, right: Shape): boolean {
+  if (left.fields.length !== right.fields.length) return false;
+  return left.fields.every((field) => {
+    const known = right.fields.find((entry) => entry.name === field.name);
+    if (known === undefined) return false;
+    if (describe(known.value) === describe(field.value)) return true;
+    return unshapedReference(known.value) || unshapedReference(field.value);
+  });
+}
+
+/**
+ * Folds every pair of shapes that differ only where one of them says nothing,
+ * and answers the key each shape is now the same object as.
+ *
+ * The walk is over pairs rather than a map, because the relation is not
+ * transitive on its own: a shape that says nothing about a field is the same as
+ * two shaped ones only if they are the same as each other, and comparing every
+ * pair and unioning is what finds the group a shape belongs to. It is a handful
+ * of comparisons per program: an object type is written out in full at every
+ * literal, so two functions build two objects only when they write different
+ * fields.
+ */
+function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
+  const keys = [...shapes.keys()];
+  const parent = new Map<string, string>(keys.map((key) => [key, key]));
+  const find = (key: string): string => {
+    let root = key;
+    while (parent.get(root) !== root) root = parent.get(root) as string;
+    let walk = key;
+    while (walk !== root) {
+      const next = parent.get(walk) as string;
+      parent.set(walk, root);
+      walk = next;
+    }
+    return root;
+  };
+  for (let left = 0; left < keys.length; left += 1) {
+    for (let right = left + 1; right < keys.length; right += 1) {
+      const first = shapes.get(keys[left]);
+      const second = shapes.get(keys[right]);
+      if (first === undefined || second === undefined) continue;
+      if (find(keys[left]) === find(keys[right])) continue;
+      if (!sameShape(first, second)) continue;
+      // The shape that names what the field points at is kept as the one the
+      // group answers to, so a field that is a reference in one literal and a
+      // null in the other is a reference afterwards: a null is a value any
+      // reference can hold, so reading it as the reference says nothing false.
+      const firstShaped = first.fields.some((field) => !unshapedReference(field.value));
+      const secondShaped = second.fields.some((field) => !unshapedReference(field.value));
+      const keep = firstShaped === secondShaped ? keys[left] : firstShaped ? keys[left] : keys[right];
+      parent.set(find(keys[right]), find(keep));
+    }
+  }
+  return new Map(keys.map((key) => [key, find(key)]));
 }
 
 /**
@@ -483,6 +585,38 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
     body.statements(definition.statements);
     bodies.set(caller.name, body);
     mergeShape(shapes, owners, body);
+  }
+
+  // Two shapes that differ only where one of them says nothing about what a
+  // reference points at are one object, and the keys that changed are written
+  // back into every body that named them: a body holds the object in the name it
+  // bound the value to, and a traversal that reads a field through a name bound
+  // before the fold would look the old key up and find nothing.
+  const remapped = uniteShapes(shapes);
+  if ([...remapped].some(([key, root]) => key !== root)) {
+    const folded = new Map<string, Shape>();
+    for (const [key, root] of remapped) {
+      const shape = shapes.get(key);
+      if (shape === undefined) continue;
+      const held = folded.get(root);
+      if (held === undefined) {
+        folded.set(root, { key: root, fields: shape.fields.map((field) => ({ ...field })) });
+        continue;
+      }
+      for (const field of shape.fields) {
+        const known = held.fields.find((entry) => entry.name === field.name);
+        if (known === undefined) {
+          held.fields.push({ name: field.name, value: field.value });
+          continue;
+        }
+        // A field one literal wrote as a reference and another as a null is a
+        // reference: the null is a value the reference can hold.
+        if (unshapedReference(known.value)) known.value = field.value;
+      }
+    }
+    shapes.clear();
+    for (const [key, shape] of folded) shapes.set(key, shape);
+    for (const body of bodies.values()) body.renameObjects(remapped);
   }
 
   const names = new Map<string, string>();

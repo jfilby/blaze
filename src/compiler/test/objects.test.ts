@@ -458,3 +458,38 @@ test("fields read equally often keep the order the source wrote them in", () => 
   );
   assert.equal(layout.size, 16);
 });
+
+test("a list built of a head of nulls and elements after it is one object", () => {
+  // A list is written as two literals: the head, whose link is `null` because
+  // there is nothing to point at yet, and every element after it, whose link is
+  // the element before. They are one object, but the first writes the link as a
+  // reference to nothing and the second writes it as a reference to the object
+  // the first describes, so the two keys differ and the program lays out two node
+  // types where the source wrote one. A traversal typed against the first then
+  // reads whichever field sits at the offset it took from it.
+  const source = [
+    "function build(count: number): any {",
+    "  let head = { next: null, item: 0 };",
+    "  let i = count;",
+    "  while (i > 0) {",
+    "    head = { next: head, item: i };",
+    "    i -= 1;",
+    "  }",
+    "  return head;",
+    "}",
+    "main();",
+    "",
+  ].join("\n");
+  const contracts = contractsOf({ "1.ts": source }, "1.ts");
+  const build = contracts.build;
+  assert.ok(build !== undefined);
+  const objects = Object.keys(build.definition?.objects ?? {});
+  assert.deepEqual(objects, ["Object1"], "the head and the elements are one node type");
+  const layout = build.definition?.objects?.Object1;
+  assert.ok(layout !== undefined);
+  // The link is a reference to the object it is in, which is what a list is.
+  assert.deepEqual(
+    layout.fields.map((field) => [field.name, field.type, field.offset]),
+    [["next", "ref<Object1>", 0], ["item", "f64", 8]],
+  );
+});
