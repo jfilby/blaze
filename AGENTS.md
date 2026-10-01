@@ -76,6 +76,8 @@ Make use of:
 
 - Move complexity down where possible.
 - Pass data structures instead of using private fields to improve determinism.
+- If you need to add features to the compiler, aim for correctness over speed
+of implementing those features.
 
 
 ## List of do's
@@ -117,6 +119,7 @@ LLMs are used to verify both IR and low-level targets. They do not implement
 fixes themselves. Instead, they inspect an artifact and propose fixes. The
 rule-based compiler evaluates those proposals and, when they are valid, applies
 them by regenerating the artifact.
+
 
 ## The rules a review may propose
 
