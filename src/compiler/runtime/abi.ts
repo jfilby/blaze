@@ -220,7 +220,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
       ["count", "size_t"],
     ],
     "Gives the runtime the arguments the program was given, as numbers.",
-    "The host calls this once, before the program runs. An argument that is not a number is 0.",
+    "The host calls this once, before the program runs, and it reads each argument the way the source reads it: an argument that is not a number is NaN.",
     { tags: ["host"] },
   ),
   entry(
@@ -235,8 +235,8 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "blaze_rt_argv",
     "double",
     [["index", "size_t"]],
-    "The argument at an index of process.argv, or 0 when there is no such argument.",
-    "A number: index 0 and 1 are where the program runs and the file it runs, so index 2 is the first argument; an argument that is missing or is not a number is 0.",
+    "The argument at an index of process.argv, or NaN when there is no such argument.",
+    "A number: index 0 and 1 are where the program runs and the file it runs, so index 2 is the first argument; an argument that is missing, or that the host read as not a number, is NaN.",
     { tags: ["arguments"] },
   ),
   entry(
@@ -263,7 +263,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "void",
     [["value", "double"]],
     "Writes a number to the output as the shortest text that reads back as it.",
-    "Writes no newline: the program decides where a line ends.",
+    "Writes no newline: the program decides where a line ends. A negative zero keeps its sign here, which is how the host a program was written for prints it and not how the language writes one.",
     { tags: ["output"] },
   ),
   entry(
@@ -275,7 +275,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
       ["size", "size_t"],
     ],
     "Writes the text of a number into a buffer, NUL terminated.",
-    "Writes into the caller's buffer and returns the number of bytes written, which is never more than size - 1, and 0 when size is 0.",
+    "Writes into the caller's buffer and returns the number of bytes written, which is never more than size - 1, and 0 when size is 0. This is the text an interpolation reads a number as, and a zero of either sign is written as 0: only printing keeps the sign of a negative zero.",
     { tags: ["output"] },
   ),
   entry(
@@ -745,14 +745,20 @@ double blaze_rt_argv(size_t index) {
      entries the host does not hold arguments for and the read past the end of
      the array are settled here in every mode, because the index is the
      runtime's own arithmetic rather than a check a program makes of itself:
-     the ABI promises 0 for an index that names no argument, and a danger
+     the ABI promises NaN for an index that names no argument, and a danger
      build leaves out the checks a program makes of itself, not this. Without
      it a program that reads an argument it was not given reads a pointer
      before the array, or off the end of a VLA the host sized for the
-     arguments that exist. */
-  if (index < 2) return 0.0;
+     arguments that exist.
+
+     NaN is the answer because the source reads it as one: process.argv holds
+     strings, and the two entries before the arguments are the path the
+     program runs and the file it runs, neither of which is a number. Reading
+     an argument the program was not given is +undefined, and a zero there
+     would be a value the source never wrote. */
+  if (index < 2) return NAN;
   const size_t argument = index - 2;
-  if (blaze_rt_arguments == NULL || argument >= blaze_rt_argument_count) return 0.0;
+  if (blaze_rt_arguments == NULL || argument >= blaze_rt_argument_count) return NAN;
   return blaze_rt_arguments[argument];
 }
 
@@ -796,12 +802,13 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
      form outside that range. The program this build delivers is compared
      against the source, so both have to write a number the same way. A value
      that is not finite has no shortest decimal, so the language writes those as
-     Infinity, -Infinity and NaN. A negative zero keeps its sign, which is what
-     the source prints for it. */
+     Infinity, -Infinity and NaN. A zero of either sign is written as 0: the
+     language writes a negative zero the same way it writes a positive one, and
+     only a test for the sign of a zero can tell them apart. */
   const char* fixed = NULL;
   if (isnan(value)) fixed = "NaN";
   else if (isinf(value)) fixed = signbit(value) ? "-Infinity" : "Infinity";
-  else if (value == 0.0) fixed = signbit(value) ? "-0" : "0";
+  else if (value == 0.0) fixed = "0";
   if (fixed != NULL) {
     return blaze_rt_write_number(fixed, strlen(fixed), buffer, size);
   }
@@ -938,6 +945,14 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
 
 void blaze_rt_print_number(double value) {
   char text[64];
+  /* A program prints a number the way the host it was written for prints it,
+     and that host writes a negative zero with its sign. Only an interpolation
+     reads one as the plain zero the language makes of it, which is what
+     blaze_rt_format_number answers and what this would answer without this. */
+  if (value == 0.0 && signbit(value)) {
+    fwrite("-0", 1, 2, stdout);
+    return;
+  }
   const size_t written = blaze_rt_format_number(value, (unsigned char*)text, sizeof text);
   fwrite(text, 1, written, stdout);
 }

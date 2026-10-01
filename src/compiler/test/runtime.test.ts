@@ -107,8 +107,8 @@ test("a danger runtime still answers the ABI where its own arithmetic would not"
   // runtime's own answers are not such a check: `index - 2` underflows to a
   // pointer before the argument array, and `size - 1` underflows to the
   // largest size there is, which copied a whole number into a buffer of
-  // nothing and ended the run on a fault. The ABI promises 0 for a missing
-  // argument and 0 for a size of 0, in every mode.
+  // nothing and ended the run on a fault. The ABI promises NaN for an index
+  // that names no argument and 0 for a size of 0, in every mode.
   const probe = [
     "#include <stdio.h>",
     "#include <stddef.h>",
@@ -141,13 +141,13 @@ test("a danger runtime still answers the ABI where its own arithmetic would not"
     assert.equal(result.code, 0, `${mode} must answer rather than fault`);
     assert.deepEqual(
       result.stdout.trim().split("\n"),
-      ["0.000000", "0.000000", "5.000000", "0.000000", "0"],
-      `${mode}: an index that names no argument is 0, and a buffer of nothing is written nothing`,
+      ["nan", "nan", "5.000000", "nan", "0"],
+      `${mode}: an index that names no argument is NaN, and a buffer of nothing is written nothing`,
     );
   }
 });
 
-test("an argument read before the host gave any is 0 in every mode", async () => {
+test("an argument read before the host gave any is NaN in every mode", async () => {
   // The probe harness a candidate is checked by calls the function without
   // giving the runtime any arguments, so `blaze_rt_arguments` is still the null
   // it starts as. A read of index 2 is the first argument, which is one the host
@@ -155,7 +155,8 @@ test("an argument read before the host gave any is 0 in every mode", async () =>
   // decides it is the runtime's own arithmetic over an index the program built,
   // not a check a program makes of itself, so `danger` keeps it. Without it a
   // candidate of any program that reads `process.argv` is killed by the probe
-  // before it is ever run.
+  // before it is ever run. NaN rather than 0 is the answer the source gives:
+  // reading an argument a program was not given is `+undefined`.
   const probe = [
     "#include <stdio.h>",
     `#include "${RUNTIME_NAME}.h"`,
@@ -182,8 +183,8 @@ test("an argument read before the host gave any is 0 in every mode", async () =>
     const result = run(binary, [], { timeoutMs: 60_000 });
     assert.equal(result.code, 0, `${mode} must answer rather than fault`);
     // No arguments were given, so the count is the program and the file it runs
-    // and every argument the program asked for is the 0 the ABI promises.
-    assert.deepEqual(result.stdout.trim().split("\n"), ["0.000000", "0.000000", "2"], `${mode}: no argument is 0, and two entries are always there`);
+    // and every argument the program asked for is the NaN the ABI promises.
+    assert.deepEqual(result.stdout.trim().split("\n"), ["nan", "nan", "2"], `${mode}: no argument is NaN, and two entries are always there`);
   }
 });
 
@@ -653,8 +654,9 @@ test("argv_count counts the program and the file it runs, as process.argv does",
 
   // Three arguments are five entries of process.argv, and the first argument
   // sits at index 2: a count of three would send a program that walked
-  // process.argv past its end, and one that returned the raw count.
-  assert.deepEqual(out.stdout.trim().split("\n"), ["5", "0.0", "5.0", "9.0", "0.0"]);
+  // process.argv past its end, and one that returned the raw count. Index 0 and
+  // the index past the end name no argument at all, and are NaN.
+  assert.deepEqual(out.stdout.trim().split("\n"), ["5", "nan", "5.0", "9.0", "nan"]);
 });
 
 test("an over-aligned object is writable across its whole length in the Nim adapter", async (t) => {

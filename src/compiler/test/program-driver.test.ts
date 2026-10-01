@@ -25,6 +25,12 @@ import { parseSemanticProgram } from "../semantics/ir-text.ts";
 /** The object the driver of every program here links against, built once. */
 let runtime: Promise<string> | null = null;
 
+/**
+ * The command line Deno hands a program, for a source written for Deno and run
+ * under node to be compared with what the delivered binary prints.
+ */
+const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.slice(2)}";
+
 /** A one file TypeScript program, resolved exactly as a build resolves it. */
 function resolved(source: string): SemanticProgram {
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
@@ -179,6 +185,75 @@ test("Deno.args reads the arguments the program was given", async () => {
   const delivered = run(binary, ["7"], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, "n: 7\ngiven: 1\n");
+});
+
+test("an argument is read as the number the language reads it as", async () => {
+  // A command line argument is text, and the source reads it by coercing it to
+  // a number. The host reads each one once, before the program runs, and the
+  // answer has to be the one the language gives: 0b101 is five and " 10 " is
+  // ten, an argument that is not a number is NaN, and an argument the program
+  // was not given is NaN as well. A host that answered 0 for a missing or an
+  // unreadable argument handed the program a value the source never wrote, and
+  // a benchmark that reads its size was handed a benchmark that computes
+  // nothing.
+  const source = ["const given = Deno.args.length;", "const n = given > 0 ? +Deno.args[0] : 0;", "console.log(`${n}`);", ""].join("\n");
+  const { directory, binary } = await linked(source);
+  // Every argument the language spells differently from a C library, plus the
+  // two the host has to settle for itself: one it was not given, and one that
+  // is not a number at all.
+  const cases = [
+    ["10"],
+    ["abc"],
+    ["5x"],
+    [" 10 "],
+    ["0x10"],
+    ["0b101"],
+    ["0o17"],
+    ["-0"],
+    ["Infinity"],
+    ["-Infinity"],
+    ["+0x10"],
+    ["1_000"],
+    ["0x"],
+    [""],
+    [".5"],
+    ["."],
+  ];
+  for (const arguments_ of cases) {
+    const original = run("node", ["--import", DENO_PRELUDE, "main.ts", ...arguments_], { cwd: directory, timeoutMs: 60_000 });
+    assert.equal(original.code, 0, original.stderr);
+    const delivered = run(binary, arguments_, { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, original.stdout, `the argument ${JSON.stringify(arguments_[0])} reads as one number`);
+  }
+  // No argument at all is the case the host settles alone, and it is what a
+  // benchmark started without its size does.
+  const empty = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(empty.code, 0, empty.stderr);
+  assert.equal(empty.stdout, "0\n", "the program was given no argument to read");
+});
+
+test("a length the program settles on that is not a number is no length", async () => {
+  // A NaN reaches a length exactly where a program reads its size from the
+  // command line and was given nothing to read. The language reads it as no
+  // length at all, which is zero, and a cast of a NaN to an unsigned type is
+  // whatever the machine made of it: the largest size there is, and an
+  // allocation of that ended the run on a fault.
+  const source = [
+    "const n = +Deno.args[0];",
+    "const block = new SharedArrayBuffer(8 * n);",
+    "const a = new Float64Array(block, 0, n);",
+    "let total = 0;",
+    "for (let i = 0; i < n; i++) total += a[i];",
+    "console.log(`${n} ${total}`);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await linked(source);
+  const original = run("node", ["--import", DENO_PRELUDE, "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, "a NaN length must not fault the run");
+  assert.equal(delivered.stdout, original.stdout);
 });
 
 test("a whole number the source wrote as a bigint is whole to the width it was resolved at", async () => {

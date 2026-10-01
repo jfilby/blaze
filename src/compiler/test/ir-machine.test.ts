@@ -1105,13 +1105,14 @@ test("a statement moves a name on, and a power is the library's", async () => {
 });
 
 test("a function reads the arguments the program was given from the runtime", async () => {
-  // Nothing set the arguments here, so the runtime answers the count it always
-  // answers: the program and the file it runs.
+  // Nothing set the arguments here. The count is the one it always answers,
+  // the program and the file it runs, and index 0 is one of those two: it is a
+  // path rather than a number, so it reads as the NaN the source reads it as.
   const count = subject(USIZE, handsBack({ k: "argv", type: USIZE, index: null }));
   assert.equal(await lowered(count, (name) => `printf("%zu", ${name}());`), "2");
 
   const first = subject(F64, handsBack({ k: "argv", type: F64, index: number("0", USIZE) }));
-  assert.equal(await lowered(first, (name) => `printf("%.17g", ${name}());`), "0");
+  assert.equal(await lowered(first, (name) => `printf("%s", ${name}() != ${name}() ? "not a number" : "a number");`), "not a number");
 });
 
 test("the object defines the symbol the function is called by, and nothing else", async () => {

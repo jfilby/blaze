@@ -30,6 +30,8 @@ import {
   slotType,
   typeText,
   type SemanticFunction,
+  isFloat,
+  isUnsigned,
   valueKind,
   type CompareOp,
   type SemanticBlock,
@@ -102,6 +104,12 @@ export interface ProgramTarget {
   type(type: SemanticType): string;
   /** The same value read as another type. */
   cast(type: SemanticType, expression: string): string;
+  /**
+   * A number the program settled on when it ran, read as a whole count. A NaN
+   * is no count at all and reads as zero, which is what the language reads it
+   * as; a cast alone would leave the machine's answer for a NaN there.
+   */
+  asLength(expression: string): string;
   /** One number as a literal of the type it initializes. */
   literal(text: string, type: string): string;
   /** A line that declares a value; a value of no type is a string. */
@@ -631,6 +639,11 @@ class ProgramEmitter {
     // every use reads it as.
     if (!isNumber(value.type) || !isNumber(as)) return text;
     if (value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name) return text;
+    // A number read as a length or an index is read the way the language reads
+    // one: a NaN is no length at all, and it is zero. A cast would leave
+    // whatever the machine made of the value there instead, which for a NaN is
+    // the largest size there is, and an allocation of that ends the run.
+    if (isFloat(value.type) && isUnsigned(as)) return this.target.asLength(text);
     return this.target.cast(as, text);
   }
 

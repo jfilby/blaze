@@ -35,7 +35,7 @@ test("the whole-number path writes what the search it replaces writes", async ()
   size_t reference_format(double value, char* buffer, size_t size) {
     if (isnan(value)) { strcpy(buffer, "NaN"); return 3; }
     if (isinf(value)) { if (signbit(value)) { strcpy(buffer, "-Infinity"); return 9; } strcpy(buffer, "Infinity"); return 8; }
-    if (value == 0.0) { if (signbit(value)) { strcpy(buffer, "-0"); return 2; } strcpy(buffer, "0"); return 1; }
+    if (value == 0.0) { strcpy(buffer, "0"); return 1; }
     const int negative = signbit(value);
     const double magnitude = negative ? -value : value;
     char text[40];

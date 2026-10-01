@@ -549,11 +549,21 @@ proc blaze_rt_argv_count*(): csize_t {.exportc, cdecl.} =
   ## it runs before the arguments it was given.
   csize_t(blazeArguments.len + 2)
 
+proc blazeNaN*(): float64 =
+  ## The number that is not one, which is what the source reads an argument it
+  ## was not given as. Nim has no literal for it: a zero divided by itself is
+  ## the only way to write one.
+  let zero = 0.0
+  zero / zero
+
 proc blaze_rt_argv*(index: csize_t): float64 {.exportc, cdecl.} =
   ## The index is the one process.argv uses, which counts where node runs
   ## and the file it runs, so the first argument the program was given is 2.
+  ## An index that names no argument is NaN: the two entries before the
+  ## arguments are the path the program runs and the file it runs, and reading
+  ## an argument that was never given is +undefined, not a zero.
   let argument = int(index) - 2
-  if argument >= 0 and argument < blazeArguments.len: blazeArguments[argument] else: 0.0
+  if argument >= 0 and argument < blazeArguments.len: blazeArguments[argument] else: blazeNaN()
 
 proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
   if text != nil: stdout.write($text)
@@ -566,11 +576,13 @@ proc blaze_rt_print_text_n*(text: cstring, length: csize_t) {.exportc, cdecl.} =
 ## The shortest decimal that reads back as the value, placed the way the source
 ## language places it: in full from 1e-6 up to 1e21, and in exponential form
 ## outside that range. A value that is not finite has no shortest decimal, so
-## it is written as the language writes it, and a negative zero keeps its sign.
+## it is written as the language writes it, and a zero of either sign is written
+## as 0: the language writes a negative zero the same way it writes a positive
+## one, and only a test for the sign of a zero can tell them apart.
 proc blazeShortest(value: float64): string =
   if classify(value) == fcNan: return "NaN"
   if classify(value) in {fcInf, fcNegInf}: return if value < 0.0: "-Infinity" else: "Infinity"
-  if value == 0.0: return (if classify(value) == fcNegZero: "-0" else: "0")
+  if value == 0.0: return "0"
   let negative = value < 0.0
   let magnitude = if negative: -value else: value
 
@@ -605,6 +617,12 @@ proc blazeShortest(value: float64): string =
   (if negative: "-" else: "") & body
 
 proc blaze_rt_print_number*(value: float64) {.exportc, cdecl.} =
+  ## A program prints a number the way the host it was written for prints it,
+  ## and that host writes a negative zero with its sign. Only an interpolation
+  ## reads one as the plain zero the language makes of it.
+  if value == 0.0 and classify(value) == fcNegZero:
+    stdout.write("-0")
+    return
   stdout.write(blazeShortest(value))
 
 proc blaze_rt_format_number*(value: float64, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =
