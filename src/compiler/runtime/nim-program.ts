@@ -77,6 +77,19 @@ proc programRound(value: float64): float64 =
   let rounded = floor(value + 0.5)
   (if rounded == 0.0 and value < 0.0: -0.0 else: rounded)
 
+## A number written at a fixed number of digits after the point, which is what
+## x.toFixed(d) is: the same digits every time, rounded at the last of them,
+## and never the exponent form the shortest writing falls back on. A negative
+## count is no digits, which is the word the language rounds it to.
+proc programFixed(value: float64, digits: int): string =
+  ## A number that is not a number, and one of a million million million and
+  ## over, is written as the language writes it rather than at the digits asked
+  ## for: (1e21).toFixed(2) is 1e+21 and not the twenty two digits that follow
+  ## the point.
+  if value != value or classify(value) == fcInf or classify(value) == fcNegInf or abs(value) >= 1e21:
+    programText(value)
+  else: formatFloat(value, ffDecimal, (if digits < 0: 0 else: digits))
+
 ## The values a counted loop takes, in the order it takes them, as the source
 ## counts: the index is added to, as the source adds, because a multiplication
 ## would not give the same doubles, and the loop stops on the bound rather
@@ -216,6 +229,7 @@ const NIM_OPERATORS: Record<string, string> = {
   "/": "/",
   "<<": "shl",
   ">>": "shr",
+  ">>>": "ushr",
   "&": "and",
   "|": "or",
   "^": "xor",
@@ -269,6 +283,27 @@ ${anchor}
     ${RUNTIME_NAME}_arguments_set(cast[ptr UncheckedArray[float64]](addr argumentStorage[0]), csize_t(argumentStorage.len))
   else:
     ${RUNTIME_NAME}_arguments_set(nil, 0)`;
+  }
+
+  openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[] {
+    // A function the program declares is a proc of its own: it is called by
+    // name from the body that runs and from the other functions.
+    const returns = nimParameter(parseType(signature.returns));
+    const given = parameters
+      .map((param) => `${param.name}: ${nimParameter(parseType(param.type))}`)
+      .join(", ");
+    return [`proc ${nimName(signature.symbol)}(${given}): ${returns} =`];
+  }
+
+  closeFunction(releases: readonly string[], returned: boolean): string[] {
+    // What the body allocated is freed before it returns, in the reverse of the
+    // order the body took it. A body that returns a value has already written
+    // its `return`, and one that falls off the end returns nothing at all.
+    return [...releases, ...(returned ? [] : ["return"]), ""];
+  }
+
+  returnValue(value: string): string {
+    return `return ${value}`;
   }
 
   openProgram(): string[] {
@@ -327,6 +362,37 @@ ${anchor}
       `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate(${bytes} * ${elementSize(contractType(element))}))`,
       ...values.map((text, index) => `${name}[${index}] = ${text}`),
     ];
+  }
+
+  sized(name: string, element: SemanticType, count: string): string[] {
+    // A block of a count the program settled on when it ran. The count is read
+    // as a length and the block is cleared, so a read of an element the program
+    // never wrote is the zero the language answers it with; a block of no
+    // elements is one byte, because an allocation of nothing fails and the
+    // language answers an empty array with an array.
+    const written = elementNim(contractType(element));
+    return [
+      `const ${name}_length = (${count}).csize_t`,
+      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate((${name}_length == 0'u64).csize_t * ${elementSize(contractType(element))}))`,
+    ];
+  }
+
+  view(name: string, element: SemanticType, base: string, offset: string, count: string): string[] {
+    // A window of a block the program laid out: the same bytes read as the
+    // element of the view, from the byte offset the view starts at. The block
+    // is not freed here: it belongs to the name the program gave it, which was
+    // declared before this one, and what a block frees is freed after every
+    // window taken of it.
+    const written = elementNim(contractType(element));
+    return [
+      `const ${name}_length = (${count}).csize_t`,
+      `var ${name} = cast[${bufferNimType(written)}](cast[pointer](cast[uint8](${base}) + (${offset}).csize_t))`,
+    ];
+  }
+
+  fill(name: string, index: string, element: SemanticType, value: string): string[] {
+    const written = elementNim(contractType(element));
+    return [`for ${index} in 0 ..< ${name}_length.csize_t: ${name}[${index}] = (${written})(${value})`];
   }
 
   alias(name: string, _element: SemanticType, source: string, length: string): string[] {
@@ -482,12 +548,16 @@ ${anchor}
     switch (call.callee) {
       case "Math.abs":
         return `abs(${argument(0)})`;
+      case "Math.sqrt":
+        return `sqrt(${argument(0)})`;
       case "Math.floor":
         return `floor(${argument(0)})`;
       case "Math.round":
         return `programRound(${argument(0)})`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
+      case "sharedBlock":
+        return `cast[pointer](${RUNTIME_NAME}_allocate((${argument(0)}).csize_t))`;
       default:
         throw hostError(`the driver cannot write down ${call.callee}`);
     }
@@ -539,11 +609,14 @@ ${anchor}
     return `cmp(${left}, ${right})`;
   }
 
-  toText(value: string, type: SemanticType): string {
+  toText(value: string, type: SemanticType, digits: number | null): string {
     // Nothing prints as the word for it, as the language does: `$(nil)` is the
     // empty string, which the source never printed.
     if (type.kind === "void" || (type.kind === "ref" && type.of === null)) return '"null"';
     if (isBoolean(type)) return `(if ${value}: "true" else: "false")`;
+    // A number written at a fixed number of digits is written at them whatever
+    // it is, and not at the digits the shortest writing would choose.
+    if (digits !== null) return `programFixed((${value}).float64, ${digits})`;
     return isFloat(type) ? `programText(${value})` : `$((${value}))`;
   }
 

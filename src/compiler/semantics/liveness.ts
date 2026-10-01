@@ -241,6 +241,10 @@ class Graph {
           this.value(events, statement.value);
           node = this.make(events);
           break;
+        case "fill":
+          throw new Error(
+            `liveness does not model a fill of ${statement.buffer}: a function allocates no array, so it fills none`,
+          );
         default: {
           // A statement kind this walk does not model would leave a name live
           // where it is not, and the register it is put in would be one the

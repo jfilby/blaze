@@ -180,6 +180,7 @@ const ARITHMETIC: Record<BinaryOp, ArithOp | null> = {
   "**": "pow",
   "<<": "shl",
   ">>": "shr",
+  ">>>": "ushr",
   "<": null,
   "<=": null,
   ">": null,
@@ -203,6 +204,7 @@ const COMPARISONS: Record<BinaryOp, CompareOp | null> = {
   "**": null,
   "<<": null,
   ">>": null,
+  ">>>": null,
   "<": "lt",
   "<=": "le",
   ">": "gt",
@@ -707,7 +709,7 @@ class FunctionBody {
         break;
       case "boolean":
       case "reference":
-        this.write({ k: "printText", value: { k: "toText", type: TEXT, of: value }, line: statement.line });
+        this.write({ k: "printText", value: { k: "toText", type: TEXT, of: value, digits: null }, line: statement.line });
         break;
       case "null":
         this.write({
@@ -1317,7 +1319,7 @@ class FunctionBody {
 
   /** A value as the text a string carries it as. */
   private asText(value: SemanticValue): SemanticValue {
-    return isText(value.type) ? value : { k: "toText", type: TEXT, of: value };
+    return isText(value.type) ? value : { k: "toText", type: TEXT, of: value, digits: null };
   }
 
   /* ---------------------------------------------------------------------- */

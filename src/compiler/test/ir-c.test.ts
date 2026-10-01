@@ -408,7 +408,7 @@ test("a reference is written as the address a driver writes for one", async () =
         id: "entry",
         statements: [
           { k: "let", slot: { kind: "object", name: "p", mutable: true, type: POINT }, value: built, line: 1 },
-          { k: "printText", value: { k: "toText", type: TEXT, of: held }, line: 2 },
+          { k: "printText", value: { k: "toText", digits: null, type: TEXT, of: held }, line: 2 },
           { k: "printNewline", line: 3 },
         ],
         releases: [],
@@ -549,7 +549,7 @@ test("a whole number is written as the integer it is, above the width of a doubl
     assert.equal(printed.trimEnd(), shape.written, shape.name);
 
     const interpolated = await lowered(
-      subject(TEXT, handsBack(joined(literal("v="), { k: "toText", type: TEXT, of: read })), [parameter]),
+      subject(TEXT, handsBack(joined(literal("v="), { k: "toText", digits: null, type: TEXT, of: read })), [parameter]),
       (name) => `printf("%s\\n", ${name}(${shape.argument}));`,
     );
     assert.equal(interpolated.trimEnd(), `v=${shape.written}`, shape.name);

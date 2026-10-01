@@ -54,6 +54,8 @@ export type ProgramValue =
   | { k: "null" }
   /** A string, with the values a template string interpolates. */
   | { k: "text"; parts: ProgramText[] }
+  /** A number written as text at a fixed number of digits, as `x.toFixed(2)`. */
+  | { k: "fixed"; of: ProgramValue; digits: number }
   /**
    * A buffer written out element by element, as a typed array literal is, and
    * the element type the view it was allocated from states. The view is what
@@ -61,6 +63,14 @@ export type ProgramValue =
    * doubles.
    */
   | { k: "buffer"; element: PrimitiveTypeName; values: ProgramValue[] }
+  /** A block of bytes the program laid out, which the views over it read. */
+  | { k: "shared"; count: ProgramValue }
+  /** A typed array of a count the program settles on when it runs. */
+  | { k: "sized"; element: PrimitiveTypeName; count: ProgramValue }
+  /** A window of a block at a byte offset, of a count of elements. */
+  | { k: "view"; element: PrimitiveTypeName; of: ProgramValue; offset: ProgramValue; count: ProgramValue }
+  /** Every element of an array written as one value, as `a.fill(1)` is. */
+  | { k: "fill"; buffer: ProgramValue; value: ProgramValue }
   | { k: "name"; name: string }
   /** `name.length`, of a buffer or of a string. */
   | { k: "length"; of: string }
@@ -80,6 +90,7 @@ export type ProgramBinaryOp =
   | "**"
   | "<<"
   | ">>"
+  | ">>>"
   | "&"
   | "|"
   | "^"
@@ -131,7 +142,24 @@ export type ProgramStatement =
   | { kind: "continue"; line: number }
   | { kind: "block"; body: ProgramStatement[]; line: number }
   /** A call kept for what it does, as in `main();`. */
-  | { kind: "invoke"; function: string; args: ProgramValue[]; line: number };
+  | { kind: "invoke"; function: string; args: ProgramValue[]; line: number }
+  /** A function the program declares, which runs when it is called. */
+  | { kind: "function"; name: string; params: { name: string; type: string | null }[]; body: ProgramStatement[]; line: number }
+  /** What a function hands back, as `return value;` is written. */
+  | { kind: "result"; value: ProgramValue; line: number };
+
+/**
+ * A function a program declares. The parameters carry the types the source
+ * wrote, and a function that reads a name of the scope it is declared in is
+ * compiled with that name as a parameter of its own: a program has no
+ * environment to close over, and a name it reads is a name it is given.
+ */
+export interface ProgramFunction {
+  name: string;
+  params: { name: string; type: string | null }[];
+  body: ProgramStatement[];
+  line: number;
+}
 
 /** The statements of a module that run, with the file they were written in. */
 export interface ProgramBody {

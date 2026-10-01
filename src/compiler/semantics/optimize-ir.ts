@@ -24,17 +24,17 @@
  * `common-subexpression` hold a model's proposal to is what this holds itself.
  */
 
-import {
-  type SemanticBlock,
-  type SemanticFunction,
-  type SemanticLoop,
-  type SemanticProgram,
-  type SemanticSlot,
-  type SemanticStatement,
-  type SemanticType,
-  type SemanticValue,
+import type {
+  SemanticBlock,
+  SemanticFunction,
+  SemanticLoop,
+  SemanticProgram,
+  SemanticSlot,
+  SemanticStatement,
+  SemanticType,
+  SemanticValue,
 } from "../core/semantic-ir.ts";
-import { hasCall, isInteger, isUnsigned, slotType } from "../core/semantic-ir.ts";
+import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -136,6 +136,7 @@ function foldArithmetic(op: string, left: number, right: number, name: NumericNa
     case "max": folded = Math.max(left, right); break;
     case "shl": folded = left * 2 ** right; break;
     case "shr": folded = Math.trunc(left / 2 ** right); break;
+    case "ushr": folded = left >>> right; break;
     case "and": folded = toBits(left) & toBits(right); break;
     case "or": folded = toBits(left) | toBits(right); break;
     case "xor": folded = toBits(left) ^ toBits(right); break;
@@ -189,7 +190,14 @@ export function valueChildren(value: SemanticValue): readonly SemanticValue[] {
     case "newObject":
       return value.fields.map((field) => field.value);
     case "buffer":
-      return value.values;
+      // A count the program settled on when it ran is a value of its own, and
+      // a view is a window of a block another name holds: both are read, and a
+      // walk that stops at the block reads nothing at all.
+      return [
+        ...(value.count === null ? [] : [value.count]),
+        ...(value.view === null ? [] : [value.view.of, value.view.offset]),
+        ...value.values,
+      ];
     case "text":
       return value.parts.flatMap((part) => (part.k === "value" ? [part.value] : []));
     case "argv":
@@ -254,14 +262,6 @@ export function nestedSemanticBlocks(block: SemanticBlock): SemanticBlock[] {
   return [block, ...nested];
 }
 
-function statementBlocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
-  switch (statement.k) {
-    case "if": return [statement.then, statement.otherwise].filter((one): one is SemanticBlock => one !== null);
-    case "loop": return [statement.loop.body];
-    case "block": return [statement.body];
-    default: return [];
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /* Folding                                                                     */
@@ -474,27 +474,6 @@ export function foldSemanticValue(value: SemanticValue): SemanticValue {
  * as a name nothing reads, and a pass that drops unread bindings would then drop
  * one a call still reads.
  */
-function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
-  switch (statement.k) {
-    case "let":
-    case "set":
-    case "printText":
-    case "printNumber":
-    case "retain":
-    case "storeField": return [statement.value];
-    case "step": return [];
-    case "setElement": return [statement.index, statement.value];
-    case "if": return [statement.condition];
-    case "raise": return [statement.message];
-    case "call": return [{ k: "call", type: statement.call.returns, call: statement.call }];
-    case "loop": {
-      const loop = statement.loop;
-      if (loop.kind === "counted") return [loop.from, loop.to, ...(loop.step === null ? [] : [loop.step])];
-      return loop.kind === "each" ? [loop.length] : [loop.condition];
-    }
-    default: return [];
-  }
-}
 
 /** Every value a block computes, and every one inside those values. */
 function valuesOf(block: SemanticBlock, visit: (value: SemanticValue) => void): void {
@@ -549,6 +528,10 @@ function foldStatement(statement: SemanticStatement): SemanticStatement {
       const index = foldSemanticValue(statement.index);
       const value = foldSemanticValue(statement.value);
       return index === statement.index && value === statement.value ? statement : { ...statement, index, value };
+    }
+    case "fill": {
+      const value = foldSemanticValue(statement.value);
+      return value === statement.value ? statement : { ...statement, value };
     }
     case "let":
     case "set":
@@ -927,6 +910,7 @@ function namesWrittenIn(block: SemanticBlock): Set<string> {
         case "set":
         case "step": written.add(statement.name); break;
         case "setElement": written.add(statement.buffer); break;
+        case "fill": written.add(statement.buffer); break;
         case "let": written.add(statement.slot.name); break;
         default: break;
       }
@@ -1072,6 +1056,7 @@ function rootsOf(block: SemanticBlock): SemanticValue[] {
       case "retain":
       case "storeField": read(statement.value); break;
       case "setElement": read(statement.index); read(statement.value); break;
+      case "fill": read(statement.value); break;
       case "if": read(statement.condition); break;
       case "raise": read(statement.message); break;
       case "call": roots.push({ k: "call", type: statement.call.returns, call: statement.call }); break;
@@ -1682,6 +1667,10 @@ export function optimizeSemanticEntry(entry: SemanticBlock): SemanticBlock {
  */
 export function optimizeSemanticProgram(program: SemanticProgram): SemanticProgram {
   optimizeSemanticEntry(program.entry);
+  // A function the program declares is a body of its own, and the rewrites that
+  // run over a program run over it: a loop invariant hoisted out of a function
+  // is worth as much there as it is in the block the program starts in.
+  for (const fn of program.bodies) optimizeSemanticEntry(fn.entry);
   return program;
 }
 

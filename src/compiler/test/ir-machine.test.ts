@@ -848,7 +848,7 @@ test("text is written, measured, joined and compared by what it says", async () 
       { k: "printNewline", line: 3 },
       { k: "printText", line: 4, value: { k: "text", type: TEXT, parts: [{ k: "text", value: "n=" }, { k: "value", value: local("v") }] } },
       { k: "printNewline", line: 5 },
-      { k: "printText", line: 6, value: { k: "toText", type: TEXT, of: { k: "nothing", type: PTR } } },
+      { k: "printText", line: 6, value: { k: "toText", digits: null, type: TEXT, of: { k: "nothing", type: PTR } } },
       { k: "printNewline", line: 7 },
     ],
     releases: [],

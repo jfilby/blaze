@@ -124,6 +124,7 @@ const ARITHMETIC_OPERATORS: Record<string, string> = {
   mod: "%",
   shl: "<<",
   shr: ">>",
+  ushr: ">>",
   and: "&",
   or: "|",
   xor: "^",
@@ -148,6 +149,8 @@ function builtinExpression(name: string, args: string[]): string {
   switch (name) {
     case "Math.abs":
       return `fabs(${args[0]})`;
+    case "Math.sqrt":
+      return `sqrt(${args[0]})`;
     case "Math.floor":
       return `floor(${args[0]})`;
     case "Math.trunc":

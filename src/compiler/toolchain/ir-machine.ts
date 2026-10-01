@@ -172,6 +172,7 @@ const IMMEDIATE_OPERATIONS: Record<string, true> = {
   mul: true,
   shl: true,
   shr: true,
+  ushr: true,
   sar: true,
   and: true,
   or: true,
@@ -288,6 +289,7 @@ const FLOAT_OPERATION: Record<string, true> = { add: true, sub: true, mul: true,
 /** The maths builtin each source name is one call of, by the name C gives it. */
 const MATH_LIBRARY: Record<string, string> = {
   "Math.abs": "fabs",
+  "Math.sqrt": "sqrt",
   "Math.floor": "floor",
   "Math.trunc": "trunc",
 };
@@ -316,6 +318,17 @@ function widthOf(type: SemanticType): Width {
 function signedOf(type: SemanticType): boolean {
   if (type.kind !== "primitive") return true;
   return isUnsigned(type) ? false : true;
+}
+
+/**
+ * Which shift a shift right is written as. `>>` keeps the sign of a signed
+ * number and `>>>` never does, so a shift right is the arithmetic one over a
+ * signed number and the logical one over everything else.
+ */
+function shiftOf(operation: "shl" | "shr" | "ushr" | "sar", type: SemanticType): "shl" | "shr" | "sar" {
+  if (operation === "ushr") return "shr";
+  if (operation === "shr" && signedOf(type)) return "sar";
+  return operation;
 }
 
 /**
@@ -691,7 +704,7 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
 /* -------------------------------------------------------------------------- */
 
 /** What a whole number may be combined with, and how. */
-type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "sar" | "and" | "or" | "xor";
+type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "ushr" | "sar" | "and" | "or" | "xor";
 
 /**
  * The labels one loop's header and its exit are written under, and the ids the
@@ -2475,13 +2488,15 @@ class Machine {
         this.code.imul(RAX, RCX, wide);
         return;
       case "shl":
+      case "ushr":
       case "shr":
         // A shift right keeps the sign of a signed number and fills a whole
         // number with zeros of an unsigned one, which is what the sign of the
-        // type says. The count is taken at the width the language carries the
-        // shift out at, which is the width the sides were promoted to.
+        // type says; `>>>` is the one that fills with zeros either way. The
+        // count is taken at the width the language carries the shift out at,
+        // which is the width the sides were promoted to.
         this.code.aluImm("and", RCX, wide ? 63 : 31);
-        this.code.shift(operation === "shr" && signedOf(type) ? "sar" : operation, RAX, wide);
+        this.code.shift(shiftOf(operation, type), RAX, wide);
         return;
       case "div":
       case "mod": {
@@ -2778,17 +2793,13 @@ class Machine {
         this.code.imulImm(RAX, value, wide);
         return;
       case "shl":
+      case "ushr":
       case "shr":
       case "sar":
         // The count of a shift is taken at the width the language masks it to,
         // and the mask is applied here rather than left to the machine, so the
         // count this form carries is the count the language computes.
-        this.code.shiftImm(
-          operation === "shr" && signedOf(type) ? "sar" : operation,
-          RAX,
-          value & (wide ? 63 : 31),
-          wide,
-        );
+        this.code.shiftImm(shiftOf(operation, type), RAX, value & (wide ? 63 : 31), wide);
         return;
       default:
         throw machineError(`${this.fn.symbol} performs ${operation} by a number written out, which the machine has no instruction for`);
@@ -3510,6 +3521,12 @@ class Machine {
    * it already had and reloads the address for a call-valued element.
    */
   private buffer(value: SemanticValue & { k: "buffer" }): void {
+    if (value.length === null) {
+      throw machineError(
+        `${this.fn.symbol} holds an array whose length the program settled on`,
+        "a function is given its arrays, and allocates none of its own",
+      );
+    }
     this.code.movRegImm(RDI, BigInt(value.length));
     this.code.movRegImm(RSI, BigInt(widthOf(value.element)));
     this.runtime("_array_new");

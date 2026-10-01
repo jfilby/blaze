@@ -18,6 +18,13 @@ export interface BuiltinSignature {
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
 const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 
+/**
+ * The name a block of bytes a program laid out is allocated under. The
+ * runtime provides the block and the views over it are the compiler's: what the
+ * program writes is `new SharedArrayBuffer(bytes)`, and this is what that is.
+ */
+export const SHARED = "sharedBlock";
+
 /** The name the length of `process.argv` is read under. */
 export const ARGV_LENGTH = "argvLength";
 
@@ -27,10 +34,12 @@ export const ARGV = "argv";
 export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.max": { params: [F64, F64], returns: F64, arity: 2 },
   "Math.min": { params: [F64, F64], returns: F64, arity: 2 },
+  "Math.sqrt": { params: [F64], returns: F64, arity: 1 },
   "Math.abs": { params: [F64], returns: F64, arity: 1 },
   "Math.floor": { params: [F64], returns: F64, arity: 1 },
   "Math.round": { params: [F64], returns: F64, arity: 1 },
   "Math.trunc": { params: [F64], returns: F64, arity: 1 },
+  [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
   [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
   [ARGV]: { params: [USIZE], returns: F64, arity: 1 },
 };

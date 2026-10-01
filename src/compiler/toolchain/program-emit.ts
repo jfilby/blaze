@@ -20,7 +20,8 @@ import { CompilerError } from "../core/errors.ts";
 import { NameScope } from "./names.ts";
 import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
-import type { TypeExpr } from "../core/types.ts";
+import type { FunctionSignature, TypeExpr } from "../core/types.ts";
+import { contractText } from "../semantics/contract.ts";
 import {
   elementTypeOf,
   isNumber,
@@ -28,6 +29,7 @@ import {
   isTextType,
   slotType,
   typeText,
+  type SemanticFunction,
   valueKind,
   type CompareOp,
   type SemanticBlock,
@@ -46,13 +48,17 @@ import {
  * operators as the source language writes them, so the walk translates the one
  * name into the other and leaves the spelling to the target.
  */
-const ARITH_OPERATORS: Record<"add" | "sub" | "mul" | "div" | "shl" | "shr" | "and" | "or" | "xor", ProgramBinaryOp> = {
+const ARITH_OPERATORS: Record<
+  "add" | "sub" | "mul" | "div" | "shl" | "shr" | "ushr" | "and" | "or" | "xor",
+  ProgramBinaryOp
+> = {
   add: "+",
   sub: "-",
   mul: "*",
   div: "/",
   shl: "<<",
   shr: ">>",
+  ushr: ">>>",
   and: "&",
   or: "|",
   xor: "^",
@@ -76,6 +82,15 @@ const COMPARE_OPERATORS: Record<CompareOp, string> = {
 export interface ProgramTarget {
   /** Everything above the program body: helpers, object types, the functions. */
   prelude(program: SemanticProgram): string;
+  /**
+   * The lines that open a function the program declares, its parameters
+   * written as they are given, and the lines that close it, releasing what its
+   * body allocated.
+   */
+  openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[];
+  closeFunction(releases: readonly string[], returned: boolean): string[];
+  /** The line a function hands its result back with. */
+  returnValue(value: string): string;
   /** The lines that open the body of the program, runtime and all. */
   openProgram(): string[];
   /** The lines that close it, releasing what the program allocated. */
@@ -93,6 +108,14 @@ export interface ProgramTarget {
   declare(name: string, type: SemanticType | null, value: string): string;
   /** The lines that allocate a buffer of a known length and write it out. */
   allocate(name: string, element: SemanticType, length: number, values: string[]): string[];
+  /**
+   * The lines that allocate a block of a count the program settled on when it
+   * ran, and the lines that take a window of a block at a byte offset.
+   */
+  sized(name: string, element: SemanticType, count: string): string[];
+  view(name: string, element: SemanticType, base: string, offset: string, count: string): string[];
+  /** The lines that write one value into every element of an array. */
+  fill(name: string, index: string, element: SemanticType, value: string): string[];
   /** The lines that name a buffer another name already holds. */
   alias(name: string, element: SemanticType, source: string, length: string): string[];
   /** One element of a buffer. */
@@ -181,8 +204,12 @@ export interface ProgramTarget {
    * comparison that is not an equality is a question about the order.
    */
   stringCompare(left: string, right: string): string;
-  /** A value carried inside a string, as the runtime writes it. */
-  toText(expression: string, type: SemanticType): string;
+  /**
+   * A value carried inside a string, as the runtime writes it, at the number
+   * of digits the source asked for or as the language writes it where it asked
+   * for none.
+   */
+  toText(expression: string, type: SemanticType, digits: number | null): string;
   /** The line that tests a value against nothing. */
   isNull(value: string, negate: boolean): string;
   /** The text of a value that is nothing. */
@@ -231,12 +258,63 @@ class ProgramEmitter {
   }
 
   emit(): string {
+    // A function the program declares is a function of the program: it is
+    // written above the body that runs, and the program calls it as it calls
+    // any other function.
+    const declared = this.program.bodies.map((fn) => this.function(fn));
     const body = this.entry();
     const opened = this.target.openProgram().map((line) => indent(1, line));
     const closed = this.target
       .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.names.read(name))))
       .map((line) => indent(1, line));
-    return [this.target.prelude(this.program), ...opened, ...body, ...closed, ...this.target.epilogue(), ""].join("\n");
+    return [
+      this.target.prelude(this.program),
+      ...declared.flatMap((lines) => lines),
+      ...opened,
+      ...body,
+      ...closed,
+      ...this.target.epilogue(),
+      "",
+    ].join("\n");
+  }
+
+  /** One function the program declared, as the target writes a function. */
+  private function(fn: SemanticFunction): string[] {
+    this.names.enter();
+    const parameters = fn.params.map((param) => {
+      const type = slotType(param);
+      return { name: this.names.declare(param.name, type), type: contractText(type) };
+    });
+    this.lines = [];
+    this.depth = 1;
+    for (const statement of fn.entry.statements) this.statement(statement);
+    // What a function hands back is written where the source returned it, and a
+    // body that falls off the end returns the zero of a type it never returns.
+    const terminator = fn.entry.terminator;
+    const returned = terminator.k === "return" && terminator.value !== null;
+    if (terminator.k === "return" && terminator.value !== null) {
+      this.write(this.target.returnValue(this.expression(terminator.value, fn.returns)));
+    }
+    this.terminator(terminator, null);
+    const body = this.lines;
+    this.lines = [];
+    // What the body allocated is read by the names the body declared, so the
+    // releases are written while the body is still the scope they are in.
+    const releases = fn.entry.releases.map((name) => this.target.release(this.names.read(name)));
+    this.names.leave();
+    return [
+      ...this.target.openFunction(
+        {
+          name: fn.name,
+          symbol: fn.symbol,
+          params: parameters.map((param) => ({ name: param.name, type: param.type })),
+          returns: contractText(fn.returns),
+        },
+        parameters,
+      ),
+      ...body,
+      ...this.target.closeFunction(releases, returned),
+    ];
   }
 
   /* ---------------------------------------------------------------------- */
@@ -321,6 +399,16 @@ class ProgramEmitter {
         this.body(statement.body, null);
         this.write(this.target.closeBody() ?? "");
         return;
+      case "fill":
+        for (const line of this.target.fill(
+          this.names.read(statement.buffer),
+          this.names.read(statement.index),
+          statement.type,
+          this.expression(statement.value, statement.type),
+        )) {
+          this.write(line);
+        }
+        return;
       case "retain":
         this.write(this.target.retain(this.expression(statement.value)));
         return;
@@ -360,10 +448,31 @@ class ProgramEmitter {
         return;
       }
       if (value.k !== "buffer") throw emitError(`the emitter cannot write down ${slot.name} as an array`);
+      // A block of a count the program settled on when it ran, a window of a
+      // block it laid out, and the values it wrote out are the three ways a
+      // program gets an array, and all three are the declaration.
+      if (value.view !== null) {
+        for (const line of this.target.view(
+          name,
+          slot.element,
+          this.expression(value.view.of),
+          this.expression(value.view.offset, USIZE),
+          this.expression(value.count as SemanticValue, USIZE),
+        )) {
+          this.write(line);
+        }
+        return;
+      }
+      if (value.count !== null) {
+        for (const line of this.target.sized(name, slot.element, this.expression(value.count, USIZE))) {
+          this.write(line);
+        }
+        return;
+      }
       for (const line of this.target.allocate(
         name,
         slot.element,
-        value.length,
+        value.length ?? 0,
         value.values.map((one) => this.expression(one, slot.element)),
       )) {
         this.write(line);
@@ -564,7 +673,7 @@ class ProgramEmitter {
         // A string carried into a string is the string itself: a driver builds
         // text out of pointers, and a number is the one thing it converts.
         if (isTextType(value.of.type)) return this.expression(value.of);
-        return this.target.toText(this.expression(value.of), value.of.type);
+        return this.target.toText(this.expression(value.of), value.of.type, value.digits);
       case "argv":
         return value.index === null ? this.target.argvCount() : this.target.argv(this.expression(value.index));
       case "compare":
@@ -682,6 +791,7 @@ class ProgramEmitter {
       case "div":
       case "shl":
       case "shr":
+      case "ushr":
       // The bitwise operators are whole numbers masked whole, and the targets
       // already know how each of them is spelled.
       case "and":

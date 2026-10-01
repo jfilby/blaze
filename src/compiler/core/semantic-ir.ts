@@ -261,6 +261,7 @@ export type ArithOp =
   | "max"
   | "shl"
   | "shr"
+  | "ushr"
   | "and"
   | "or"
   | "xor"
@@ -288,8 +289,22 @@ export type SemanticValue =
   | { k: "length"; type: SemanticType; of: SemanticValue }
   /** One element of an array or a slice. */
   | { k: "element"; type: SemanticType; of: SemanticValue; index: SemanticValue }
-  /** A typed array, allocated where the program wrote it out. */
-  | { k: "buffer"; type: SemanticType; element: SemanticType; length: number; values: SemanticValue[] }
+  /**
+   * A typed array, allocated where the program wrote it out. `length` is the
+   * number of elements the program wrote down and `count` the number it
+   * settled on when it ran, and a `view` is a window of a block another name
+   * holds rather than a block of its own: the byte offset it starts at, and
+   * the block it starts in.
+   */
+  | {
+      k: "buffer";
+      type: SemanticType;
+      element: SemanticType;
+      length: number | null;
+      count: SemanticValue | null;
+      view: { of: SemanticValue; offset: SemanticValue } | null;
+      values: SemanticValue[];
+    }
   /**
    * An object on the heap, allocated and filled as one value. Its fields are
    * written where the object is built rather than beside it, so an object built
@@ -318,7 +333,7 @@ export type SemanticValue =
   /** `a === null` and `a !== null`. */
   | { k: "isNull"; type: TypeExpr; operand: SemanticValue; negate: boolean }
   /** A number written as text, as a string carries it. */
-  | { k: "toText"; type: TextType; of: SemanticValue }
+  | { k: "toText"; type: TextType; of: SemanticValue; digits: number | null }
   /** `process.argv`, or one of its arguments. */
   | { k: "argv"; type: SemanticType; index: SemanticValue | null };
 
@@ -378,6 +393,11 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
       walkValues(value.right, visit);
       return;
     case "buffer":
+      if (value.count !== null) walkValues(value.count, visit);
+      if (value.view !== null) {
+        walkValues(value.view.of, visit);
+        walkValues(value.view.offset, visit);
+      }
       for (const element of value.values) walkValues(element, visit);
       return;
     case "loadField":
@@ -511,8 +531,13 @@ export type SemanticSlot =
   | { kind: "value"; name: string; mutable: boolean; type: SemanticType }
   /** A string, as text when the program wrote it out, or built at run time. */
   | { kind: "text"; name: string; mutable: boolean }
-  /** An array the program allocated, written out element by element. */
-  | { kind: "buffer"; name: string; mutable: boolean; element: TypeExpr; length: number }
+  /**
+   * An array the program allocated, written out element by element where the
+   * count was settled on when the program ran. A view is a buffer too: it holds
+   * no block of its own, and the block it looks into is freed under its own
+   * name, which the program declared before it.
+   */
+  | { kind: "buffer"; name: string; mutable: boolean; element: TypeExpr; length: number | null }
   /** A reference to an object one of the compiled functions returned. */
   | { kind: "object"; name: string; mutable: boolean; type: SemanticType };
 
@@ -526,6 +551,50 @@ export function slotType(slot: SemanticSlot): SemanticType {
       return TEXT;
     case "buffer":
       return { kind: "array", of: slot.element, length: slot.length };
+  }
+}
+
+/** Every block of a statement that is a block of its own. */
+export function statementBlocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
+  switch (statement.k) {
+    case "if": return [statement.then, statement.otherwise].filter((one): one is SemanticBlock => one !== null);
+    case "loop": return [statement.loop.body];
+    case "block": return [statement.body];
+    default: return [];
+  }
+}
+
+/**
+ * Every value a statement computes, in the order it computes them.
+ *
+ * A call is one value whose own children are its arguments, which is how a walk
+ * of a block already reads it, so a name read as an argument is read here too.
+ * A walk that stopped at the call would count a name that is read in one as a
+ * name nothing reads, and a pass that drops unread bindings would then drop one
+ * a call still reads. A fill reads the value it writes into every element, and
+ * writes the array rather than reading it: the array is a name the block owns
+ * either way.
+ */
+export function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
+  switch (statement.k) {
+    case "let":
+    case "set":
+    case "printText":
+    case "printNumber":
+    case "retain":
+    case "storeField": return [statement.value];
+    case "step": return [];
+    case "fill": return [statement.value];
+    case "setElement": return [statement.index, statement.value];
+    case "if": return [statement.condition];
+    case "raise": return [statement.message];
+    case "call": return [{ k: "call", type: statement.call.returns, call: statement.call }];
+    case "loop": {
+      const loop = statement.loop;
+      if (loop.kind === "counted") return [loop.from, loop.to, ...(loop.step === null ? [] : [loop.step])];
+      return loop.kind === "each" ? [loop.length] : [loop.condition];
+    }
+    default: return [];
   }
 }
 
@@ -639,7 +708,13 @@ export type SemanticStatement =
   /** Ends the program with a message. Nothing after this runs. */
   | { k: "raise"; message: SemanticValue; line: number }
   /** Writes a field of an object, of the layout the access names. */
-  | { k: "storeField"; object: SemanticValue; layout: string; field: string; value: SemanticValue; line: number };
+  | { k: "storeField"; object: SemanticValue; layout: string; field: string; value: SemanticValue; line: number }
+  /**
+   * Every element of an array written as one value, as `a.fill(1)` is. The
+   * index is a name of the compiler's own, so two fills in one block do not
+   * count with the same one.
+   */
+  | { k: "fill"; buffer: string; index: string; value: SemanticValue; type: SemanticType; line: number };
 
 /* -------------------------------------------------------------------------- */
 /* Program                                                                    */
@@ -715,5 +790,12 @@ export interface SemanticProgram {
   entry: SemanticBlock;
   /** Every function the program calls, in the order the contract declares them. */
   functions: FunctionSignature[];
+  /**
+   * The functions the program declares, as the IR holds a function whole. A
+   * function the source declared is compiled on its own and called like any
+   * other, so it is a body here rather than a run of statements in the block
+   * the program starts in.
+   */
+  bodies: SemanticFunction[];
   objects: Record<string, ObjectLayout>;
 }

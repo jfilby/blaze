@@ -18,12 +18,30 @@
  * against `node`, which runs TypeScript directly.
  */
 
+import { readFileSync } from "node:fs";
 import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
 
 /** The language a source is checked against. */
 const TOOLCHAIN: Record<string, string> = { typescript: "node", ts: "node" };
+
+/**
+ * The command line Deno hands a program, for a source written for Deno and run
+ * by the toolchain that runs TypeScript. The two hosts differ in one place: node
+ * counts the program and the file it runs before the arguments a program was
+ * given, and Deno hands over the arguments alone, so `Deno.args[0]` is what
+ * `process.argv[2]` is under one and `process.argv[1]` is under the other. A
+ * prelude is what makes the source mean here what it means there, and it is the
+ * same shift the compiler reads `Deno.args` with, so the source and the binary
+ * are given the same arguments whichever host wrote the source.
+ */
+const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.slice(2)}";
+
+/** Whether a source reads the command line the way a Deno program does. */
+function readsDenoArgs(source: string): boolean {
+  return /\bDeno\s*\.\s*args\b/.test(source);
+}
 
 /** One line of the first difference between two programs, with both outputs. */
 export type { ProgramMismatch };
@@ -123,7 +141,12 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
 
   // A program reads the arguments it is given, so both runs get the same ones.
   const arguments_ = [...(request.arguments ?? [])];
-  const source = run(toolchain, [request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
+  // A source written for Deno is run with the command line Deno hands a
+  // program, so that the oracle is the source as it was written rather than a
+  // source that cannot run at all.
+  const deno = readFileSync(request.sourcePath, "utf8");
+  const before = readsDenoArgs(deno) ? ["--import", DENO_PRELUDE] : [];
+  const source = run(toolchain, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({
       category: "VerificationError",
@@ -137,7 +160,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
       category: "VerificationError",
       stage: "verify",
       message: "the program source does not run",
-      detail: `${formatCommand(toolchain, [request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`,
+      detail: `${formatCommand(toolchain, [...before, request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`,
     });
   }
 

@@ -57,6 +57,7 @@
  */
 
 import { parseType, typeToString } from "./contract.ts";
+import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import { mapTypeScriptType } from "./typescript.ts";
 import type {
@@ -68,8 +69,8 @@ import type {
   ProgramUnaryOp,
   ProgramValue,
 } from "./module.ts";
-import type { Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
-import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
+import type { CallEdge, Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
+import { ARGV, ARGV_LENGTH, SHARED, builtinFor } from "./builtins.ts";
 import {
   BOOLEAN,
   NUMERIC,
@@ -85,6 +86,7 @@ import {
   type CompareOp,
   type SemanticBlock,
   type SemanticCall,
+  type SemanticFunction,
   type SemanticProgram,
   type SemanticSlot,
   type SemanticStatement,
@@ -113,7 +115,8 @@ interface ArrayHeld {
   name: string;
   mutable: boolean;
   element: PrimitiveTypeName | null;
-  length: number;
+  /** How many elements it holds, or null when the program settled on the count. */
+  length: number | null;
   /** The elements as they were written, in the type the array is used at. */
   values: DraftValue[];
 }
@@ -166,10 +169,18 @@ type DraftValue =
   | { k: "literal"; held: NumberHeld }
   /** A typed array literal, of the element type it is used at. */
   | { k: "buffer"; held: ArrayHeld }
+  /** A typed array of a count the program settled on when it ran. */
+  | { k: "sized"; element: PrimitiveTypeName; count: DraftValue; held: ArrayHeld }
+  /** A window of a block at a byte offset, of a count of elements. */
+  | { k: "view"; element: PrimitiveTypeName; of: DraftValue; offset: DraftValue; count: DraftValue; held: ArrayHeld }
+  /** Every element of an array written as one value. */
+  | { k: "fill"; buffer: DraftValue; value: DraftValue; held: ArrayHeld }
   /** A value the program declared, read by the name it was declared as. */
   | { k: "reference"; name: string; held: Held }
   /** A string the program builds. */
   | { k: "text"; parts: DraftTextPart[] }
+  /** A number written as text at the number of digits the source asked for. */
+  | { k: "fixed"; of: DraftValue; digits: number }
   | { k: "call"; call: DraftCall }
   /** The length of an array. */
   | { k: "length"; buffer: string; bufferType: TypeExpr; type: PrimitiveTypeName }
@@ -236,13 +247,17 @@ type DraftStatement =
     }
   | { kind: "break"; line: number }
   | { kind: "continue"; line: number }
-  | { kind: "block"; body: DraftStatement[]; line: number };
+  | { kind: "block"; body: DraftStatement[]; line: number }
+  /** What a function hands back, which ends the block it was written in. */
+  | { kind: "result"; value: DraftValue; line: number };
 
 /** A program with every name and type resolved, ready to be written down. */
 interface DraftProgram {
   file: string;
   statements: DraftStatement[];
   functions: FunctionSignature[];
+  /** The functions the program declares, with the body each of them runs. */
+  declared: ProgramFunctionDraft[];
   objects: Record<string, ObjectLayout>;
 }
 
@@ -358,6 +373,7 @@ function numericResult(_left: PrimitiveTypeName | null, _right: PrimitiveTypeNam
 function holdsText(value: DraftValue): boolean {
   switch (value.k) {
     case "text":
+    case "fixed":
       return true;
     case "reference":
       return value.held.kind === "text";
@@ -367,6 +383,9 @@ function holdsText(value: DraftValue): boolean {
       return value.type === null;
     case "literal":
     case "buffer":
+    case "sized":
+    case "view":
+    case "fill":
     case "call":
     case "length":
     case "stringLength":
@@ -385,11 +404,16 @@ function draftType(value: DraftValue): TypeExpr | null {
   switch (value.k) {
     case "literal":
       return value.held.type === null ? null : { kind: "primitive", name: value.held.type };
+    case "sized":
+    case "view":
+    case "fill":
+      return { kind: "array", of: { kind: "primitive", name: value.held.element ?? "f64" }, length: value.held.length };
     case "buffer":
       return { kind: "slice", of: { kind: "primitive", name: value.held.element ?? "f64" } };
     case "reference":
       return heldType(value.held);
     case "text":
+    case "fixed":
       return null;
     case "call":
       return value.call.returns;
@@ -455,8 +479,17 @@ function wholeResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | 
   return left !== null && right !== null && isWhole(left) && isWhole(right) ? programWholeOf(left, right) : "i64";
 }
 
+/** The array forms a declaration is the allocation of, rather than an alias of. */
+const ARRAY_FORMS: ReadonlySet<string> = new Set(["buffer", "sized", "view"]);
+
 /** The operators only whole numbers have. */
 const WHOLE_OPERATORS: readonly ProgramBinaryOp[] = ["%", "<<", ">>", "&", "|", "^"];
+/**
+ * The operators the language converts rather than refuses: `>>>` reads both of
+ * its sides as the unsigned 32 bit numbers JavaScript reads them as, whatever
+ * they are, and answers one of those.
+ */
+const CONVERTING_OPERATORS: readonly ProgramBinaryOp[] = [">>>"];
 /** The compound assignments only whole numbers have. */
 const WHOLE_ASSIGNMENTS: readonly ProgramAssignOp[] = ["%="];
 const EQUALITY: readonly ProgramBinaryOp[] = ["===", "!==", "==", "!="];
@@ -473,6 +506,7 @@ const ARITHMETIC: Record<ProgramBinaryOp, ArithOp | null> = {
   "**": "pow",
   "<<": "shl",
   ">>": "shr",
+  ">>>": "ushr",
   "&": "and",
   "|": "or",
   "^": "xor",
@@ -498,6 +532,7 @@ const COMPARISONS: Record<ProgramBinaryOp, CompareOp | null> = {
   "**": null,
   "<<": null,
   ">>": null,
+  ">>>": null,
   "&": null,
   "|": null,
   "^": null,
@@ -520,12 +555,258 @@ const UNARY: Record<ProgramUnaryOp, UnaryOp> = { "-": "neg", "+": "pos", "!": "n
 const EXTREMES: Record<string, "min" | "max"> = { "Math.min": "min", "Math.max": "max" };
 
 /* -------------------------------------------------------------------------- */
+/* What a function reads of the scope around it                               */
+/* -------------------------------------------------------------------------- */
+
+/** The names a body calls, which is what a function is given for. */
+function calledNames(body: readonly ProgramStatement[]): string[] {
+  const called: string[] = [];
+  const walk = (statements: readonly ProgramStatement[]): void => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "invoke":
+          if (!called.includes(statement.function)) called.push(statement.function);
+          break;
+        case "if":
+          walk(statement.then);
+          walk(statement.otherwise);
+          break;
+        case "while":
+        case "doWhile":
+        case "block":
+          walk(statement.body);
+          break;
+        case "for":
+        case "forOf":
+          walk(statement.body);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  walk(body);
+  return called;
+}
+
+/**
+ * The names a body reads that it does not declare itself, in the order they
+ * were first read. A function of a program is compiled on its own, so every
+ * name it reads of the scope it is declared in is a parameter of its own: this
+ * is the list of what it reads, and the types are the types the scope it was
+ * declared in holds.
+ *
+ * A name declared in the block a read is written in shadows one of the same
+ * name outside it, so the walk carries the scopes rather than collecting every
+ * name the body mentions: a body that declares `let i` of its own inside a loop
+ * reads the `i` around it nowhere, and one that only reads the `i` it declared
+ * reads nothing at all.
+ */
+function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<string>): string[] {
+  const read: string[] = [];
+  const scopes: Set<string>[] = [new Set(parameters)];
+  const seen = (name: string): boolean => scopes.some((scope) => scope.has(name));
+  const note = (name: string): void => {
+    if (seen(name) || read.includes(name)) return;
+    read.push(name);
+  };
+  const walk = (statements: readonly ProgramStatement[]): void => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "declare":
+          // A declaration is a name of the block it is written in, whether the
+          // value it holds is read before it: `const n = +Deno.args[0]` reads
+          // the command line and declares `n` in the same breath.
+          value(statement.value);
+          scopes[scopes.length - 1].add(statement.name);
+          continue;
+        case "assign":
+          value(statement.value);
+          continue;
+        case "elementAssign":
+          value(statement.index);
+          value(statement.value);
+          continue;
+        case "update":
+          continue;
+        case "print":
+          statement.values.forEach(value);
+          continue;
+        case "invoke":
+          statement.args.forEach(value);
+          continue;
+        case "if":
+          value(statement.condition);
+          scopes.push(new Set());
+          walk(statement.then);
+          scopes.pop();
+          scopes.push(new Set());
+          walk(statement.otherwise);
+          scopes.pop();
+          continue;
+        case "while":
+        case "doWhile":
+          value(statement.condition);
+          scopes.push(new Set());
+          walk(statement.body);
+          scopes.pop();
+          continue;
+        case "for":
+          // The index is a name of the loop, and the loop reads it in its own
+          // condition: `for (let i = 0; i < n; i++)` reads the `i` it declared,
+          // and `n` is the one name the loop reads of the scope around it.
+          scopes.push(new Set([statement.variable]));
+          value(statement.from);
+          value(statement.to);
+          if (statement.step !== null) value(statement.step);
+          walk(statement.body);
+          scopes.pop();
+          continue;
+        case "forOf":
+          scopes.push(new Set([statement.variable]));
+          walk(statement.body);
+          scopes.pop();
+          continue;
+        case "block":
+          scopes.push(new Set());
+          walk(statement.body);
+          scopes.pop();
+          continue;
+        case "break":
+        case "continue":
+          continue;
+        case "result":
+          value(statement.value);
+          continue;
+        case "function":
+          // A function reads the scope it is declared in when it is *called*,
+          // and the call is what passes the names: what the declaration itself
+          // is written with is its own parameters, which are its own scope.
+          continue;
+      }
+    }
+  };
+  const value = (one: ProgramValue): void => {
+    switch (one.k) {
+      case "name":
+        note(one.name);
+        return;
+      case "length":
+        note(one.of);
+        return;
+      case "element":
+        note(one.buffer);
+        value(one.index);
+        return;
+      case "call":
+        one.args.forEach(value);
+        return;
+      case "unary":
+        value(one.operand);
+        return;
+      case "binary":
+        value(one.left);
+        value(one.right);
+        return;
+      case "conditional":
+        value(one.condition);
+        value(one.then);
+        value(one.otherwise);
+        return;
+      case "text":
+        one.parts.forEach((part) => {
+          if (part.k === "value") value(part.value);
+        });
+        return;
+      case "fixed":
+        value(one.of);
+        return;
+      case "shared":
+        value(one.count);
+        return;
+      case "sized":
+        value(one.count);
+        return;
+      case "view":
+        value(one.of);
+        value(one.offset);
+        value(one.count);
+        return;
+      case "fill":
+        value(one.buffer);
+        value(one.value);
+        return;
+      case "number":
+      case "bigint":
+      case "boolean":
+      case "null":
+      case "buffer":
+        return;
+    }
+  };
+  walk(body);
+  return read;
+}
+
+/**
+ * What a name a function of a program is given holds. A buffer parameter is an
+ * array the function may write to, and its length is whatever the caller laid
+ * out, which the IR holds no number for; a pointer is a reference to a block
+ * rather than a run of elements, so a name of one is not a name an element is
+ * read out of; and everything else is a number.
+ */
+function heldOf(text: string): Held {
+  const type = parseType(text);
+  if (type.kind === "slice" || type.kind === "array") {
+    return { kind: "array", name: "", mutable: true, element: elementOf(type) ?? "f64", length: null, values: [] };
+  }
+  if (type.kind === "ptr" || type.kind === "ref") {
+    return { kind: "object", name: "", mutable: true, type };
+  }
+  return { kind: "number", name: "", mutable: true, type: primitive(type), text: "" };
+}
+
+/** A function the program declared, and what has been settled about it. */
+interface ProgramFunctionDraft {
+  name: string;
+  /** The names the body reads of the scope it is declared in, and their types. */
+  captured: { name: string; type: TypeExpr }[];
+  /** The parameters the source wrote, in the order it wrote them. */
+  params: { name: string; type: TypeExpr }[];
+  body: ProgramStatement[];
+  line: number;
+  /** Set once the scope it is declared in has settled the type of every name. */
+  signature: FunctionSignature | null;
+  /** The body, resolved, once the names it reads are all declared. */
+  compiled: DraftProgram | null;
+}
+
+/** A declared function whose body has been read, and so is settled whole. */
+type SettledFunction = ProgramFunctionDraft & { signature: FunctionSignature; compiled: DraftProgram };
+
+/**
+ * What every function of one program shares: the table they are called by, the
+ * bodies waiting for the scope they were declared in to settle, and the names
+ * the program holds. A function declared inside a function is compiled on its
+ * own and called like any other, so the whole program reads and writes one
+ * table rather than a table per scope.
+ */
+interface ProgramFunctions {
+  readonly table: Map<string, ProgramFunctionDraft>;
+  /** The bodies whose scope has settled and whose body has not been read yet. */
+  waiting: ProgramFunctionDraft[];
+  /** The bodies being read right now, which a call of one of them reaches. */
+  readonly settling: Set<ProgramFunctionDraft>;
+  /** The names the program holds, so a generated name is not one of them. */
+  readonly used: Set<string>;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Resolver                                                                   */
 /* -------------------------------------------------------------------------- */
 
 class ProgramResolver {
   private readonly scopes: Map<string, Held>[] = [new Map()];
-  private readonly used = new Set<string>();
   private readonly body: ProgramBody;
   private readonly contracts: Map<string, { signature: FunctionSignature; effects: Effect[] }>;
   private readonly objects: Record<string, ObjectLayout>;
@@ -533,26 +814,221 @@ class ProgramResolver {
   private readonly aliases: [ArrayHeld, ArrayHeld][] = [];
   /** How many loops the statement being resolved is written in. */
   private loops = 0;
+  /** The functions the program declares, and what they share. */
+  private readonly functions: ProgramFunctions;
 
-  constructor(body: ProgramBody, contracts: Map<string, { signature: FunctionSignature; effects: Effect[] }>, objects: Record<string, ObjectLayout>) {
+  constructor(
+    body: ProgramBody,
+    contracts: Map<string, { signature: FunctionSignature; effects: Effect[] }>,
+    objects: Record<string, ObjectLayout>,
+    functions: ProgramFunctions,
+  ) {
     this.body = body;
     this.contracts = contracts;
     this.objects = objects;
+    this.functions = functions;
   }
 
   resolve(): DraftProgram {
-    const statements = this.statements(this.body.statements);
+    const statements = this.statements(this.body.statements, false);
+    // A body is read when it is called, because what a call is typed by is
+    // what the body hands back. A function nobody calls is read here, at the
+    // end of the scope it was declared in, which is the same body either way.
+    for (const draft of [...this.functions.waiting]) this.settle(draft);
     return {
       file: this.body.file,
       statements,
       functions: [...this.contracts.values()].map((contract) => contract.signature),
+      declared: [...this.functions.table.values()],
+      objects: this.objects,
+    };
+  }
+
+  /**
+   * A function the program declared, with the names it reads of the scope
+   * around it given to it as parameters. A program has no environment for a
+   * function to close over: it is compiled on its own and called, so what it
+   * reads of the scope it is written in is passed to it at every call, and the
+   * call site is where that scope is.
+   */
+  private declared(statement: ProgramStatement & { kind: "function" }): void {
+    // A function bound to the block it is declared in is bound once, whatever
+    // the statement it is written at: the block hoists it and the statement
+    // that reached it finds it already there.
+    if (this.functions.table.has(statement.name)) return;
+    const params = statement.params.map((param) => {
+      if (param.type === null) {
+        throw programError(
+          `"${param.name}" has no type`,
+          this.body,
+          statement.line,
+          `line ${statement.line} of ${this.body.file}: a function of a program is compiled on its own, so every name it is given is written with its type, as in function f(n: number)`,
+        );
+      }
+      return { name: param.name, type: this.annotation(param.type, statement.line) };
+    });
+    // Every name the body reads of the scope around it is a parameter of the
+    // function, of the type the scope holds it at: a function of a program is
+    // compiled on its own, so what it reads from around it is passed to it at
+    // every call, and the call is where that scope is.
+    const captures: { name: string; type: TypeExpr }[] = [];
+    for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
+      const held = this.lookup(name);
+      if (held === undefined) {
+        throw programError(
+          `"${name}" is not declared`,
+          this.body,
+          statement.line,
+          `line ${statement.line} of ${this.body.file}: ${statement.name} reads "${name}" of the scope it is declared in, and a name it reads is one the scope holds`,
+        );
+      }
+      // A name of no type is a string, and a string is not something a function
+      // of a program can be given: a parameter is a number, a buffer or a
+      // reference, and a text value has none of them.
+      const type = heldType(held);
+      if (type === null) {
+        throw programError(
+          `"${name}" is a string`,
+          this.body,
+          statement.line,
+          `line ${statement.line} of ${this.body.file}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
+        );
+      }
+      captures.push({ name, type });
+    }
+    const draft: ProgramFunctionDraft = {
+      name: statement.name,
+      captured: captures,
+      params,
+      body: statement.body,
+      line: statement.line,
+      // What the function hands back is settled by reading its body, and the
+      // names it is given are settled here, where the scope it reads is.
+      signature: null,
+      compiled: null,
+    };
+    this.functions.table.set(statement.name, draft);
+    this.functions.used.add(statement.name);
+    this.functions.waiting.push(draft);
+    // A function is also given what the functions it calls read, so the closure
+    // is settled as soon as there is a call to settle it from.
+    this.closure();
+  }
+
+  /**
+   * What every function of the program is given: the names it reads of the
+   * scope it is declared in, and the names the functions it calls read, to a
+   * fixed point. A function is compiled on its own and every call passes it
+   * what it needs, so a function that calls one needs what that one needs: a
+   * body that calls a helper which reads `n` reads `n` itself, whether or not
+   * it says so.
+   */
+  private closure(): void {
+    for (let round = 0; round <= this.functions.table.size; round += 1) {
+      let changed = false;
+      for (const draft of this.functions.table.values()) {
+        for (const called of calledNames(draft.body)) {
+          const other = this.functions.table.get(called);
+          if (other === undefined) continue;
+          for (const capture of other.captured) {
+            if (draft.params.some((param) => param.name === capture.name)) continue;
+            if (draft.captured.some((one) => one.name === capture.name)) continue;
+            draft.captured.push(capture);
+            changed = true;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+    for (const draft of this.functions.table.values()) {
+      const params = [...draft.params, ...draft.captured];
+      draft.signature = {
+        name: draft.name,
+        symbol: draft.name,
+        params: params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
+        returns: draft.signature?.returns ?? "void",
+      };
+    }
+  }
+
+  /**
+   * The body of one function, read once however many call it. What it hands
+   * back settles what a call of it is typed by, so a call reads the body of
+   * what it calls before it types the call: a function of a program is
+   * compiled on its own, and what it returns is part of its signature.
+   */
+  private settle(draft: ProgramFunctionDraft): void {
+    if (draft.compiled !== null) return;
+    if (this.functions.settling.has(draft)) {
+      throw programError(
+        `"${draft.name}" calls itself`,
+        this.body,
+        draft.line,
+        `line ${draft.line} of ${this.body.file}: what a function hands back is settled by reading its body, and a function that calls itself is its own answer; write it as a function of the module, which is contracted and may recurse`,
+      );
+    }
+    this.functions.settling.add(draft);
+    // The body leaves the queue before it is read: reading it reaches the bodies
+    // declared inside it, and those are settled from the queue this one is on.
+    this.functions.waiting = this.functions.waiting.filter((one) => one !== draft);
+    try {
+      const body = this.read(draft);
+      const result = body.statements.find((statement) => statement.kind === "result");
+      const returns = result === undefined ? "void" : typeToString(this.returned(result));
+      draft.signature = { ...(draft.signature as FunctionSignature), returns };
+      draft.compiled = body;
+    } finally {
+      this.functions.settling.delete(draft);
+    }
+    // A function declared inside the body that was just read reads the scope it
+    // was declared in, which is now settled: it is read here rather than at the
+    // end of the program, so the function it is called from is compiled whole.
+    for (const waiting of [...this.functions.waiting]) this.settle(waiting);
+  }
+
+  /** What a function hands back, read as the type the body made it. */
+  private returned(result: DraftStatement & { kind: "result" }): TypeExpr {
+    return draftType(result.value) ?? { kind: "void" };
+  }
+
+  /**
+   * The statements of one function, resolved with its own parameters and every
+   * name it reads of the scope around it declared as parameters of its own. The
+   * types of those names are the types the scope it was declared in holds, and
+   * they are settled at the declaration: a function is called from inside the
+   * scope it was written in.
+   */
+  private read(draft: ProgramFunctionDraft): DraftProgram {
+    if (draft.signature === null) {
+      throw programError(
+        `"${draft.name}" reads a name the scope around it does not hold`,
+        this.body,
+        draft.line,
+        `line ${draft.line} of ${this.body.file}: declare the name above the function that reads it, or take it as a parameter of the function`,
+      );
+    }
+    // A body is a program of its own: the same contracts and the same
+    // functions, with the parameters and the captured names declared before
+    // the first statement of the body runs.
+    const inner = new ProgramResolver(this.body, this.contracts, this.objects, this.functions);
+    inner.open();
+    for (const param of draft.signature.params) {
+      inner.declareName(param.name, draft.line, heldOf(param.type));
+    }
+    const statements = inner.statements(draft.body);
+    inner.close();
+    return {
+      file: this.body.file,
+      statements,
+      functions: [...this.contracts.values()].map((contract) => contract.signature),
+      declared: [],
       objects: this.objects,
     };
   }
 
   /** The names the program holds, so a generated name is not one of them. */
   taken(): Set<string> {
-    return this.used;
+    return this.functions.used;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -585,7 +1061,7 @@ class ProgramResolver {
       throw programError(`"${name}" is declared twice in the same block`, this.body, line);
     }
     const declared = { ...held, name } as Held;
-    this.used.add(name);
+    this.functions.used.add(name);
     this.scopes[this.scopes.length - 1].set(name, declared);
     return declared;
   }
@@ -613,8 +1089,22 @@ class ProgramResolver {
   /* Statements                                                              */
   /* ---------------------------------------------------------------------- */
 
-  private statements(list: readonly ProgramStatement[]): DraftStatement[] {
-    return list.map((statement) => this.statement(statement));
+  private statements(list: readonly ProgramStatement[], hoisted = true): DraftStatement[] {
+    // A function declared inside a function is bound to the body it is declared
+    // in rather than to the statement it is written at, so a body may call what
+    // it declares further down: the names such a function reads are the ones
+    // the body holds, which is where they are declared. The top of a program is
+    // the one block read in the order it runs, because what a function declared
+    // there reads is whatever the program has declared by the time it is called.
+    if (hoisted) {
+      for (const statement of list) {
+        if (statement.kind === "function" && !this.functions.table.has(statement.name)) this.declared(statement);
+      }
+    }
+    return list.flatMap((statement) => {
+      const resolved = this.statement(statement);
+      return resolved === null ? [] : [resolved];
+    });
   }
 
   private block(body: ProgramStatement[]): DraftStatement[] {
@@ -624,7 +1114,8 @@ class ProgramResolver {
     return resolved;
   }
 
-  private statement(statement: ProgramStatement): DraftStatement {
+  /** What a statement is, or null when it is a name the program binds. */
+  private statement(statement: ProgramStatement): DraftStatement | null {
     switch (statement.kind) {
       case "declare":
         return this.declaration(statement);
@@ -707,6 +1198,22 @@ class ProgramResolver {
           : { kind: "continue", line: statement.line };
       case "block":
         return { kind: "block", body: this.block(statement.body), line: statement.line };
+      case "result":
+        return { kind: "result", value: this.value(statement.value, null, statement.line), line: statement.line };
+      case "function":
+        // A function is a name the program binds, and a name runs when it is
+        // called: what is written here is its signature, and its body is
+        // compiled once the scope it was declared in has every name in it.
+        if (this.functions.table.has(statement.name) && this.functions.table.get(statement.name)?.line !== statement.line) {
+          throw programError(
+            `"${statement.name}" is declared twice`,
+            this.body,
+            statement.line,
+            `line ${statement.line} of ${this.body.file}: a program compiles every function it declares under the name it is called by`,
+          );
+        }
+        this.declared(statement);
+        return null;
     }
   }
 
@@ -721,7 +1228,13 @@ class ProgramResolver {
       return { kind: "declare", name: declared.name, held: declared, value, line: statement.line };
     };
     switch (value.k) {
+      // A typed array is a name of its own, whichever of the three forms the
+      // source wrote it in, and a fill is that array with every element
+      // written: the fill is what the value is, and the name holds the array.
       case "buffer":
+      case "sized":
+      case "view":
+      case "fill":
         return declare({
           kind: "array",
           mutable,
@@ -729,6 +1242,8 @@ class ProgramResolver {
           length: value.held.length,
           values: value.held.values,
         });
+      case "fixed":
+        return declare({ kind: "text", mutable, value: null });
       case "text": {
         const written = value.parts
           .filter((part) => part.k === "text")
@@ -779,7 +1294,9 @@ class ProgramResolver {
       case "call": {
         const returns = primitive(value.call.returns);
         if (returns !== null) return declare({ kind: "number", mutable, type: returns, text: "" });
-        if (value.call.returns.kind === "ref") {
+        // A block of bytes is what the views over it are taken of, and a
+        // program holds one as the reference it is.
+        if (value.call.returns.kind === "ref" || value.call.returns.kind === "ptr") {
           return declare({ kind: "object", mutable, type: value.call.returns });
         }
         throw programError(
@@ -1013,6 +1530,54 @@ class ProgramResolver {
         return { k: "boolean", value: value.value };
       case "null":
         return { k: "null", type: expect };
+      case "shared": {
+        // A block of bytes is what a view is taken of, and the runtime lays it
+        // out: the program asks for a number of bytes and is given a block.
+        const count = this.value(value.count, USIZE, line);
+        return { k: "call", call: this.shared(count, line) };
+      }
+      case "sized":
+        return {
+          k: "sized",
+          element: value.element,
+          count: this.value(value.count, USIZE, line),
+          held: this.arrayed(value.element, null),
+        };
+      case "view": {
+        const of = this.value(value.of, null, line);
+        const block = draftType(of);
+        // A view is a window of a block of bytes, and a block is what a view
+        // reads: a number is not a block however it is written.
+        if (block === null || !isReference(block)) {
+          throw programError(
+            "a view is taken of a block of bytes",
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: a view reads the block a name holds, as in new Float64Array(block, 0, n)`,
+          );
+        }
+        return {
+          k: "view",
+          element: value.element,
+          of,
+          offset: this.value(value.offset, USIZE, line),
+          count: this.value(value.count, USIZE, line),
+          held: this.arrayed(value.element, null),
+        };
+      }
+      case "fill": {
+        // `a.fill(x)` answers the array with every element written, so what the
+        // name is declared under is the array and what the source wrote happens
+        // to it.
+        const buffer = this.value(value.buffer, null, line);
+        const held = this.arrayOf(buffer, line);
+        return {
+          k: "fill",
+          buffer,
+          value: this.value(value.value, numeric(held.element ?? "f64"), line),
+          held: { ...held, mutable: true },
+        };
+      }
       case "buffer": {
         const held: ArrayHeld = {
           kind: "array",
@@ -1033,6 +1598,21 @@ class ProgramResolver {
       }
       case "text":
         return { k: "text", parts: this.parts(value.parts, line) };
+      case "fixed": {
+        // What is written at a fixed number of digits is a number: a string is
+        // already the text the digits would have been written into, and the
+        // digits would be dropped rather than refused.
+        const of = this.value(value.of, null, line);
+        if (holdsText(of)) {
+          throw programError(
+            "a string is not written at a fixed number of digits",
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: a string is already text; write it as it is`,
+          );
+        }
+        return { k: "fixed", of, digits: value.digits };
+      }
       case "name": {
         // An array is used at one element type, whichever name it is passed by.
         const held = this.held(value.name, line);
@@ -1090,6 +1670,42 @@ class ProgramResolver {
       case "binary":
         return this.binary(value, expect, line);
     }
+  }
+
+  /** What an array of a count the program settled on holds, before it is named. */
+  private arrayed(element: PrimitiveTypeName, length: number | null): ArrayHeld {
+    return { kind: "array", name: "", mutable: false, element, length, values: [] };
+  }
+
+  /** The call a block of bytes is laid out by. */
+  private shared(count: DraftValue, line: number): DraftCall {
+    const builtin = builtinFor(SHARED);
+    if (builtin === null) throw programError("a block of bytes is not a call this compiler makes", this.body, line);
+    return {
+      name: SHARED,
+      signature: {
+        name: SHARED,
+        symbol: SHARED,
+        params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) })),
+        returns: typeToString(builtin.returns),
+      },
+      args: [count],
+      returns: builtin.returns,
+      effects: [],
+      builtin: true,
+    };
+  }
+
+  /** The array a value holds, or the diagnostic of what the value is instead. */
+  private arrayOf(value: DraftValue, line: number): ArrayHeld {
+    if (value.k === "reference" && value.held.kind === "array") return value.held;
+    if (value.k === "buffer" || value.k === "sized" || value.k === "view" || value.k === "fill") return value.held;
+    throw programError(
+      "an array is what is written into element by element",
+      this.body,
+      line,
+      `line ${line} of ${this.body.file}: a program fills the arrays it allocated, as in a.fill(1)`,
+    );
   }
 
   private reference(name: string, line: number): DraftValue {
@@ -1184,6 +1800,21 @@ class ProgramResolver {
       const compared = this.equality(op, left, right, line);
       if (compared.k === "boolean") return compared;
       return { ...compared, negate: op === "!==" || op === "!=" };
+    }
+    if (CONVERTING_OPERATORS.includes(op)) {
+      // `>>>` is the shift the language converts rather than refuses: both of
+      // its sides are read as the unsigned 32 bit numbers the language reads
+      // them as, whatever they are, and what it answers is one of those. A
+      // number written in a program is a double, so `x >>> 1` is the shift of
+      // a double truncated to a whole number, which is what the source means.
+      const type = numeric("u32");
+      return {
+        k: "binary",
+        op,
+        left: this.value(value.left, type, line),
+        right: this.value(value.right, type, line),
+        type,
+      };
     }
     const left = this.value(value.left, null, line);
     const right = this.value(value.right, left.k === "literal" ? draftType(left) : null, line);
@@ -1354,6 +1985,50 @@ class ProgramResolver {
         builtin: true,
       };
     }
+    // A function the program declared is called like any other: it is compiled
+    // on its own, and what it hands back is settled by reading its body, so a
+    // call reads the body of what it calls before it types the call.
+    const declared = this.functions.table.get(value.function);
+    if (declared !== undefined) {
+      this.settle(declared);
+      const signature = declared.signature as FunctionSignature;
+      // The arguments the source wrote are the ones it takes: what it reads of
+      // the scope around it is passed at every call and counted by neither.
+      const arity = signature.params.length - declared.captured.length;
+      if (value.args.length !== arity) {
+        const expected = signature.params
+          .slice(0, arity)
+          .map((param) => `${param.name}: ${param.type}`)
+          .join(", ");
+        throw programError(
+          `${value.function} takes ${arity} argument(s), not ${value.args.length}`,
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: ${expected}`,
+        );
+      }
+      // What the function reads of the scope it was declared in is passed to it
+      // at every call, after the arguments the source wrote: the call is the
+      // only place the two scopes meet, so the call is what hands them over.
+      const written = value.args.map((argument, position) =>
+        this.value(argument, parseType(signature.params[position].type), line),
+      );
+      const captured = declared.captured.map((capture, position) =>
+        this.value(
+          { k: "name", name: capture.name },
+          parseType(signature.params[value.args.length + position].type),
+          line,
+        ),
+      );
+      return {
+        name: signature.symbol,
+        signature,
+        args: [...written, ...captured],
+        returns: parseType(signature.returns),
+        effects: [],
+        builtin: false,
+      };
+    }
     const contract = this.contracts.get(value.function);
     if (contract === undefined) {
       const compiled = [...this.contracts.keys()];
@@ -1472,6 +2147,9 @@ class ProgramResolver {
   /** A literal index the array does not have is refused where it is written. */
   private within(index: DraftValue, held: ArrayHeld, line: number): void {
     if (index.k !== "literal") return;
+    // An array the program sized when it ran is as long as the count it settled
+    // on, and that count is a value: there is no bound to refuse a read against.
+    if (held.length === null) return;
     const at = integerLiteral(index.held.text);
     if (at === null) return;
     if (at < 0n || at >= BigInt(held.length)) {
@@ -1565,6 +2243,10 @@ interface BlockFrame {
 function draftHasCall(value: DraftValue): boolean {
   switch (value.k) {
     case "call":
+    case "fixed":
+    case "fill":
+    case "sized":
+    case "view":
       return true;
     case "buffer":
     case "literal":
@@ -1618,16 +2300,81 @@ class ProgramLowering {
   }
 
   lower(program: DraftProgram): SemanticProgram {
-    const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "return", value: null } };
+    // A function the program declares is a function of its own, lowered by a
+    // lowering of its own: the names it holds are its own, and a name it
+    // generates is not one the program around it generated.
+    const settled = program.declared.filter(
+      (draft): draft is SettledFunction => draft.signature !== null && draft.compiled !== null,
+    );
+    const bodies = settled.map((draft) => this.function(draft));
+    // A block starts open and is closed by what ends it: a program ends by
+    // handing back nothing, and a function ends by handing back what it
+    // returns or by falling off the end of its body.
+    const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "next" } };
     this.enter(entry, null);
     this.statements(program.statements);
     this.leave();
+    if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
     return {
       file: program.file,
       entry,
-      functions: program.functions,
+      functions: [...program.functions, ...settled.map((draft) => draft.signature)],
+      bodies,
       objects: program.objects,
     };
+  }
+
+  /** One function the program declared, as the IR holds a function whole. */
+  private function(draft: SettledFunction): SemanticFunction {
+    const signature = draft.signature as FunctionSignature;
+    // The parameters are the parameters of the signature the resolver settled,
+    // read back as the types the body reads them at: a buffer is a pointer to
+    // its first element, and a number is the number it is.
+    const params = signature.params.map((param) => ({
+      kind: "value" as const,
+      name: param.name,
+      mutable: false,
+      type: parseType(param.type) as SemanticType,
+    }));
+    // The body is lowered on its own: its own entry block, its own names, and
+    // a value of its own for each parameter it is given.
+    const inner = new ProgramLowering(new Set(this.used));
+    const entry = inner.body(draft.compiled as DraftProgram);
+    const allocates = entry.releases.length > 0;
+    return {
+      name: signature.name,
+      symbol: signature.symbol,
+      params,
+      returns: parseType(signature.returns),
+      requires: [],
+      ensures: [],
+      // What a function of a program does beyond computing its result is what
+      // its body does: it allocates what it allocates, prints what it prints,
+      // and reads the command line only where the source reads it.
+      effects: allocates ? ["memory"] : [],
+      allocates,
+      prints: printsOf(entry),
+      readsArgv: readsArgvOf(entry),
+      objects: {},
+      calls: callsOf(entry),
+      entry,
+    };
+  }
+
+  /**
+   * The block one body runs in. A function's parameters are the parameters of
+   * the function itself, so the body reads them as it reads any other name and
+   * nothing in the block declares them again.
+   */
+  private body(program: DraftProgram): SemanticBlock {
+    const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "next" } };
+    this.enter(entry, null);
+    this.statements(program.statements);
+    this.leave();
+    // A body that falls off the end hands back what the function returns, which
+    // is nothing at all unless the source returns something.
+    if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
+    return entry;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1730,7 +2477,11 @@ class ProgramLowering {
       // after it is dead and is written nowhere. A block the program reaches
       // again is a block the loop writes, so a later statement of the same
       // block is the one the program runs next time round.
-      if (this.frame().block.terminator.k === "jump") break;
+      // A `break` or a `continue` leaves the block, and a `return` ends the
+      // function, so what the source wrote after either is dead and is written
+      // nowhere.
+      const end = this.frame().block.terminator.k;
+      if (end === "jump" || end === "return") break;
       this.draft(statement);
     }
   }
@@ -1739,16 +2490,28 @@ class ProgramLowering {
     switch (statement.kind) {
       case "declare": {
         const slot = this.declared(statement.held);
-        // An array the program wrote out is the name it is declared as, not a
-        // name of its own: the declaration is the allocation.
-        const value = statement.value.k === "buffer" && statement.held.kind === "array"
-          ? this.buffer(statement.held, statement.line)
-          : this.value(statement.value, null, statement.line);
+        // An array the program wrote is the name it is declared as, not a name
+        // of its own: the declaration is the allocation, whether the values
+        // were written out, the count was settled on when the program ran, or
+        // the array is a window of a block. A fill is the one array form the
+        // declaration is not: the fill is a loop, and a loop is a statement of
+        // its own, so the array is written under a name first and the name
+        // declared here is that array again.
+        const written: DraftValue | null =
+          statement.held.kind === "array" && ARRAY_FORMS.has(statement.value.k) ? statement.value : null;
+        const allocated =
+          written !== null && (written.k === "buffer" || written.k === "sized" || written.k === "view");
+        const value = allocated ? this.buffer(written, statement.line) : this.value(statement.value, null, statement.line);
         // A name that is nothing is declared as the reference it is, so the
         // name reads as what it holds. An array another name already holds is
         // named again rather than allocated again, so the block owns it once.
         const held = value.k === "nothing" && slot.kind === "object" ? { ...value, type: slot.type } : value;
-        if (slot.kind === "buffer" && statement.value.k !== "reference") this.own(slot.name);
+        // A view holds no block of its own: the block it looks into belongs to
+        // the name the program gave it, and what that block frees is freed
+        // after every view of it, because a block frees in the reverse of the
+        // order the program took it. Freeing a view would free bytes in the
+        // middle of a block, which is not a block at all.
+        if (allocated && written !== null && written.k !== "view") this.own(slot.name);
         this.statement({ k: "let", slot, value: held, line: statement.line });
         return;
       }
@@ -1852,6 +2615,13 @@ class ProgramLowering {
       case "block":
         this.statement({ k: "block", body: this.arm(statement.body, this.frame().loop), line: statement.line });
         return;
+      case "result": {
+        // What a function hands back ends the block it was written in, and
+        // whatever that value hoisted is written before the block ends.
+        this.flush();
+        this.frame().block.terminator = { k: "return", value: this.value(statement.value, null, statement.line) };
+        return;
+      }
     }
   }
 
@@ -1928,7 +2698,7 @@ class ProgramLowering {
         return;
       case "boolean":
       case "reference":
-        this.statement({ k: "printText", value: { k: "toText", type: TEXT, of: value }, line });
+        this.statement({ k: "printText", value: { k: "toText", type: TEXT, of: value, digits: null }, line });
         return;
       case "null":
         this.statement({ k: "printText", value: { k: "text", type: TEXT, parts: [{ k: "text", value: "null" }] }, line });
@@ -1949,7 +2719,40 @@ class ProgramLowering {
         return { k: "const", type: numeric(name), text: value.held.text };
       }
       case "buffer":
+      case "sized":
+      case "view":
         return this.array(value, line);
+      case "fill": {
+        // The array is written under a name of its own, and the fill runs
+        // where the source wrote it: a name reads the array, and every element
+        // of it is written before the statement that uses the name.
+        // The array the fill writes into is the one the name holds, or the one
+        // the source allocated in the same breath: `a.fill(1)` fills what `a`
+        // is, and `new Float64Array(n).fill(1)` fills what it just made. An
+        // allocation written in the breath of the fill is written under a name
+        // of its own first, so the fill has a name to walk.
+        const array = this.value(value.buffer, null, line);
+        if (array.k !== "local") {
+          throw new CompilerError({
+            category: "ContractError",
+            stage: "program",
+            message: "a fill is written of an array the program allocated",
+            detail: "the resolver resolved the array to a name; the lowering writes it down under that name",
+          });
+        }
+        const element = numeric(value.held.element ?? "f64");
+        this.pending.push({
+          k: "fill",
+          buffer: array.name,
+          index: this.generated("i"),
+          value: this.value(value.value, element, line),
+          type: element,
+          line,
+        });
+        return array;
+      }
+      case "fixed":
+        return { k: "toText", type: TEXT, of: this.value(value.of, null, line), digits: value.digits };
       case "reference":
         return { k: "local", type: this.localType(value.held), name: value.name };
       case "text":
@@ -2016,7 +2819,7 @@ class ProgramLowering {
   private written(value: DraftValue, line: number): SemanticValue {
     const mapped = this.value(value, null, line);
     if (isTextType(mapped.type)) return mapped;
-    return { k: "toText", type: TEXT, of: mapped };
+    return { k: "toText", type: TEXT, of: mapped, digits: null };
   }
 
   /**
@@ -2024,9 +2827,9 @@ class ProgramLowering {
    * wrote it, and the block it was written in owns it: a name reads that
    * array, and it is freed when the block ends.
    */
-  private array(value: DraftValue & { k: "buffer" }, line: number): SemanticValue {
-    const name = this.generated("a");
+  private array(value: DraftValue & { k: "buffer" | "sized" | "view" }, line: number): SemanticValue {
     const held = value.held;
+    const name = this.generated("a");
     const slot: SemanticSlot = {
       kind: "buffer",
       name,
@@ -2034,21 +2837,64 @@ class ProgramLowering {
       element: numeric(held.element ?? "f64"),
       length: held.length,
     };
-    this.pending.push({ k: "let", slot, value: this.buffer(held, line), line });
-    this.own(name);
+    this.pending.push({ k: "let", slot, value: this.buffer(value, line), line });
+    // A view holds no block of its own: the block it looks into was declared
+    // before it, and what that block frees is freed after every view of it,
+    // because a block frees in the reverse of the order the program took it.
+    if (value.k !== "view") this.own(name);
     return { k: "local", type: arrayType(held), name };
   }
 
-  /** A typed array, written out element by element in the type it is used at. */
-  private buffer(held: ArrayHeld, line: number): SemanticValue {
+  /** A typed array, in the form the program wrote it. */
+  private buffer(value: DraftValue & { k: "buffer" | "sized" | "view" }, line: number): SemanticValue {
+    const held = value.held;
     const element = numeric(held.element ?? "f64");
+    if (value.k === "sized") {
+      // The count the program settled on is the length of the array, and the
+      // block is cleared: a read past what the program filled is the zero the
+      // language answers it with.
+      return {
+        k: "buffer",
+        type: arrayType(held),
+        element,
+        length: null,
+        count: this.value(value.count, USIZE, line),
+        view: null,
+        values: [],
+      };
+    }
+    if (value.k === "view") {
+      return {
+        k: "buffer",
+        type: arrayType(held),
+        element,
+        length: null,
+        count: this.value(value.count, USIZE, line),
+        view: { of: this.held(this.value(value.of, null, line), line), offset: this.value(value.offset, USIZE, line) },
+        values: [],
+      };
+    }
     return {
       k: "buffer",
       type: arrayType(held),
       element,
       length: held.length,
+      count: null,
+      view: null,
       values: held.values.map((item) => this.value(item, element, line)),
     };
+  }
+
+  /**
+   * The value a view is taken of, which the emitter has to name to keep the
+   * block alive: a view of a value that is not a name is written under one.
+   */
+  private held(value: SemanticValue, line: number): SemanticValue {
+    if (value.k === "local") return value;
+    const name = this.generated("a");
+    this.pending.push({ k: "let", slot: this.slot(name, value.type, false), value, line });
+    this.own(name);
+    return { k: "local", type: value.type, name };
   }
 
   /**
@@ -2144,7 +2990,10 @@ class ProgramLowering {
       argTypes: call.signature.params.map((param) => parseType(param.type)),
       returns: call.returns,
       effects: call.effects,
-      ownership: ownership(call.returns),
+      // What the caller owns is what the callee made: a block of bytes is laid
+      // out with one reference of its own, and a pointer a function was handed
+      // is borrowed for as long as the caller holds it.
+      ownership: call.name === SHARED ? "owned" : ownership(call.returns),
       retain: false,
       builtin: call.builtin,
     };
@@ -2157,6 +3006,62 @@ class ProgramLowering {
     if (held.kind === "array") return arrayType(held);
     return heldType(held) ?? TEXT;
   }
+}
+
+/** Whether a body and the blocks inside it print anything. */
+function printsOf(block: SemanticBlock): boolean {
+  for (const statement of block.statements) {
+    if (statement.k === "printText" || statement.k === "printNumber") return true;
+    for (const nested of statementBlocksOf(statement)) if (printsOf(nested)) return true;
+  }
+  return block.terminator.k === "return" && block.terminator.value !== null && printsValue(block.terminator.value);
+}
+
+/** Whether a value, or anything inside it, is the command line. */
+function printsValue(value: SemanticValue): boolean {
+  let found = false;
+  walkValues(value, (one) => {
+    if (one.k === "argv") found = true;
+  });
+  return found;
+}
+
+/** Whether a body reads the command line the program was started with. */
+function readsArgvOf(block: SemanticBlock): boolean {
+  for (const statement of block.statements) {
+    for (const value of statementValues(statement)) {
+      if (printsValue(value)) return true;
+    }
+    for (const nested of statementBlocksOf(statement)) if (readsArgvOf(nested)) return true;
+  }
+  return false;
+}
+
+/** Every call a body makes, in the order it first makes each. */
+function callsOf(block: SemanticBlock): CallEdge[] {
+  const edges: CallEdge[] = [];
+  const seen = new Set<string>();
+  const walk = (one: SemanticBlock): void => {
+    for (const statement of one.statements) {
+      for (const value of statementValues(statement)) {
+        walkValues(value, (inner) => {
+          if (inner.k !== "call" || seen.has(inner.call.callee)) return;
+          seen.add(inner.call.callee);
+          edges.push({ callee: inner.call.callee, strategy: "call" });
+        });
+      }
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+    if (one.terminator.k === "return" && one.terminator.value !== null) {
+      walkValues(one.terminator.value, (inner) => {
+        if (inner.k !== "call" || seen.has(inner.call.callee)) return;
+        seen.add(inner.call.callee);
+        edges.push({ callee: inner.call.callee, strategy: "call" });
+      });
+    }
+  };
+  walk(block);
+  return edges;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2176,7 +3081,12 @@ export function resolveProgram(body: ProgramBody, program: ProgramContract): Sem
       Object.assign(objects, contract.definition.objects);
     }
   }
-  const resolver = new ProgramResolver(body, contractsOf(program), objects);
+  const resolver = new ProgramResolver(body, contractsOf(program), objects, {
+    table: new Map(),
+    waiting: [],
+    settling: new Set(),
+    used: new Set(),
+  });
   return new ProgramLowering(resolver.taken()).lower(resolver.resolve());
 }
 

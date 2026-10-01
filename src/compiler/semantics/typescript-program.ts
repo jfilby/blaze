@@ -20,6 +20,11 @@
  *   - a block: `{ ... }`
  *   - a declaration: `const`, `let` or `var`, a name, an optional `: Type` and
  *     a value; only `const` binds a value the program may not change
+ *   - a function: `function f(n: number) { ... }`, declared where it is written
+ *     and run when it is called. A function of a program is compiled on its own,
+ *     so every name it reads of the scope around it is a parameter of its own,
+ *     and what it hands back is what its body returns
+ *   - a return: `return value;`, which ends the function it is written in
  *   - a choice: `if (c) body else body`, where the body is a block or a single
  *     statement, and an `else if` is an `if` as the other branch
  *   - a loop: `while (c) body`, `do body while (c)`, a counted
@@ -40,9 +45,16 @@
  * call, `[index]` or `.length`; a `++` or a `--` is a statement of its own, so
  * a program reads neither as a value. What a value is on its own: a
  * number, a bigint as `12n`, a string or a template string, `true`, `false`,
- * `null` and `undefined`, a name, `( expr )`, `new Float64Array([1, 2])`,
- * `Float64Array.BYTES_PER_ELEMENT`, `process.argv` and `Deno.args` with `[i]`
- * and `.length`, and `Math.max` and the five other builtins.
+ * `null` and `undefined`, a name, `( expr )`, `Float64Array.BYTES_PER_ELEMENT`,
+ * `process.argv` and `Deno.args` with `[i]` and `.length`, and `Math.max` and
+ * the six other builtins.
+ *
+ * A typed array is a value in three shapes: the values it holds, as in
+ * `new Float64Array([1, 2])`; a count the program settles on when it runs, as
+ * in `new Float64Array(n)`; and a window of a block the program laid out, as in
+ * `new Float64Array(block, offset, n)` over a `new SharedArrayBuffer(bytes)`.
+ * `a.fill(x)` writes one value into every element of an array and answers the
+ * array, and `x.toFixed(d)` answers a number written as text at `d` digits.
  *
  * A template string interpolates values; its text is taken as written, with the
  * escapes in ESCAPES resolved and any other escape left as written. A negative
@@ -125,7 +137,7 @@ const BINARY_LEVELS: readonly (readonly ProgramBinaryOp[])[] = [
   ["&"],
   ["===", "!==", "==", "!="],
   ["<", "<=", ">", ">="],
-  ["<<", ">>"],
+  ["<<", ">>", ">>>"],
   ["+", "-"],
   ["*", "/", "%"],
 ];
@@ -206,7 +218,7 @@ class ProgramParser {
   private fail(message: string, token: Token = this.peek()): void {
     this.diagnostics.report(
       message,
-      `near "${token.text}"; a program runs declarations, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math, process.argv and Deno.args`,
+      `near "${token.text}"; a program runs declarations, function declarations, return, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math, process.argv and Deno.args`,
       token.line,
     );
   }
@@ -286,6 +298,13 @@ class ProgramParser {
       return { kind: "update", name, op, prefix: true, line };
     }
     if (this.at("console")) return this.print();
+    if (this.at("return")) {
+      this.next();
+      const value = this.value();
+      this.accept(";");
+      return { kind: "result", value, line };
+    }
+    if (this.at("function")) return this.declaredFunction();
     if (this.peek().kind === "ident") {
       const statement = this.named();
       if (statement !== undefined) return statement;
@@ -548,6 +567,35 @@ class ProgramParser {
     return { value: { k: "unary", op: "-", operand: value }, refused: false };
   }
 
+  /**
+   * `function f(n: number) { ... }`: a function the program declares, which
+   * runs when it is called. A program declares a function where it writes it,
+   * inside another function as well as at the top of the program, and what it
+   * reads of the scope around it is given to it at every call.
+   */
+  private declaredFunction(): ProgramStatement {
+    const line = this.peek().line;
+    this.expect("function");
+    const name = this.identifier("the name of a function");
+    const params: { name: string; type: string | null }[] = [];
+    this.expect("(");
+    if (!this.at(")")) {
+      for (;;) {
+        const parameter = this.identifier("the name of a parameter");
+        let type: string | null = null;
+        if (this.accept(":")) type = this.annotation("the type of a parameter");
+        params.push({ name: parameter, type });
+        if (!this.accept(",")) break;
+      }
+    }
+    this.expect(")");
+    // A return type is what the body works out, so a program writes none: a
+    // function that returns something says so with its `return`.
+    if (this.accept(":")) this.annotation("the type a function returns");
+    const body = this.at("{") ? this.braces() : this.statements();
+    return { kind: "function", name, params, body, line };
+  }
+
   /** `console.log(v, ...)`: the values a program writes out. */
   private print(): ProgramStatement | null {
     const line = this.peek().line;
@@ -724,16 +772,26 @@ class ProgramParser {
       return { k: "element", buffer: value.name, index };
     }
     if (this.at(".")) {
-      if (value.k !== "name") {
-        this.fail("a program cannot read a member of a value; it reads the length of a name");
-        this.next();
-        this.identifier("the property of a value");
-        return value;
-      }
+      const dot = this.peek();
       this.next();
       const member = this.identifier("the property of a value");
+      // `x.toFixed(2)` writes a number as text at two digits, and `a.fill(x)`
+      // writes a number into every element of an array. Both are written of
+      // whatever the value is, and both answer the value they were written of.
+      if (member === "toFixed" && this.at("(")) return this.fixed(value);
+      if (member === "fill" && this.at("(")) return this.filled(value);
+      if (value.k !== "name") {
+        this.fail(
+          "a program cannot read a member of a value; it reads the length of a name, and writes a number as x.toFixed(digits)",
+          dot,
+        );
+        if (this.at("(")) this.skipArguments();
+        return value;
+      }
       if (member !== "length") {
-        this.fail(`${value.name}.${member} is not a value a program can read; a program reads name.length`);
+        this.fail(
+          `${value.name}.${member} is not a value a program can read; a program reads name.length, and writes a number as name.toFixed(digits)`,
+        );
         return value;
       }
       return { k: "length", of: value.name };
@@ -748,6 +806,42 @@ class ProgramParser {
       return { k: "call", function: value.name, args: this.arguments() };
     }
     return value;
+  }
+
+  /**
+   * `a.fill(x)`: every element of the array written as `x`, and the array
+   * itself, so that `const b = a.fill(1)` names the array it filled. Whether
+   * what it is written of is an array is not settled here: the resolver reads
+   * the value and names what it holds, which is the answer that says it.
+   */
+  private filled(buffer: ProgramValue): ProgramValue {
+    this.expect("(");
+    const value = this.value();
+    this.expect(")");
+    return { k: "fill", buffer, value };
+  }
+
+  /**
+   * `x.toFixed(d)`: the number written as text at `d` digits after the point.
+   * The count is written out in the source, so it is a number the parser reads
+   * rather than a value it evaluates.
+   */
+  private fixed(of: ProgramValue): ProgramValue {
+    const open = this.peek();
+    this.next();
+    const digits = this.peek();
+    if (digits.kind !== "number" || !/^\d+$/.test(digits.text)) {
+      this.fail("the digits a number is written at are written out, as in x.toFixed(2)", digits);
+      this.skipArguments();
+      return this.nothing();
+    }
+    this.next();
+    if (!this.at(")")) this.fail("x.toFixed takes one number of digits", this.peek());
+    this.expect(")");
+    if (of.k === "text" || of.k === "fixed") {
+      this.fail("a number is what is written at a fixed number of digits; a string is already text", open);
+    }
+    return { k: "fixed", of, digits: Number(digits.text) };
   }
 
   /** A value on its own. */
@@ -897,8 +991,26 @@ class ProgramParser {
     return { k: "binary", op: "-", left: length, right: { k: "number", text: String(shift) } };
   }
 
+  /**
+   * `new SharedArrayBuffer(bytes)`: a block of bytes the program lays out, which
+   * the views over it read and write. It is what a program allocates when it
+   * wants one array to be three arrays of it, as the language allows.
+   */
+  private sharedBuffer(): ProgramValue {
+    this.next();
+    this.expect("(");
+    const count = this.value();
+    this.expect(")");
+    return { k: "shared", count };
+  }
+
   /** `new Float64Array([1, x, 3])`: the values are the elements of the buffer. */
   private bufferLiteral(): ProgramValue {
+    // A block of bytes is not a view of one, and it is read before the view
+    // name is: the two are allocated the same way and named differently.
+    if (this.peek().text === "SharedArrayBuffer" || this.peek().text === "ArrayBuffer") {
+      return this.sharedBuffer();
+    }
     const view = this.identifier("a typed array name");
     if (!(view in VIEWS)) {
       this.fail(`a program cannot allocate ${view}; supported: ${VIEWS_LIST}`);
@@ -906,10 +1018,20 @@ class ProgramParser {
       return this.nothing();
     }
     this.expect("(");
-    // A program has no length to fill with zeros: it writes the values down.
+    // `new Float64Array(n)` is a block of n elements the program sizes when it
+    // runs, and `new Float64Array(block, offset, n)` is a window of one that
+    // was laid out: both take counts, and both are cleared.
     if (!this.at("[")) {
-      this.fail(`a program writes a typed array as the values it holds, as in new ${view}([1, 2])`);
-      this.skipArguments();
+      const args = this.arguments();
+      if (args.length === 1) {
+        return { k: "sized", element: VIEWS[view] as PrimitiveTypeName, count: args[0] };
+      }
+      if (args.length === 3) {
+        return { k: "view", element: VIEWS[view] as PrimitiveTypeName, of: args[0], offset: args[1], count: args[2] };
+      }
+      this.fail(
+        `a program allocates a typed array as the values it holds, as in new ${view}([1, 2]), or as a count of elements, as in new ${view}(n), or as a view of a block, as in new ${view}(block, offset, n)`,
+      );
       return this.nothing();
     }
     this.next();

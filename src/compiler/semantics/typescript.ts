@@ -261,7 +261,7 @@ export interface Token {
   /** The character the string was written with. */
   quote?: string;
 }
-const PUNCTUATION = ["===", "!==", "**=", "**", "==", "!=", "<=", ">=", "<<", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
+const PUNCTUATION = ["===", "!==", "**=", "**", "==", "!=", "<=", ">=", "<<", ">>>", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
@@ -1061,7 +1061,7 @@ class TypeScriptParser {
   }
 
   private readShift(): Expression {
-    return this.readBinaryLevel(["<<", ">>"], () => this.readAdditive());
+    return this.readBinaryLevel(["<<", ">>", ">>>"], () => this.readAdditive());
   }
 
   private readAdditive(): Expression {

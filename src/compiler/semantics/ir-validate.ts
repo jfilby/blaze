@@ -35,6 +35,7 @@ import {
   commonNumber,
   hasCall,
   isBoolean,
+  isFloat,
   isInteger,
   isNumber,
   isReference,
@@ -61,7 +62,7 @@ import type {
   SemanticValue,
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
-import { parseType } from "./contract.ts";
+import { parseType, typeToString } from "./contract.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
@@ -92,6 +93,7 @@ const WHOLE_OPERATIONS: Record<string, true> = {
   mod: true,
   shl: true,
   shr: true,
+  ushr: true,
   and: true,
   or: true,
   xor: true,
@@ -638,6 +640,28 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       return problems;
     }
     case "buffer": {
+      if (value.length === null) {
+        // The count the program settled on is a value, and a view writes no
+        // values of its own: what it holds is the block it looks into.
+        if (value.count === null) {
+          problems.push(`${prefix}the array declares no elements and settles on no count`);
+        } else if (!isNumber(value.count.type)) {
+          problems.push(`${prefix}the array is settled on a ${typeText(value.count.type)}, which is not a number`);
+        }
+        if (value.view === null && value.values.length > 0) {
+          problems.push(`${prefix}the array settles on a count and writes ${value.values.length} value(s) out`);
+        }
+        if (value.view !== null && (!isReference(value.view.of.type) || !isSequence(value.view.of.type))) {
+          problems.push(`${prefix}a view is taken of a ${typeText(value.view.of.type)}, which is not a block of bytes`);
+        }
+        if (value.view !== null && !isNumber(value.view.offset.type)) {
+          problems.push(`${prefix}the view starts at a ${typeText(value.view.offset.type)}, which is not a number`);
+        }
+        return problems;
+      }
+      if (value.view !== null) {
+        problems.push(`${prefix}a view declares ${value.length} elements of its own`);
+      }
       if (value.values.length !== value.length) {
         problems.push(`${prefix}the array declares ${value.length} elements and writes ${value.values.length}`);
       }
@@ -718,8 +742,27 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         problems.push(`${prefix}${value.op} over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
         return problems;
       }
+      // A shift is written as the type of what it shifts, and `>>>` is the one
+      // that converts: JavaScript reads both of its sides as 32 bit unsigned
+      // numbers whatever they are, so its answer is its own type and not the
+      // type of either side.
       const expected = value.op === "shl" || value.op === "shr" ? value.left.type : value.type;
-      if (!typeEquals(expected, value.left.type) && !typeEquals(expected, value.right.type)) {
+      // `>>>` is the one shift that converts, so it is not written as the type
+      // of either side: both are read as the unsigned 32 bit numbers the
+      // language reads them as, and what it answers is one of those.
+      if (value.op === "ushr") {
+        if (!convertibleTo(value.left.type, value.type) || !convertibleTo(value.right.type, value.type)) {
+          problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);
+        }
+        return problems;
+      }
+      // A whole pair added, subtracted, multiplied or divided answers a double,
+      // and that is the language's own answer rather than a type the IR chose:
+      // a program counts in whole numbers and computes in doubles, so `i * i`
+      // over a loop index is a double on both sides of the language and here.
+      const widened =
+        isFloat(value.type) && isInteger(value.left.type) && isInteger(value.right.type) && value.op !== "min" && value.op !== "max";
+      if (!widened && !typeEquals(expected, value.left.type) && !typeEquals(expected, value.right.type)) {
         problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is neither`);
         return problems;
       }
@@ -1042,9 +1085,9 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
 
   const params: string[] =
     builtin !== null
-      ? builtin.params.map((type) => typeText(type))
+      ? builtin.params.map((type) => typeToString(type))
       : (signature?.params ?? []).map((param) => param.type);
-  const returns = builtin !== null ? typeText(builtin.returns) : (signature?.returns ?? "void");
+  const returns = builtin !== null ? typeToString(builtin.returns) : (signature?.returns ?? "void");
 
   if (call.signature.params.length !== params.length) {
     problems.push(`${prefix}${call.callee} is called against a signature of ${call.signature.params.length} parameters`);
@@ -1385,7 +1428,20 @@ function nameProblems(context: Context, tree: Tree): string[] {
  */
 export function semanticIrProblems(program: SemanticProgram, contract?: ProgramContract): string[] {
   const tree = readTree(program);
-  return bodyProblems(programContext(program, contract), programBody(program, tree), tree);
+  return [
+    ...bodyProblems(programContext(program, contract), programBody(program, tree), tree),
+    // A function the program declares is checked as the function it is: the
+    // same body a candidate of the program is checked against, with the
+    // signatures it is called by in hand.
+    ...program.bodies.flatMap((fn) => {
+      const own = readFunctionTree(fn, fn.entry);
+      return bodyProblems(
+        { objects: program.objects, functions: program.functions, contract, declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)] },
+        functionBody(fn.entry, own),
+        own,
+      ).map((problem) => `${fn.symbol}: ${problem}`);
+    }),
+  ];
 }
 
 /* -------------------------------------------------------------------------- */

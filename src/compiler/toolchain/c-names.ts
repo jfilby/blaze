@@ -269,6 +269,12 @@ const C_WIDE_INTEGERS: Record<string, { type: string; suffix: string; low: bigin
   isize: { type: "intptr_t", suffix: "LL", low: -(2n ** 63n), high: 2n ** 63n - 1n },
 };
 
+/**
+ * How wide an unsigned whole number is, where C spells one narrow enough that
+ * a literal is not a `long long` whatever it holds.
+ */
+const UNSIGNED_WIDTHS: Record<string, number> = { u8: 8, u16: 16, u32: 32 };
+
 /** The value an integer literal is, or null where the text is not one. */
 function integerLiteral(text: string): bigint | null {
   if (/^[+-]?0[xX]/.test(text)) {
@@ -283,6 +289,15 @@ function integerLiteral(text: string): bigint | null {
 /** One number as the C type of the value it initializes. */
 export function cLiteral(text: string, type: string): string {
   if (type === "bool") return text === "0" ? "false" : "true";
+  const width = UNSIGNED_WIDTHS[type];
+  if (width !== undefined) {
+    // A number the source wrote as a negative magnitude and a use settled at an
+    // unsigned width is that many bits, not a negative int: `-1 >>> 1` reads
+    // `-1` as the unsigned 32 bit number the language reads it as, and C reads
+    // `-1` as a signed int and fills the shift with its sign.
+    const magnitude = integerLiteral(text);
+    if (magnitude !== null && magnitude < 0n) return `${(1n << BigInt(width)) + magnitude}U`;
+  }
   const wide = C_WIDE_INTEGERS[type];
   if (wide !== undefined) {
     const value = integerLiteral(text);
@@ -330,6 +345,7 @@ const C_OPERATORS: Record<string, string> = {
   "%": "%",
   "<<": "<<",
   ">>": ">>",
+  ">>>": ">>",
   "&": "&",
   "|": "|",
   "^": "^",

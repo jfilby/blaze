@@ -78,6 +78,25 @@ static const char* program_number_text(double value) {
   return program_string(text, written);
 }
 
+/* A number written at a fixed number of digits after the point, which is what
+   x.toFixed(d) is: the same digits every time, rounded at the last of them,
+   and never the exponent form the shortest writing falls back on. The digits
+   are bounded by the buffer, and a number that needs more of them than it is
+   given is written at the width of the buffer rather than past the end of it. */
+static const char* program_number_fixed(double value, int digits) {
+  /* A number that is not a number, and one of a million million million and
+     over, is written as the language writes it rather than at the digits asked
+     for: (1e21).toFixed(2) is 1e+21 and not the twenty two digits that follow
+     the point, and what follows the point of a value that is not a number is
+     nothing at all. */
+  if (isnan(value) || isinf(value) || fabs(value) >= 1e21) return program_number_text(value);
+  char text[512];
+  const int wanted = digits < 0 ? 0 : (digits > 400 ? 400 : digits);
+  const int written = snprintf(text, sizeof text, "%.*f", wanted, value);
+  if (written < 0) return program_string("NaN", 3);
+  return program_string(text, (size_t)(written < (int)sizeof text ? written : (int)sizeof text - 1));
+}
+
 /* A whole number written out, without the locale-aware formatting snprintf
    does for it. A double holds every i64 only up to 2^53, so a 64 bit integer is
    written by dividing by ten rather than by handing it to a printf. */
@@ -242,6 +261,28 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}(${parameters.join(", ") || "void"})${cSymbolLabel(signature.symbol)};`;
   }
 
+  openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[] {
+    // A function the program declares is a C function of its own: it is called
+    // by name from the body that runs and from the other functions, and what it
+    // hands back is what its own body settled.
+    const returns = cDeclarationType(parseType(signature.returns));
+    const given = parameters
+      .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
+      .join(", ");
+    return [`${returns} ${cSymbolName(signature.symbol)}(${given || "void"})${cSymbolLabel(signature.symbol)} {`];
+  }
+
+  closeFunction(releases: readonly string[], returned: boolean): string[] {
+    // What the body allocated is freed before it returns, in the reverse of the
+    // order the body took it. A body that returns a value has already written
+    // its `return`, and one that falls off the end returns nothing at all.
+    return [...releases, ...(returned ? [] : ["return;"]), "}", ""];
+  }
+
+  returnValue(value: string): string {
+    return `return ${value};`;
+  }
+
   openProgram(): string[] {
     return [
       "",
@@ -296,6 +337,38 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
       `if (${name} == NULL) program_fail("out of memory");`,
       ...values.map((text, index) => `${name}[${index}] = ${text};`),
     ];
+  }
+
+  sized(name: string, element: SemanticType, count: string): string[] {
+    // A block of a count the program settled on when it ran. The count is read
+    // as a length and the block is cleared, so a read of an element the program
+    // never wrote is the zero the language answers it with; a block of no
+    // elements is one byte, because a C allocation of nothing is a failure and
+    // the language answers an empty array with an array.
+    const written = declaredType(element);
+    return [
+      `const size_t ${name}_length = (size_t)(${count});`,
+      `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate((${name}_length == 0 ? 1 : ${name}_length) * sizeof(${written}));`,
+      `if (${name} == NULL) program_fail("out of memory");`,
+    ];
+  }
+
+  view(name: string, element: SemanticType, base: string, offset: string, count: string): string[] {
+    // A window of a block the program laid out: the same bytes read as the
+    // element of the view, from the byte offset the view starts at. The block
+    // is not freed here: it belongs to the name the program gave it, which was
+    // declared before this one, and what a block frees is freed after every
+    // window taken of it.
+    const written = declaredType(element);
+    return [
+      `const size_t ${name}_length = (size_t)(${count});`,
+      `${written}* ${name} = (${written}*)((unsigned char*)(${base}) + (size_t)(${offset}));`,
+    ];
+  }
+
+  fill(name: string, index: string, element: SemanticType, value: string): string[] {
+    const written = declaredType(element);
+    return [`for (size_t ${index} = 0; ${index} < ${name}_length; ${index} += 1) ${name}[${index}] = (${written})(${value});`];
   }
 
   alias(name: string, element: SemanticType, source: string, length: string): string[] {
@@ -469,12 +542,16 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     switch (call.callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;
+      case "Math.sqrt":
+        return `sqrt(${argument(0)})`;
       case "Math.floor":
         return `floor(${argument(0)})`;
       case "Math.round":
         return `program_round(${argument(0)})`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
+      case "sharedBlock":
+        return `${RUNTIME_NAME}_allocate((size_t)(${argument(0)}))`;
       default:
         throw driverError(`the driver cannot write down ${call.callee}`);
     }
@@ -525,7 +602,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `program_string_compare(${left}, ${right})`;
   }
 
-  toText(value: string, type: SemanticType): string {
+  toText(value: string, type: SemanticType, digits: number | null): string {
     // A reference to nothing has no number of its own, and the word for it is
     // what the language prints: casting it to a number hands out the zero the
     // source never printed.
@@ -539,6 +616,10 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
       return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;
     }
     if (isBoolean(type)) return `(${value} ? "true" : "false")`;
+    // A number written at a fixed number of digits is written at them whatever
+    // it is: `(-0.0004).toFixed(2)` is `-0.00` and not the zero the shortest
+    // writing gives it.
+    if (digits !== null) return `program_number_fixed((double)(${value}), ${digits})`;
     if (isFloat(type)) return `program_number_text((double)(${value}))`;
     return isUnsigned(type)
       ? `program_unsigned_text((unsigned long long)(${value}))`

@@ -943,3 +943,190 @@ test("a number of one width is compared with a number of another as the source c
   assert.equal(delivered.stdout, "true\ntrue\nfalse\ntrue false\n");
   assert.equal(delivered.stdout, sourceRun.stdout);
 });
+
+test("an array the program sizes when it runs is as long as the count it settled on", async () => {
+  // A typed array written out is as long as the values written into it, so the
+  // only way a program can work out how much it needs is to say how much: the
+  // count is a value, the block is settled on it when the program runs, and the
+  // length the program reads is the count it asked for.
+  const source = [
+    "const n = 5;",
+    "const a = new Float64Array(n);",
+    "console.log(a.length);",
+    "for (let i = 0; i < n; i++) a[i] = i * i;",
+    "let total = 0;",
+    "for (const value of a) total += value;",
+    "console.log(total);",
+    // A block the program never wrote a value into is the zero the language
+    // answers a typed array with, which is what a cleared block gives it.
+    "const cleared = new Float64Array(3);",
+    "console.log(cleared[0], cleared[2]);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "5\n30\n0 0\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("a block the program lays out is three arrays of it, each with its own length", async () => {
+  // `new Float64Array(block, offset, n)` is a window of a block rather than a
+  // block of its own: three windows over one block are what a program means when
+  // it wants three arrays to be one allocation, and each of them is as long as
+  // the count it was given, not as long as the block.
+  const source = [
+    "const n = 4;",
+    "const block = new SharedArrayBuffer(3 * 8 * n);",
+    "const u = new Float64Array(block, 0, n).fill(1);",
+    "const v = new Float64Array(block, 8 * n, n);",
+    "const w = new Float64Array(block, 16 * n, n);",
+    "for (let i = 0; i < n; i++) {",
+    "  v[i] = i;",
+    "  w[i] = u[i] + v[i];",
+    "}",
+    "console.log(u.length, v.length, w.length);",
+    "console.log(w[0], w[3]);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "4 4 4\n1 4\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("a program declares a function, and a function is given what it reads of the scope around it", async () => {
+  // A function of a program is compiled on its own and called, so it has no
+  // environment to close over: what it reads of the scope it is declared in is
+  // passed to it at every call, and the call is the only place the two scopes
+  // meet. A function that calls another is given what that one reads as well,
+  // whether or not it says so itself.
+  const source = [
+    "const n = 4;",
+    "function total(values: Float64Array) {",
+    "  let sum = 0;",
+    "  for (let i = 0; i < n; i++) sum += values[i];",
+    "  return sum;",
+    "}",
+    "function twice(value: number): number {",
+    "  return value + value;",
+    "}",
+    "const a = new Float64Array(n);",
+    "for (let i = 0; i < n; i++) a[i] = i;",
+    "console.log(total(a));",
+    "console.log(twice(twice(3)));",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "6\n12\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("a function the program declares is a body of its own, and the IR says so", () => {
+  // A function of a program is not a run of statements in the block the program
+  // starts in: it is a function the IR holds whole, and a call of it is a call
+  // like any other, with what it reads of the scope around it passed in.
+  const program_ = resolved({
+    "main.ts": [
+      "const n = 3;",
+      "function scale(value: number): number {",
+      "  return value * n;",
+      "}",
+      "console.log(scale(2));",
+      "",
+    ].join("\n"),
+  });
+  assert.deepEqual(
+    program_.functions.map((signature) => `${signature.name}(${signature.params.map((param) => param.name).join(", ")}) -> ${signature.returns}`),
+    ["scale(value, n) -> f64"],
+  );
+  const [scale] = program_.bodies;
+  assert.equal(scale.name, "scale");
+  assert.deepEqual(scale.params.map((param) => param.name), ["value", "n"]);
+  // The body is a body: it ends by handing back what the source returned, and
+  // the return is the one thing only its entry block may do.
+  const terminator = scale.entry.terminator;
+  assert.equal(terminator.k, "return");
+  assert.equal(terminator.k === "return" && terminator.value?.k, "arith");
+});
+
+test("a function that reads a name the scope around it does not hold is refused", () => {
+  // The names a function is given are the names the scope it is declared in
+  // holds above it, and a name declared below it is not one of them: a function
+  // is compiled on its own, so what it reads has to be a name somebody declared
+  // where the function can see it.
+  assert.match(
+    diagnostic(() =>
+      resolved({
+        "main.ts": [
+          "const first = 1;",
+          "function f(value: number): number {",
+          "  return value + later;",
+          "}",
+          "const later = 2;",
+          "console.log(f(first));",
+          "",
+        ].join("\n"),
+      }),
+    ),
+    /"later" is not declared/,
+  );
+});
+
+test("a function of a program that calls itself is refused rather than answered", () => {
+  // What a function hands back is settled by reading its body, and a function
+  // that calls itself is its own answer: a function of a program is compiled on
+  // its own, so a recursive one is written as a function of the module, which
+  // is contracted and may recurse.
+  assert.match(
+    diagnostic(() =>
+      resolved({
+        "main.ts": [
+          "const start = 3;",
+          "function down(n: number): number {",
+          "  if (n > 0) return down(n - 1);",
+          "  return 0;",
+          "}",
+          "console.log(down(start));",
+          "",
+        ].join("\n"),
+      }),
+    ),
+    /"down" calls itself/,
+  );
+});
+
+test("`>>>` is the shift the language defines, and `toFixed` writes at the digits it was asked for", async () => {
+  // `>>>` reads both of its sides as the unsigned 32 bit numbers the language
+  // reads them as, so `-1 >>> 1` is 2147483647 rather than -1, and it converts
+  // rather than refusing a number written with a point in it. `toFixed` writes a
+  // number at a fixed number of digits, which is not the shortest writing and
+  // not the exponent form above a million million million.
+  const source = [
+    "console.log(-1 >>> 1);",
+    "console.log((7 * 8) >>> 2);",
+    "const n = 37;",
+    "console.log(n >>> 2);",
+    "console.log(Math.sqrt(2).toFixed(9));",
+    "console.log((1 / 3).toFixed(4));",
+    "console.log((-0.0004).toFixed(2));",
+    "console.log((1e21).toFixed(2));",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "2147483647\n14\n9\n1.414213562\n0.3333\n-0.00\n1e+21\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});

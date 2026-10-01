@@ -181,7 +181,7 @@ import {
   type ProgramContract,
   type TypeExpr,
 } from "../core/types.ts";
-import { parseType, typeToString } from "./contract.ts";
+import { contractText, parseType, typeToString } from "./contract.ts";
 import { builtinFor } from "./builtins.ts";
 import { unescape } from "./typescript.ts";
 
@@ -207,11 +207,25 @@ const ARITH_OPS: readonly ArithOp[] = [
   "max",
   "shl",
   "shr",
+  "ushr",
   "and",
   "or",
   "xor",
   "concat",
 ];
+
+/** A number the IR text states, or a refusal of what is not one. */
+function integer(text: string, what: string): number {
+  if (!/^-?\d+$/.test(text)) {
+    throw new CompilerError({
+      category: "SemanticIrError",
+      stage: "ir",
+      message: `${what} is not a number`,
+      detail: `the IR text states a number of elements, and "${text}" is not one`,
+    });
+  }
+  return Number(text);
+}
 
 /** The six comparisons, each of which prints as the IR names it. */
 const COMPARE_OPS: readonly CompareOp[] = ["eq", "ne", "lt", "le", "gt", "ge"];
@@ -337,7 +351,7 @@ function slotText(slot: SemanticSlot): string {
     case "text":
       return `text ${slot.name} ${state}`;
     case "buffer":
-      return `buffer ${slot.name} ${state} element[${typeText(slot.element)}] ${slot.length}`;
+      return `buffer ${slot.name} ${state} element[${typeText(slot.element)}] ${slot.length ?? "runtime"}`;
     case "object":
       return `object[${typeText(slot.type)}] ${slot.name} ${state}`;
   }
@@ -379,6 +393,12 @@ export function printSemanticValue(value: SemanticValue): string {
     case "element":
       return `[element[${typeText(value.type)}] ${printSemanticValue(value.of)} ${printSemanticValue(value.index)}]`;
     case "buffer":
+      if (value.view !== null) {
+        return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] view ${printSemanticValue(value.view.offset)} ${printSemanticValue(value.view.of)} ${printSemanticValue(value.count as SemanticValue)}]`;
+      }
+      if (value.count !== null) {
+        return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] runtime ${printSemanticValue(value.count)}]`;
+      }
       return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] ${value.length} ${value.values.map(printSemanticValue).join(" ")}]`;
     case "newObject":
       return `[new_object[${typeText(value.type)}] ${value.layout} ${value.fields.map((field) => `${field.name} ${printSemanticValue(field.value)}`).join(" ")}]`;
@@ -403,7 +423,7 @@ export function printSemanticValue(value: SemanticValue): string {
     case "isNull":
       return `[${value.negate ? "is_not_null" : "is_null"}[${typeText(value.type)}] ${printSemanticValue(value.operand)}]`;
     case "toText":
-      return `[to_text ${printSemanticValue(value.of)}]`;
+      return `[to_text${value.digits === null ? "" : `@${value.digits}`} ${printSemanticValue(value.of)}]`;
     case "argv":
       return value.index === null
         ? `argv[${typeText(value.type)}]`
@@ -470,6 +490,10 @@ function statementText(statement: SemanticStatement, indent: number): string[] {
   switch (statement.k) {
     case "let":
       return [`${pad}let ${slotText(statement.slot)} = ${printSemanticValue(statement.value)}${mark}`];
+    case "fill":
+      return [
+        `${pad}fill ${statement.buffer} ${statement.index} element[${typeText(statement.type)}] ${printSemanticValue(statement.value)}${mark}`,
+      ];
     case "set":
       return [`${pad}set ${statement.name} ${statement.op} ${printSemanticValue(statement.value)}${mark}`];
     case "setElement":
@@ -513,8 +537,15 @@ function statementText(statement: SemanticStatement, indent: number): string[] {
 /** The IR as text: what a person reads and a model writes. */
 export function printSemanticProgram(program: SemanticProgram): string {
   const lines: string[] = [`ir ${VERSION}`, `file ${stringLiteral(program.file)}`];
-  for (const signature of program.functions) lines.push(signatureText(signature));
+  // A function the program calls from another file is a signature: its body is
+  // in that file's object. A function the program declares is a body here, and
+  // is written whole.
+  const declared = new Set(program.bodies.map((fn) => fn.name));
+  for (const signature of program.functions) {
+    if (!declared.has(signature.name)) lines.push(signatureText(signature));
+  }
   for (const name of Object.keys(program.objects)) lines.push(...objectLines(name, program.objects[name]));
+  for (const fn of program.bodies) lines.push("", ...functionLines(fn));
   lines.push("");
   lines.push(...blockLines(program.entry, 0, null));
   return `${lines.join("\n")}\n`;
@@ -605,6 +636,8 @@ class ContractBinder {
   // adding a key, and the function silently vanishes from the table it is in.
   private readonly functions = new Map<string, FunctionContract>();
   private readonly layouts = new Map<string, ObjectLayout>();
+  /** The functions a program declares, which no contract of the program states. */
+  private readonly declared = new Map<string, BoundCall>();
 
   constructor(contract: ProgramContract) {
     for (const file of contract.files) {
@@ -650,7 +683,7 @@ class ContractBinder {
 
   /** Every name a call may reach, which an error lists so that it can be fixed. */
   names(): string[] {
-    return [...this.functions.keys()];
+    return [...this.functions.keys(), ...this.declared.keys()];
   }
 
   /**
@@ -682,15 +715,42 @@ class ContractBinder {
       const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) }));
       return { signature: { name, symbol: name, params, returns: typeToString(builtin.returns) }, effects: [], builtin: true };
     }
+    const own = this.declared.get(name);
+    if (own !== undefined) return own;
     const declared = this.functions.get(name);
     if (declared === undefined) return null;
     return { signature: declared.function, effects: declared.effects, builtin: false };
+  }
+
+  /**
+   * A function the program itself declares, bound as a call of it is bound: the
+   * text is the only statement of what it takes and what it hands back, because a
+   * program function has no contract of its own.
+   */
+  declare(signature: FunctionSignature, effects: readonly Effect[]): void {
+    this.declared.set(signature.name, { signature, effects: [...effects], builtin: false });
+    this.declared.set(signature.symbol, { signature, effects: [...effects], builtin: false });
+  }
+
+  /** The declaration of a function the program declares, for a body that names it. */
+  declarationOf(name: string): FunctionSignature | null {
+    return this.declared.get(name)?.signature ?? null;
   }
 }
 
 /* -------------------------------------------------------------------------- */
 /* Reading one line                                                            */
 /* -------------------------------------------------------------------------- */
+
+/** What a function the program declares is called by. */
+function functionSignature(fn: SemanticFunction): FunctionSignature {
+  return {
+    name: fn.name,
+    symbol: fn.symbol,
+    params: fn.params.map((param) => ({ name: param.name, type: typeText(slotType(param)) })),
+    returns: typeText(fn.returns),
+  };
+}
 
 /** A line of the text is not a program, said as the line it was written on. */
 function fail(line: number, expected: string, found: string): never {
@@ -1021,7 +1081,15 @@ class IrScanner {
     this.skip();
     const bracketed = this.peek() === "[";
     if (bracketed) this.at += 1;
+    // An operation may carry what it was asked for after its name, as
+    // `to_text@9` is a number written at nine digits: the name is one word and
+    // what follows it is another, and the two are taken apart here.
     const head = this.word();
+    let asked: string | null = null;
+    if (this.peek() === "@") {
+      this.at += 1;
+      asked = this.token();
+    }
     if (head === "logical_and" || head === "logical_or") {
       return this.closing(bracketed, {
         k: "logical",
@@ -1106,8 +1174,17 @@ class IrScanner {
           then: this.value(),
           otherwise: this.value(),
         });
-      case "to_text":
-        return this.closing(bracketed, { k: "toText", type: TEXT, of: this.value() });
+      case "to_text": {
+        // `to_text@9` is a number written at nine digits, and `to_text` is one
+        // written as the language writes it.
+        if (asked !== null && !/^\d+$/.test(asked)) this.refuse("the digits a number is written at", asked);
+        return this.closing(bracketed, {
+          k: "toText",
+          type: TEXT,
+          of: this.value(),
+          digits: asked === null ? null : Number(asked),
+        });
+      }
       case "length":
         return this.closing(bracketed, { k: "length", type: this.typed(), of: this.value() });
       case "element":
@@ -1130,10 +1207,20 @@ class IrScanner {
         const type = this.typed();
         this.keyword("element");
         const element = this.typed();
-        const length = this.integer();
+        // `view <offset> <block> <count>`, `runtime <count>`, and a number of
+        // elements followed by the values written into them.
+        const length = this.word();
+        if (length === "view") {
+          const offset = this.value();
+          const of = this.value();
+          return this.closed({ k: "buffer", type, element, length: null, count: this.value(), view: { of, offset }, values: [] });
+        }
+        if (length === "runtime") {
+          return this.closed({ k: "buffer", type, element, length: null, count: this.value(), view: null, values: [] });
+        }
         const values: SemanticValue[] = [];
         while (this.more()) values.push(this.value());
-        return this.closed({ k: "buffer", type, element, length, values });
+        return this.closed({ k: "buffer", type, element, length: integer(length, typeText(type)), count: null, view: null, values });
       }
       case "call": {
         const type = this.typed();
@@ -1435,6 +1522,13 @@ class BlockReader {
         const value = scanner.value();
         return { k: "set", name, op, value, line: scanner.mark() };
       }
+      case "fill": {
+        const buffer = scanner.word();
+        const index = scanner.word();
+        scanner.keyword("element");
+        const element = scanner.contractType();
+        return { k: "fill", buffer, index, type: element, value: scanner.value(), line: scanner.mark() };
+      }
       case "set_element": {
         const buffer = scanner.word();
         const index = scanner.value();
@@ -1593,8 +1687,8 @@ class BlockReader {
       const mutable = this.mutable(scanner);
       scanner.keyword("element");
       const element = scanner.contractType();
-      const length = scanner.integer();
-      return { kind, name, mutable, element, length };
+      const length = scanner.word();
+      return { kind, name, mutable, element, length: length === "runtime" ? null : integer(length, name) };
     }
     if (kind === "text") {
       const name = scanner.word();
@@ -1646,17 +1740,192 @@ class ProgramReader extends BlockReader {
     const file = this.file();
     const functions: FunctionSignature[] = [];
     const objects: Record<string, ObjectLayout> = {};
+    // Every function the program declares is bound before any of their bodies is
+    // read, so a function that calls one declared after it is bound the same as
+    // one that calls it above: a program function is bound to the whole block it
+    // was declared in, not to the line it was written at.
+    const declaredAt: number[] = [];
     for (let line = this.peek(); line !== null && line.indent === 0; line = this.peek()) {
       const head = headOf(line);
       if (head !== "function" && head !== "object") break;
       this.at += 1;
-      if (head === "function") functions.push(this.function(line));
-      else this.object(line, objects);
+      // A function written on one line is a signature: its body is in the
+      // object it was compiled into. A function with lines under it is one the
+      // program declares, and is read whole.
+      if (head === "object") this.object(line, objects);
+      else if (this.atIndent(2)) {
+        this.declareFunction(line);
+        declaredAt.push(this.at - 1);
+        // The body is read in the pass below, so this one steps over it to the
+        // next line of the program's own indent.
+        while (this.peek() !== null && (this.peek() as IrLine).indent > 0) this.at += 1;
+      } else functions.push(this.function(line));
+    }
+    const bodies: SemanticFunction[] = [];
+    for (const at of declaredAt) {
+      this.at = at + 1;
+      bodies.push(this.declared());
     }
 
     const entry = this.block(0, false).body;
     this.finish("the end of the program");
-    return { file, entry, functions, objects };
+    return {
+      file,
+      entry,
+      functions: [...functions, ...bodies.map(functionSignature)],
+      bodies,
+      objects,
+    };
+  }
+
+  /**
+   * A function the program declares, read whole. There is no contract to read
+   * it against — a program function is contracted by being its own body — so
+   * the text is what it is read from, and every line of it is read to be sure
+   * of what it says.
+   */
+  private declared(): SemanticFunction {
+    const header = this.header(this.lines[this.at - 1]);
+    const { name, symbol, returns } = header;
+    const requires = this.conditions("requires");
+    const ensures = this.conditions("ensures");
+    const allocates = this.flag("allocates");
+    const prints = this.flag("prints");
+    const readsArgv = this.flag("reads_argv");
+    const effects = this.effectsOf();
+    const calls = this.callEdges();
+    const declared_ = this.parameters();
+    const entry = this.block(2, false).body;
+    return {
+      name,
+      symbol,
+      params: declared_,
+      returns,
+      requires,
+      ensures,
+      effects,
+      allocates,
+      prints,
+      readsArgv,
+      // A function of a program allocates no object: an object a program holds
+      // is a reference to one a function handed back, and a program declares no
+      // layout of its own.
+      objects: {},
+      calls,
+      entry,
+    };
+  }
+
+  /**
+   * The header of a function the program declares: what it is called, what it
+   * takes and what it hands back. It is read once to bind every function before
+   * any body is read, and once more with the body it belongs to.
+   */
+  private header(line: IrLine): { name: string; symbol: string; params: { name: string; type: string }[]; returns: SemanticType; text: string } {
+    const scanner = this.scanner(line);
+    const name = scanner.word();
+    let symbol = name;
+    if (scanner.peek() === " ") {
+      scanner.keyword("as");
+      symbol = scanner.word();
+    }
+    const params: { name: string; type: string }[] = [];
+    scanner.expect("(");
+    for (;;) {
+      scanner.skip();
+      if (scanner.peek() === ")") break;
+      const parameter = scanner.word();
+      scanner.expect(":");
+      // A signature states its types in the contract's own language, so a
+      // parameter read off the header is written back the way the resolver
+      // wrote it and a call bound to it is the same call.
+      params.push({ name: parameter, type: contractText(scanner.type()) });
+      scanner.skip();
+      if (scanner.peek() !== ",") break;
+      scanner.expect(",");
+    }
+    scanner.expect(")");
+    scanner.expect("->");
+    const returns = scanner.type();
+    scanner.end();
+    return { name, symbol, params, returns, text: contractText(returns) };
+  }
+
+  /** Binds a function of the program, so a body calling it is read against it. */
+  private declareFunction(line: IrLine): void {
+    const header = this.header(line);
+    this.binder.declare({ name: header.name, symbol: header.symbol, params: header.params, returns: header.text }, []);
+  }
+
+  /** The effects a function states, which the line says as a list. */
+  private effectsOf(): Effect[] {
+    const line = this.line(2);
+    this.at += 1;
+    if (headOf(line) !== "effects") fail(line.number, '"effects"', line.text);
+    const scanner = this.scanner(line);
+    const effects: Effect[] = [];
+    for (;;) {
+      scanner.separator();
+      if (scanner.peek() === "") break;
+      const word = scanner.word();
+      if (word === "none") break;
+      effects.push(scanner.oneOf(word, EFFECTS));
+    }
+    scanner.end();
+    return effects;
+  }
+
+  /** The conditions a function is held to, which a program function states none of. */
+  private conditions(keyword: "requires" | "ensures"): string[] {
+    const conditions: string[] = [];
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === keyword; line = this.peek()) {
+      this.at += 1;
+      const scanner = this.scanner(line);
+      scanner.skip();
+      if (scanner.peek() === '"') {
+        conditions.push(scanner.string());
+        continue;
+      }
+      const none = scanner.word();
+      if (none !== "none") scanner.refuse('"none" or a condition in quotes', none);
+      scanner.end();
+    }
+    return conditions;
+  }
+
+  /** What a function does beyond its result, as the word it is written with. */
+  private flag(keyword: string): boolean {
+    const line = this.line(2);
+    this.at += 1;
+    if (headOf(line) !== keyword) fail(line.number, `"${keyword}"`, line.text);
+    const scanner = this.scanner(line);
+    const word = scanner.oneOf(scanner.word(), FLAGS);
+    scanner.end();
+    return word === "yes";
+  }
+
+  /** The parameters of a function, as the slots its body reads them by. */
+  private parameters(): SemanticSlot[] {
+    const params: SemanticSlot[] = [];
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "param"; line = this.peek()) {
+      this.at += 1;
+      params.push(this.slot(this.scanner(line)));
+    }
+    return params;
+  }
+
+  /** The calls a body makes, in the order the text lists them. */
+  private callEdges(): CallEdge[] {
+    const calls: CallEdge[] = [];
+    for (let line = this.peek(); line !== null && line.indent === 2 && headOf(line) === "call"; line = this.peek()) {
+      this.at += 1;
+      const scanner = this.scanner(line);
+      const callee = scanner.word();
+      scanner.end();
+      this.binder.bind(callee, line.number);
+      calls.push({ callee, strategy: "call" });
+    }
+    return calls;
   }
 
   private file(): string {

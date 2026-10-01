@@ -24,7 +24,7 @@ import {
   type PrimitiveTypeName,
   type TypeExpr,
 } from "../core/types.ts";
-import { wholeOf } from "../core/semantic-ir.ts";
+import { wholeOf, type SemanticType } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
@@ -159,6 +159,23 @@ export function typeToString(type: TypeExpr): string {
     case "void":
       return "void";
   }
+}
+
+/**
+ * How the contract type language spells a type the IR holds, which is the
+ * language a signature is stated in. A buffer is a pointer to its first
+ * element, which is what a caller hands over and what the body reads; the IR
+ * writes the same type as a slice and the contract as the pointer it is.
+ */
+export function contractText(type: SemanticType): string {
+  if (type.kind === "primitive") return type.name;
+  if (type.kind === "text") return "text";
+  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
+    const of = contractText(type.of);
+    return type.kind === "array" && type.length !== null ? `array<${of},${type.length}>` : `${type.kind}<${of}>`;
+  }
+  if (type.kind === "ref") return type.name === undefined ? "ref<any>" : `ref<${type.name}>`;
+  return "void";
 }
 
 export type BufferType = Extract<TypeExpr, { kind: "ptr" | "slice" | "array" }>;

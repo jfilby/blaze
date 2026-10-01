@@ -324,6 +324,39 @@ test("a program round trips through the text a model may write it in", () => {
   assert.deepEqual(read.entry.releases, program.entry.releases);
 });
 
+test("a function the program declares is read back whole, body and all", () => {
+  // A function of a program is a body the IR holds, not a signature: the text
+  // carries it whole so that a review of the program is shown what it does, and
+  // what it reads back is the same function. Its calls are bound to the
+  // signatures the program itself declares, because there is no contract of
+  // theirs to bind them to.
+  const { program, contract } = resolved({
+    "main.ts": [
+      "const n = 3;",
+      "function total(values: Float64Array): number {",
+      "  let sum = 0;",
+      "  for (let i = 0; i < n; i++) sum += values[i];",
+      "  return sum;",
+      "}",
+      "const a = new Float64Array(n);",
+      "console.log(total(a));",
+      "",
+    ].join("\n"),
+  });
+  const printed = printSemanticProgram(program);
+  const read = parseSemanticProgram(printed, contract);
+  assert.equal(printSemanticProgram(read), printed);
+  assert.deepEqual(
+    read.bodies.map((fn) => fn.name),
+    ["total"],
+  );
+  // The body reads the names it is given, and the call passes the one it reads
+  // of the scope around it.
+  const [total] = read.bodies;
+  assert.deepEqual(total.params.map((param) => param.name), ["values", "n"]);
+  assert.deepEqual(read.entry.statements, program.entry.statements);
+});
+
 test("a function round trips through the text a model may write it in", async () => {
   const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
   const printed = await runSemanticIr(example, { all: true });
@@ -769,6 +802,7 @@ test("the objects and the errors the IR states are what the runtime is asked for
   const program: SemanticProgram = {
     file: "main.ts",
     functions: [],
+    bodies: [],
     objects: {
       Object1: { name: "Object1", size: 8, align: 8, fields: [{ name: "value", type: "f64", offset: 0 }] },
     },
