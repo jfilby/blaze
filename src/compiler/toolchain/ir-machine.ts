@@ -4746,7 +4746,20 @@ class Machine {
         // types are written differently and are the same word.
         if (isReference(held.type) && isReference(type)) return held;
       }
-      if (at === last && intoLast !== undefined && this.readIntoRegister(argument, intoLast, type)) {
+      // Reading the last argument straight into the register it is taken in
+      // writes that register before any of the other arguments are in place, so
+      // it is only done where no other argument is pinned in it. An argument
+      // whose value is a name the build gave a register of its own has no
+      // `at` of its own to be clobbered by, which is what the call keeps the
+      // register for; this one is a write in front of the reads rather than
+      // beside them, so nothing else in the body would have said so.
+      const pinnedHere =
+        intoLast !== undefined &&
+        call.args.some(
+          (other, otherAt) =>
+            otherAt !== at && other.k === "local" && this.slot(other.name).register === intoLast,
+        );
+      if (at === last && intoLast !== undefined && !pinnedHere && this.readIntoRegister(argument, intoLast, type)) {
         placed = at;
         return null;
       }
@@ -4880,6 +4893,18 @@ class Machine {
    * A call, with the arguments where the convention puts them. The registers
    * are read last, because writing an argument that has no register left goes
    * through the very registers the others are read into.
+   *
+   * Within that, the order the registers are *written* in is not the order the
+   * arguments are in. An argument the build gave a register of its own is read
+   * out of that register, and the register an earlier argument is taken in is
+   * very often the one it is in: `f(t1, bx)` with `bx` in `rdi` and `t1` taken
+   * in `rdi` wrote `t1` over `bx` and then handed the callee `t1` for both
+   * arguments. The same goes for the accumulator a last argument is left in,
+   * which `xmm0` is also the first float argument register.
+   *
+   * So every argument that reads a register waits for every argument that
+   * writes it, and two arguments that want each other's registers — which no
+   * order satisfies — are broken by putting one of them in the frame first.
    */
   private callSymbol(symbol: string, args: readonly (Held | null)[], returns: SemanticType, fresh = -1, placed = -1): void {
     this.external(symbol);
@@ -4924,33 +4949,74 @@ class Machine {
       }
       this.code.movMemReg(address, RAX);
     });
+    // The moves that fill the argument registers, each with the register its
+    // value is read out of: the one the build pinned it in, the accumulator a
+    // call before this one left it in, or null where it is read out of the
+    // frame. An argument already read into its own register is not a move at
+    // all, which is the store and the load the caller avoided by not writing
+    // the value down in the first place.
+    type Move = { register: number; held: Held; source: number | null };
+    const moves: Move[] = [];
     for (const { register, held, at } of registers) {
-      // An argument that was read straight into its own register is already
-      // there, and filling it again from the frame is the move the caller
-      // avoided by not writing it there at all.
       if (at === placed) continue;
-      // An argument that is pinned is in its register, so it is copied from
-      // there rather than read out of the frame.
-      if (held.register !== null) {
-        if (isFloat(held.type)) this.code.movsMove(register, held.register, widthOf(held.type) === 4);
-        else this.code.movRegReg(register, held.register);
+      const source =
+        held.register !== null
+          ? held.register
+          : at === fresh && onStack.length === 0
+            ? isFloat(held.type)
+              ? XMM0
+              : RAX
+            : null;
+      if (source === register) continue;
+      moves.push({ register, held, source });
+    }
+    // How many of the moves left read each register, which is what says a
+    // register cannot be written yet: one is being read by one of them.
+    const reading = new Map<number, number>();
+    for (const move of moves) {
+      if (move.source === null) continue;
+      reading.set(move.source, (reading.get(move.source) ?? 0) + 1);
+    }
+    const done = (move: Move): void => {
+      if (move.source === null) return;
+      const left = (reading.get(move.source) ?? 1) - 1;
+      if (left === 0) reading.delete(move.source);
+      else reading.set(move.source, left);
+    };
+    const ordered: Move[] = [];
+    while (moves.length > 0) {
+      const at = moves.findIndex((move) => !reading.has(move.register));
+      // Every register left is read by one of the moves left, which is a cycle
+      // two or three of them go round. One value is written into the frame and
+      // read back from there, which is a store and a load paid once to break
+      // it; the frame is where every other value this call is passed is read
+      // from anyway.
+      if (at === -1) {
+        const move = moves[0] as Move;
+        const source = move.source as number;
+        const parked = this.hold(move.held.type, "blaze_call_argument");
+        if (isFloat(move.held.type)) this.code.movsStore(frame(parked.offset), source, widthOf(move.held.type) === 4);
+        else this.code.movMemRegSized(frame(parked.offset), source, widthOf(move.held.type));
+        move.held = parked;
+        move.source = null;
+        done(move);
         continue;
       }
-      // The answer of a call passed straight to this one is in the accumulator
-      // and was never written down. An argument with no register left is written
-      // through that accumulator, so this holds only when there is none, and it
-      // is read last, so nothing after it takes the accumulator away.
-      if (at === fresh && onStack.length === 0) {
-        if (isFloat(held.type)) {
-          if (register !== XMM0) this.code.movsMove(register, XMM0, widthOf(held.type) === 4);
-        } else if (register !== RAX) this.code.movRegReg(register, RAX);
+      const [move] = moves.splice(at, 1);
+      done(move);
+      ordered.push(move as Move);
+    }
+    for (const move of ordered) {
+      if (move.source !== null) {
+        if (isFloat(move.held.type)) this.code.movsMove(move.register, move.source, widthOf(move.held.type) === 4);
+        else this.code.movRegReg(move.register, move.source);
         continue;
       }
-      if (isFloat(held.type)) {
-        this.code.movsLoad(register, frame(held.offset), widthOf(held.type) === 4);
+      if (isFloat(move.held.type)) {
+        this.code.movsLoad(move.register, frame(move.held.offset), widthOf(move.held.type) === 4);
         continue;
       }
-      this.code.movRegMemSized(register, frame(held.offset), widthOf(held.type), signedOf(held.type));
+      this.code.movRegMemSized(move.register, frame(move.held.offset), widthOf(move.held.type), signedOf(move.held.type));
     }
     // The stack a call pushes onto has to leave the stack sixteen byte aligned,
     // which is what every function the C library was compiled for assumes of the

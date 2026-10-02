@@ -188,6 +188,12 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
       "int calls = 0;",
       "double f(double v) { calls++; return v + 1.0; }",
       "double g(struct Point* p) { calls++; return p->x + p->y; }",
+      // Two arguments in two registers, which is the smallest call whose first
+      // argument register is also a register a value can be pinned in.
+      "double two(double a, double b) { calls++; return 10.0 * a + b; }",
+      // The same call over whole numbers, whose argument registers are the ones
+      // a whole number is pinned in.
+      "long long mix(long long a, long long b) { calls++; return 10 * a + b; }",
       // Nine floats is past the eight the convention has registers for, so a
       // call of this one is the shape where the arguments that run out of
       // registers are written to the stack before the registers are read.
@@ -205,7 +211,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
     fn,
     contract,
     target: TARGET,
-    callable: new Set(["f", "g", "h9"]),
+    callable: new Set(["f", "g", "h9", "two", "mix"]),
     objectPath: object,
   });
   assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
@@ -218,6 +224,8 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
       "#include <string.h>",
       "extern int calls;",
       "extern double f(double v);",
+      "extern double two(double, double);",
+      "extern long long mix(long long, long long);",
       `struct Point { double x; double y; };`,
       "extern double h9(double, double, double, double, double, double, double, double, double);",
       `extern ${cDeclarationType(parseType(typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns })))} ${symbolOf(contract)}(${contract.function.params
@@ -326,6 +334,71 @@ test("a call takes every argument where the convention puts it", async () => {
     { kind: "value", name: "v", mutable: false, type: F64 },
   ]);
   assert.equal(await lowered(spare, callAndCount), "11|1", "one argument, left in the accumulator");
+});
+
+test("an argument the build gave a register of its own is read before that register is written", async () => {
+  // A value the census weighs as worth a register is kept in one, and the
+  // register it is kept in is very often one the call it is an argument of is
+  // taken in: `rdi` is both the first argument register and the first register
+  // a whole number no call reaches is given. So filling the argument registers
+  // in the order the arguments are in takes the value out from under the
+  // argument behind it, and `mix(7, v)` with `v` in `rdi` handed the callee
+  // `mix(7, 7)`. That is what the secp256k1 benchmark's `pAdd` did: `bx` is in
+  // `rdi`, `fCopy(t1, bx)` passed `t1` twice, and every value the point
+  // addition built from `t1` came out as a zero.
+  //
+  // The two shapes are the two ways the registers can want each other. The
+  // first is one direction, which is a matter of order: the argument read out
+  // of `rdi` goes first. The second is a swap — `mix(w, v)` with `v` in `rdi`
+  // and `w` in `rsi` reads `rsi` into `rdi` and `rdi` into `rsi`, and no order
+  // satisfies both, so one value is put in the frame first.
+  const call = (symbol: string, args: readonly SemanticValue[]): SemanticValue => ({
+    k: "call",
+    type: I64,
+    call: {
+      callee: symbol,
+      builtin: false,
+      signature: {
+        name: symbol,
+        symbol,
+        params: args.map((_, index) => ({ name: `a${String(index)}`, type: "i64" })),
+        returns: "i64",
+      },
+      args: [...args],
+      argTypes: args.map(() => I64),
+      returns: I64,
+      effects: [],
+      ownership: "none",
+      retain: false,
+    },
+  });
+  const params: SemanticSlot[] = [
+    { kind: "value", name: "v", mutable: false, type: I64 },
+    { kind: "value", name: "w", mutable: false, type: I64 },
+  ];
+  // Both parameters are read six times over, which is what the census weighs
+  // as worth a register of its own. `v` arrives in `rdi` and `w` in `rsi`, and
+  // each is given its own arrival register because it is where its value
+  // already is.
+  const summed = (name: string): SemanticValue =>
+    Array.from({ length: 6 }, () => local(name, I64)).reduce((left, right) => ({ k: "arith", type: I64, op: "add", left, right }));
+  const answers = (args: readonly SemanticValue[]): SemanticFunction => subject(I64, handsBack(call("mix", args)), params);
+  // `mix(v + v + v + v + v + v, v)` with `v` at 3: the first argument is
+  // written into the register the second is read out of.
+  // `10 * 18 + 3`: an ordering that wrote the first argument before it read the
+  // second handed the callee `mix(18, 18)` and answered `198`.
+  assert.equal(
+    await lowered(answers([summed("v"), local("v", I64)]), (name) => `printf("%lld", ${name}(3, 0));`),
+    "183",
+    "the argument read out of a register the first argument is taken in",
+  );
+  // `mix(v, w)`, which is the swap: neither register can be written before the
+  // other has been read out of it.
+  assert.equal(
+    await lowered(answers([local("v", I64), local("w", I64)]), (name) => `printf("%lld", ${name}(3, 4));`),
+    "34",
+    "two arguments that want each other's registers",
+  );
 });
 
 test("a jump past an arm that writes nothing is still written", async () => {
