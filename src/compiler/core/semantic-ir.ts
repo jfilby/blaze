@@ -632,7 +632,10 @@ export function statementBlocksOf(statement: SemanticStatement): readonly Semant
  * name nothing reads, and a pass that drops unread bindings would then drop one
  * a call still reads. A fill reads the value it writes into every element, and
  * writes the array rather than reading it: the array is a name the block owns
- * either way.
+ * either way. The buffer an element is written into is not among these values
+ * because it is not one: a `setElement` names its buffer as a bare string, the
+ * way a `set` names what it writes, and a walk over values cannot reach a name
+ * that is not written as one.
  */
 export function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
   switch (statement.k) {

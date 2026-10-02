@@ -1257,7 +1257,12 @@ class IrScanner {
   call(returns: SemanticType): SemanticCall {
     const callee = this.word();
     const bound = this.binder.bind(callee, this.line);
-    if (this.declaredCallees !== null && !this.declaredCallees.includes(callee)) {
+    // A builtin is the compiler's own: it is not one of the program's functions,
+    // so the call list a body is written with never named it, and holding a
+    // body that reaches for `Math.floor` to a list of the program's own
+    // functions is refusing arithmetic over a number for no reason. `bind`
+    // above has already said whether the name is one the compiler provides.
+    if (this.declaredCallees !== null && !bound.builtin && !this.declaredCallees.includes(callee)) {
       const declared = this.declaredCallees.join(", ") || "no calls";
       fail(this.line, `a call this function declared, one of: ${declared}`, callee);
     }

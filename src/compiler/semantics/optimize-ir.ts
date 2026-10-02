@@ -612,6 +612,12 @@ function readCounts(body: Body): Map<string, number> {
         count(statement.loop.index);
         count(statement.loop.element);
       }
+      // The buffer an element is written into is named as a bare string, so no
+      // walk of the values above reaches it. It is a read all the same: the
+      // name holding the elements is read to find which element is written,
+      // and a binding read only that way is one this would otherwise drop,
+      // leaving the write naming a name the function never declared.
+      if (statement.k === "setElement") count(statement.buffer);
     }
   };
   walk(body.entry);
@@ -1151,19 +1157,34 @@ function namesWrittenHere(block: SemanticBlock): Set<string> {
  * with, not the one the counter holds now. Nothing writing that name anywhere
  * in the function is the test that says so without having to place every read
  * against every write.
+ *
+ * A name reached through a buffer is not one of those reads either way. An
+ * element is written into a buffer the statement names as a bare string, so a
+ * substitution over values cannot reach it: propagating a copy of a name that
+ * is written or read that way would drop the binding and leave the element
+ * write naming a name the function does not have. Such a name is therefore
+ * both written and unreachable here, and the copy is left alone.
  */
 function propagateCopies(body: Body): boolean {
   const writes = new Set<string>();
+  const buffers = new Set<string>();
   const candidates: { name: string; source: string }[] = [];
   for (const block of nestedSemanticBlocks(body.entry)) {
     for (const statement of block.statements) {
       if (statement.k === "set" || statement.k === "step") writes.add(statement.name);
+      if (statement.k === "setElement") {
+        writes.add(statement.buffer);
+        buffers.add(statement.buffer);
+      }
       if (statement.k === "let" && statement.value.k === "local") {
         candidates.push({ name: statement.slot.name, source: statement.value.name });
       }
     }
   }
-  const copied = candidates.filter((copy) => !writes.has(copy.source) && !writes.has(copy.name));
+  const copied = candidates.filter(
+    (copy) =>
+      !writes.has(copy.source) && !writes.has(copy.name) && !buffers.has(copy.source) && !buffers.has(copy.name),
+  );
   if (copied.length === 0) return false;
   // Keyed by the read of the copy rather than by the read it becomes, because
   // that is the node `replaceValues` finds.
@@ -1423,6 +1444,33 @@ function dropDeadWrites(body: Body): boolean {
  * the statement is then also the reason the call runs.
  */
 
+/**
+ * Every name a block reads, the blocks inside it included.
+ *
+ * This is what a loop body needs and a plain block does not. A body that ends
+ * by writing a name it read at the top has not ended that name's life: the
+ * turn after this one reads it again, so the name is live where the body ends.
+ * Counted on its own the body says otherwise, and a walk that believes it
+ * deletes a store the next turn was going to read — which is how a program that
+ * shifts a number down a limb at a time came to shift the number it started
+ * with once, and then stop.
+ */
+function namesReadIn(block: SemanticBlock): Set<string> {
+  const read = new Set<string>();
+  const walk = (one: SemanticBlock): void => {
+    valuesOf(one, (value) => {
+      walkSemanticValue(value, (part) => {
+        if (part.k === "local") read.add(part.name);
+      });
+    });
+    for (const statement of one.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+  };
+  walk(block);
+  return read;
+}
+
 /** Whether a value reads the name it is being asked about. */
 function readsLocal(value: SemanticValue, name: string): boolean {
   let found = false;
@@ -1464,6 +1512,10 @@ function dropOverwrittenStores(body: Body): boolean {
         const seeded = new Set(after);
         if (statement.k === "loop") {
           for (const value of loopInvariants(statement.loop)) note(seeded, value);
+          // The body is read again on the next turn, so what it reads is live
+          // where it ends: a name a turn reads at the top and writes at the
+          // bottom is carried, not left behind.
+          for (const name of namesReadIn(nested)) seeded.add(name);
         }
         const leaving = walk(nested, seeded);
         // A block that ends by falling through continues into what follows the
