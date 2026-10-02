@@ -18,7 +18,7 @@ import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseSemanticFunction } from "../semantics/ir-text.ts";
-import type { SemanticFunction, SemanticType } from "../core/semantic-ir.ts";
+import type { ArithOp, CompareOp, SemanticFunction, SemanticType } from "../core/semantic-ir.ts";
 
 /** The parts of the engine a case here drives a module with. */
 interface Engine {
@@ -742,3 +742,238 @@ test("a module whose code is larger than one buffer is written whole", async () 
   const expected = Array.from({ length: 60 }, (_, index) => 1 * (index + 1.5) + 2 * (index + 2.25)).reduce((sum, value) => sum + value, 0);
   await compute("a: Float64Array, n: number", lines, "run\n2 1\n1 2\n", `RESULT ${expected}\n`);
 });
+
+test("a wide constant is laid down in the module's own memory and read back", () => {
+  // A wide number is thirty-two bytes and no WebAssembly instruction carries
+  // thirty-two bytes, so the literal is written once into a data segment and
+  // every use of it is its address. This is the one part of carrying a wide
+  // number that has to be right before any arithmetic on one can be: an
+  // operation reads its operands out of memory at an address, and an address
+  // that points at nothing reads back as zero and every limb of the answer is
+  // then zero as well.
+  //
+  // The limbs are laid down lowest first, which is what the arithmetic reads
+  // them back in, and the segment begins above the scratch a computation writes
+  // into — a data segment is written by the host and not by the module, so a
+  // constant and a value in flight cannot share an address.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const TEXT = "0x0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98";
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(
+    new engine.Module(moduleBytes(returnsConstant(U, TEXT), wideContract())),
+    { env: { memory } },
+  );
+  const address = (instance.exports as { subject: () => number }).subject();
+  const view = new Uint8Array(memory.buffer);
+  let limbs = "";
+  for (let limb = 3; limb >= 0; limb -= 1) {
+    for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
+  }
+  assert.equal(limbs, TEXT.slice(2), "the four limbs are where the address says, lowest first");
+});
+
+/** The contract for a function of no arguments answering one wide number. */
+function wideContract(): FunctionContract {
+  return {
+    version: "1",
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    function: { name: "subject", symbol: "subject", params: [], returns: "u256" },
+    optimize: { primary: "latency", secondary: "size" },
+    effects: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    requires: [],
+    ensures: [],
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+}
+
+/** A function whose whole body is one wide literal. */
+function returnsConstant(type: SemanticType, text: string): SemanticFunction {
+  return {
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: type,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value: { k: "const", type, text } } },
+  };
+}
+
+test("a wide number is arithmetic on four limbs, in the module's own memory", () => {
+  // There is no two hundred and fifty six bit add in WebAssembly and, because
+  // a module imports the host's memory and nothing else, there is no kernel to
+  // call either. What is left is the arithmetic the C backend's kernel does,
+  // written out: four limbs combined one at a time with the carry threaded
+  // into the next.
+  //
+  // The carry is found by comparing rather than by sign, because these are
+  // whole numbers and a signed comparison would read the top bit as a sign.
+  // Three values go into each limb — both operands and the carry from below —
+  // so it takes two comparisons, and a limb that carries on its own while the
+  // carry coming in pushes it past again is the case that catches a version
+  // which only tests the first.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const MASK = (1n << 256n) - 1n;
+  const VECTORS: readonly (readonly [string, string])[] = [
+    ["0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98", "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef"],
+    ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "0000000000000000000000000000000000000000000000000000000000000001"],
+    ["ffffffffffffffff0000000000000000ffffffffffffffff0000000000000000", "0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff"],
+  ];
+  for (const op of ["add", "sub", "and", "or", "xor"] as const) {
+    for (const [leftText, rightText] of VECTORS) {
+      const left = BigInt(`0x${leftText}`);
+      const right = BigInt(`0x${rightText}`);
+      const expected = op === "add" ? (left + right) & MASK : op === "sub" ? (left - right) & MASK : op === "and" ? left & right : op === "or" ? left | right : left ^ right;
+      const bytes = moduleBytes(wideBinary(U, op, leftText, rightText), wideContract());
+      const memory = new engine.Memory({ initial: 1 });
+      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+      const address = (instance.exports as { subject: () => number }).subject();
+      const view = new Uint8Array(memory.buffer);
+      let limbs = "";
+      for (let limb = 3; limb >= 0; limb -= 1) {
+        for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
+      }
+      assert.equal(limbs, expected.toString(16).padStart(64, "0"), `the ${op} of ${leftText} and ${rightText}`);
+    }
+  }
+});
+
+/** A function whose whole body is one wide operation on two wide literals. */
+function wideBinary(type: SemanticType, op: ArithOp, left: string, right: string): SemanticFunction {
+  return {
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: type,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: { k: "arith", type, op, left: { k: "const", type, text: `0x${left}` }, right: { k: "const", type, text: `0x${right}` } },
+      },
+    },
+  };
+}
+
+test("two whole numbers are compared a limb at a time, from the top", () => {
+  // Whole numbers are ordered by their top limbs: a number whose top limbs
+  // match is ordered by the first pair below them that does not. That is the
+  // walk this exercises, and the vectors are chosen so that the answer is found
+  // at the top in one case and at the bottom in another — a walk that started
+  // at the bottom and stopped at the first difference would order `1` below
+  // `2^64` correctly and `2^64` below `1` wrongly.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const MASK = (1n << 256n) - 1n;
+  const VECTORS: readonly (readonly [string, string])[] = [
+    ["1", "2"],
+    ["2", "1"],
+    ["ffffffffffffffff00000000000000000000000000000000000000000000000000000000", "ffffffffffffffffffffffffffffffff0000000000000000000000000000000000000000000000"],
+    ["00000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "00000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000"],
+    ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+    ["0", "0"],
+  ];
+  for (const op of ["eq", "ne", "lt", "le", "gt", "ge"] as const) {
+    for (const [leftText, rightText] of VECTORS) {
+      const left = BigInt(`0x${leftText}`) & MASK;
+      const right = BigInt(`0x${rightText}`) & MASK;
+      const expected =
+        op === "eq" ? left === right : op === "ne" ? left !== right
+        : op === "lt" ? left < right : op === "le" ? left <= right
+        : op === "gt" ? left > right : left >= right;
+      const memory = new engine.Memory({ initial: 1 });
+      const bytes: Uint8Array = moduleBytes(wideComparison(U, op, leftText, rightText), boolContract());
+      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+      const answer: number = (instance.exports as { subject: () => number }).subject();
+      assert.equal(answer !== 0, expected, `the ${op} of ${leftText} and ${rightText}`);
+    }
+  }
+});
+
+/** A function whose whole body is one comparison of two wide literals. */
+function wideComparison(type: SemanticType, op: CompareOp, left: string, right: string): SemanticFunction {
+  return {
+    name: "subject", symbol: "subject", params: [], returns: { kind: "primitive", name: "bool" },
+    requires: [], ensures: [], effects: [], allocates: false, prints: false, readsArgv: false, objects: {}, calls: [],
+    entry: {
+      id: "entry", statements: [], releases: [],
+      terminator: {
+        k: "return",
+        value: { k: "compare", type: { kind: "primitive", name: "bool" }, op, operand: type,
+          left: { k: "const", type, text: `0x${left}` }, right: { k: "const", type, text: `0x${right}` } },
+      },
+    },
+  };
+}
+
+/** The contract for a function of no arguments answering a truth. */
+function boolContract(): FunctionContract {
+  return {
+    version: "1",
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    function: { name: "subject", symbol: "subject", params: [], returns: "bool" },
+    optimize: { primary: "latency", secondary: "size" },
+    effects: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    requires: [], ensures: [],
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+}
+
+test("a whole number is chosen between two, a limb at a time", () => {
+  // The module has an instruction that chooses between two values, and running
+  // it on two wide numbers would choose between their two addresses — which are
+  // two different places, and the answer is whichever place holds it. So the
+  // limbs are chosen and written, which is the selection the operator means.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  for (const take of [true, false]) {
+    const then = "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
+    const otherwise = "0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98";
+    const bytes: Uint8Array = moduleBytes(wideSelection(U, take, then, otherwise), wideContract());
+    const memory = new engine.Memory({ initial: 1 });
+    const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+    const address: number = (instance.exports as { subject: () => number }).subject();
+    const view = new Uint8Array(memory.buffer);
+    let limbs = "";
+    for (let limb = 3; limb >= 0; limb -= 1) {
+      for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
+    }
+    assert.equal(limbs, take ? then : otherwise, `the selection when the condition is ${take}`);
+  }
+});
+
+/** A function whose whole body is one selection between two wide literals. */
+function wideSelection(type: SemanticType, take: boolean, then: string, otherwise: string): SemanticFunction {
+  return {
+    name: "subject", symbol: "subject", params: [], returns: type,
+    requires: [], ensures: [], effects: [], allocates: false, prints: false, readsArgv: false, objects: {}, calls: [],
+    entry: {
+      id: "entry", statements: [], releases: [],
+      terminator: {
+        k: "return",
+        value: {
+          k: "select", type,
+          condition: { k: "bool", type: { kind: "primitive", name: "bool" }, value: take },
+          then: { k: "const", type, text: `0x${then}` },
+          otherwise: { k: "const", type, text: `0x${otherwise}` },
+        },
+      },
+    },
+  };
+}

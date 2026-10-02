@@ -188,6 +188,18 @@ const WHOLE_RANK: Record<string, number> = {
  */
 export const WIDE_LIMBS: Readonly<Record<string, number>> = { u256: 4 };
 
+/**
+ * How many bytes one limb of a wide number is.
+ *
+ * Every limb is a whole machine word whatever the target's word is, because a
+ * wide number is a number of limbs rather than a number of the target's own
+ * width: a backend that measured a limb in the target's word would give a
+ * thirty-two bit target a wide number of sixteen bytes and call that the same
+ * number. Sixty four is what every backend this compiler has encodes for
+ * carries the ABI out in, so it is stated once here rather than per backend.
+ */
+export const LIMB_BYTES = 8;
+
 /** True when a type is one of the whole numbers wider than a machine word. */
 export function isWide(name: PrimitiveTypeName): boolean {
   return WIDE_LIMBS[name] !== undefined;

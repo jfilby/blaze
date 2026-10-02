@@ -35,6 +35,7 @@ import {
   type SemanticLoop,
   type SemanticStatement,
   type SemanticTerminator,
+  type CompareOp,
   type SemanticValue,
   elementTypeOf,
   slotType,
@@ -273,7 +274,19 @@ interface TypeFacts {
   load: { code: number; align: number };
   /** The store that writes a value of this type at its width. */
   store: { code: number; align: number };
+  /**
+   * True when the carrier is the address of a value rather than the value.
+   *
+   * Every load and store below moves one element at a width, and neither knows
+   * what it is looking at. A value whose carrier is a pointer is four times the
+   * width it is loaded at, so anything that reads one of these as though the
+   * carrier held the value would move a quarter of it — this is what says so.
+   */
+  wide?: boolean;
 }
+
+/** The limb operations of the three that do not carry, by the IR's name. */
+const WIDE_BITWISE: Record<string, number> = { and: 0x83, or: 0x84, xor: 0x85 };
 
 /** The width one element of a buffer takes, which is the width the host lays it out at. */
 const WIDTHS: Record<string, number> = {
@@ -322,6 +335,69 @@ const REFERENCE: TypeFacts = {
   store: { code: 0x36, align: 2 },
 };
 
+/**
+ * A wide number is four 64 bit limbs laid out in memory, and WebAssembly has no
+ * value type for one — so what the type is carried *as* is the address of
+ * those four limbs, in the 32 bit address the memory is already indexed with.
+ *
+ * This is the same answer a buffer gets, and the reason is the same: the format
+ * has one pointer-shaped value and this is what it points at. The difference is
+ * that a wide number is not read from and written to by the host as a whole; the
+ * four limbs are this backend's own, laid out once and never moved as a unit.
+ *
+ * Every operation on one is written out here as limb arithmetic rather than
+ * lowered to anything: a module imports the host's linear memory and nothing
+ * else, so there is no kernel to call, and an operation this file has not
+ * written refuses rather than being carried out four limbs wide.
+ */
+const WIDE: TypeFacts = {
+  held: I32,
+  unsigned: false,
+  size: 4,
+  shift: 2,
+  load: { code: 0x29, align: 3 },
+  store: { code: 0x37, align: 3 },
+  wide: true,
+};
+
+/**
+ * Where the read-only constants begin, and why they do not begin at zero.
+ *
+ * The constants a body pools go into one data segment, and a data segment is
+ * written by the host when the module is instantiated and is not a thing a
+ * module may write to afterwards. The limbs of a wide number, on the other hand,
+ * are scratch: every operation writes one somewhere and reads it back. So the
+ * two cannot share an address range, and this is the boundary between them — a
+ * page is 65536 bytes and the import asks the host for one, so everything below
+ * this is addressable whatever the host allocated.
+ *
+ * The scratch needs no initialising because every byte of the host's memory
+ * starts as zero, and a wide number that has not been written yet is zero.
+ */
+const WIDE_DATA_BASE = 4096;
+
+/**
+ * Two hundred and fifty six low bits set, which is a whole number wrapping
+ * around at its own width.
+ *
+ * This is the mask rather than the power, because it is used as one: `&` is a
+ * bitwise and, and a whole number masked with two to the two hundred and fifty
+ * six is zero for every number the width can hold, because none of them has that
+ * bit set. The number a literal wraps to is the low 256 bits of the literal.
+ */
+const WIDE_MASK = (1n << 256n) - 1n;
+
+/** The four limbs of a whole number, lowest first. */
+function byteViewOf(value: bigint): bigint[] {
+  const limbs: bigint[] = [];
+  let rest = value & WIDE_MASK;
+  for (let limb = 0; limb < 4; limb += 1) {
+    limbs.push(rest & 0xffffffffffffffffn);
+    rest >>= 64n;
+  }
+  return limbs;
+}
+
 const FACTS = new Map<string, TypeFacts>();
 
 function facts(type: SemanticType): TypeFacts {
@@ -335,14 +411,7 @@ function facts(type: SemanticType): TypeFacts {
   //
   // Refusing keeps that unreachable: nothing below has to know what a wide
   // number is, because no value of one ever arrives.
-  if (type.kind === "primitive" && isWide(type.name)) {
-    throw new CompilerError({
-      category: "AssemblyError",
-      stage: "wasm",
-      message: `this backend cannot lower a ${type.name}`,
-      detail: "a wide number is four 64 bit limbs laid out in memory and WebAssembly has no value type for one; lower this function to the c backend, where a wide operation is a call into the wide kernel",
-    });
-  }
+  if (type.kind === "primitive" && isWide(type.name)) return WIDE;
   if (type.kind !== "primitive") return REFERENCE;
   const known = FACTS.get(type.name);
   if (known !== undefined) return known;
@@ -572,6 +641,16 @@ class Body {
   /** Every float constant the body laid down, in the order the globals are numbered. */
   readonly pooledFloats: { type: number; opcode: number; bytes: number[] }[] = [];
 
+  /**
+   * The wide constants the body pooled, thirty-two bytes each, lowest limb
+   * first. They are laid down in one data segment by {@link buildWasmModule}
+   * once every address in the body is known.
+   */
+  readonly pooledWides: number[][] = [];
+
+  /** How far through the scratch below the constants the arithmetic has come. */
+  private wideInFlight = 0;
+
   constructor(fn: SemanticFunction, contract: FunctionContract, returns: SemanticType, candidate: string | undefined) {
     this.fn = fn;
     this.contract = contract;
@@ -651,6 +730,20 @@ class Body {
     else free.push(at);
   }
 
+  /**
+   * Copies what is on the top of the stack into a borrowed local and leaves it
+   * there, which the format calls `local.tee`.
+   *
+   * A limb walk needs this at every step: each step reads a value it computed
+   * one instruction earlier, and there is no way to copy what is on the stack
+   * except to put it in a local. Storing and loading it back would be the same
+   * two instructions plus a store.
+   */
+  private tee(at: number): void {
+    this.op(0x22);
+    this.code.varuint(at);
+  }
+
   /** Stores what is on the top of the stack in a borrowed local. */
   private keep(at: number): void {
     this.op(0x21);
@@ -688,6 +781,12 @@ class Body {
     this.code.byte(value);
     this.readLocal = -1;
     this.readAt = -1;
+  }
+
+  /** Reads the local at an index, which the format calls `local.get`. */
+  private localAt(at: number): void {
+    this.op(0x20);
+    this.code.varuint(at);
   }
 
   private i32(value: number): void {
@@ -1085,6 +1184,13 @@ class Body {
         this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "select":
+        // Two whole numbers are not chosen between by choosing between their
+        // addresses — the two addresses are two different places and the answer
+        // is whichever place holds it — so the limbs are chosen and written.
+        if (at.kind === "primitive" && isWide(at.name)) {
+          this.wideSelect(value.condition, value.then, value.otherwise);
+          return;
+        }
         // A `select` reads its condition last: it is the top of the stack, and
         // the two arms below it are what it chooses between. Both arms are
         // emitted in the type the use reads the whole in, so what it hands back
@@ -1167,6 +1273,21 @@ class Body {
         // loses every fraction of them and answers the other arm than the one
         // the source wrote. An operator's type is the operands' own type.
         const compared = value.k === "compare" ? value.operand : value.type;
+        // A wide number is carried as the address of its four limbs, and every
+        // operation on one has to be written out as limb arithmetic below —
+        // there is no instruction for thirty-two bytes and, because a module
+        // reaches no runtime service, nothing to call either. What is written is
+        // routed to it and everything else stops here rather than reaching the
+        // table below, where a four-limb value would be carried out as one
+        // `i32` and answer the low thirty-two bits of the number it was given.
+        if (compared.kind === "primitive" && isWide(compared.name)) {
+          if (value.k === "compare") {
+            this.wideCompare(value.op, value.left, value.right);
+            return;
+          }
+          this.wideBinary(value.op, value.left, value.right);
+          return;
+        }
         const held = facts(compared).held;
         this.value(value.left, compared);
         this.value(value.right, compared);
@@ -1249,6 +1370,14 @@ class Body {
    * through the conversion.
    */
   private constant(text: string, type: SemanticType, at: SemanticType): void {
+    // A wide constant is not a literal: there is no instruction that carries
+    // thirty-two bytes. It is laid down once in the module's own data and every
+    // use is its address, the same way a pooled float is read out of a global
+    // rather than written out again at every place it appears.
+    if (type.kind === "primitive" && isWide(type.name)) {
+      this.wideConstant(BigInt(text));
+      return;
+    }
     const held = facts(type).held;
     const wanted = facts(at).held;
     // The number the literal's own carrier holds is what a conversion would
@@ -1256,6 +1385,359 @@ class Body {
     // destination decides whether that carrier can hold it as it stands.
     const value = this.valueOf(text, held);
     this.literal(text, held !== wanted && !this.exact(value, wanted) ? held : wanted);
+  }
+
+  /**
+   * Lays a wide constant down once and leaves its address on the stack.
+   *
+   * The limbs are written lowest first, which is the order the arithmetic reads
+   * them back in and the order the machine backend writes them in, so the two
+   * backends lay the same thirty-two bytes out the same way for the same
+   * number. The value is read as a whole number, so a literal with a sign is its
+   * two's complement over 256 bits rather than a negative number of limbs.
+   */
+  private wideConstant(value: bigint): void {
+    const key = `u256:${value & WIDE_MASK}`;
+    const known = this.pooled.get(key);
+    if (known !== undefined) {
+      this.i32(known);
+      return;
+    }
+    const bytes: number[] = [];
+    const limbs = byteViewOf(value);
+    for (const limb of limbs) for (let at = 0; at < 8; at += 1) bytes.push(Number((limb >> BigInt(at * 8)) & 0xffn));
+    this.pooled.set(key, WIDE_DATA_BASE + this.pooledWides.reduce((whole, bytes) => whole + bytes.length, 0));
+    this.pooledWides.push(bytes);
+    this.i32(this.pooled.get(key) as number);
+  }
+
+  /**
+   * One comparison of two whole numbers, as a limb walk from the top.
+   *
+   * The limbs are the same whatever the order asked for, so only two are
+   * written: whether the two limbs are equal, and whether the left is the
+   * smaller. Everything else is those two and not — `le` is `lt` or `eq`,
+   * `gt` is `lt` the other way round, and `ne` is not `eq`.
+   *
+   * The walk starts at the top limb because that is the one that decides: a
+   * number whose top limbs match is ordered by the first pair below them that
+   * does not, and a pair of equal limbs passes the question down. Stopping at
+   * the first difference and keeping that answer is what makes the walk `O(1)`
+   * on the values that differ high and `O(4)` on the rest, and the answer is the
+   * same either way.
+   */
+  private wideCompare(op: CompareOp, left: SemanticValue, right: SemanticValue): void {
+    if (op === "lt") {
+      this.wideOrder(left, right, false);
+      return;
+    }
+    if (op === "gt") {
+      this.wideOrder(right, left, false);
+      return;
+    }
+    if (op === "le") {
+      this.wideOrder(left, right, true);
+      return;
+    }
+    if (op === "ge") {
+      this.wideOrder(right, left, true);
+      return;
+    }
+    if (op !== "eq" && op !== "ne") this.wideRefuse(`compare ${op}`);
+    const leftAt = this.borrow(I32);
+    this.value(left, left.type);
+    this.keep(leftAt);
+    const rightAt = this.borrow(I32);
+    this.value(right, right.type);
+    this.keep(rightAt);
+    const leftLimb = this.borrow(I64);
+    const rightLimb = this.borrow(I64);
+    // A comparison answers a zero or a one and not a limb, so the answer is
+    // kept as the `i32` it is rather than in one of the limbs it compared.
+    const answer = this.borrow(I32);
+    for (let limb = 0; limb < 4; limb += 1) {
+      this.loadLimb(leftAt, limb, leftLimb);
+      this.loadLimb(rightAt, limb, rightLimb);
+      this.localAt(leftLimb);
+      this.localAt(rightLimb);
+      this.op(0x51); // `i64.eq`
+      // Every limb has to match, so each one is anded into the answer so far.
+      if (limb === 0) this.keep(answer);
+      else {
+        this.localAt(answer);
+        this.op(0x71); // `i32.and`
+        this.keep(answer);
+      }
+    }
+    this.localAt(answer);
+    // `ne` is `eq` answered the other way round, which is asking whether the
+    // answer is nothing: `eq` leaves a one for a match and the two are never
+    // both true at once.
+    if (op === "ne") this.op(0x45); // `i32.eqz`
+    for (const at of [leftLimb, rightLimb]) this.release(I64, at);
+    for (const at of [leftAt, rightAt, answer]) this.release(I32, at);
+  }
+
+  /**
+   * Whether the first whole number is below the second, or below it or equal.
+   *
+   * Each limb from the top down answers one question — are these two limbs
+   * equal, and if not, which is smaller — and the answer to the whole is the
+   * first one that is not "equal", because a limb that matches says nothing
+   * about the limbs below it. That is what the two selections do: the later
+   * limbs only speak when every limb above them matched.
+   */
+  private wideOrder(left: SemanticValue, right: SemanticValue, orEqual: boolean): void {
+    const leftAt = this.borrow(I32);
+    this.value(left, left.type);
+    this.keep(leftAt);
+    const rightAt = this.borrow(I32);
+    this.value(right, right.type);
+    this.keep(rightAt);
+    const leftLimb = this.borrow(I64);
+    const rightLimb = this.borrow(I64);
+    const answer = this.borrow(I32);
+    // Whether this pair of limbs matches, and what the pair decides on its own.
+    // Both are kept because a `select` reads its condition last and its first
+    // value below that, so the three have to be in locals to be in that order.
+    const matches = this.borrow(I32);
+    const decided = this.borrow(I32);
+    // What the walk has settled on so far, which for the top limbs is "no pair
+    // has differed yet" — and that is already the answer when they never do.
+    // Two equal numbers are below each other only when equal is allowed.
+    this.i32(orEqual ? 1 : 0);
+    this.keep(answer);
+    for (let limb = 3; limb >= 0; limb -= 1) {
+      this.loadLimb(leftAt, limb, leftLimb);
+      this.loadLimb(rightAt, limb, rightLimb);
+      // `equal ? answer : (smaller ? one : zero)`
+      this.localAt(leftLimb);
+      this.localAt(rightLimb);
+      this.op(0x51); // `i64.eq`
+      this.keep(matches);
+      if (orEqual) {
+        this.localAt(leftLimb);
+        this.localAt(rightLimb);
+        this.op(0x54); // `i64.lt_u`
+        this.keep(decided);
+      } else {
+        // `<` is not `le`: a pair of equal limbs decides nothing, so the answer
+        // for this pair is the comparison itself and a zero for a match. A
+        // `select` reads its condition last and its first value below that, so
+        // the one has to be pushed before the zero.
+        this.i32(1);
+        this.i32(0);
+        this.localAt(leftLimb);
+        this.localAt(rightLimb);
+        this.op(0x54); // `i64.lt_u`
+        this.op(0x1b); // `select`
+        this.keep(decided);
+      }
+      // `matches ? answer : decided` — the limbs below only speak when every
+      // limb above them matched.
+      this.localAt(answer);
+      this.localAt(decided);
+      this.localAt(matches);
+      this.op(0x1b); // `select`
+      this.keep(answer);
+    }
+    this.localAt(answer);
+    for (const at of [leftLimb, rightLimb]) this.release(I64, at);
+    for (const at of [leftAt, rightAt, answer, matches, decided]) this.release(I32, at);
+  }
+
+  /**
+   * One whole number chosen between two, copied limb by limb.
+   *
+   * The module has an instruction that chooses between two values, and what it
+   * chooses between here is the two addresses rather than the two numbers — and
+   * two addresses are two different places, of which one holds the answer. So
+   * the limbs are chosen and written, which is the selection the operator means.
+   */
+  private wideSelect(condition: SemanticValue, then: SemanticValue, otherwise: SemanticValue): void {
+    const thenAt = this.borrow(I32);
+    this.value(then, then.type);
+    this.keep(thenAt);
+    const otherAt = this.borrow(I32);
+    this.value(otherwise, otherwise.type);
+    this.keep(otherAt);
+    const out = this.wideScratch();
+    for (let limb = 0; limb < 4; limb += 1) {
+      // The address of the limb is below both arms, because a store reads its
+      // address before its value and the value is what the selection answers —
+      // and it is pushed once per limb, because the store consumes it.
+      this.atScratch(out);
+      this.loadLimb(thenAt, limb);
+      this.loadLimb(otherAt, limb);
+      this.condition(condition);
+      this.op(0x1b); // `select`
+      this.storeLimb(limb);
+    }
+    for (const at of [thenAt, otherAt]) this.release(I32, at);
+    this.i32(out);
+  }
+
+  /**
+   * Thirty-two bytes of scratch, somewhere below every constant.
+   *
+   * The two cannot share an address range — a data segment is written by the
+   * host and a value in flight is written by the module — so the scratch is
+   * taken from below and the constants from above. Every byte of it starts as
+   * zero, which is a whole number that has not been written yet.
+   *
+   * A function whose arithmetic nests more deeply than this has more values in
+   * flight at once than there is room for, and that is said rather than
+   * overwriting one with another.
+   */
+  private wideScratch(): number {
+    return this.wideScratchOf(32);
+  }
+
+  /** The same, for a region that is not one whole number wide. */
+  private wideScratchOf(bytes: number): number {
+    const at = this.wideInFlight;
+    this.wideInFlight += bytes;
+    if (at + bytes > WIDE_DATA_BASE) {
+      throw new CompilerError({
+        category: "AssemblyError",
+        stage: "wasm",
+        message: "this function keeps more wide numbers in flight than the module has scratch for",
+        detail: `every value an operation is computing on is thirty-two bytes and they live below the module's constants, of which there are ${(WIDE_DATA_BASE / 32) | 0}; split the expression`,
+      });
+    }
+    return at;
+  }
+
+  /**
+   * One wide operation, written out as arithmetic on the four limbs.
+   *
+   * There is no instruction for a two hundred and fifty six bit add and there
+   * is nothing to call — a module reaches no runtime service, so the kernel the
+   * C backend calls is not here. It is a limb walk: load each limb of both
+   * sides, combine them, and carry or borrow into the next.
+   *
+   * The carry is found by comparison rather than by sign, because these are
+   * whole numbers and `i64.lt_s` would read the top bit as a sign. Three inputs
+   * go into each limb, so it takes two comparisons: `a + b` may carry on its
+   * own, and adding the carry from below may carry again. Testing only the first
+   * is right for the top limb of a value that never carries and wrong for the
+   * rest of one that does.
+   */
+  private wideBinary(op: string, left: SemanticValue, right: SemanticValue): void {
+    // A shift's right operand is the number of bits to move rather than another
+    // whole number, so a shift is written out by its own walk and not by the
+    // limb-by-limb combine below, which reads both of its operands as
+    // addresses of limbs.
+    if (op === "shl" || op === "shr") this.wideRefuse(op);
+    const leftAt = this.borrow(I32);
+    this.value(left, left.type);
+    this.keep(leftAt);
+    const rightAt = this.borrow(I32);
+    this.value(right, right.type);
+    this.keep(rightAt);
+    const out = this.wideScratch();
+
+    const bitwise = WIDE_BITWISE[op];
+    if (bitwise !== undefined) {
+      for (let limb = 0; limb < 4; limb += 1) {
+        this.atScratch(out);
+        this.loadLimb(leftAt, limb);
+        this.loadLimb(rightAt, limb);
+        this.op(bitwise);
+        this.storeLimb(limb);
+      }
+      this.release(I32, leftAt);
+      this.release(I32, rightAt);
+      this.i32(out);
+      return;
+    }
+
+    const carries = op === "add";
+    if (!carries && op !== "sub") this.wideRefuse(op);
+    // The limb being combined, the sum or difference of the two, and the flag
+    // carried or borrowed in from the limb below.
+    const leftLimb = this.borrow(I64);
+    const rightLimb = this.borrow(I64);
+    const middle = this.borrow(I64);
+    const summed = this.borrow(I64);
+    // A comparison answers a zero or a one and not a limb, so the flag is held
+    // as the `i32` it is and widened back to a limb before it joins one.
+    const flag = this.borrow(I32);
+    const carry = this.borrow(I64);
+    this.i64(0n);
+    this.keep(carry);
+    for (let limb = 0; limb < 4; limb += 1) {
+      this.loadLimb(leftAt, limb, leftLimb);
+      this.loadLimb(rightAt, limb, rightLimb);
+      this.localAt(leftLimb);
+      this.localAt(rightLimb);
+      this.op(carries ? 0x7c : 0x7d); // `i64.add` or `i64.sub`
+      this.tee(middle);
+      this.localAt(carries ? leftLimb : rightLimb); // the first test is against the operand that moved least
+      this.op(0x54); // `i64.lt_u`
+      this.keep(flag);
+      this.localAt(middle);
+      this.localAt(carry);
+      this.op(carries ? 0x7c : 0x7d);
+      // The limb before the carry and the limb after it are kept apart: the
+      // second test is whether adding the carry in pushed the sum past what it
+      // was, and comparing the sum with itself is the one comparison that can
+      // never be true — a carry chain that stops after the first limb and is
+      // right on every value that never carries.
+      this.tee(summed);
+      this.localAt(carries ? middle : carry); // subtracting the borrow in underflows when the difference went past zero
+      this.op(0x54); // `i64.lt_u`
+      this.op(0xad); // `i64.extend_i32_u`
+      this.localAt(flag);
+      this.op(0xad); // `i64.extend_i32_u`
+      this.op(0x84); // `i64.or`
+      this.keep(carry);
+      this.atScratch(out);
+      this.localAt(summed);
+      this.storeLimb(limb);
+    }
+    for (const at of [leftLimb, rightLimb, middle, summed, carry]) this.release(I64, at);
+    // The two addresses and the flag are 32 bit, and handing one of those back
+    // as a limb would offer a later borrow of a limb the index of a short one.
+    for (const at of [leftAt, rightAt, flag]) this.release(I32, at);
+    this.i32(out);
+  }
+
+  /** One limb of a whole number, left on the stack or kept in a local. */
+  private loadLimb(address: number, limb: number, into?: number): void {
+    this.localAt(address);
+    this.op(0x29); // `i64.load`
+    this.code.varuint(3);
+    this.code.varuint(limb * 8);
+    if (into !== undefined) this.keep(into);
+  }
+
+  /**
+   * The address the scratch the result is written to lives at.
+   *
+   * A store takes its address before its value — the address is the deeper of
+   * the two on the stack — so this is pushed before the value is computed rather
+   * than after, and the value is computed above it.
+   */
+  private atScratch(address: number): void {
+    this.i32(address);
+  }
+
+  /** The address and the value on top of the stack, written as one limb. */
+  private storeLimb(limb: number): void {
+    this.op(0x37); // `i64.store`
+    this.code.varuint(3);
+    this.code.varuint(limb * 8);
+  }
+
+  /** The refusal of an operation on a wide number this file has not written. */
+  private wideRefuse(op: string): never {
+    throw new CompilerError({
+      category: "AssemblyError",
+      stage: "wasm",
+      message: `this backend has not written a wide ${op}`,
+      detail: `a whole number of this width is four 64 bit limbs in the host's memory and WebAssembly has one instruction per limb, so this is written out by hand and ${op} is not written yet`,
+    });
   }
 
   /** The number a literal denotes at one carrier. */
@@ -1879,6 +2361,25 @@ export function moduleBytes(
       one.absorb(code);
     }),
   );
+  // The wide constants the body pooled, laid down once by the host when the
+  // module is instantiated. The segment starts above the scratch the arithmetic
+  // writes into, because a data segment is not a thing a module may write to
+  // and a wide number in flight is. Its offset is a constant expression rather
+  // than an address the body reads, which is what the format requires.
+  if (body.pooledWides.length > 0) {
+    module.section(11, (data) =>
+      data.counted(1, (one) => {
+        // An active segment in memory zero, written at a constant expression.
+        one.varuint(0);
+        one.byte(0x41);
+        one.varbig(BigInt(WIDE_DATA_BASE));
+        one.byte(0x0b);
+        const bytes = body.pooledWides.flat();
+        one.varuint(bytes.length);
+        for (const byte of bytes) one.byte(byte);
+      }),
+    );
+  }
   return module.build();
 }
 

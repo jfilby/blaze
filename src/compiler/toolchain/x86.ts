@@ -96,7 +96,7 @@ export type Condition =
   | "np";
 
 /** The arithmetic and logic the encoder writes, by the name the IR gives them. */
-export type Binary = "add" | "sub" | "and" | "or" | "xor" | "cmp";
+export type Binary = "add" | "sub" | "and" | "or" | "xor" | "cmp" | "adc" | "sbb";
 
 /** The shifts the encoder writes. */
 export type Shift = "shl" | "shr" | "sar";
@@ -208,13 +208,26 @@ const CONDITION: Record<Condition, number> = {
 };
 
 /** The opcode extension of each operation when it writes a memory operand. */
-const BINARY: Record<Binary, number> = { add: 0, or: 1, and: 4, sub: 5, xor: 6, cmp: 7 };
+const BINARY: Record<Binary, number> = { add: 0, or: 1, adc: 2, sbb: 3, and: 4, sub: 5, xor: 6, cmp: 7 };
 
 /** The opcode of each operation when it writes a register from an operand. */
-const BINARY_TO_REGISTER: Record<Binary, number> = { add: 0x03, or: 0x0b, and: 0x23, sub: 0x2b, xor: 0x33, cmp: 0x3b };
+
+/**
+ * The two operations that consume the carry the one before them left, which is
+ * what a number wider than one register is carried out with.
+ *
+ * `adc` is an add that takes the carry in as well and `sbb` is a subtract that
+ * takes the borrow in as well, so a chain of them over the limbs of a wide
+ * number is one instruction per limb after the first: no branch, and no memory
+ * round trip in the middle of it. Neither is a different operation from `add`
+ * and `sub` — it is the same one with the flag the previous limb left folded
+ * in — which is why they belong to the same type here rather than to a separate
+ * one, so that a carry chain is written with the same calls as anything else.
+ */
+const BINARY_TO_REGISTER: Record<Binary, number> = { add: 0x03, or: 0x0b, and: 0x23, sub: 0x2b, xor: 0x33, cmp: 0x3b, adc: 0x13, sbb: 0x1b };
 
 /** The opcode of each operation when both of its operands are bytes. */
-const BYTE_BINARY: Record<Binary, number> = { add: 0x00, or: 0x08, and: 0x20, sub: 0x28, xor: 0x30, cmp: 0x38 };
+const BYTE_BINARY: Record<Binary, number> = { add: 0x00, or: 0x08, and: 0x20, sub: 0x28, xor: 0x30, cmp: 0x38, adc: 0x10, sbb: 0x18 };
 
 /** The opcode extension of each shift, which all three take the count in `cl`. */
 
@@ -842,6 +855,20 @@ export class Encoder {
   aluRegMem(operation: Binary, register: number, address: Memory, wide = true): void {
     this.rex(wide, register, address);
     this.byte(BINARY_TO_REGISTER[operation]);
+    this.modrm(address, register);
+  }
+
+  /**
+   * The address a memory operand names, written into a register.
+   *
+   * `lea` computes an address rather than reading what is at it, which is what a
+   * call taking the address of an argument needs: three thirty-two byte values
+   * are handed to the kernel as three addresses, and reading them first would
+   * move ninety-six bytes to write back the three pointers to them.
+   */
+  leaMemReg(address: Memory, register: number): void {
+    this.rex(true, register, address);
+    this.byte(0x8d);
     this.modrm(address, register);
   }
 

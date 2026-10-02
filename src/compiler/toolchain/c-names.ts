@@ -276,7 +276,7 @@ const C_WIDE_INTEGERS: Record<string, { type: string; suffix: string; low: bigin
 const UNSIGNED_WIDTHS: Record<string, number> = { u8: 8, u16: 16, u32: 32 };
 
 /** The value an integer literal is, or null where the text is not one. */
-function integerLiteral(text: string): bigint | null {
+export function integerLiteral(text: string): bigint | null {
   if (/^[+-]?0[xX]/.test(text)) {
     // BigInt takes the sign of a decimal literal only, so a negative
     // hexadecimal one is negated rather than converted with its sign.

@@ -24,8 +24,13 @@ import { join } from "node:path";
 import { run } from "../core/process.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildObject as buildMachineObject } from "../toolchain/ir-machine.ts";
+import { Encoder, RDI, RSI, RDX, R8, R9, R10, R11, mem } from "../toolchain/x86.ts";
+
+/** The four general registers a wide operation is carried out in. */
+const WORK = [R8, R9, R10, R11];
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
-import type { ArithOp, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { ArithOp, CompareOp, SemanticFunction, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { FunctionContract } from "../core/types.ts";
 import type { TargetSpec, TypeExpr } from "../core/types.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource, WIDE_SYMBOLS } from "../runtime/abi.ts";
 
@@ -34,8 +39,18 @@ const MODULUS = (1n << BigInt(WIDTH)) - 1n;
 const LIMBS = WIDTH / 64;
 const U256: SemanticType = { kind: "primitive", name: "u256" };
 const U64: SemanticType = { kind: "primitive", name: "u64" };
-const BOOL: TypeExpr = { kind: "primitive", name: "bool" };
+const BOOL: SemanticType = { kind: "primitive", name: "bool" };
 const TARGET: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
+
+/** Two wide literals whose limbs carry into one another in every position. */
+const WIDE_LEFT = "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const WIDE_RIGHT = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/** The low two limbs of the argument, spelled as C literals. */
+/** The argument, chosen so every limb differs and the carries are real. */
+const WIDE_ARGUMENT = "0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98";
+/** A constant whose limbs are all distinct, so a limb left out would show. */
+const WIDE_ADDEND = "0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
 
 /** A value as the 64 hex digits the harness reads, most significant limb first. */
 function digits(value: bigint): string {
@@ -260,7 +275,7 @@ function loweringSubjects(): { symbol: string; returns: SemanticType; value: Sem
       value: {
         k: "select",
         type: U256,
-        condition: { k: "compare", type: BOOL, op: "gt", operand: U256, left: a, right: wide("5") },
+        condition: { k: "compare", type: BOOL as TypeExpr, op: "gt", operand: U256, left: a, right: wide("5") },
         then: a,
         otherwise: wide("7"),
       },
@@ -272,7 +287,7 @@ function loweringSubjects(): { symbol: string; returns: SemanticType; value: Sem
         k: "unary",
         type: BOOL,
         op: "not",
-        operand: { k: "compare", type: BOOL, op: "lt", operand: U256, left: a, right: wide("5") },
+        operand: { k: "compare", type: BOOL as TypeExpr, op: "lt", operand: U256, left: a, right: wide("5") },
       },
     },
   ];
@@ -344,31 +359,34 @@ test("the C backend lowers a wide operation to the kernel and answers it", async
   }
 });
 
-test("a backend that cannot lower a wide number refuses it rather than narrowing it", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-m-"));
-  // The two backends that do not implement one must say so. Both measure a value
-  // through a single scalar carrier — one machine register, one WebAssembly value
-  // type — and both have a table that answers eight bytes for a type they do not
-  // recognise. Left to that default a `u256` would be given a slot a quarter of
-  // the size of the value written into it, and the three limbs above the first
-  // would be whatever sat beside it: a wrong answer from a build that reported
-  // success. A refusal is the only answer they can give honestly today.
+test("a wide argument to a call this backend has not written is refused", async () => {
+  // Every wide operation is written now, and every way a value crosses into or
+  // out of a function this compiler compiled itself is refused: a call it makes
+  // hands its arguments over in registers, and there are six registers the
+  // convention does not preserve and a wide number is four limbs, so a wide
+  // argument has nowhere to go that a value the callee can read.
+  //
+  // The refusal matters because the alternative is the default this backend has
+  // everywhere else: a table that answers eight bytes for a type it does not
+  // recognise. A wide argument given one of those is a pointer written where
+  // thirty-two bytes were promised, and the callee reads four words of the frame
+  // that were never written to them — a wrong answer from a build that reported
+  // success.
+  //
+  // Calling into this backend from C does work, because the convention hands such
+  // a value over in memory and `arrivals` reads it there; it is only a call this
+  // backend emits for itself that has no answer yet.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-call-"));
   const WIDE: SemanticType = { kind: "primitive", name: "u256" };
-  const wide: SemanticValue = { k: "local", type: WIDE, name: "a" };
-  const value: SemanticValue = { k: "arith", type: WIDE, op: "add", left: wide, right: wide };
-
-  // The refusal is placed at the one function every read, write and frame slot
-  // is derived from, so it is that function itself being exercised here rather
-  // than a whole build: the build reads its contract before it reaches a value,
-  // and what has to hold is that no width is ever measured for a wide number.
+  const VOID: SemanticType = { kind: "void" };
   await assert.rejects(
     () =>
       buildMachineObject({
         fn: {
           name: "subject",
           symbol: "subject",
-          params: [{ kind: "value", name: "a", mutable: false, type: WIDE }],
-          returns: WIDE,
+          params: [],
+          returns: VOID,
           requires: [],
           ensures: [],
           effects: [],
@@ -376,18 +394,40 @@ test("a backend that cannot lower a wide number refuses it rather than narrowing
           prints: false,
           readsArgv: false,
           objects: {},
-          calls: [],
-          entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value } },
+          calls: [{ callee: "callee", strategy: "call" }],
+          entry: {
+            id: "entry",
+            statements: [],
+            releases: [],
+            terminator: {
+              k: "return",
+              value: {
+                k: "call",
+                type: VOID,
+                call: {
+                  callee: "callee",
+                  signature: {
+                    name: "callee",
+                    symbol: "callee",
+                    params: [{ name: "a", type: "u256" }],
+                    returns: "void",
+                  },
+                  args: [{ k: "const", type: WIDE, text: "0x0123456789abcdeffedcba9876543210" }],
+                  argTypes: [WIDE],
+                  returns: VOID,
+                  effects: [],
+                  ownership: "borrowed",
+                  retain: false,
+                  builtin: false,
+                },
+              },
+            },
+          },
         },
         contract: {
           version: "1",
           numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
-          function: {
-            name: "subject",
-            symbol: "subject",
-            params: [{ name: "a", type: "u256" }],
-            returns: "u256",
-          },
+          function: { name: "subject", symbol: "subject", params: [], returns: "void" },
           optimize: { primary: "latency", secondary: "size" },
           effects: [],
           memory: { reads: [], writes: [], aliasing: [] },
@@ -396,11 +436,856 @@ test("a backend that cannot lower a wide number refuses it rather than narrowing
           definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
         },
         target: TARGET,
-        callable: new Set<string>(),
-        objectPath: directory,
-        candidate: "c1",
+        callable: new Set(["callee"]),
+        objectPath: join(directory, "subject.o"),
       }),
-    /cannot lower a u256/,
-    "the machine backend must refuse a wide number",
+    /no single-register width/,
+    "a wide argument to a compiled call must be refused rather than narrowed",
   );
 });
+
+/* ------------------------------------------------------------------------ */
+/* The machine backend                                                         */
+/* ------------------------------------------------------------------------ */
+
+test("the machine backend carries a wide operation out in registers and answers it", async () => {
+  // A function that takes nothing and returns the answer to one operation on
+  // two wide literals is the smallest thing that exercises the whole of what a
+  // wide number is in this backend: a literal written four limbs at a time, the
+  // operation itself, an answer written down to the frame, and the frame's
+  // thirty two bytes copied to the pointer the caller passed.
+  //
+  // The two literals are chosen so that every limb of an answer differs from
+  // every limb of the operands and the carries are real. A sum whose limbs do
+  // not carry is a sum that would also be right with the carry left out of every
+  // limb after the first, so an implementation that threaded the carry into
+  // nothing would pass on it.
+  //
+  // Every operation is here rather than one, because they are carried out in two
+  // different ways and one test of each is what says both are right: a sum and a
+  // difference read the carry the limb before them left, and the three bitwise
+  // combinations do not — a chain that read one for those would be a chain that
+  // added a carry to a value that never carried.
+  const left = BigInt(WIDE_LEFT);
+  const right = BigInt(WIDE_RIGHT);
+  const cases: { op: ArithOp; answer: bigint }[] = [
+    { op: "add", answer: (left + right) & MODULUS },
+    { op: "sub", answer: (left - right) & MODULUS },
+    { op: "mul", answer: (left * right) & MODULUS },
+    { op: "and", answer: left & right },
+    { op: "or", answer: left | right },
+    { op: "xor", answer: left ^ right },
+  ];
+  for (const { op, answer } of cases) {
+    const directory = await mkdtemp(join(tmpdir(), `blaze-u256-machine-${op}-`));
+    const runtime = await buildStandaloneRuntime(directory);
+    const object = join(directory, "subject.o");
+    const built = await buildMachineObject({
+      fn: wideOperationFunction(op),
+      contract: wideOperationContract(),
+      target: TARGET,
+      callable: new Set<string>(),
+      objectPath: object,
+    });
+    assert.ok(built.textSizeBytes > 0, `the object carries the code a ${op} is`);
+
+    await writeFile(
+      join(directory, "driver.c"),
+      [
+        "#include <stdio.h>",
+        "#include <stdint.h>",
+        "extern void subject(uint64_t *out);",
+        "int main(void) {",
+        "  uint64_t r[4];",
+        "  subject(r);",
+        '  printf("%016llx%016llx%016llx%016llx\\n", (unsigned long long)r[3], (unsigned long long)r[2], (unsigned long long)r[1], (unsigned long long)r[0]);',
+        "  return 0;",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const binary = join(directory, "subject");
+    const linked = run(
+      "gcc",
+      ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+      { timeoutMs: 180_000 },
+    );
+    assert.equal(linked.code, 0, `a wide ${op} must link:\n${linked.stderr}`);
+    const ran = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(ran.code, 0, `a wide ${op} must run:\n${ran.stderr}`);
+    assert.equal(ran.stdout.trim(), hexadecimal(answer), `the answer a wide ${op} gives`);
+  }
+});
+
+/** `function subject(): u256` whose body is one operation on two wide literals. */
+function wideOperationFunction(op: ArithOp): SemanticFunction {
+  const literal = (text: string): SemanticValue => ({ k: "const", type: U256, text });
+  const sum: SemanticValue = { k: "arith", type: U256, op, left: literal(WIDE_LEFT), right: literal(WIDE_RIGHT) };
+  return {
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: U256,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: { k: "return", value: sum },
+    },
+  };
+}
+
+function wideOperationContract(): FunctionContract {
+  return {
+    version: "1",
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    function: { name: "subject", symbol: "subject", params: [], returns: "u256" },
+    optimize: { primary: "latency", secondary: "size" },
+    effects: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    requires: [],
+    ensures: [],
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+}
+
+test("the machine backend reads a wide argument off the stack and answers on it", async () => {
+  // A wide argument is thirty-two bytes, which is more than the register file has
+  // to spare for one argument, so the convention hands it over on the stack as
+  // four consecutive words. This is the whole of that path: the words are read
+  // one at a time above the return address into the four limbs of a slot, and
+  // the answer is written back the same way.
+  //
+  // The argument is the left of a sum and the answer is put in the second
+  // argument, which is the only shape a wide parameter can be exercised in from
+  // outside: a caller in C passes by address and this backend has no way yet to
+  // hand a wide value to another function it compiled itself.
+  // The answer is spelled out from `BigInt` rather than written down here: the
+  // limbs of a sum with a carry out of the first are exactly the kind of thing a
+  // hand-written expectation gets wrong, and a test that carries the same mistake
+  // as the code it checks passes both ways.
+  const argumentLimbs = [0, 1, 2, 3]
+    .map((limb) => `0x${((BigInt(`0x${WIDE_ARGUMENT}`) >> BigInt(limb * 64)) & 0xffffffffffffffffn).toString(16)}ULL`)
+    .join(", ");
+  const addend = BigInt(`0x${WIDE_ARGUMENT}`);
+  const sum = (addend + BigInt(WIDE_ADDEND)) & MODULUS;
+  const expectedLimbs = [0, 1, 2, 3]
+    .map((limb) => `0x${((sum >> BigInt(limb * 64)) & 0xffffffffffffffffn).toString(16)}ULL`)
+    .join(", ");
+  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-argument-"));
+  const runtime = await buildStandaloneRuntime(directory);
+  const object = join(directory, "subject.o");
+  const built = await buildMachineObject({
+    fn: wideArgumentFunction(),
+    contract: wideArgumentContract(),
+    target: TARGET,
+    callable: new Set<string>(),
+    objectPath: object,
+  });
+  assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
+
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      // Declared by value, and not as a pointer to one: thirty-two bytes is past
+      // what the register file hands over for a single argument, so the
+      // convention passes such a value in memory and the compiler has to be told
+      // so to place it. A pointer here would be one register, and the callee
+      // would read four words of the frame that were never written.
+      "struct blaze_u256 { uint64_t limbs[4]; };",
+      "extern void subject(struct blaze_u256 addend, struct blaze_u256 *out);",
+      "int main(void) {",
+      `  const struct blaze_u256 a = {{${argumentLimbs}}};`,
+      "  struct blaze_u256 r;",
+      "  subject(a, &r);",
+      `  const uint64_t e[4] = {${expectedLimbs}};`,
+      "  int ok = 1;",
+      "  for (int i = 0; i < 4; i++) ok &= (r.limbs[i] == e[i]);",
+      '  printf("%s\\n", ok ? "right" : "wrong");',
+      "  return ok ? 0 : 1;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "subject");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.stdout.trim(), "right", `a wide argument must arrive whole: ${ran.stderr}`);
+});
+
+/**
+ * `function subject(addend: u256): u256`, whose answer is its argument plus a
+ * constant.
+ *
+ * The argument is read off the stack four words at a time and the answer goes
+ * back through the pointer the caller passed, which between them cover both
+ * halves of the convention for a value this size.
+ */
+function wideArgumentFunction(): SemanticFunction {
+  const addend: SemanticValue = { k: "local", type: U256, name: "addend" };
+  const sum: SemanticValue = {
+    k: "arith",
+    type: U256,
+    op: "add",
+    left: addend,
+    right: { k: "const", type: U256, text: WIDE_ADDEND },
+  };
+  return {
+    name: "subject",
+    symbol: "subject",
+    params: [{ kind: "value", name: "addend", mutable: false, type: U256 }],
+    returns: U256,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value: sum } },
+  };
+}
+
+function wideArgumentContract(): FunctionContract {
+  return {
+    version: "1",
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    function: {
+      name: "subject",
+      symbol: "subject",
+      params: [{ name: "addend", type: "u256" }],
+      returns: "u256",
+    },
+    optimize: { primary: "latency", secondary: "size" },
+    effects: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    requires: [],
+    ensures: [],
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+}
+
+test("the machine backend answers a wide complement, negation, comparison and choice", async () => {
+  // Four more shapes, and each is a different answer to the same question of
+  // where a wide value lives while it is being worked on.
+  //
+  // A complement and a negation are one instruction per limb over the registers.
+  // A comparison is a walk from the top limb down that leaves the registers. A
+  // choice is four conditional moves, which is the one shape that has to hold
+  // both sides at once.
+  const left = BigInt(`0x${WIDE_ARGUMENT}`);
+  const cases: { name: string; returns: SemanticType; value: SemanticValue; answer: bigint | boolean }[] = [
+    {
+      name: "complement",
+      returns: U256,
+      value: { k: "unary", type: U256, op: "bitNot", operand: { k: "const", type: U256, text: `0x${WIDE_ARGUMENT}` } },
+      answer: ~left & MODULUS,
+    },
+    {
+      name: "negation",
+      returns: U256,
+      value: { k: "unary", type: U256, op: "neg", operand: { k: "const", type: U256, text: `0x${WIDE_ARGUMENT}` } },
+      answer: (0n - left) & MODULUS,
+    },
+    {
+      name: "lesser",
+      returns: BOOL,
+      value: wideCompare("lt", BigInt(WIDE_RIGHT) - 1n),
+      answer: left < BigInt(WIDE_RIGHT) - 1n,
+    },
+    {
+      name: "greater",
+      returns: BOOL,
+      value: wideCompare("gt", BigInt(WIDE_RIGHT) + 1n),
+      answer: left > BigInt(WIDE_RIGHT) + 1n,
+    },
+    {
+      name: "equal",
+      returns: BOOL,
+      value: wideCompare("eq", left),
+      answer: true,
+    },
+    {
+      name: "chosen",
+      returns: U256,
+      value: {
+        k: "select",
+        type: U256,
+        condition: { k: "bool", type: BOOL, value: true },
+        then: { k: "const", type: U256, text: WIDE_LEFT },
+        otherwise: { k: "const", type: U256, text: WIDE_RIGHT },
+      },
+      answer: BigInt(WIDE_LEFT),
+    },
+  ];
+  for (const { name, returns, value, answer } of cases) {
+    const directory = await mkdtemp(join(tmpdir(), `blaze-u256-${name}-`));
+    const runtime = await buildStandaloneRuntime(directory);
+    const object = join(directory, "subject.o");
+    const built = await buildMachineObject({
+      fn: {
+        name: "subject",
+        symbol: "subject",
+        params: [],
+        returns,
+        requires: [],
+        ensures: [],
+        effects: [],
+        allocates: false,
+        prints: false,
+        readsArgv: false,
+        objects: {},
+        calls: [],
+        entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value } },
+      },
+      contract: singleResultContract(returns),
+      target: TARGET,
+      callable: new Set<string>(),
+      objectPath: object,
+    });
+    assert.ok(built.textSizeBytes > 0, `the object carries the code a ${name} is`);
+
+    const wide = returns === U256;
+    await writeFile(
+      join(directory, "driver.c"),
+      [
+        "#include <stdio.h>",
+        "#include <stdint.h>",
+        ...(wide ? ["struct blaze_u256 { uint64_t limbs[4]; };"] : []),
+        ...(wide ? ["extern void subject(struct blaze_u256 *out);"] : ["extern int subject(void);"]),
+        "int main(void) {",
+        ...(wide ? ["  struct blaze_u256 r;", "  subject(&r);"] : ["  int r = subject();"]),
+        ...(wide
+          ? [`  const uint64_t e[4] = {${expectedLimbsOf(answer as bigint)}};`,
+             "  int ok = 1;",
+             "  for (int i = 0; i < 4; i++) ok &= (r.limbs[i] == e[i]);",
+             '  printf("%s\\n", ok ? "right" : "wrong");',
+             "  return ok ? 0 : 1;"]
+          : [`  printf("%s\\n", r == ${(answer as boolean) ? 1 : 0} ? "right" : "wrong");`,
+             `  return r == ${(answer as boolean) ? 1 : 0} ? 0 : 1;`]),
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const binary = join(directory, "subject");
+    const linked = run(
+      "gcc",
+      ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+      { timeoutMs: 180_000 },
+    );
+    assert.equal(linked.code, 0, `a wide ${name} must link:\n${linked.stderr}`);
+    const ran = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(ran.stdout.trim(), "right", `a wide ${name} must answer correctly: ${ran.stderr}`);
+  }
+});
+
+/** A comparison between the standing argument and `other`. */
+function wideCompare(op: CompareOp, other: bigint): SemanticValue {
+  return {
+    k: "compare",
+    type: BOOL as TypeExpr,
+    op,
+    operand: U256,
+    left: { k: "const", type: U256, text: `0x${WIDE_ARGUMENT}` },
+    right: { k: "const", type: U256, text: `0x${other.toString(16)}` },
+  };
+}
+
+/** The four limbs of a wide number, spelled as C literals. */
+function expectedLimbsOf(value: bigint): string {
+  return [0, 1, 2, 3]
+    .map((limb) => `0x${((value >> BigInt(limb * 64)) & 0xffffffffffffffffn).toString(16)}ULL`)
+    .join(", ");
+}
+
+function singleResultContract(returns: SemanticType): FunctionContract {
+  return {
+    version: "1",
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    function: {
+      name: "subject",
+      symbol: "subject",
+      params: [],
+      returns: returns.kind === "primitive" ? returns.name : "u8",
+    },
+    optimize: { primary: "latency", secondary: "size" },
+    effects: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    requires: [],
+    ensures: [],
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+}
+
+/**
+ * The four limbs of a wide number, least significant first, as C literals.
+ *
+ * Derived from the same text the expectation is computed from, because writing
+ * the two out separately is how they come to disagree: a hand-written limb and
+ * a hand-written expectation of the same number is two chances to be wrong in
+ * ways that cancel out, and the test passes.
+ */
+function cLimbs(hex: string): string {
+  const digits = hex.replace(/^0x/, "");
+  return [0, 1, 2, 3]
+    .map((limb) => `0x${digits.slice((3 - limb) * 16, (4 - limb) * 16)}ULL`)
+    .join(", ");
+}
+
+/** A wide number written as the thirty-two hex digits its limbs spell. */
+function hexadecimal(value: bigint): string {
+  return value.toString(16).padStart(64, "0");
+}
+
+/* ------------------------------------------------------------------------ */
+/* The carry chain                                                            */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * `void carry(const uint64_t *a, const uint64_t *b, uint64_t *r)`, written in
+ * the machine encoder rather than in the backend, so that what is checked here
+ * is the encoding of a carry chain and nothing else: that `adc` and `sbb` are
+ * the opcodes they are taken to be, and that a memory operand with a
+ * displacement of eight, sixteen and twenty four bytes addresses the limb it
+ * means to.
+ */
+function carryChain(op: "add" | "sub"): Uint8Array {
+  const code = new Encoder();
+  // The left operand is brought into the working registers and the right is
+  // read as a memory operand, so the chain reads left to right and the order
+  // the two are written in is the order they are subtracted in.
+  for (let limb = 0; limb < 4; limb += 1) code.movRegMemSized(WORK[limb], mem(RDI, limb * 8), 8, false);
+  code.aluRegMem(op, WORK[0], mem(RSI, 0), true);
+  for (let limb = 1; limb < 4; limb += 1) {
+    code.aluRegMem(op === "add" ? "adc" : "sbb", WORK[limb], mem(RSI, limb * 8), true);
+  }
+  for (let limb = 0; limb < 4; limb += 1) code.movMemRegSized(mem(RDX, limb * 8), WORK[limb], 8);
+  return code.finish();
+}
+
+test("a carry chain the machine encoder writes is the arithmetic the language's bigints do", async () => {
+  // The chain is the whole of what a wide addition is once the operands have
+  // been brought into registers: one instruction for the first limb and one per
+  // limb after it, with no branch and no memory round trip between them. If the
+  // carry is not threaded, the answer differs from the right one in its high
+  // limbs — which is why this is checked against `BigInt` and not a literal
+  // written out by hand.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-carry-"));
+  const symbol = (name: string, op: "add" | "sub"): string => {
+    const hex = Array.from(carryChain(op))
+      .map((byte) => `0x${byte.toString(16).padStart(2, "0")}`)
+      .join(",");
+    return `__asm__(".globl ${name}\\n.type ${name},@function\\n${name}:\\n.byte ${hex}\\nret\\n.size ${name},.-${name}\\n");`;
+  };
+  const LIMBS_A = "0x0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98";
+  const LIMBS_B = "0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
+  await writeFile(
+    join(directory, "carry.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      symbol("blaze_test_add", "add"),
+      symbol("blaze_test_sub", "sub"),
+      "extern void blaze_test_add(const uint64_t *, const uint64_t *, uint64_t *);",
+      "extern void blaze_test_sub(const uint64_t *, const uint64_t *, uint64_t *);",
+      "int main(void) {",
+      `  const uint64_t a[4] = {${cLimbs(LIMBS_A)}};`,
+      `  const uint64_t b[4] = {${cLimbs(LIMBS_B)}};`,
+      "  uint64_t r[4];",
+      "  blaze_test_add(a, b, r);",
+      '  printf("add %016llx%016llx%016llx%016llx\\n", (unsigned long long)r[3], (unsigned long long)r[2], (unsigned long long)r[1], (unsigned long long)r[0]);',
+      "  blaze_test_sub(a, b, r);",
+      '  printf("sub %016llx%016llx%016llx%016llx\\n", (unsigned long long)r[3], (unsigned long long)r[2], (unsigned long long)r[1], (unsigned long long)r[0]);',
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "carry");
+  const built = run("gcc", ["-std=c11", "-O1", join(directory, "carry.c"), "-o", binary], { timeoutMs: 180_000 });
+  assert.equal(built.code, 0, `the encoded chain must assemble:\n${built.stderr}`);
+
+  const left = BigInt(LIMBS_A);
+  const right = BigInt(LIMBS_B);
+  const answers = run(binary, [], { timeoutMs: 60_000 }).stdout.trim().split("\n");
+  assert.deepEqual(answers, [
+    `add ${hexadecimal((left + right) & MODULUS)}`,
+    `sub ${hexadecimal((left - right) & MODULUS)}`,
+  ]);
+});
+
+test("the machine backend moves a wide number by a whole number of bits", async () => {
+  // A shift is the one operation that is not a carry chain: bits leave one limb
+  // and arrive in its neighbour, and the amount is a value rather than a flag.
+  // These amounts are the ones that break a shift written limb at a time —
+  // zero, one, a whole limb, one either side of a whole limb, the two highest
+  // bits, and every bit position across the top limb.
+  const M = MODULUS;
+  const value = BigInt(`0x${WIDE_ARGUMENT}`);
+  const cases: { op: "shl" | "shr"; by: number; answer: bigint }[] = [
+    { op: "shl", by: 0, answer: value },
+    { op: "shl", by: 1, answer: (value << 1n) & M },
+    { op: "shl", by: 63, answer: (value << 63n) & M },
+    { op: "shl", by: 64, answer: (value << 64n) & M },
+    { op: "shl", by: 65, answer: (value << 65n) & M },
+    { op: "shl", by: 127, answer: (value << 127n) & M },
+    { op: "shl", by: 128, answer: (value << 128n) & M },
+    { op: "shl", by: 191, answer: (value << 191n) & M },
+    { op: "shl", by: 192, answer: (value << 192n) & M },
+    { op: "shl", by: 255, answer: (value << 255n) & M },
+    { op: "shr", by: 0, answer: value },
+    { op: "shr", by: 1, answer: value >> 1n },
+    { op: "shr", by: 63, answer: value >> 63n },
+    { op: "shr", by: 64, answer: value >> 64n },
+    { op: "shr", by: 65, answer: value >> 65n },
+    { op: "shr", by: 127, answer: value >> 127n },
+    { op: "shr", by: 128, answer: value >> 128n },
+    { op: "shr", by: 191, answer: value >> 191n },
+    { op: "shr", by: 192, answer: value >> 192n },
+    { op: "shr", by: 255, answer: value >> 255n },
+  ];
+  for (const { op, by, answer } of cases) {
+    const name = `${op}${by}`;
+    const directory = await mkdtemp(join(tmpdir(), `blaze-u256-${name}-`));
+    const runtime = await buildStandaloneRuntime(directory);
+    const object = join(directory, "subject.o");
+    const built = await buildMachineObject({
+      fn: {
+        name: "subject",
+        symbol: "subject",
+        params: [],
+        returns: U256,
+        requires: [],
+        ensures: [],
+        effects: [],
+        allocates: false,
+        prints: false,
+        readsArgv: false,
+        objects: {},
+        calls: [],
+        entry: {
+          id: "entry",
+          statements: [],
+          releases: [],
+          terminator: {
+            k: "return",
+            value: {
+              k: "arith",
+              type: U256,
+              op,
+              left: { k: "const", type: U256, text: `0x${WIDE_ARGUMENT}` },
+              right: { k: "const", type: { kind: "primitive", name: "u32" }, text: String(by) },
+            },
+          },
+        },
+      },
+      contract: singleResultContract(U256),
+      target: TARGET,
+      callable: new Set<string>(),
+      objectPath: object,
+    });
+    assert.ok(built.textSizeBytes > 0, `the object carries the code a ${name} is`);
+    await writeFile(
+      join(directory, "driver.c"),
+      [
+        "#include <stdio.h>",
+        "#include <stdint.h>",
+        "struct blaze_u256 { uint64_t limbs[4]; };",
+        "extern void subject(struct blaze_u256 *out);",
+        "int main(void) {",
+        "  struct blaze_u256 r;",
+        "  subject(&r);",
+        `  const uint64_t e[4] = {${expectedLimbsOf(answer)}};`,
+        "  int ok = 1;",
+        "  for (int i = 0; i < 4; i++) ok &= (r.limbs[i] == e[i]);",
+        '  printf("%s\\n", ok ? "right" : "wrong");',
+        "  return ok ? 0 : 1;",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const binary = join(directory, "subject");
+    const linked = run(
+      "gcc",
+      ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+      { timeoutMs: 180_000 },
+    );
+    assert.equal(linked.code, 0, `a wide ${name} must link:\n${linked.stderr}`);
+    const ran = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(ran.stdout.trim(), "right", `a wide ${name} must answer correctly: ${ran.stderr}`);
+  }
+});
+
+/* ------------------------------------------------------------------------ */
+/* One vector set, two backends                                              */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * The pairs every backend is asked the same questions about.
+ *
+ * The set is chosen for what it makes a lowering get wrong rather than for
+ * covering the space: a pair whose limbs are all distinct so that a limb left at
+ * the wrong index cannot pass, a pair that carries out of every limb so that a
+ * carry threaded into only the first limb cannot pass, and the two boundaries a
+ * wide number is most likely to be mishandled at — all ones and one.
+ */
+const DIFFERENTIAL_VECTORS: readonly (readonly [string, string])[] = [
+  ["0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98", "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef"],
+  ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "0000000000000000000000000000000000000000000000000000000000000001"],
+  ["ffffffffffffffff0000000000000000ffffffffffffffff0000000000000000", "0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff"],
+  ["0000000000000000000000000000000000000000000000000000000000000000", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+];
+
+/**
+ * The operations both backends are asked, each with the answer the language's
+ * own `BigInt` gives for the same two numbers.
+ *
+ * Division and the rest are left out: they are the one path where both backends
+ * call the same kernel, so a vector set including them compares the kernel
+ * against itself and says nothing about either backend's own lowering.
+ */
+const DIFFERENTIAL_OPS = ["add", "sub", "mul", "and", "or", "xor", "shl", "shr"] as const;
+
+/** The amount both shifts are asked for, as a machine number. */
+const SHIFT_COUNT = 65n;
+type DifferentialOp = (typeof DIFFERENTIAL_OPS)[number];
+
+const DIFFERENTIAL_ANSWER: Record<DifferentialOp, (left: bigint, right: bigint) => bigint> = {
+  add: (left, right) => left + right,
+  sub: (left, right) => left - right,
+  mul: (left, right) => left * right,
+  and: (left, right) => left & right,
+  or: (left, right) => left | right,
+  xor: (left, right) => left ^ right,
+  // The count of a shift is the number the source wrote, which is a scalar and
+  // not a whole number of the width being shifted — `65` is past the first limb
+  // and before the second, so every limb of the answer comes from a different
+  // limb of the input and a backend that shifted one limb and stopped the wrong
+  // way cannot pass.
+  shl: (left) => (left << SHIFT_COUNT) & MODULUS,
+  // The types are unsigned, so this is a zero fill at the top.
+  shr: (left) => left >> SHIFT_COUNT,
+};
+
+test("a shift by a whole number is refused rather than answered", async () => {
+  // The count of a shift is the number of bits to move, which is a machine
+  // number. The IR does not stop a whole number from being written there, and
+  // both backends used to take the first eight bytes of it as the count — the C
+  // backend by asking its writer for a scalar expression of a value that is a
+  // whole number, which produced a compound literal where an integer belongs
+  // and did not compile, and the machine backend by reading the number as one
+  // register, which compiled, ran, and answered the low half of the number
+  // being shifted.
+  //
+  // The second is the reason this is tested rather than fixed in the validator:
+  // it is a build that reported success and gave a wrong answer, which is the
+  // one failure this compiler is built to make impossible.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-count-"));
+  const refused = { k: "arith", type: U, op: "shl", left: { k: "const", type: U, text: "0x01" }, right: { k: "const", type: U, text: "0x08" } } as const;
+  await assert.rejects(
+    () =>
+      buildMachineObject({
+        fn: {
+          name: "subject", symbol: "subject", params: [], returns: U, requires: [], ensures: [],
+          effects: [], allocates: false, prints: false, readsArgv: false, objects: {}, calls: [],
+          entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value: refused } },
+        },
+        contract: singleResultContract(U),
+        target: TARGET,
+        callable: new Set<string>(),
+        objectPath: join(directory, "subject.o"),
+      }),
+    /number of bits to move/,
+    "the machine backend must refuse a wide shift count rather than read one",
+  );
+  assert.throws(
+    () => generateFunctionC({
+      name: "subject", symbol: "subject", params: [], returns: U, requires: [], ensures: [],
+      effects: [], allocates: false, prints: false, readsArgv: false, objects: {}, calls: [],
+      entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value: refused } },
+    }),
+    /number of bits to move/,
+    "the C backend must refuse a wide shift count rather than coerce one",
+  );
+});
+
+test("the C and machine backends answer one vector set the same way", async () => {
+  // Two backends that lower the same IR to two different languages will drift,
+  // and the drift is invisible to a test that checks each against a literal: the
+  // literal can be wrong in the same direction as the code. Checking both
+  // against `BigInt` over the same vectors says something neither can say alone
+  // — that the two implementations of carry, borrow and ordering agree, and that
+  // both agree with the language's own answer for the same numbers.
+  //
+  // This is the guard the WebAssembly backend has to pass when it is written.
+  // The wasm module is not built here because it cannot carry a wide number yet,
+  // and a test that skipped it would be a test that quietly stopped checking the
+  // third backend rather than one that reported its absence.
+  for (const [leftText, rightText] of DIFFERENTIAL_VECTORS) {
+    for (const op of DIFFERENTIAL_OPS) {
+      const left = BigInt(`0x${leftText}`);
+      const right = BigInt(`0x${rightText}`);
+      const expected = (DIFFERENTIAL_ANSWER[op](left, right)) & MODULUS;
+      // The C runtime's formatter writes the shortest form of a whole number, so
+      // `1` comes back as one digit where a machine `%016llx` writes sixteen. The
+      // number is the same either way and the comparison is about the number, so
+      // both are read as the same fixed width.
+      const viaC = (await cBackendAnswer(op, leftText, rightText)).padStart(64, "0");
+      const viaMachine = await machineBackendAnswer(op, leftText, rightText);
+      assert.equal(viaC, hexadecimal(expected), `the C backend's ${op} of ${leftText} and ${rightText}`);
+      assert.equal(viaMachine, hexadecimal(expected), `the machine backend's ${op} of ${leftText} and ${rightText}`);
+    }
+  }
+});
+
+/** One operation on two wide literals, lowered to C, compiled, and run. */
+/** The right operand of an operation: a whole number, or a shift's scalar count. */
+function rightOperand(op: DifferentialOp, wide: SemanticType, text: string): SemanticValue {
+  return op === "shl" || op === "shr"
+    ? { k: "const", type: { kind: "primitive", name: "usize" }, text: SHIFT_COUNT.toString() }
+    : { k: "const", type: wide, text: `0x${text}` };
+}
+
+async function cBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {
+  const U = U256;
+  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-diff-c-"));
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("danger"), "utf8");
+  const subject = generateFunctionC({
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: U,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: { k: "arith", type: U, op, left: { k: "const", type: U, text: `0x${leftText}` }, right: rightOperand(op, U, rightText) },
+      },
+    },
+  });
+  await writeFile(
+    join(directory, "wide.c"),
+    [
+      "#include <stdio.h>",
+      subject,
+      "int main(void) {",
+      "  blaze_u256 r = subject();",
+      "  unsigned char text[80];",
+      `  (void)${RUNTIME_NAME}_u256_format(&r, 16, text, sizeof text);`,
+      '  printf("%s\\n", (const char *)text);',
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "wide");
+  const built = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "wide.c"), join(directory, "runtime.c"), "-o", binary],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(built.code, 0, `the C must build:\n${built.stderr}`);
+  return run(binary, [], { timeoutMs: 60_000 }).stdout.trim();
+}
+
+/** The same operation, lowered to machine code, linked and run. */
+async function machineBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-diff-m-"));
+  const runtime = await buildStandaloneRuntime(directory);
+  const object = join(directory, "subject.o");
+  const built = await buildMachineObject({
+    fn: {
+      name: "subject",
+      symbol: "subject",
+      params: [],
+      returns: U256,
+      requires: [],
+      ensures: [],
+      effects: [],
+      allocates: false,
+      prints: false,
+      readsArgv: false,
+      objects: {},
+      calls: [],
+      entry: {
+        id: "entry",
+        statements: [],
+        releases: [],
+        terminator: {
+          k: "return",
+          value: {
+            k: "arith",
+            type: U256,
+            op,
+            left: { k: "const", type: U256, text: `0x${leftText}` },
+            right: rightOperand(op, U256, rightText),
+          },
+        },
+      },
+    },
+    contract: singleResultContract(U256),
+    target: TARGET,
+    callable: new Set<string>(),
+    objectPath: object,
+  });
+  assert.ok(built.textSizeBytes > 0, "the object carries the code");
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      "struct blaze_u256 { uint64_t limbs[4]; };",
+      "extern void subject(struct blaze_u256 *out);",
+      "int main(void) {",
+      "  struct blaze_u256 r;",
+      "  subject(&r);",
+      '  printf("%016llx%016llx%016llx%016llx\\n", (unsigned long long)r.limbs[3], (unsigned long long)r.limbs[2], (unsigned long long)r.limbs[1], (unsigned long long)r.limbs[0]);',
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "subject");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+  return run(binary, [], { timeoutMs: 60_000 }).stdout.trim();
+}

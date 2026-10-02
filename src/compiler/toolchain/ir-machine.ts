@@ -21,6 +21,8 @@ import { stat, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
+import type { Condition } from "./x86.ts";
+import { integerLiteral } from "./c-names.ts";
 import { ARGV_LENGTH, BUILTINS } from "../semantics/builtins.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import {
@@ -33,6 +35,9 @@ import {
   isReference,
   isTextType,
   isWide,
+  isWideType,
+  WIDE_LIMBS,
+  LIMB_BYTES,
   isUnsigned,
   slotType,
   typeEquals,
@@ -206,6 +211,41 @@ const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14];
  */
 const OBJECT_POINTER = R15;
 
+/**
+ * The four general registers a wide number is carried in, least significant
+ * limb first.
+ *
+ * They are four of the six the convention does not ask a callee to preserve, so
+ * a value in them is gone after a call — which is why a wide number whose life
+ * reaches past one lives in the frame and is read into these when it is used.
+ * They start at `r8` because `rdi` and `rsi` are argument registers: a value
+ * sitting in one of those when a call is made has it written over.
+ *
+ * The accumulator is not among them and could not be. `rax` is where every other
+ * value the body computes is passed, and a limb written there would be
+ * indistinguishable from a scalar the body had just produced.
+ */
+const WIDE_WORK: readonly number[] = [R8, R9, R10, R11];
+
+/**
+ * How a comparison of two whole numbers is spelled as a condition the machine
+ * reads flags with.
+ *
+ * The unsigned forms are the ones a whole number needs: every whole number the
+ * language has is read as unsigned here unless its own type is signed, and a
+ * limb of a wide number is an unsigned sixty-four bit value whatever the wide
+ * type is called.
+ */
+const WIDE_CONDITION: Record<CompareOp, Condition> = {
+  eq: "e",
+  ne: "ne",
+  lt: "b",
+  le: "be",
+  gt: "a",
+  ge: "ae",
+};
+
+
 
 /**
  * The vector registers a callee leaves as it found them, which are the ones a
@@ -297,25 +337,24 @@ const MATH_LIBRARY: Record<string, string> = {
 
 /** How wide a value of this type is, which is the width a slot holds it at. */
 /**
- * How wide a value of this type is, which is the width a slot holds it at.
+ * How wide a value of this type is, in the one register a scalar is carried in.
  *
- * A wide number is refused here rather than measured, and this is the one place
- * the refusal belongs. `Width` is 1, 2, 4 or 8, and every read, write and frame
- * slot in this backend is derived from it: a value of a type this returns 8 for
- * is loaded eight bytes at a time, stored eight bytes at a time, and given an
- * eight byte slot. A `u256` is thirty two bytes of four limbs, so answering 8
- * here would not be a narrow answer — it would be a frame slot a quarter of the
- * size of the value written into it, and the top three limbs of every wide
- * number would be whatever the frame held next to it.
+ * A wide number has no answer here, and this function says so rather than
+ * measuring one. `Width` is 1, 2, 4 or 8 — the width of one register — and every
+ * scalar read, write and sign-extension in this backend is derived from it. A
+ * `u256` is four limbs, so there is no width at which one register carries it:
+ * answering 8 would not be a narrow answer, it would be a claim that one limb is
+ * the value, and a read or a write built on it would move a quarter of the
+ * number and leave the rest of the register holding whatever was there.
  *
- * Refusing is what keeps that from being reachable. Nothing below this function
- * has to know what a wide number is, because no value of one ever reaches it.
+ * `frameBytes` is what reserves room for a value, and it answers thirty two for
+ * a wide number, so a value written down has somewhere for all four limbs to go.
  */
 function widthOf(type: SemanticType): Width {
   if (type.kind === "primitive" && isWide(type.name)) {
     throw machineError(
-      `this backend cannot lower a ${type.name}`,
-      "a wide number is four 64 bit limbs laid out in memory, and this backend binds every value to one machine register or one eight byte slot; lower this function to the c backend, where a wide operation is a call into the wide kernel",
+      `a ${type.name} has no single-register width`,
+      "a wide number is four 64 bit limbs and this is the width one register carries a value at; a wide number is measured in frame bytes and carried in limb registers, not in the accumulator",
     );
   }
   if (type.kind !== "primitive") return 8;
@@ -334,6 +373,21 @@ function widthOf(type: SemanticType): Width {
     default:
       return 8;
   }
+}
+
+/**
+ * How many bytes a value of this type occupies in the frame.
+ *
+ * This is `widthOf` for everything a register can carry and thirty two for a
+ * wide number, which is four limbs of eight bytes. Every reservation of frame
+ * room goes through here rather than through `widthOf`, because a slot that
+ * answers eight bytes for a wide number is a quarter of the value written into
+ * it: the three limbs above the first would be whatever the frame held beside
+ * them, and the value read back would be a number the program never wrote.
+ */
+function frameBytes(type: SemanticType): number {
+  if (type.kind === "primitive" && isWide(type.name)) return WIDE_LIMBS[type.name] * LIMB_BYTES;
+  return widthOf(type);
 }
 
 /** Whether a whole number of this type is read as signed. */
@@ -1066,6 +1120,19 @@ class Machine {
   private pinnedVectors: VectorSave[] = [];
   /** The register an object being filled lives in, when this function fills one. */
   private objectRegister: number | null = null;
+  /**
+   * Where a wide answer is put down before it is copied to the caller, and where
+   * the pointer the caller gave for it was kept.
+   *
+   * A wide number is returned through memory, so the convention passes the
+   * address to write it at in `rdi` — the first argument register, which the body
+   * is then free to overwrite. It is put in a slot on entry and read back in the
+   * epilogue, and the four limbs are written to a slot of their own rather than
+   * straight through the pointer, so that the answer is computed and finished
+   * before anything is copied anywhere.
+   */
+  private wideResult: Held | null = null;
+  private wideSret: Held | null = null;
   /** Whether the body calls anything, which is what the frame's size answers for. */
   private mayCall = false;
   /** The arguments that arrived on the stack, and where each one's address is written. */
@@ -1132,7 +1199,7 @@ class Machine {
     // which is the first slot's own address, and it is never read — every use of
     // a held value goes through `load`, `store` or `scratchFrom`, and those
     // three read the register.
-    const offset = register === null ? this.reserve(widthOf(type)) : 0;
+    const offset = register === null ? this.reserve(frameBytes(type)) : 0;
     const held: Held = { offset, type, register };
     this.slots.set(emitted, held);
     return held;
@@ -1177,7 +1244,7 @@ class Machine {
   private reserveSlot(type: SemanticType, prefix: string): Held {
     this.temporaries += 1;
     const name = this.names.reserve(`${prefix}_${this.temporaries}`);
-    const offset = this.spareSlots.pop() ?? this.reserve(Math.max(widthOf(type), 8));
+    const offset = this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8));
     const held: Held = { offset, type, register: null };
     this.slots.set(name, held);
     return held;
@@ -1425,6 +1492,35 @@ class Machine {
      * of it shares their register and neither pays for it.
      */
     const assign = (name: string, type: SemanticType): void => {
+      // A wide number is not pinned, and this is where that is decided rather
+      // than worked around further down. Everything this function does below is
+      // about one register: `pinned` names a single register, the prologue
+      // pushes one per pinned name, and a load and a store move one. Handing a
+      // wide number one of those would give a thirty-two byte value one
+      // register, and the three limbs above the first would be whatever the
+      // register's neighbours held — a wrong answer from a build that reported
+      // success. It is left in the frame, where all four limbs have somewhere to
+      // be.
+      //
+      // The register file is the other half of the answer, and it is worth
+      // stating because the obvious way to give one of these four registers runs
+      // out at the first call. `CALLEE_SAVED` is `rbx`, `r12`, `r13` and `r14` —
+      // four registers, and a wide number is four limbs. One wide name that has to
+      // survive a call would therefore take the whole preserved file and leave
+      // nothing for any other name that does, so a function holding a wide value
+      // and a scalar live across one call could not have both in registers at
+      // once. `CALLER_SAVED` has six and would fit one wide name with two to
+      // spare, but nothing in it survives a call at all.
+      //
+      // So there is no pool a wide name can be pinned into that does not cost
+      // more than it saves, and it is left in the frame. It is read into
+      // `WIDE_WORK` when an operation needs it and written back when one is done,
+      // which is the same traffic a pinned scalar would avoid and is paid once
+      // per operation rather than once per access. Pinning one would only be
+      // worth it for a name read many times between writes, and the answer to
+      // that is to hoist the expression, not to spend the preserved file on one
+      // value.
+      if (isWideType(type)) return;
       const facts = liveness.get(name);
       if (facts === undefined || facts.live.length === 0) return;
       const live = facts.live;
@@ -1559,6 +1655,10 @@ class Machine {
     this.names.enter();
     this.block(this.fn.entry);
     this.code.bind(this.epilogue);
+    // A wide answer is copied to where the caller said it wanted it before the
+    // frame is given back, because the pointer to that place was read out of
+    // `rdi` on entry and the body has had every use of `rdi` since.
+    this.returnWide();
     const bytes = this.frameBytes();
     this.code.epilogue(this.pinnedRegisters, this.pinnedVectors, bytes);
     // An argument that arrived on the stack is above the return address, which
@@ -1574,6 +1674,23 @@ class Machine {
     // frame is as large as what the body reserved.
     else this.code.unwriteSub(frameAt);
     return this.code.finish();
+  }
+
+  /**
+   * The four limbs of a wide answer, copied to where the caller said it wanted
+   * them.
+   *
+   * The address is read back into `rcx` rather than left in a slot through the
+   * copy, because four reads of a slot is four reads of the same address where
+   * one register holding it is one read and three register-to-memory moves.
+   */
+  private returnWide(): void {
+    if (this.wideResult === null || this.wideSret === null) return;
+    this.wideLoad(this.wideResult);
+    this.code.movRegMemSized(RCX, frame(this.wideSret.offset), 8, false);
+    for (let limb = 0; limb < this.limbsOf(this.fn.returns); limb += 1) {
+      this.code.movMemRegSized(mem(RCX, limb * LIMB_BYTES), WIDE_WORK[limb], 8);
+    }
   }
 
   /**
@@ -1621,30 +1738,59 @@ class Machine {
    * and a move into a register another parameter has not been read out of yet
    * destroys that argument.
    */
-  private arrivals(): { register: number | null; stack: number }[] {
+  private arrivals(): { register: number | null; stack: number; limbs: number }[] {
     let general = 0;
     let floating = 0;
     let stack = 0;
+    // Whether the registers have run out, which is not the same question as
+    // whether anything has gone on the stack. The two came apart when a wide
+    // number arrived: one is handed over in memory because it is too big for the
+    // register file, and the other because there was nowhere left to put it. Only
+    // the second means that everything after it is in memory too, and conflating
+    // the two put every argument after a wide number on the stack, where the
+    // convention hands those in registers exactly as it otherwise would.
+    let exhausted = false;
     return this.fn.params.map((parameter) => {
       const type = slotType(parameter);
-      const register = stack > 0 ? undefined : isFloat(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+      // A wide number is thirty-two bytes, which is more than the register file
+      // has to spare for one argument, and the convention's answer to a value of
+      // that size is to hand it over on the stack, in four eight-byte slots.
+      //
+      // It starts on a sixteen byte boundary, because a value that size is what
+      // the convention aligns most strictly and a slot is skipped to give it one.
+      if (isWideType(type)) {
+        if (stack % 2 !== 0) stack += 1;
+        const here = stack;
+        stack += this.limbsOf(type);
+        return { register: null, stack: here, limbs: this.limbsOf(type) };
+      }
+      const register =
+        exhausted ? undefined : isFloat(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
       if (register === undefined) {
+        exhausted = true;
         const here = stack;
         stack += 1;
-        return { register: null, stack: here };
+        return { register: null, stack: here, limbs: 1 };
       }
       if (isFloat(type)) floating += 1;
       else general += 1;
-      return { register, stack: -1 };
+      return { register, stack: -1, limbs: 1 };
     });
   }
-
   /**
    * The arguments as they arrive: the first six whole numbers and the first
    * eight floats come in registers, and the rest are on the stack above the
    * return address.
    */
   private parameters(): void {
+    // A wide answer is returned through memory, and the pointer to where it goes
+    // arrives in `rdi` ahead of every other argument, so it is taken out of the
+    // register the body is about to use for something else.
+    if (isWideType(this.fn.returns)) {
+      this.wideResult = this.reserveSlot(this.fn.returns, "blaze_wide_result");
+      this.wideSret = this.reserveSlot(POINTER, "blaze_wide_sret");
+      this.code.movMemRegSized(frame(this.wideSret.offset), RDI, 8);
+    }
     const arrivals = this.arrivals();
     for (const [at, parameter] of this.fn.params.entries()) {
       const arrival = arrivals[at];
@@ -1671,6 +1817,19 @@ class Machine {
         if (held.register === register) continue;
         if (isFloat(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
         else this.code.movRegReg(held.register, register);
+        continue;
+      }
+      if (register === null && isWideType(type)) {
+        // A wide argument arrives as four consecutive words above the return
+        // address, and each of them is copied into the limb of the slot that
+        // reads at that place. The words are read one at a time through the
+        // accumulator rather than as one copy, because the slot is thirty-two
+        // bytes and there is no instruction that moves thirty-two bytes from one
+        // place to another.
+        for (let limb = 0; limb < arrival.limbs; limb += 1) {
+          this.code.movRegMemSized(RAX, this.stackArgument(8 + (arrival.stack + limb) * 8), 8, false);
+          this.code.movMemRegSized(this.limbOf(offset, limb), RAX, 8);
+        }
         continue;
       }
       if (register === null) {
@@ -1868,11 +2027,24 @@ class Machine {
           this.store(this.bind(statement.slot.name, type));
           return;
         }
+        // A wide number is not in the accumulator, so it is written down from
+        // the working registers rather than from `rax`.
+        if (isWideType(type)) {
+          this.wideValue(statement.value);
+          this.wideStore(this.bind(statement.slot.name, type));
+          return;
+        }
         this.at(statement.value, type);
         this.store(this.bind(statement.slot.name, type));
         return;
       }
       case "set":
+        const held = this.slot(statement.name);
+        if (isWideType(held.type)) {
+          this.wideValue(statement.value);
+          this.wideStore(held);
+          return;
+        }
         this.assign(statement.name, statement.op, statement.value);
         return;
       case "setElement": {
@@ -2818,7 +2990,17 @@ class Machine {
   private terminator(terminator: SemanticTerminator): void {
     if (terminator.k === "next") return;
     if (terminator.k === "return") {
-      if (terminator.value !== null) this.at(terminator.value, this.fn.returns);
+      // A wide number is returned through a pointer the caller passes rather
+      // than in a register, because four limbs do not fit in the two registers
+      // the convention returns a whole number in. The pointer was taken out of
+      // `rdi` on entry and put in a slot of the frame, so that whatever the body
+      // does to `rdi` — which is everything, it is the first argument register
+      // — the epilogue still knows where the answer goes.
+      if (isWideType(this.fn.returns) && terminator.value !== null) {
+        this.wideValue(terminator.value);
+        this.wideStore(this.wideResult ?? this.bind(this.fn.name, this.fn.returns));
+      }
+      if (terminator.value !== null && !isWideType(this.fn.returns)) this.at(terminator.value, this.fn.returns);
       this.code.jmp(this.epilogue);
       return;
     }
@@ -2918,12 +3100,20 @@ class Machine {
         this.code.movzxReg8(RAX, RAX);
         return;
       case "unary":
+        if (isWideType(value.type)) {
+          this.wideUnary(value);
+          return;
+        }
         this.unary(value);
         return;
       case "arith":
         this.arithmetic(value);
         return;
       case "compare":
+        if (isWideType(value.operand)) {
+          this.wideCompare(value);
+          return;
+        }
         this.comparison(value);
         return;
       case "logical":
@@ -2933,6 +3123,10 @@ class Machine {
         this.coalesce(value);
         return;
       case "select":
+        if (isWideType(value.type)) {
+          this.wideSelect(value);
+          return;
+        }
         this.select(value);
         return;
       case "buffer":
@@ -3325,6 +3519,14 @@ class Machine {
   }
 
   private arithmetic(value: SemanticValue & { k: "arith" }): void {
+    // A wide number is carried out in four registers rather than in the
+    // accumulator, and none of what follows below is written for that: it moves
+    // one value through one register and adds it to another, which is not what a
+    // number of four limbs is. So the wide case is answered before any of it.
+    if (isWideType(value.type)) {
+      this.wideArithmetic(value);
+      return;
+    }
     const type = value.type;
     if (value.op === "concat") {
       this.concat(value.left, value.right, type);
@@ -3399,6 +3601,387 @@ class Machine {
     this.scratchFrom(right);
     this.apply(value.op, type);
     this.normalizeArithmetic(type);
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Wide numbers                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  /** The address of one limb of a wide number held in the frame. */
+  private limbOf(offset: number, limb: number): Memory {
+    return frame(offset + limb * LIMB_BYTES);
+  }
+
+  /** How many limbs a wide number of this type is written as. */
+  private limbsOf(type: SemanticType): number {
+    if (type.kind !== "primitive") return 0;
+    return WIDE_LIMBS[type.name] ?? 0;
+  }
+
+  /**
+   * Four limbs brought into the working registers from a slot of the frame.
+   *
+   * This is a wide number's answer to `load`, and the one thing about it worth
+   * saying is that the accumulator is left alone: a wide value is not in `rax`
+   * and nothing downstream may read it from there.
+   */
+  private wideLoad(held: Held): void {
+    const limbs = this.limbsOf(held.type);
+    for (let limb = 0; limb < limbs; limb += 1) {
+      this.code.movRegMemSized(WIDE_WORK[limb], this.limbOf(held.offset, limb), 8, false);
+    }
+  }
+
+  /**
+   * The four limbs in the working registers written down to a slot of the frame,
+   * which is a wide number's answer to `store`.
+   */
+  private wideStore(held: Held): void {
+    const limbs = this.limbsOf(held.type);
+    for (let limb = 0; limb < limbs; limb += 1) {
+      this.code.movMemRegSized(this.limbOf(held.offset, limb), WIDE_WORK[limb], 8);
+    }
+  }
+
+  /**
+   * A wide number written into the working registers.
+   *
+   * A literal is one instruction per limb, because a limb is a whole machine
+   * word and `mov` writes one: a constant wider than a word is not one
+   * instruction at any width, and the only question is how many.
+   */
+  private wideValue(value: SemanticValue): void {
+    switch (value.k) {
+      case "const": {
+        const limbs = this.limbsOf(value.type);
+        const whole = integerLiteral(value.text) ?? 0n;
+        for (let limb = 0; limb < limbs; limb += 1) {
+          this.code.movRegImm(WIDE_WORK[limb], (whole >> BigInt(limb * 64)) & 0xffffffffffffffffn);
+        }
+        return;
+      }
+      case "local":
+        this.wideLoad(this.slot(value.name));
+        return;
+      case "arith":
+        this.wideArithmetic(value);
+        return;
+      case "unary":
+        this.wideUnary(value);
+        return;
+      case "select":
+        this.wideSelect(value);
+        return;
+      default:
+        throw machineError(
+          `a wide number is not built from a ${value.k}`,
+          "a wide number is a literal, a name, or the answer to an operation on two of those, and nothing else yet",
+        );
+    }
+  }
+
+  /**
+   * An operation on two wide numbers, carried out in the working registers.
+   *
+   * The left side is written to a slot of the frame and the right side is left
+   * in the working registers, and the operation is then a chain over the right
+   * reading the left out of memory a limb at a time. That is what makes a sum
+   * seven instructions rather than a call with three addresses prepared for it:
+   * the carry travels in the flags between one limb and the next, and nothing is
+   * written down and read back in the middle of it.
+   *
+   * A product and a quotient are the two the machine has no instruction for, and
+   * they are the kernel's rather than this file's — which is why they are the
+   * only two below that are not written here.
+   */
+  private wideArithmetic(value: SemanticValue & { k: "arith" }): void {
+    const type = value.type;
+    const limbs = this.limbsOf(type);
+    if (value.op === "mul" || value.op === "div") {
+      this.wideKernel(value.op, value.left, value.right, type);
+      return;
+    }
+    if (value.op === "shl" || value.op === "shr") {
+      this.wideShift(value, value.op);
+      return;
+    }
+    const plain =
+      value.op === "add" || value.op === "sub" || value.op === "and" || value.op === "or" || value.op === "xor"
+        ? value.op
+        : null;
+    if (plain === null) {
+      throw machineError(
+        `a wide ${value.op} is not written in this backend`,
+        "a wide number adds, subtracts and combines bitwise here, and multiplies and divides through the wide kernel",
+      );
+    }
+    // The right side is answered first and written to a slot, and the left is
+    // left in the working registers. That is the order the rest of this backend
+    // evaluates an operation in — the answer of the right is not the answer, and
+    // the one that is has to be last in the registers — and it is what makes a
+    // difference and a quotient the left taken from the right rather than the
+    // other way round. An addition and a product would not notice the two being
+    // the wrong way about, which is the reason this is the order and not
+    // whichever happened to be written first.
+    //
+    // A second quad in registers is not available, so the right side is a slot:
+    // the six registers the convention does not preserve are six and a wide
+    // number is four of them.
+    const right = this.hold(type, "blaze_wide_right");
+    this.wideValue(value.right);
+    this.wideStore(right);
+    this.wideValue(value.left);
+    // The first limb does not read the carry the one before it left, because
+    // there is no one before it; every limb after it does, which is the whole
+    // difference between an addition of four limbs and four additions. The three
+    // bitwise combinations read none, because a carry means nothing to them and
+    // reading one would add it to a value that never carried.
+    const carry = value.op === "add" ? "adc" : value.op === "sub" ? "sbb" : null;
+    this.code.aluRegMem(plain, WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+    for (let limb = 1; limb < limbs; limb += 1) {
+      this.code.aluRegMem(carry ?? plain, WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+    }
+  }
+
+  /**
+   * An operation on one wide number.
+   *
+   * A complement is one instruction per limb, and a negation is a subtraction
+   * from zero, so both are the operations below run over four limbs rather than
+   * anything of their own.
+   */
+  private wideUnary(value: SemanticValue & { k: "unary" }): void {
+    const type = value.type;
+    const limbs = this.limbsOf(type);
+    if (value.op === "pos") return;
+    if (value.op === "bitNot") {
+      this.wideValue(value.operand);
+      for (let limb = 0; limb < limbs; limb += 1) this.code.not(WIDE_WORK[limb], true);
+      return;
+    }
+    if (value.op === "neg") {
+      // `0 - x`, limb by limb with the borrow chained. The zero is materialised
+      // into the second half of the pair rather than subtracted from the
+      // registers it will overwrite, so that every limb of the operand is still
+      // readable when its own turn comes.
+      const value_ = this.hold(type, "blaze_wide_operand");
+      this.wideValue(value.operand);
+      this.wideStore(value_);
+      this.code.movRegImm(WIDE_WORK[0], 0n);
+      for (let limb = 1; limb < limbs; limb += 1) this.code.movRegImm(WIDE_WORK[limb], 0n);
+      this.code.aluRegMem("sub", WIDE_WORK[0], this.limbOf(value_.offset, 0), true);
+      for (let limb = 1; limb < limbs; limb += 1) {
+        this.code.aluRegMem("sbb", WIDE_WORK[limb], this.limbOf(value_.offset, limb), true);
+      }
+      return;
+    }
+    throw machineError(
+      `a wide ${value.op} is not written in this backend`,
+      "a wide number complements and negates here; `not` is the logical negation of a comparison, which is a whole number however wide the two sides are",
+    );
+  }
+
+  /**
+   * Two wide numbers compared, limb by limb from the top down.
+   *
+   * The top limb is the one that decides, because the number it is part of is
+   * the sum of the limbs below it and a difference anywhere below is smaller
+   * than the weight of the one above. So the walk stops at the first limb that
+   * differs and the condition is read off the comparison of that one — which is
+   * why the answer is a branch out of the middle of the walk rather than four
+   * comparisons combined afterwards.
+   *
+   * Two numbers whose every limb matches are equal whatever the condition asks,
+   * so the walk falls off the end with a zero in the accumulator.
+   */
+  private wideCompare(value: SemanticValue & { k: "compare" }): void {
+    const limbs = this.limbsOf(value.operand);
+    const left = this.hold(value.operand, "blaze_wide_left");
+    const right = this.hold(value.operand, "blaze_wide_right");
+    this.wideValue(value.left);
+    this.wideStore(left);
+    this.wideValue(value.right);
+    this.wideStore(right);
+    const decided = this.code.label("Lwide_decided");
+    const end = this.code.label("Lwide_end");
+    for (let limb = limbs - 1; limb >= 0; limb -= 1) {
+      this.code.movRegMemSized(RAX, this.limbOf(left.offset, limb), 8, false);
+      this.code.aluRegMem("cmp", RAX, this.limbOf(right.offset, limb), true);
+      this.code.jcc("ne", decided);
+    }
+    // Every limb matched, so the two are the same number. An equality is
+    // therefore true and every ordering is false — the walk ran out of limbs
+    // without finding one that differs, and a condition asked of two equal
+    // numbers has only one of those two answers.
+    this.code.movRegImm(RAX, value.op === "eq" ? 1n : 0n);
+    this.code.jmp(end);
+    this.code.bind(decided);
+    // `setcc` writes one byte and leaves the rest of the register as it was, and
+    // what it was a moment earlier is the limb the walk had just compared. The
+    // rest is cleared afterwards rather than before, which is the only order that
+    // works: clearing it first would be a `xor` or a `mov` of zero, and both are
+    // instructions that set the flags — so the condition `setcc` is about to read
+    // would be the one they left rather than the one the comparison set.
+    //
+    // The clear is a thirty-two bit `and`, which has the second effect of writing
+    // `eax` and so zeroing everything above it. The flags it changes are the ones
+    // the condition has already been read out of, and nothing reads them again.
+    this.code.setcc(WIDE_CONDITION[value.op], RAX);
+    this.code.aluImm("and", RAX, 0xff, false);
+    this.code.bind(end);
+  }
+
+  /**
+   * One of two wide numbers, chosen by a condition.
+   *
+   * Every limb moves on the condition, so the answer is four conditional moves
+   * rather than a branch over two thirty-two byte copies: the two are in the
+   * working registers and a scratch quad at once either way, and the move costs
+   * one instruction per limb where a branch costs a copy of both sides.
+   */
+  private wideSelect(value: SemanticValue & { k: "select" }): void {
+    const limbs = this.limbsOf(value.type);
+    const whenTrue = this.hold(value.type, "blaze_wide_then");
+    const whenFalse = this.hold(value.type, "blaze_wide_otherwise");
+    this.wideValue(value.then);
+    this.wideStore(whenTrue);
+    this.wideValue(value.otherwise);
+    this.wideStore(whenFalse);
+    // The condition is tested once, before anything is moved: a `mov` leaves the
+    // flags alone, so all four moves read the same test and a chain of them is
+    // four conditional moves rather than four branches.
+    this.value(value.condition);
+    this.code.test(RAX, true);
+    for (let limb = 0; limb < limbs; limb += 1) {
+      this.code.movRegMemSized(WIDE_WORK[limb], this.limbOf(whenFalse.offset, limb), 8, false);
+      this.code.cmov("ne", WIDE_WORK[limb], this.limbOf(whenTrue.offset, limb), true);
+    }
+  }
+
+  /**
+   * A wide number moved left or right by a whole number of bits.
+   *
+   * Moving a wide number is not a carry chain. The bits leaving one limb arrive
+   * in its neighbour, in whichever direction the number is going, and the amount
+   * is a value rather than a flag the previous limb left. Written as one
+   * instruction per limb it would drop every bit that crosses a boundary, and a
+   * shift that is right in its outer limbs and wrong in its middle ones is a
+   * number the program never asked for and cannot tell from a right answer.
+   *
+   * So the amount is split into a number of whole limbs and a number of bits
+   * inside one, and each output limb is built from two limbs of the input:
+   * `out[i] = (src[i - k] << r) | ((src[i - k-1] >> 1) >> (63 - r))` for a shift
+   * left. The second half is written that way rather than as `>> (64 - r)`
+   * because a shift of sixty-four is not a shift — the machine counts only six
+   * bits of the amount and would shift by zero — and because folding the one bit
+   * in first makes the whole expression zero when `r` is zero, which is what it
+   * is: a shift of zero whole limbs is a copy.
+   *
+   * The input is read through an index rather than one limb at a time written
+   * out, because the limb a shift wants is `i - k` and `k` is only known at run
+   * time. It is read from a slot with a whole limb of padding on each side and
+   * the padding cleared, so that `i - k` running off either end of the number
+   * reads zero rather than the neighbouring slot — which is what a shift of a
+   * limb out of the bottom, or a whole limb in past the top, has to answer.
+   */
+  private wideShift(value: SemanticValue & { k: "arith" }, op: "shl" | "shr"): void {
+    // The count is the number the source wrote, which is a machine number. The
+    // IR does not stop one being a wide number, and reading one as a machine
+    // number would take the first eight bytes of it — the count would be the low
+    // half of the number being shifted, and the answer wrong rather than refused.
+    if (isWideType(value.right.type)) {
+      throw new CompilerError({
+        category: "SemanticIrError",
+        stage: "semantic-ir",
+        message: `the count of a shift by ${op} is a wide number, which is not the number of bits to move`,
+      });
+    }
+    const type = value.type;
+    const limbs = this.limbsOf(type);
+    const padding = limbs * LIMB_BYTES;
+    const span = padding * 3;
+    const region = this.reserve(span);
+    const base = region + padding;
+    // The padding is cleared rather than left to be whatever the frame held: a
+    // limb read from beyond the number is not a limb of it.
+    this.code.movRegImm(RAX, 0n);
+    for (let at = 0; at < span; at += LIMB_BYTES) this.code.movMemRegSized(frame(region + at), RAX, 8);
+    this.wideValue(value.left);
+    for (let limb = 0; limb < limbs; limb += 1) {
+      this.code.movMemRegSized(this.limbOf(base, limb), WIDE_WORK[limb], 8);
+    }
+    // The amount: `k` whole limbs and `r` bits inside one. `k` is negated for a
+    // shift left, because the limb it wants is below the one being written and
+    // an index register can only count up.
+    this.at(value.right, USIZE);
+    this.code.movRegReg(RSI, RAX);
+    this.code.movRegReg(RCX, RAX);
+    this.code.aluImm("and", RCX, 63, true);
+    this.code.movRegReg(RDX, RAX);
+    // The count for a register shift is the scratch register, so six is written
+    // there rather than as an immediate: the shift below is by six, not by the
+    // bits-within-a-limb the scratch held a moment ago.
+    this.code.movRegImm(RCX, 6n);
+    this.code.shift("shr", RDX, true);
+    if (op === "shl") this.code.neg(RDX, true);
+    // The scratch register held six for that shift and is what every shift below
+    // counts from, so the bits-within-a-limb amount goes back into it.
+    this.code.movRegReg(RCX, RSI);
+    for (let limb = 0; limb < limbs; limb += 1) {
+      this.code.movRegMemSized(WIDE_WORK[limb], indexed(RSP, RDX, 8, base + limb * LIMB_BYTES), 8, false);
+    }
+    for (let limb = 0; limb < limbs; limb += 1) this.code.shift(op, WIDE_WORK[limb], true);
+    // Both halves of the neighbouring limb move the opposite way to the number:
+    // a number going left takes the bits out of the limb below it and drops them
+    // downwards. `63 - r` is kept in `rsi` because the count for a register shift
+    // is the scratch register, which the fold below needs to be holding two
+    // different amounts in the same loop.
+    this.code.movRegImm(RAX, 63n);
+    this.code.alu("sub", RAX, RSI, true);
+    this.code.movRegReg(RSI, RAX);
+    const towards = op === "shl" ? "shr" : "shl";
+    for (let limb = 0; limb < limbs; limb += 1) {
+      const neighbour = op === "shl" ? limb - 1 : limb + 1;
+      this.code.movRegMemSized(RAX, indexed(RSP, RDX, 8, base + neighbour * LIMB_BYTES), 8, false);
+      // The bit is folded off before the rest is shifted by `63 - r`, which is
+      // what makes this zero when `r` is zero: a shift of sixty-four bits is not a
+      // shift on this machine — the count is six bits wide — so `>> 64` would
+      // read as `>> 0` and hand back the whole limb instead of nothing.
+      this.code.movRegImm(RCX, 1n);
+      this.code.shift(towards, RAX, true);
+      this.code.movRegReg(RCX, RSI);
+      this.code.shift(towards, RAX, true);
+      this.code.alu("or", WIDE_WORK[limb], RAX, true);
+    }
+  }
+
+  /**
+   * A wide operation the machine has no instruction for, carried out by the
+   * kernel.
+   *
+   * The kernel takes the addresses of its operands and writes through one, so
+   * both sides have to be somewhere it can point at — which is the one thing an
+   * operation written in registers cannot arrange. Both are therefore in slots,
+   * and the working registers are not involved at all.
+   */
+  private wideKernel(op: "mul" | "div", left: SemanticValue, right: SemanticValue, type: SemanticType): void {
+    const result = this.hold(type, "blaze_wide_out");
+    const a = this.hold(type, "blaze_wide_a");
+    const b = this.hold(type, "blaze_wide_b");
+    this.wideValue(left);
+    this.wideStore(a);
+    this.wideValue(right);
+    this.wideStore(b);
+    this.code.leaMemReg(mem(RSP, result.offset), RDI);
+    this.code.leaMemReg(mem(RSP, a.offset), RSI);
+    this.code.leaMemReg(mem(RSP, b.offset), RDX);
+    this.library(`${RUNTIME_NAME}_u256_${op}`);
+    // The kernel writes its answer through the first pointer, so it is in the
+    // slot that pointer names and not in the registers. Every other wide value
+    // is left in the working registers by whatever produced it, and the caller
+    // is right to expect the same of this one: a value left in a slot would be
+    // read as whatever the last register operation happened to put there.
+    this.wideLoad(result);
   }
 
   /**

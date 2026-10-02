@@ -41,6 +41,7 @@ import {
   type SemanticType,
   type SemanticValue,
   type ValueKind,
+  typeText,
 } from "../core/semantic-ir.ts";
 import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
@@ -826,6 +827,20 @@ class FunctionEmitter {
     // statement expression names it in the call, and a name C reads before its
     // declaration is one it has never heard of.
     if (value.op === "shl" || value.op === "shr") {
+      // The count of a shift is the number the source wrote, which is a machine
+      // number and not a whole number of the width being shifted. The IR does
+      // not stop one being a whole number, and asking the writer for a scalar
+      // expression of a value that is one answers `(unsigned)(size_t){...}` —
+      // a compound literal where an integer belongs, which does not compile. A
+      // build that stops here says what is wrong; the same request answered
+      // anyway is a build that fails somewhere else entirely.
+      if (isWideType(value.right.type)) {
+        throw new CompilerError({
+          category: "SemanticIrError",
+          stage: "semantic-ir",
+          message: `the count of a shift by ${value.op} is a ${typeText(value.right.type)}, which is a whole number rather than the number of bits to move`,
+        });
+      }
       const out = this.temporary("blaze_wide");
       const moved = this.temporary("blaze_wide");
       const count = this.temporary("blaze_shift");
