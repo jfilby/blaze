@@ -883,6 +883,14 @@ test("a truth is a truth: an empty string, an absent reference and a zero are al
     { name: "a reference", value: local("a", PTR), expected: "1", argument: "(double*)16" },
     { name: "a zero", value: number("0"), expected: "0" },
     { name: "a number that is not zero", value: number("0.5"), expected: "1" },
+    // `UCOMISD` raises the parity bit on an operand that is no number, and oring
+    // that bit into the answer made every NaN true. `Boolean(NaN)` is false in
+    // the language and the C backend already reads it that way, so a NaN that
+    // held kept `x || fallback` on the NaN and handed the program the wrong
+    // branch — the binarytrees benchmark read `+process.argv[2] || 0` and got
+    // the NaN, so every depth after it was a NaN too.
+    { name: "a value that is not a number", value: number("NaN"), expected: "0" },
+    { name: "a value that is not a number, at the single width", value: number("NaN", F32), expected: "0" },
   ];
   for (const entry of cases) {
     const fn = subject(

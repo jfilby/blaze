@@ -2772,7 +2772,14 @@ class Machine {
   }
 
   /**
-   * A float is true when it is not zero, and a value that is no number is too.
+   * A float is true when it is a number that is not zero. A value that is no
+   * number holds nothing, as it does in the language and as the C backend
+   * reads it: `UCOMISD` raises the parity bit on an operand that is not a
+   * number, so the truth is `not equal` *and* `ordered`, the same pair the
+   * `eq` arm of `compare` reads for the same reason. Oring the parity bit in
+   * instead made every NaN true, which is what turned `NaN || 0` into the NaN
+   * and handed a benchmark a depth of `NaN` where it read `6`.
+   *
    * The `movzx` that turns the two condition bytes into a number sets the
    * zero flag from that number, so the truth is in the flags once the move is
    * written and nothing has to ask about it afterwards.
@@ -2781,8 +2788,8 @@ class Machine {
     this.code.xorFloat(XMM2, XMM2);
     this.code.sseCompare(XMM0, XMM2, widthOf(type) === 4, false);
     this.code.setcc("ne", RAX);
-    this.code.setcc("p", RCX);
-    this.code.alu8("or", RAX, RCX);
+    this.code.setcc("np", RCX);
+    this.code.alu8("and", RAX, RCX);
     this.code.movzxReg8(RAX, RAX);
   }
 
