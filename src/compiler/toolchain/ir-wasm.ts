@@ -440,7 +440,7 @@ const BINARY: Record<number, Record<string, number>> = {
   },
   [I64]: {
     add: 0x7c, sub: 0x7d, mul: 0x7e, div: 0x7f, mod: 0x81, and: 0x83, or: 0x84, xor: 0x85,
-    shl: 0x86, shr: 0x87, ushr: 0x89, eq: 0x51, ne: 0x52, lt: 0x53, gt: 0x55, le: 0x57, ge: 0x59,
+    shl: 0x86, shr: 0x87, ushr: 0x88, eq: 0x51, ne: 0x52, lt: 0x53, gt: 0x55, le: 0x57, ge: 0x59,
   },
   [F32]: {
     add: 0x92, sub: 0x93, mul: 0x94, div: 0x95, min: 0x96, max: 0x97,
@@ -465,7 +465,7 @@ const BINARY: Record<number, Record<string, number>> = {
  */
 const UNSIGNED_BINARY: Record<number, Record<string, number>> = {
   [I32]: { div: 0x6e, mod: 0x70, shr: 0x76, ushr: 0x77, lt: 0x49, gt: 0x4b, le: 0x4d, ge: 0x4f },
-  [I64]: { div: 0x80, mod: 0x82, shr: 0x88, ushr: 0x89, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
+  [I64]: { div: 0x80, mod: 0x82, shr: 0x87, ushr: 0x88, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
   [F32]: {},
   [F64]: {},
 };
@@ -1578,6 +1578,131 @@ class Body {
   }
 
   /**
+   * One whole number moved by a number of bits, a limb at a time.
+   *
+   * A count of bits splits into a whole number of limbs and the bits left over,
+   * and a limb of the answer is a limb of the number moved and the limb below it
+   * moved the other way. Both need a limb that is not there — the one below the
+   * bottom limb, and the one the count pushes past the top — so the number is
+   * first copied into a padded run with zeros on both sides, and every limb the
+   * walk wants can then be read without asking whether it exists.
+   */
+  private wideShift(op: "shl" | "shr", value: SemanticValue, count: SemanticValue): void {
+    const valueAt = this.borrow(I32);
+    this.value(value, value.type);
+    this.keep(valueAt);
+    const countAt = this.borrow(I32);
+    // The count is a machine number and the machine moves a number by less than
+    // two hundred and fifty six bits, so it is read at the width of the register
+    // it is counted in rather than the width its own type carries it.
+    this.value(count, { kind: "primitive", name: "u32" });
+    this.keep(countAt);
+    const bits = this.borrow(I32);
+    const offset = this.borrow(I32);
+    const address = this.borrow(I32);
+    const limbValue = this.borrow(I64);
+    // Ninety-six bytes: a limb of zero on each side of the four that are copied
+    // in, so a count that moves the walk off either end still reads a limb
+    // rather than a neighbour of the copy.
+    const padded = this.wideScratchOf(96);
+    for (let cleared = 0; cleared < 96; cleared += 4) {
+      this.i32(padded + cleared);
+      this.i32(0);
+      this.op(0x36); // `i32.store`
+      this.code.varuint(2);
+      this.code.varuint(0);
+    }
+    // The four limbs are laid out with a limb of zero on each side, so a count
+    // that pushes the walk off either end still reads a limb rather than a
+    // neighbour of the copy.
+    for (let limb = 0; limb < 4; limb += 1) {
+      this.i32(padded + 32 + limb * 8);
+      this.loadLimb(valueAt, limb);
+      this.op(0x37); // `i64.store`
+      this.code.varuint(3);
+      this.code.varuint(0);
+    }
+    // The count is a whole number of limbs and the bits left over, and the limb
+    // count is turned into a byte offset here because every address below is one
+    // a store takes. A number going left takes its bits from the limb below it,
+    // so the limb it reads is `k` below the one being written, and the index
+    // only counts up, so `k` is negated here rather than at every use.
+    if (op === "shl") this.i32(0);
+    this.localAt(countAt);
+    this.i32(6);
+    this.op(0x76); // `i32.shr_u`
+    this.i32(3);
+    this.op(0x74); // `i32.shl`
+    // `i32.sub` takes the top of the stack away from the one below it, so the
+    // zero that makes this a negation is written before the count rather than
+    // after it.
+    if (op === "shl") this.op(0x6b); // `i32.sub`
+    this.keep(offset);
+    this.localAt(countAt);
+    this.i32(63);
+    this.op(0x71); // `i32.and`
+    this.keep(bits);
+    const out = this.wideScratch();
+    for (let limb = 0; limb < 4; limb += 1) {
+      this.i32(out + limb * 8);
+      this.localAt(offset);
+      this.i32(limb * 8);
+      this.op(0x6a); // `i32.add`
+      this.i32(32 + padded);
+      this.op(0x6a);
+      this.keep(address);
+      this.localAt(address);
+      this.op(0x29); // `i64.load`
+      this.code.varuint(3);
+      this.code.varuint(0);
+      this.keep(limbValue);
+      this.localAt(limbValue);
+      this.localAt(bits);
+      this.op(0xad); // `i64.extend_i32_u`
+      this.op(op === "shl" ? 0x86 : 0x88); // `i64.shl` or `i64.shr_u`
+      this.keep(limbValue);
+      // The neighbouring limb gives up the bits this one is short of. It is the
+      // one below for a shift left and the one above for a shift right.
+      this.localAt(address);
+      this.i32(op === "shl" ? -8 : 8);
+      this.op(0x6a); // `i32.add`
+      this.op(0x29); // `i64.load`
+      this.code.varuint(3);
+      this.code.varuint(0);
+      // A shift left takes the top of the limb below into the bottom of this one,
+      // and a shift right takes the bottom of the limb above into the top of this
+      // one, so the neighbouring limb moves one the other way before it is moved
+      // the rest of the way.
+      this.i64(1n);
+      this.op(op === "shl" ? 0x88 : 0x86);
+      // Sixty-three and then the bits left over: the shift above moved the
+      // neighbouring limb by one bit and this moves it the rest of the way, so
+      // the two together move exactly the sixty-four that fill this limb.
+      this.i32(63);
+      this.localAt(bits);
+      this.op(0x6b); // `i32.sub`
+      this.op(0xad); // `i64.extend_i32_u`
+      this.op(op === "shl" ? 0x88 : 0x86);
+      // A count of no bits at all leaves nothing for the neighbouring limb to
+      // give up, and the two shifts that fold it in would together move sixty-four
+      // bits, which a machine shift reads as none at all. So the fold is chosen
+      // away when there are no bits left over.
+      this.i64(0n);
+      this.localAt(bits);
+      this.i32(0);
+      this.op(0x47); // `i32.ne`
+      this.op(0x1b); // `select`
+      this.localAt(limbValue);
+      this.op(0x84); // `i64.or`
+      this.op(0x37); // `i64.store`
+      this.code.varuint(3);
+      this.code.varuint(0);
+    }
+    for (const at of [valueAt, countAt]) this.release(I32, at);
+    this.i32(out);
+  }
+
+  /**
    * Thirty-two bytes of scratch, somewhere below every constant.
    *
    * The two cannot share an address range — a data segment is written by the
@@ -1628,7 +1753,10 @@ class Body {
     // whole number, so a shift is written out by its own walk and not by the
     // limb-by-limb combine below, which reads both of its operands as
     // addresses of limbs.
-    if (op === "shl" || op === "shr") this.wideRefuse(op);
+    if (op === "shl" || op === "shr") {
+      this.wideShift(op, left, right);
+      return;
+    }
     const leftAt = this.borrow(I32);
     this.value(left, left.type);
     this.keep(leftAt);
@@ -1673,19 +1801,36 @@ class Body {
       this.localAt(rightLimb);
       this.op(carries ? 0x7c : 0x7d); // `i64.add` or `i64.sub`
       this.tee(middle);
-      this.localAt(carries ? leftLimb : rightLimb); // the first test is against the operand that moved least
+      // Whether the operation on its own carried or borrowed is a comparison of
+      // the two it was given: a sum is below the limb it started from when it
+      // carried, and a difference is one the limb being subtracted from was not
+      // big enough to cover.
+      if (carries) {
+        this.localAt(leftLimb);
+      } else {
+        this.localAt(leftLimb);
+        this.localAt(rightLimb);
+      }
       this.op(0x54); // `i64.lt_u`
       this.keep(flag);
       this.localAt(middle);
       this.localAt(carry);
       this.op(carries ? 0x7c : 0x7d);
       // The limb before the carry and the limb after it are kept apart: the
-      // second test is whether adding the carry in pushed the sum past what it
-      // was, and comparing the sum with itself is the one comparison that can
+      // second test is whether the carry going in pushed the result past what it
+      // was, and comparing the result with itself is the one comparison that can
       // never be true — a carry chain that stops after the first limb and is
       // right on every value that never carries.
       this.tee(summed);
-      this.localAt(carries ? middle : carry); // subtracting the borrow in underflows when the difference went past zero
+      // A sum that carried again is below what it was before the carry went in,
+      // and a difference borrowed again when the result underflowed, which is
+      // the same question asked of the difference before the borrow went in:
+      // nothing was there to subtract it from.
+      // For a sum the test is against the limb before the carry went in; for a
+      // difference it is against the difference itself, because a borrow only
+      // underflows when the difference was already below the borrow.
+      this.localAt(middle);
+      if (!carries) this.localAt(summed);
       this.op(0x54); // `i64.lt_u`
       this.op(0xad); // `i64.extend_i32_u`
       this.localAt(flag);

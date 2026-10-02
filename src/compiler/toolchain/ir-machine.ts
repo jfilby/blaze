@@ -36,6 +36,7 @@ import {
   isTextType,
   isWide,
   isWideType,
+  limbsOf as limbsOfName,
   WIDE_LIMBS,
   LIMB_BYTES,
   isUnsigned,
@@ -3612,10 +3613,15 @@ class Machine {
     return frame(offset + limb * LIMB_BYTES);
   }
 
-  /** How many limbs a wide number of this type is written as. */
+  /**
+   * How many limbs a wide number of this type is written as.
+   *
+   * The count is the IR's rather than this backend's, because it is a fact about
+   * the number and not about how it is carried here: a backend that decided its
+   * own would agree with this one only for as long as both were right.
+   */
   private limbsOf(type: SemanticType): number {
-    if (type.kind !== "primitive") return 0;
-    return WIDE_LIMBS[type.name] ?? 0;
+    return type.kind === "primitive" ? limbsOfName(type.name) ?? 0 : 0;
   }
 
   /**

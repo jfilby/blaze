@@ -24,12 +24,22 @@ import { join } from "node:path";
 import { run } from "../core/process.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildObject as buildMachineObject } from "../toolchain/ir-machine.ts";
+import { moduleBytes } from "../toolchain/ir-wasm.ts";
 import { Encoder, RDI, RSI, RDX, R8, R9, R10, R11, mem } from "../toolchain/x86.ts";
 
 /** The four general registers a wide operation is carried out in. */
 const WORK = [R8, R9, R10, R11];
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import type { ArithOp, CompareOp, SemanticFunction, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+
+/** The engine the build runs on, reached the way the backend reaches it. */
+interface WasmEngine {
+  Memory: new (init: { initial: number }) => { buffer: ArrayBuffer };
+  Module: new (bytes: Uint8Array) => unknown;
+  Instance: new (module: unknown, imports: Record<string, unknown>) => { exports: unknown };
+}
+const engine = (globalThis as { WebAssembly?: WasmEngine }).WebAssembly as WasmEngine;
+assert.ok(engine !== undefined, "the engine the build runs on carries modules");
 import type { FunctionContract } from "../core/types.ts";
 import type { TargetSpec, TypeExpr } from "../core/types.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource, WIDE_SYMBOLS } from "../runtime/abi.ts";
@@ -1131,7 +1141,23 @@ test("a shift by a whole number is refused rather than answered", async () => {
   );
 });
 
-test("the C and machine backends answer one vector set the same way", async () => {
+test("the backends write a whole number as the same limbs in the same order", () => {
+  // The IR says a wide number is four limbs least significant first, and says so
+  // once, because it is the order the runtime reads a value it is handed a
+  // pointer to in. A backend is free to carry the number however it likes — in
+  // registers here, in linear memory there — but what it writes out is the
+  // number's limbs in the order the IR names, or a value handed from one backend
+  // to another is a different number.
+  //
+  // The number is read back from each backend's own answer rather than from a
+  // struct, because the point is what each one writes, not what it was handed.
+  const left = "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
+  assert.equal(limbsOf("u256"), 4, "a u256 is four limbs, and the count is the IR's");
+  const expected = "fedcba9876543210" + "0123456789abcdef" + "fedcba9876543210" + "0123456789abcdef";
+  assert.equal(wasmBackendAnswer("add", left, "0".repeat(64)), expected, "the WebAssembly backend writes the limbs least significant first");
+});
+
+test("the C, machine and WebAssembly backends answer one vector set the same way", async () => {
   // Two backends that lower the same IR to two different languages will drift,
   // and the drift is invisible to a test that checks each against a literal: the
   // literal can be wrong in the same direction as the code. Checking both
@@ -1139,10 +1165,10 @@ test("the C and machine backends answer one vector set the same way", async () =
   // — that the two implementations of carry, borrow and ordering agree, and that
   // both agree with the language's own answer for the same numbers.
   //
-  // This is the guard the WebAssembly backend has to pass when it is written.
-  // The wasm module is not built here because it cannot carry a wide number yet,
-  // and a test that skipped it would be a test that quietly stopped checking the
-  // third backend rather than one that reported its absence.
+  // The WebAssembly backend answers what it has written and refuses the rest, so
+  // the vector set names it in the failure rather than the harness skipping the
+  // third backend quietly: a backend that stops being checked is one that stops
+  // being known.
   for (const [leftText, rightText] of DIFFERENTIAL_VECTORS) {
     for (const op of DIFFERENTIAL_OPS) {
       const left = BigInt(`0x${leftText}`);
@@ -1156,8 +1182,30 @@ test("the C and machine backends answer one vector set the same way", async () =
       const viaMachine = await machineBackendAnswer(op, leftText, rightText);
       assert.equal(viaC, hexadecimal(expected), `the C backend's ${op} of ${leftText} and ${rightText}`);
       assert.equal(viaMachine, hexadecimal(expected), `the machine backend's ${op} of ${leftText} and ${rightText}`);
+      // A backend that has not written an operation refuses it, and the refusal
+      // is recorded rather than swallowed: what the WebAssembly backend has
+      // answered is asserted below, so an operation leaving that set is visible.
+      let answered: string | null = null;
+      try {
+        answered = wasmBackendAnswer(op, leftText, rightText);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("has not written")) throw error;
+        wasmRefused.add(op);
+      }
+      if (answered !== null) {
+        wasmAnswered.add(op);
+        assert.equal(answered, hexadecimal(expected), `the WebAssembly backend's ${op} of ${leftText} and ${rightText}`);
+      }
     }
   }
+  // What the WebAssembly backend answers of this set, named. An operation
+  // leaving it is the backend losing a capability, and the name is here so that
+  // losing one is a failing test rather than a line that quietly vanished.
+  assert.deepEqual(
+    [...wasmAnswered].sort(),
+    ["add", "and", "or", "shl", "shr", "sub", "xor"],
+    "the operations the WebAssembly backend answers of this vector set",
+  );
 });
 
 /** One operation on two wide literals, lowered to C, compiled, and run. */
@@ -1223,6 +1271,79 @@ async function cBackendAnswer(op: DifferentialOp, leftText: string, rightText: s
 }
 
 /** The same operation, lowered to machine code, linked and run. */
+/**
+ * The same operation answered by the WebAssembly backend, run as a module.
+ *
+ * A wide number is a pointer into the module's own memory here rather than a
+ * struct the host passes in, so the answer is read off that memory at the address
+ * the module returns.
+ */
+/** What the WebAssembly backend has answered of the set, and what it has not. */
+const wasmAnswered = new Set<DifferentialOp>();
+const wasmRefused = new Set<DifferentialOp>();
+
+/**
+ * The operation answered by the WebAssembly backend, run as a module.
+ *
+ * A wide number is a pointer into the module's own memory here rather than a
+ * struct the host passes in, so the answer is read off that memory at the address
+ * the module returns. An operation this backend has not written raises, which is
+ * how the caller learns it is not answered.
+ */
+function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): string {
+  const memory = new engine.Memory({ initial: 1 });
+  const bytes = moduleBytes(
+    {
+      name: "subject",
+      symbol: "subject",
+      params: [],
+      returns: U256,
+      requires: [],
+      ensures: [],
+      effects: [],
+      allocates: false,
+      prints: false,
+      readsArgv: false,
+      objects: {},
+      calls: [],
+      entry: {
+        id: "entry",
+        statements: [],
+        releases: [],
+        terminator: {
+          k: "return",
+          value: {
+            k: "arith",
+            type: U256,
+            op: op as ArithOp,
+            left: { k: "const", type: U256, text: `0x${leftText}` },
+            right: rightOperand(op, U256, rightText),
+          },
+        },
+      },
+    } as unknown as SemanticFunction,
+    {
+      version: "1",
+      numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+      function: { name: "subject", symbol: "subject", params: [], returns: "u256" },
+      optimize: { primary: "latency", secondary: "size" },
+      effects: [],
+      memory: { reads: [], writes: [], aliasing: [] },
+      requires: [],
+      ensures: [],
+      definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+    },
+  );
+  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+  const address = (instance.exports as { subject: () => number }).subject();
+  const view = new Uint8Array(memory.buffer);
+  let limbs = "";
+  for (let limb = 3; limb >= 0; limb -= 1) {
+    for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
+  }
+  return limbs;
+}
+
 async function machineBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "blaze-u256-diff-m-"));
   const runtime = await buildStandaloneRuntime(directory);

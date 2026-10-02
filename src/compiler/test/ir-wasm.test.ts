@@ -825,6 +825,9 @@ test("a wide number is arithmetic on four limbs, in the module's own memory", ()
     ["0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98", "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef"],
     ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "0000000000000000000000000000000000000000000000000000000000000001"],
     ["ffffffffffffffff0000000000000000ffffffffffffffff0000000000000000", "0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff"],
+    ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+    ["00000000000000010000000000000000", "00000000000000010000000000000000"],
+    ["00000000000000000000000000000000", "00000000000000000000000000000001"],
   ];
   for (const op of ["add", "sub", "and", "or", "xor"] as const) {
     for (const [leftText, rightText] of VECTORS) {
@@ -836,12 +839,45 @@ test("a wide number is arithmetic on four limbs, in the module's own memory", ()
       const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
       const address = (instance.exports as { subject: () => number }).subject();
       const view = new Uint8Array(memory.buffer);
+
       let limbs = "";
       for (let limb = 3; limb >= 0; limb -= 1) {
         for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
       }
       assert.equal(limbs, expected.toString(16).padStart(64, "0"), `the ${op} of ${leftText} and ${rightText}`);
     }
+  }
+});
+
+test("two whole numbers are subtracted a limb at a time, borrowing as it goes", () => {
+  // A borrow runs up the number when a limb cannot cover what is taken from it,
+  // so the vectors are chosen so that the borrow starts at the bottom and at the
+  // top and stops somewhere in the middle. A version that stops after the first
+  // limb is right on every value that never borrows and wrong on every value
+  // that does.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const MASK = (1n << 256n) - 1n;
+  const VECTORS: readonly (readonly [string, string])[] = [
+    ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+    ["00000000000000000000000000000000", "00000000000000000000000000000001"],
+    ["00000000000000010000000000000000", "00000000000000010000000000000000"],
+    ["ffffffffffffffff000000000000000000000000000000000000000000000000", "0000000000000001000000000000000000000000000000000000000000000000"],
+    ["0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98", "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef"],
+    ["ffffffffffffffffffffffffffffffff0000000000000000ffffffffffffffff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+  ];
+  for (const [leftText, rightText] of VECTORS) {
+    const left = BigInt(`0x${leftText}`);
+    const right = BigInt(`0x${rightText}`);
+    const bytes = moduleBytes(wideBinary(U, "sub", leftText, rightText), wideContract());
+    const memory = new engine.Memory({ initial: 1 });
+    const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+    const address = (instance.exports as { subject: () => number }).subject();
+    const view = new Uint8Array(memory.buffer);
+    let limbs = "";
+    for (let limb = 3; limb >= 0; limb -= 1) {
+      for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
+    }
+    assert.equal(limbs, ((left - right) & MASK).toString(16).padStart(64, "0"), `the sub of ${leftText} and ${rightText}`);
   }
 });
 
@@ -977,3 +1013,69 @@ function wideSelection(type: SemanticType, take: boolean, then: string, otherwis
     },
   };
 }
+
+/** A function whose whole body is one wide shift by a scalar count. */
+function wideShifted(type: SemanticType, op: "shl" | "shr", left: string, right: string): SemanticFunction {
+  return {
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: type,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: { k: "arith", type, op, left: { k: "const", type, text: `0x${left}` }, right: { k: "const", type: { kind: "primitive", name: "usize" }, text: right } },
+      },
+    },
+  };
+}
+
+test("a module imports the host's memory and nothing else", () => {
+  // The whole of what a module can reach is its own arithmetic and the memory the
+  // host placed in it. A module that imported a function would be reaching for a
+  // runtime service, and one that grew its memory would be reaching past the host
+  // for more — so both are asserted here rather than left as a claim in a
+  // comment, because a module that broke the rule would still be a valid module
+  // and would still run.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const bytes = moduleBytes(wideBinary(U, "add", "ff".repeat(32), "01".padStart(64, "0")), wideContract());
+  const listed = (engine.Module as unknown as { imports(module: object): { module: string; name: string; kind: string }[] }).imports(new engine.Module(bytes));
+  assert.deepEqual(listed, [{ module: "env", name: "memory", kind: "memory" }], "the module asks for the host's memory and nothing else");
+});
+
+test("a whole number moves by a number of bits, a limb at a time", () => {
+  // A count of bits is a whole number of limbs and the bits left over. The walk
+  // this exercises is the one that has to combine the two — a version that moved
+  // each limb by the whole count, or by only the leftover bits, is right for
+  // counts under sixty-four and wrong for every count above it.
+  const U: SemanticType = { kind: "primitive", name: "u256" };
+  const MASK = (1n << 256n) - 1n;
+  const VALUE = "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
+  const left = BigInt(`0x${VALUE}`);
+  for (const op of ["shl", "shr"] as const) {
+    for (const count of [0, 1, 7, 63, 64, 65, 127, 200]) {
+      const expected = (op === "shl" ? left << BigInt(count) : left >> BigInt(count)) & MASK;
+      const bytes = moduleBytes(wideShifted(U, op, VALUE, String(count)), wideContract());
+      const memory = new engine.Memory({ initial: 1 });
+      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+      const address = (instance.exports as { subject: () => number }).subject();
+      const view = new Uint8Array(memory.buffer);
+      let limbs = "";
+      for (let limb = 3; limb >= 0; limb -= 1) {
+        for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
+      }
+      assert.equal(limbs, expected.toString(16).padStart(64, "0"), `a shift ${op === "shl" ? "left" : "right"} by ${count}`);
+    }
+  }
+});
