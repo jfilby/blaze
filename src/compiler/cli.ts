@@ -4,6 +4,7 @@
  *
  *   blaze build <input>        frontend, contract, generation, verification, output
  *   blaze generate <input>     the same pipeline up to candidate selection
+ *   blaze init                 write a new project file in this directory
  *   blaze test <project>       re-verify the selected candidate of a build
  *   blaze benchmark <project>  re-benchmark the selected candidate of a build
  *   blaze inspect <project>    print the build record
@@ -13,7 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -67,6 +68,8 @@ rest with a reason.
 
 Usage:
   blaze build [input.toml] [arguments...] build a function, or a program
+  blaze init                          write a ${PROJECT_FILE} here, and fail if
+                                     one is already there
   blaze generate [input.toml] [options]  build and validate the candidates
   blaze ir [input.toml] [options] print the semantic IR: the program the
                             project runs, one function, or every function
@@ -194,6 +197,47 @@ function defaultProjectFile(): string {
     });
   }
   return candidate;
+}
+
+/**
+ * The project file a new project starts from. Machine code is the default
+ * because it is the artifact the compiler itself writes: the object is encoded
+ * by `toolchain/ir-machine.ts` and no toolchain touches it, so a project that
+ * names nothing gets the one build that needs nothing installed.
+ */
+const PROJECT_FILE_TEMPLATE = `# The project blaze build builds in this directory, named after it.
+language = "typescript"
+sourceFile = "main.ts"
+
+# Machine code: the compiler encodes the object itself. The other output kinds
+# are ir, c, asm and wasm, and \`blaze --help\` says what each one is.
+output = "machine"
+backend = "machine"
+
+# A project names its provider and model, never its key: the credential comes
+# from the environment, and AI_MODEL names the pair when this does not.
+# [model]
+# provider = "openrouter"
+# model = "anthropic/claude-sonnet-4.5"
+`;
+
+/**
+ * Writes the project file of a new project. One that is already there is not
+ * overwritten: a project file holds what a person wrote, and a build running
+ * by the same name would read the new one and never the old.
+ */
+function initProject(): void {
+  const path = resolve(process.cwd(), PROJECT_FILE);
+  if (existsSync(path)) {
+    throw new CompilerError({
+      category: "InputError",
+      stage: "input",
+      message: `${path} already exists`,
+      detail: "blaze init writes a new project file; edit the one that is there, or remove it and run this again",
+    });
+  }
+  writeFileSync(path, PROJECT_FILE_TEMPLATE, "utf8");
+  process.stdout.write(`created ${path}\n\nWrite ${PROJECT_FILE}'s sourceFile, then run blaze build.\n`);
 }
 
 /**
@@ -383,6 +427,10 @@ async function main(argv: string[]): Promise<number> {
         throw cause;
       }
       title.stop("ok");
+      return 0;
+    }
+    case "init": {
+      initProject();
       return 0;
     }
     case "test":

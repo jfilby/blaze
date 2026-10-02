@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
@@ -72,6 +72,43 @@ test("without a blaze.toml the default says what to do", async () => {
   assert.match(execution.stderr, /blaze build <input\.toml>/);
 });
 
+test("init writes a project file that builds machine code", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-init-"));
+  const created = await run(process.execPath, [CLI, "init"], { cwd: directory });
+  assert.equal(created.code, 0, created.stderr);
+  assert.match(created.stdout, /created .*blaze\.toml/);
+
+  // The file init writes is a project the compiler reads, not a sketch of one.
+  await writeFile(join(directory, "main.ts"), "console.log(1 + 2);\n", "utf8");
+  const built = blaze(directory, "build");
+  assert.equal(built.code, 0, built.stderr);
+  assert.match(built.stdout, /Output \(machine\)/);
+
+  // Machine code is the default, so an object arrives with no toolchain asked
+  // for, and it is a program that runs.
+  const project = basename(directory);
+  const delivered = join(directory, ".blaze/projects", project, "output", project);
+  const executed = run(delivered, [], { timeoutMs: 60_000 });
+  assert.equal(executed.code, 0, executed.stderr);
+  assert.equal(executed.stdout, "3\n");
+});
+
+test("init refuses to write over a project file, and leaves it as it was", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-init-twice-"));
+  assert.equal((await run(process.execPath, [CLI, "init"], { cwd: directory })).code, 0);
+
+  const written = 'language = "typescript"\nsource = "console.log(1);"\n';
+  const path = join(directory, "blaze.toml");
+  await writeFile(path, written, "utf8");
+
+  const again = await run(process.execPath, [CLI, "init"], { cwd: directory });
+  assert.notEqual(again.code, 0);
+  assert.match(again.stderr, /blaze\.toml already exists/);
+  // A refusal that overwrote would take the project it refused to replace with
+  // it, so the file the user wrote is the file still on disk.
+  assert.equal(await readFile(path, "utf8"), written);
+});
+
 test("a source file handed to build is not a project file", async () => {
   const directory = await projectDirectory();
   const execution = blaze(directory, "build", join(directory, "main.ts"));
@@ -127,7 +164,7 @@ test("help lists every command", async () => {
   const directory = await projectDirectory();
   const execution = blaze(directory, "--help");
   assert.equal(execution.code, 0);
-  for (const command of ["build", "generate", "test", "benchmark", "inspect", "projects"]) {
+  for (const command of ["build", "generate", "test", "benchmark", "inspect", "projects", "init"]) {
     assert.match(execution.stdout, new RegExp(`blaze ${command}`));
   }
 });
