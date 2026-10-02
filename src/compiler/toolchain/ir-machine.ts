@@ -4131,13 +4131,16 @@ class Machine {
     const end = this.code.label("Lend");
     const keep = hasCall(value.right);
     if (!keep && value.left.k === "compare" && isBoolean(value.left.type) && typeEquals(value.left.type, value.type)) {
-      // A truth answered by a comparison is the other arm when the comparison
-      // does not hold, and a comparison that does not hold is the one truth it
-      // can be: so the deciding arm is written down rather than kept, and the
-      // comparison is asked of the flags instead of being written as a number
-      // first. A `(a < b) && c` is then a comparison and a jump where it was a
-      // comparison, a condition byte, a widening, a test and a jump.
-      this.truthBranch(value.left, value.op === "and", otherwise);
+      // The deciding arm holds the answer the operator gives when the left one
+      // settles it: zero for `&&`, whose left arm being false settles it, and
+      // one for `||`, whose left arm being *true* settles it. So the jump to
+      // that arm is taken when the comparison is false under `&&` and when it
+      // is true under `||` - the opposite sense for the two, which is what the
+      // argument says. Taking it the other way round answered both operators
+      // with the other operator's rule: an `a && b` with a true a jumped past
+      // b and answered false, and an `a || b` with a true a fell into b and
+      // answered b.
+      this.truthBranch(value.left, value.op === "or", otherwise);
       this.at(value.right, value.type);
       this.code.jmp(end);
       this.code.bind(otherwise);

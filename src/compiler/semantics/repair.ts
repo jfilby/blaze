@@ -953,7 +953,12 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
     return { refused: `${calleeName} is called with an argument that is itself a call, which would be evaluated after the body inlined in front of it` };
   }
 
-  const taken = slotNames(fn);
+  // A block id is a name like any other, so the ids this function already has
+  // are taken before a fresh one is made. The compiler inlines on its own and
+  // runs a round per call, so a later round that renamed a block onto an id an
+  // earlier round had already left behind put two blocks under one name, which
+  // is a function the compiler cannot read back.
+  const taken = new Set([...slotNames(fn), ...blocksOf(fn).map((block) => block.id)]);
   // Every name the callee declares is renamed into this function, and its
   // parameters become the arguments the call was made with, so nothing it was
   // written as can be read here as something of this function's.
@@ -996,7 +1001,10 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   // else it brought with it.
   const blocks = new Map<string, string>();
   for (const inner of nestedBlocks(callee.entry)) {
-    if (inner.id !== callee.entry.id) blocks.set(inner.id, `inlined_${freshName(taken, "block")}`);
+    // The prefix is part of what `freshName` counts, not something added to
+    // what it chose: a name it picked as free is free under its own spelling,
+    // and `inlined_block1` is the spelling the earlier round left behind.
+    if (inner.id !== callee.entry.id) blocks.set(inner.id, freshName(taken, "inlined_block"));
   }
   // The block ids are renamed by a walk of the whole statement rather than by
   // picking the ones a loop names: a jump target, a loop's own header and exit
