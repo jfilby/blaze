@@ -28,6 +28,17 @@ tests all live there. Run commands from it.
   where the input is read. Everything is lowered on the one path in
   `codegen.ts:materialize`, and the backend is in the reuse key
   (`incremental.ts`) so an object is never shared across one.
+- A build record names the engine that built it (`core/version.ts:engineStamp`):
+  the release and eight hex digits of the review fingerprint, which is a hash
+  of the compiler's own sources. It moves when anything that decides what a
+  function is moves, and a run that finds a different stamp announces it
+  before spending anything — the whole cache is invalidated at once, so the
+  user is asked on a terminal and the announcement is printed when there is
+  nobody to ask. Answering no throws `CancelledError` before the record is
+  written, so a declined build leaves the last one as it was;
+  `blaze build --recompile` is the same answer given in advance, and rebuilding
+  on an engine change is what the announcement promises, so it discards what
+  was stored even where the reuse keys would have let it through.
 - A third setting says how hard the toolchain builds. `mode` is `debug`
   (`-O0 -g`, the default), `release` (`-O3`, or `-O2` where the contract asks
   for `size`), or `danger` (release, and the generated runtime leaves its guards

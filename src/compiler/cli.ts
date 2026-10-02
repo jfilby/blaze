@@ -15,6 +15,7 @@
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
@@ -100,8 +101,15 @@ A build is incremental. A function whose contract, the functions it is linked
 against, the target, the options, the model and the compiler's own sources are
 all unchanged keeps the object an earlier build verified, and the model is only
 asked for what changed. Editing a comment in the project changes nothing a
-build is keyed on, so it rebuilds nothing; editing the compiler itself rebuilds
-everything, because the stored objects were built by rules that have moved.
+build is keyed on, so it rebuilds nothing.
+
+Every build records the engine that built it, as the release and a short
+fingerprint of the compiler's own sources. When that moves, nothing stored can
+be trusted, so the build says so before it spends anything: on a terminal it
+asks whether to recompile every function, and answering no leaves the last
+build exactly as it was. Piped into a file or a log there is nobody to ask, so
+it says the same thing and recompiles. --recompile is that answer given in
+advance, and it rebuilds even when the engine has not moved.
 
 On a terminal, a command that works animates the tab title as the blaze brand
 next to a spinner, and settles it on the outcome: a check mark for a build that
@@ -116,6 +124,9 @@ Options:
                             source, and validate it against the contract
   --function <name>          print one function of the project as the IR holds
                             it, rather than the program it runs
+  --recompile                rebuild every function from the semantic IR even
+                            though nothing it was built from has changed, and
+                            without asking
   --all                      print every function of every file as the IR holds it
   --output <kind>           what is built: ir (semantic IR the compiler lowers),
                             c, asm, machine or wasm (default ir)
@@ -185,6 +196,24 @@ function defaultProjectFile(): string {
   return candidate;
 }
 
+/**
+ * Asks the one question `blaze build` asks, and only where there is somebody
+ * to answer it: a terminal. A build whose input is a pipe or a file takes the
+ * answer a person would give, because a prompt read from a script's next line
+ * is worse than no prompt — and the announcement the question follows is on
+ * stdout either way, so a log says what happened.
+ */
+async function terminalConfirm(question: string): Promise<boolean> {
+  if (process.stdin.isTTY !== true) return true;
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await prompt.question(question)).trim().toLowerCase();
+    return answer === "y" || answer === "yes";
+  } finally {
+    prompt.close();
+  }
+}
+
 function optionNumber(value: string | undefined, name: string, minimum = 1, maximum?: number): number | undefined {
   if (value === undefined) return undefined;
   // Strictly: `parseInt` reads "4x" as 4 and the flag then asks for something
@@ -221,9 +250,18 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   if (mode !== undefined && !BUILD_MODES.includes(mode as BuildMode)) {
     throw new Error(`--mode must be one of ${BUILD_MODES.join(", ")}, got "${String(mode)}"`);
   }
+  const recompile = values.recompile === true;
+  // The two ask opposite things of the record: `--reuse` builds only from what
+  // is stored, `--recompile` builds only what is not, so a build asking for
+  // both is refused rather than resolved in favour of either.
+  if (recompile && values.reuse === true) {
+    throw new Error("--recompile and --reuse ask for opposite builds: one rebuilds everything, the other rebuilds nothing");
+  }
   return {
     cwd: process.cwd(),
     reuse: values.reuse === true,
+    ...(recompile ? { recompile: true } : {}),
+    confirm: terminalConfirm,
     // What is left on the command line after the command and the project is
     // what the program is given: `blaze build 12` checks it the way it runs.
     arguments: [...arguments_],
@@ -257,6 +295,19 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   };
 }
 
+/**
+ * A build nobody asked for is not a fault, so it is reported as the decision
+ * it was: the record it leaves behind is the last build's, and pointing at a
+ * diagnostic file for a build that never started would send a reader looking
+ * for an error that is not there.
+ */
+function reportCancelled(error: SerializedCompilerError): void {
+  process.stdout.write(`\n· ${error.message}\n`);
+  if (error.detail !== undefined && error.detail.trim() !== "") {
+    process.stdout.write(`\n${error.detail.trim()}\n`);
+  }
+}
+
 function reportError(error: SerializedCompilerError): void {
   process.stderr.write(`\n✗ ${error.stage} failed: ${error.message}\n`);
   const context = [
@@ -287,6 +338,7 @@ async function main(argv: string[]): Promise<number> {
     options: {
       model: { type: "string" },
       reuse: { type: "boolean" },
+      recompile: { type: "boolean" },
       output: { type: "string" },
       runtime: { type: "string" },
       mode: { type: "string" },
@@ -393,15 +445,17 @@ async function main(argv: string[]): Promise<number> {
 try {
   process.exitCode = await main(process.argv.slice(2));
 } catch (cause) {
-  reportError(
-    isCompilerError(cause)
-      ? cause.toJSON()
-      : {
-          category: "InputError",
-          stage: "cli",
-          message: cause instanceof Error ? cause.message : String(cause),
-          detail: cause instanceof Error ? cause.stack : undefined,
-        },
-  );
+  const failure = isCompilerError(cause)
+    ? cause.toJSON()
+    : {
+        category: "InputError" as const,
+        stage: "cli",
+        message: cause instanceof Error ? cause.message : String(cause),
+        detail: cause instanceof Error ? cause.stack : undefined,
+      };
+  // A declined recompile is the one exit that is not a fault: nothing was
+  // built, nothing was damaged, and the last build is still the project's.
+  if (failure.category === "CancelledError") reportCancelled(failure);
+  else reportError(failure);
   process.exitCode = 1;
 }

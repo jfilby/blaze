@@ -158,3 +158,18 @@ export async function toolchainFingerprints(): Promise<Fingerprints> {
   reading ??= fingerprintSources(PACKAGE_ROOT);
   return reading;
 }
+
+/**
+ * The engine one build ran on: the release, and the fingerprint of the sources
+ * that decide what a function is. A build record carries it and the next run
+ * compares it, which is what lets `blaze build` say that the compiler moved
+ * under a project instead of silently asking a model for every function again.
+ *
+ * Only the review fingerprint is in it, because that is the side that costs:
+ * an edit to a lowering-only source leaves everything a model reviewed
+ * standing, so the objects are rebuilt by the rules as they are now and there
+ * is nothing to ask about. Every other edit is in here.
+ */
+export function engineStamp(fingerprints: Fingerprints): string {
+  return `${COMPILER_VERSION}+${fingerprints.review.slice(0, 8)}`;
+}

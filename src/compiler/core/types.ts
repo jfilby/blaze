@@ -620,5 +620,14 @@ export interface BuildStatus {
   model: string;
   modelConfig: string;
   compilerVersion: string;
+  /**
+   * The engine that built it, as `engineStamp` names it: the release and the
+   * fingerprint of the sources that decide what a function is. A later run
+   * compares it with its own, so a build that changed the compiler under a
+   * project says so instead of quietly re-asking a model for every function.
+   */
+  engine: string;
+  /** Whether this build asked for every function again whatever the engine. */
+  recompiled?: boolean;
   error?: { category: string; stage: string; message: string; detail?: string };
 }

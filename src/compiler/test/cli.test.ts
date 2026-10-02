@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, mkdtemp } from "node:fs/promises";
+import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../core/process.ts";
+import { writeProject } from "./project.ts";
 
 const CLI = new URL("../cli.ts", import.meta.url).pathname;
 const EXAMPLE = new URL("../../examples/hello_world", import.meta.url).pathname;
@@ -139,4 +140,64 @@ test("a build that is not on a terminal leaves the title alone", async () => {
 
   assert.equal(execution.code, 0, execution.stderr);
   assert.doesNotMatch(execution.stdout, /\u001b]0;/);
+});
+
+/** The build record as it is on the disk, which is what a reader opens. */
+async function readBuildRecord(path: string): Promise<{ engine?: string; recompiled?: boolean }> {
+  return JSON.parse(await readFile(path, "utf8")) as { engine?: string; recompiled?: boolean };
+}
+
+/**
+ * A review that finds nothing to change, which is what most rounds answer, so
+ * a build driven from a replay fixture spends nothing and asks nothing.
+ */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
+
+/** A library project of its own, so the test builds no example it needs. */
+async function libraryProject(name: string): Promise<{ directory: string; replay: string }> {
+  const directory = await mkdtemp(join(tmpdir(), `blaze-cli-${name}-`));
+  await writeProject(join(directory, "input.toml"), {
+    language: "nim",
+    source: ["proc square(x: float32): float32 =", "  result = x * x", ""].join("\n"),
+    entry: "square",
+    output: "ir",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  const replay = join(directory, "reviews.json");
+  await writeFile(replay, JSON.stringify({ reviews: [SOUND] }), "utf8");
+  return { directory, replay };
+}
+
+test("--recompile rebuilds what the last build proved, and refuses to be paired with --reuse", async () => {
+  const { directory, replay } = await libraryProject("recompile");
+  const build = (...flags: string[]) =>
+    run(process.execPath, [CLI, "build", "input.toml", `--model=replay:${replay}`, ...flags], {
+      cwd: directory,
+      timeoutMs: 300_000,
+    });
+
+  const first = build();
+  assert.equal(first.code, 0, first.stderr);
+
+  // The engine is what a later run compares against, so the record a reader
+  // opens says which compiler produced the artifact it names.
+  const record = join(directory, ".blaze/projects/input/build.json");
+  const stored = await readBuildRecord(record);
+  assert.match(stored.engine ?? "", /^0\.1\.0\+[0-9a-f]{8}$/, JSON.stringify(stored));
+
+  // Nothing about the project changed, so this build is one a plain run would
+  // have reused whole. `--recompile` rebuilds it anyway, and the record says so
+  // rather than only the log.
+  const plain = build();
+  assert.equal(plain.code, 0, plain.stderr);
+  assert.match(plain.stdout, /was not rebuilt/, "a plain build did not reuse what the first one proved");
+
+  const forced = build("--recompile");
+  assert.equal(forced.code, 0, forced.stderr);
+  assert.doesNotMatch(forced.stdout, /was not rebuilt/, "a recompile reused what the build before it proved");
+  assert.equal((await readBuildRecord(record)).recompiled, true);
+
+  const refused = build("--recompile", "--reuse");
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /--recompile and --reuse ask for opposite builds/);
 });

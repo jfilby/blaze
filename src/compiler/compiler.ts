@@ -85,7 +85,7 @@ import {
 } from "./incremental.ts";
 import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget, optimizationOptions } from "./core/target.ts";
 import { run } from "./core/process.ts";
-import { COMPILER_VERSION, toolchainFingerprints } from "./core/version.ts";
+import { COMPILER_VERSION, engineStamp, toolchainFingerprints } from "./core/version.ts";
 import {
   type ProgramMismatch,
   DEFAULT_BENCHMARK,
@@ -138,6 +138,18 @@ export interface BuildOptions {
   reuse: boolean;
   maxCandidates?: number;
   maxAttempts?: number;
+  /**
+   * Ask the user a yes/no question. A build that has no way to ask — a pipe, a
+   * test, a script — answers for itself, so nothing ever blocks on a terminal
+   * that is not there.
+   */
+  confirm?: (question: string) => Promise<boolean>;
+  /**
+   * Rebuild every function whatever the engine says, and without asking: the
+   * stored candidates and objects are kept, and what was reviewed from
+   * different inputs is asked for again.
+   */
+  recompile?: boolean;
   /** Extra model requests one attempt may spend on an answer with no implementation. */
   maxRetries?: number;
   /** Candidates reviewed at the same time; 1 reviews them one at a time. */
@@ -621,6 +633,32 @@ async function writeBuildRecord(store: JsonStore, paths: ProjectPaths, build: Bu
 }
 
 /**
+ * How long ago a record says it was written, in the words a person reads: the
+ * build that is about to be redone is usually a build from this session, and
+ * an ISO timestamp says less about that than "2 minutes ago". A time this
+ * compiler cannot read is the timestamp itself, because a guess would be
+ * worse than the text it stands in for.
+ */
+function agoFrom(iso: string | undefined): string {
+  if (iso === undefined) return "at an unrecorded time";
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return iso;
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (seconds < 45) return "moments ago";
+  const units: readonly (readonly [string, number])[] = [
+    ["minute", 60],
+    ["hour", 3600],
+    ["day", 86400],
+  ];
+  for (const [name, size] of units) {
+    const count = Math.round(seconds / size);
+    if (count < 60) return `${count} ${name}${count === 1 ? "" : "s"} ago`;
+  }
+  const days = Math.round(seconds / 86400);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/**
  * Records that a project was rejected before any build could start. The
  * record carries what the last build named, because that is the build this
  * one failed to be, and it is marked failed so nothing reads it as the
@@ -636,6 +674,10 @@ async function recordRejected(
   const failure = toCompilerError(cause, { category: "InputError", stage: "input" });
   const error = new CompilerError({ ...failure.toJSON(), project: id });
   const stamp = new Date().toISOString();
+  // The engine is this one, not the last build's: the record says which
+  // compiler rejected the project, and a record written before this compiler
+  // existed has nothing to compare a later build against.
+  const engine = engineStamp(await toolchainFingerprints());
   await writeBuildRecord(store, paths, {
     id,
     input: paths.input,
@@ -653,6 +695,7 @@ async function recordRejected(
     model: previous?.model ?? "unset",
     modelConfig: previous?.modelConfig ?? "unset",
     compilerVersion: COMPILER_VERSION,
+    engine,
     error: error.toJSON(),
   });
   return error;
@@ -911,6 +954,50 @@ export async function runBuild(
   // before anything can fail, including a model that cannot be reached.
   reporter.stage("model", "info", `Model: ${modelName ?? "(unset)"}`);
 
+  // The engine is read before anything is written, because a build that is
+  // going to stop must stop without having touched the record of the last one.
+  const toolchain = await toolchainFingerprints();
+  const engine = engineStamp(toolchain);
+  // A record written by a different engine is a proof about a compiler that
+  // no longer exists, and every function in it has to be asked for again, so
+  // it is the one change that costs a build its whole cache. It is announced
+  // and, on a terminal, confirmed: the question is what a person can answer
+  // and a script cannot, and a build that has no way to ask answers for
+  // itself. `--recompile` is the same answer given in advance.
+  const previousEngine = previousBuild?.engine;
+  const engineChanged = previousEngine !== undefined && previousEngine !== engine;
+  if (engineChanged && options.reuse !== true) {
+    reporter.stage(
+      "engine",
+      "info",
+      `Engine changed: ${previousEngine} -> ${engine} (last build ${agoFrom(previousBuild?.updatedAt)})`,
+    );
+    reporter.stage(
+      "engine",
+      "info",
+      "The stored objects were built by different rules, so every function is reviewed again from the semantic IR",
+    );
+    if (options.recompile !== true && options.confirm !== undefined) {
+      const recompile = await options.confirm("Recompile every function from scratch? [y/N] ");
+      if (!recompile) {
+        throw new CompilerError({
+          category: "CancelledError",
+          stage: "engine",
+          message: `the engine changed (${previousEngine} -> ${engine}) and the recompile was declined`,
+          detail: "nothing was built and the last build is still the project's; run blaze build --recompile to rebuild it",
+        });
+      }
+    }
+  }
+  // What an earlier build stored is what this build does not look at when the
+  // engine moved under it, and what it does not look at when it was told to
+  // recompile. The two are the same decision: the announcement above promised
+  // a rebuild, so the stored candidates go with it even where the keys alone
+  // would have let them through. A `--reuse` build discards nothing — it asks
+  // no model for anything, so there is nothing to rebuild, and it reports the
+  // mismatch against what it was promised instead.
+  const discardStored = options.recompile === true || (engineChanged && options.reuse !== true);
+
   await store.mkdirp(paths.root);
   await store.mkdirp(paths.work);
   await store.mkdirp(paths.output);
@@ -937,6 +1024,10 @@ export async function runBuild(
     model: modelName ?? "unset",
     modelConfig: modelName ?? previousBuild?.modelConfig ?? "unset",
     compilerVersion: COMPILER_VERSION,
+    engine,
+    // The flag is the record of a build that was told to recompile. An engine
+    // change that forced one is already visible as the stamp, which moved.
+    ...(options.recompile === true ? { recompiled: true } : {}),
   };
   await writeBuildRecord(store, paths, build);
 
@@ -995,7 +1086,12 @@ export async function runBuild(
     // What an earlier build proved per function. It is read before this build
     // writes to it, and it is written as each function is proved, so a build
     // that fails on a later function still leaves the earlier ones reusable.
-    const incremental = await readIncremental(store, paths.incremental);
+    // A recompile reads it as empty, so nothing earlier is reused and every
+    // function is asked for again: what this build proves is still recorded,
+    // which is the point of recompiling rather than of forgetting.
+    const incremental = discardStored
+      ? (Object.create(null) as IncrementalRecord)
+      : await readIncremental(store, paths.incremental);
     const base = store.resolve(paths.work);
     // What every function of this build was compiled against, so nothing is
     // reused across a change of contract, target, options or model.
@@ -1022,7 +1118,6 @@ export async function runBuild(
     // is lowered into. An edit to the second leaves the first standing, so the
     // candidates an earlier build reviewed are put through the toolchain as it
     // is now rather than asked for again.
-    const toolchain = await toolchainFingerprints();
     const keyOf = (unit: CompilationUnit): UnitKeys =>
       unitKeys({
         contract: unit.contract,

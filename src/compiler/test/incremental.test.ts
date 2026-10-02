@@ -5,7 +5,7 @@ import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
 import type { Candidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { fingerprintSources, toolchainFingerprints } from "../core/version.ts";
+import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprints } from "../core/version.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { returns as returnsValue } from "./definition.ts";
@@ -346,6 +346,34 @@ test("an edit to a compiler source moves the fingerprint that decides it", async
   const here = await toolchainFingerprints();
   assert.match(here.review, /^[0-9a-f]{64}$/);
   assert.match(here.lowering, /^[0-9a-f]{64}$/);
+});
+
+test("the engine stamp names the release and the sources that decide a function", async () => {
+  // The stamp is what a build record carries so the next run can tell whether
+  // the compiler moved under it. It has to move when the sources that decide
+  // what a function is move, or a build reuses an object a different compiler
+  // made and calls it freshly proved.
+  const root = await mkdtemp(join(tmpdir(), "blaze-engine-"));
+  await mkdir(join(root, "toolchain"), { recursive: true });
+  await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 1;\n", "utf8");
+  const before = await fingerprintSources(root);
+  const stamp = engineStamp(before);
+  assert.match(stamp, new RegExp(`^${COMPILER_VERSION.replace(/\./g, "\\.")}\\+[0-9a-f]{8}$`));
+
+  // A lowering-only source decides what the IR becomes and not what it is, so
+  // the candidates an earlier build reviewed still stand and nothing is worth
+  // asking the user about.
+  await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 2;\n", "utf8");
+  const loweringOnly = await fingerprintSources(root);
+  assert.notEqual(loweringOnly.lowering, before.lowering, "the edit did not reach the lowering");
+  assert.equal(engineStamp(loweringOnly), stamp, "a lowering edit moved the engine");
+
+  await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 1;\n", "utf8");
+  await writeFile(join(root, "review.ts"), "export const prompt = 1;\n", "utf8");
+  const reviewSide = await fingerprintSources(root);
+  assert.notEqual(reviewSide.review, before.review, "the edit did not reach the review");
+  assert.notEqual(engineStamp(reviewSide), stamp, "an edit that invalidates every candidate left the engine stamp alone");
+  await rm(root, { recursive: true, force: true });
 });
 
 test("every file a build consumes from a reused candidate is one it asked for", () => {

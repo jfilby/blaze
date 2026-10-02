@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runBuild, runStored, inspectProject, STATE_DIRECTORY } from "../compiler.ts";
+import { runBuild, runStored, inspectProject, STATE_DIRECTORY, type Reporter } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import type { ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
@@ -454,6 +454,139 @@ test("a change that leaves a contract alone does not rebuild the function", asyn
 
   assert.equal(second.build.status, "success");
   assert.deepEqual(second.build.reused, { dotProduct: "c1" });
+});
+
+/**
+ * A build record as it is on the disk, so a test can say a build ran under a
+ * different engine without touching the compiler's own sources.
+ */
+async function storedRecord(directory: string, project: string): Promise<Record<string, unknown>> {
+  return JSON.parse(
+    await readFile(join(directory, STATE_DIRECTORY, `projects/${project}/build.json`), "utf8"),
+  ) as Record<string, unknown>;
+}
+
+async function writeStoredRecord(directory: string, project: string, record: Record<string, unknown>): Promise<void> {
+  await writeFile(
+    join(directory, STATE_DIRECTORY, `projects/${project}/build.json`),
+    JSON.stringify(record, null, 2),
+    "utf8",
+  );
+}
+
+/** The record of what a build proved per function, exactly as it is stored. */
+async function storedIncremental(directory: string, project: string): Promise<string> {
+  return readFile(join(directory, STATE_DIRECTORY, `projects/${project}/incremental.json`), "utf8");
+}
+
+test("a build records the engine that built it", async () => {
+  const directory = await workspace("engine-recorded");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
+
+  // The stamp is the release and a fingerprint of the compiler's own sources,
+  // which is what the next run compares against its own.
+  assert.match(outcome.build.engine, /^0\.1\.0\+[0-9a-f]{8}$/);
+  assert.equal((await storedRecord(directory, outcome.project)).engine, outcome.build.engine);
+});
+
+test("an engine that changed is announced, and declining leaves the last build alone", async () => {
+  const directory = await workspace("engine-changed");
+  const replay = await writableReplay(directory, REPLAY);
+  const first = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  assert.equal(first.build.status, "success");
+
+  // The record now claims an engine that is not this one, which is what a
+  // compiler updated under a project looks like from inside a build.
+  const record = await storedRecord(directory, first.project);
+  await writeStoredRecord(directory, first.project, { ...record, engine: "0.1.0+00000000" });
+  const before = await storedIncremental(directory, first.project);
+
+  const asked: string[] = [];
+  await assert.rejects(
+    () =>
+      runBuild(
+        "input.toml",
+        {
+          cwd: directory,
+          reuse: false,
+          model: `replay:${replay}`,
+          confirm: async (question) => {
+            asked.push(question);
+            return false;
+          },
+        },
+        quiet,
+        "build",
+      ),
+    /the engine changed \(0\.1\.0\+00000000 -> /,
+  );
+
+  assert.equal(asked.length, 1, `the user was asked ${asked.length} times: ${asked.join(" ")}`);
+  assert.match(asked[0] ?? "", /Recompile every function from scratch/);
+  // Nothing was built, so the record is the build that was there before, not a
+  // failed one: the project still has the object the last build verified.
+  const after = await storedRecord(directory, first.project);
+  assert.equal(after.status, "success");
+  assert.equal(after.engine, "0.1.0+00000000", "a declined build overwrote the record it was asked about");
+  assert.deepEqual(after.selectedCandidates, first.build.selectedCandidates);
+  // What the last build proved is still proved: a build that stops before it
+  // starts has not invalidated the proof it was about to replace.
+  assert.equal(await storedIncremental(directory, first.project), before, "a declined build disturbed what was stored");
+});
+
+test("an engine that changed is recompiled when the user says so, and without asking otherwise", async () => {
+  const directory = await workspace("engine-accepted");
+  const replay = await writableReplay(directory, REPLAY);
+  const first = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  const record = await storedRecord(directory, first.project);
+  await writeStoredRecord(directory, first.project, { ...record, engine: "0.1.0+00000000" });
+
+  const log: string[] = [];
+  const listening: Reporter = { stage: (_stage, _status, message) => log.push(message) };
+  // No confirm hook at all is a build that has nobody to ask: a pipe, a log, a
+  // script. It says what happened and goes on to build.
+  const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, listening, "build");
+  assert.equal(second.build.status, "success");
+  assert.ok(log.some((message) => /Engine changed: 0\.1\.0\+00000000 -> /.test(message)), log.join("\n"));
+  // Every function is asked for again. The announcement says so, so the build
+  // has to do it even where the keys alone would have let it through: a stamp
+  // that moved says the sources this compiler reads are not the ones the
+  // stored objects were built from, whatever else about them agrees.
+  assert.deepEqual(second.build.reused, {});
+  assert.notEqual(second.build.engine, "0.1.0+00000000");
+  assert.equal(second.build.engine, first.build.engine);
+});
+
+test("--recompile rebuilds every function even though the engine has not moved", async () => {
+  const directory = await workspace("engine-recompile");
+  const replay = await writableReplay(directory, REPLAY);
+  const first = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
+  assert.deepEqual(first.build.reused, {});
+
+  const asked: string[] = [];
+  const second = await runBuild(
+    "input.toml",
+    {
+      cwd: directory,
+      reuse: false,
+      recompile: true,
+      model: `replay:${replay}`,
+      confirm: async (question) => {
+        asked.push(question);
+        return true;
+      },
+    },
+    quiet,
+    "build",
+  );
+
+  assert.equal(second.build.status, "success");
+  assert.deepEqual(asked, [], "a build that was told to recompile asked anyway");
+  assert.deepEqual(second.build.reused, {}, "the stored implementation was reused by a recompile");
+  assert.equal(second.build.recompiled, true);
+  // The record says so, so a reader of it can tell this build apart from one
+  // that had to rebuild because its inputs moved.
+  assert.equal((await storedRecord(directory, second.project)).recompiled, true);
 });
 
 test("a stored implementation whose files are gone is rebuilt from it, without a model", async () => {

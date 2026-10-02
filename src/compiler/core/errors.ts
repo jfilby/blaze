@@ -15,6 +15,8 @@ export type ErrorCategory =
   | "SemanticIrError"
   | "AssemblyError"
   | "VerificationError"
+  /** A build the user stopped before it started, so nothing is wrong. */
+  | "CancelledError"
   | "BenchmarkError"
   | "LinkError"
   | "TargetError"
