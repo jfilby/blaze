@@ -60,99 +60,49 @@ const PROJECT_FILE = "blaze.toml";
 
 const USAGE = `blaze - AI native compiler
 
-A build resolves the source into the semantic IR, reviews that IR with the
-model, lowers the revised IR to the target the project asked for, reviews the
-target, and compiles what came of that. The model verifies and proposes; the
-compiler writes every program, applies the proposals it accepts and refuses the
-rest with a reason.
+A build resolves the source into the semantic IR, has the model review that,
+lowers the revised IR to the target, has the model review it again, and compiles
+the result. The model verifies and proposes; the compiler writes every program
+and applies the proposals it accepts, refusing the rest with a reason.
 
 Usage:
   blaze build [input.toml] [arguments...] build a function, or a program
-  blaze init                          write a ${PROJECT_FILE} here, and fail if
-                                     one is already there
-  blaze generate [input.toml] [options]  build and validate the candidates
-  blaze ir [input.toml] [options] print the semantic IR: the program the
-                            project runs, one function, or every function
-  blaze test <project> [options]         re-verify the selected candidate
-  blaze benchmark <project> [options]    re-benchmark the selected candidate
-  blaze inspect <project>                print the build record
-  blaze projects                         list projects in ${STATE_DIRECTORY}/projects
+  blaze generate [input.toml]              build and validate the candidates
+  blaze ir [input.toml] [options]          print the semantic IR
+  blaze init                               write a ${PROJECT_FILE} here
+  blaze test <project>                     re-verify the selected candidate
+  blaze benchmark <project>                re-benchmark the selected candidate
+  blaze inspect <project>                  print the build record
+  blaze projects                           list ${STATE_DIRECTORY}/projects
 
-  blaze build                       build the ./blaze.toml in this directory
-  blaze build <input.toml>          build the given input instead
+build, generate and ir take ./${PROJECT_FILE} when no path is given, and a directory
+holding one names its project; any other .toml names its own. State is written
+to ${STATE_DIRECTORY}/ in the current directory. Arguments after the path are the program's
+own, so \`blaze build 12\` checks it the way it runs.
 
-A project is described by a ${PROJECT_FILE} file, and a directory that holds one is
-named after that directory, so "blaze build examples/hello_world/${PROJECT_FILE}"
-builds project hello_world. Any other .toml file names its own project.
-
-A project names its provider and model, never its key:
-
-  [model]
-  provider = "openrouter"
-  model = "anthropic/claude-sonnet-4.5"
-
-The credential comes from the environment. --model overrides the project, and
-the project overrides AI_MODEL.
-
-The compiler waits for the model for as long as it takes and says which model
-it is waiting on. Set generation.timeoutSeconds to bound one model request
-instead, for example in a build that must not hang: every request is given the
-whole of that budget, and one that overruns it fails the build at once rather
-than being asked for again.
-
-A build is incremental. A function whose contract, the functions it is linked
-against, the target, the options, the model and the compiler's own sources are
-all unchanged keeps the object an earlier build verified, and the model is only
-asked for what changed. Editing a comment in the project changes nothing a
-build is keyed on, so it rebuilds nothing.
-
-Every build records the engine that built it, as the release and a short
-fingerprint of the compiler's own sources. When that moves, nothing stored can
-be trusted, so the build says so before it spends anything: on a terminal it
-asks whether to recompile every function, and answering no leaves the last
-build exactly as it was. Piped into a file or a log there is nobody to ask, so
-it says the same thing and recompiles. --recompile is that answer given in
-advance, and it rebuilds even when the engine has not moved.
-
-On a terminal, a command that works animates the tab title as the blaze brand
-next to a spinner, and settles it on the outcome: a check mark for a build that
-produced an object, a cross for one that did not. A command whose output is a
-pipe or a file never writes a title, so a log holds nothing but the build.
+generation.timeoutSeconds in ${PROJECT_FILE} bounds one model request; unset, a
+build waits as long as the model takes.
 
 Options:
-  --model <provider/model>  model configuration, overrides AI_MODEL
-  --reuse                   build only from what an earlier build verified, and
-                            fail rather than ask a model for anything
-  --from <file>              read IR from the file instead of resolving the
+  --model <provider/model>  overrides AI_MODEL, which the project also sets;
+                            the credential comes from the environment
+  --reuse                   build only from what an earlier build verified
+  --recompile               rebuild every function, without asking
+  --from <file>             read the IR from a file instead of resolving the
                             source, and validate it against the contract
-  --function <name>          print one function of the project as the IR holds
-                            it, rather than the program it runs
-  --recompile                rebuild every function from the semantic IR even
-                            though nothing it was built from has changed, and
-                            without asking
-  --all                      print every function of every file as the IR holds it
-  --output <kind>           what is built: ir (semantic IR the compiler lowers),
-                            c, asm, machine or wasm (default ir)
-  --backend <name>           what lowers the IR: c (the C the compiler writes,
-                            which gcc makes an object of), wasm (a module the
-                            compiler encodes itself) or machine (an object the
-                            compiler encodes itself); defaults to the one the
-                            output kind implies
-  --mode <name>              how the toolchain builds: debug (-O0 -g, default),
-                            release (-O3), or danger (release, and the runtime's
-                            own guards are left out of the generated program)
-  --runtime <name>           host runtime: none or nim (default none)
-  --max-candidates <n>      number of candidates to build, each reviewed from
-                            the IR the compiler resolved
-  --max-attempts <n>        rounds per candidate: the first reviews that IR, the
-                            rest review what the round before it produced
-  --max-retries <n>         extra model requests one review spends on an answer
-                            that could not be read; they cost no round
-  --candidate-concurrency <n> candidates to review at the same time (default 4);
-                            verification and benchmarking stay serial
-  --function-concurrency <n> functions to review at the same time (default 3);
-                            assembles, verification and benchmarking stay serial
-  --debug                   print the prompt sent to the model for every review
+  --function <name>         one function as the IR holds it, not the program
+  --all                     every function of every file, as the IR holds it
+  --output <kind>           ir, c, asm, machine or wasm (default ir)
+  --backend <name>          c, wasm or machine; defaults to the output's
+  --mode <name>             debug (-O0 -g, default), release (-O3), or danger
+                            (release, with the runtime's guards left out)
+  --runtime <name>          host runtime: none or nim (default none)
+  --max-candidates <n>      candidates to build per function (default 5)
+  --max-attempts <n>        review rounds per candidate (default 3)
+  --max-retries <n>         re-requests for an unreadable answer (default 3)
+  --candidate-concurrency <n> candidates reviewed at once (default 4)
+  --function-concurrency <n> functions reviewed at once (default 3)
+  --debug                   print the prompt sent for every review
   --random-cases <n>        randomized test cases per build
   --max-length <n>          maximum generated buffer length
   -h, --help                show this help
