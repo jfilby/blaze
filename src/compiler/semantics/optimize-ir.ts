@@ -15,6 +15,11 @@
  * exposes the next: a fold makes a value hoistable, and a hoist makes two
  * computations the same one.
  *
+ * One rewrite is not a rewrite of one body: whole-number arithmetic
+ * (`whole-numbers.ts`) reads a whole program, because what it needs to know is
+ * what the callers of a function hand it. It therefore runs once, at the end,
+ * rather than in the rounds below.
+ *
  * Every rewrite here is value-preserving by construction, and the two places
  * that could have been are guarded and say why: folding a floating-point
  * operation is only exact where IEEE says the result is exact, and moving a
@@ -36,6 +41,7 @@ import type {
 } from "../core/semantic-ir.ts";
 import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
+import { wholeNumberArithmetic } from "./whole-numbers.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -1671,6 +1677,12 @@ export function optimizeSemanticProgram(program: SemanticProgram): SemanticProgr
   // run over a program run over it: a loop invariant hoisted out of a function
   // is worth as much there as it is in the block the program starts in.
   for (const fn of program.bodies) optimizeSemanticEntry(fn.entry);
+  // Whole-number arithmetic is the one rewrite here that is a question about a
+  // whole program rather than about one body: what it needs to know is what
+  // the callers of a function hand it, which is settled once every body has
+  // settled. It runs last and it runs once, because a function it has rewritten
+  // already holds whole-number parameters and would be rewritten again.
+  wholeNumberArithmetic(program);
   return program;
 }
 

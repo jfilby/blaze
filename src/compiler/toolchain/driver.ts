@@ -343,6 +343,10 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `return ${value};`;
   }
 
+  returnNothing(): string {
+    return "return;";
+  }
+
   openProgram(): string[] {
     return [
       "",
@@ -373,12 +377,14 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `(${declaredType(type)})(${expression})`;
   }
 
-  asLength(expression: string): string {
+  asLength(expression: string, type: SemanticType): string {
     // The value is bound because it is read twice and a value the IR calls is a
     // call: `blaze_rt_argv(0)` allocates what the argument was and reads it a
     // second time out of nothing. A NaN is no count and is zero, which is what
-    // the language reads a length that is not a number as.
-    return `({ double program_count = (${expression}); (size_t)(program_count != program_count ? 0.0 : program_count); })`;
+    // the language reads a length that is not a number as. The conversion is at
+    // the width the IR reads the value at, so a `u32` truncates at thirty-two
+    // bits rather than counting in sixty-four and being narrowed afterwards.
+    return `({ double program_count = (${expression}); (${declaredType(type)})(program_count != program_count ? 0.0 : program_count); })`;
   }
 
   literal(text: string, type: string): string {

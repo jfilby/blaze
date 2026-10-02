@@ -24,6 +24,7 @@ import {
   isFloat,
   isNumber,
   isTextType,
+  typeText,
   type SemanticCall,
   type SemanticType,
   type ValueKind,
@@ -372,6 +373,10 @@ ${anchor}
     return `return ${value}`;
   }
 
+  returnNothing(): string {
+    return "return";
+  }
+
   openProgram(): string[] {
     return [];
   }
@@ -412,14 +417,16 @@ ${anchor}
     return `${isTextType(type) ? "string" : nimParameter(type)}(${expression})`;
   }
 
-  asLength(expression: string): string {
+  asLength(expression: string, type: SemanticType): string {
     // A NaN is no count and is zero, which is what the language reads a length
     // that is not a number as. Nim's own conversion answers the largest size
     // there is for a NaN, and an allocation of that ends the run. The count is
-    // bound because it is read twice and a value the IR calls is a call.
+    // bound because it is read twice and a value the IR calls is a call, and
+    // the conversion is at the width the IR reads the value at rather than at
+    // the width of a count.
     return `block:
   let program_count = ${expression}
-  if program_count != program_count: 0'u64 else: csize_t(program_count)`;
+  if program_count != program_count: ${literal("0", typeText(type))} else: ${isTextType(type) ? "string" : nimParameter(type)}(program_count)`;
   }
 
   literal(text: string, type: string): string {

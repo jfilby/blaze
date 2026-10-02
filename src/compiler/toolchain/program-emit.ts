@@ -29,6 +29,7 @@ import {
   isTextType,
   slotType,
   typeText,
+  VOID,
   type SemanticFunction,
   isFloat,
   isUnsigned,
@@ -93,6 +94,11 @@ export interface ProgramTarget {
   closeFunction(releases: readonly string[], returned: boolean): string[];
   /** The line a function hands its result back with. */
   returnValue(value: string): string;
+  /**
+   * The line a block ends with a return that hands back nothing, which is what
+   * a body that returns before it reaches the end of itself leaves.
+   */
+  returnNothing(): string;
   /** The lines that open the body of the program, runtime and all. */
   openProgram(): string[];
   /** The lines that close it, releasing what the program allocated. */
@@ -105,11 +111,15 @@ export interface ProgramTarget {
   /** The same value read as another type. */
   cast(type: SemanticType, expression: string): string;
   /**
-   * A number the program settled on when it ran, read as a whole count. A NaN
-   * is no count at all and reads as zero, which is what the language reads it
-   * as; a cast alone would leave the machine's answer for a NaN there.
+   * A number read as a whole number of the given type. A NaN is no count at
+   * all and reads as zero, which is what the language reads it as; a cast
+   * alone would leave the machine's answer for a NaN there.
+   *
+   * The type is the one the read is made at, which is not always a full word:
+   * `u32 >>> 1` truncates at thirty-two bits and a length at sixty-four, and
+   * reading one as the other is a different number rather than a slower one.
    */
-  asLength(expression: string): string;
+  asLength(expression: string, type: SemanticType): string;
   /** One number as a literal of the type it initializes. */
   literal(text: string, type: string): string;
   /** A line that declares a value; a value of no type is a string. */
@@ -255,6 +265,13 @@ class ProgramEmitter {
   private lines: string[] = [];
   /** The loops whose bodies are being written, the innermost last. */
   private readonly loops: { header: string; exit: string }[] = [];
+  /**
+   * What the block being written hands back, which is the return type of the
+   * function it is in and `void` for the body the program starts in. A return
+   * inside the body is read at this width, the same one the return that ends
+   * the body is read at.
+   */
+  private returns: SemanticType = VOID;
   private depth = 0;
   /** The names the program declared, and the names a target reads them by. */
   private names!: NameScope;
@@ -295,15 +312,14 @@ class ProgramEmitter {
     });
     this.lines = [];
     this.depth = 1;
+    this.returns = fn.returns;
     for (const statement of fn.entry.statements) this.statement(statement);
-    // What a function hands back is written where the source returned it, and a
-    // body that falls off the end returns the zero of a type it never returns.
-    const terminator = fn.entry.terminator;
-    const returned = terminator.k === "return" && terminator.value !== null;
-    if (terminator.k === "return" && terminator.value !== null) {
-      this.write(this.target.returnValue(this.expression(terminator.value, fn.returns)));
-    }
-    this.terminator(terminator, null);
+    // What a function hands back is written where the source returned it. A body
+    // that returns a value has written its return above; one that falls off the
+    // end returns the zero of a type it never returns, which is what the closing
+    // line says for it.
+    const returned = fn.entry.terminator.k === "return" && fn.entry.terminator.value !== null;
+    this.terminator(fn.entry.terminator, null, true);
     const body = this.lines;
     this.lines = [];
     // What the body allocated is read by the names the body declared, so the
@@ -335,9 +351,12 @@ class ProgramEmitter {
 
   /** The statements of the block the run starts in, and where it ends. */
   private entry(): string[] {
+    // The body the program starts in returns nothing, so a return inside it
+    // leaves the run with nothing in its hands.
     this.depth = 1;
+    this.returns = VOID;
     for (const statement of this.program.entry.statements) this.statement(statement);
-    this.terminator(this.program.entry.terminator, null);
+    this.terminator(this.program.entry.terminator, null, true);
     return this.lines;
   }
 
@@ -595,11 +614,30 @@ class ProgramEmitter {
   }
 
   /**
-   * Where control goes when a block is done. A jump names the block it leaves,
-   * which is either the header of the loop it is in — the run goes on from the
-   * top of it — or the block the loop sits in, which the run carries on from.
+   * Where control goes when a block is done.
+   *
+   * A return is written here and not only where the body of a function ends: a
+   * block nested in the body can end in one, which is a block that answers
+   * before the statements after it run. It hands back what the function returns,
+   * read at the width the function returns it at, so an answer written in a
+   * whole number is read as the number the caller is waiting for.
+   *
+   * A jump names the block it leaves, which is either the header of the loop it
+   * is in — the run goes on from the top of it — or the block the loop sits in,
+   * which the run carries on from.
    */
-  private terminator(terminator: SemanticTerminator, loop: SemanticLoop | null): void {
+  private terminator(terminator: SemanticTerminator, loop: SemanticLoop | null, final = false): void {
+    if (terminator.k === "return") {
+      // A body that returns nothing ends at its closing line, so a return there
+      // would say what the closing line already says.
+      if (final && terminator.value === null) return;
+      this.write(
+        terminator.value === null
+          ? this.target.returnNothing()
+          : this.target.returnValue(this.expression(terminator.value, this.returns)),
+      );
+      return;
+    }
     if (terminator.k !== "jump") return;
     for (const name of terminator.releases) this.write(this.target.release(this.names.read(name)));
     const open = loop ?? this.loops[this.loops.length - 1];
@@ -643,7 +681,7 @@ class ProgramEmitter {
     // one: a NaN is no length at all, and it is zero. A cast would leave
     // whatever the machine made of the value there instead, which for a NaN is
     // the largest size there is, and an allocation of that ends the run.
-    if (isFloat(value.type) && isUnsigned(as)) return this.target.asLength(text);
+    if (isFloat(value.type) && isUnsigned(as)) return this.target.asLength(text, as);
     return this.target.cast(as, text);
   }
 
