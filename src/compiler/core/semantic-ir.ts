@@ -53,6 +53,7 @@ export const NUMERIC: readonly PrimitiveTypeName[] = [
   "u16",
   "u32",
   "u64",
+  "u256",
   "f32",
   "f64",
   "usize",
@@ -148,6 +149,13 @@ export function typeEquals(left: SemanticType, right: SemanticType): boolean {
   return typeText(left) === typeText(right);
 }
 
+/**
+ * How wide each whole number is, as a rank a pair is promoted along. A wide
+ * number is ranked above every machine word so that a pair of a wide number and
+ * a narrower whole number is computed as the wide one: promoting it the other
+ * way would silently drop the high limbs of a value that does not fit in one,
+ * which is the one answer here that is never what the source wrote.
+ */
 const WHOLE_RANK: Record<string, number> = {
   i8: 1,
   u8: 1,
@@ -159,7 +167,46 @@ const WHOLE_RANK: Record<string, number> = {
   u64: 4,
   isize: 4,
   usize: 4,
+  u256: 5,
+  // A wide number, ranked above every machine word. See the note above.
 };
+
+/**
+ * The types wider than one machine word, and the number of 64 bit limbs each
+ * is held as.
+ *
+ * A type here is not a wider spelling of a `u64`: it is a whole number too wide
+ * for a register, so every backend holds it in memory as this many limbs, least
+ * significant first, and carries or borrows between them by hand. That is why
+ * the limb count is the unit these are described in rather than a bit count —
+ * a limb is what the arithmetic is actually done over, and the bit width is a
+ * consequence of how many of them there are.
+ *
+ * The table is what makes a further width a row rather than a rewrite: `u128` is
+ * two limbs and `u512` is eight, and every backend reads this one table rather
+ * than a width of its own.
+ */
+export const WIDE_LIMBS: Readonly<Record<string, number>> = { u256: 4 };
+
+/** True when a type is one of the whole numbers wider than a machine word. */
+export function isWide(name: PrimitiveTypeName): boolean {
+  return WIDE_LIMBS[name] !== undefined;
+}
+
+/**
+ * The 64 bit limbs a wide number is held as, or null when the type is not a
+ * wide number. The limbs are least significant first, which is the order every
+ * backend writes them to memory in and therefore the order the runtime reads a
+ * value it is handed a pointer to in.
+ */
+export function limbsOf(name: PrimitiveTypeName): number | null {
+  return WIDE_LIMBS[name] ?? null;
+}
+
+/** True when a type is one of the whole numbers wider than a machine word. */
+export function isWideType(type: SemanticType): boolean {
+  return type.kind === "primitive" && WIDE_LIMBS[type.name] !== undefined;
+}
 
 /** The number two numbers are computed as, a whole pair included. */
 function promoted(left: PrimitiveTypeName, right: PrimitiveTypeName): PrimitiveTypeName {

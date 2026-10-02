@@ -304,6 +304,51 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   ),
 ];
 
+/**
+ * The prototypes of the wide integer kernel.
+ *
+ * These are declared in the header for the same reason the runtime ABI is, and
+ * are deliberately not part of it. `RUNTIME_ABI` is the boundary a host crosses
+ * into the runtime — allocation, printing, arguments — and every entry in it is
+ * implemented twice, once in C and once in the Nim adapter, so that a program
+ * runs the same on either host. The wide kernel is not a service a host calls:
+ * it is arithmetic that generated code itself calls, and only the C runtime
+ * defines it. Putting it in the ABI would oblige the Nim adapter to restate
+ * every carry and borrow, which is the one place two answers to the same
+ * arithmetic could quietly disagree.
+ */
+const U256_DECLARATIONS: readonly string[] = [
+  "void blaze_rt_u256_add(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_sub(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_or(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_xor(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_not(blaze_u256* out, const blaze_u256* value)",
+  "void blaze_rt_u256_shl(blaze_u256* out, const blaze_u256* value, unsigned count)",
+  "void blaze_rt_u256_shr(blaze_u256* out, const blaze_u256* value, unsigned count)",
+  "int blaze_rt_u256_less(const blaze_u256* left, const blaze_u256* right)",
+  "int blaze_rt_u256_equal(const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_from_u64(blaze_u256* out, uint64_t value)",
+  "uint64_t blaze_rt_u256_to_u64(const blaze_u256* value)",
+  "size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size)",
+  "void blaze_rt_print_u256(const blaze_u256* value)",
+  "void blaze_rt_print_u256_hex(const blaze_u256* value)",
+];
+
+/**
+ * The wide integer symbols, which generated code may reference alongside the
+ * runtime ABI. Kept apart from `RUNTIME_SYMBOLS` because they are the compiler's
+ * own arithmetic rather than a service the host provides; see
+ * `U256_DECLARATIONS` for why the two are not one list.
+ */
+export const WIDE_SYMBOLS: Record<string, true> = Object.fromEntries(
+  U256_DECLARATIONS.map((declaration) => [
+    declaration.slice(declaration.indexOf("blaze_rt_"), declaration.indexOf("(")),
+    true as const,
+  ]),
+);
+
 /** Symbols generated code may reference. Nothing else resolves at link time. */
 export const RUNTIME_SYMBOLS: Record<string, true> = Object.fromEntries(
   RUNTIME_ABI.map((item) => [item.symbol, true as const]),
@@ -318,7 +363,7 @@ export const RUNTIME_ANCHOR: readonly string[] = RUNTIME_ABI.map((item) => item.
 
 /** True when generated code is allowed to reference a symbol. */
 export function isRuntimeSymbol(symbol: string): boolean {
-  return RUNTIME_SYMBOLS[symbol] === true;
+  return RUNTIME_SYMBOLS[symbol] === true || WIDE_SYMBOLS[symbol] === true;
 }
 const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H
 #define BLAZE_RT_H
@@ -347,6 +392,32 @@ typedef struct blaze_rt_header {
 /* The largest a request may be, so a product of a count and an element size
    that would wrap is refused rather than answered with a smaller block. */
 #define BLAZE_RT_MAX_ALLOCATION (1ULL << 40)
+
+/*
+ * The canonical representation of a fixed-width wide integer.
+ *
+ * A wide number is held as an array of 64 bit limbs, least significant first,
+ * and that array is the whole ABI: every backend lays a value out in memory in
+ * this order, passes it to the runtime as a pointer to it, and reads it back
+ * the same way. Least-significant-first is chosen because it is the order the
+ * arithmetic walks the value in — a carry or a borrow propagates from limb 0
+ * upward — and because it is the order the bytes are in on every target this
+ * compiler emits for, so no backend has to reverse one.
+ *
+ * The limbs are unsigned whatever the width of the number is. A u256 is
+ * unsigned, and a further width added beside it is unsigned for the same
+ * reason: a wide number is a fixed-size bag of bits whose arithmetic is defined
+ * modulo 2^(64*limbs), and a signed wide number would have to be answered from
+ * the sign of the top limb on every operation, which is a rule each backend
+ * would then have to implement its own way.
+ */
+typedef struct blaze_u256 {
+  uint64_t limbs[4];
+} blaze_u256;
+
+/* The number of bytes a u256 occupies, for a backend laying a frame out. */
+#define BLAZE_U256_BYTES 32u
+
 `;
 
 const HEADER_EPILOGUE = `
@@ -361,8 +432,293 @@ export function runtimeHeaderSource(): string {
       item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
     })${suffix};`;
   }).join("\n");
-  return `${HEADER_PREAMBLE}\n${declarations}\n${HEADER_EPILOGUE}`;
+  return `${HEADER_PREAMBLE}\n${declarations}\n\n${U256_DECLARATIONS.map((declaration) => `${declaration};`).join("\n")}\n${HEADER_EPILOGUE}`;
 }
+
+/**
+ * The arithmetic of a fixed-width wide integer, in one place.
+ *
+ * Every backend lowers a wide operation to a call into this kernel rather than
+ * to instructions of its own, and that is what makes the semantics one answer
+ * on every target: carry propagation, borrow propagation, the truncation of a
+ * shift and the order limbs are compared in are the parts of a wide operation
+ * a backend gets subtly wrong, and there is one copy of them here rather than
+ * three. It is also what makes a further width cheap — `u128` is this source
+ * with two limbs and `u512` with eight — because the backends hold no
+ * per-operation code to extend: they only lay a value out and call in here.
+ *
+ * Values are in and out by pointer. A 32 byte struct is past the width a target
+ * passes in registers, so passing by value would give each target its own
+ * calling convention and an ABI that no longer matched the memory layout the
+ * backends already use. A pointer is one argument everywhere, and the caller
+ * already holds the value in memory because a wide number is never in a
+ * register.
+ *
+ * Every operation is modulo 2^256 by definition of the type. An overflow is
+ * therefore not a condition to report but the answer the source asked for,
+ * which is why the carry out of the top limb is computed and dropped rather
+ * than checked: there is nothing for it to be other than a discarded value.
+ *
+ * `out` may alias either operand. Addition and the logical operations read each
+ * limb before writing it, so they are safe under aliasing; the shifts read the
+ * whole value before writing any limb, so they are too.
+ */
+export const U256_KERNEL = `
+/* The zero every operation starts from and the value an underflow produces. */
+static blaze_u256 blaze_u256_zero(void) {
+  blaze_u256 out;
+  out.limbs[0] = 0; out.limbs[1] = 0; out.limbs[2] = 0; out.limbs[3] = 0;
+  return out;
+}
+
+static blaze_u256 blaze_u256_of_u64(uint64_t value) {
+  blaze_u256 out = blaze_u256_zero();
+  out.limbs[0] = value;
+  return out;
+}
+
+/* The carry is a full 128 bits so the sum of two limbs and a carry cannot
+   overflow before the carry out of it is extracted. A 64 bit accumulator would
+   lose the bit that belongs to the next limb up. */
+void blaze_rt_u256_add(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  unsigned __int128 carry = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 sum = (unsigned __int128)left->limbs[i] + right->limbs[i] + carry;
+    out->limbs[i] = (uint64_t)sum;
+    carry = sum >> 64;
+  }
+}
+
+/* The borrow is extracted from the top of the wide difference: a subtraction
+   that underflowed a limb is a 128 bit value near 2^128, so its high half is 1
+   exactly when the limb borrowed. Folding the borrow in as a full-width
+   subtraction is what makes \`0 - 1\` the largest value rather than a value
+   tested for after the fact. */
+void blaze_rt_u256_sub(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  unsigned __int128 borrow = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 difference =
+      (unsigned __int128)left->limbs[i] - right->limbs[i] - borrow;
+    out->limbs[i] = (uint64_t)difference;
+    borrow = (difference >> 64) & 1u;
+  }
+}
+
+/* Schoolbook multiplication over the limbs. Every partial product is a 64x64
+   product accumulated in 128 bits, so the carry out of one column of the
+   product is added to the next rather than lost, and the columns above the top
+   limb are dropped: they are the bits above 2^256, which is where the type
+   ends. */
+void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  blaze_u256 accumulator = blaze_u256_zero();
+  for (unsigned i = 0; i < 4; i += 1) {
+    unsigned __int128 carry = 0;
+    for (unsigned j = 0; i + j < 4; j += 1) {
+      const unsigned __int128 product =
+        (unsigned __int128)left->limbs[i] * right->limbs[j] + accumulator.limbs[i + j] + carry;
+      accumulator.limbs[i + j] = (uint64_t)product;
+      carry = product >> 64;
+    }
+  }
+  *out = accumulator;
+}
+
+void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] & right->limbs[i];
+}
+
+void blaze_rt_u256_or(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] | right->limbs[i];
+}
+
+void blaze_rt_u256_xor(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] ^ right->limbs[i];
+}
+
+/* The complement covers every limb, so it is a complement over all 256 bits
+   rather than a 64 bit one repeated four times. */
+void blaze_rt_u256_not(blaze_u256* out, const blaze_u256* value) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = ~value->limbs[i];
+}
+
+/* A shift left by a whole number of limbs is a copy with zeros at the bottom.
+   This is the common case for the multiples of 64 a caller asks for, and it is
+   separated because the bit-carrying general case below cannot express it
+   without a shift by the full width of a limb, which is undefined in C. */
+static void blaze_u256_shl_limbs(blaze_u256* out, const blaze_u256* value, unsigned limbs) {
+  blaze_u256 result = blaze_u256_zero();
+  for (unsigned i = limbs; i < 4; i += 1) result.limbs[i] = value->limbs[i - limbs];
+  *out = result;
+}
+
+static void blaze_u256_shr_limbs(blaze_u256* out, const blaze_u256* value, unsigned limbs) {
+  blaze_u256 result = blaze_u256_zero();
+  for (unsigned i = 0; i + limbs < 4; i += 1) result.limbs[i] = value->limbs[i + limbs];
+  *out = result;
+}
+
+/* A shift left by a count that is not a whole number of limbs. Limb i takes
+   its own bits moved up, plus the bits that fall into it from the limb below,
+   which are the topmost bits of that limb. Both halves are taken from value
+   rather than from result, so the move does not depend on the order the
+   limbs are written in and may not be done in place.
+
+   The top limb is not an exception: its own bits move up and are dropped when
+   they leave it, which is what makes the shift of 255 bits a shift of one bit
+   rather than no shift at all. */
+static void blaze_u256_shl_bits(blaze_u256* out, const blaze_u256* value, unsigned bits) {
+  blaze_u256 result = blaze_u256_zero();
+  for (unsigned i = 0; i < 4; i += 1) {
+    uint64_t limb = value->limbs[i] << bits;
+    if (i > 0u) limb |= value->limbs[i - 1u] >> (64u - bits);
+    result.limbs[i] = limb;
+  }
+  *out = result;
+}
+
+/* A shift right by a count that is not a whole number of limbs. The top limb
+   fills with zeros because the number is unsigned and has no sign to extend,
+   and limb zero's own bits are dropped as they leave it. */
+static void blaze_u256_shr_bits(blaze_u256* out, const blaze_u256* value, unsigned bits) {
+  blaze_u256 result = blaze_u256_zero();
+  for (unsigned i = 0; i < 4; i += 1) {
+    uint64_t limb = value->limbs[i] >> bits;
+    if (i + 1u < 4u) limb |= value->limbs[i + 1u] << (64u - bits);
+    result.limbs[i] = limb;
+  }
+  *out = result;
+}
+
+/* A shift of 256 or more shifts every bit out, which is zero for an unsigned
+   number. It is answered before the count is reduced rather than left to a
+   reduction modulo 256, which would make a shift of 256 a shift of zero and so
+   agree with the source by accident. */
+void blaze_rt_u256_shl(blaze_u256* out, const blaze_u256* value, unsigned count) {
+  if (count >= 256u) { *out = blaze_u256_zero(); return; }
+  const unsigned limbs = count / 64u;
+  const unsigned bits = count % 64u;
+  /* The count is applied as a limb shift and then a bit shift rather than as
+     one of either, because a shift of a whole number of limbs and a shift of
+     the bits inside a limb are the two halves of the same move. Applying only
+     the bit half drops the limbs — a shift of 129 bits would move one bit and
+     leave the value two limbs too low, which is a wrong answer rather than a
+     refused one. The bit shift runs on the already moved value, which is why
+     the intermediate is written out rather than composed limb by limb. */
+  if (bits == 0u) {
+    blaze_u256_shl_limbs(out, value, limbs);
+    return;
+  }
+  blaze_u256 moved;
+  blaze_u256_shl_limbs(&moved, value, limbs);
+  blaze_u256_shl_bits(out, &moved, bits);
+}
+
+void blaze_rt_u256_shr(blaze_u256* out, const blaze_u256* value, unsigned count) {
+  if (count >= 256u) { *out = blaze_u256_zero(); return; }
+  const unsigned limbs = count / 64u;
+  const unsigned bits = count % 64u;
+  if (bits == 0u) {
+    blaze_u256_shr_limbs(out, value, limbs);
+    return;
+  }
+  blaze_u256 moved;
+  blaze_u256_shr_limbs(&moved, value, limbs);
+  blaze_u256_shr_bits(out, &moved, bits);
+}
+
+/* A comparison walks from the top limb down, because the top limb holds the
+   most significant bits: the first limb that differs decides the answer and no
+   limb below it can change it. Returned as a C boolean, which is what every
+   backend's own comparison already produces. */
+int blaze_rt_u256_less(const blaze_u256* left, const blaze_u256* right) {
+  for (unsigned i = 4; i-- > 0;) {
+    if (left->limbs[i] < right->limbs[i]) return 1;
+    if (left->limbs[i] > right->limbs[i]) return 0;
+  }
+  return 0;
+}
+
+int blaze_rt_u256_equal(const blaze_u256* left, const blaze_u256* right) {
+  return (left->limbs[0] == right->limbs[0]) && (left->limbs[1] == right->limbs[1]) &&
+         (left->limbs[2] == right->limbs[2]) && (left->limbs[3] == right->limbs[3]);
+}
+
+/* Widening zero-extends, because the number is unsigned; narrowing keeps the
+   low limb, because a use of a narrow value asks for its low bits and not for
+   an error. */
+void blaze_rt_u256_from_u64(blaze_u256* out, uint64_t value) {
+  *out = blaze_u256_of_u64(value);
+}
+
+uint64_t blaze_rt_u256_to_u64(const blaze_u256* value) {
+  return value->limbs[0];
+}
+
+/* A wide number as text. Decimal has no cheap C spelling, so it is produced by
+   repeated long division of the limbs; the remainder of one turn is at most
+   nine, which is what makes it one digit per turn. Hexadecimal reads the limbs
+   top down and skips the leading zeros, so the text carries no padding the
+   source did not write.
+
+   Only decimal and hexadecimal are answered. A base outside them is refused by
+   the caller rather than answered in base ten, which would print a different
+   number from the one the source wrote. */
+size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size) {
+  if (base != 10u && base != 16u) return 0;
+  char text[80];
+  size_t used = 0;
+  if (base == 10u) {
+    blaze_u256 rest = *value;
+    const blaze_u256 zero = blaze_u256_zero();
+    const blaze_u256 ten = blaze_u256_of_u64(10u);
+    while (!blaze_rt_u256_equal(&rest, &zero)) {
+      unsigned __int128 remainder = 0;
+      for (unsigned i = 4; i-- > 0;) {
+        const unsigned __int128 current = (remainder << 64) | rest.limbs[i];
+        rest.limbs[i] = (uint64_t)(current / ten.limbs[0]);
+        remainder = current % ten.limbs[0];
+      }
+      if (used + 1u < sizeof text) text[used++] = (char)('0' + (unsigned)remainder);
+    }
+    if (used == 0u) text[used++] = '0';
+    for (size_t i = 0; i < used / 2u; i += 1) {
+      const char swap = text[i];
+      text[i] = text[used - 1u - i];
+      text[used - 1u - i] = swap;
+    }
+  } else {
+    unsigned limb = 4;
+    while (limb > 0u && value->limbs[limb - 1u] == 0u) limb -= 1u;
+    int leading = 1;
+    while (limb > 0u) {
+      limb -= 1u;
+      for (unsigned nibble = 16u; nibble-- > 0;) {
+        const unsigned digit = (unsigned)((value->limbs[limb] >> (nibble * 4u)) & 0xfu);
+        if (leading && digit == 0u) continue;
+        leading = 0;
+        if (used + 1u < sizeof text) text[used++] = "0123456789abcdef"[digit];
+      }
+    }
+    if (leading) text[used++] = '0';
+  }
+  if (used + 1u > size) return 0;
+  memcpy(buffer, text, used);
+  buffer[used] = '\\0';
+  return used;
+}
+
+void blaze_rt_print_u256(const blaze_u256* value) {
+  unsigned char text[80];
+  const size_t written = blaze_rt_u256_format(value, 10u, text, sizeof text);
+  fwrite(text, 1, written, stdout);
+}
+
+void blaze_rt_print_u256_hex(const blaze_u256* value) {
+  unsigned char text[80];
+  const size_t written = blaze_rt_u256_format(value, 16u, text, sizeof text);
+  fwrite(text, 1, written, stdout);
+}
+`;
 
 /**
  * The runtime the compiler emits for `runtime: none`, on top of libc.
@@ -969,6 +1325,8 @@ void blaze_rt_raise(const char* message) {
 const char* blaze_rt_last_error(void) {
   return blaze_rt_last_message;
 }
+
+${U256_KERNEL}
 `;
 }
 

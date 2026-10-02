@@ -230,6 +230,12 @@ const PRIMITIVES: Record<string, string> = {
   number: "f64",
   bigint: "i64",
   boolean: "bool",
+  // The compiler's own wide integer, named as a type. It is neither a
+  // TypeScript type nor a typed array: a source spells it to ask for
+  // arithmetic at a fixed width wider than any the language has a keyword for,
+  // and a value written at that width keeps it rather than widening to a
+  // double, which is what every other whole number in a program does.
+  u256: "u256",
 };
 
 /** A function that returns nothing declares `void`. */
@@ -1492,7 +1498,7 @@ function usageOf(declaration: TypeScriptFunction): {
 
 /** The symbol a program entry named `main` is compiled under: a program is
  *  hosted by one that has a `main` of its own, so the two cannot share it. */
-const PROGRAM_ENTRY_SYMBOL = "blaze_main";
+export const PROGRAM_ENTRY_SYMBOL = "blaze_main";
 
 
 /* -------------------------------------------------------------------------- */

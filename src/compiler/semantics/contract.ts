@@ -40,6 +40,7 @@ const INTEGER_NAMES: Record<string, true> = {
   u32: true,
   u64: true,
   usize: true,
+  u256: true,
   isize: true,
 };
 
@@ -80,6 +81,8 @@ export function integerBits(name: PrimitiveTypeName): number {
     case "i32":
     case "u32":
       return 32;
+    case "u256":
+      return 256;
     default:
       return 64;
   }

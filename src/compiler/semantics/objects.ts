@@ -414,6 +414,13 @@ function elementOfType(type: TypeExpr): TypeExpr {
  * else is a double, which is what a number is until a use fixes it.
  */
 export function numeric(left: Inferred, right: Inferred): TypeExpr {
+  // A wide number keeps its width, for the same reason a machine word does
+  // below it: the rule this function ends on is a double because a double holds
+  // every value a program counts with, and a value wider than a machine word is
+  // not one of them. Narrowing here would drop every limb above the first
+  // before a backend is handed the expression at all.
+  if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "u256") return left.type;
+  if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "u256") return right.type;
   if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64") return I64;
   if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64") return I64;
   if (left.kind === "type" && left.type.kind === "primitive" && right.kind === "type" && right.type.kind === "primitive") {

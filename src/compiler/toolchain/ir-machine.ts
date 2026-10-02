@@ -32,6 +32,7 @@ import {
   isNumber,
   isReference,
   isTextType,
+  isWide,
   isUnsigned,
   slotType,
   typeEquals,
@@ -295,7 +296,28 @@ const MATH_LIBRARY: Record<string, string> = {
 };
 
 /** How wide a value of this type is, which is the width a slot holds it at. */
+/**
+ * How wide a value of this type is, which is the width a slot holds it at.
+ *
+ * A wide number is refused here rather than measured, and this is the one place
+ * the refusal belongs. `Width` is 1, 2, 4 or 8, and every read, write and frame
+ * slot in this backend is derived from it: a value of a type this returns 8 for
+ * is loaded eight bytes at a time, stored eight bytes at a time, and given an
+ * eight byte slot. A `u256` is thirty two bytes of four limbs, so answering 8
+ * here would not be a narrow answer — it would be a frame slot a quarter of the
+ * size of the value written into it, and the top three limbs of every wide
+ * number would be whatever the frame held next to it.
+ *
+ * Refusing is what keeps that from being reachable. Nothing below this function
+ * has to know what a wide number is, because no value of one ever reaches it.
+ */
 function widthOf(type: SemanticType): Width {
+  if (type.kind === "primitive" && isWide(type.name)) {
+    throw machineError(
+      `this backend cannot lower a ${type.name}`,
+      "a wide number is four 64 bit limbs laid out in memory, and this backend binds every value to one machine register or one eight byte slot; lower this function to the c backend, where a wide operation is a call into the wide kernel",
+    );
+  }
   if (type.kind !== "primitive") return 8;
   switch (type.name) {
     case "bool":

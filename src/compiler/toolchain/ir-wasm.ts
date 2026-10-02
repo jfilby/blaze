@@ -29,6 +29,7 @@ import { parseType, symbolOf } from "../semantics/contract.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
+  isWide,
   type SemanticBlock,
   type SemanticFunction,
   type SemanticLoop,
@@ -324,6 +325,24 @@ const REFERENCE: TypeFacts = {
 const FACTS = new Map<string, TypeFacts>();
 
 function facts(type: SemanticType): TypeFacts {
+  // A wide number is refused here rather than described, and this is the one
+  // place the refusal belongs. Everything below is a table keyed by a single
+  // WebAssembly value type: a `TypeFacts` names the one carrier a value lives in
+  // and the load and store that move it. A `u256` has no such carrier — it is
+  // four `i64` limbs laid out in memory — so describing it would mean answering
+  // `i64` and a size of eight, and every load and store of it would then move a
+  // quarter of the value.
+  //
+  // Refusing keeps that unreachable: nothing below has to know what a wide
+  // number is, because no value of one ever arrives.
+  if (type.kind === "primitive" && isWide(type.name)) {
+    throw new CompilerError({
+      category: "AssemblyError",
+      stage: "wasm",
+      message: `this backend cannot lower a ${type.name}`,
+      detail: "a wide number is four 64 bit limbs laid out in memory and WebAssembly has no value type for one; lower this function to the c backend, where a wide operation is a call into the wide kernel",
+    });
+  }
   if (type.kind !== "primitive") return REFERENCE;
   const known = FACTS.get(type.name);
   if (known !== undefined) return known;

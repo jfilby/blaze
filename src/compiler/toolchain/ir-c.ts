@@ -29,6 +29,7 @@ import {
   isNumber,
   isReference,
   isUnsigned,
+  isWideType,
   isTextType,
   slotType,
   valueKind,
@@ -633,6 +634,7 @@ class FunctionEmitter {
         // float as the text it was given, so a text constant came out as a
         // bare identifier the C compiler has never heard of.
         if (isTextType(value.type)) return cStringLiteral(value.text);
+        if (isWideType(value.type)) return cLiteral(value.text, "u256");
         return cLiteral(value.text, isNumber(value.type) && value.type.kind === "primitive" ? value.type.name : "f64");
       case "bool":
         return value.value ? "1" : "0";
@@ -666,6 +668,17 @@ class FunctionEmitter {
       case "unary": {
         const operand = this.expression(value.operand, value.type, depth);
         if (value.op === "not") return `((${this.condition(value.operand, depth)}) == 0)`;
+        // A wide complement covers every limb, which C's `~` cannot be asked for
+        // over a struct, so it is the kernel's operation rather than an operator.
+        if (value.op === "bitNot" && isWideType(value.type)) {
+          const out = this.temporary("blaze_wide");
+          const moved = this.temporary("blaze_wide");
+          return (
+            `({ blaze_u256 ${out}; ` +
+            `blaze_u256 ${moved} = ${this.expression(value.operand, value.type, depth)}; ` +
+            `${RUNTIME_NAME}_u256_not(&${out}, &${moved}); ${out}; })`
+          );
+        }
         if (value.op === "bitNot") return `(~${operand})`;
         // The sign binds to the operand, and the whole is parenthesised so a
         // negation of a product stays a negation of the whole product.
@@ -674,6 +687,21 @@ class FunctionEmitter {
       case "arith":
         return this.arith(value, depth);
       case "compare": {
+        // A wide comparison walks limbs in the kernel. C compares a struct with
+        // `==` only by identity and has no ordering at all, so the operator the
+        // IR names has no spelling here.
+        if (isWideType(value.operand)) {
+          const left = this.temporary("blaze_wide");
+          const right = this.temporary("blaze_wide");
+          const kernel = value.op === "eq" || value.op === "ne" ? "equal" : "less";
+          const test = `${RUNTIME_NAME}_u256_${kernel}(&${left}, &${right})`;
+          const flip = (value.op === "ne" || value.op === "ge" || value.op === "gt") ? "!" : "";
+          return (
+            `({ const blaze_u256 ${left} = ${this.expression(value.left, value.operand, depth)}; ` +
+            `const blaze_u256 ${right} = ${this.expression(value.right, value.operand, depth)}; ` +
+            `${flip}${test}; })`
+          );
+        }
         if (!isTextType(value.operand)) {
           return `(${this.expression(value.left, value.operand, depth)} ${cOperator(COMPARE_OPERATORS[value.op])} ${this.expression(value.right, value.operand, depth)})`;
         }
@@ -729,6 +757,7 @@ class FunctionEmitter {
   }
 
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {
+    if (isWideType(value.type)) return this.wideArith(value, depth);
     if (value.op === "concat") return this.concat(value.left, value.right, depth);
     const left = this.expression(value.left, value.type, depth);
     const right = this.expression(value.right, value.type, depth);
@@ -775,6 +804,47 @@ class FunctionEmitter {
       default:
         return `(${left} ${cOperator(ARITHMETIC_OPERATORS[value.op])} ${right})`;
     }
+  }
+
+  /**
+   * A wide operation as a call into the kernel.
+   *
+   * C has no arithmetic over a struct, so the operator the IR names cannot be
+   * written down: `a + b` over two `blaze_u256` is not a C expression the
+   * compiler accepts. The kernel defines each operation as a function taking
+   * pointers, which is the one form every target has, so the operands are bound
+   * to names first and the call is what computes the answer. Binding them is
+   * not tidiness — an operand may itself be a call, and one written into the
+   * argument list would run once per mention rather than once per operation.
+   *
+   * The shift is the one operation whose second operand is a count rather than
+   * a value of the type: a `u256` shifted by a `u256` has no meaning, and the
+   * count is the machine word the language would have shifted by.
+   */
+  private wideArith(value: SemanticValue & { k: "arith" }, depth: number): string {
+    // The result is declared before the operands rather than after them: the
+    // statement expression names it in the call, and a name C reads before its
+    // declaration is one it has never heard of.
+    if (value.op === "shl" || value.op === "shr") {
+      const out = this.temporary("blaze_wide");
+      const moved = this.temporary("blaze_wide");
+      const count = this.temporary("blaze_shift");
+      return (
+        `({ blaze_u256 ${out}; ` +
+        `blaze_u256 ${moved} = ${this.expression(value.left, value.type, depth)}; ` +
+        `const unsigned ${count} = (unsigned)${this.expression(value.right, USIZE, depth)}; ` +
+        `${RUNTIME_NAME}_u256_${value.op}(&${out}, &${moved}, ${count}); ${out}; })`
+      );
+    }
+    const out = this.temporary("blaze_wide");
+    const left = this.temporary("blaze_wide");
+    const right = this.temporary("blaze_wide");
+    return (
+      `({ blaze_u256 ${out}; ` +
+      `const blaze_u256 ${left} = ${this.expression(value.left, value.type, depth)}; ` +
+      `const blaze_u256 ${right} = ${this.expression(value.right, value.type, depth)}; ` +
+      `${RUNTIME_NAME}_u256_${value.op}(&${out}, &${left}, &${right}); ${out}; })`
+    );
   }
 
   /** Two texts as one, which is what `+` over text and `+=` into it are. */

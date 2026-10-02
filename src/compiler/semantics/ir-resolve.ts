@@ -59,7 +59,7 @@
 import { parseType, typeToString } from "./contract.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
-import { mapTypeScriptType } from "./typescript.ts";
+import { mapTypeScriptType, PROGRAM_ENTRY_SYMBOL } from "./typescript.ts";
 import type {
   ProgramAssignOp,
   ProgramBody,
@@ -78,6 +78,7 @@ import {
   VOID,
   isBoolean,
   isReference,
+  isWide,
   isTextType,
   isWhole,
   wholeOf,
@@ -365,7 +366,15 @@ function programWholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTy
  * another rule (`wholeResult`), and a length is a whole number because a
  * length is read as one, not because arithmetic on it is.
  */
-function numericResult(_left: PrimitiveTypeName | null, _right: PrimitiveTypeName | null, _floating: boolean): PrimitiveTypeName {
+function numericResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | null, _floating: boolean): PrimitiveTypeName {
+  // A wide number is the exception to the rule above, and it is the one that
+  // matters: the answer is a double because a double is wide enough for every
+  // value a program counts with, and a `u256` is not one of them. Widening a
+  // wide number to a double here would drop every limb above the first before
+  // a backend was handed the value at all, so an operation over one keeps the
+  // width it was written at.
+  if (left !== null && isWide(left)) return left;
+  if (right !== null && isWide(right)) return right;
   return "f64";
 }
 
@@ -944,7 +953,16 @@ class ProgramResolver {
       const params = [...draft.params, ...draft.captured];
       draft.signature = {
         name: draft.name,
-        symbol: draft.name,
+        symbol: draft.name === "main" ? PROGRAM_ENTRY_SYMBOL : draft.name,
+        // A program is hosted by a driver that has a `main` of its own, so a
+        // function the program declares under the name `main` is compiled
+        // under another symbol. A module declares its functions before its
+        // first statement and so is mangled by the frontend (see
+        // `PROGRAM_ENTRY_SYMBOL`), but a program body is read from the first
+        // statement and declares `main` there — secp256k1 declares its curve
+        // constants first and its `main` last. Both are the same program, so
+        // both spell the entry the one way, or the C the driver is written in
+        // carries two `main` definitions and the link fails.
         params: params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
         returns: draft.signature?.returns ?? "void",
       };

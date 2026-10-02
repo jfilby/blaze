@@ -44,6 +44,7 @@ import {
   isTextType,
   localNames,
   slotType,
+  isWideType,
   UNSTATED_LINE,
   typeEquals,
   typeText,
@@ -98,6 +99,32 @@ const WHOLE_OPERATIONS: Record<string, true> = {
   or: true,
   xor: true,
 };
+
+/**
+ * The arithmetic a wide number has, which is the arithmetic its kernel has.
+ *
+ * The kernel defines an add, a subtraction, a product, the logical operations,
+ * the shifts and the comparisons, and nothing else. A division, a remainder
+ * and a power are not there, and an IR that carried one would reach a backend
+ * with no instruction and no declaration for it: the C backend would write the C
+ * operator over a struct and produce a source that does not compile, and the
+ * machine backend would have no divide at the width to emit.
+ *
+ * Refusing here is what makes that unreachable. The validator is the last thing
+ * that runs before a backend is handed the tree, so a program that needs one of
+ * the missing operations is told which is missing rather than carried to a
+ * target that cannot answer it.
+ */
+const WIDE_ARITHMETIC: ReadonlySet<string> = new Set([
+  "add",
+  "sub",
+  "mul",
+  "and",
+  "or",
+  "xor",
+  "shl",
+  "shr",
+]);
 
 /* -------------------------------------------------------------------------- */
 /* What a body is checked against                                              */
@@ -704,6 +731,20 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       return problems;
     }
     case "arith": {
+      // A wide number is answered by the kernel, which defines the operations
+      // listed above and nothing else. Anything else over one would reach a
+      // backend with no instruction for it — the C backend would write a C
+      // operator over a struct and produce a source that does not compile, and
+      // the machine backend has no divide at the width — so it is refused here,
+      // which is the last point before a backend is handed the tree.
+      if (isWideType(value.left.type) || isWideType(value.right.type) || isWideType(value.type)) {
+        if (!WIDE_ARITHMETIC.has(value.op)) {
+          problems.push(
+            `${prefix}${value.op} is not defined over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}; a wide number has an add, a subtraction, a product, the logical operations and the shifts`,
+          );
+        }
+        return problems;
+      }
       if (value.op === "concat") {
         if (!isTextType(value.left.type) || !isTextType(value.right.type) || !isTextType(value.type)) {
           problems.push(`${prefix}concat is written over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);

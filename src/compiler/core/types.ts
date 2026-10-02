@@ -26,6 +26,7 @@ export type PrimitiveTypeName =
   | "u16"
   | "u32"
   | "u64"
+  | "u256"
   | "f32"
   | "f64"
   | "usize"
@@ -41,6 +42,7 @@ export const PRIMITIVE_TYPES: readonly PrimitiveTypeName[] = [
   "u16",
   "u32",
   "u64",
+  "u256",
   "f32",
   "f64",
   "usize",
