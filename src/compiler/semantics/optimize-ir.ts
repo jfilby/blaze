@@ -42,7 +42,7 @@ import type {
 import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
-import { markParallelLoops } from "./parallel.ts";
+import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -1884,8 +1884,8 @@ interface Body {
  * nothing more would be. Comparing the tree against a copy of itself by
  * writing both out as text is the same answer for far more work.
  */
-export function optimizeSemanticFunction(fn: SemanticFunction): SemanticFunction {
-  optimizeBody(fn);
+export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees = NO_CALLEES): SemanticFunction {
+  optimizeBody(fn, callees);
   return fn;
 }
 
@@ -1898,8 +1898,8 @@ export function optimizeSemanticFunction(fn: SemanticFunction): SemanticFunction
  * program is a loop like any other, and the value its body computes on every
  * turn is computed once above it here as it is in a function.
  */
-export function optimizeSemanticEntry(entry: SemanticBlock): SemanticBlock {
-  optimizeBody({ params: [], entry });
+export function optimizeSemanticEntry(entry: SemanticBlock, callees: Callees = NO_CALLEES): SemanticBlock {
+  optimizeBody({ params: [], entry }, callees);
   return entry;
 }
 
@@ -1908,12 +1908,21 @@ export function optimizeSemanticEntry(entry: SemanticBlock): SemanticBlock {
  * calls: the statements of the program itself, with nothing bound in it but what
  * those statements declare.
  */
-export function optimizeSemanticProgram(program: SemanticProgram): SemanticProgram {
-  optimizeSemanticEntry(program.entry);
+export function optimizeSemanticProgram(
+  program: SemanticProgram,
+  known: Callees = new Map(program.bodies.map((fn) => [fn.name, fn])),
+): SemanticProgram {
+  // The callees are read before any body is marked: whether a loop may run its
+  // turns at once is a question about what the functions it calls write, and a
+  // program that runs nothing of its own holds no bodies of its own — its
+  // functions are resolved and compiled one at a time, and the caller is the one
+  // holding them.
+  const callees: Callees = known;
+  optimizeSemanticEntry(program.entry, callees);
   // A function the program declares is a body of its own, and the rewrites that
   // run over a program run over it: a loop invariant hoisted out of a function
   // is worth as much there as it is in the block the program starts in.
-  for (const fn of program.bodies) optimizeSemanticEntry(fn.entry);
+  for (const fn of program.bodies) optimizeSemanticEntry(fn.entry, callees);
   // Whole-number arithmetic is the one rewrite here that is a question about a
   // whole program rather than about one body: what it needs to know is what
   // the callers of a function hand it, which is settled once every body has
@@ -1923,7 +1932,7 @@ export function optimizeSemanticProgram(program: SemanticProgram): SemanticProgr
   return program;
 }
 
-function optimizeBody(body: Body): void {
+function optimizeBody(body: Body, callees: Callees): void {
   for (let round = 0; round < 8; round += 1) {
     let changed = false;
     if (foldAll(body)) changed = true;
@@ -1953,7 +1962,7 @@ function optimizeBody(body: Body): void {
   // be claiming something about a body that has since been rewritten — a loop
   // the rounds split in two, or unrolled away entirely, is not the loop the
   // answer was about.
-  markParallelLoops(body.entry);
+  markParallelLoops(body.entry, callees);
 }
 
 /** Folds every block of the function, nested ones included. */

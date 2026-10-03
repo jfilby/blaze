@@ -734,12 +734,19 @@ function semanticFunctions(program: ProgramContract, objectNames: Record<string,
   };
   const resolved: Record<string, SemanticFunction> = {};
   for (const file of program.files) {
+    for (const contract of Object.values(file.functions)) {
+      resolved[contract.function.name] = resolveFunction(contract, context);
+    }
+  }
+  // Every body is resolved before any of them is checked, because a function is
+  // checked against the others: a loop marked parallel is proved against what
+  // the functions it calls write, and that is a question about the program.
+  const callees = new Map(Object.entries(resolved));
+  for (const file of program.files) {
     for (const [name, contract] of Object.entries(file.functions)) {
-      const semantic = resolveFunction(contract, context);
       // A function is checked before it is shown to anything, so a function
       // that is not one a backend may lower never reaches a model.
-      validateSemanticFunction(semantic, contract);
-      resolved[name] = semantic;
+      validateSemanticFunction(resolved[name], contract, callees);
     }
   }
   return resolved;
@@ -1489,11 +1496,11 @@ export async function runBuild(
     const driver =
       phase.body === undefined
         ? undefined
-        : optimizeSemanticProgram(resolveProgram(phase.body, program));
+        : optimizeSemanticProgram(resolveProgram(phase.body, program), new Map(Object.entries(semantics)));
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
-      validateSemanticProgram(driver);
+      validateSemanticProgram(driver, undefined, new Map(Object.entries(semantics)));
       reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
     }
     const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
@@ -1956,10 +1963,10 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     entry,
     read: moduleReader(directory),
   });
+  const semantics = semanticFunctions(phase.program, phase.objectNames);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
   if (options.function !== undefined || options.all === true) {
-    const semantics = semanticFunctions(phase.program, phase.objectNames);
     if (options.function === undefined) {
       return phase.program.files
         .map((file) => printSemanticModule(resolveModule(file.path, file.functions, functionContext(phase))))
@@ -1976,7 +1983,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     }
     // What the backends are handed is folded, so what is printed here is what
     // was lowered rather than what the frontend resolved.
-    return printSemanticFunction(optimizeSemanticFunction(structuredClone(wanted)));
+    return printSemanticFunction(optimizeSemanticFunction(structuredClone(wanted), new Map(Object.entries(semantics))));
   }
   if (phase.body === undefined) {
     throw new CompilerError({
@@ -1986,14 +1993,15 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
       detail: "this project declares functions and runs nothing of its own; ask for one with --function, or for all of them with --all",
     });
   }
+  const callees = new Map(Object.entries(semantics));
   const program =
     options.from === undefined
       ? resolveProgram(phase.body, phase.program)
       : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
-  validateSemanticProgram(program, phase.program);
+  validateSemanticProgram(program, phase.program, callees);
   // As for a function: the program the backends lower is folded, so the one
   // printed here is the one they were handed.
-  return printSemanticProgram(optimizeSemanticProgram(program));
+  return printSemanticProgram(optimizeSemanticProgram(program, callees));
 }
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {

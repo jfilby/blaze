@@ -180,6 +180,37 @@ is a permission and not an instruction: the C backend takes it and writes
 `#pragma omp parallel for`, and the machine and wasm backends run the turns in
 order, which is the same program because nothing about one turn reaches another.
 
+A turn may also call a function, which is the case that needs the whole program
+rather than one body: what a call reaches is the *callee's* body, so the analysis
+is given every function of the program and reads a callee's body with the rule a
+loop body is read with, unchanged. A call is refused on three things the IR
+states about it — an owned result (the allocator is one heap), a retained result
+(the reference count is one number every turn shares), and any effect beyond
+`memory` — and on everything the callee does, transitively. So `scaled` below is
+admitted because it writes only its own `acc`, and the loop calling it is
+parallel; make `scaled` write anything else and the loop is refused, because a
+function that is not pure cannot be run by two turns whatever asked for it.
+
+```ts
+export function scaled(x: number): number {
+  let acc = x;          // its own name, so its own
+  acc = acc * 1.25 + x;
+  return acc;
+}
+
+for (let i = 0; i < n; i += 1) {
+  output[i] = scaled(input[i]);   // marked parallel
+}
+```
+
+Recursion terminates by assuming the answer and checking it afterwards, which is
+the only reading that does: a function that calls itself and writes nothing is
+pure, and one whose recursion reaches a write is caught where the write is.
+Nothing about a function is assumed from its name or its contract — a body this
+build does not hold is a body nobody has read, so a call to one is refused, and
+that refusal is why `Callees` is an argument on `optimizeSemanticProgram`,
+`validateSemanticProgram` and `refusalFor` rather than something looked up.
+
 The mark is not asked of a model and cannot be proposed as a repair rule.
 Independence is not something a proposal can carry, because a proposal that is
 wrong about it is a program with a race in it rather than a program that is a
@@ -194,6 +225,12 @@ is bound by the memory it moves; the same pragma over a loop whose turn computes
 few hundred values measured 1.9 times faster. A turn below eight computed values
 is therefore refused on cost alone, which is the one clause here that is a
 judgement about speed rather than a proof about correctness.
+
+What a turn computes *through a call* counts toward that eight, because the
+thread runs the callee too. `out[i] = scaled(input[i])` writes one element and
+computes two values, and counting only those would refuse exactly the shape the
+purity rule exists to admit. The loop calling `scaled` above over four million
+elements measured 1.38 times faster than in order.
 
 ## Benchmarking
 

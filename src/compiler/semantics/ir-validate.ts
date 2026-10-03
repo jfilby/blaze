@@ -64,7 +64,7 @@ import type {
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { parseType, typeToString } from "./contract.ts";
-import { refusalFor } from "./parallel.ts";
+import { NO_CALLEES, refusalFor, type Callees } from "./parallel.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
@@ -145,6 +145,12 @@ interface Context {
   objects: Record<string, ObjectLayout>;
   /** Every function this body may call, or null where nothing declares them. */
   functions: FunctionSignature[] | null;
+  /**
+   * Every function of the program as the IR holds it, by name, which is what a
+   * loop marked parallel is proved against. A call to a name this does not hold
+   * is a call whose body nobody has read, and a parallel loop may not make one.
+   */
+  callees: Callees;
   /** The whole program contract, where the caller has one. */
   contract?: ProgramContract;
   /** The names the body itself declares, which no other body declares. */
@@ -171,15 +177,16 @@ interface Body {
 }
 
 /** What a program body is checked against: everything the program holds. */
-function programContext(program: SemanticProgram, contract?: ProgramContract): Context {
-  return { objects: program.objects, functions: program.functions, contract, declared: [] };
+function programContext(program: SemanticProgram, callees: Callees, contract?: ProgramContract): Context {
+  return { objects: program.objects, functions: program.functions, callees, contract, declared: [] };
 }
 
 /** What a function body is checked against: what the function itself holds. */
-function functionContext(fn: SemanticFunction, program?: ProgramContract): Context {
+function functionContext(fn: SemanticFunction, callees: Callees, program?: ProgramContract): Context {
   return {
     objects: fn.objects,
     functions: program === undefined ? null : signaturesOf(program),
+    callees,
     contract: program,
     declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)],
   };
@@ -1468,17 +1475,25 @@ function nameProblems(context: Context, tree: Tree): string[] {
 /**
  * Every way the program is not a program a backend may lower, contract or not.
  */
-export function semanticIrProblems(program: SemanticProgram, contract?: ProgramContract): string[] {
+export function semanticIrProblems(
+  program: SemanticProgram,
+  contract?: ProgramContract,
+  known: Callees = new Map(program.bodies.map((fn) => [fn.name, fn])),
+): string[] {
   const tree = readTree(program);
+  // A loop marked parallel is proved against the bodies the caller holds: a call
+  // to one of them is a call whose writes this check can read, and a call to
+  // anything else is a call it cannot.
+  const callees: Callees = known;
   return [
-    ...bodyProblems(programContext(program, contract), programBody(program, tree), tree),
+    ...bodyProblems(programContext(program, callees, contract), programBody(program, tree), tree),
     // A function the program declares is checked as the function it is: the
     // same body a candidate of the program is checked against, with the
     // signatures it is called by in hand.
     ...program.bodies.flatMap((fn) => {
       const own = readFunctionTree(fn, fn.entry);
       return bodyProblems(
-        { objects: program.objects, functions: program.functions, contract, declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)] },
+        { objects: program.objects, functions: program.functions, callees, contract, declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)] },
         functionBody(fn.entry, own),
         own,
       ).map((problem) => `${fn.symbol}: ${problem}`);
@@ -1495,7 +1510,7 @@ function bodyProblems(context: Context, body: Body, tree: Tree): string[] {
   return [
     ...structureProblems(body),
     ...controlFlowProblems(tree),
-    ...parallelProblems(tree),
+    ...parallelProblems(context, tree),
     ...valueProblems(tree),
     ...typeProblems(context, tree),
     ...callProblems(context, tree),
@@ -1567,7 +1582,7 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
  * So the claim is proved here as well, and a loop that fails is refused with the
  * reason the analysis gives.
  */
-function parallelProblems(tree: Tree): string[] {
+function parallelProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
   for (const placed of tree.statements) {
@@ -1576,7 +1591,7 @@ function parallelProblems(tree: Tree): string[] {
     const loop = statement.loop;
     if (loop.kind !== "counted" && loop.kind !== "each") continue;
     if (loop.parallel !== true) continue;
-    const refusal = refusalFor(loop);
+    const refusal = refusalFor(loop, context.callees);
     if (refusal !== null) {
       problems.push(`${label(placed.block.block.id, statement.line)}loop is marked parallel but ${refusal}`);
     }
@@ -1734,9 +1749,10 @@ function functionProblems(
   fn: SemanticFunction,
   contract: FunctionContract | undefined,
   program: ProgramContract | undefined,
+  callees: Callees,
 ): string[] {
   const tree = readFunctionTree(fn, fn.entry);
-  const context = functionContext(fn, program);
+  const context = functionContext(fn, callees, program);
   const found = [
     ...conditionProblems(fn),
     ...parameterProblems(fn, contract),
@@ -1756,33 +1772,45 @@ function functionProblems(
  * checked on its own is checked against its own contract, which is not the
  * whole program, so a call it cannot resolve is left to the module check.
  */
-export function semanticFunctionProblems(fn: SemanticFunction, contract?: FunctionContract): string[] {
-  return functionProblems(fn, contract, undefined);
+export function semanticFunctionProblems(
+  fn: SemanticFunction,
+  contract?: FunctionContract,
+  callees: Callees = NO_CALLEES,
+): string[] {
+  return functionProblems(fn, contract, undefined, callees);
 }
 
 /** The same, for every function of a file, in the order the file declares them. */
-export function semanticModuleProblems(module: SemanticModule, program?: ProgramContract): string[] {
+export function semanticModuleProblems(
+  module: SemanticModule,
+  program?: ProgramContract,
+  callees: Callees = new Map(module.functions.map((fn) => [fn.name, fn])),
+): string[] {
   const problems: string[] = [];
   for (const fn of module.functions) {
     const contract = contractedFunction(program, fn.symbol);
-    problems.push(...functionProblems(fn, contract ?? undefined, program));
+    problems.push(...functionProblems(fn, contract ?? undefined, program, callees));
   }
   return problems;
 }
 
 /** Refuses a program that is not one. Throws one CompilerError. */
-export function validateSemanticProgram(program: SemanticProgram, contract?: ProgramContract): void {
-  refuse(`${program.file} is not a program the compiler may lower`, semanticIrProblems(program, contract));
+export function validateSemanticProgram(program: SemanticProgram, contract?: ProgramContract, callees?: Callees): void {
+  refuse(`${program.file} is not a program the compiler may lower`, semanticIrProblems(program, contract, callees));
 }
 
 /** Refuses a function that is not one. Throws one CompilerError. */
-export function validateSemanticFunction(fn: SemanticFunction, contract?: FunctionContract): void {
-  refuse(`${fn.symbol} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract));
+export function validateSemanticFunction(
+  fn: SemanticFunction,
+  contract?: FunctionContract,
+  callees: Callees = NO_CALLEES,
+): void {
+  refuse(`${fn.symbol} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract, callees));
 }
 
 /** Refuses a module holding a function that is not one. Throws one CompilerError. */
-export function validateSemanticModule(module: SemanticModule, program?: ProgramContract): void {
-  refuse(`${module.path} is not a module the compiler may lower`, semanticModuleProblems(module, program));
+export function validateSemanticModule(module: SemanticModule, program?: ProgramContract, callees?: Callees): void {
+  refuse(`${module.path} is not a module the compiler may lower`, semanticModuleProblems(module, program, callees));
 }
 
 /** The one error a caller is given: what it read, and everything wrong with it. */

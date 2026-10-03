@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { SemanticFunction, SemanticLoop, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticCall, SemanticFunction, SemanticLoop, SemanticSlot, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
 import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { entryIsParallel, markParallelLoops, refusalFor } from "../semantics/parallel.ts";
 import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-validate.ts";
@@ -254,6 +254,121 @@ test("a loop that allocates is not marked, because the allocator is one heap", (
     ]),
   );
   markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+/** A call to `callee`, as the IR states one. */
+function call(callee: string, over: Partial<SemanticCall> = {}): Extract<SemanticStatement, { k: "call" }> {
+  return {
+    k: "call",
+    line: 2,
+    call: {
+      callee,
+      signature: { name: callee, symbol: `blaze_${callee}`, params: [], returns: "f64" },
+      args: [],
+      argTypes: [],
+      returns: F64,
+      effects: [],
+      ownership: "none",
+      retain: false,
+      builtin: false,
+      ...over,
+    },
+  };
+}
+
+/** A function of the program, as `optimizeSemanticProgram` collects them. */
+function callee(
+  name: string,
+  statements: readonly SemanticStatement[],
+  params: readonly SemanticSlot[] = [],
+): SemanticFunction {
+  return {
+    ...functionWith(countedLoop([])),
+    name,
+    symbol: `blaze_${name}`,
+    params: [...params],
+    entry: { id: "entry", statements: [...statements], releases: [], terminator: { k: "return", value: null } },
+  };
+}
+
+test("a loop calling a function that writes nothing is marked", () => {
+  const fn = functionWith(countedLoop([call("pure"), chain(8)]));
+  const callees = new Map([["pure", callee("pure", [chain(8)])]]);
+  markParallelLoops(fn.entry, callees);
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a loop calling a function that writes an outer name is not marked", () => {
+  const impure = callee(
+    "impure",
+    [{ k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } }],
+    [{ kind: "value", name: "total", mutable: true, type: F64 }],
+  );
+  const fn = functionWith(countedLoop([call("impure"), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["impure", impure]]));
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a loop calling a function this build does not hold is not marked", () => {
+  const fn = functionWith(countedLoop([call("elsewhere"), chain(8)]));
+  markParallelLoops(fn.entry, new Map());
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a loop calling a function that allocates what it hands back is not marked", () => {
+  const fn = functionWith(countedLoop([call("maker", { ownership: "owned" }), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["maker", callee("maker", [chain(8)])]]));
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a loop calling a function that counts a reference is not marked", () => {
+  const fn = functionWith(countedLoop([call("keeper", { retain: true }), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["keeper", callee("keeper", [chain(8)])]]));
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a loop calling a function with an effect beyond memory is not marked", () => {
+  const fn = functionWith(countedLoop([call("clock", { effects: ["clock"] }), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["clock", callee("clock", [chain(8)])]]));
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("purity is transitive: a call to a pure function is pure", () => {
+  const inner = callee("inner", [chain(8)]);
+  const middle = callee("middle", [call("inner"), chain(8)]);
+  const fn = functionWith(countedLoop([call("middle"), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["middle", middle], ["inner", inner]]));
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("purity is transitive both ways: one impure step refuses the whole chain", () => {
+  const impure = callee(
+    "impure",
+    [{ k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } }],
+    [{ kind: "value", name: "total", mutable: true, type: F64 }],
+  );
+  const middle = callee("middle", [call("impure"), chain(8)]);
+  const fn = functionWith(countedLoop([call("middle"), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["middle", middle], ["impure", impure]]));
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a function that calls itself and writes nothing is pure, and reading it ends", () => {
+  const recursive = callee("recursive", [call("recursive"), chain(8)]);
+  const fn = functionWith(countedLoop([call("recursive"), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["recursive", recursive]]));
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a loop calling a pure function a turn writes beside is still refused for the write", () => {
+  const fn = functionWith(
+    countedLoop([
+      { k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry, new Map());
   assert.equal(onlyLoop(fn).parallel, undefined);
 });
 

@@ -527,9 +527,10 @@ export function readSemanticCandidate(
   candidate: Candidate,
   program: ProgramContract,
   contract: FunctionContract,
+  functions: Readonly<Record<string, SemanticFunction>> = {},
 ): SemanticFunction {
   const fn = parseSemanticFunction(candidate.text, program);
-  validateSemanticFunction(fn, contract);
+  validateSemanticFunction(fn, contract, new Map(Object.entries(functions)));
   return fn;
 }
 
@@ -556,10 +557,9 @@ export function foldedCandidate(
   try {
     // Inlining comes before the rewrites, because the callee spliced in was
     // resolved from the source and has not been through them yet.
-    const inlined = inlineCalls(parseSemanticFunction(candidate.text, program), {
-      functions: new Map(Object.entries(functions)),
-    });
-    return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined)) };
+    const callees = new Map(Object.entries(functions));
+    const inlined = inlineCalls(parseSemanticFunction(candidate.text, program), { functions: callees });
+    return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined, callees)) };
   } catch {
     return candidate;
   }
@@ -759,7 +759,7 @@ async function buildCandidate(
     // is not a program the compiler may lower is refused here, inside the
     // refusal path, where a diagnostic comes of it and a repair round is given
     // the reason.
-    const fn = readSemanticCandidate(candidate, request.program, request.contract);
+    const fn = readSemanticCandidate(candidate, request.program, request.contract, request.functions);
     const calls = fn.calls.map((edge) => edge.callee).filter((callee) => request.callable.has(callee));
     const built = await materialize(request, candidate, paths, vectors, fn, calls.length === 0);
 
@@ -1043,7 +1043,7 @@ function revise(
     // a fold that makes two values the same one is what lets the rule that
     // binds a repeated value see them as repeated, and a rule that proposes to
     // hoist something the last round already hoisted is proposing nothing.
-    current = optimizeSemanticFunction(current);
+    current = optimizeSemanticFunction(current, context.functions);
     const outcome = applyProposal(current, proposal, context);
     if ("refused" in outcome) {
       const note = `\`${proposal.text}\` was refused: ${outcome.refused}`;
@@ -1052,7 +1052,7 @@ function revise(
       continue;
     }
     try {
-      validateSemanticFunction(outcome.applied, request.contract);
+      validateSemanticFunction(outcome.applied, request.contract, context.functions);
     } catch (cause) {
       const error = toCompilerError(cause, { category: "SemanticIrError", stage: "ir" });
       const note = `\`${proposal.text}\` was refused: the rule applies, but what it produced is not a function the compiler may lower\n${error.detail ?? error.message}`;
@@ -1066,7 +1066,7 @@ function revise(
   // And once more after the last proposal, so a round that proposed nothing at
   // all still arrives folded, and so the text a review reads is what the
   // backends are handed rather than what the model last wrote.
-  current = optimizeSemanticFunction(current);
+  current = optimizeSemanticFunction(current, context.functions);
   return { text: printSemanticFunction(current), applied, refused };
 }
 

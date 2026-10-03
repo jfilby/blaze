@@ -34,7 +34,7 @@ import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/o
 import { programIsParallel } from "./semantics/parallel.ts";
 import { printSemanticProgram } from "./semantics/ir-text.ts";
 import { semanticFunctionProblems, validateSemanticProgram } from "./semantics/ir-validate.ts";
-import { inlineCalls } from "./semantics/repair.ts";
+import { inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
@@ -77,13 +77,13 @@ async function main(): Promise<void> {
   // Every function is resolved before any is inlined, because the inliner
   // reads the bodies it may write out and a body is what resolution writes.
   const resolvedByName = new Map(contracts.map(([name, contract]) => [name, resolveFunction(contract, context)]));
-  const inlinable = { functions: resolvedByName };
+  const inlinable: RepairContext = { functions: resolvedByName };
 
   // The program, resolved and folded exactly as a build folds the driver.
-  const program = optimizeSemanticProgram(resolveProgram(phase.body, phase.program));
+  const program = optimizeSemanticProgram(resolveProgram(phase.body, phase.program), inlinable.functions);
   // The validator refuses rather than answers, so a program that is not one a
   // backend may lower stops here with the reason it gave.
-  validateSemanticProgram(program, phase.program);
+  validateSemanticProgram(program, phase.program, inlinable.functions);
   await writeFile(join(work, "ir.program.txt"), `${printSemanticProgram(program)}\n`, "utf8");
 
   // The symbol of a function is the one its own contract names, which the
@@ -99,7 +99,7 @@ async function main(): Promise<void> {
     for (const [name, contract] of Object.entries(file.functions)) {
       // A candidate is inlined and then folded, in that order, because the
       // callee spliced in has not been through the rewrites yet.
-      const lowered = optimizeSemanticFunction(inlineCalls(resolvedByName.get(name) as SemanticFunction, inlinable));
+      const lowered = optimizeSemanticFunction(inlineCalls(resolvedByName.get(name) as SemanticFunction, inlinable), inlinable.functions);
       const here = semanticFunctionProblems(lowered);
       if (here.length > 0) {
         for (const problem of here) console.error(`  ${name}: ${problem}`);
