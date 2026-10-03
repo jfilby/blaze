@@ -874,6 +874,72 @@ test("a callee that leaves from more than one block is left as a call, and the p
   assert.match(generation.functions.main.outcomes[0]?.probe?.reason ?? "", /it calls step/);
 });
 
+/**
+ * A program of two modules whose callee carries a loop the compiler proved its
+ * turns independent, so the object of that callee is compiled with a
+ * team-of-threads pragma in it.
+ *
+ * `scale` recurses on a whole number and hands one back, so the turns of
+ * `total`'s loop combine what it returns in any order, and the loop writes
+ * nothing a turn of it found. Nothing about that is in the program's own
+ * statements — the driver calls `total` and holds no loop — so the pragma is
+ * in an object the driver links, and the link is where the threading runtime
+ * has to be asked for.
+ */
+const PARALLEL_CALLING_PROGRAM = [
+  "export function scale(depth: number): number {",
+  "  if (depth > 0) {",
+  "    return 1 + scale(depth - 1);",
+  "  }",
+  "  return 1;",
+  "}",
+  "",
+  "export function total(depth: number, iterations: number): number {",
+  "  let sum = 0;",
+  "  for (var i = 0; i < iterations; i++) {",
+  "    sum += scale(depth);",
+  "  }",
+  "  return sum;",
+  "}",
+  "",
+].join("\n");
+
+const PARALLEL_ENTRY = ['import { total } from "./lib.ts";', "", "console.log(total(4, 8));", ""].join("\n");
+
+test("a program whose function carries a parallel loop links the threading runtime", async (t) => {
+  const directory = await scratch("blaze-parallel-program-");
+  await writeFile(join(directory, "lib.ts"), PARALLEL_CALLING_PROGRAM, "utf8");
+  await writeFile(join(directory, "main.ts"), PARALLEL_ENTRY, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    // The `c` backend is named because it is the one that writes the pragma:
+    // the machine and wasm backends run a marked loop's turns in order, so an
+    // object of theirs carries nothing for a link to serve.
+    backend: "c",
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  await chatEndpoint(t, [], { answer: () => SOUND });
+
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  // The pragma is what an object of this program carries, and the delivered
+  // binary is one that ran, so the link served it rather than dropping it.
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  // Eight turns of `scale(4)`, which is 5.
+  assert.equal(execution.stdout, "40\n");
+});
+
 test("a caller of a leaf is built as a function of its own, with no review asking for it", async (t) => {
   // Nothing proposes this rewrite. The fold asks the compiler's own question
   // about every call on the way to every object, and a callee that is a single

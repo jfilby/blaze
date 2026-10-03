@@ -485,6 +485,13 @@ export function runtimePreparer(request: {
 export interface Materialized {
   runner: Runner | null;
   sizeBytes: number;
+  /**
+   * Whether the object carries a loop the compiler proved its turns
+   * independent. The C backend writes that loop as a pragma, and only the
+   * OpenMP runtime serves it, so a program that links such an object has to
+   * ask for the runtime whatever its own driver holds.
+   */
+  threads: boolean;
   textSizeBytes: number;
   implementationPath: string;
 }
@@ -588,6 +595,11 @@ async function materialize(
    */
   standalone: boolean,
 ): Promise<Materialized> {
+  // Whether the object this candidate is lowered into carries a team-of-threads
+  // pragma. Only the C backend writes one: the machine and wasm backends run a
+  // marked loop's turns in order, which is the same program, so an object of
+  // theirs asks for no threading runtime however it was marked.
+  const threads = request.lowering === "c" && entryIsParallel(fn.entry);
   if (request.lowering === "wasm") {
     const module = await buildModule({
       fn,
@@ -599,6 +611,7 @@ async function materialize(
     return {
       runner: module.runner,
       sizeBytes: module.moduleSizeBytes,
+      threads: false,
       textSizeBytes: (await stat(paths.implementation)).size,
       implementationPath: paths.implementation,
     };
@@ -640,7 +653,7 @@ async function materialize(
   if (!standalone) {
     // Assembled, but not linked: the program this candidate is part of is the
     // one that has to run it, and it is linked once every candidate is chosen.
-    return { runner: null, sizeBytes: object.objectSizeBytes, textSizeBytes, implementationPath: paths.implementation };
+    return { runner: null, sizeBytes: object.objectSizeBytes, threads, textSizeBytes, implementationPath: paths.implementation };
   }
 
   // A build that links the C runtime runs the candidate in a C harness. A
@@ -660,7 +673,7 @@ async function materialize(
       runtimeObjectPath: runtime.objectPath,
       // A candidate whose object carries a pragma needs the runtime that serves
       // it at the link, and one whose object does not links none.
-      threads: entryIsParallel(fn.entry),
+      threads,
       includeDirectories: [dirname(runtime.headerPath)],
       outputPath: paths.executable,
       functionName: request.contract.function.name,
@@ -668,6 +681,7 @@ async function materialize(
     return {
       runner: { command: paths.executable, args: [] },
       sizeBytes: object.objectSizeBytes,
+      threads,
       textSizeBytes,
       implementationPath: paths.implementation,
     };
@@ -686,6 +700,7 @@ async function materialize(
   return {
     runner: host.runner,
     sizeBytes: object.objectSizeBytes,
+    threads,
     textSizeBytes,
     implementationPath: paths.implementation,
   };
@@ -774,6 +789,7 @@ async function buildCandidate(
           probe: { called: false, reason: `it calls ${calls.join(", ")}, so the program it belongs to is what runs it` },
           textSizeBytes: built.textSizeBytes,
           objectSizeBytes: built.sizeBytes,
+          threads: built.threads,
         },
         timing: null,
       };
@@ -785,7 +801,7 @@ async function buildCandidate(
     // executed at all; the program it belongs to is what says whether the two
     // agree, and it keeps that job.
     if (vectors === null) {
-      const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed), fn);
+      const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed), built.threads);
       if (probe.reason !== null && probe.called) {
         return {
           outcome: {
@@ -804,6 +820,7 @@ async function buildCandidate(
             probe: { called: probe.called, reason: probe.reason },
             textSizeBytes: built.textSizeBytes,
             objectSizeBytes: built.sizeBytes,
+            threads: built.threads,
           },
           timing: null,
         };
@@ -815,6 +832,7 @@ async function buildCandidate(
           probe: { called: probe.called, reason: probe.reason },
           textSizeBytes: built.textSizeBytes,
           objectSizeBytes: built.sizeBytes,
+          threads: built.threads,
         },
         timing: null,
       };
@@ -855,6 +873,7 @@ async function buildCandidate(
           },
           textSizeBytes: built.textSizeBytes,
           objectSizeBytes: built.sizeBytes,
+          threads: built.threads,
           verification,
         },
         timing: null,
@@ -871,6 +890,7 @@ async function buildCandidate(
         valid: true,
         textSizeBytes: built.textSizeBytes,
         objectSizeBytes: built.sizeBytes,
+        threads: built.threads,
         verification,
       },
       timing: {
@@ -932,8 +952,8 @@ async function probeCandidate(
   request: CandidateEvaluationRequest,
   paths: CandidatePaths,
   plan: ProbePlan,
-  /** The IR the candidate is, whose body says whether it needs threads linked. */
-  fn: SemanticFunction,
+  /** Whether the object carries a team-of-threads pragma the probe must serve. */
+  threads: boolean,
 ): Promise<ProbeOutcome> {
   if (plan.kind === "skip") return { called: false, reason: plan.reason, stderr: "" };
   // The probe links the object the C toolchain links, so it runs for every
@@ -956,7 +976,7 @@ async function probeCandidate(
     harnessPath: paths.probeHarness,
     objectPath: paths.object,
     runtimeObjectPath: runtime.objectPath,
-    threads: entryIsParallel(fn.entry),
+    threads,
     includeDirectories: [dirname(runtime.headerPath)],
     outputPath: paths.probeExecutable,
     functionName: request.contract.function.name,

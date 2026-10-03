@@ -1517,6 +1517,20 @@ export async function runBuild(
       const objectPaths = unitsGenerated().map((entry) =>
         join(base, entry.unit.contract.function.name, `${entry.result.selected as string}.o`),
       );
+      // `-fopenmp` is asked for when an object of the program carries a loop the
+      // compiler proved its turns independent: the C backend writes that loop as
+      // a pragma and only the OpenMP runtime serves it, so an object with one in
+      // it links `GOMP_parallel` and fails to link without the flag. A program's
+      // own statements are not the whole of this — its functions are objects of
+      // their own, compiled one at a time, and the loop the driver holds nothing
+      // of may be in any of them.
+      const threads =
+        programIsParallel(driver.entry, driver.bodies) ||
+        unitsGenerated().some((entry) => {
+          const selected = entry.result.selected;
+          if (selected === null) return false;
+          return entry.result.outcomes.find((outcome) => outcome.candidate === selected)?.threads === true;
+        });
       const runner =
         runtimeKind === "none"
           ? await buildProgramDriver({
@@ -1527,7 +1541,7 @@ export async function runBuild(
               workDirectory: base,
               objectPaths,
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
-              threads: programIsParallel(driver.entry, driver.bodies),
+              threads,
               outputPath: programPath,
             })
           : await buildProgramHost({

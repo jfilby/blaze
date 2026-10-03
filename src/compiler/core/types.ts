@@ -513,6 +513,15 @@ export interface CandidateOutcome {
     message: string;
     detail?: string;
   };
+  /**
+   * Whether the object this candidate produced carries a loop the compiler
+   * proved its turns independent, which the C backend writes as a pragma and
+   * which only the OpenMP runtime serves. It is recorded per candidate because
+   * it is a property of the object: a program links the objects of all its
+   * functions, so one object carrying the pragma is what asks for the runtime
+   * at the link, whatever the driver's own statements hold.
+   */
+  threads?: boolean;
   objectSizeBytes?: number;
   textSizeBytes?: number;
   verification?: VerificationResult;
