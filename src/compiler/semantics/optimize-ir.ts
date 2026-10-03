@@ -1305,11 +1305,19 @@ function propagateCopies(body: Body): boolean {
   );
   if (copied.length === 0) return false;
   // Keyed by the read of the copy rather than by the read it becomes, because
-  // that is the node `replaceValues` finds.
+  // that is the node `replaceValues` finds. A copy of a copy — `let b = a;
+  // let c = b` — is a chain, and the read of `c` becomes a read of `b`, which
+  // is a name this pass is dropping. A value that has already been replaced is
+  // not looked at again, so the read of `b` inside the value `c` was replaced
+  // by would survive it and be left naming nothing. Each copy is therefore
+  // resolved against the copies recorded before it, which is every name its
+  // value can read: a value reads what is declared above it, and every copy
+  // above it has been resolved already.
   const reads = new Map<string, SemanticValue>();
   for (const copy of copied) {
     const type = localTypeOf(body, copy.name);
-    reads.set(valueKey({ k: "local", type, name: copy.name }), { k: "local", type, name: copy.source });
+    const source = { k: "local", type, name: copy.source } as const;
+    reads.set(valueKey({ k: "local", type, name: copy.name }), replaceValues(source, reads) as SemanticValue);
   }
   const isCopy = (name: string): boolean => copied.some((copy) => copy.name === name);
   const walk = (block: SemanticBlock): void => {
@@ -1391,7 +1399,16 @@ function inlineSingleUses(body: Body): boolean {
         if (statement !== undefined) keep.push(statement);
         continue;
       }
-      replacements.set(valueKey({ k: "local", type: slotType(statement.slot), name }), statement.value);
+      // The same chain as `propagateCopies` meets here: `let v1 = v0 + 1` in a
+      // block of them has each value read the name the binding before it
+      // replaces. A replaced value is not looked at again, so that read would
+      // outlive the binding it names. Resolving the value against the bindings
+      // recorded before it closes the chain before anything is replaced, and a
+      // value only reads what is declared above it, so those are all of them.
+      replacements.set(
+        valueKey({ k: "local", type: slotType(statement.slot), name }),
+        replaceValues(statement.value, replacements),
+      );
       changed = true;
     }
     if (replacements.size === 0) continue;

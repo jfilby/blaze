@@ -453,6 +453,56 @@ test("a copy of a name nothing writes is read as the name it copies", () => {
   assert.match(after, /set sum \+= local\[f64\] a/);
 });
 
+test("a copy of a copy is read as the name the first copy names", () => {
+  // `let b = a; let c = b` is a chain, and both bindings go: the read of `c`
+  // becomes a read of `a`. Resolving each copy against the copies above it is
+  // what keeps the name it would have read from outliving its own binding.
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: false, type: F64 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const fn = fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "b", mutable: false, type: F64 }, value: { k: "local", type: F64, name: "a" }, line: 1 },
+      { k: "let", slot: { kind: "value", name: "c", mutable: false, type: F64 }, value: { k: "local", type: F64, name: "b" }, line: 2 },
+      { k: "set", name: "sum", op: "+=", value: { k: "local", type: F64, name: "c" }, line: 3 },
+    ],
+  }, F64, [a, sum]);
+  const after = printed(fn);
+  assert.doesNotMatch(after, /local\[f64\] b|local\[f64\] c/, "neither copy is left to be read");
+  assert.match(after, /set sum \+= local\[f64\] a/);
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(fn)), []);
+});
+
+test("a chain of bindings read once is inlined whole", () => {
+  // The chain in a loop body, which is where the hoist met it: every name of
+  // the chain is read once by the one above it, so every binding is inlined and
+  // what is left reads one value. A value that has already been replaced is
+  // not looked at again, so a chain that is not resolved as it is recorded
+  // leaves the name under it naming nothing — which the validator refuses, and
+  // the hoist then carries the same broken read out of the loop.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: false, type: I32 };
+  const i: SemanticSlot = { kind: "value", name: "i", mutable: false, type: I32 };
+  const loop = countedLoop({ k: "local", type: I32, name: "n" });
+  const body = loop.k === "loop" ? loop.loop.body : { id: "b2", releases: [], statements: [], terminator: { k: "jump" as const, target: "b1", releases: [] } };
+  let value: SemanticValue = { k: "local", type: I32, name: "n" };
+  for (let index = 0; index < 8; index += 1) {
+    const name = `v${index}`;
+    body.statements.push({
+      k: "let", line: 3 + index,
+      slot: { kind: "value", name, mutable: false, type: I32 },
+      value: bin("add", value, constOf(String(index), I32), I32),
+    });
+    value = { k: "local", type: I32, name };
+  }
+  body.statements.push({ k: "printNumber", value, line: 20 });
+  const fn = fnOf({ id: "entry", releases: [], terminator: { k: "return", value: null }, statements: [loop] }, { kind: "void" }, [n, i]);
+  const after = printed(fn);
+  // Every name of the chain is bound once and read nowhere else, so none of them
+  // is left reading another one of them.
+  assert.doesNotMatch(after, /local\[i32\] v\d/);
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(fn)), []);
+});
+
 test("a copy of a name the function writes is kept", () => {
   // `t` is the number the parameter held before the step, and the program reads
   // it after the step: reading the parameter instead would read what the
