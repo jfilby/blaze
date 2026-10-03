@@ -100,7 +100,12 @@ async function main(): Promise<void> {
       // A candidate is inlined and then folded, in that order, because the
       // callee spliced in has not been through the rewrites yet.
       const lowered = optimizeSemanticFunction(inlineCalls(resolvedByName.get(name) as SemanticFunction, inlinable), inlinable.functions);
-      const here = semanticFunctionProblems(lowered);
+      // The callees are read again here because the mark the optimizer set was
+      // decided with them: a loop that calls a function is measured by what that
+      // function computes, and a validator given no callees measures it as a
+      // call and nothing more — so it refuses a loop the optimizer admitted and
+      // the build fails on a verdict nothing actually changed.
+      const here = semanticFunctionProblems(lowered, contract, inlinable.functions);
       if (here.length > 0) {
         for (const problem of here) console.error(`  ${name}: ${problem}`);
         throw new Error(`${name} did not validate`);

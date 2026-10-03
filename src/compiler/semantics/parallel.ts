@@ -147,7 +147,7 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): R
   if (loop.kind === "counted" && !canonicalCounted(loop)) {
     return "the counter is not a whole number counting up one at a time, which is the only shape a parallel loop takes";
   }
-  const reach: Reach = { callees, reading: new Set(), verdicts: new Map() };
+  const reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() };
   if (turnIsTooCheap(loop.body, reach)) {
     return "a turn of this loop computes so little that a team of threads costs more than the turns it runs";
   }
@@ -250,6 +250,8 @@ interface Reach {
   readonly reading: Set<string>;
   /** What each callee was found to do, kept so a shared callee is read once. */
   readonly verdicts: Map<string, Refusal | null>;
+  /** What each callee was found to answer, kept so a shared callee is read once. */
+  readonly wholes: Map<string, boolean>;
 }
 
 /**
@@ -336,36 +338,75 @@ function canonicalCounted(loop: Extract<SemanticLoop, { kind: "counted" }>): boo
  * What a turn computes *through a call* counts as its own, because the thread
  * runs the callee too: `out[i] = f(values[i])` writes one element and computes
  * two values, and refusing it on that count would refuse exactly the shape the
- * purity analysis exists to admit. A callee already read is counted once.
+ * purity analysis exists to admit. A callee already read is counted once, and
+ * the whole of a block is read — the value a block ends in is as much of what a
+ * turn computes as the statements before it, and a function that computes its
+ * answer in a `return` has almost all of its work there.
  *
- * The threshold is the point between those two, and a count of values is what
- * the IR holds of the size of a turn.
+ * A callee that reaches itself is the one case a count cannot speak for, and it
+ * is not counted and refused but not refused at all. Reading a recursive
+ * function once gives one turn of it however many turns the recursion actually
+ * takes: `createTree` read once is a handful of values, and `createTree` at a
+ * depth a program chooses is as many as the program says. The IR holds no bound
+ * on how deep a recursion goes, so the cost of one call is not a number this
+ * count can answer, and a turn that makes one is not a turn that is cheap — it
+ * is a turn whose cost nobody has measured. Refusing it on a threshold would be
+ * the absence of a measurement wearing the clothes of one.
+ *
+ * The threshold is the point between the two measured cases, and a count of
+ * values is what the IR holds of the size of a turn.
  */
 const MINIMUM_VALUES_PER_TURN = 8;
 
 function turnIsTooCheap(body: SemanticBlock, reach: Reach): boolean {
-  return valuesIn(body, reach) < MINIMUM_VALUES_PER_TURN;
+  const cost: TurnCost = { values: 0, unbounded: false };
+  measureTurn(body, reach, cost);
+  return !cost.unbounded && cost.values < MINIMUM_VALUES_PER_TURN;
+}
+
+/** What one turn is measured to be: how many values it computes, and whether it calls itself. */
+interface TurnCost {
+  values: number;
+  /** True when a turn calls a function that reaches itself, which this cannot measure. */
+  unbounded: boolean;
 }
 
 /** The values a body computes, and those the functions it calls compute. */
-function valuesIn(body: SemanticBlock, reach: Reach): number {
-  let computed = 0;
+function measureTurn(body: SemanticBlock, reach: Reach, cost: TurnCost): void {
   for (const block of blocksWithin(body)) {
+    // What a block ends in is as much of its work as what it does before it, and
+    // for a function that computes an answer that answer is nearly all of it.
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      walkValues(block.terminator.value, (inner) => {
+        cost.values += 1;
+        if (inner.k === "call") measureCall(inner.call.callee, reach, cost);
+      });
+    }
     for (const statement of block.statements) {
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          computed += 1;
+          cost.values += 1;
           if (inner.k !== "call") return;
-          const callee = reach.callees.get(inner.call.callee);
-          if (callee === undefined || reach.reading.has(callee.name)) return;
-          reach.reading.add(callee.name);
-          computed += valuesIn(callee.entry, reach);
-          reach.reading.delete(callee.name);
+          measureCall(inner.call.callee, reach, cost);
         });
       }
     }
   }
-  return computed;
+}
+
+/** What a call a turn makes adds to what the turn is measured to be. */
+function measureCall(name: string, reach: Reach, cost: TurnCost): void {
+  const callee = reach.callees.get(name);
+  if (callee === undefined) return;
+  // A call already being read is this callee reaching itself, and how many
+  // turns that is nobody can say from what the IR holds.
+  if (reach.reading.has(callee.name)) {
+    cost.unbounded = true;
+    return;
+  }
+  reach.reading.add(callee.name);
+  measureTurn(callee.entry, reach, cost);
+  reach.reading.delete(callee.name);
 }
 
 /** One element of an array the body reaches, and whether the body writes it. */
@@ -403,7 +444,7 @@ function bodyRefusal(
   body: SemanticBlock,
   counter: string | null,
   callees: Callees,
-  reach: Reach = { callees, reading: new Set(), verdicts: new Map() },
+  reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() },
   combined: ReadonlyMap<string, SemanticReduction> = NO_REDUCTIONS,
   perCall: readonly string[] = [],
 ): Refusal | null {
@@ -521,7 +562,7 @@ function writeRefusal(
       if (statement.op !== (reduction.op === "+" ? "+=" : "*=")) {
         return `the body writes "${statement.name}" with ${statement.op}, which is not the ${reduction.op} the turns combine it with`;
       }
-      if (!valueIsWhole(statement.value)) {
+      if (!valueIsWhole(statement.value, reach)) {
         return `the body combines "${statement.name}" from a value that is not a whole number, and a sum of doubles is not the same number however it is grouped`;
       }
       return null;
@@ -577,7 +618,7 @@ const NO_REDUCTIONS: ReadonlyMap<string, SemanticReduction> = new Map();
  * carries: the IR states the width an operation runs at, and where a whole
  * number meets a double the statement is a double whatever it says.
  */
-function valueIsWhole(value: SemanticValue): boolean {
+function valueIsWhole(value: SemanticValue, reach: Reach): boolean {
   // A number written without a point is a whole number however wide a use
   // holds it, which is the same rule a loop counter is counted by. What decides
   // this is the number, not the width it is carried at: `1` held at `f64` is
@@ -589,9 +630,51 @@ function valueIsWhole(value: SemanticValue): boolean {
     // A division and a remainder over whole numbers are not whole numbers, and
     // neither is a power: `100 / i` is a double whatever both of its sides are.
     if (DIVIDING.has(value.op)) return false;
-    return valueIsWhole(value.left) && valueIsWhole(value.right);
+    return valueIsWhole(value.left, reach) && valueIsWhole(value.right, reach);
   }
+  // A call answers whatever the body it calls answers, so what the body hands
+  // back is the question — not the width the answer is held at, which is what
+  // stops a function that returns `1 + 1 + 1` from being read as a double and
+  // refused for it.
+  if (value.k === "call") return calleeAnswersWhole(value.call.callee, reach);
   return value.type.kind === "primitive" && isWhole(value.type.name);
+}
+
+/**
+ * Whether every number a function hands back is a whole number.
+ *
+ * The answer is read from what the body returns, in every block that returns:
+ * `checksum` answers `1`, or `1 + checksum(left) + checksum(right)`, and each of
+ * those is whole — so a loop that adds up what it returns may combine them in
+ * any order and get the same number.
+ *
+ * Recursion is answered by assuming and checking afterwards, which is the only
+ * reading that terminates: a function that calls itself is taken to answer a
+ * whole number while its own body is still being read, and the call inside it
+ * is then a call to a whole answer whatever the outer turn finds. A function
+ * that reaches itself through a value that is not whole still answers false,
+ * because the check is on the value the recursive call sits in rather than on
+ * the call being there at all.
+ */
+function calleeAnswersWhole(name: string, reach: Reach): boolean {
+  const known = reach.wholes.get(name);
+  if (known !== undefined) return known;
+  if (reach.reading.has(name)) return true;
+  const callee = reach.callees.get(name);
+  if (callee === undefined) return false;
+  reach.reading.add(name);
+  let whole = true;
+  for (const block of blocksWithin(callee.entry)) {
+    if (block.terminator.k !== "return") continue;
+    const value = block.terminator.value;
+    if (value !== null && !valueIsWhole(value, reach)) {
+      whole = false;
+      break;
+    }
+  }
+  reach.reading.delete(name);
+  reach.wholes.set(name, whole);
+  return whole;
 }
 
 /** The operations whose answer is a double however whole their sides are. */

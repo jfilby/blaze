@@ -665,3 +665,56 @@ test("a loop with two accumulators names both of them", () => {
     { name: "product", op: "*", exact: true },
   ]);
 });
+
+test("a turn that calls a function which reaches itself is not refused as cheap", () => {
+  // The cost of one call is not a number the IR holds: `createTree` read once is
+  // a handful of values, and at a depth the program chooses it is as many as the
+  // program says. Refusing a turn on a threshold nobody measured is not the same
+  // judgement as refusing one that was measured and found too small.
+  const recursive = callee("recursive", [call("recursive"), chain(8)]);
+  const fn = functionWith(countedLoop([call("recursive")]));
+  markParallelLoops(fn.entry, new Map([["recursive", recursive]]));
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a turn that computes in what a block returns is not refused as cheap", () => {
+  // A function that computes its answer in the `return` has nearly all its work
+  // there, and reading only the statements before it counted almost none.
+  // Eight values, none of them in a statement: a callee whose whole work is the
+  // value it ends in, which is what reading only the statements missed.
+  const ones: SemanticValue[] = Array.from({ length: 8 }, () => ({ k: "const", type: F64, text: "1" }));
+  const answered = ones.slice(1).reduce<SemanticValue>((left, right) => ({ k: "arith", type: F64, op: "add", left, right }), ones[0] as SemanticValue);
+  const answering = callee("answering", []);
+  const fn = functionWith(countedLoop([call("answering")]));
+  const entry = { ...answering.entry, terminator: { k: "return" as const, value: answered } };
+  markParallelLoops(fn.entry, new Map([["answering", { ...answering, entry }]]));
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a loop whose turns are few enough to measure is still refused on that count", () => {
+  // The threshold is still the threshold: a turn that computes two values and
+  // calls nothing is still not worth a team of threads.
+  const fn = functionWith(countedLoop([{ k: "let", line: 2, slot: { kind: "value", name: "t", mutable: true, type: F64 }, value: { k: "const", type: F64, text: "1" } }]));
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a turn that combines what a call answers is marked when the call answers a whole number", () => {
+  // `checksum` answers `1`, or `1 + checksum(left) + checksum(right)`, and each
+  // of those is whole — so the turns may add their totals up in any order and
+  // get the same number. That is what the return values are read for.
+  const checksum = callee("checksum", []);
+  const entry = { ...checksum.entry, terminator: { k: "return" as const, value: { k: "const" as const, type: F64, text: "1" } } };
+  const fn = functionWith(countedLoop([{ k: "set", line: 2, name: "total", op: "+=", value: { k: "call", type: F64, call: { callee: "checksum", signature: { name: "checksum", symbol: "blaze_checksum", params: [], returns: "f64" }, args: [], argTypes: [], returns: F64, effects: [], ownership: "none", retain: false, builtin: false } } }, chain(8)]));
+  markParallelLoops(fn.entry, new Map([["checksum", { ...checksum, entry }]]));
+  assert.equal(onlyLoop(fn).parallel, true);
+  assert.deepEqual(onlyLoop(fn).reductions, [{ name: "total", op: "+", exact: true }]);
+});
+
+test("a turn that combines what a call answers is not marked when the call does not answer a whole number", () => {
+  const halved = callee("halved", []);
+  const entry = { ...halved.entry, terminator: { k: "return" as const, value: { k: "const" as const, type: F64, text: "0.5" } } };
+  const fn = functionWith(countedLoop([{ k: "set", line: 2, name: "total", op: "+=", value: { k: "call", type: F64, call: { callee: "halved", signature: { name: "halved", symbol: "blaze_halved", params: [], returns: "f64" }, args: [], argTypes: [], returns: F64, effects: [], ownership: "none", retain: false, builtin: false } } }, chain(8)]));
+  markParallelLoops(fn.entry, new Map([["halved", { ...halved, entry }]]));
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
