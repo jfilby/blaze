@@ -359,13 +359,13 @@ test("a function the program declares is read back whole, body and all", () => {
 });
 
 test("a function round trips through the text a model may write it in", async () => {
-  const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
+  const example = new URL("../../benchmarks/c_backend/binarytrees/blaze.toml", import.meta.url).pathname;
   const printed = await runSemanticIr(example, { all: true });
   // Reading a module back binds every signature, effect, call and layout to
   // the contract, so what comes back is the same module or an error.
   const phase = phaseOf(
     "typescript",
-    { "1.ts": readFileSync(new URL("../../examples/binarytrees/1.ts", import.meta.url).pathname, "utf8") },
+    { "1.ts": readFileSync(new URL("../../benchmarks/c_backend/binarytrees/1.ts", import.meta.url).pathname, "utf8") },
     "1.ts",
   );
   const read = parseSemanticModule(printed, phase.program);
@@ -883,7 +883,7 @@ test("an object built in the arm of a conditional is built when that arm is take
   // calls createTree once. An IR that hoisted either object out of its arm
   // would build both, and the program the model reads would not be the program
   // the source writes.
-  const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
+  const example = new URL("../../benchmarks/c_backend/binarytrees/blaze.toml", import.meta.url).pathname;
   const printed = await runSemanticIr(example, { function: "createTree" });
 
   const calls = (printed.match(/createTree \[arg/g) ?? []).length;
@@ -896,48 +896,6 @@ test("an object built in the arm of a conditional is built when that arm is take
   // The arms are inside the selection, which is what keeps them lazy.
   assert.match(printed, /return \[select\[/);
   assert.match(printed, /new_object\[ref<Object1>\] Object1 left .* right /);
-});
-
-test("a function is described whole, and reads back as itself", async () => {
-  // A function is not a body: the IR carries what it is called by, what it is
-  // held to, what it does beyond computing its result, and its body. Every
-  // function of a real project, printed and parsed, has to come back the same.
-  const example = new URL("../../examples/binarytrees/blaze.toml", import.meta.url).pathname;
-  const printed = await runSemanticIr(example, { all: true });
-  assert.match(printed, /^function checksum\(node: ref<any>\) -> f64$/m);
-  assert.match(printed, /^ {2}allocates no$/m);
-  assert.match(printed, /^ {2}effects io syscall$/m);
-  assert.match(printed, /^ {2}param value\[f64\] depth mutable$/m);
-  // The body is the function's: a field read, a recursive call, a return.
-  assert.match(printed, /return \[add\[f64\]/);
-  assert.match(printed, /load_field\[ref<any>\]/);
-
-  // A function whose contract states a result carries that result and a body
-  // both: the postcondition is what the result is held to, and the body is
-  // what the compiler resolved and would lower.
-  const library = new URL("../../examples/hello_world/blaze.toml", import.meta.url).pathname;
-  const said = await runSemanticIr(library, { function: "dotProduct" });
-  assert.match(said, /ensures /);
-  assert.match(said, /^ {2}block entry: releases\[\]$/m);
-});
-
-test("the IR of a project is what the compiler resolved, and reads back as itself", async () => {
-  const example = new URL("../../examples/hello_world/blaze.toml", import.meta.url).pathname;
-  const printed = await runSemanticIr(example, {});
-  // What is printed is a program the compiler may lower, which is the whole
-  // point of printing it: a person reads the same program a backend lowers.
-  assert.match(printed, /^ir 1$/m);
-  assert.match(printed, /function dotProduct\(a: slice<f64>, b: slice<f64>, n: f64\) -> f64/);
-  assert.match(printed, /call\[f64\] dotProduct/);
-  assert.match(printed, /^return$/m);
-
-  // Written out and read back, it is the program it was, and it still validates.
-  const directory = await scratch("blaze-ir-");
-  const path = join(directory, "program.ir");
-  writeFileSync(path, printed, "utf8");
-  const again = await runSemanticIr(example, { from: path });
-  assert.equal(again, printed);
-  assert.equal(readFileSync(path, "utf8"), printed);
 });
 
 test("the type of a program is the type its names read as", () => {

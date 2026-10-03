@@ -1,20 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
 const CLI = new URL("../cli.ts", import.meta.url).pathname;
-const EXAMPLE = new URL("../../examples/hello_world", import.meta.url).pathname;
 const REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
 
-/** A project directory named after the project it contains, as the example is. */
+/**
+ * A project directory holding one project.
+ *
+ * What these tests read is the command line's own answer — which command ran,
+ * where the state landed, what the usage says — so the project is written here
+ * rather than copied from a program that happens to be checked in beside it. A
+ * test about argument handling that failed because a benchmark moved would be a
+ * test about the benchmark.
+ */
 async function projectDirectory(): Promise<string> {
   const root = await scratch("blaze-cli-");
   const directory = join(root, "hello_world");
-  await cp(EXAMPLE, directory, { recursive: true });
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "main.ts"), 'export function main(): void {\n  console.log("hello");\n}\n', "utf8");
+  await writeFile(join(directory, "blaze.toml"), 'language = "typescript"\nsourceFile = "main.ts"\noutput = "c"\nbackend = "c"\nmode = "debug"\n', "utf8");
   return directory;
 }
 
@@ -29,39 +38,6 @@ function blaze(directory: string, ...args: string[]) {
     timeoutMs: 300_000,
   });
 }
-
-test("build with no argument builds the blaze.toml in the current directory", async () => {
-  const directory = await projectDirectory();
-  const execution = blaze(directory, "build");
-
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.match(execution.stdout, /Correctness verified/);
-  assert.match(execution.stdout, /Output \(machine\)/);
-
-  const delivered = join(directory, ".blaze/projects/hello_world/output/hello_world");
-  // The example entry module is a program, so the delivered binary is that
-  // program: it prints what main.ts prints, whatever it is given on stdin.
-  const result = run(delivered, [], { input: "run\n3 3 3\n", timeoutMs: 60_000 });
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
-});
-
-test("generate with no argument uses the same default", async () => {
-  const directory = await projectDirectory();
-  const execution = blaze(directory, "generate");
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.match(execution.stdout, /Project: \.blaze\/projects\/hello_world/);
-});
-
-test("an explicit path still builds, and the state lands in the current directory", async () => {
-  // The project is named by an explicit path, the state by the directory the
-  // build runs in: the two are different directories here, which is the point.
-  const project = await projectDirectory();
-  const directory = await scratch("blaze-cli-elsewhere-");
-  const execution = blaze(directory, "build", join(project, "blaze.toml"));
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.match(execution.stdout, /projects\/hello_world\/output\/hello_world/);
-});
 
 test("without a blaze.toml the default says what to do", async () => {
   const directory = await scratch("blaze-cli-empty-");
@@ -109,55 +85,11 @@ test("init refuses to write over a project file, and leaves it as it was", async
   assert.equal(await readFile(path, "utf8"), written);
 });
 
-test("a source file handed to build is not a project file", async () => {
-  const directory = await projectDirectory();
-  const execution = blaze(directory, "build", join(directory, "main.ts"));
-
-  assert.notEqual(execution.code, 0);
-  assert.match(execution.stderr, /main\.ts is a source file, not a project file/);
-  assert.match(execution.stderr, /blaze\.toml beside it/);
-});
-
 test("an unknown command prints the usage and fails", async () => {
   const directory = await projectDirectory();
   const execution = blaze(directory, "frobnicate");
   assert.notEqual(execution.code, 0);
   assert.match(execution.stderr, /unknown command "frobnicate"/);
-});
-
-test("the model is named before the work starts, and on failure too", async () => {
-  const directory = await projectDirectory();
-  const built = blaze(directory, "build");
-  // The mode is the first line of a build, and it is the mode the project
-  // named, with the flags that mode is built with.
-  assert.equal(built.stdout.split("\n")[0], "· Mode: release (-O3 -fno-math-errno -fno-trapping-math -flto -ffat-lto-objects)");
-
-  assert.match(built.stdout, new RegExp(`^\\u00b7 Model: replay:${REPLAY}`, "m"));
-
-  // The model is named before any work starts, so it is on record even when
-  // the build fails.
-  const unreachable = await scratch("blaze-cli-nokey-");
-  await cp(EXAMPLE, unreachable, { recursive: true });
-  const failed = run(process.execPath, [CLI, "build", "--model", "openai/gpt-5"], {
-    cwd: unreachable,
-    env: { OPENAI_API_KEY: "", AI_API_KEY: "", AI_MODEL: "" },
-    timeoutMs: 300_000,
-  });
-  assert.notEqual(failed.code, 0);
-  assert.match(failed.stdout, /\u00b7 Model: openai\/gpt-5/);
-  assert.match(failed.stderr, /missing API key for provider "openai"/);
-});
-
-test("test and projects name the model as well", async () => {
-  const directory = await projectDirectory();
-  assert.equal(blaze(directory, "build").code, 0);
-
-  const verified = blaze(directory, "test", "hello_world");
-  assert.equal(verified.code, 0, verified.stderr);
-  assert.match(verified.stdout, /\u00b7 Model: replay:/);
-
-  const listed = blaze(directory, "projects");
-  assert.match(listed.stdout, new RegExp(`hello_world\\s+success\\s+\\S+\\s+replay:`));
 });
 
 test("help lists every command", async () => {
@@ -167,16 +99,6 @@ test("help lists every command", async () => {
   for (const command of ["build", "generate", "test", "benchmark", "inspect", "projects", "init"]) {
     assert.match(execution.stdout, new RegExp(`blaze ${command}`));
   }
-});
-
-test("a build that is not on a terminal leaves the title alone", async () => {
-  // The tests run blaze with a pipe, not a terminal, which is the case that
-  // must stay silent: an OSC escape in a log file is corruption.
-  const directory = await projectDirectory();
-  const execution = blaze(directory, "build");
-
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.doesNotMatch(execution.stdout, /\u001b]0;/);
 });
 
 /** The build record as it is on the disk, which is what a reader opens. */

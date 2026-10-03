@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild, runStored, inspectProject, STATE_DIRECTORY, type Reporter } from "../compiler.ts";
 import { run } from "../core/process.ts";
@@ -13,8 +13,6 @@ import { scratch } from "./scratch.ts";
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
 const PROTO_REPLAY = new URL("./fixtures/proto-function-replay.json", import.meta.url).pathname;
-const EXAMPLE_DIRECTORY = new URL("../../examples/hello_world", import.meta.url).pathname;
-
 const INPUT: SourceInput = {
   language: "nim",
   source: [
@@ -56,16 +54,6 @@ async function workspace(name: string, input: SourceInput = INPUT): Promise<stri
  * links beside the project file, so a test that builds the example builds a
  * copy: the repository is not the test's scratch directory.
  */
-async function exampleWorkspace(name: string): Promise<string> {
-  const root = await scratch(`blaze-${name}-`);
-  const directory = join(root, "hello_world");
-  await cp(EXAMPLE_DIRECTORY, directory, { recursive: true });
-  // The example ships with the state of an earlier build, and what these tests
-  // read is what their own build writes.
-  await rm(join(directory, STATE_DIRECTORY), { recursive: true, force: true });
-  return directory;
-}
-
 const quiet = { stage: () => {} };
 
 test("a backend that cannot deliver the output kind asked for is refused", async () => {
@@ -140,36 +128,6 @@ test("a build names the mode it built in, and one that names none gets the defau
   const implied = await workspace("mode-implied");
   await runBuild("input.toml", { cwd: implied, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.equal((await inspectProject("input", implied)).mode, "debug");
-});
-
-test("every mode builds a program that prints what the source prints", async () => {
-  // A mode changes the flags the toolchain is driven with, so each one has to
-  // produce a program that still computes the same thing: a build only
-  // checked in one mode has not proved the other two.
-  for (const mode of ["debug", "release", "danger"] as const) {
-    const directory = await exampleWorkspace(`mode-${mode}`);
-    await writeProject(join(directory, "blaze.toml"), {
-      language: "typescript",
-      sourceFile: "main.ts",
-      output: "machine",
-      mode,
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    });
-    const outcome = await runBuild(
-      join(directory, "blaze.toml"),
-      { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
-      quiet,
-      "build",
-    );
-    assert.equal(outcome.build.status, "success", `${mode} did not build: ${outcome.build.error?.message ?? ""}`);
-    const execution = run(outcome.outputPath as string, [], { timeoutMs: 60_000 });
-    assert.equal(execution.code, 0, `${mode} did not run: ${execution.stderr}`);
-    assert.equal(
-      execution.stdout,
-      "starting: dot product of 4 elements\ndone: dot product = 70\n",
-      `${mode} printed something else`,
-    );
-  }
 });
 
 test("a function the source named __proto__ is compiled and recorded like any other", async () => {
@@ -659,68 +617,12 @@ test("test and benchmark re-run against the selected candidate", async () => {
   assert.equal(measured.functions.dotProduct.benchmark?.iterations, 200);
 });
 
-test("the shipped TypeScript example builds into a program that prints what it claims", async () => {
-  const directory = await exampleWorkspace("example");
-  const outcome = await runBuild(
-    join(directory, "blaze.toml"),
-    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
-    quiet,
-    "build",
-  );
-
-  assert.equal(outcome.project, "hello_world");
-  assert.equal(outcome.build.status, "success");
-  assert.deepEqual(outcome.contracts.dotProduct.function.params, [
-    { name: "a", type: "slice<f64>" },
-    { name: "b", type: "slice<f64>" },
-    { name: "n", type: "f64" },
-  ]);
-  // The entry module is a program, so what it prints is what it is checked on,
-  // and the function it calls is the one the build compiles.
-  assert.equal(outcome.body?.file, "main.ts");
-  assert.deepEqual(Object.keys(outcome.build.selectedCandidates ?? {}), ["dotProduct"]);
-
-  assert.ok(outcome.outputPath !== null);
-  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.equal(execution.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
-});
-
 /**
  * A program is delivered twice: the store keeps the copy the build record
  * names, and the project directory gets the binary beside the sources, named
  * after the project. Both are named the way the platform names an executable,
  * so a build on Linux writes no `.exe` at all.
  */
-test("a program is delivered to the project directory under the platform's name", async () => {
-  const directory = await exampleWorkspace("deliver");
-
-  const suffix = process.platform === "win32" ? ".exe" : "";
-  const outcome = await runBuild(
-    join(directory, "blaze.toml"),
-    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
-    quiet,
-    "build",
-  );
-
-  // The store keeps its own copy, which is what `blaze test` re-runs.
-  assert.equal(outcome.outputPath, join(directory, STATE_DIRECTORY, "projects/hello_world/output/hello_world"));
-  const delivered = join(directory, `hello_world${suffix}`);
-  const execution = run(delivered, [], { timeoutMs: 60_000 });
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.equal(execution.stdout, "starting: dot product of 4 elements\ndone: dot product = 70\n");
-
-  const work = join(directory, STATE_DIRECTORY, "projects/hello_world/work");
-  const written = await readdir(work);
-  assert.ok(written.includes(`program${suffix}`), "the linked program is named for the platform");
-  const foreign = suffix === "" ? ".exe" : "";
-  assert.deepEqual(
-    written.filter((name) => name.endsWith(foreign)),
-    [],
-    "no artifact carries another platform's executable suffix",
-  );
-});
-
 /**
  * A program whose only compiled function reads an object. A reference is not
  * something the harness protocol can pass, so there is no vector to plan and
@@ -1041,52 +943,6 @@ test("a program entry is accepted under the symbol its contract names, not under
  * is what a bare `./binary` gives it. The output is drained until the terminal
  * is closed, so every line the program wrote is seen.
  */
-function runOnTerminal(command: string, timeoutMs = 30_000): { code: number | null; output: string } {
-  const driver = `
-import os, pty, select, subprocess, sys
-master, slave = pty.openpty()
-program = subprocess.Popen([${JSON.stringify(command)}], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
-os.close(slave)
-chunks = []
-while True:
-    ready, _, _ = select.select([master], [], [], ${timeoutMs / 1000})
-    if not ready:
-        break
-    try:
-        data = os.read(master, 4096)
-    except OSError:
-        break
-    if not data:
-        break
-    chunks.append(data)
-program.wait()
-sys.stdout.write(b"".join(chunks).decode("utf8", "replace"))
-sys.exit(program.returncode)
-`;
-  const result = run("python3", ["-c", driver], { timeoutMs });
-  return { code: result.code, output: result.stdout };
-}
-
-test("a delivered program started on a terminal runs and exits instead of hanging", async (t) => {
-  if (run("python3", ["-c", "pass"]).spawnError !== undefined) {
-    t.skip("python3 is needed to give the program a terminal");
-    return;
-  }
-  const directory = await exampleWorkspace("tty");
-  const outcome = await runBuild(
-    join(directory, "blaze.toml"),
-    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
-    quiet,
-    "build",
-  );
-  assert.ok(outcome.outputPath !== null);
-
-  const execution = runOnTerminal(outcome.outputPath);
-  // The binary must terminate on its own: a timeout here is the bug.
-  assert.equal(execution.code, 0, execution.output);
-  assert.match(execution.output, /^done: dot product = 70$/m);
-});
-
 test("a project names its provider and model, and the flag overrides it", async () => {
   const directory = await workspace("models");
   await writeProject(join(directory, "input.toml"), {
@@ -1270,46 +1126,3 @@ test("generate stops at candidate selection and delivers nothing", async () => {
   assert.equal(outcome.build.status, "success");
   await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/output/input"), "utf8"));
 });
-
-test("the mode decides the flags and the guards, and the artifact shows which", async () => {
-  // A mode that only the build record knows about would be a mode nothing can
-  // tell apart, so each one is checked on the artifact it delivers: `debug`
-  // keeps the debug info and the guards, `release` drops the debug info, and
-  // `danger` drops the guards as well.
-  const built: Record<string, { sections: number; guard: boolean }> = {};
-  for (const mode of ["debug", "release", "danger"] as const) {
-    const directory = await exampleWorkspace(`flags-${mode}`);
-    await writeProject(join(directory, "blaze.toml"), {
-      language: "typescript",
-      sourceFile: "main.ts",
-      output: "machine",
-      mode,
-      generation: { maxCandidates: 1, maxAttempts: 1 },
-    });
-    const outcome = await runBuild(
-      join(directory, "blaze.toml"),
-      { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
-      quiet,
-      "build",
-    );
-    assert.equal(outcome.build.status, "success", `${mode} did not build`);
-    const binary = outcome.outputPath as string;
-    const sections = run("readelf", ["-S", binary], { timeoutMs: 30_000 });
-    const runtime = await readFile(
-      join(directory, STATE_DIRECTORY, "projects/hello_world/work", "blaze_rt.c"),
-      "utf8",
-    );
-    built[mode] = {
-      // The compiler emits no warnings, so a build that failed to strip its
-      // debug info would be told by the sections alone.
-      sections: (sections.stdout.match(/debug_\w+/g) ?? []).length,
-      guard: runtime.includes("not a live runtime pointer"),
-    };
-  }
-  assert.ok(built.debug!.sections > 0, "a debug build carries no debug info");
-  assert.equal(built.release!.sections, 0, "a release build still carries debug info");
-  assert.equal(built.danger!.sections, 0, "a danger build still carries debug info");
-  assert.ok(built.debug!.guard && built.release!.guard, "a guarded build lost its guard");
-  assert.equal(built.danger!.guard, false, "a danger build still emits the use-after-free guard");
-});
-

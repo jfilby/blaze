@@ -1,7 +1,7 @@
 /**
  * Objects: what a function allocates, and the layout every field sits at.
  *
- * The tree of `src/examples/binarytrees/1.ts` is the case the pass exists for:
+ * The tree of `src/benchmarks/c_backend/binarytrees/1.ts` is the case the pass exists for:
  * `createTree` writes a node, `checksum` reads its fields, and neither states a
  * result as one expression, so the contract carries the layout instead.
  */

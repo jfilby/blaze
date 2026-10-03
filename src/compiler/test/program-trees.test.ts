@@ -2,7 +2,7 @@
  * A program that runs functions: the driver that runs them, and the object the
  * functions share.
  *
- * `src/examples/binarytrees/1.ts` is the case: a program whose statements call
+ * `src/benchmarks/c_backend/binarytrees/1.ts` is the case: a program whose statements call
  * one function, which calls two that recurse over an allocated tree. What the
  * driver has to get right is everything between the source and the binary: the
  * objects it declares, the arguments it passes, and the symbol the compiled
@@ -24,7 +24,7 @@ import { verifyProgram } from "../toolchain/verify-program.ts";
 import { RUNTIME_ABI, RUNTIME_NAME } from "../runtime/abi.ts";
 import { scratch } from "./scratch.ts";
 
-const TREES = new URL("../../examples/binarytrees/1.ts", import.meta.url).pathname;
+const TREES = new URL("../../benchmarks/c_backend/binarytrees/1.ts", import.meta.url).pathname;
 
 async function trees() {
   const source = await readFile(TREES, "utf8");

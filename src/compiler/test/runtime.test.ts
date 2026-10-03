@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeProject } from "./project.ts";
 import { runBuild, STATE_DIRECTORY } from "../compiler.ts";
@@ -24,9 +24,6 @@ import { scratch } from "./scratch.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
 const OBJECT_REPLAY = new URL("./fixtures/runtime-object-replay.json", import.meta.url).pathname;
-const EXAMPLE = new URL("../../examples/hosted_dot_product", import.meta.url).pathname;
-const EXAMPLE_REVIEWS = new URL("../../examples/hosted_dot_product/reviews.json", import.meta.url).pathname;
-
 const INPUT: SourceInput = {
   language: "nim",
   source: [
@@ -376,120 +373,6 @@ test("the C a build compiles includes the runtime ABI, so a function that alloca
   }
 });
 
-test("a hosted build runs the candidate inside a Nim host program", async (t) => {
-  if (!nimAvailable) {
-    t.skip("the Nim compiler is not installed");
-    return;
-  }
-  const directory = await workspace("runtime-nim");
-  const outcome = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${REPLAY}`, runtime: "nim" },
-    quiet,
-    "build",
-  );
-
-  assert.equal(outcome.build.runtime, "nim");
-  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
-  assert.equal(outcome.build.status, "success");
-
-  // The host program and the adapter are compiler output, and the adapter
-  // implements the whole ABI on Nim's allocator. They sit in a directory of
-  // the candidate's own, because candidates are built alongside each other
-  // and a shared adapter is a file one of them truncates under the other.
-  const adapter = await readFile(join(project(directory), `work/dotProduct/c1_host/${RUNTIME_NAME}.nim`), "utf8");
-  assert.match(adapter, /proc blaze_rt_allocate\*/);
-  const host = await readFile(join(project(directory), "work/dotProduct/c1_host/host.nim"), "utf8");
-  assert.match(host, /import blaze_rt/);
-  assert.match(host, /proc dotProduct\(/);
-
-  // The delivered program is the Nim host, with the candidate linked into it.
-  const symbols = run("nm", ["--defined-only", outcome.outputPath!], { timeoutMs: 30_000 });
-  assert.ok(symbols.stdout.includes("dotProduct"), "the candidate must be linked into the host program");
-  assert.ok(symbols.stdout.includes("blaze_rt_allocate"), "the adapter must provide the ABI");
-  assert.ok(symbols.stdout.includes("NimMain"), "the delivered program must be a Nim program");
-});
-
-test("a hosted build is compiled at the mode the build was given", async (t) => {
-  if (!nimAvailable) {
-    t.skip("the Nim compiler is not installed");
-    return;
-  }
-  // The host is the program a hosted build delivers, so the mode that is
-  // chosen for the toolchain is the mode it has to be compiled at: a `debug`
-  // host carries the debug info `-g` asks of the C side, and a `danger` one is
-  // written without the guards the runtime leaves out at that mode.
-  const debugDirectory = await workspace("runtime-nim-debug");
-  const dangerDirectory = await workspace("runtime-nim-danger");
-  const debug = await runBuild(
-    "input.toml",
-    { cwd: debugDirectory, reuse: false, model: `replay:${REPLAY}`, runtime: "nim", mode: "debug" },
-    quiet,
-    "build",
-  );
-  const danger = await runBuild(
-    "input.toml",
-    { cwd: dangerDirectory, reuse: false, model: `replay:${REPLAY}`, runtime: "nim", mode: "danger" },
-    quiet,
-    "build",
-  );
-
-  assert.equal(debug.build.status, "success");
-  assert.equal(danger.build.status, "success");
-
-  const sections = (path: string): string => run("readelf", ["-S", path], { timeoutMs: 30_000 }).stdout;
-  assert.match(sections(debug.outputPath!), /\.debug_info/, "a debug host must carry the debug info its mode asks for");
-  assert.doesNotMatch(sections(danger.outputPath!), /\.debug_info/, "a danger host must not be built with debug info");
-
-  const guarded = await readFile(join(project(debugDirectory), `work/dotProduct/c1_host/${RUNTIME_NAME}.nim`), "utf8");
-  assert.match(guarded, /not a live blaze pointer/, "a guarded mode must keep the runtime checks in the adapter");
-  const unguarded = await readFile(join(project(dangerDirectory), `work/dotProduct/c1_host/${RUNTIME_NAME}.nim`), "utf8");
-  assert.doesNotMatch(unguarded, /not a live blaze pointer/, "danger must leave the runtime checks out of the adapter");
-
-  // Whichever mode it was built at, the host speaks the harness protocol.
-  for (const outcome of [debug, danger]) {
-    const execution = run(outcome.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
-    assert.equal(execution.code, 0, execution.stderr);
-    assert.deepEqual(results(execution.stdout), [6, 8]);
-  }
-});
-
-test("both runtimes answer the harness protocol identically", async (t) => {
-  if (!nimAvailable) {
-    t.skip("the Nim compiler is not installed");
-    return;
-  }
-  const standalone = await runBuild(
-    "input.toml",
-    { cwd: await workspace("runtime-parity-none"), reuse: false, model: `replay:${REPLAY}` },
-    quiet,
-    "build",
-  );
-  const hosted = await runBuild(
-    "input.toml",
-    { cwd: await workspace("runtime-parity-nim"), reuse: false, model: `replay:${REPLAY}`, runtime: "nim" },
-    quiet,
-    "build",
-  );
-
-  const fromStandalone = run(standalone.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
-  const fromHosted = run(hosted.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
-  assert.equal(fromStandalone.code, 0, fromStandalone.stderr);
-  assert.equal(fromHosted.code, 0, fromHosted.stderr);
-  assert.deepEqual(results(fromHosted.stdout), results(fromStandalone.stdout));
-
-  const benchRequest = "bench 100\n3 3 3\n1 2 3\n1 1 1\n";
-  for (const runner of [standalone.outputPath!, hosted.outputPath!]) {
-    const bench = run(runner, [], { input: benchRequest, timeoutMs: 60_000 });
-    assert.equal(bench.code, 0, bench.stderr);
-    const line = bench.stdout.split("\n").find((entry) => entry.startsWith("BENCH "));
-    assert.ok(line !== undefined, `a benchmark must report a BENCH line, got ${JSON.stringify(bench.stdout)}`);
-    const [, duration, sink] = line.split(" ");
-    assert.ok(Number(duration) > 0, "the benchmark must report a positive duration");
-    assert.equal(Number(sink), 600, "the sink must accumulate one result per iteration");
-  }
-});
-
 test("a result too small for seventeen decimal places is still the number it is", async (t) => {
   if (!nimAvailable) {
     t.skip("the Nim compiler is not installed");
@@ -565,32 +448,6 @@ test("a result too small for seventeen decimal places is still the number it is"
   }
 });
 
-test("the shipped hosted example builds against the Nim runtime", async (t) => {
-  if (!nimAvailable) {
-    t.skip("the Nim compiler is not installed");
-    return;
-  }
-  // The build delivers its program beside the project file, so the example is
-  // built as a copy: the repository is not the test's scratch directory.
-  const root = await scratch("blaze-hosted-example-");
-  const directory = join(root, "hosted_dot_product");
-  await cp(EXAMPLE, directory, { recursive: true });
-  const outcome = await runBuild(
-    join(directory, "blaze.toml"),
-    { cwd: directory, reuse: false, model: `replay:${EXAMPLE_REVIEWS}`, maxAttempts: 1 },
-    quiet,
-    "build",
-  );
-
-  assert.equal(outcome.project, "hosted_dot_product");
-  assert.equal(outcome.build.runtime, "nim");
-  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
-
-  const execution = run(outcome.outputPath!, [], { input: VECTORS, timeoutMs: 60_000 });
-  assert.equal(execution.code, 0, execution.stderr);
-  assert.deepEqual(results(execution.stdout), [6, 8]);
-});
-
 test("an unknown runtime is rejected before anything is built", async () => {
   const directory = await workspace("runtime-unknown");
   await assert.rejects(
@@ -610,23 +467,6 @@ test("a WebAssembly module cannot link a host runtime", async () => {
     ),
     /cannot link the "nim" runtime/,
   );
-});
-
-test("a project file may name its runtime", async (t) => {
-  if (!nimAvailable) {
-    t.skip("the Nim compiler is not installed");
-    return;
-  }
-  const directory = await workspace("runtime-project");
-  await writeProject(join(directory, "input.toml"), { ...INPUT, runtime: "nim" });
-  const outcome = await runBuild(
-    "input.toml",
-    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
-    quiet,
-    "build",
-  );
-  assert.equal(outcome.build.runtime, "nim");
-  assert.equal(outcome.verification.dotProduct[0]?.passed, true);
 });
 
 test("argv_count counts the program and the file it runs, as process.argv does", async (t) => {

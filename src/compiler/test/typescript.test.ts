@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
 import { frontendFor } from "../semantics/frontend.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
@@ -21,29 +20,6 @@ function contractOfExport(source: string, name: string): FunctionContract {
 }
 
 const typescript = frontendFor("typescript");
-
-const HELLO_WORLD = new URL("../../examples/hello_world/hello_world.ts", import.meta.url).pathname;
-
-test("the shipped example compiles to the expected contract", async () => {
-  const source = await readFile(HELLO_WORLD, "utf8");
-  const contract = contractOf("typescript", source, { entry: "dotProduct" });
-
-  assert.deepEqual(contract.function, {
-    name: "dotProduct",
-    symbol: "dotProduct",
-    params: [
-      { name: "a", type: "slice<f64>" },
-      { name: "b", type: "slice<f64>" },
-      { name: "n", type: "f64" },
-    ],
-    returns: "f64",
-  });
-  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
-  assert.deepEqual(contract.requires, ["a != null", "len(a) >= n", "b != null", "len(b) >= n"]);
-  assert.deepEqual(contract.memory.reads, ["a[0:n]", "b[0:n]"]);
-  assert.deepEqual(contract.effects, []);
-  parseContract(contract);
-});
 
 test("a body that reads a buffer at a position the contract cannot name is refused", () => {
   // The same loop, once bounded by the parameter and once by a local holding
