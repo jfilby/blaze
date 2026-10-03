@@ -301,15 +301,27 @@ test("a loop calling a function that writes nothing is marked", () => {
   assert.equal(onlyLoop(fn).parallel, true);
 });
 
-test("a loop calling a function that writes an outer name is not marked", () => {
-  const impure = callee(
-    "impure",
-    [{ k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } }],
-    [{ kind: "value", name: "total", mutable: true, type: F64 }],
+test("a loop calling a function that spends its own parameter is marked", () => {
+  // Every turn that calls the function is a separate call with its own copy of
+  // the argument, so a callee that decrements it on the way down reaches nobody
+  // else. Refusing this refused nearly every loop that calls a function written
+  // the ordinary way — `createTree` spending the depth it was given among them.
+  const countdown = callee(
+    "countdown",
+    [{ k: "step", line: 2, name: "n", op: "--", prefix: false }, chain(8)],
+    [{ kind: "value", name: "n", mutable: true, type: F64 }],
   );
-  const fn = functionWith(countedLoop([call("impure"), chain(8)]));
-  markParallelLoops(fn.entry, new Map([["impure", impure]]));
-  assert.equal(onlyLoop(fn).parallel, undefined);
+  const fn = functionWith(countedLoop([call("countdown"), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["countdown", countdown]]));
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a loop calling a function that declares and writes its own name is marked", () => {
+  // A name the callee declares is its own on the same terms as a parameter.
+  const accumulator = callee("accumulator", [{ k: "let", line: 2, slot: { kind: "value", name: "held", mutable: true, type: F64 }, value: { k: "const", type: F64, text: "1" } }, chain(8)]);
+  const fn = functionWith(countedLoop([call("accumulator"), chain(8)]));
+  markParallelLoops(fn.entry, new Map([["accumulator", accumulator]]));
+  assert.equal(onlyLoop(fn).parallel, true);
 });
 
 test("a loop calling a function this build does not hold is not marked", () => {
@@ -360,11 +372,9 @@ test("purity is transitive: a call to a pure function is pure", () => {
 });
 
 test("purity is transitive both ways: one impure step refuses the whole chain", () => {
-  const impure = callee(
-    "impure",
-    [{ k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } }],
-    [{ kind: "value", name: "total", mutable: true, type: F64 }],
-  );
+  // The step is impure because it prints, which is what output order is: a
+  // callee that writes an argument of its own is no longer a step that refuses.
+  const impure = callee("impure", [{ k: "printNumber", line: 2, value: { k: "const", type: F64, text: "1" } }, chain(8)]);
   const middle = callee("middle", [call("impure"), chain(8)]);
   const fn = functionWith(countedLoop([call("middle"), chain(8)]));
   markParallelLoops(fn.entry, new Map([["middle", middle], ["impure", impure]]));

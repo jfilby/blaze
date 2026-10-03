@@ -279,7 +279,14 @@ function calleeRefusal(name: string, reach: Reach): Refusal | null {
     return refusal;
   }
   reach.reading.add(name);
-  const refusal = bodyRefusal(callee.entry, null, reach.callees, reach);
+  // The parameters belong to one call of the callee, which is what a turn is:
+  // every turn that calls this gets its own copy of each, so a write to one is
+  // a write to that turn's own frame and reaches nobody else. A callee that
+  // reuses an argument — `n -= 1` on the way down a countdown, the way
+  // `createTree` spends the depth it was given — was refused here as a write to
+  // a name the turn only found, which refused nearly every loop that calls a
+  // function written the ordinary way.
+  const refusal = bodyRefusal(callee.entry, null, reach.callees, reach, NO_REDUCTIONS, callee.params.map((param) => param.name));
   reach.reading.delete(name);
   reach.verdicts.set(name, refusal);
   return refusal;
@@ -377,6 +384,12 @@ interface ElementAccess {
  * body is in, and a write to any of that is a write another turn can be reading
  * at the same moment.
  *
+ * The names a callee was handed are its own for the same reason, one call
+ * further out: every turn that calls it is a separate call, with a separate copy
+ * of each parameter. That is what `perCall` carries, and it is why a function
+ * that spends its argument — a countdown stepping `n` down — is a callee two
+ * turns may both make.
+ *
  * An array element is the exception, and it is the exception that makes the
  * rule worth anything: `out[i] = f(values[i])` is the shape nearly every loop
  * worth parallelising is, and refusing it would leave a rule that marks only
@@ -392,13 +405,14 @@ function bodyRefusal(
   callees: Callees,
   reach: Reach = { callees, reading: new Set(), verdicts: new Map() },
   combined: ReadonlyMap<string, SemanticReduction> = NO_REDUCTIONS,
+  perCall: readonly string[] = [],
 ): Refusal | null {
   // A name this body declares is the body's own, and every turn of it has one
   // of its own: the declaration is written inside the turn and every turn
   // enters it. A name the body only found belongs to the frame the body is in,
   // and a write to one of those is a write another turn can be reading at the
   // same moment.
-  const declared = new Set<string>();
+  const declared = new Set<string>(perCall);
   for (const block of blocksWithin(body)) {
     for (const statement of block.statements) {
       if (statement.k === "let") declared.add(statement.slot.name);
