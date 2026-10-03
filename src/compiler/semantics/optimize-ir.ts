@@ -42,6 +42,7 @@ import type {
 import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
+import { markParallelLoops } from "./parallel.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -1947,6 +1948,12 @@ function optimizeBody(body: Body): void {
     if (dropUnread(body)) changed = true;
     if (!changed) break;
   }
+  // Independence is marked last, on the body the rounds have settled. A verdict
+  // is a claim about a body as it stands, so a pass that ran before them would
+  // be claiming something about a body that has since been rewritten — a loop
+  // the rounds split in two, or unrolled away entirely, is not the loop the
+  // answer was about.
+  markParallelLoops(body.entry);
 }
 
 /** Folds every block of the function, nested ones included. */

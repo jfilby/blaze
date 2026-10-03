@@ -26,6 +26,7 @@ import { parseSemanticFunction, printSemanticFunction } from "./semantics/ir-tex
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { applyProposal, inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { optimizeSemanticFunction } from "./semantics/optimize-ir.ts";
+import { entryIsParallel } from "./semantics/parallel.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
@@ -657,6 +658,9 @@ async function materialize(
       harnessPath: paths.harness,
       objectPath: paths.object,
       runtimeObjectPath: runtime.objectPath,
+      // A candidate whose object carries a pragma needs the runtime that serves
+      // it at the link, and one whose object does not links none.
+      threads: entryIsParallel(fn.entry),
       includeDirectories: [dirname(runtime.headerPath)],
       outputPath: paths.executable,
       functionName: request.contract.function.name,
@@ -781,7 +785,7 @@ async function buildCandidate(
     // executed at all; the program it belongs to is what says whether the two
     // agree, and it keeps that job.
     if (vectors === null) {
-      const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed));
+      const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed), fn);
       if (probe.reason !== null && probe.called) {
         return {
           outcome: {
@@ -928,6 +932,8 @@ async function probeCandidate(
   request: CandidateEvaluationRequest,
   paths: CandidatePaths,
   plan: ProbePlan,
+  /** The IR the candidate is, whose body says whether it needs threads linked. */
+  fn: SemanticFunction,
 ): Promise<ProbeOutcome> {
   if (plan.kind === "skip") return { called: false, reason: plan.reason, stderr: "" };
   // The probe links the object the C toolchain links, so it runs for every
@@ -950,6 +956,7 @@ async function probeCandidate(
     harnessPath: paths.probeHarness,
     objectPath: paths.object,
     runtimeObjectPath: runtime.objectPath,
+    threads: entryIsParallel(fn.entry),
     includeDirectories: [dirname(runtime.headerPath)],
     outputPath: paths.probeExecutable,
     functionName: request.contract.function.name,

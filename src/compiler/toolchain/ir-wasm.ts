@@ -2146,6 +2146,12 @@ class Body {
    * Whatever a loop counts on is bound before either frame, because a branch
    * back to the loop start runs everything ahead of it, and a counter bound
    * inside the loop is a counter bound again on every pass.
+   *
+   * A loop marked parallel is written out as the loop it is. This module's one
+   * import is an unshared `env.memory`, and `boundaryProblems` refuses any
+   * other, so a WebAssembly thread is not something this backend can emit. The
+   * mark says the turns do not depend on each other rather than that they must
+   * be run at once, and running them in order is the same program.
    */
   private loop(loop: SemanticLoop): void {
     // A loop declares its index and its element in the block its body is, and

@@ -47,7 +47,8 @@ import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { DEFAULT_ALIGNMENT, RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { archOptions, assemblyOptions, cTargetOptions, loweringOptions } from "../core/target.ts";
+import { archOptions, assemblyOptions, cTargetOptions, loweringOptions, threadingOptions } from "../core/target.ts";
+import { entryIsParallel } from "../semantics/parallel.ts";
 
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
@@ -457,6 +458,17 @@ class FunctionEmitter {
         // the loop never ends. A step with a name of its own is added by that
         // name, whichever of the two it is.
         const move = by === null ? `${variable}${loop.down ? "--" : "++"}` : `${variable} += ${step ?? (by as string)}`;
+        // A loop the compiler proved has turns that do not depend on each other
+        // is handed to OpenMP, which is the C compiler's threads and not the
+        // compiler's: the pragma asks for a team of them over the turns, and
+        // every name the body reads but does not write is shared and read-only
+        // by the proof the mark carries. The bounds were hoisted into locals
+        // above, so the loop OpenMP is handed is the canonical one — an integer
+        // counter from a bound up to a bound — and a bound the loop re-read on
+        // every turn is read by one thread rather than by all of them.
+        if (loop.parallel === true) {
+          this.write([`${pad(depth)}#pragma omp parallel for`]);
+        }
         this.write([`${pad(depth)}for (${written} ${variable} = ${from ?? start}; ${variable} ${bound} ${to ?? end}; ${move}) {`]);
         this.block(loop.body, depth + 1);
         this.write([`${pad(depth)}}`]);
@@ -470,6 +482,9 @@ class FunctionEmitter {
         // name the walk would read anyway.
         const length = readEveryTurn(loop.length) ? this.temporary("blaze_length") : null;
         if (length !== null) this.write([`${pad(depth)}size_t ${length} = ${walk as string};`]);
+        if (loop.parallel === true) {
+          this.write([`${pad(depth)}#pragma omp parallel for`]);
+        }
         this.write([
           `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length ?? (walk as string)}; ${index}++) {`,
           `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${buffer as string}[${index}];`,
@@ -1144,6 +1159,10 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
 
   const archFlag = cTargetOptions(request.target);
   const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
+  // `-fopenmp` is asked for only when the function has a loop the compiler
+  // proved its turns independent, because it is the flag that makes the pragma
+  // a team of threads rather than a line the C compiler ignores.
+  const threads = threadingOptions(entryIsParallel(request.fn.entry));
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or
   // instruction is a model's to choose, on any target. An assembly build
@@ -1164,6 +1183,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
         "-std=c11",
         ...assemblyOptions(request.mode, request.contract.optimize.primary),
         "-S",
+        ...threads,
         ...archFlag,
         ...includes,
         "-o",
@@ -1216,6 +1236,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
         "-std=c11",
         ...loweringOptions(request.mode, request.contract.optimize.primary),
         "-c",
+        ...threads,
         ...archFlag,
         ...includes,
         "-o",

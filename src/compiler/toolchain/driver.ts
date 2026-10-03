@@ -28,7 +28,7 @@ import {
   type ValueKind,
 } from "../core/semantic-ir.ts";
 import type { BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
-import { cTargetOptions, linkOptions } from "../core/target.ts";
+import { cTargetOptions, linkOptions, threadingOptions } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
@@ -577,6 +577,16 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     ];
   }
 
+  /**
+   * A loop the compiler proved has turns that do not depend on each other is
+   * handed to OpenMP. Everything the body reads and does not write is shared
+   * and read-only by that proof, and the index the turns run on is private to
+   * whichever turn is running it, which is what the pragma says.
+   */
+  parallelDirective(): string[] {
+    return ["#pragma omp parallel for"];
+  }
+
   breakLine(): string {
     return "break;";
   }
@@ -761,6 +771,13 @@ export interface ProgramDriverRequest {
   objectPaths: string[];
   /** The compiler runtime object, when the build links one. */
   runtimeObjectPath?: string;
+  /**
+   * True when any object of the program, or the driver itself, carries a loop
+   * the compiler proved its turns independent. It is what asks for threads at
+   * the link: an object compiled with a pragma in it needs the runtime that
+   * serves the pragma, and a program with no such object does not link one.
+   */
+  threads?: boolean;
   outputPath: string;
 }
 
@@ -774,7 +791,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller
   // naming a cpu asked for and what an unnamed one would not get otherwise.
-  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads === true), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

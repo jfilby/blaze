@@ -64,6 +64,7 @@ import type {
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { parseType, typeToString } from "./contract.ts";
+import { refusalFor } from "./parallel.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
@@ -1494,6 +1495,7 @@ function bodyProblems(context: Context, body: Body, tree: Tree): string[] {
   return [
     ...structureProblems(body),
     ...controlFlowProblems(tree),
+    ...parallelProblems(tree),
     ...valueProblems(tree),
     ...typeProblems(context, tree),
     ...callProblems(context, tree),
@@ -1544,6 +1546,40 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
       }
     }
     walked(value, (inner) => problems.push(...valueTypeProblems(where, inner, context)));
+  }
+
+  return problems;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Rule 2b: independence                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A loop the IR says is parallel is a loop the compiler has to agree is
+ * parallel.
+ *
+ * The mark normally arrives from `semantics/parallel.ts`, which is the analysis
+ * that sets it and does not set a mark it has not proved. It also arrives from
+ * IR text: a body written by a model, or by a person reading `blaze ir`, can
+ * carry the word, and a loop that calls its turns independent when they are not
+ * is a program with a race in it rather than a program that is a little slower.
+ * So the claim is proved here as well, and a loop that fails is refused with the
+ * reason the analysis gives.
+ */
+function parallelProblems(tree: Tree): string[] {
+  const problems: string[] = [];
+
+  for (const placed of tree.statements) {
+    const statement = placed.statement;
+    if (statement.k !== "loop") continue;
+    const loop = statement.loop;
+    if (loop.kind !== "counted" && loop.kind !== "each") continue;
+    if (loop.parallel !== true) continue;
+    const refusal = refusalFor(loop);
+    if (refusal !== null) {
+      problems.push(`${label(placed.block.block.id, statement.line)}loop is marked parallel but ${refusal}`);
+    }
   }
 
   return problems;

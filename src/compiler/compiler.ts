@@ -54,6 +54,8 @@ import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
+import { programIsParallel } from "./semantics/parallel.ts";
+
 import { parseSemanticFunction, printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
 import { validateSemanticProgram } from "./semantics/ir-validate.ts";
 import { parseSemanticProgram, printSemanticProgram } from "./semantics/ir-text.ts";
@@ -1518,6 +1520,7 @@ export async function runBuild(
               workDirectory: base,
               objectPaths,
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
+              threads: programIsParallel(driver.entry, driver.bodies),
               outputPath: programPath,
             })
           : await buildProgramHost({

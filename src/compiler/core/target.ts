@@ -266,6 +266,21 @@ export function cTargetOptions(target: TargetSpec): string[] {
 }
 
 /**
+ * The option a translation unit carrying a parallel loop is compiled with, and
+ * the empty list where there is none.
+ *
+ * `-fopenmp` is what makes `#pragma omp parallel for` a team of threads rather
+ * than a line the C compiler ignores, and it is the only reason it is here. It
+ * links a threading runtime into the program, so a build with no parallel loop
+ * in it does not ask for it: an unused `-fopenmp` is a `libgomp` a program
+ * never calls into, which is a dependency the delivered binary did not have
+ * before for no reason the source gave.
+ */
+export function threadingOptions(parallel: boolean): string[] {
+  return parallel ? ["-fopenmp"] : [];
+}
+
+/**
  * The Nim compiler options a build mode asks for.
  *
  * Nim spells its own three build profiles as defines, so the mode is the

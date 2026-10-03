@@ -184,6 +184,17 @@ export interface ProgramTarget {
     step: string | null,
   ): string[];
   openForOf(index: string, variable: string, type: SemanticType, buffer: string, length: string): string[];
+  /**
+   * The directive that hands a loop to the host's threads, or nothing where the
+   * host has none to hand it to.
+   *
+   * A loop marked parallel says its turns do not depend on each other, so a
+   * target that returns nothing runs them in order — which is the same program,
+   * because nothing about one turn reaches another. That is the whole of what
+   * a target without threads owes the mark, and it is why the mark is in the IR
+   * rather than a call the IR makes.
+   */
+  parallelDirective(): string[];
   /** The line that leaves the innermost loop, and the one that starts it again. */
   breakLine(): string;
   continueLine(): string;
@@ -558,6 +569,7 @@ class ProgramEmitter {
         break;
       }
       case "counted": {
+        if (loop.parallel === true) for (const line of this.target.parallelDirective()) this.write(line);
         const bounds = counted as { type: SemanticType; from: string; to: string; step: string | null };
         for (const line of this.target.openFor(
           this.names.read(loop.variable),
@@ -574,6 +586,7 @@ class ProgramEmitter {
         break;
       }
       case "each": {
+        if (loop.parallel === true) for (const line of this.target.parallelDirective()) this.write(line);
         for (const line of this.target.openForOf(
           this.names.read(loop.index),
           this.names.read(loop.element),

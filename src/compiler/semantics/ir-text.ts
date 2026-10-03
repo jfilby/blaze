@@ -473,12 +473,15 @@ function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
       const bound = loop.inclusive ? "inclusive" : "exclusive";
       const direction = loop.down ? "down" : "up";
       const step = loop.step === null ? "default" : printSemanticValue(loop.step);
-      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${printSemanticValue(loop.from)} to ${printSemanticValue(loop.to)} ${bound} ${direction} step ${step}`;
+      const parallel = loop.parallel === true ? " parallel" : "";
+      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${printSemanticValue(loop.from)} to ${printSemanticValue(loop.to)} ${bound} ${direction} step ${step}${parallel}`;
       break;
     }
-    case "each":
-      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${printSemanticValue(loop.length)}`;
+    case "each": {
+      const parallel = loop.parallel === true ? " parallel" : "";
+      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${printSemanticValue(loop.length)}${parallel}`;
       break;
+    }
   }
   return [head + mark, ...blockLines(loop.body, indent + 2, null)];
 }
@@ -1589,6 +1592,12 @@ class BlockReader {
         let step: SemanticValue | null = null;
         if (scanner.peek() === "d") scanner.keyword("default");
         else step = scanner.value();
+        // `parallel` is a word a loop carries and not every loop does, so it is
+        // read by whether it is there rather than as part of the step: the step
+        // is a value, and a value is not the word `parallel`.
+        scanner.skip();
+        const parallel = scanner.peek() === "p";
+        if (parallel) scanner.keyword("parallel");
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
         return {
@@ -1602,6 +1611,7 @@ class BlockReader {
             inclusive: bound === "inclusive",
             down: direction === "down",
             step,
+            ...(parallel ? { parallel: true } : {}),
             header,
             exit,
             body,
@@ -1618,9 +1628,27 @@ class BlockReader {
         const index = scanner.word();
         scanner.keyword("length");
         const length = scanner.value();
+        scanner.skip();
+        const parallel = scanner.peek() === "p";
+        if (parallel) scanner.keyword("parallel");
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
-        return { k: "loop", loop: { kind: "each", index, element, elementType, of, length, header, exit, body }, line: at };
+        return {
+          k: "loop",
+          loop: {
+            kind: "each",
+            index,
+            element,
+            elementType,
+            of,
+            length,
+            ...(parallel ? { parallel: true } : {}),
+            header,
+            exit,
+            body,
+          },
+          line: at,
+        };
       }
       case "block": {
         // The statement is the head of its own block, so the block reads the line.

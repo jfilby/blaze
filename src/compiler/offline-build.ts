@@ -31,6 +31,7 @@ import { runContractPhase } from "./semantics/program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, type FunctionContext } from "./semantics/ir-function.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
+import { programIsParallel } from "./semantics/parallel.ts";
 import { printSemanticProgram } from "./semantics/ir-text.ts";
 import { semanticFunctionProblems, validateSemanticProgram } from "./semantics/ir-validate.ts";
 import { inlineCalls } from "./semantics/repair.ts";
@@ -127,6 +128,7 @@ async function main(): Promise<void> {
     workDirectory: work,
     objectPaths,
     runtimeObjectPath: runtime.objectPath,
+    threads: programIsParallel(program.entry, program.bodies),
     outputPath,
   });
   console.log(`  ${outputPath}`);

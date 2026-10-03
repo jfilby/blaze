@@ -2267,6 +2267,15 @@ class Machine {
     }
   }
 
+  /**
+   * A loop marked parallel is written out as the loop it is.
+   *
+   * The mark says the turns do not depend on each other, not that they must be
+   * run at once, and this backend writes the instructions itself: it has no
+   * thread to start and no atomics to hand a shared counter over with — the
+   * encoder has no `lock`-prefixed instruction at all. Running the turns in
+   * order is the same program, so that is what it does.
+   */
   private loop(loop: SemanticLoop): void {
     this.names.enter();
     const labels = this.loopLabels(loop);

@@ -719,6 +719,17 @@ export type SemanticLoop =
       header: string;
       exit: string;
       body: SemanticBlock;
+      /**
+       * True when the compiler proved the turns of this loop write nothing
+       * another turn reads or writes, so they may run at the same time on more
+       * than one thread. See `semantics/parallel.ts`.
+       *
+       * It is a permission and not an instruction: a backend that can spawn
+       * threads takes it, and a backend that cannot runs the turns in order,
+       * which is the same program because the turns do not depend on each
+       * other. Nothing is inferred from it beyond that.
+       */
+      parallel?: boolean;
     }
   | {
       kind: "each";
@@ -731,6 +742,17 @@ export type SemanticLoop =
       header: string;
       exit: string;
       body: SemanticBlock;
+      /**
+       * True when the compiler proved the turns of this loop write nothing
+       * another turn reads or writes, so they may run at the same time on more
+       * than one thread. See `semantics/parallel.ts`.
+       *
+       * It is a permission and not an instruction: a backend that can spawn
+       * threads takes it, and a backend that cannot runs the turns in order,
+       * which is the same program because the turns do not depend on each
+       * other. Nothing is inferred from it beyond that.
+       */
+      parallel?: boolean;
     };
 
 /** The operators `op=` accepts. */

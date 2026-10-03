@@ -139,6 +139,15 @@ them by regenerating the artifact.
 rewrite of the semantic IR, so what a rule produces is a program the compiler
 wrote and every validator, printer and backend already reads.
 
+That vocabulary is the whole of what a review may propose, and it is
+deliberately not a rule that parallelises a loop. The rules above each rewrite a
+program into the same program written differently, and a program written
+differently is one the validator can refuse if the rewrite was wrong. A
+parallel loop is the same *outcome* reached by a different *execution*, and
+whether it is the same program depends on a proof about what two turns may
+touch — which is `semantics/parallel.ts`, and which is not something a
+proposal can carry.
+
 
 ## Rule-based code transformers
 
@@ -156,6 +165,35 @@ between 133 ms and 64 ms at n=1000, which is where a build whose counters are
 every intermediate is under 2^53, and the IR holds no bound on a loop counter,
 so the body answers the whole-number form only inside a reach it tests its own
 arguments against, and keeps the arithmetic the source wrote outside it.
+
+`semantics/parallel.ts` marks the loops whose turns do not depend on each other,
+so a backend may run them at the same time on more than one thread. It is the
+one rewrite whose answer is a *proof* rather than a cheaper form of the same
+program: a turn may run beside another exactly when neither writes anything the
+other reads or writes, so a body that writes an outer name, allocates (the
+runtime's allocator is one heap with one free list), prints or calls anything is
+left alone. The one write it accepts is the element named by the turn's own
+counter — `out[i] = f(values[i])` is the shape nearly every loop worth
+parallelising is — and any other index is refused, because the IR holds no
+length and nothing could say the two turns do not name the same element. A mark
+is a permission and not an instruction: the C backend takes it and writes
+`#pragma omp parallel for`, and the machine and wasm backends run the turns in
+order, which is the same program because nothing about one turn reaches another.
+
+The mark is not asked of a model and cannot be proposed as a repair rule.
+Independence is not something a proposal can carry, because a proposal that is
+wrong about it is a program with a race in it rather than a program that is a
+little slower. `ir-validate.ts` asks the same analysis about every loop the IR
+*text* claims is parallel, so a mark written by hand or by a model is proved
+rather than believed.
+
+It also asks whether a turn is worth a thread. Handing `out[i] = in[i] * 2 + 1`
+over four million elements to four threads measured 1.6 times *slower* than
+running it in order, because the C compiler already vectorises it and the loop
+is bound by the memory it moves; the same pragma over a loop whose turn computes
+few hundred values measured 1.9 times faster. A turn below eight computed values
+is therefore refused on cost alone, which is the one clause here that is a
+judgement about speed rather than a proof about correctness.
 
 ## Benchmarking
 

@@ -594,6 +594,19 @@ ${anchor}
     ];
   }
 
+  /**
+   * Nothing: the Nim host runs a parallel loop's turns in order.
+   *
+   * Nim spells a parallel loop `par for`, which needs the program compiled with
+   * `--threads:on` and turns every allocation in it into one a lock guards. The
+   * mark a loop carries says its turns do not depend on each other, so running
+   * them in order is the same program, and that is what a host without threads
+   * owes it.
+   */
+  parallelDirective(): [] {
+    return [];
+  }
+
   breakLine(): string {
     return "break";
   }
