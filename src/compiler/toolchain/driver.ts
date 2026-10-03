@@ -24,6 +24,7 @@ import {
   isTextType,
   isUnsigned,
   type SemanticCall,
+  type SemanticReduction,
   type SemanticType,
   type ValueKind,
 } from "../core/semantic-ir.ts";
@@ -582,9 +583,18 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
    * handed to OpenMP. Everything the body reads and does not write is shared
    * and read-only by that proof, and the index the turns run on is private to
    * whichever turn is running it, which is what the pragma says.
+   *
+   * An accumulator the turns combine is named on the pragma as well, and that
+   * is what the clause is for: without it every turn writes the one accumulator
+   * the turns share and the updates are lost to each other. OpenMP gives each
+   * turn a total of its own and combines them at the end, which is the same
+   * number as a turn writing the accumulator, because `semantics/parallel.ts`
+   * proved the values combined are whole numbers.
    */
-  parallelDirective(): string[] {
-    return ["#pragma omp parallel for"];
+  parallelDirective(reductions: readonly SemanticReduction[]): string[] {
+    if (reductions.length === 0) return ["#pragma omp parallel for"];
+    const clauses = reductions.map((reduction) => `reduction(${reduction.op}:${reduction.name})`);
+    return [`#pragma omp parallel for ${clauses.join(" ")}`];
   }
 
   breakLine(): string {

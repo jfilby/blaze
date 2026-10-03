@@ -38,6 +38,7 @@ import {
   type SemanticBlock,
   type SemanticCall,
   type SemanticLoop,
+  type SemanticReduction,
   type SemanticSlot,
   type SemanticStatement,
   type SemanticTerminator,
@@ -193,8 +194,13 @@ export interface ProgramTarget {
    * because nothing about one turn reaches another. That is the whole of what
    * a target without threads owes the mark, and it is why the mark is in the IR
    * rather than a call the IR makes.
+   *
+   * The accumulators the turns combine come with it, because a target that does
+   * hand the turns to threads has to be told how to combine them: a directive
+   * that names no accumulator leaves every turn writing the one the turns share,
+   * which is the race the reduction exists to answer.
    */
-  parallelDirective(): string[];
+  parallelDirective(reductions: readonly SemanticReduction[]): string[];
   /** The line that leaves the innermost loop, and the one that starts it again. */
   breakLine(): string;
   continueLine(): string;
@@ -569,7 +575,8 @@ class ProgramEmitter {
         break;
       }
       case "counted": {
-        if (loop.parallel === true) for (const line of this.target.parallelDirective()) this.write(line);
+        const reductions = this.combined(loop);
+        if (loop.parallel === true) for (const line of this.target.parallelDirective(reductions)) this.write(line);
         const bounds = counted as { type: SemanticType; from: string; to: string; step: string | null };
         for (const line of this.target.openFor(
           this.names.read(loop.variable),
@@ -586,7 +593,8 @@ class ProgramEmitter {
         break;
       }
       case "each": {
-        if (loop.parallel === true) for (const line of this.target.parallelDirective()) this.write(line);
+        const reductions = this.combined(loop);
+        if (loop.parallel === true) for (const line of this.target.parallelDirective(reductions)) this.write(line);
         for (const line of this.target.openForOf(
           this.names.read(loop.index),
           this.names.read(loop.element),
@@ -603,6 +611,18 @@ class ProgramEmitter {
     if (!closedByDo) this.write(this.target.closeBody() ?? "");
     this.loops.pop();
     this.names.leave();
+  }
+
+  /**
+   * The accumulators a loop's turns combine, with each name read as the scope
+   * this loop is written in holds it.
+   *
+   * The name in the IR is the program's own; what a directive has to name is
+   * the local this emitter gave it, which is a different name wherever the
+   * program renamed one to keep a turn's copies apart.
+   */
+  private combined(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): SemanticReduction[] {
+    return (loop.reductions ?? []).map((reduction) => ({ ...reduction, name: this.names.read(reduction.name) }));
   }
 
   /** The statements of one block, and what is done when it ends. */

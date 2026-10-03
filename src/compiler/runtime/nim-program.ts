@@ -26,6 +26,7 @@ import {
   isTextType,
   typeText,
   type SemanticCall,
+  type SemanticReduction,
   type SemanticType,
   type ValueKind,
 } from "../core/semantic-ir.ts";
@@ -603,7 +604,8 @@ ${anchor}
    * them in order is the same program, and that is what a host without threads
    * owes it.
    */
-  parallelDirective(): [] {
+  parallelDirective(reductions: readonly SemanticReduction[]): [] {
+    void reductions;
     return [];
   }
 

@@ -730,6 +730,22 @@ export type SemanticLoop =
        * other. Nothing is inferred from it beyond that.
        */
       parallel?: boolean;
+      /**
+       * What the turns of this loop combine, where they combine something.
+       *
+       * A turn that accumulates into a name it found is otherwise refused,
+       * because every turn writes the same name and the turns then depend on
+       * each other's order. A reduction is the one answer to that which is
+       * still the same program: each turn keeps a sum of its own and the
+       * totals are added at the end, which is the same number whenever adding
+       * the values in any order gives the same number.
+       *
+       * Which values that is, is decided by `semantics/parallel.ts` and not
+       * here. Whole numbers are exact however they are grouped; a double is
+       * only exact while the running total is a number a double holds, so a
+       * reduction over doubles carries that condition rather than dropping it.
+       */
+      reductions?: SemanticReduction[];
     }
   | {
       kind: "each";
@@ -753,7 +769,45 @@ export type SemanticLoop =
        * other. Nothing is inferred from it beyond that.
        */
       parallel?: boolean;
+      /**
+       * What the turns of this loop combine, where they combine something —
+       * the same thing a counted loop carries, for the same reason.
+       */
+      reductions?: SemanticReduction[];
     };
+
+/**
+ * One accumulator a parallel loop's turns combine.
+ *
+ * The name is a name the body found rather than declared, which is what makes
+ * it shared; the turns each keep a total of their own and the totals are
+ * combined once the loop is done. The operator is the one the turns combine
+ * with, and it is named rather than left to the assignment the body writes
+ * because a backend has to combine with it and cannot read it off the body.
+ */
+export interface SemanticReduction {
+  /** The accumulator every turn adds into, declared outside the loop body. */
+  name: string;
+  /** How the turns combine their totals: a sum or a product. */
+  op: "+" | "*";
+  /**
+   * True when every value a turn combines is a whole number.
+   *
+   * It is what makes the combination the same number in any order, and it is
+   * recorded rather than assumed because a backend combining numbers has to
+   * know whether it may regroup them. Whole numbers are exact however they are
+   * grouped, so a sum of them is the same answer whichever turn ran first.
+   *
+   * The condition this rests on is exactness, not order: a sum of whole numbers
+   * is the same number however it is grouped only while the running total is a
+   * number a double holds, and the IR holds no bound on how many turns there
+   * are. That is a condition on the program rather than on this loop, and the
+   * compiler cannot prove it from what the IR says — so it is recorded, and
+   * what it means for a given program is stated where the value is combined
+   * rather than left to whoever reads the flag.
+   */
+  exact: boolean;
+}
 
 /** The operators `op=` accepts. */
 export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "%=";

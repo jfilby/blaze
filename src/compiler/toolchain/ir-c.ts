@@ -404,6 +404,26 @@ class FunctionEmitter {
     }
   }
 
+  /**
+   * The pragma that hands a loop's turns to the host's threads, with the
+   * accumulators the turns combine named on it.
+   *
+   * OpenMP's `reduction` clause is what the reduction in the IR asks for: each
+   * turn keeps a total of its own, and the totals are combined once the loop is
+   * done. That is the same number as a turn writing the accumulator, and it is
+   * only that because `semantics/parallel.ts` proved the values combined are
+   * whole numbers, where combining in any order gives the same number.
+   *
+   * A loop with no accumulators names none and the pragma is the one it always
+   * was: the turns share nothing, so there is nothing to combine.
+   */
+  private parallelDirective(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
+    const reductions = loop.reductions ?? [];
+    if (reductions.length === 0) return "#pragma omp parallel for";
+    const clauses = reductions.map((reduction) => `reduction(${reduction.op}:${this.names.read(reduction.name)})`);
+    return `#pragma omp parallel for ${clauses.join(" ")}`;
+  }
+
   private loop(loop: SemanticLoop, depth: number): void {
     // The buffer a `for..of` iterates is read here, in the scope the loop was
     // entered in, and not in the loop's own. An element declared under the
@@ -467,7 +487,7 @@ class FunctionEmitter {
         // counter from a bound up to a bound — and a bound the loop re-read on
         // every turn is read by one thread rather than by all of them.
         if (loop.parallel === true) {
-          this.write([`${pad(depth)}#pragma omp parallel for`]);
+          this.write([`${pad(depth)}${this.parallelDirective(loop)}`]);
         }
         this.write([`${pad(depth)}for (${written} ${variable} = ${from ?? start}; ${variable} ${bound} ${to ?? end}; ${move}) {`]);
         this.block(loop.body, depth + 1);
@@ -483,7 +503,7 @@ class FunctionEmitter {
         const length = readEveryTurn(loop.length) ? this.temporary("blaze_length") : null;
         if (length !== null) this.write([`${pad(depth)}size_t ${length} = ${walk as string};`]);
         if (loop.parallel === true) {
-          this.write([`${pad(depth)}#pragma omp parallel for`]);
+          this.write([`${pad(depth)}${this.parallelDirective(loop)}`]);
         }
         this.write([
           `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length ?? (walk as string)}; ${index}++) {`,

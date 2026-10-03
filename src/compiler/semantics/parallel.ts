@@ -30,10 +30,22 @@
  * turn that builds values of its own and lets them go is admitted, which is
  * what admits out[i] = build(in[i]) — the shape nearly every loop worth marking
  * has, and one that allocates on every turn.
+ *
+ * Accumulating into a name the turn found is refused too, and a reduction is
+ * the one answer to that which is still the same program: each turn keeps a
+ * total of its own and the totals are combined once the loop is done. A sum of
+ * whole numbers is the same number however it is grouped, so a loop that adds
+ * whole numbers into an accumulator it found is marked and names the
+ * accumulator; one that adds anything else is not, because a sum of doubles is
+ * not the same number however it is grouped. A turn that leaves the loop with a
+ * `break` is refused outright — OpenMP has no `break` in a parallel loop, and a
+ * turn that leaves decides whether the next one runs.
  */
 
+import { isWholeNumberText } from "./objects.ts";
 import {
   isInteger,
+  isWhole,
   statementBlocksOf,
   statementValues,
   walkValues,
@@ -42,6 +54,7 @@ import {
   type SemanticFunction,
   type SemanticLoop,
   type SemanticStatement,
+  type SemanticReduction,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 
@@ -98,7 +111,14 @@ export function markParallelLoops(entry: SemanticBlock, callees: Callees = NO_CA
       const loop = statement.loop;
       if (loop.kind !== "counted" && loop.kind !== "each") continue;
       if (loop.parallel === true) continue;
-      if (refusalFor(loop, callees) === null) loop.parallel = true;
+      if (refusalFor(loop, callees) !== null) continue;
+      // The accumulators go on the loop beside the mark, because that is where
+      // a backend reads what to combine: a mark with nothing to combine is a
+      // loop whose turns share nothing, and one whose accumulators are named is
+      // a loop whose turns share exactly those.
+      const combined = [...reductionsFor(loop.body, loop.kind === "counted" ? loop.variable : loop.index).values()];
+      if (combined.length > 0) loop.reductions = combined;
+      loop.parallel = true;
     }
   }
 }
@@ -131,8 +151,89 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): R
   if (turnIsTooCheap(loop.body, reach)) {
     return "a turn of this loop computes so little that a team of threads costs more than the turns it runs";
   }
-  return bodyRefusal(loop.body, loop.kind === "counted" ? loop.variable : loop.index, callees, reach);
+  // A turn that leaves the loop early is a turn that decides whether the next
+  // one runs, which is the whole of what handing the turns to threads forbids:
+  // OpenMP has no `break` in a parallel loop at all, so a loop whose body can
+  // leave it is not one the pragma may be written against. A turn that skips to
+  // the next one with `continue` is fine, and a `break` out of a loop inside this
+  // one is that inner loop's own.
+  if (leavesItself(loop)) {
+    return "the body leaves the loop with a break, and a turn that leaves decides whether the next one runs";
+  }
+  const counter = loop.kind === "counted" ? loop.variable : loop.index;
+  // What the turns combine is worked out before the body is read, because it is
+  // the one shared write the body is allowed and everything else about the body
+  // is read against it: a write the loop combines is a write the turns do not
+  // share, and a write it does not is refused as it was.
+  const combined = reductionsFor(loop.body, counter);
+  return bodyRefusal(loop.body, counter, callees, reach, combined);
 }
+
+/**
+ * Whether a turn of this loop can leave it, which is a block of its own body
+ * ending in a jump to where the loop stops.
+ *
+ * The blocks of a loop nested inside this one are not read, because a `break`
+ * there leaves that loop rather than this one — and that loop is read on its own
+ * when the rule reaches it, so the one that may not be parallel is refused there.
+ */
+function leavesItself(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): boolean {
+  const inside = (block: SemanticBlock): boolean => {
+    for (const statement of block.statements) {
+      if (statement.k === "loop") continue;
+      for (const nested of statementBlocksOf(statement)) {
+        if (nested.terminator.k === "jump" && nested.terminator.target === loop.exit) return true;
+        if (inside(nested)) return true;
+      }
+    }
+    return block.terminator.k === "jump" && block.terminator.target === loop.exit;
+  };
+  return inside(loop.body);
+}
+
+/**
+ * The accumulators the turns of a loop combine, read off its body.
+ *
+ * A name the turn accumulates into with `+=` or `*=` and never assigns outright
+ * is a reduction, and a name the turn assigns is not — a turn that decides what
+ * the total is has made its answer depend on which turn ran last, which no
+ * combining afterwards repairs.
+ *
+ * Whether the combining is the same number in any order is decided per
+ * accumulator, by whether every value a turn combines is a whole number. Whole
+ * numbers are exact however they are grouped, so a sum or a product of them is
+ * the turns' totals added in any order. A value that is not a whole number is a
+ * double, and a sum of doubles is not the same number however it is grouped, so
+ * that accumulator is refused rather than marked as one whose order does not
+ * matter.
+ */
+function reductionsFor(body: SemanticBlock, counter: string): Map<string, SemanticReduction> {
+  const declared = new Set<string>();
+  for (const block of blocksWithin(body)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let") declared.add(statement.slot.name);
+    }
+  }
+  const combined = new Map<string, SemanticReduction>();
+  for (const block of blocksWithin(body)) {
+    for (const statement of block.statements) {
+      if (statement.k !== "set") continue;
+      if (declared.has(statement.name) || statement.name === counter) continue;
+      if (statement.op !== "+=" && statement.op !== "*=") continue;
+      // A name two turns both accumulate into with the same operator combines;
+      // one written `+=` in a turn and `*=` in another does not, so the first
+      // operator seen is the one that must hold for all of them.
+      const seen = combined.get(statement.name);
+      const op = statement.op === "+=" ? "+" : "*";
+      if (seen !== undefined && seen.op !== op) {
+        combined.delete(statement.name);
+        continue;
+      }
+      combined.set(statement.name, { name: statement.name, op, exact: true });
+    }
+  }
+  return combined;
+ }
 
 /* -------------------------------------------------------------------------- */
 /* Purity                                                                      */
@@ -290,6 +391,7 @@ function bodyRefusal(
   counter: string | null,
   callees: Callees,
   reach: Reach = { callees, reading: new Set(), verdicts: new Map() },
+  combined: ReadonlyMap<string, SemanticReduction> = NO_REDUCTIONS,
 ): Refusal | null {
   // A name this body declares is the body's own, and every turn of it has one
   // of its own: the declaration is written inside the turn and every turn
@@ -307,7 +409,7 @@ function bodyRefusal(
     for (const statement of block.statements) {
       const refusal = valueRefusal(statement, reach);
       if (refusal !== null) return refusal;
-      const written = writeRefusal(statement, accesses, declared, reach);
+      const written = writeRefusal(statement, accesses, declared, reach, combined);
       if (written !== null) return written;
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
@@ -386,13 +488,30 @@ function writeRefusal(
   accesses: ElementAccess[],
   declared: ReadonlySet<string>,
   reach: Reach,
+  combined: ReadonlyMap<string, SemanticReduction>,
 ): Refusal | null {
   switch (statement.k) {
-    // A name the body declared is the turn's own; anything else is the frame's.
-    case "set":
-      return declared.has(statement.name)
-        ? null
-        : `the body writes "${statement.name}", which every turn of it shares`;
+    // A name the body declared is the turn's own; anything else is the frame's
+    // — unless the loop combines it, which is what a reduction is: a write to
+    // one accumulator the turns combine once the loop is done, which is the
+    // same number as a turn writing it, so long as combining is exact.
+    case "set": {
+      if (declared.has(statement.name)) return null;
+      const reduction = combined.get(statement.name);
+      if (reduction === undefined) {
+        return `the body writes "${statement.name}", which every turn of it shares`;
+      }
+      // A name a turn assigns outright is not a reduction at all — it decided
+      // the total rather than adding to it — and one written a different way in
+      // another turn is not a combination either.
+      if (statement.op !== (reduction.op === "+" ? "+=" : "*=")) {
+        return `the body writes "${statement.name}" with ${statement.op}, which is not the ${reduction.op} the turns combine it with`;
+      }
+      if (!valueIsWhole(statement.value)) {
+        return `the body combines "${statement.name}" from a value that is not a whole number, and a sum of doubles is not the same number however it is grouped`;
+      }
+      return null;
+    }
     case "step":
       return declared.has(statement.name)
         ? null
@@ -429,6 +548,40 @@ function writeRefusal(
       return null;
   }
 }
+
+/** What a loop that combines nothing is asked about, which is every loop but one. */
+const NO_REDUCTIONS: ReadonlyMap<string, SemanticReduction> = new Map();
+
+/**
+ * Whether a value is a whole number, which is what makes combining it the same
+ * number however the turns are grouped.
+ *
+ * A number written without a point is one, however wide a use holds it — the
+ * same rule `objects.ts` applies to a loop counter, asked here of a value
+ * rather than of a body. Anything else is decided by the type it was resolved
+ * to, and an operation is asked of both its sides rather than of the type it
+ * carries: the IR states the width an operation runs at, and where a whole
+ * number meets a double the statement is a double whatever it says.
+ */
+function valueIsWhole(value: SemanticValue): boolean {
+  // A number written without a point is a whole number however wide a use
+  // holds it, which is the same rule a loop counter is counted by. What decides
+  // this is the number, not the width it is carried at: `1` held at `f64` is
+  // the whole number 1, and adding it a whole number of times is exact in the
+  // same way `1` at `i64` is. What is not safe is a number with a point in it,
+  // because that one is a fraction however it is held.
+  if (value.k === "const") return isWholeNumberText(value.text);
+  if (value.k === "arith") {
+    // A division and a remainder over whole numbers are not whole numbers, and
+    // neither is a power: `100 / i` is a double whatever both of its sides are.
+    if (DIVIDING.has(value.op)) return false;
+    return valueIsWhole(value.left) && valueIsWhole(value.right);
+  }
+  return value.type.kind === "primitive" && isWhole(value.type.name);
+}
+
+/** The operations whose answer is a double however whole their sides are. */
+const DIVIDING: ReadonlySet<string> = new Set(["div", "mod", "pow"]);
 
 
 /* -------------------------------------------------------------------------- */

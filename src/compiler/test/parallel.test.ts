@@ -38,6 +38,7 @@ const PARALLEL_SOURCE = [
 
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
 const I64: TypeExpr = { kind: "primitive", name: "i64" };
+const BOOL: TypeExpr = { kind: "primitive", name: "bool" };
 const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 
 type CountedLoop = Extract<SemanticLoop, { kind: "counted" }>;
@@ -377,7 +378,9 @@ test("a function that calls itself and writes nothing is pure, and reading it en
   assert.equal(onlyLoop(fn).parallel, true);
 });
 
-test("a loop calling a pure function a turn writes beside is still refused for the write", () => {
+test("a loop accumulating a whole number written as a double is marked", () => {
+  // `1` held at `f64` is the whole number 1, and what decides whether the turns
+  // may combine it is the number rather than the width it is carried at.
   const fn = functionWith(
     countedLoop([
       { k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } },
@@ -385,7 +388,8 @@ test("a loop calling a pure function a turn writes beside is still refused for t
     ]),
   );
   markParallelLoops(fn.entry, new Map());
-  assert.equal(onlyLoop(fn).parallel, undefined);
+  assert.equal(onlyLoop(fn).parallel, true);
+  assert.deepEqual(onlyLoop(fn).reductions, [{ name: "total", op: "+", exact: true }]);
 });
 
 test("a loop whose body prints is not marked, because output order is the program's", () => {
@@ -568,4 +572,86 @@ test("a body that writes a shared name is left unmarked and stays valid", () => 
   ];
   assert.deepEqual(semanticFunctionProblems(fn), []);
   assert.equal(onlyLoop(fn).parallel, undefined);
+});
+test("a turn that accumulates into a name it found is marked, and the loop names the accumulator", () => {
+  const fn = functionWith(countedLoop([{ k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: I64, text: "1" } }, chain(8)]));
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, true);
+  assert.deepEqual(onlyLoop(fn).reductions, [{ name: "total", op: "+", exact: true }]);
+});
+
+test("a turn that multiplies into a name it found is marked, and combines by the product", () => {
+  const fn = functionWith(countedLoop([{ k: "set", line: 2, name: "product", op: "*=", value: { k: "const", type: I64, text: "2" } }, chain(8)]));
+  markParallelLoops(fn.entry);
+  assert.deepEqual(onlyLoop(fn).reductions, [{ name: "product", op: "*", exact: true }]);
+});
+
+test("a turn that combines a value which is not a whole number is not marked", () => {
+  // A sum of doubles is not the same number however it is grouped, so a turn
+  // that adds one is a turn whose answer depends on which turn ran, and the
+  // loop is left as it was written.
+  const fn = functionWith(countedLoop([{ k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1.5" } }, chain(8)]));
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a turn that divides into a name it found is not marked, because a division is not a whole number", () => {
+  const fn = functionWith(
+    countedLoop([
+      { k: "set", line: 2, name: "total", op: "+=", value: { k: "arith", type: F64, op: "div", left: { k: "const", type: I64, text: "100" }, right: { k: "local", type: I64, name: "i" } } },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a turn that decides what the total is, rather than adding to it, is not marked", () => {
+  // `total = x` is not a combination: the turn decided the answer, so which turn
+  // ran last is the answer, and no combining afterwards repairs that.
+  const fn = functionWith(countedLoop([{ k: "set", line: 2, name: "total", op: "=", value: { k: "const", type: I64, text: "1" } }, chain(8)]));
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a loop whose body leaves it with a break is not marked", () => {
+  // OpenMP has no `break` in a parallel loop, and a turn that leaves decides
+  // whether the next one runs, which is the thing handing turns to threads
+  // forbids.
+  const fn = functionWith(
+    countedLoop([
+      { k: "if", line: 2, condition: { k: "bool", type: BOOL, value: true }, then: { id: "bx", statements: [], releases: [], terminator: { k: "jump", target: "x1", releases: [] } }, otherwise: null },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
+test("a loop whose body only skips a turn with a continue is marked", () => {
+  // A `continue` is the turn saying it has nothing to add, which is a decision
+  // about itself and not about the next turn, so it is left alone.
+  const fn = functionWith(
+    countedLoop([
+      { k: "if", line: 2, condition: { k: "bool", type: BOOL, value: true }, then: { id: "bx", statements: [], releases: [], terminator: { k: "jump", target: "h1", releases: [] } }, otherwise: null },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a loop with two accumulators names both of them", () => {
+  const fn = functionWith(
+    countedLoop([
+      { k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: I64, text: "1" } },
+      { k: "set", line: 3, name: "product", op: "*=", value: { k: "const", type: I64, text: "2" } },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry);
+  assert.deepEqual(onlyLoop(fn).reductions, [
+    { name: "total", op: "+", exact: true },
+    { name: "product", op: "*", exact: true },
+  ]);
 });

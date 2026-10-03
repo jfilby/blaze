@@ -32,6 +32,7 @@ import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { semanticFunctionProblems, semanticIrProblems, validateSemanticProgram } from "../semantics/ir-validate.ts";
 import { parseType } from "../semantics/contract.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
+import { markParallelLoops } from "../semantics/parallel.ts";
 import {
   parseSemanticFunction,
   parseSemanticModule,
@@ -1002,3 +1003,34 @@ test("two whole numbers of one width are computed as the unsigned of the pair", 
   assert.match(written, /\breturn \(a \+ \(uint32_t\)\(b\)\);/);
 });
 
+
+test("a loop's reduction is written in the text a model may write it in, and read back", () => {
+  // The text form is what a model is handed and may hand back, so the
+  // accumulators a marked loop combines have to survive being written out and
+  // read again — otherwise a model that rewrites the IR silently drops them and
+  // the backend is handed a marked loop with nothing to combine.
+  const source = [
+    "export function f(n: number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i += 1) {",
+    "    total += i * 2 + i + i + i + i + i + i + i;",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { f } from "./lib.ts";\nconsole.log(f(1));\n', "lib.ts": source };
+  const phase = phaseOf("typescript", files, "main.ts");
+  // The loop is marked here rather than by a build, because what this reads is
+  // the text form: marking is what `semantics/parallel.ts` decides and is read
+  // in the tests that cover it.
+  const fn = semanticsOf(phase).f as SemanticFunction;
+  markParallelLoops(fn.entry);
+  const printed = printSemanticFunction(fn);
+  assert.match(printed, /parallel reduction total \+/, "a marked loop names what its turns combine");
+  assert.equal(
+    printSemanticFunction(parseSemanticFunction(printed, phase.program)),
+    printed,
+    "what a reduction prints, the text form reads back",
+  );
+});

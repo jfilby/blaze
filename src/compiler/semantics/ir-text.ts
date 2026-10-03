@@ -156,6 +156,7 @@ import {
   type SemanticCall,
   type SemanticFunction,
   type SemanticLoop,
+  type SemanticReduction,
   type SemanticModule,
   type SemanticProgram,
   type SemanticSlot,
@@ -473,17 +474,50 @@ function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
       const bound = loop.inclusive ? "inclusive" : "exclusive";
       const direction = loop.down ? "down" : "up";
       const step = loop.step === null ? "default" : printSemanticValue(loop.step);
-      const parallel = loop.parallel === true ? " parallel" : "";
-      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${printSemanticValue(loop.from)} to ${printSemanticValue(loop.to)} ${bound} ${direction} step ${step}${parallel}`;
+      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${printSemanticValue(loop.from)} to ${printSemanticValue(loop.to)} ${bound} ${direction} step ${step}${loopMark(loop)}`;
       break;
     }
     case "each": {
-      const parallel = loop.parallel === true ? " parallel" : "";
-      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${printSemanticValue(loop.length)}${parallel}`;
+      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${printSemanticValue(loop.length)}${loopMark(loop)}`;
       break;
     }
   }
   return [head + mark, ...blockLines(loop.body, indent + 2, null)];
+}
+
+/**
+ * What a loop carries beside its header: the word `parallel`, and the
+ * accumulators the turns combine when they do.
+ *
+ * `reduction sum +` reads back as the loop says it — the name, then the
+ * operator the turns combine with — so the text a model may write holds the
+ * reduction and not only the mark that says there is one.
+ */
+function loopMark(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
+  if (loop.parallel !== true) return "";
+  const reductions = loop.reductions ?? [];
+  if (reductions.length === 0) return " parallel";
+  return ` parallel reduction ${reductions.map((one) => `${one.name} ${one.op}`).join(" ")}`;
+}
+
+/** The accumulators a loop's header names after the word `parallel`. */
+function loopReductions(scanner: IrScanner): SemanticReduction[] {
+  const reductions: SemanticReduction[] = [];
+  // The scanner is left on the space before the first accumulator rather than on
+  // its first letter, so the spaces are read before the name is looked for.
+  scanner.skip();
+  while (scanner.peek() === "r") {
+    scanner.keyword("reduction");
+    const name = scanner.word();
+    // The operator is a punctuation mark rather than a word, so it is read as
+    // the character it is: `word()` reads names and stops at the first character
+    // that is not part of one.
+    const op = scanner.punctuation("a reduction to combine with + or *");
+    if (op !== "+" && op !== "*") fail(scanner.line, "a reduction to combine with + or *", op);
+    reductions.push({ name, op, exact: true });
+    scanner.skip();
+  }
+  return reductions;
 }
 
 /** One statement, and the blocks it owns. */
@@ -815,6 +849,15 @@ class IrScanner {
    * the text of a string, so a name in quotes is said here rather than left as
    * a quote at the front of what was found.
    */
+  /** The punctuation mark next, which is one character and not a name. */
+  punctuation(expected: string): string {
+    this.skip();
+    const mark = this.peek();
+    if (mark === "") fail(this.line, expected, "end of line");
+    this.at += 1;
+    return mark;
+  }
+
   word(): string {
     this.skip();
     const start = this.at;
@@ -1598,6 +1641,7 @@ class BlockReader {
         scanner.skip();
         const parallel = scanner.peek() === "p";
         if (parallel) scanner.keyword("parallel");
+        const reductions = parallel ? loopReductions(scanner) : [];
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
         return {
@@ -1612,6 +1656,7 @@ class BlockReader {
             down: direction === "down",
             step,
             ...(parallel ? { parallel: true } : {}),
+            ...(reductions.length === 0 ? {} : { reductions }),
             header,
             exit,
             body,
