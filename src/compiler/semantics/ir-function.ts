@@ -58,7 +58,7 @@
 import { parseType, typeToString } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
-import { ANY_REF, BOOL, F64, I64, USIZE, coalesce, describe, elementOf, numeric } from "./objects.ts";
+import { ANY_REF, BOOL, F64, I64, USIZE, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
 import { isWhole, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
@@ -347,6 +347,27 @@ class FunctionBody {
       line,
       "a compiled function declares every name it uses before it uses it",
     );
+  }
+
+  /**
+   * Every name in scope that holds a whole number, for the rule that asks
+   * whether a loop body is written entirely in whole numbers.
+   *
+   * A name is here because it was declared as one — a parameter the source
+   * annotated, or a value the body has already resolved to a whole-number
+   * width. A name that is not here is one the source wrote as a plain number,
+   * which in this language is a double, so a body that reads one is a body whose
+   * arithmetic is at that width.
+   */
+  private wholeNames(): string[] {
+    const names: string[] = [];
+    for (const scope of this.scopes) {
+      for (const [name, held] of scope) {
+        if (held.inferred.kind !== "type" || held.inferred.type.kind !== "primitive") continue;
+        if (isWhole(held.inferred.type.name)) names.push(name);
+      }
+    }
+    return names;
   }
 
   private open(): void {
@@ -650,14 +671,23 @@ class FunctionBody {
     // side effects a typed expression has — an `i++` written as the step
     // becomes a `let` and a `step` of its own — a second time.
     const step = statement.step === null ? null : this.typed(statement.step, null, statement.line);
-    // What the loop counts with is the type it starts at and moves by; a bound
-    // only says where the loop stops.
+    // A counter that starts and moves by whole numbers counts in whole numbers,
+    // and the body decides whether it may: a body written entirely in whole
+    // numbers reads the counter at the counter's width whatever that width is,
+    // so widening it changes no answer and is what lets the parallel rule hand
+    // the loop to a thread. A body that mixes the counter into a double is left
+    // alone, because there the counter is read through the accumulator's width
+    // and an `i64` in that expression is a number the source never wrote.
+    const wholeNames = new Set(this.wholeNames());
+    const countsWholeItself = countsWholeNumber(statement.from, from.inferred) && (step === null || (statement.step !== null && countsWholeNumber(statement.step, step.inferred)));
     const counted =
-      from.inferred.kind === "type"
-        ? step === null || step.inferred.kind !== "type"
-          ? from.inferred.type
-          : numeric(from.inferred, step.inferred)
-        : USIZE;
+      countsWholeItself && bodyIsWhole(statement.body, statement.variable, wholeNames)
+        ? I64
+        : from.inferred.kind === "type"
+          ? step === null || step.inferred.kind !== "type"
+            ? from.inferred.type
+            : numeric(from.inferred, step.inferred)
+          : USIZE;
     const type = asType(counted);
     // A number written as the start is counted in the type the loop counts in.
     const starts: SemanticValue =

@@ -17,6 +17,7 @@
 import type { Expression, Statement } from "../core/ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { FileContract, FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
+import { isWhole } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 
@@ -404,6 +405,152 @@ export function elementOf(value: Inferred): TypeExpr {
 
 function elementOfType(type: TypeExpr): TypeExpr {
   return type.kind === "primitive" || type.kind === "ref" || type.kind === "void" ? F64 : type.of ?? F64;
+}
+
+/**
+ * True when a number written in the source is a whole number, whatever width
+ * it is read at.
+ *
+ * The text decides it rather than the type, because a number the source wrote
+ * without a point is a whole number however a use goes on to hold it: `0` is
+ * `0` whether it is read as a double or as a machine word, and reading it as a
+ * whole number does not reinterpret it.
+ */
+export function isWholeNumberText(text: string): boolean {
+  return /^[+-]?\d+$/.test(text) || /^[+-]?0[xX][0-9a-fA-F]+$/.test(text);
+}
+
+/**
+ * Whether a loop counts in whole numbers, asked of what it is built from.
+ *
+ * The bound the loop counts to is deliberately not part of the answer, and that
+ * is the whole of the rule. A bound says where counting ends and not what is
+ * counted, so a loop that starts at 0 and moves by 1 counts in whole numbers
+ * however large the number it stops at — which is the loop the parallel rule
+ * can hand to OpenMP, since a canonical loop is exactly this shape.
+ *
+ * A start or a step that is not whole decides the other way. Reading `0.5` as a
+ * whole number truncates it where it was written and counts from the wrong
+ * place, which is a different program rather than a faster one, so a loop that
+ * starts in halves stays in halves however whole its bound is.
+ *
+ * A step written `i += 2` reaches here wrapped in a unary, because that is how
+ * the parser reads a step that is not one, so the sign is looked through: `+2`
+ * is the whole number 2, and a `-` in front of it is not a step a counted loop
+ * counts down by — a downward loop says so with `>` rather than with a negative
+ * step.
+ *
+ * This lives here rather than in either resolver because both ask it and the
+ * two answers must be one: `for (let i = 0; i < 4; i += 1)` is the same loop
+ * whether it is written at the top of a module or inside a function body, and
+ * the two paths once answered differently — an `i64` counter in one and an
+ * `f64` counter in the other, for one line of source.
+ */
+export function countsWholeNumber(expression: Expression, inferred: Inferred): boolean {
+  if (expression.k === "literal") return isWholeNumberText(expression.text);
+  if (expression.k === "unary" && expression.op === "+") return countsWholeNumber(expression.operand, inferred);
+  return inferred.kind === "type" && inferred.type.kind === "primitive" && isWhole(inferred.type.name);
+}
+
+/**
+ * Whether a loop body is written entirely in whole numbers, which is what makes
+ * a whole-number counter in it a change of width rather than a change of
+ * program.
+ *
+ * The counter is a whole number wherever the source starts it at a whole number
+ * and moves it by one, and the module-level resolver has said so for every
+ * module-level loop since it was written. Inside a function body the counter
+ * reaches arithmetic that is resolved at the width of what surrounds it, so
+ * widening it there is only safe where the body was whole to begin with: a body
+ * that computes `total += i * j` over a double accumulator reads the counter
+ * through the accumulator's width, and an `i64` in that expression is a number
+ * the source never wrote.
+ *
+ * So this is asked of the body as it is written, and it answers yes only for a
+ * body whose every number is a whole number: no fractional literal anywhere in
+ * it, and no name read that is not itself a whole number the body was given.
+ * That is the narrow case — a loop that counts elements, indexes with the
+ * counter and stores whole numbers — and it is the case the parallel rule can
+ * hand to a thread, because there is no arithmetic in it to disagree about.
+ */
+export function bodyIsWhole(body: readonly Statement[], counter: string, whole: ReadonlySet<string>): boolean {
+  for (const statement of body) {
+    switch (statement.kind) {
+      case "declare":
+        if (!whole.has(statement.name) && !expressionIsWhole(statement.init, counter, whole)) return false;
+        break;
+      case "loop":
+        if (!expressionIsWhole(statement.from, counter, whole) || !expressionIsWhole(statement.to, counter, whole)) return false;
+        if (statement.step !== null && !expressionIsWhole(statement.step, counter, whole)) return false;
+        if (!bodyIsWhole(statement.body, statement.variable, whole)) return false;
+        break;
+      case "assign":
+      case "memberAssign":
+        if (!expressionIsWhole(statement.value, counter, whole)) return false;
+        break;
+      case "update":
+        if (!whole.has(statement.name)) return false;
+        break;
+      case "result":
+        if (!expressionIsWhole(statement.value, counter, whole)) return false;
+        break;
+      case "if":
+        if (!expressionIsWhole(statement.condition, counter, whole)) return false;
+        if (!bodyIsWhole(statement.then, counter, whole) || !bodyIsWhole(statement.otherwise, counter, whole)) return false;
+        break;
+      case "while":
+      case "doWhile":
+        if (!expressionIsWhole(statement.condition, counter, whole)) return false;
+        if (!bodyIsWhole(statement.body, counter, whole)) return false;
+        break;
+      case "forOf":
+        if (!bodyIsWhole(statement.body, statement.variable, whole)) return false;
+        break;
+      case "print":
+        if (!expressionIsWhole(statement.value, counter, whole)) return false;
+        break;
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+/** Whether an expression is written entirely in whole numbers. */
+function expressionIsWhole(expression: Expression, counter: string, whole: ReadonlySet<string>): boolean {
+  switch (expression.k) {
+    case "literal":
+      return isWholeNumberText(expression.text);
+    case "bigint":
+      return true;
+    case "ident":
+      return expression.name === counter || whole.has(expression.name);
+    case "unary":
+      return expressionIsWhole(expression.operand, counter, whole);
+    case "conditional":
+      return (
+        expressionIsWhole(expression.condition, counter, whole) &&
+        expressionIsWhole(expression.then, counter, whole) &&
+        expressionIsWhole(expression.otherwise, counter, whole)
+      );
+    case "binary":
+      // A division and a power over whole numbers are not whole numbers: `100
+      // / i` is a double whatever both sides are, and it is read as one, so a
+      // body that divides is not a body written entirely in whole numbers.
+      if (expression.op === "/" || expression.op === "%" || expression.op === "**") return false;
+      return expressionIsWhole(expression.left, counter, whole) && expressionIsWhole(expression.right, counter, whole);
+    case "index":
+      return expressionIsWhole(expression.base, counter, whole) && expressionIsWhole(expression.index, counter, whole);
+    case "member":
+      return expressionIsWhole(expression.base, counter, whole);
+    case "argv":
+      return expression.index === null || expressionIsWhole(expression.index, counter, whole);
+    default:
+      // A call hands back whatever it returns and an object and a string are
+      // not numbers at all, so a body that has one is not a body written
+      // entirely in whole numbers.
+      return false;
+  }
 }
 
 /**

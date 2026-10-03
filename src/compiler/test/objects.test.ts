@@ -9,9 +9,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
-import { programOf } from "./phase.ts";
+import { programOf, phaseOf } from "./phase.ts";
 import { diagnostic } from "./phase.ts";
 import { parseContract } from "../semantics/contract.ts";
+import { resolveFunction } from "../semantics/ir-function.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { statementBlocksOf, type SemanticBlock, type SemanticLoop } from "../core/semantic-ir.ts";
 
 const TREE = [
   "function checksum(node: any): number {",
@@ -492,4 +495,108 @@ test("a list built of a head of nulls and elements after it is one object", () =
     layout.fields.map((field) => [field.name, field.type, field.offset]),
     [["next", "ref<Object1>", 0], ["item", "f64", 8]],
   );
+});
+
+/**
+ * The width a loop's counter is held at, as the compiler resolved a function
+ * body — which is the one place the two resolvers once answered differently.
+ */
+function counterOf(source: string, name = "main"): string {
+  const contracts = contractsOf({ "1.ts": source }, "1.ts");
+  const contract = contracts[name];
+  assert.ok(contract !== undefined, `the program declares ${name}`);
+  // Every function the program declares is handed to the resolver, because a
+  // call in the body is compiled against the contract of what it calls.
+  const resolved = resolveFunction(contract, { objectNames: {}, functions: contracts });
+  const loops: SemanticLoop[] = [];
+  const walk = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      if (statement.k === "loop") {
+        loops.push(statement.loop);
+        walk(statement.loop.body);
+      }
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+  };
+  walk(resolved.entry);
+  const counted = loops.filter((loop): loop is Extract<SemanticLoop, { kind: "counted" }> => loop.kind === "counted");
+  assert.ok(counted.length > 0, "the body holds a counted loop to read the width of");
+  const type = counted[0]?.type;
+  return type?.kind === "primitive" ? type.name : "?";
+}
+
+test("a counter in a body written in whole numbers is a whole number", () => {
+  assert.equal(
+    counterOf(["export function main(): number {", "  let total = 0;", "  for (let i = 0; i < 10; i += 1) { total += i; }", "  return total;", "}", "console.log(main());", ""].join("\n")),
+    "i64",
+  );
+});
+
+test("a counter that moves by a whole number other than one is a whole number", () => {
+  assert.equal(
+    counterOf(["export function main(): number {", "  let total = 0;", "  for (let i = 0; i < 10; i += 2) { total += i; }", "  return total;", "}", "console.log(main());", ""].join("\n")),
+    "i64",
+  );
+});
+
+test("a counter in a body that divides is left a double, because a division is one", () => {
+  // `100 / i` is a double whatever both of its sides are, so a body that
+  // divides is not a body written entirely in whole numbers and widening the
+  // counter would state an integer division the source never wrote.
+  assert.equal(
+    counterOf(["export function main(): number {", "  let total = 0;", "  for (let i = 1; i < 10; i += 1) { total += 100 / i; }", "  return total;", "}", "console.log(main());", ""].join("\n")),
+    "f64",
+  );
+});
+
+test("a counter that starts in halves is left a double", () => {
+  assert.equal(
+    counterOf(["export function main(): number {", "  let total = 0;", "  for (let i = 0.5; i < 4; i += 1) { total += i; }", "  return total;", "}", "console.log(main());", ""].join("\n")),
+    "f64",
+  );
+});
+
+test("a counter in a body holding a fraction is left a double", () => {
+  assert.equal(
+    counterOf(["export function main(): number {", "  let total = 0;", "  for (let i = 0; i < 10; i += 1) { total += i * 0.5; }", "  return total;", "}", "console.log(main());", ""].join("\n")),
+    "f64",
+  );
+});
+
+test("a counter in a body that calls is left a double, because a call answers whatever it answers", () => {
+  assert.equal(
+    counterOf(
+      [
+        "export function scaled(x: number): number {",
+        "  let acc = x;",
+        "  acc = acc * 1.25 + x;",
+        "  return acc;",
+        "}",
+        "export function main(): number {",
+        "  let total = 0;",
+        "  for (let i = 0; i < 10; i += 1) { total += scaled(i); }",
+        "  return total;",
+        "}",
+        "console.log(main());",
+        "",
+      ].join("\n"),
+    ),
+    "f64",
+  );
+});
+
+test("a loop in a body and the same loop in a module count in the same width", () => {
+  // The two resolvers are one compiler answering one question, so the same line
+  // of source is one width whichever side of a function boundary it is written
+  // on. They once answered differently: an `i64` counter at the top of a module
+  // and an `f64` one inside a body.
+  const inBody = counterOf(["export function main(): number {", "  let total = 0;", "  for (let i = 0; i < 10; i += 1) { total += i; }", "  return total;", "}", "console.log(main());", ""].join("\n"));
+  // The module-level program is the statements of its entry, so the loop is
+  // read from the program rather than from a function of it.
+  const phase = phaseOf("typescript", { "1.ts": ["let total = 0;", "for (let i = 0; i < 10; i += 1) {", "  total += i;", "}", "console.log(total);", ""].join("\n") }, "1.ts");
+  assert.ok(phase.body !== undefined, "the entry module has statements to resolve");
+  const program = resolveProgram(phase.body, phase.program);
+  const first = program.entry.statements[1];
+  assert.ok(first !== undefined && first.k === "loop" && first.loop.kind === "counted");
+  assert.equal(first.loop.type.kind === "primitive" ? first.loop.type.name : "?", inBody);
 });

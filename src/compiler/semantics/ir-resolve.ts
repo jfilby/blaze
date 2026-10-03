@@ -57,6 +57,7 @@
  */
 
 import { parseType, typeToString } from "./contract.ts";
+import { isWholeNumberText } from "./objects.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import { mapTypeScriptType, PROGRAM_ENTRY_SYMBOL } from "./typescript.ts";
@@ -299,10 +300,12 @@ function isBufferType(type: TypeExpr): boolean {
 
 /** True of a type a value is counted with, rather than measured. */
 /** The whole number type two whole numbers have in common. */
-/** True when a number written in the source is a whole number. */
-function isWholeLiteral(text: string): boolean {
-  return /^[+-]?\d+$/.test(text) || /^[+-]?0[xX][0-9a-fA-F]+$/.test(text);
-}
+/**
+ * True when a number written in the source is a whole number. This is the one
+ * rule both resolvers ask, so a loop written in a function body and the same
+ * loop written at the top of a module count in the same width.
+ */
+const isWholeLiteral = isWholeNumberText;
 
 /**
  * The value a whole number written in the source is, or null where the text is
