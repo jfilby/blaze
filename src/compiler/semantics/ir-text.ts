@@ -505,24 +505,52 @@ function loopMark(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): st
   return ` ${marks.join(" ")}${reductionsWord}`;
 }
 
-/** The accumulators a loop's header names after the word `parallel`. */
-function loopReductions(scanner: IrScanner): SemanticReduction[] {
-  const reductions: SemanticReduction[] = [];
-  // The scanner is left on the space before the first accumulator rather than on
-  // its first letter, so the spaces are read before the name is looked for.
-  scanner.skip();
-  while (scanner.peek() === "r") {
-    scanner.keyword("reduction");
-    const name = scanner.word();
-    // The operator is a punctuation mark rather than a word, so it is read as
-    // the character it is: `word()` reads names and stops at the first character
-    // that is not part of one.
-    const op = scanner.punctuation("a reduction to combine with + or *");
-    if (op !== "+" && op !== "*") fail(scanner.line, "a reduction to combine with + or *", op);
-    reductions.push({ name, op, exact: true });
-    scanner.skip();
+/**
+ * The words a loop's header carries after its bounds, read back in whatever
+ * order the text writes them.
+ *
+ * `parallel` and `region` are about different things and either may be there
+ * alone, so neither is read as the other's absence: the words are read one at
+ * a time until what follows is the `header` the loop always names. The
+ * accumulators follow both marks, as `reduction <name> <op>` — one word for
+ * however many there are, which is how the printer writes them.
+ */
+function loopMarks(scanner: IrScanner): { parallel: boolean; region: boolean; reductions: SemanticReduction[] } {
+  const marks = { parallel: false, region: false, reductions: [] as SemanticReduction[] };
+  for (;;) {
+    const next = scanner.peekWord();
+    if (next === "parallel") {
+      scanner.keyword("parallel");
+      marks.parallel = true;
+      continue;
+    }
+    if (next === "region") {
+      scanner.keyword("region");
+      marks.region = true;
+      continue;
+    }
+    if (next === "reduction") {
+      scanner.keyword("reduction");
+      // The operator is a punctuation mark rather than a word, so it is read as
+      // the character it is: `word()` reads names and stops at the first
+      // character that is not part of one. Another accumulator follows its
+      // operator, and the loop ends where a mark or the header begins.
+      while (!isMarkOrHeader(scanner)) {
+        const name = scanner.word();
+        const op = scanner.punctuation("a reduction to combine with + or *");
+        if (op !== "+" && op !== "*") scanner.refuse("a reduction to combine with + or *", op);
+        marks.reductions.push({ name, op, exact: true });
+      }
+      continue;
+    }
+    return marks;
   }
-  return reductions;
+}
+
+/** Whether the next word ends the accumulators, being a mark or the header. */
+function isMarkOrHeader(scanner: IrScanner): boolean {
+  const next = scanner.peekWord();
+  return next === "parallel" || next === "region" || next === "header";
 }
 
 /** One statement, and the blocks it owns. */
@@ -849,11 +877,23 @@ class IrScanner {
   }
 
   /**
-   * A name, a keyword or a type word: everything up to the next delimiter. A
-   * name is written bare, and the one thing the text does write in quotes is
-   * the text of a string, so a name in quotes is said here rather than left as
-   * a quote at the front of what was found.
+   * The word next, read and put back, so what follows can be told apart without
+   * consuming it. A line with nothing but spaces left has no word rather than a
+   * bad one, because a loop's marks are optional and what follows them may be
+   * nothing.
    */
+  peekWord(): string {
+    const start = this.at;
+    this.skip();
+    if (!isWordCharacter(this.peek())) {
+      this.at = start;
+      return "";
+    }
+    const word = this.word();
+    this.at = start;
+    return word;
+  }
+
   /** The punctuation mark next, which is one character and not a name. */
   punctuation(expected: string): string {
     this.skip();
@@ -1640,15 +1680,13 @@ class BlockReader {
         let step: SemanticValue | null = null;
         if (scanner.peek() === "d") scanner.keyword("default");
         else step = scanner.value();
-        // `parallel` is a word a loop carries and not every loop does, so it is
-        // read by whether it is there rather than as part of the step: the step
-        // is a value, and a value is not the word `parallel`.
-        scanner.skip();
-        const parallel = scanner.peek() === "p";
-        if (parallel) scanner.keyword("parallel");
-        const region = scanner.peek() === "r";
-        if (region) scanner.keyword("region");
-        const reductions = parallel ? loopReductions(scanner) : [];
+        // `parallel` and `region` are words a loop carries and not every loop
+        // does, so they are read by whether they are there rather than as part
+        // of the step: the step is a value, and a value is not a mark. The
+        // marks and the accumulators a marked loop combines are read together,
+        // because the printer writes them in that order and a text a model
+        // writes may carry the region mark without the parallel one.
+        const marks = loopMarks(scanner);
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
         return {
@@ -1662,9 +1700,9 @@ class BlockReader {
             inclusive: bound === "inclusive",
             down: direction === "down",
             step,
-            ...(parallel ? { parallel: true } : {}),
-            ...(region ? { region: true } : {}),
-            ...(reductions.length === 0 ? {} : { reductions }),
+            ...(marks.parallel ? { parallel: true } : {}),
+            ...(marks.region ? { region: true } : {}),
+            ...(marks.reductions.length === 0 ? {} : { reductions: marks.reductions }),
             header,
             exit,
             body,
@@ -1681,11 +1719,7 @@ class BlockReader {
         const index = scanner.word();
         scanner.keyword("length");
         const length = scanner.value();
-        scanner.skip();
-        const parallel = scanner.peek() === "p";
-        if (parallel) scanner.keyword("parallel");
-        const region = scanner.peek() === "r";
-        if (region) scanner.keyword("region");
+        const marks = loopMarks(scanner);
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
         return {
@@ -1697,8 +1731,9 @@ class BlockReader {
             elementType,
             of,
             length,
-            ...(parallel ? { parallel: true } : {}),
-            ...(region ? { region: true } : {}),
+            ...(marks.parallel ? { parallel: true } : {}),
+            ...(marks.region ? { region: true } : {}),
+            ...(marks.reductions.length === 0 ? {} : { reductions: marks.reductions }),
             header,
             exit,
             body,

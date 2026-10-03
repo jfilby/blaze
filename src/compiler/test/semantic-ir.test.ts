@@ -992,3 +992,43 @@ test("a loop's reduction is written in the text a model may write it in, and rea
     "what a reduction prints, the text form reads back",
   );
 });
+
+test("a loop's marks are read in whatever order the text writes them", () => {
+  // Both marks may sit on one loop, and the text a model writes may put them the
+  // other way round from the printer. Reading only `parallel` and then `region`
+  // in that fixed order refused `parallel region`, and refused it as a missing
+  // reduction, because `region` begins with the letter a reduction begins with.
+  const source = [
+    "export function f(n: number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i += 1) {",
+    "    total += i * 2 + i + i + i + i + i + i + i;",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { f } from "./lib.ts";\nconsole.log(f(1));\n', "lib.ts": source };
+  const phase = phaseOf("typescript", files, "main.ts");
+  const fn = semanticsOf(phase).f as SemanticFunction;
+  markParallelLoops(fn.entry);
+  const printed = printSemanticFunction(fn);
+  // The region mark is added here rather than by a build, because what this
+  // reads is the text form: which loops a region pass marks is read in the
+  // tests that cover it.
+  const withRegion = printed.replace(" parallel reduction", " parallel region reduction");
+  const reread = parseSemanticFunction(withRegion, phase.program);
+  assert.equal(printSemanticFunction(reread), withRegion, "what the marks print, the text form reads back");
+  const statement = reread.entry.statements.find((one) => one.k === "loop");
+  assert.ok(statement !== undefined && statement.loop.kind === "counted");
+  assert.equal(statement.loop.parallel, true);
+  assert.equal(statement.loop.region, true);
+  assert.deepEqual(statement.loop.reductions, [{ name: "total", op: "+", exact: true }]);
+  // The other order reads as well, and prints back in the order the printer
+  // writes: the text says the same thing whichever way round the two words are.
+  assert.equal(
+    printSemanticFunction(parseSemanticFunction(withRegion.replace("parallel region", "region parallel"), phase.program)),
+    withRegion,
+    "the marks read whichever order the text writes them",
+  );
+});
