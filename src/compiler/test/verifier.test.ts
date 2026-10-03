@@ -12,11 +12,11 @@ import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts"
 import { readIncremental } from "../incremental.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
 import { probeFault } from "../codegen.ts";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FunctionContract, TestConfig } from "../core/types.ts";
 import { body, dotProductBody } from "./definition.ts";
+import { scratch } from "./scratch.ts";
 
 const PYTHON = "python3";
 
@@ -236,7 +236,7 @@ test("a whole number and the double that holds it are the same result", () => {
 });
 
 test("the store keeps every path inside its root", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blaze-store-"));
+  const root = await scratch("blaze-store-");
   const store = createJsonStore(root);
   await assert.rejects(() => store.read("../escape.json"), /escapes root/);
   await assert.rejects(() => store.read("/etc/passwd"), /must be relative/);
@@ -249,7 +249,7 @@ test("the store keeps every path inside its root", async () => {
 });
 
 test("the store round trips values and leaves no temporary files", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blaze-store-"));
+  const root = await scratch("blaze-store-");
   const store = createJsonStore(root);
   const value = { id: "dot-product", status: "success", nested: [1, 2, { deep: true }] };
   await store.write("projects/dot-product/build.json", value);
@@ -266,7 +266,7 @@ test("the store round trips values and leaves no temporary files", async () => {
 });
 
 test("a record that is present but unreadable is a fault, not a record that is not there", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "blaze-store-"));
+  const root = await scratch("blaze-store-");
   const store = createJsonStore(root);
   const path = "projects/p/build.json";
   await store.mkdirp("projects/p");
@@ -381,7 +381,7 @@ test("a program that grows more heap than it is given is refused, not killed", a
   // allocated too much: V8 claims tens of gigabytes before it allocates a
   // byte, so a limit that counted reservations would refuse it outright. The
   // limit is on the heap, and a node run that loads TypeScript still works.
-  const probe = join(await mkdtemp(join(tmpdir(), "blaze-heap-")), "probe.ts");
+  const probe = join(await scratch("blaze-heap-"), "probe.ts");
   await writeFile(probe, "const value: number = 1;\nconsole.log(value);\n", "utf8");
   const hosted = run("node", [probe], { timeoutMs: 60_000, heapBytes: GENERATED_HEAP_BYTES });
   assert.equal(hosted.code, 0, hosted.stderr);
@@ -405,3 +405,4 @@ test("a program that grows more heap than it is given is refused, not killed", a
   assert.equal(missing.code, null);
   assert.equal(missing.signal, null);
 });
+

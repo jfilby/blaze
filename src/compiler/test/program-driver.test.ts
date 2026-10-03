@@ -10,8 +10,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { generateProgramDriver, buildProgramDriver } from "../toolchain/driver.ts";
 import { resolveProgram, type SemanticProgram } from "../semantics/ir-resolve.ts";
@@ -21,6 +20,7 @@ import { run } from "../core/process.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
 import { semanticIrProblems } from "../semantics/ir-validate.ts";
 import { parseSemanticProgram } from "../semantics/ir-text.ts";
+import { scratch } from "./scratch.ts";
 
 /** The object the driver of every program here links against, built once. */
 let runtime: Promise<string> | null = null;
@@ -45,12 +45,12 @@ function driver(source: string): string {
 
 /** The program written to disk and the binary it was linked into. */
 async function linked(source: string): Promise<{ directory: string; binary: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-program-"));
+  const directory = await scratch("blaze-program-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   // The driver includes the runtime header by name, as a build keeps the
   // runtime beside the driver it links.
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
-  runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
+  runtime ??= buildStandaloneRuntime(await scratch("blaze-runtime-")).then((built) => built.objectPath);
   const runner = await buildProgramDriver({
     mode: "debug",
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
@@ -508,9 +508,9 @@ test("a string is ordered by what it says, not by whether it matches", async () 
     phase.program,
   );
   assert.deepEqual(semanticIrProblems(turned, phase.program), [], "the artifact is one the compiler may lower");
-  const directory = await mkdtemp(join(tmpdir(), "blaze-order-"));
+  const directory = await scratch("blaze-order-");
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
-  runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
+  runtime ??= buildStandaloneRuntime(await scratch("blaze-runtime-")).then((built) => built.objectPath);
   const runner = await buildProgramDriver({
     mode: "debug",
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
@@ -523,3 +523,4 @@ test("a string is ordered by what it says, not by whether it matches", async () 
   const ran = run(runner.command, [], { timeoutMs: 60_000 });
   assert.equal(ran.stdout, "true\n", "apple reads before banana");
 });
+

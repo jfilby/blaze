@@ -23,6 +23,13 @@
  * more than one thread, and a backend with no threads runs the same loop it
  * always did and is correct, which is why this is an IR flag rather than a
  * runtime call the IR cannot make.
+ *
+ * Allocating is not one of the things that refuses a turn. It used to be: the
+ * runtime kept one heap with one free list, so two turns taking a block at once
+ * were handed the same block. It keeps a pool of its own per thread now, so a
+ * turn that builds values of its own and lets them go is admitted, which is
+ * what admits out[i] = build(in[i]) — the shape nearly every loop worth marking
+ * has, and one that allocates on every turn.
  */
 
 import {
@@ -45,11 +52,11 @@ export type Refusal = string;
  * Every function a body may call, by contract name.
  *
  * A callee this map does not hold is a callee whose body nobody has read, and a
- * body nobody has read may print, allocate or write anything — so a call to one
- * is refused. That is the safe reading of an absent entry, and it is why the
- * map is an argument rather than something looked up: a caller that has the
- * bodies says so, and a caller that has not gets the answer that assumes the
- * worst.
+ * body nobody has read may print, count a reference or write anything — so a
+ * call to one is refused. That is the safe reading of an absent entry, and it
+ * is why the map is an argument rather than something looked up: a caller that
+ * has the bodies says so, and a caller that has not gets the answer that
+ * assumes the worst.
  */
 export type Callees = ReadonlyMap<string, SemanticFunction>;
 
@@ -149,8 +156,11 @@ interface Reach {
  *
  * The callee's body is read with the rule a loop body is read with and nothing
  * of it loosened: a callee that writes a name of its own frame, prints,
- * allocates or calls something impure is refused, and one whose body the program
- * does not hold is refused too, because a body nobody has read may do anything.
+ * counts a reference or calls something impure is refused, and one whose body
+ * the program does not hold is refused too, because a body nobody has read may
+ * do anything. Allocating is not on that list — the runtime's allocator keeps a
+ * pool per thread, so a callee that builds values and drops them is pure for
+ * this purpose however many it builds.
  *
  * Recursion is answered by assuming the answer and checking it afterwards,
  * which is the only reading that terminates: a function that calls itself and
@@ -176,13 +186,11 @@ function calleeRefusal(name: string, reach: Reach): Refusal | null {
 
 /** Why a call a turn makes may not be made by two turns at once. */
 function callRefusal(call: SemanticCall, reach: Reach): Refusal | null {
-  // An owned result is a fresh block, and the allocator is one heap with one
-  // free list: two turns taking a block at once corrupt it. A retained result is
-  // a reference count written through a reference, which is one number every
-  // turn of the loop shares.
-  if (call.ownership === "owned") {
-    return `the body calls ${call.callee}, which allocates what it hands back, and the allocator is one heap`;
-  }
+  // An owned result is a fresh block, and the runtime's allocator keeps a pool
+  // of its own per thread, so two turns taking a block at once take them from
+  // two cursors and that is a program rather than a corruption. A retained
+  // result is different in kind: it is a reference count written through a
+  // reference, which is one number every turn of the loop shares.
   if (call.retain) {
     return `the body calls ${call.callee} and counts the reference it hands back, which is one number every turn shares`;
   }
@@ -322,10 +330,12 @@ function bodyRefusal(
  * Why the values a statement computes may not be computed by two turns at once.
  *
  * A value that reads memory is fine — nothing writes it — but a value that calls
- * is a value that allocates, prints or counts a reference, and each of those is
- * one thing the whole program shares. The call is read here rather than
- * refused outright, so a body whose callee the compiler can prove writes nothing
- * is not refused for calling it.
+ * is a value that may print, may count a reference, and is read through the
+ * callee's own body. Each of those that a turn cannot do is one thing the whole
+ * program shares. The call is read here rather than refused outright, so a body
+ * whose callee the compiler can prove writes nothing is not refused for calling
+ * it — and neither is one refused for allocating, which the per-thread pool
+ * makes safe.
  */
 function valueRefusal(statement: SemanticStatement, reach: Reach): Refusal | null {
   for (const value of statementValues(statement)) {
@@ -408,15 +418,10 @@ function writeRefusal(
       return callRefusal(statement.call, reach);
     // A declared name is the turn's own, so declaring one writes nothing shared.
     // A buffer and an object are each an allocation, and the runtime's
-    // allocator is one heap with one free list: two turns allocating at once
-    // corrupt it. A text is an allocation too when it interpolates.
+    // allocator keeps a pool of its own per thread, so two turns allocating at
+    // once take their blocks from two cursors and push onto two lists. A text
+    // is an allocation too when it interpolates, and answers the same way.
     case "let":
-      if (statement.slot.kind === "object") {
-        return `the body allocates the object "${statement.slot.name}", and the runtime's allocator is one heap`;
-      }
-      if (statement.slot.kind === "buffer") {
-        return `the body allocates the array "${statement.slot.name}", and the runtime's allocator is one heap`;
-      }
       return null;
     default:
       // `if`, `block` and `loop` hold no writes of their own: what is inside

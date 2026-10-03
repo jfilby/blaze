@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { machine } from "../codegen.ts";
@@ -9,6 +8,7 @@ import { run } from "../core/process.ts";
 import type { SourceInput } from "../core/types.ts";
 import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 
 const SQUARE_SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
 
@@ -28,7 +28,7 @@ const SOUND = "verdict: sound\nreason: the body computes what the contract state
 
 async function project(t: TestContext, answers: string[]): Promise<string> {
   await chatEndpoint(t, answers);
-  const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
+  const directory = await scratch("blaze-debug-");
   await writeProject(join(directory, "blaze.toml"), SQUARE);
   return directory;
 }
@@ -41,7 +41,7 @@ async function fanOutProject(
   until?: number,
 ): Promise<{ directory: string; peak: () => number }> {
   const endpoint = await chatEndpoint(t, answers, until === undefined ? {} : { until });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
+  const directory = await scratch("blaze-debug-");
   const project: SourceInput = {
     ...SQUARE,
     generation: { maxCandidates: 1, maxAttempts: 1 },
@@ -85,7 +85,7 @@ test("candidate concurrency of one reviews candidates one at a time", async (t) 
 
 test("without --debug the prompts stay out of the way", async (t) => {
   const endpoint = await chatEndpoint(t, [SOUND]);
-  const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
+  const directory = await scratch("blaze-debug-");
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
   const written: string[] = [];
@@ -141,7 +141,7 @@ test("--debug prints the system and user prompt of every review", async (t) => {
 
 test("the prompt reaches the model as the contract and the instructions", async (t) => {
   const endpoint = await chatEndpoint(t, [SOUND]);
-  const directory = await mkdtemp(join(tmpdir(), "blaze-debug-"));
+  const directory = await scratch("blaze-debug-");
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
   await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
@@ -182,7 +182,7 @@ async function pairProject(
   until?: number,
 ): Promise<{ directory: string; endpoint: ChatEndpoint }> {
   const endpoint = await chatEndpoint(t, [], { until, answer: () => SOUND });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-functions-"));
+  const directory = await scratch("blaze-functions-");
   for (const [name, source] of Object.entries(PAIR_SOURCES)) {
     await writeFile(join(directory, name), source, "utf8");
   }
@@ -248,7 +248,7 @@ test("the default reviews up to three functions at a time", async (t) => {
       return SOUND;
     },
   });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-default-"));
+  const directory = await scratch("blaze-default-");
   for (const [name, source] of Object.entries(sources)) {
     await writeFile(join(directory, name), source, "utf8");
   }
@@ -418,3 +418,4 @@ test("a measurement is not kept behind the builds that keep arriving", async () 
     "a measurement is taken before the builds queued behind it, and the two measurements keep apart",
   );
 });
+

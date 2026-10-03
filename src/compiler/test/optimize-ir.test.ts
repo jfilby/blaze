@@ -12,8 +12,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
@@ -26,6 +25,7 @@ import { typeText } from "../core/semantic-ir.ts";
 import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 import type { TypeExpr } from "../core/types.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
+import { scratch } from "./scratch.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const I32: SemanticType = { kind: "primitive", name: "i32" };
@@ -651,7 +651,7 @@ test("the folded C computes what the unfolded C computes", async () => {
     { name: "a value against itself, at most", expression: cmp("le", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
     { name: "a value against itself, over", expression: cmp("ge", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
   ];
-  const directory = await mkdtemp(join(tmpdir(), "blaze-opt-"));
+  const directory = await scratch("blaze-opt-");
   await writeFile(join(directory, "blaze_rt.h"), runtimeHeaderSource(), "utf8");
   const runtime = await buildStandaloneRuntime(directory);
   for (const one of cases) {
@@ -1191,3 +1191,4 @@ test("dropping what a raise makes unreachable still leaves a function the compil
   };
   assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(fnOf(entry, { kind: "void" }, []))), []);
 });
+

@@ -11,10 +11,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyProgram } from "../toolchain/verify-program.ts";
+import { scratch } from "./scratch.ts";
 
 const SOURCE = [
   "function total(n: number): number {",
@@ -29,7 +29,7 @@ const SOURCE = [
 
 /** The source, written out where node can run it. */
 async function source(): Promise<{ path: string; directory: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-program-verify-"));
+  const directory = await scratch("blaze-program-verify-");
   const path = join(directory, "main.ts");
   await writeFile(path, SOURCE, "utf8");
   return { path, directory };
@@ -104,3 +104,4 @@ test("a program in a language with no toolchain of its own cannot be checked", a
     /a program in nim cannot be checked/,
   );
 });
+

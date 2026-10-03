@@ -329,9 +329,9 @@ proc blaze_rt_finalize*() {.exportc, cdecl.} =
 
 ## A block with room for the payload asked for, and optionally cleared.
 ##
-## The per-thread allocator is used rather than the shared one. The shared heap
-## takes a lock, and nothing in this ABI creates a thread or hands a block to
-## one, so every allocation was paying a lock for a heap nothing contends with.
+## A block too large for a class goes to Nim's allocator rather than to a slab.
+## That one takes a lock and the pooled path above deliberately does not, so a
+## program that allocates a great deal of small values pays for no lock at all.
 proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
   let align = if alignment == 0: BlazeDefaultAlignment else: alignment
   ## The payload is placed with a mask, which only places it for a power of two,

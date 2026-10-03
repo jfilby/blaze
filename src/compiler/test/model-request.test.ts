@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+
 import { join } from "node:path";
 import { runBuild, inspectProject } from "../compiler.ts";
 import type { SourceInput } from "../core/types.ts";
 import { CompilerError } from "../core/errors.ts";
 import { chatEndpoint, type ChatEndpoint, type ChatEndpointOptions } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 
 const quiet = { stage: () => {} };
 const SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -22,7 +22,7 @@ async function projectWaitingOn(
 ): Promise<{ directory: string; received: Promise<void> }> {
   const endpoint = await chatEndpoint(t, [], { silent: true });
 
-  const directory = await mkdtemp(join(tmpdir(), "blaze-model-"));
+  const directory = await scratch("blaze-model-");
   const input: SourceInput = {
     language: "typescript",
     source: SOURCE,
@@ -48,7 +48,7 @@ async function projectAnswering(
   source = SOURCE,
 ): Promise<{ directory: string; chat: ChatEndpoint }> {
   const chat = await chatEndpoint(t, answers, endpoint);
-  const directory = await mkdtemp(join(tmpdir(), "blaze-model-"));
+  const directory = await scratch("blaze-model-");
   const input: SourceInput = {
     language: "typescript",
     source,
@@ -391,3 +391,4 @@ test("a review of the IR and a review of the target each regenerate the artifact
   // the one the first review produced.
   assert.equal(outcome.candidates.square.length, 1);
 });
+

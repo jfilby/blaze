@@ -9,16 +9,16 @@
  * out of the same source, so what is compared is the two implementations of the
  * same rule rather than two hand-written expectations.
  */
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { run } from "../core/process.ts";
 import { runtimeHeaderSource, runtimeSourceSource } from "../runtime/abi.ts";
+import { scratch } from "./scratch.ts";
 
 test("the whole-number path writes what the search it replaces writes", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-fmt-"));
+  const directory = await scratch("blaze-fmt-");
   await writeFile(join(directory, "blaze_rt.h"), runtimeHeaderSource());
   await writeFile(join(directory, "blaze_rt.c"), runtimeSourceSource("danger"));
 
@@ -141,3 +141,4 @@ test("the whole-number path writes what the search it replaces writes", async ()
   const ran = run(join(directory, "t"), [], { timeoutMs: 300_000 });
   assert.match(ran.stdout, /all agree/, `the two must agree on every number:\n${ran.stdout.trim()}`);
 });
+

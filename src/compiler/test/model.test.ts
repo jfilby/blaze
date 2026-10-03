@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReviewRequest } from "../ai/review.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { resolveModel, OPENROUTER_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
 import { createBackend, ReplayBackend, VercelAiBackend } from "../ai/backend.ts";
+import { scratch } from "./scratch.ts";
 
 function diagnostic(run: () => unknown): string {
   try {
@@ -120,7 +120,7 @@ function reviewRequest(): ReviewRequest {
 }
 
 test("the replay backend serves a recorded review, and refuses a file that holds none", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-replay-"));
+  const directory = await scratch("blaze-replay-");
   const file = join(directory, "reviews.json");
   await writeFile(file, JSON.stringify({ reviews: ["verdict: sound\nreason: nothing to change"] }), "utf8");
   const backend = createBackend(resolveModel(`replay:${file}`, {}));
@@ -138,7 +138,7 @@ test("the replay backend serves a recorded review, and refuses a file that holds
 });
 
 test("a replay entry that is not a review fails the build where it was served", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-replay-bad-"));
+  const directory = await scratch("blaze-replay-bad-");
   const file = join(directory, "reviews.json");
   await writeFile(file, "here is the function you asked for\nfunction dotProduct() {}", "utf8");
   const backend = createBackend(resolveModel(`replay:${file}`, {}));
@@ -147,3 +147,4 @@ test("a replay entry that is not a review fails the build where it was served", 
     /replay entry 1 is not a review of the ir of dotProduct/,
   );
 });
+

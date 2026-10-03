@@ -13,8 +13,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { STATE_DIRECTORY, runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
@@ -25,6 +24,7 @@ import type { SemanticFunction } from "../core/semantic-ir.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 
 const quiet = { stage: () => {} };
 
@@ -82,7 +82,7 @@ function resolved(): string {
 
 /** A project of an entry program and the library it calls, with the limits a test needs. */
 async function project(name: string, model: object, attempts = 1): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = await scratch(`blaze-${name}-`);
   await writeFile(join(directory, "main.ts"), ENTRY, "utf8");
   await writeFile(join(directory, "lib.ts"), LIBRARY, "utf8");
   await writeProject(join(directory, "input.toml"), {
@@ -217,7 +217,7 @@ test("a function that states a postcondition is reviewed and verified like any o
   // postcondition is what the result is checked against. There is no path where
   // a postcondition sends the build back to C.
   const endpoint = await chatEndpoint(t, [], { answer: () => SOUND });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-ir-postcondition-"));
+  const directory = await scratch("blaze-ir-postcondition-");
   await writeFile(
     join(directory, "main.ts"),
     "export function square(count: number): number {\n  return count * count;\n}\n",
@@ -286,3 +286,4 @@ test("an increment used as a value hands back the value its side says it does", 
   assert.match(c("--i"), /--i;\n {2}double t\d+ = i;/);
   assert.match(c("i--"), /double t\d+ = i;\n {2}i--;/);
 });
+

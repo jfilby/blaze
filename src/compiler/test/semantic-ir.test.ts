@@ -10,8 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+
 import { join } from "node:path";
 import { runSemanticIr } from "../compiler.ts";
 import { CompilerError } from "../core/errors.ts";
@@ -47,6 +46,7 @@ import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "../runti
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import type { ProgramContract } from "../core/types.ts";
 import { phaseOf, programOf, semanticsOf } from "./phase.ts";
+import { scratch } from "./scratch.ts";
 
 /** A program of one entry module and the library it calls, resolved to the IR. */
 function resolved(files: Record<string, string>): { program: SemanticProgram; contract: ProgramContract } {
@@ -64,7 +64,7 @@ const I64 = { kind: "primitive", name: "i64" } as const;
  * rather than by a text assertion that passes on nonsense.
  */
 async function deliverDriver(program: SemanticProgram): Promise<{ binary: string; directory: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-ir-driver-"));
+  const directory = await scratch("blaze-ir-driver-");
   const header = join(directory, `${RUNTIME_NAME}.h`);
   const source = join(directory, `${RUNTIME_NAME}.c`);
   const driver = join(directory, "program.c");
@@ -931,7 +931,7 @@ test("the IR of a project is what the compiler resolved, and reads back as itsel
   assert.match(printed, /^return$/m);
 
   // Written out and read back, it is the program it was, and it still validates.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-ir-"));
+  const directory = await scratch("blaze-ir-");
   const path = join(directory, "program.ir");
   writeFileSync(path, printed, "utf8");
   const again = await runSemanticIr(example, { from: path });
@@ -1001,3 +1001,4 @@ test("two whole numbers of one width are computed as the unsigned of the pair", 
   assert.match(written, /\ba \+= \(uint32_t\)\(b\);/);
   assert.match(written, /\breturn \(a \+ \(uint32_t\)\(b\)\);/);
 });
+

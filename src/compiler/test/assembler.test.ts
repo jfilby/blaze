@@ -4,11 +4,11 @@ import { inspectObject, readAssemblyStructure, validateAssembly } from "../toolc
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { run } from "../core/process.ts";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FunctionContract } from "../core/types.ts";
 import { dotProductBody } from "./definition.ts";
+import { scratch } from "./scratch.ts";
 
 const REFERENCE = `	.globl	dotProduct
 	.type	dotProduct, @function
@@ -327,7 +327,7 @@ test("an object whose size cannot be measured is refused, not measured as nothin
     t.skip("the GNU assembler is needed to make an object to measure");
     return;
   }
-  const directory = await mkdtemp(join(tmpdir(), "blaze-size-"));
+  const directory = await scratch("blaze-size-");
   const assemblyPath = join(directory, "candidate.s");
   const objectPath = join(directory, "candidate.o");
   const text = "\t.globl dotProduct\ndotProduct:\n\tret\n";
@@ -368,3 +368,4 @@ test("an object whose size cannot be measured is refused, not measured as nothin
     process.env.PATH = real;
   }
 });
+

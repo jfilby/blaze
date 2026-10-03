@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 
 const CLI = new URL("../cli.ts", import.meta.url).pathname;
 const EXAMPLE = new URL("../../examples/hello_world", import.meta.url).pathname;
@@ -12,7 +12,7 @@ const REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pa
 
 /** A project directory named after the project it contains, as the example is. */
 async function projectDirectory(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "blaze-cli-"));
+  const root = await scratch("blaze-cli-");
   const directory = join(root, "hello_world");
   await cp(EXAMPLE, directory, { recursive: true });
   return directory;
@@ -57,14 +57,14 @@ test("an explicit path still builds, and the state lands in the current director
   // The project is named by an explicit path, the state by the directory the
   // build runs in: the two are different directories here, which is the point.
   const project = await projectDirectory();
-  const directory = await mkdtemp(join(tmpdir(), "blaze-cli-elsewhere-"));
+  const directory = await scratch("blaze-cli-elsewhere-");
   const execution = blaze(directory, "build", join(project, "blaze.toml"));
   assert.equal(execution.code, 0, execution.stderr);
   assert.match(execution.stdout, /projects\/hello_world\/output\/hello_world/);
 });
 
 test("without a blaze.toml the default says what to do", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-cli-empty-"));
+  const directory = await scratch("blaze-cli-empty-");
   const execution = blaze(directory, "build");
 
   assert.notEqual(execution.code, 0);
@@ -73,7 +73,7 @@ test("without a blaze.toml the default says what to do", async () => {
 });
 
 test("init writes a project file that builds machine code", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-init-"));
+  const directory = await scratch("blaze-init-");
   const created = await run(process.execPath, [CLI, "init"], { cwd: directory });
   assert.equal(created.code, 0, created.stderr);
   assert.match(created.stdout, /created .*blaze\.toml/);
@@ -94,7 +94,7 @@ test("init writes a project file that builds machine code", async () => {
 });
 
 test("init refuses to write over a project file, and leaves it as it was", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-init-twice-"));
+  const directory = await scratch("blaze-init-twice-");
   assert.equal((await run(process.execPath, [CLI, "init"], { cwd: directory })).code, 0);
 
   const written = 'language = "typescript"\nsource = "console.log(1);"\n';
@@ -136,7 +136,7 @@ test("the model is named before the work starts, and on failure too", async () =
 
   // The model is named before any work starts, so it is on record even when
   // the build fails.
-  const unreachable = await mkdtemp(join(tmpdir(), "blaze-cli-nokey-"));
+  const unreachable = await scratch("blaze-cli-nokey-");
   await cp(EXAMPLE, unreachable, { recursive: true });
   const failed = run(process.execPath, [CLI, "build", "--model", "openai/gpt-5"], {
     cwd: unreachable,
@@ -192,7 +192,7 @@ const SOUND = "verdict: sound\nreason: the body computes what the contract state
 
 /** A library project of its own, so the test builds no example it needs. */
 async function libraryProject(name: string): Promise<{ directory: string; replay: string }> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-cli-${name}-`));
+  const directory = await scratch(`blaze-cli-${name}-`);
   await writeProject(join(directory, "input.toml"), {
     language: "nim",
     source: ["proc square(x: float32): float32 =", "  result = x * x", ""].join("\n"),
@@ -238,3 +238,4 @@ test("--recompile rebuilds what the last build proved, and refuses to be paired 
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /--recompile and --reuse ask for opposite builds/);
 });
+

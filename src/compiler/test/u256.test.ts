@@ -18,8 +18,7 @@
 import assert from "node:assert/strict";
 import { isInteger, isWhole, limbsOf, wholeOf } from "../core/semantic-ir.ts";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run } from "../core/process.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
@@ -43,6 +42,7 @@ assert.ok(engine !== undefined, "the engine the build runs on carries modules");
 import type { FunctionContract } from "../core/types.ts";
 import type { TargetSpec, TypeExpr } from "../core/types.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource, WIDE_SYMBOLS } from "../runtime/abi.ts";
+import { scratch } from "./scratch.ts";
 
 const WIDTH = 256;
 const MODULUS = (1n << BigInt(WIDTH)) - 1n;
@@ -166,7 +166,7 @@ function cases(): bigint[] {
 }
 
 test("the wide kernel answers the same arithmetic the language's bigints do", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-"));
+  const directory = await scratch("blaze-u256-");
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
   await writeFile(join(directory, "runtime.c"), runtimeSourceSource("danger"), "utf8");
   await writeFile(join(directory, "harness.c"), HARNESS, "utf8");
@@ -305,7 +305,7 @@ function loweringSubjects(): { symbol: string; returns: SemanticType; value: Sem
 
 test("the C backend lowers a wide operation to the kernel and answers it", async () => {
   const subjects = loweringSubjects();
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-c-"));
+  const directory = await scratch("blaze-u256-c-");
   const runtime = await buildStandaloneRuntime(directory);
   const value = 0xfedcba0987654321n * (1n << 64n) + 0x1234567890abcdefn;
   const seed = ["blaze_u256 a = {0,0,0,0};", "a.limbs[0] = 0x1234567890abcdefULL;", "a.limbs[1] = 0xfedcba0987654321ULL;"];
@@ -386,7 +386,7 @@ test("a wide argument to a call this backend has not written is refused", async 
   // Calling into this backend from C does work, because the convention hands such
   // a value over in memory and `arrivals` reads it there; it is only a call this
   // backend emits for itself that has no answer yet.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-call-"));
+  const directory = await scratch("blaze-u256-call-");
   const WIDE: SemanticType = { kind: "primitive", name: "u256" };
   const VOID: SemanticType = { kind: "void" };
   await assert.rejects(
@@ -487,7 +487,7 @@ test("the machine backend carries a wide operation out in registers and answers 
     { op: "xor", answer: left ^ right },
   ];
   for (const { op, answer } of cases) {
-    const directory = await mkdtemp(join(tmpdir(), `blaze-u256-machine-${op}-`));
+    const directory = await scratch(`blaze-u256-machine-${op}-`);
     const runtime = await buildStandaloneRuntime(directory);
     const object = join(directory, "subject.o");
     const built = await buildMachineObject({
@@ -591,7 +591,7 @@ test("the machine backend reads a wide argument off the stack and answers on it"
   const expectedLimbs = [0, 1, 2, 3]
     .map((limb) => `0x${((sum >> BigInt(limb * 64)) & 0xffffffffffffffffn).toString(16)}ULL`)
     .join(", ");
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-argument-"));
+  const directory = await scratch("blaze-u256-argument-");
   const runtime = await buildStandaloneRuntime(directory);
   const object = join(directory, "subject.o");
   const built = await buildMachineObject({
@@ -747,7 +747,7 @@ test("the machine backend answers a wide complement, negation, comparison and ch
     },
   ];
   for (const { name, returns, value, answer } of cases) {
-    const directory = await mkdtemp(join(tmpdir(), `blaze-u256-${name}-`));
+    const directory = await scratch(`blaze-u256-${name}-`);
     const runtime = await buildStandaloneRuntime(directory);
     const object = join(directory, "subject.o");
     const built = await buildMachineObject({
@@ -899,7 +899,7 @@ test("a carry chain the machine encoder writes is the arithmetic the language's 
   // carry is not threaded, the answer differs from the right one in its high
   // limbs — which is why this is checked against `BigInt` and not a literal
   // written out by hand.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-carry-"));
+  const directory = await scratch("blaze-u256-carry-");
   const symbol = (name: string, op: "add" | "sub"): string => {
     const hex = Array.from(carryChain(op))
       .map((byte) => `0x${byte.toString(16).padStart(2, "0")}`)
@@ -976,7 +976,7 @@ test("the machine backend moves a wide number by a whole number of bits", async 
   ];
   for (const { op, by, answer } of cases) {
     const name = `${op}${by}`;
-    const directory = await mkdtemp(join(tmpdir(), `blaze-u256-${name}-`));
+    const directory = await scratch(`blaze-u256-${name}-`);
     const runtime = await buildStandaloneRuntime(directory);
     const object = join(directory, "subject.o");
     const built = await buildMachineObject({
@@ -1112,7 +1112,7 @@ test("a shift by a whole number is refused rather than answered", async () => {
   // it is a build that reported success and gave a wrong answer, which is the
   // one failure this compiler is built to make impossible.
   const U: SemanticType = { kind: "primitive", name: "u256" };
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-count-"));
+  const directory = await scratch("blaze-u256-count-");
   const refused = { k: "arith", type: U, op: "shl", left: { k: "const", type: U, text: "0x01" }, right: { k: "const", type: U, text: "0x08" } } as const;
   await assert.rejects(
     () =>
@@ -1218,7 +1218,7 @@ function rightOperand(op: DifferentialOp, wide: SemanticType, text: string): Sem
 
 async function cBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {
   const U = U256;
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-diff-c-"));
+  const directory = await scratch("blaze-u256-diff-c-");
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
   await writeFile(join(directory, "runtime.c"), runtimeSourceSource("danger"), "utf8");
   const subject = generateFunctionC({
@@ -1345,7 +1345,7 @@ function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: stri
 }
 
 async function machineBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-u256-diff-m-"));
+  const directory = await scratch("blaze-u256-diff-m-");
   const runtime = await buildStandaloneRuntime(directory);
   const object = join(directory, "subject.o");
   const built = await buildMachineObject({
@@ -1410,3 +1410,4 @@ async function machineBackendAnswer(op: DifferentialOp, leftText: string, rightT
   assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
   return run(binary, [], { timeoutMs: 60_000 }).stdout.trim();
 }
+

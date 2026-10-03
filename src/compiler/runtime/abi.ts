@@ -814,9 +814,30 @@ ${guarded ? `  if (elementSize != 0 && count > BLAZE_RT_MAX_ALLOCATION / element
    larger than the largest class, is the host's to give and the host's to take
    back — the last of those because a slab is never handed back, and a program
    that allocates one large block and frees it should get that memory again. */
-static char* blaze_rt_slab_at = NULL;
-static char* blaze_rt_slab_end = NULL;
-static blaze_rt_header* blaze_rt_released[BLAZE_RT_SLAB_CLASSES];
+/* The pool is per thread, and that is what lets a turn of a parallel loop
+   allocate. Two turns carving out of one cursor and pushing onto one list is
+   what made an allocating turn unsafe before: the cursor is read, advanced and
+   written by every thread at once, so two turns are handed the same block and
+   two blocks are linked into one list. A pool of its own per thread removes
+   the race outright rather than locking it away — there is nothing left to
+   share, so no lock is bought and no turn waits on one.
+
+   A block released by a thread other than the one that carved it goes onto
+   the releasing thread's list rather than back to where it came from, which
+   is sound because a slab is never handed back to the host: the memory a
+   block sits in stays mapped whatever list it is on, and a block on this
+   thread's list is only ever handed to this thread. The cost of that is that
+   blocks migrate towards whoever is releasing most, which for a program whose
+   turns each build and drop their own values is the right direction anyway.
+
+   What the per-thread pool does not make safe is the reference count, which is
+   one number every turn shares: a turn that retains or releases a value
+   another turn also holds is still refused by the rule that marks loops
+   parallel. What it makes safe is a turn that builds values of its own and
+   lets them go, which is the shape "out[i] = build(in[i])" has. */
+static _Thread_local char* blaze_rt_slab_at = NULL;
+static _Thread_local char* blaze_rt_slab_end = NULL;
+static _Thread_local blaze_rt_header* blaze_rt_released[BLAZE_RT_SLAB_CLASSES];
 
 /* The class a block of total bytes at the given alignment belongs to,
    counting from one, or zero for a block the host is asked for. A class is

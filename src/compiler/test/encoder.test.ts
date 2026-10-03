@@ -11,8 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run } from "../core/process.ts";
 import {
@@ -40,6 +39,7 @@ import {
   XMM15,
   frame,
 } from "../toolchain/x86.ts";
+import { scratch } from "./scratch.ts";
 
 /** One encoding, and the last instruction the assembler must read back. */
 interface Case {
@@ -191,7 +191,7 @@ async function meaningOf(cases: readonly Case[]): Promise<string[]> {
     entry.build(encoder);
     assembly += `.globl case_${at}\ncase_${at}:\n  .byte ${Array.from(encoder.finish()).join(",")}\n`;
   });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-encoder-"));
+  const directory = await scratch("blaze-encoder-");
   const source = join(directory, "encodings.s");
   const object = join(directory, "encodings.o");
   await writeFile(source, assembly, "utf8");
@@ -259,3 +259,4 @@ test("a register above seven is named by the extension bit of the field it is wr
     assert.equal(extension !== undefined && extension & 0b100, 4, `r${register} is written in the register field here, so the extension's R bit is what names it`);
   }
 });
+

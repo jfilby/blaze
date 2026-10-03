@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildWasm, generateWasmHost, wasmSignature, wasmValueType } from "../toolchain/wasm.ts";
 import { parseType } from "../semantics/contract.ts";
@@ -10,6 +9,7 @@ import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { dotProductBody } from "./definition.ts";
+import { scratch } from "./scratch.ts";
 
 /** The WebAssembly surface this test uses; @types/node does not declare it. */
 interface WasmModuleHandle {
@@ -164,7 +164,7 @@ test("a buffer of a narrow element is laid out one element to its own width", as
   ];
 
   for (const one of cases) {
-    const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+    const directory = await scratch("blaze-wasm-");
     const contract: FunctionContract = {
       ...CONTRACT,
       function: {
@@ -234,7 +234,7 @@ test("the hand assembled module satisfies the host import and export contract", 
 });
 
 test("the host calls the module, places buffers in its memory and prints results", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const [hostPath, modulePath] = await hostIn(directory, CONTRACT, constantModuleBytes("dotProduct"));
 
   const vector: TestVector = {
@@ -252,7 +252,7 @@ test("the host calls the module, places buffers in its memory and prints results
 });
 
 test("the host reports a module that does not export the contracted function", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const [hostPath, modulePath] = await hostIn(directory, CONTRACT, constantModuleBytes("otherName"));
 
   const execution = run(process.execPath, [hostPath, modulePath], { input: "run\n0 0 0\n", timeoutMs: 60_000 });
@@ -261,7 +261,7 @@ test("the host reports a module that does not export the contracted function", a
 });
 
 test("the host calls the export the contract renames its entry to", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   // A candidate that follows the prompt exports the symbol, and the host has
   // to be looking for the same name the module boundary is checked against.
   const [hostPath, modulePath] = await hostIn(directory, RENAMED, constantModuleBytes("blaze_main"));
@@ -272,7 +272,7 @@ test("the host calls the export the contract renames its entry to", async () => 
 });
 
 test("a module that exports the unrenamed name is not the contracted function", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const [hostPath, modulePath] = await hostIn(directory, RENAMED, constantModuleBytes("main"));
 
   const execution = run(process.execPath, [hostPath, modulePath], { input: "run\n0 0 0\n", timeoutMs: 60_000 });
@@ -281,7 +281,7 @@ test("a module that exports the unrenamed name is not the contracted function", 
 });
 
 test("the module boundary is checked against the symbol the contract renames to", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   // Every rejection a wasm build raises names the function it is about, and
   // the one the module is checked against.
   await assert.rejects(
@@ -302,7 +302,7 @@ test("the module boundary is checked against the symbol the contract renames to"
 });
 
 test("the host runs a contract that takes nothing, whose vectors are blank lines", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const contract: FunctionContract = {
     ...CONTRACT,
     function: { name: "answer", symbol: "blaze_answer", params: [], returns: "i32" },
@@ -328,7 +328,7 @@ test("the host runs a contract that takes nothing, whose vectors are blank lines
 });
 
 test("an unsigned 64 bit result is printed as the unsigned number it is", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const contract: FunctionContract = {
     ...CONTRACT,
     function: { name: "big", symbol: "blaze_big", params: [], returns: "u64" },
@@ -349,3 +349,4 @@ test("an unsigned 64 bit result is printed as the unsigned number it is", async 
   assert.equal(execution.code, 0, execution.stderr);
   assert.equal(execution.stdout, "RESULT 18446744073709551615\n");
 });
+

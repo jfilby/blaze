@@ -12,8 +12,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildProgramDriver, generateProgramDriver } from "../toolchain/driver.ts";
 import { resolveProgram, type SemanticProgram } from "../semantics/ir-resolve.ts";
@@ -23,6 +22,7 @@ import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { RUNTIME_NAME, runtimeHeaderSource } from "../runtime/abi.ts";
 import { run } from "../core/process.ts";
 import { phaseOf } from "./phase.ts";
+import { scratch } from "./scratch.ts";
 
 /** The object the driver of every program here links against, built once. */
 let runtime: Promise<string> | null = null;
@@ -81,10 +81,10 @@ function written(source: string): string {
 
 /** The program written to disk and the binary it was linked into. */
 async function linked(source: string): Promise<{ directory: string; binary: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-whole-"));
+  const directory = await scratch("blaze-whole-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
-  runtime ??= buildStandaloneRuntime(await mkdtemp(join(tmpdir(), "blaze-runtime-"))).then((built) => built.objectPath);
+  runtime ??= buildStandaloneRuntime(await scratch("blaze-runtime-")).then((built) => built.objectPath);
   const runner = await buildProgramDriver({
     mode: "debug",
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },

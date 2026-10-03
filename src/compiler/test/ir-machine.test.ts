@@ -11,8 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assertMachineTarget, buildObject } from "../toolchain/ir-machine.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
@@ -22,6 +21,7 @@ import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
 import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import { scratch } from "./scratch.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const F32: SemanticType = { kind: "primitive", name: "f32" };
@@ -179,7 +179,7 @@ const NUMBERS: SemanticSlot[] = [
  * prove about it.
  */
 async function lowered(fn: SemanticFunction, driver: (name: string) => string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-machine-"));
+  const directory = await scratch("blaze-machine-");
   const contract = contracted(fn);
   const runtime = await buildStandaloneRuntime(directory);
   await writeFile(
@@ -1198,7 +1198,7 @@ test("a function reads the arguments the program was given from the runtime", as
 });
 
 test("the object defines the symbol the function is called by, and nothing else", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-machine-symbols-"));
+  const directory = await scratch("blaze-machine-symbols-");
   const fn = subject(F64, handsBack(local("v")), NUMBERS);
   const objectPath = join(directory, "subject.o");
   await buildObject({ fn, contract: contracted(fn), target: TARGET, callable: new Set(), objectPath });
@@ -1571,7 +1571,7 @@ function reference(a: readonly number[], turns: number, weight: (i: number) => n
 
 /** What the instructions say, so a test can see which path the lowering took. */
 async function emitted(fn: SemanticFunction, callable: readonly string[] = ["f", "g", "h9"]): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-census-"));
+  const directory = await scratch("blaze-census-");
   const objectPath = join(directory, "subject.o");
   await buildObject({ fn, contract: contracted(fn), target: TARGET, callable: new Set(callable), objectPath });
   return run("objdump", ["-d", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 }).stdout;
@@ -1727,7 +1727,7 @@ test("a whole number accumulator is refused, because the additions are of double
  * back both times.
  */
 async function answeredBy(value: SemanticValue, inputs: readonly string[], folded: boolean): Promise<string[]> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-machine-identity-"));
+  const directory = await scratch("blaze-machine-identity-");
   const runtime = await buildStandaloneRuntime(directory);
   const body = (): SemanticFunction =>
     subject(
@@ -1804,3 +1804,4 @@ test("the machine code of a folded identity is the machine code of the unfolded 
     assert.deepEqual(folded, plain, `${one.name}: folding changed what the machine code computes`);
   }
 });
+

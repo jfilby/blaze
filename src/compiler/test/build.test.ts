@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild, runStored, inspectProject, STATE_DIRECTORY, type Reporter } from "../compiler.ts";
 import { run } from "../core/process.ts";
@@ -9,6 +8,7 @@ import type { ProgramContract, SourceInput, VerificationResult } from "../core/t
 import { chatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
 import { irOf } from "./phase.ts";
+import { scratch } from "./scratch.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const HELLO_WORLD_REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
@@ -46,7 +46,7 @@ async function reviews(directory: string, ...answers: string[]): Promise<string>
 }
 
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = await scratch(`blaze-${name}-`);
   await writeProject(join(directory, "input.toml"), input);
   return directory;
 }
@@ -57,7 +57,7 @@ async function workspace(name: string, input: SourceInput = INPUT): Promise<stri
  * copy: the repository is not the test's scratch directory.
  */
 async function exampleWorkspace(name: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const root = await scratch(`blaze-${name}-`);
   const directory = join(root, "hello_world");
   await cp(EXAMPLE_DIRECTORY, directory, { recursive: true });
   // The example ships with the state of an earlier build, and what these tests
@@ -178,7 +178,7 @@ test("a function the source named __proto__ is compiled and recorded like any ot
   // check read the inherited accessor, so it refused a program that declares
   // the name once, and the records were assigned into rather than built, so
   // the entry never existed in them.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-proto-"));
+  const directory = await scratch("blaze-proto-");
   await writeProject(join(directory, "input.toml"), {
     language: "typescript",
     source: ["export function __proto__(n: bigint): bigint {", "  return n * 2n;", "}", ""].join("\n"),
@@ -740,7 +740,7 @@ const REFERENCE_PROGRAM = [
 
 /** A program project, whose reviews are recorded rather than asked for. */
 async function programProject(name: string, source: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = await scratch(`blaze-${name}-`);
   await writeProject(join(directory, "input.toml"), { ...INPUT, language: "typescript", entry: "", source });
   await writeFile(join(directory, "reviews.json"), JSON.stringify({ reviews: [SOUND] }), "utf8");
   return directory;
@@ -818,7 +818,7 @@ const LEAF_CALLING_PROGRAM = [
  * gets is decided by the function the prompt is for.
  */
 async function callingProject(name: string): Promise<{ directory: string; answer: () => string }> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = await scratch(`blaze-${name}-`);
   await writeFile(join(directory, "main.ts"), CALLING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -901,7 +901,7 @@ const BRANCHING_PROGRAM = [
 
 test("a review that inlines a call has the callee's body put where the call was", async (t) => {
   const inline = "verdict: repaired\nreason: the callee is a leaf\nproposal: inline-call entry callee=twice";
-  const directory = await mkdtemp(join(tmpdir(), "blaze-writes-out-"));
+  const directory = await scratch("blaze-writes-out-");
   await writeFile(join(directory, "main.ts"), LEAF_CALLING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -942,7 +942,7 @@ test("a callee that leaves from more than one block is left as a call, and the p
   // of its blocks, and a body like that has nowhere to go in a caller that has
   // one. The call stays, both functions are linked, and the program prints what
   // the source prints.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-writes-transitive-"));
+  const directory = await scratch("blaze-writes-transitive-");
   await writeFile(join(directory, "main.ts"), BRANCHING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -978,7 +978,7 @@ test("a caller of a leaf is built as a function of its own, with no review askin
   // block has a body that can be put where the call was. What the caller gains
   // is the thing it did not have: with no call left in it, the object stands
   // on its own and is checked against its contract instead of by the program.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-inline-leaf-"));
+  const directory = await scratch("blaze-inline-leaf-");
   await writeFile(join(directory, "main.ts"), LEAF_CALLING_PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -1194,7 +1194,7 @@ test("an imported module that runs code is refused, because nothing would run it
 
 /** A project whose entry module imports another module of the same directory. */
 async function multiFileProject(name: string, helper: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = await scratch(`blaze-${name}-`);
   await writeFile(
     join(directory, "dot.ts"),
     [
@@ -1312,3 +1312,4 @@ test("the mode decides the flags and the guards, and the artifact shows which", 
   assert.ok(built.debug!.guard && built.release!.guard, "a guarded build lost its guard");
   assert.equal(built.danger!.guard, false, "a danger build still emits the use-after-free guard");
 });
+

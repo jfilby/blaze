@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeProject } from "./project.ts";
 import { runBuild, STATE_DIRECTORY } from "../compiler.ts";
@@ -21,6 +20,7 @@ import { buildIrReviewPrompt, type ReviewRequest } from "../ai/review.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { programWithSemantics } from "./phase.ts";
 import type { FunctionContract, SourceInput } from "../core/types.ts";
+import { scratch } from "./scratch.ts";
 
 const REPLAY = new URL("./fixtures/runtime-dot-product-replay.json", import.meta.url).pathname;
 const OBJECT_REPLAY = new URL("./fixtures/runtime-object-replay.json", import.meta.url).pathname;
@@ -68,7 +68,7 @@ const ALLOCATING: SourceInput = {
 const quiet = { stage: () => {} };
 
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `blaze-${name}-`));
+  const directory = await scratch(`blaze-${name}-`);
   await writeProject(join(directory, "input.toml"), input);
   return directory;
 }
@@ -128,7 +128,7 @@ test("a danger runtime still answers the ABI where its own arithmetic would not"
     "",
   ].join("\n");
   for (const mode of ["debug", "danger"] as const) {
-    const directory = await mkdtemp(join(tmpdir(), `blaze-argv-${mode}-`));
+    const directory = await scratch(`blaze-argv-${mode}-`);
     await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
     await writeFile(join(directory, "runtime.c"), runtimeSourceSource(mode), "utf8");
     await writeFile(join(directory, "probe.c"), probe, "utf8");
@@ -171,7 +171,7 @@ test("an argument read before the host gave any is NaN in every mode", async () 
     "",
   ].join("\n");
   for (const mode of ["debug", "danger"] as const) {
-    const directory = await mkdtemp(join(tmpdir(), `blaze-argv-none-${mode}-`));
+    const directory = await scratch(`blaze-argv-none-${mode}-`);
     await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
     await writeFile(join(directory, "runtime.c"), runtimeSourceSource(mode), "utf8");
     await writeFile(join(directory, "probe.c"), probe, "utf8");
@@ -241,7 +241,7 @@ test("a released block is the next block of its size, and a null release is noth
     "",
   ].join("\n");
   for (const mode of ["debug", "danger"] as const) {
-    const directory = await mkdtemp(join(tmpdir(), `blaze-pool-${mode}-`));
+    const directory = await scratch(`blaze-pool-${mode}-`);
     await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
     await writeFile(join(directory, "runtime.c"), runtimeSourceSource(mode), "utf8");
     await writeFile(join(directory, "probe.c"), probe, "utf8");
@@ -524,7 +524,7 @@ test("a result too small for seventeen decimal places is still the number it is"
   };
   const candidate = "double small(double x, double* a, unsigned long n) { (void)a; (void)n; return x * 1e-18; }\n";
   const request = "run\n1 1 1\n1\n";
-  const root = await mkdtemp(join(tmpdir(), "blaze-float-"));
+  const root = await scratch("blaze-float-");
 
   const plain = join(root, "plain");
   await mkdir(plain);
@@ -572,7 +572,7 @@ test("the shipped hosted example builds against the Nim runtime", async (t) => {
   }
   // The build delivers its program beside the project file, so the example is
   // built as a copy: the repository is not the test's scratch directory.
-  const root = await mkdtemp(join(tmpdir(), "blaze-hosted-example-"));
+  const root = await scratch("blaze-hosted-example-");
   const directory = join(root, "hosted_dot_product");
   await cp(EXAMPLE, directory, { recursive: true });
   const outcome = await runBuild(
@@ -634,7 +634,7 @@ test("argv_count counts the program and the file it runs, as process.argv does",
     t.skip("the Nim compiler is not installed");
     return;
   }
-  const directory = await mkdtemp(join(tmpdir(), "blaze-argv-count-"));
+  const directory = await scratch("blaze-argv-count-");
   const probe = [
     "var args: array[3, float64] = [5, 7, 9]",
     `${RUNTIME_NAME}_arguments_set(cast[ptr UncheckedArray[float64]](addr args[0]), csize_t(3))`,
@@ -664,7 +664,7 @@ test("an over-aligned object is writable across its whole length in the Nim adap
     t.skip("the Nim compiler is not installed");
     return;
   }
-  const directory = await mkdtemp(join(tmpdir(), "blaze-align-"));
+  const directory = await scratch("blaze-align-");
   const probe = [
     "for align in [16'u64, 32, 64, 128]:",
     "  let n = 20",
@@ -699,7 +699,7 @@ test("an object alignment that leaves the allocator no budget is refused, not wr
   // the guard read as the whole size_t range, the total wrapped into a 4 KiB
   // allocation, and the payload was then placed a terabyte from it: the
   // header write was a wild write rather than a refusal.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-alloc-"));
+  const directory = await scratch("blaze-alloc-");
   const runtime = await buildStandaloneRuntime(directory);
   const compile = async (request: string[], name: string): Promise<string> => {
     const path = join(directory, `${name}.c`);
@@ -753,3 +753,4 @@ test("an object alignment that leaves the allocator no budget is refused, not wr
   assert.equal(worked.code, 0, worked.stderr);
   assert.equal(worked.stdout.trim(), "ok");
 });
+

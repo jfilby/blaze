@@ -11,8 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
@@ -20,6 +19,7 @@ import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { run } from "../core/process.ts";
 import type { ObjectLayout } from "../core/types.ts";
 import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import { scratch } from "./scratch.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
@@ -126,7 +126,7 @@ const NUMBERS: SemanticSlot[] = [
  * whatever the C compiler could prove about it.
  */
 async function lowered(fn: SemanticFunction, driver: (name: string) => string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-irc-"));
+  const directory = await scratch("blaze-irc-");
   const source = join(directory, `${fn.symbol}.c`);
   await writeFile(
     source,
@@ -587,3 +587,4 @@ test("a power is a floating value, whatever the operands are", async () => {
   ]);
   assert.deepEqual(semanticFunctionProblems(subject(F64, handsBack(power(F64)))), []);
 });
+

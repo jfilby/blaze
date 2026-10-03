@@ -9,8 +9,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
@@ -22,6 +21,7 @@ import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
 import type { BuildMode } from "../core/types.ts";
 import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 const quiet = { stage: () => {} };
@@ -273,7 +273,7 @@ const PRINTED = [
 ];
 
 async function numberProgram(runtime?: "nim"): Promise<{ directory: string; binary: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-numbers-"));
+  const directory = await scratch("blaze-numbers-");
   await writeFile(join(directory, "numbers.ts"), `${NUMBERS.map((text) => `console.log(${text});`).join("\n")}\n`, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -323,7 +323,7 @@ const LANGUAGE = [
 
 /** Builds a program of one entry module, and returns the binary it delivers. */
 async function program(source: string, runtime?: "nim", mode?: BuildMode): Promise<{ directory: string; binary: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-program-"));
+  const directory = await scratch("blaze-program-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -408,7 +408,7 @@ test("a typed array holds the elements its view says it does", async () => {
     .map((one) => (one.k === "let" && one.slot.kind === "buffer" ? typeText(one.slot.element) : ""));
   assert.deepEqual(views, ["i8", "f32", "u32", "i32"]);
 
-  const directory = await mkdtemp(join(tmpdir(), "blaze-views-"));
+  const directory = await scratch("blaze-views-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -510,7 +510,7 @@ test("the Nim driver of a program is compiled at the mode the build was given", 
 });
 
 test("a program that prints something else is reported against the line it differs on", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-oracle-"));
+  const directory = await scratch("blaze-oracle-");
   await writeFile(join(directory, "main.ts"), 'console.log("expected");\n', "utf8");
 
   const same = await verifyProgram({
@@ -538,7 +538,7 @@ test("a program that prints something else is reported against the line it diffe
 });
 
 test("a program that stops is reported against the line it never printed", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-stopped-"));
+  const directory = await scratch("blaze-stopped-");
   await writeFile(join(directory, "main.ts"), 'console.log("expected");\nconsole.log("wanted");\n', "utf8");
 
   // A program that prints a line and is then killed has no line to disagree
@@ -567,7 +567,7 @@ test("a delivered program that runs out of memory is a verdict, not a dead build
     t.skip("python3 is needed to grow more heap than a program is given");
     return;
   }
-  const directory = await mkdtemp(join(tmpdir(), "blaze-oom-"));
+  const directory = await scratch("blaze-oom-");
   await writeFile(join(directory, "main.ts"), 'console.log("expected");\n', "utf8");
 
   // The program prints the line the source prints and then grows more heap
@@ -867,7 +867,7 @@ test("a value that is not a number holds nothing, as a condition reads it", asyn
 });
 
 test("a program in a language the compiler cannot run is refused", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-oracle-nim-"));
+  const directory = await scratch("blaze-oracle-nim-");
   await writeFile(join(directory, "main.nim"), 'echo "hello"\n', "utf8");
 
   await assert.rejects(
@@ -1130,3 +1130,4 @@ test("`>>>` is the shift the language defines, and `toFixed` writes at the digit
   assert.equal(delivered.stdout, "2147483647\n14\n9\n1.414213562\n0.3333\n-0.00\n1e+21\n");
   assert.equal(delivered.stdout, sourceRun.stdout);
 });
+

@@ -12,9 +12,7 @@
 
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+
 import { machine, reviewCandidates, runtimePreparer, type CodegenRequest } from "../codegen.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
@@ -25,6 +23,7 @@ import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import type { ProgramMismatch, SourceInput } from "../core/types.ts";
+import { scratch } from "./scratch.ts";
 
 const SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
 const SOUND = "verdict: sound\nreason: the body computes what the contract states";
@@ -56,7 +55,7 @@ const TARGET = { arch: "x86_64" as const, os: "linux" as const, abi: "sysv" as c
 /** A project pointed at the endpoint the test opened, with the artifact under test. */
 async function request(t: TestContext, base: SemanticFunction, over: Partial<CodegenRequest> = {}): Promise<CodegenRequest> {
   const endpoint: ChatEndpoint = await chatEndpoint(t, [], { answer: () => SOUND });
-  const directory = await mkdtemp(join(tmpdir(), "blaze-review-loop-"));
+  const directory = await scratch("blaze-review-loop-");
   const model = resolveModel("openai-compatible/stub", { AI_API_KEY: "test-key", AI_BASE_URL: endpoint.url });
   return {
     contract,
@@ -178,3 +177,4 @@ export const REVIEW_LOOP_INPUT: SourceInput = {
   source: SOURCE,
   entry: "square",
 };
+

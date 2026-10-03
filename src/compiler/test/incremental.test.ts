@@ -4,11 +4,11 @@ import { readIncremental, reusable, unitKeys, type IncrementalEntry, type UnitKe
 import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
 import type { Candidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprints } from "../core/version.ts";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { returns as returnsValue } from "./definition.ts";
+import { scratch } from "./scratch.ts";
 
 function contractOf(name: string, returns: string, objects: Record<string, ObjectLayout> = {}): FunctionContract {
   return {
@@ -185,7 +185,7 @@ test("an object from another lowering is rebuilt and an object from this one is 
 });
 
 test("a record that is not JSON is no record, not a build that cannot start", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blaze-incremental-"));
+  const root = await scratch("blaze-incremental-");
   const store = createJsonStore(join(root, ".blaze"));
   await store.writeText("projects/p/incremental.json", "{ not json");
 
@@ -198,7 +198,7 @@ test("a record that is not JSON is no record, not a build that cannot start", as
 });
 
 test("two stores writing the same path do not share a temporary name", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blaze-store-"));
+  const root = await scratch("blaze-store-");
   const first = createJsonStore(join(root, ".blaze"));
   const second = createJsonStore(join(root, ".blaze"));
 
@@ -220,7 +220,7 @@ test("a function the source named __proto__ is a stored implementation like any 
   // prototype, assigning to that key is the inherited setter rather than an
   // assignment: it replaces the prototype, adds no entry, and the stored
   // implementation is dropped on the way in and never read on the way out.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-proto-"));
+  const directory = await scratch("blaze-proto-");
   const entry = (key: string) =>
     `{"reviewKey":"${key}","objectKey":"${key}","file":"f","selected":"c1","candidates":[],"outcomes":[{"candidate":"c1","valid":true}]}`;
   // Written as text: `__proto__` in an object literal is the prototype setter,
@@ -240,7 +240,7 @@ test("the empty record a first build writes into keeps a function named __proto_
   // prototype, adds no entry, and the spread that writes the record back
   // carries the entry nowhere. The function is then never cached, and every
   // other function name reads the entry's own fields off the prototype.
-  const directory = await mkdtemp(join(tmpdir(), "blaze-proto-empty-"));
+  const directory = await scratch("blaze-proto-empty-");
   const record = await readIncremental(createJsonStore(directory), "inc.json");
   record.__proto__ = entry({ outcomes: [{ candidate: "c1", valid: true }] });
 
@@ -254,7 +254,7 @@ test("the empty record a first build writes into keeps a function named __proto_
 });
 
 test("an edit to a compiler source moves the fingerprint that decides it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blaze-fingerprint-"));
+  const root = await scratch("blaze-fingerprint-");
   await mkdir(join(root, "toolchain"), { recursive: true });
   await mkdir(join(root, "runtime"), { recursive: true });
   await mkdir(join(root, "test"), { recursive: true });
@@ -353,7 +353,7 @@ test("the engine stamp names the release and the sources that decide a function"
   // the compiler moved under it. It has to move when the sources that decide
   // what a function is move, or a build reuses an object a different compiler
   // made and calls it freshly proved.
-  const root = await mkdtemp(join(tmpdir(), "blaze-engine-"));
+  const root = await scratch("blaze-engine-");
   await mkdir(join(root, "toolchain"), { recursive: true });
   await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 1;\n", "utf8");
   const before = await fingerprintSources(root);
@@ -427,3 +427,4 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   // A wasm build links no object at all, whatever the program around it does.
   assert.deepEqual(names("wasm", true, true, "wasm"), [".s", ".wasm"]);
 });
+

@@ -8,8 +8,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+
 import { join } from "node:path";
 import { buildModule, moduleBytes } from "../toolchain/ir-wasm.ts";
 import { programWithSemantics } from "./phase.ts";
@@ -19,6 +18,7 @@ import type { FunctionContract } from "../core/types.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseSemanticFunction } from "../semantics/ir-text.ts";
 import type { ArithOp, CompareOp, SemanticFunction, SemanticType } from "../core/semantic-ir.ts";
+import { scratch } from "./scratch.ts";
 
 /** The parts of the engine a case here drives a module with. */
 interface Engine {
@@ -56,7 +56,7 @@ async function compute(
   const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
   const contract = program.files.find((file) => file.path === "lib.ts")?.functions.r;
   assert.ok(contract !== undefined, "the entry program imports the function under test");
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const built = await buildModule({
     fn: semantics.r as SemanticFunction,
     contract,
@@ -369,7 +369,7 @@ test("a 64 bit constant is the number it was written as", async () => {
   const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
   const contract: FunctionContract | undefined = program.files.find((file) => file.path === "lib.ts")?.functions.r;
   assert.ok(contract !== undefined, "the entry program imports the function under test");
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-"));
+  const directory = await scratch("blaze-wasm-");
   const built = await buildModule({
     fn: semantics.r as SemanticFunction,
     contract,
@@ -578,7 +578,7 @@ test("a compound division of a whole number above the signed range is unsigned",
   const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
   const contract: FunctionContract | undefined = program.files.find((file) => file.path === "lib.ts")?.functions.r;
   assert.ok(contract !== undefined, "the entry program imports the function under test");
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-divu-"));
+  const directory = await scratch("blaze-wasm-divu-");
   const built = await buildModule({
     fn: semantics.r as SemanticFunction,
     contract,
@@ -602,7 +602,7 @@ test("a construct the module boundary cannot reach is refused by name", async ()
   const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
   const contract: FunctionContract | undefined = program.files.find((f) => f.path === "lib.ts")?.functions.r;
   assert.ok(contract !== undefined, "the entry program imports the function under test");
-  const directory = await mkdtemp(join(tmpdir(), "blaze-wasm-print-"));
+  const directory = await scratch("blaze-wasm-print-");
   await assert.rejects(
     buildModule({
       fn: semantics.r as SemanticFunction,
@@ -1079,3 +1079,4 @@ test("a whole number moves by a number of bits, a limb at a time", () => {
     }
   }
 });
+

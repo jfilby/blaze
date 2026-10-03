@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { generateHarness } from "../toolchain/linker.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { body } from "./definition.ts";
+import { scratch } from "./scratch.ts";
 
 /** Echoes the System V argument at `register`, so the harness is judged on what it hands over. */
 function echoContract(params: string, returns = "i32"): FunctionContract {
@@ -38,7 +38,7 @@ function echoContract(params: string, returns = "i32"): FunctionContract {
  * name the harness already holds.
  */
 async function harnessResult(params: string, vector: string, body = "movl\t%edi, %eax", returns = "i32"): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-harness-"));
+  const directory = await scratch("blaze-harness-");
   const harness = join(directory, "harness.c");
   const assembly = join(directory, "clamp.s");
   const object = join(directory, "clamp.o");
@@ -104,3 +104,4 @@ test("a parameter that collides with nothing keeps the name the source gave it",
   assert.match(harness, /extern int32_t clamp\(int32_t low, int32_t high\);/);
   assert.match(harness, /^static int32_t low;$/m);
 });
+

@@ -9,8 +9,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from "node:http";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+
 import { join } from "node:path";
 import { generateText, streamText } from "ai";
 import { runBuild } from "../compiler.ts";
@@ -20,6 +19,7 @@ import type { SourceInput } from "../core/types.ts";
 import { z } from "zod";
 import { CompilerError } from "../core/errors.ts";
 import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 
 const quiet = { stage: () => {} };
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -323,7 +323,7 @@ test("a streamed answer reads the same as one asked for whole", async (t) => {
 
 /** A project pointed at a stand-in endpoint, built the way a project is. */
 async function projectUsing(t: TestContext, endpoint: GenerateEndpoint): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-commandcode-"));
+  const directory = await scratch("blaze-commandcode-");
   const input: SourceInput = {
     language: "typescript",
     source: SQUARE,
@@ -371,3 +371,4 @@ test("a project built on CommandCode produces the machine it asked for", async (
   assert.equal(endpoint.requests[0]?.body.params?.system !== undefined, true);
   assert.equal(endpoint.requests[0]?.body.params?.model, "stealth/pixel-canary");
 });
+

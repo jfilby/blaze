@@ -11,8 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { frontendFor } from "../semantics/frontend.ts";
 import { runContractPhase } from "../semantics/program.ts";
@@ -23,6 +22,7 @@ import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import { irOf } from "./phase.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { RUNTIME_ABI, RUNTIME_NAME } from "../runtime/abi.ts";
+import { scratch } from "./scratch.ts";
 
 const TREES = new URL("../../examples/binarytrees/1.ts", import.meta.url).pathname;
 
@@ -129,7 +129,7 @@ test("the runtime offers what a function needs to allocate, print and read the c
 });
 
 test("both runs of a check are given the same arguments", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blaze-argv-"));
+  const directory = await scratch("blaze-argv-");
   const sourcePath = join(directory, "source.ts");
   const binaryPath = join(directory, "program.ts");
   // The source and the program read the first argument the same way, so a
@@ -371,3 +371,4 @@ test("a function named after a C keyword is declared under another name and boun
   // the declaration took.
   assert.doesNotMatch(driver, /[^_\w]short\(/);
 });
+

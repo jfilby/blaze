@@ -234,7 +234,7 @@ test("a loop reading a written array at another index is not marked", () => {
   assert.equal(onlyLoop(fn).parallel, undefined);
 });
 
-test("a loop that allocates is not marked, because the allocator is one heap", () => {
+test("a loop that allocates is marked, because the allocator pools per thread", () => {
   const fn = functionWith(
     countedLoop([
       {
@@ -251,10 +251,11 @@ test("a loop that allocates is not marked, because the allocator is one heap", (
           values: [],
         },
       },
+      chain(8),
     ]),
   );
   markParallelLoops(fn.entry);
-  assert.equal(onlyLoop(fn).parallel, undefined);
+  assert.equal(onlyLoop(fn).parallel, true);
 });
 
 /** A call to `callee`, as the IR states one. */
@@ -316,10 +317,25 @@ test("a loop calling a function this build does not hold is not marked", () => {
   assert.equal(onlyLoop(fn).parallel, undefined);
 });
 
-test("a loop calling a function that allocates what it hands back is not marked", () => {
+test("a loop calling a function that allocates what it hands back is marked", () => {
   const fn = functionWith(countedLoop([call("maker", { ownership: "owned" }), chain(8)]));
   markParallelLoops(fn.entry, new Map([["maker", callee("maker", [chain(8)])]]));
-  assert.equal(onlyLoop(fn).parallel, undefined);
+  assert.equal(onlyLoop(fn).parallel, true);
+});
+
+test("a loop calling a function whose body allocates is marked", () => {
+  const fn = functionWith(countedLoop([call("maker"), chain(8)]));
+  const maker = callee("maker", [
+    {
+      k: "let",
+      line: 2,
+      slot: { kind: "object", name: "built", mutable: false, type: { kind: "ref", of: F64, name: "Node" } },
+      value: { k: "newObject", type: { kind: "ref", of: F64, name: "Node" }, layout: "Node", fields: [] },
+    },
+    chain(8),
+  ]);
+  markParallelLoops(fn.entry, new Map([["maker", maker]]));
+  assert.equal(onlyLoop(fn).parallel, true);
 });
 
 test("a loop calling a function that counts a reference is not marked", () => {
