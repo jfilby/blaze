@@ -18,6 +18,8 @@ import { join } from "node:path";
 import { STATE_DIRECTORY, runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
+import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
+import { NO_CALLEES } from "../semantics/parallel.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
@@ -75,9 +77,19 @@ function resolvedFunction(): SemanticFunction {
   return resolveFunction(contract, { objectNames: phase.objectNames, functions: {} });
 }
 
-/** The IR text the compiler prints for it, which is what a build delivers. */
+/** The IR text the compiler prints for what the source resolved into. */
 function resolved(): string {
   return printSemanticFunction(resolvedFunction());
+}
+
+/**
+ * The IR text a build delivers, which is the resolved IR the optimizer has
+ * been over: the passes that run in between are what decide whether a loop's
+ * turns may run at once and whether a turn may reuse the storage the turn before
+ * it took, and those marks are in the artifact that is built.
+ */
+function delivered(): string {
+  return printSemanticFunction(optimizeSemanticFunction(resolvedFunction(), NO_CALLEES));
 }
 
 /** A project of an entry program and the library it calls, with the limits a test needs. */
@@ -122,7 +134,7 @@ test("a program is built from the IR the compiler resolved, with no answer from 
   // a review that proposed nothing left it exactly as the source was written.
   const candidates = await recorded(directory);
   assert.equal(candidates.length, 1);
-  assert.equal(candidates[0].text, resolved());
+  assert.equal(candidates[0].text, delivered());
   assert.equal(candidates[0].proposals, undefined, "nothing was proposed, so nothing was rewritten");
 
   // The review is what the model was asked for, and the IR it read is the
@@ -194,7 +206,7 @@ test("a proposal the compiler refuses leaves the artifact as it was, and says wh
 
   assert.equal(outcome.build.status, "success");
   const candidates = await recorded(directory);
-  assert.equal(candidates[0].text, resolved(), "a refused proposal changes nothing");
+  assert.equal(candidates[0].text, delivered(), "a refused proposal changes nothing");
   assert.equal(candidates[0].proposals, undefined);
   assert.ok(
     log.some((message) => /total: `hoist-invariant entry` was refused: has a body that .*nothing more than once/.test(message)),

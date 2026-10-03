@@ -1,0 +1,374 @@
+/**
+ * Which loops may have the storage one turn allocates reused by the next.
+ *
+ * A program that builds something and then drops it takes fresh storage for
+ * every one it builds, and the cost of that is not the arithmetic. On
+ * binarytrees at depth 18 the pool this compiler uses today grows to a
+ * gigabyte and about three quarters of the run is the kernel handing out fresh
+ * pages for it. Rewinding a cursor at the top of every turn measured 2.8 times
+ * faster and 59 times smaller, because the next tree is written over the one
+ * just walked and the working set stays where the cache can reach it.
+ *
+ * The reuse is the same program only when nothing a turn allocates is still
+ * wanted once that turn has finished. This module is what decides whether the
+ * compiler can show that. A loop it cannot show it for keeps taking its storage
+ * fresh: a refusal costs memory, and a mistake would corrupt.
+ */
+
+import {
+  statementBlocksOf,
+  statementValues,
+  walkValues,
+  type SemanticBlock,
+  type SemanticFunction,
+  type SemanticLoop,
+  type SemanticStatement,
+  type SemanticValue,
+} from "../core/semantic-ir.ts";
+
+/** Why a loop's turns may not reuse the storage the turn before them took. */
+export type Refusal = string;
+
+/**
+ * Every function a body may call, by contract name.
+ *
+ * A body this build does not hold is a body nobody has read, so a call to one
+ * is refused rather than assumed: this module reads a callee to know what it
+ * does with what it is handed, and a callee it cannot read it cannot say.
+ */
+export type Callees = ReadonlyMap<string, SemanticFunction>;
+
+/** The names a build holds no callee for, so every call through them is refused. */
+export const NO_CALLEES: Callees = new Map();
+
+/** A block and every block nested inside it, itself included. */
+function blocksWithin(block: SemanticBlock): SemanticBlock[] {
+  const blocks: SemanticBlock[] = [block];
+  for (const statement of block.statements) {
+    for (const inner of statementBlocksOf(statement)) blocks.push(...blocksWithin(inner));
+  }
+  return blocks;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The pass                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Marks every loop whose turns may take their storage from a region.
+ *
+ * The mark is about memory and not about turns. It says nothing about whether
+ * two turns may run at once, and a loop may carry it without carrying
+ * `parallel` and the other way about.
+ *
+ * Only one loop on a path is marked, and it is the innermost one that can be.
+ * A rewind takes back everything the region has handed out, so a rewind inside
+ * a loop that is itself marked would write over what the outer turn had taken
+ * before the inner loop began. Which loop those is is decided by the program:
+ * the loop the blocks are built in is the one whose turns should pay to rewind,
+ * and an outer loop with a marked loop inside it keeps taking its storage fresh.
+ */
+export function markRegionLoops(entry: SemanticBlock, callees: Callees = NO_CALLEES): void {
+  markWithin(entry, callees);
+}
+
+/**
+ * Marks the loops of a body innermost first, and answers whether any of them
+ * was marked — which is what stops the loop around it being marked too.
+ */
+function markWithin(block: SemanticBlock, callees: Callees): boolean {
+  let marked = false;
+  for (const statement of block.statements) {
+    if (statement.k === "loop") {
+      const loop = statement.loop;
+      const beneath = markWithin(loop.body, callees);
+      if (beneath) {
+        marked = true;
+        continue;
+      }
+      if ((loop.kind === "counted" || loop.kind === "each") && loop.region !== true && refusalFor(loop, callees) === null) {
+        loop.region = true;
+        marked = true;
+      }
+      continue;
+    }
+    for (const inner of statementBlocksOf(statement)) {
+      if (markWithin(inner, callees)) marked = true;
+    }
+  }
+  return marked;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The rule                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/** What one walk of a callee's body is holding. */
+interface Reach {
+  readonly callees: Callees;
+  /** The callees already being read, so a recursive one is not read forever. */
+  readonly reading: Set<string>;
+  /** What each callee was found to build, kept so a shared callee is read once. */
+  readonly makes: Map<string, boolean>;
+  /** What each callee was found to keep, kept so a shared callee is read once. */
+  readonly keeps: Map<string, boolean>;
+}
+
+/**
+ * Why the turns of a loop may not reuse the storage the turn before them took,
+ * or null when they may.
+ *
+ * There is one clause and it is the whole of it: something the turn allocates
+ * is still wanted after the turn ends. Everything below is a way of showing
+ * that, and a way of showing it the compiler cannot take is a refusal.
+ */
+export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): Refusal | null {
+  if (loop.kind === "while" || loop.kind === "doWhile") {
+    return "a turn of a loop that may run any number of times cannot promise what the turn after it still wants";
+  }
+  return bodyRefusal(loop.body, { callees, reading: new Set(), makes: new Map(), keeps: new Map() });
+}
+
+/**
+ * Whether anything a turn allocates is still wanted once the turn has ended.
+ *
+ * The answer is about reachability rather than about types. A block built in
+ * the turn and held only by names the turn declares is gone when the turn ends;
+ * the same block held by a name the turn found is not. So the walk follows the
+ * blocks the turn makes into wherever they are put, and stops as soon as one of
+ * them lands somewhere that outlives it.
+ */
+function bodyRefusal(body: SemanticBlock, reach: Reach): Refusal | null {
+  // A name this body declares dies with it, and so does anything only that
+  // name holds. A name the body found belongs to the frame the body is in, and
+  // a block put into one of those is still wanted when the turn is over.
+  const declared = new Set<string>();
+  for (const block of blocksWithin(body)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let") declared.add(statement.slot.name);
+    }
+  }
+  // The names holding a block of this turn. A name is here once a block has
+  // been bound to it, which is the only way a block reaches a name at all.
+  const held: Set<string> = new Set();
+
+  for (const block of blocksWithin(body)) {
+    for (const statement of block.statements) {
+      const refusal = statementRefusal(statement, declared, held, reach);
+      if (refusal !== null) return refusal;
+    }
+    if (block.terminator.k === "return" && block.terminator.value !== null && ownsRegionBlock(block.terminator.value, held, reach)) {
+      return "the turn hands back something it allocated, and the reuse would write over it";
+    }
+  }
+  return null;
+}
+
+/** Why one statement of a turn may not have its blocks reused, or null. */
+function statementRefusal(
+  statement: SemanticStatement,
+  declared: ReadonlySet<string>,
+  held: Set<string>,
+  reach: Reach,
+): Refusal | null {
+  // A call written as a value is as much a call as one written as a statement,
+  // and what it is handed is as much of this turn's business: `let total =
+  // checksum(tree)` hands the tree to `checksum` exactly as `checksum(tree)` on
+  // its own line does, and the answer is the same either way.
+  for (const value of statementValues(statement)) {
+    let refused: Refusal | null = null;
+    walkValues(value, (inner) => {
+      if (refused !== null || inner.k !== "call") return;
+      for (const argument of inner.call.args) {
+        if (ownsRegionBlock(argument, held, reach) && !calleeKeepsNothing(inner.call.callee, reach)) {
+          refused = "the turn hands something it allocated to a function that keeps what it is given";
+        }
+      }
+    });
+    if (refused !== null) return refused;
+  }
+
+  switch (statement.k) {
+    case "let":
+      if (!ownsRegionBlock(statement.value, held, reach)) return null;
+      // A name the turn declares dies with the turn, so a block bound to one is
+      // gone before the next turn asks for storage.
+      if (declared.has(statement.slot.name)) {
+        held.add(statement.slot.name);
+        return null;
+      }
+      return "the turn binds something it allocated to a name that outlives it";
+    case "set":
+      return ownsRegionBlock(statement.value, held, reach)
+        ? "the turn writes something it allocated into a name that outlives it"
+        : null;
+    case "setElement":
+    case "fill":
+      // An element written into a buffer the turn made is inside the reuse; one
+      // written into a buffer the turn found is handed to whatever holds it.
+      if (ownsRegionBlock(statement.value, held, reach) && !(declared.has(statement.buffer) && held.has(statement.buffer))) {
+        return "the turn writes something it allocated into a buffer that outlives it";
+      }
+      return null;
+    case "storeField":
+      // A field of a block the turn made is inside the reuse. A field of
+      // anything else is not, and putting one there hands the next turn's
+      // rewind a value that is still wanted.
+      if (ownsRegionBlock(statement.value, held, reach) && !ownsRegionBlock(statement.object, held, reach)) {
+        return "the turn stores something it allocated into an object that outlives it";
+      }
+      return null;
+    case "retain":
+      return ownsRegionBlock(statement.value, held, reach)
+        ? "the turn counts something it allocated, and a count outlives the storage it counts"
+        : null;
+    default:
+      // Reading a block is how a turn uses one, printing one and raising with
+      // one are both over before the turn ends, and a nested loop or a block
+      // is this turn's own body.
+      return null;
+  }
+}
+
+/**
+ * Whether a value is, or reaches, a block this turn allocated.
+ *
+ * A block is anything the turn made itself. A name holds one once a block has
+ * been bound to it, and a call hands one back when the function it names builds
+ * any — so a value that is neither, and reads no name that is, is nothing the
+ * reuse would touch.
+ *
+ * A function that builds a block and does not hand it back is still read as
+ * handing one back, which refuses more loops than are strictly necessary and
+ * never fewer. That direction is the safe one: what this answers decides
+ * whether a block is reused, and a block wrongly taken for reusable is a
+ * program with a value overwritten under it.
+ */
+function ownsRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach: Reach): boolean {
+  let found = false;
+  walkValues(value, (inner) => {
+    if (found) return;
+    if (inner.k === "newObject") found = true;
+    else if (inner.k === "local" && held.has(inner.name)) found = true;
+    else if (inner.k === "call" && calleeBuilds(inner.call.callee, reach)) found = true;
+  });
+  return found;
+}
+
+/**
+ * Whether a function builds a block of its own.
+ *
+ * A function called from a thousand turns is read once, and recursion is broken
+ * by assuming: a function that reaches itself is taken to build nothing while
+ * its own body is still being read, which is the safe direction because it
+ * refuses the loops that would otherwise be admitted.
+ */
+function calleeBuilds(name: string, reach: Reach): boolean {
+  const known = reach.makes.get(name);
+  if (known !== undefined) return known;
+  const callee = reach.callees.get(name);
+  if (callee === undefined) return false;
+  if (reach.reading.has(name)) return false;
+  reach.reading.add(name);
+  let builds = false;
+  for (const block of blocksWithin(callee.entry)) {
+    builds = block.statements.some((statement) =>
+      statementValues(statement).some((value) => {
+        walkValues(value, (inner) => {
+          if (inner.k === "newObject") builds = true;
+        });
+        return builds;
+      }),
+    );
+    if (builds) break;
+  }
+  reach.reading.delete(name);
+  reach.makes.set(name, builds);
+  return builds;
+}
+
+/**
+ * Whether a function stores or hands back anything it was given.
+ *
+ * This is the other half of the same question, and it is what lets a turn pass
+ * a block it made to a function that only reads it: `checksum` walks a tree and
+ * hands back a number, so the tree is still the turn's afterwards. A function
+ * this build does not hold is a body nobody has read, and an unread body is
+ * taken to keep everything.
+ */
+function calleeKeepsNothing(name: string, reach: Reach): boolean {
+  const known = reach.keeps.get(name);
+  if (known !== undefined) return known;
+  const callee = reach.callees.get(name);
+  if (callee === undefined) return false;
+  if (reach.reading.has(name)) return true;
+  reach.reading.add(name);
+  const keeps = keepsWhatItIsGiven(callee, reach);
+  reach.reading.delete(name);
+  reach.keeps.set(name, keeps);
+  return !keeps;
+}
+
+/**
+ * Whether a function puts anything it was handed somewhere that outlives the
+ * call.
+ *
+ * A function has no names but its own, so a block it builds can only escape by
+ * being written into something it was given — a buffer, a field, a name it
+ * found — or by being handed back. That is the whole list.
+ */
+function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
+  // What the function was given, and everything a name of its own now holds
+  // because it was given it. A block it built itself is not in here: it dies
+  // with the call unless it is handed back, which is read below.
+  const given = new Set(callee.params.map((param) => param.name));
+  const declared = new Set<string>();
+  const holdsGiven = (value: SemanticValue): boolean => {
+    let found = false;
+    walkValues(value, (inner) => {
+      if (inner.k === "local" && given.has(inner.name)) found = true;
+    });
+    return found;
+  };
+
+  for (const block of blocksWithin(callee.entry)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let") {
+        declared.add(statement.slot.name);
+        if (statement.slot.kind === "value" && holdsGiven(statement.value)) given.add(statement.slot.name);
+        continue;
+      }
+      switch (statement.k) {
+        case "set":
+          // A name of its own is as safe as anything else; a name it found is
+          // somewhere the caller can still be holding the block it was given.
+          if (!declared.has(statement.name) && holdsGiven(statement.value)) return true;
+          break;
+        case "setElement":
+        case "fill":
+          if (!declared.has(statement.buffer) && holdsGiven(statement.value)) return true;
+          break;
+        case "storeField":
+          // Writing into an object it was given puts the block where the owner
+          // of that object still finds it, and so does writing something it was
+          // given into an object of any other kind: only an object built in
+          // this very statement is the function's own.
+          if (holdsGiven(statement.object)) return true;
+          if (holdsGiven(statement.value) && statement.object.k !== "newObject") return true;
+          break;
+        case "retain":
+          if (holdsGiven(statement.value)) return true;
+          break;
+        case "call":
+          for (const argument of statement.call.args) {
+            if (holdsGiven(argument) && !calleeKeepsNothing(statement.call.callee, reach)) return true;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+    if (block.terminator.k === "return" && block.terminator.value !== null && holdsGiven(block.terminator.value)) return true;
+  }
+  return false;
+}

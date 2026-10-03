@@ -332,6 +332,59 @@ proc blaze_rt_finalize*() {.exportc, cdecl.} =
 ## A block too large for a class goes to Nim's allocator rather than to a slab.
 ## That one takes a lock and the pooled path above deliberately does not, so a
 ## program that allocates a great deal of small values pays for no lock at all.
+## The region a turn of a marked loop allocates from: a cursor rewound at the
+## top of every turn, so the next tree is written over the one just walked. It
+## is the same kind of cursor as a slab and for the same reason it is per
+## it is the same kind of cursor as a slab above, and is held the same way the
+## slabs are: this host runs the program on one thread, and a cursor shared
+## between threads would hand two turns the same block.
+var
+  blazeRegionBase: pointer = nil
+  blazeRegionAt: pointer = nil
+  blazeRegionEnd: pointer = nil
+  blazeRegionRoom: uint64 = 0
+  blazeRegionOn: bool = false
+
+const BlazeRegionBytes = 4'u64 * 1024'u64 * 1024'u64
+
+proc blazeRegionEnter() =
+  blazeRegionOn = true
+  blazeRegionAt = blazeRegionBase
+
+proc blazeRegionLeave() =
+  blazeRegionOn = false
+
+## A block out of the region that is open, laid out as a block out of a slab is.
+proc blazeRegionTake(total, bytes, alignment: uint64, cleared: bool): pointer =
+  if (if blazeRegionEnd == nil: 0'u64 else: uint64(cast[uint](blazeRegionEnd) - cast[uint](blazeRegionAt))) < total:
+    ## A region that filled up was asked for more room than it had, so the next
+    ## one is twice what this one was and never less: a region that asked for the
+    ## same size every time it filled would take a fresh block on every turn,
+    ## which is the whole thing the region exists to avoid.
+    var room = if blazeRegionRoom < BlazeRegionBytes: BlazeRegionBytes else: blazeRegionRoom * 2
+    while room < total: room += room
+    let fresh = alloc0(int(room) + int(BlazeHeaderSize))
+    ## The room is never copied out of the block it was in: a block holds
+    ## pointers to the blocks beside it, and moving them would leave every one
+    ## aimed at where a block used to be. What the last turn built is abandoned
+    ## rather than carried, and it is the right size for whatever needs one.
+    if blazeRegionBase != nil and cast[uint](blazeRegionAt) == cast[uint](blazeRegionBase):
+      dealloc(blazeRegionBase)
+    blazeRegionRoom = room
+    blazeRegionBase = fresh
+    blazeRegionAt = fresh
+    blazeRegionEnd = cast[pointer](cast[uint](fresh) + uint(room))
+  let header = blazeRegionAt
+  blazeRegionAt = cast[pointer](cast[uint](blazeRegionAt) + uint(total))
+  let payload = cast[pointer](cast[uint](header) + BlazeHeaderSize)
+  let aligned = cast[pointer]((cast[uint](payload) + uint(alignment) - 1) and not (uint(alignment) - 1))
+  cast[ptr BlazeHeader](cast[uint](aligned) - BlazeHeaderSize)[] = BlazeHeader(
+    magic: BlazeMagic, base: nil, length: bytes, alignment: alignment,
+    refs: 1, capacity: bytes)
+  if cleared:
+    zeroMem(aligned, int(bytes))
+  cast[pointer](aligned)
+
 proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
   let align = if alignment == 0: BlazeDefaultAlignment else: alignment
   ## The payload is placed with a mask, which only places it for a power of two,
@@ -341,6 +394,8 @@ proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
   ## end of an array lands on, the program is allowed to make that read, and
   ## the source language answers it as a zero.
   let total = bytes + align + BlazeHeaderSize
+  if blazeRegionOn:
+    return blazeRegionTake(total, bytes, align, cleared)
 ${guarded ? `  if total > BlazeMaxAllocation:
     blazeStop("allocation: request too large")` : ""}
   let cls = if cleared: blazeClassOf(total, align) else: 0
@@ -382,6 +437,18 @@ proc blaze_rt_allocate*(bytes: csize_t): pointer {.exportc, cdecl.} =
 
 proc blaze_rt_allocate_uninitialized*(bytes: csize_t): pointer {.exportc, cdecl.} =
   blazeBlock(bytes.uint64, BlazeDefaultAlignment, false)
+
+proc blaze_rt_region_enter*() {.exportc, cdecl.} =
+  ## Begin a region: every block the program allocates until it leaves is taken
+  ## from this thread's region cursor, so the next turn of the loop the compiler
+  ## proved it for is written over the one this turn built.
+  blazeRegionEnter()
+
+proc blaze_rt_region_leave*() {.exportc, cdecl.} =
+  ## End the region begun by blaze_rt_region_enter. Nothing is freed: the
+  ## cursor keeps where the turn finished and the next region begins at its
+  ## start again.
+  blazeRegionLeave()
 
 proc blaze_rt_object_new*(bytes, alignment: csize_t): pointer {.exportc, cdecl.} =
 ${guarded ? `  let align = if alignment == 0: BlazeDefaultAlignment else: alignment.uint64

@@ -1087,6 +1087,15 @@ class Machine {
   private readonly names = new NameScope((name) => name);
   private readonly slots = new Map<string, Held>();
   private readonly loops: { header: string; exit: string; names: { header: string; exit: string } }[] = [];
+  /**
+   * The region loop the code being written is inside the body of, if any.
+   *
+   * A turn that leaves early — one that breaks out of its loop, or returns out
+   * of the function — leaves the region there rather than at the end of a body
+   * it never reaches. Only one region is open at a time: `semantics/region.ts`
+   * marks a loop only where no loop inside it is marked.
+   */
+  private region: { header: string } | null = null;
   private readonly layouts: Record<string, ObjectLayout>;
   private readonly epilogue = this.code.label("Lepilogue");
   /** How many labels the lowering has minted, one pair per loop. */
@@ -2276,6 +2285,30 @@ class Machine {
    * encoder has no `lock`-prefixed instruction at all. Running the turns in
    * order is the same program, so that is what it does.
    */
+  /**
+   * One turn of a loop, between a region's beginning and its end where the loop
+   * carries the mark.
+   *
+   * The region begins at the top of the turn and is left at the bottom, so the
+   * next turn is written over what this one built. A turn that leaves early
+   * leaves it early too — see `terminator` — and leaving it twice is nothing,
+   * which is why the end is written whether the body ended by jumping out or not.
+   */
+  private turn(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>, labels: LoopLabels): void {
+    if (loop.region !== true) {
+      this.block(loop.body);
+      if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+      return;
+    }
+    this.runtime("_region_enter");
+    const opened = this.region;
+    this.region = { header: labels.header };
+    this.block(loop.body);
+    this.runtime("_region_leave");
+    this.region = opened;
+    if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+  }
+
   private loop(loop: SemanticLoop): void {
     this.names.enter();
     const labels = this.loopLabels(loop);
@@ -2834,8 +2867,7 @@ class Machine {
       labels.exit,
       counter,
     );
-    this.block(loop.body);
-    if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+    this.turn(loop, labels);
     this.code.bind(labels.exit);
     // The slots the header was read into are dead now the loop is written, and
     // whatever the statement after this one binds takes them.
@@ -2873,8 +2905,7 @@ class Machine {
     this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType);
     this.readAt(loop.elementType);
     this.store(this.bind(loop.element, loop.elementType));
-    this.block(loop.body);
-    if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+    this.turn(loop, labels);
     this.code.bind(labels.exit);
     // The length was read before the body and is dead now the loop is written.
     this.freeSlot(length);
@@ -3000,6 +3031,7 @@ class Machine {
   private terminator(terminator: SemanticTerminator): void {
     if (terminator.k === "next") return;
     if (terminator.k === "return") {
+      this.leaveRegion();
       // A wide number is returned through a pointer the caller passes rather
       // than in a register, because four limbs do not fit in the two registers
       // the convention returns a whole number in. The pointer was taken out of
@@ -3022,7 +3054,18 @@ class Machine {
     if (open === undefined || (terminator.target !== open.names.header && terminator.target !== open.names.exit)) {
       throw machineError(`${this.fn.symbol} jumps for a block no loop around it names`, terminator.target);
     }
+    // A `continue` is another turn of the same loop, so the region is still the
+    // right one after it; a `break`, and a jump out of a loop further out, are
+    // not, and both leave the region on the way.
+    if (terminator.target !== open.names.header) this.leaveRegion();
     this.code.jmp(terminator.target === open.names.header ? open.header : open.exit);
+  }
+
+  /** Leaves the region the code being written is inside, where there is one. */
+  private leaveRegion(): void {
+    if (this.region === null) return;
+    this.runtime("_region_leave");
+    this.region = null;
   }
 
   private release(name: string): void {

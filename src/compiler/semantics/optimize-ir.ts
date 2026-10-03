@@ -43,6 +43,7 @@ import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementV
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
+import { markRegionLoops } from "./region.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -1980,6 +1981,7 @@ function optimizeBody(body: Body, callees: Callees): void {
   // the rounds split in two, or unrolled away entirely, is not the loop the
   // answer was about.
   markParallelLoops(body.entry, callees);
+  markRegionLoops(body.entry, callees);
 }
 
 /** Folds every block of the function, nested ones included. */

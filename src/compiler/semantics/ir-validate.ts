@@ -65,6 +65,7 @@ import type {
 import { builtinFor } from "./builtins.ts";
 import { parseType, typeToString } from "./contract.ts";
 import { NO_CALLEES, refusalFor, type Callees } from "./parallel.ts";
+import { refusalFor as regionRefusalFor } from "./region.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
@@ -1511,6 +1512,7 @@ function bodyProblems(context: Context, body: Body, tree: Tree): string[] {
     ...structureProblems(body),
     ...controlFlowProblems(tree),
     ...parallelProblems(context, tree),
+    ...regionProblems(context, tree),
     ...valueProblems(tree),
     ...typeProblems(context, tree),
     ...callProblems(context, tree),
@@ -1582,6 +1584,34 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
  * So the claim is proved here as well, and a loop that fails is refused with the
  * reason the analysis gives.
  */
+/**
+ * The loops whose marks about memory the validator will not take on trust.
+ *
+ * A `region` mark in IR text is a claim that everything a turn allocates is
+ * dead by the end of that turn. It is proved here rather than believed for the
+ * same reason the `parallel` mark is: a mark written by hand or by a model that
+ * is wrong is a program whose storage is rewound under a value that is still
+ * wanted, which is a program that corrupts itself rather than one that is a
+ * little slower.
+ */
+function regionProblems(context: Context, tree: Tree): string[] {
+  const problems: string[] = [];
+
+  for (const placed of tree.statements) {
+    const statement = placed.statement;
+    if (statement.k !== "loop") continue;
+    const loop = statement.loop;
+    if (loop.kind !== "counted" && loop.kind !== "each") continue;
+    if (loop.region !== true) continue;
+    const refusal = regionRefusalFor(loop, context.callees);
+    if (refusal !== null) {
+      problems.push(`${label(placed.block.block.id, statement.line)}loop is marked region but ${refusal}`);
+    }
+  }
+
+  return problems;
+}
+
 function parallelProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 

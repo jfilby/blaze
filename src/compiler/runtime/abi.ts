@@ -98,6 +98,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["memory"] },
   ),
   entry(
+    "blaze_rt_region_enter",
+    "void",
+    [],
+    "Begins a region: every block the program allocates until it leaves is taken from this thread's region cursor.",
+    "A region exists so that a turn which builds something and drops it can take the same storage again on the next turn, rather than asking for memory that has to be faulted in afresh. The compiler emits this around a loop it proved every allocation of whose turns is dead by the end of the turn. One region at a time per thread: a rewind takes the whole region, so a loop inside another region loop is not given one of its own.",
+    { tags: ["memory"] },
+  ),
+  entry(
+    "blaze_rt_region_leave",
+    "void",
+    [],
+    "Ends the region begun by blaze_rt_region_enter.",
+    "Nothing is freed: the storage goes back to being this thread's cursor, and the next region begins at its start again. A block allocated in a region is never referenced after the turn that made it — that is what the compiler proved before it emitted this — so there is nothing to hand back and nothing that still points at it.",
+    { tags: ["memory"] },
+  ),
+  entry(
     "blaze_rt_reallocate",
     "void*",
     [
@@ -839,6 +855,34 @@ static _Thread_local char* blaze_rt_slab_at = NULL;
 static _Thread_local char* blaze_rt_slab_end = NULL;
 static _Thread_local blaze_rt_header* blaze_rt_released[BLAZE_RT_SLAB_CLASSES];
 
+/* A region is the same kind of cursor as a slab, and it has the same reason to
+   be per thread. The difference is that it is rewound rather than recycled one
+   block at a time: a turn that builds a tree and walks it takes one region,
+   and the turn after it starts the region again from the same place, so the
+   nodes of the next tree are written over the ones just walked.
+
+   That is where most of the time of such a program goes without it. A tree of
+   depth d is 2^d nodes of a few words each, and a program asked for one
+   thousand of them is asked for a gigabyte of memory it will never read again.
+   Handing that out fresh costs the kernel a fault per page and a cache miss
+   per node, and rewind makes the working set small enough to stay in cache.
+
+   The cursor is rewound and never copied. A block holds pointers to the blocks
+   beside it, so growing the region by moving what it already holds would
+   leave every one of those pointers aimed at where a block used to be; a
+   region that has run out is abandoned for a larger one instead, and the
+   abandoned one is still the right size for whatever needs it to be. */
+static _Thread_local char* blaze_rt_region_base = NULL;
+static _Thread_local char* blaze_rt_region_at = NULL;
+static _Thread_local char* blaze_rt_region_end = NULL;
+static _Thread_local size_t blaze_rt_region_room = 0;
+static _Thread_local int blaze_rt_region_on = 0;
+
+/* How much a region asks for when it starts. It is big enough that the tree of
+   a benchmark run is built without ever reaching for a second one, and small
+   enough that a program which asks for one keeps one slab's worth. */
+#define BLAZE_RT_REGION_BYTES (4u * 1024u * 1024u)
+
 /* The class a block of total bytes at the given alignment belongs to,
    counting from one, or zero for a block the host is asked for. A class is
    never zero for a block that can be pooled, because the smallest block is a
@@ -868,6 +912,8 @@ static inline __attribute__((always_inline)) size_t blaze_rt_class_of(size_t tot
    that read as a zero. A block sized without the slack put the read into the
    allocator's own rounding, which is not zero, and a while loop over an array
    then ran past the values it was given. */
+static void* blaze_rt_region_take(size_t total, size_t bytes, size_t alignment, int cleared);
+
 static void* blaze_rt_block(size_t bytes, size_t alignment, int cleared) {
   if (alignment == 0) alignment = BLAZE_RT_DEFAULT_ALIGNMENT;
 ${guarded ? `  /* The payload is placed with a mask, which only places it for a power of
@@ -882,6 +928,7 @@ ${guarded ? `  /* The payload is placed with a mask, which only places it for a 
   if (alignment > BLAZE_RT_MAX_ALLOCATION - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("object alignment is too large");
   if (bytes > BLAZE_RT_MAX_ALLOCATION - alignment - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("request too large");` : ""}
   const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
+  if (blaze_rt_region_on) return blaze_rt_region_take(total, bytes, alignment, cleared);
   const size_t cls = cleared ? blaze_rt_class_of(total, alignment) : 0;
   if (cls != 0) {
     /* The header of a pooled block is at the start of its class, so the payload
@@ -932,9 +979,61 @@ ${guarded ? "  if (base == NULL) blaze_rt_refuse(\"out of memory\");" : ""}
   return (void*)aligned;
 }
 
+/* A block out of the region that is open, laid out exactly as a block out of a
+   slab is: the header first, then the payload placed with the alignment the
+   allocation asked for, and slack enough for that placement to stay inside the
+   span the cursor is advanced by. */
+static void* blaze_rt_region_take(size_t total, size_t bytes, size_t alignment, int cleared) {
+  if (blaze_rt_region_at == NULL || (size_t)(blaze_rt_region_end - blaze_rt_region_at) < total) {
+    /* A region that filled up was asked for more room than it had, so the next
+       one it asks for is twice what this one was, and never less. A region that
+       asked for the same size every time it filled would hand the host a fresh
+       block on every turn and move the rewind point onto it, which is the whole
+       thing the region exists to avoid: the turns of a loop are the same turns,
+       and a loop that fills one region fills it every time. */
+    size_t room = blaze_rt_region_room < BLAZE_RT_REGION_BYTES ? BLAZE_RT_REGION_BYTES : blaze_rt_region_room * 2;
+    while (room < total) room += room;
+    char* fresh = (char*)aligned_alloc(64, room);
+${guarded ? '    if (fresh == NULL) blaze_rt_refuse("out of memory");' : ""}
+    /* A block the region has not handed anything out of yet holds nothing this
+       turn is still using, so it goes back rather than being left for the host
+       to reclaim. One the turn has already built into is left alone: it holds
+       the tree so far, and moving that is what a copy would break. */
+    if (blaze_rt_region_at == blaze_rt_region_base) free(blaze_rt_region_base);
+    blaze_rt_region_room = room;
+    blaze_rt_region_base = fresh;
+    blaze_rt_region_at = fresh;
+    blaze_rt_region_end = fresh + room;
+  }
+  blaze_rt_header* header = (blaze_rt_header*)blaze_rt_region_at;
+  blaze_rt_region_at += total;
+  char* start = (char*)header + BLAZE_RT_HEADER_SIZE;
+  char* aligned = (char*)(((uintptr_t)start + alignment - 1) & ~(uintptr_t)(alignment - 1));
+  header->length = bytes;
+  header->alignment = alignment;
+  header->references = 1;
+  header->capacity = bytes;
+  header->magic = BLAZE_RT_MAGIC;
+  header->base = NULL;
+  if (cleared) memset(aligned, 0, bytes);
+  return aligned;
+}
+
 void blaze_rt_initialize(void) {}
 
 void blaze_rt_finalize(void) {}
+
+void blaze_rt_region_enter(void) {
+  blaze_rt_region_on = 1;
+  blaze_rt_region_at = blaze_rt_region_base;
+}
+
+void blaze_rt_region_leave(void) {
+  /* The cursor is left where the turn finished rather than sent back to the
+     start, so the next block of the same turn-sized region is the next one the
+     program asks for rather than the one it just gave away. */
+  blaze_rt_region_on = 0;
+}
 
 void* blaze_rt_allocate(size_t bytes) {
   return blaze_rt_block(bytes, BLAZE_RT_DEFAULT_ALIGNMENT, 1);
@@ -981,6 +1080,15 @@ void blaze_rt_release(void* pointer) {
      null pointer, which is a fault on the first release of a value that was
      never built. */
   if (pointer == NULL) return;
+  /* A block of an open region is not recycled on its own. A block put on the
+     released list of its class would be handed out again by the slab path
+     while the region is rewound over the same memory, and two blocks would be
+     live in one piece of it. The rewind takes the whole region instead, which
+     is what the region exists for and what every block in it is there for. */
+  if (blaze_rt_region_on) {
+    blaze_rt_header_of(pointer)->references = 0;
+    return;
+  }
   blaze_rt_header* header = blaze_rt_header_of(pointer);
   if (header->references > 1) {
     header->references -= 1;

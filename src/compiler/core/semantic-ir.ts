@@ -731,6 +731,16 @@ export type SemanticLoop =
        */
       parallel?: boolean;
       /**
+       * True when the compiler proved every block a turn of this loop
+       * allocates is dead before the next turn begins, so the storage may be
+       * reused rather than taken fresh. See `semantics/region.ts`.
+       *
+       * The mark is about memory, not about turns: it says nothing about
+       * whether the turns may run at once, and a loop may carry it, carry
+       * `parallel`, or carry both.
+       */
+      region?: boolean;
+      /**
        * What the turns of this loop combine, where they combine something.
        *
        * A turn that accumulates into a name it found is otherwise refused,
@@ -769,6 +779,16 @@ export type SemanticLoop =
        * other. Nothing is inferred from it beyond that.
        */
       parallel?: boolean;
+      /**
+       * True when the compiler proved every block a turn of this loop
+       * allocates is dead before the next turn begins, so the storage may be
+       * reused rather than taken fresh. See `semantics/region.ts`.
+       *
+       * The mark is about memory, not about turns: it says nothing about
+       * whether the turns may run at once, and a loop may carry it, carry
+       * `parallel`, or carry both.
+       */
+      region?: boolean;
       /**
        * What the turns of this loop combine, where they combine something —
        * the same thing a counted loop carries, for the same reason.

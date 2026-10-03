@@ -232,6 +232,55 @@ computes two values, and counting only those would refuse exactly the shape the
 purity rule exists to admit. The loop calling `scaled` above over four million
 elements measured 1.38 times faster than in order.
 
+`semantics/region.ts` is the other half of that, and it is about memory rather
+than about turns. A program that builds something and then drops it takes fresh
+storage for every one it builds. On binarytrees at depth 18 the pool this
+compiler uses grew to a gigabyte and about three quarters of the run was the
+kernel handing out fresh pages for it, because nothing the loop produced was
+ever released — and a node freed one at a time would cost as much to free as it
+did to build. A region is the same cursor rewound at the top of every turn, so
+the next tree is written over the one just walked: measured 6.8 times faster
+through the C backend and 3.8 through the machine one, with peak memory down
+from 5.7 GB to 252 MB at depth 18.
+
+The reuse is the same program only when nothing a turn allocates is still
+wanted once that turn has finished, and that is what the module decides. A
+block built in the turn and held only by names the turn declares is gone when
+the turn ends; the same block held by a name the turn found is not. So the walk
+follows the blocks the turn makes into wherever they are put, and stops as soon
+as one lands somewhere that outlives it — a name it did not declare, a buffer or
+an object it did not build, a reference count, a return, or a function that keeps
+what it is handed. `checksum` walks a tree and answers a number, so the tree is
+still the turn's afterwards and the loop calling it is admitted; make `checksum`
+write the tree anywhere and the loop is refused.
+
+A refusal costs memory and a mistake would corrupt, so the answer is a question
+asked of the whole program rather than of one body: what a call does with what
+it is handed is decided by reading the callee, and a body this build does not
+hold is a body nobody has read, so a call to one is taken to keep what it is
+given and the loop above it is refused. A function that reaches itself is read
+the way the parallel analysis reads one — assuming and checking afterwards —
+and `ir-validate.ts` asks this analysis about every loop the IR *text* claims is
+a region, so a mark written by hand or by a model is proved rather than believed.
+
+The mark is the word `region` beside `parallel` on the loop, and the two are
+about different things: a loop may carry either or both. One loop on a path is
+marked, and it is the innermost one that can be, because a rewind takes
+everything the region has handed out, and a rewind inside a loop that is itself
+marked would write over what the outer turn took before the inner loop began.
+The loop the blocks are built in is the one whose turns pay to rewind, which on
+binarytrees is the inner loop and not the one wrapping it.
+
+The runtime keeps one region cursor per thread, for the same reason the slab
+pool is per thread: the turns of a parallel loop are handed to threads of the
+host's, and a cursor shared between them would hand two turns the same block.
+The cursor only ever grows — a region that filled up was asked for more room
+than it had — and is never copied, because a block holds pointers to the blocks
+beside it and moving them would leave every one aimed at where a block used to
+be. A region is entered and left around the body of a marked loop and left early
+on the paths that leave the turn early, so a `break` out of the loop or a
+`return` out of the function does not carry it past the turn.
+
 ## Benchmarking
 
 You can use hyperfine to benchmark a program or more than one at a time. E.g.:

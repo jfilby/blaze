@@ -486,18 +486,23 @@ function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
 }
 
 /**
- * What a loop carries beside its header: the word `parallel`, and the
- * accumulators the turns combine when they do.
+ * What a loop carries beside its header: the word `parallel`, the word
+ * `region`, and the accumulators the turns combine when they do.
  *
  * `reduction sum +` reads back as the loop says it — the name, then the
  * operator the turns combine with — so the text a model may write holds the
- * reduction and not only the mark that says there is one.
+ * reduction and not only the mark that says there is one. The two marks are
+ * about different things and either may be there alone, so each is written and
+ * read on its own and a loop may carry both.
  */
 function loopMark(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
-  if (loop.parallel !== true) return "";
+  const marks: string[] = [];
+  if (loop.parallel === true) marks.push("parallel");
+  if (loop.region === true) marks.push("region");
+  if (marks.length === 0) return "";
   const reductions = loop.reductions ?? [];
-  if (reductions.length === 0) return " parallel";
-  return ` parallel reduction ${reductions.map((one) => `${one.name} ${one.op}`).join(" ")}`;
+  const reductionsWord = reductions.length === 0 ? "" : ` reduction ${reductions.map((one) => `${one.name} ${one.op}`).join(" ")}`;
+  return ` ${marks.join(" ")}${reductionsWord}`;
 }
 
 /** The accumulators a loop's header names after the word `parallel`. */
@@ -1641,6 +1646,8 @@ class BlockReader {
         scanner.skip();
         const parallel = scanner.peek() === "p";
         if (parallel) scanner.keyword("parallel");
+        const region = scanner.peek() === "r";
+        if (region) scanner.keyword("region");
         const reductions = parallel ? loopReductions(scanner) : [];
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
@@ -1656,6 +1663,7 @@ class BlockReader {
             down: direction === "down",
             step,
             ...(parallel ? { parallel: true } : {}),
+            ...(region ? { region: true } : {}),
             ...(reductions.length === 0 ? {} : { reductions }),
             header,
             exit,
@@ -1676,6 +1684,8 @@ class BlockReader {
         scanner.skip();
         const parallel = scanner.peek() === "p";
         if (parallel) scanner.keyword("parallel");
+        const region = scanner.peek() === "r";
+        if (region) scanner.keyword("region");
         const { header, exit, at } = this.loopTail(scanner);
         const body = this.block(indent + 2, false).body;
         return {
@@ -1688,6 +1698,7 @@ class BlockReader {
             of,
             length,
             ...(parallel ? { parallel: true } : {}),
+            ...(region ? { region: true } : {}),
             header,
             exit,
             body,

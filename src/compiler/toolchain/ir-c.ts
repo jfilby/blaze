@@ -217,6 +217,16 @@ class FunctionEmitter {
   private readonly body: string[] = [];
   private readonly names = new NameScope((name) => cEscape(name, TAKEN));
   private readonly loops: { header: string; exit: string }[] = [];
+  /**
+   * The region loop the code being written is inside the body of, if any.
+   *
+   * A region is left wherever the turn is left from, so a turn that breaks out
+   * of its loop or returns out of the function has to leave it there rather
+   * than at the end of the body it never reaches. Only one region is open at a
+   * time — `semantics/region.ts` marks a loop only where no loop inside it is
+   * marked — so one name is the whole of what has to be remembered.
+   */
+  private region: { header: string } | null = null;
   /** Every function of the program this one calls, as its C declaration. */
   private readonly externs = new Map<string, string>();
   /** Lines that must come before the statement being written. */
@@ -490,7 +500,7 @@ class FunctionEmitter {
           this.write([`${pad(depth)}${this.parallelDirective(loop)}`]);
         }
         this.write([`${pad(depth)}for (${written} ${variable} = ${from ?? start}; ${variable} ${bound} ${to ?? end}; ${move}) {`]);
-        this.block(loop.body, depth + 1);
+        this.turn(loop, depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
       }
@@ -509,7 +519,7 @@ class FunctionEmitter {
           `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length ?? (walk as string)}; ${index}++) {`,
           `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${buffer as string}[${index}];`,
         ]);
-        this.block(loop.body, depth + 1);
+        this.turn(loop, depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
       }
@@ -518,11 +528,35 @@ class FunctionEmitter {
     this.names.leave();
   }
 
+  /**
+   * The body of one turn, between a region's beginning and its end where the
+   * loop carries the mark.
+   *
+   * The region begins at the top of the turn and is left at the bottom of it,
+   * so the next turn is written over what this one built. A turn that leaves
+   * early leaves it early too — see `terminator` — and leaving it twice is
+   * nothing, which is why the end is written whether the body ended by jumping
+   * out of it or not.
+   */
+  private turn(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>, depth: number): void {
+    if (loop.region !== true) {
+      this.block(loop.body, depth);
+      return;
+    }
+    this.write([`${pad(depth)}${RUNTIME_NAME}_region_enter();`]);
+    const opened = this.region;
+    this.region = { header: loop.header };
+    this.block(loop.body, depth);
+    this.write([`${pad(depth)}${RUNTIME_NAME}_region_leave();`]);
+    this.region = opened;
+  }
+
   /** Where a block ends: the value it hands back, or where it jumps to. */
   private terminator(block: SemanticBlock, depth: number): void {
     const terminator = block.terminator;
     if (terminator.k === "next") return;
     if (terminator.k === "return") {
+      this.leaveRegion(depth);
       // A body that falls off its end says so with a return carrying nothing,
       // which a function that returns a value has nothing to say with: C will
       // not compile `return;` in one, and nothing reaches it — an arm that
@@ -544,7 +578,18 @@ class FunctionEmitter {
     if (open === undefined || (terminator.target !== open.header && terminator.target !== open.exit)) {
       throw backendError(`${this.fn.symbol} jumps for a block no loop around it names`, terminator.target);
     }
+    // A `continue` is another turn of the same loop, so the region is still the
+    // right one after it. A `break` is not, and neither is a jump out of a loop
+    // further out, so both leave the region on the way.
+    if (terminator.target !== open.header) this.leaveRegion(depth);
     this.write([`${pad(depth)}${terminator.target === open.header ? "continue;" : "break;"}`]);
+  }
+
+  /** Leaves the region the code being written is inside, where there is one. */
+  private leaveRegion(depth: number): void {
+    if (this.region === null) return;
+    this.write([`${pad(depth)}${RUNTIME_NAME}_region_leave();`]);
+    this.region = null;
   }
 
   /* ---------------------------------------------------------------------- */
