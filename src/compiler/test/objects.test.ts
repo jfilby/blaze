@@ -600,3 +600,83 @@ test("a loop in a body and the same loop in a module count in the same width", (
   assert.ok(first !== undefined && first.k === "loop" && first.loop.kind === "counted");
   assert.equal(first.loop.type.kind === "primitive" ? first.loop.type.name : "?", inBody);
 });
+
+test("a counter a body never reads is a whole number, whatever the body computes", () => {
+  // The turn builds a tree and adds up what a call returns, which is a body of
+  // no whole numbers by any reading — and a counter neither of those reads. A
+  // counter nothing reads has a width that reaches no arithmetic at all, so it
+  // is a whole number on the simpler of the two grounds the rule allows.
+  assert.equal(
+    counterOf(
+      [
+        "function build(x: number): number {",
+        "  let acc = x;",
+        "  acc = acc * 1.25 + x;",
+        "  return acc;",
+        "}",
+        "export function main(n: number): number {",
+        "  let total = 0;",
+        "  for (let i = 0; i < n; i += 1) {",
+                "    total += build(n);",
+        "  }",
+        "  return total;",
+        "}",
+        "console.log(main(4));",
+        "",
+      ].join("\n"),
+    ),
+    "i64",
+  );
+});
+
+test("a counter a body reads is left a double when the body is not wholly whole", () => {
+  // The same loop, but the turn reads its counter as well as calling. Now the
+  // counter's width is the width the arithmetic runs at, so only a body written
+  // entirely in whole numbers may hold it at one.
+  assert.equal(
+    counterOf(
+      [
+        "function build(x: number): number {",
+        "  let acc = x;",
+        "  acc = acc * 1.25 + x;",
+        "  return acc;",
+        "}",
+        "export function main(n: number): number {",
+        "  let total = 0;",
+        "  for (let i = 0; i < n; i += 1) {",
+                "    total += build(i) + i * 0.5;",
+        "  }",
+        "  return total;",
+        "}",
+        "console.log(main(4));",
+        "",
+      ].join("\n"),
+    ),
+    "f64",
+  );
+});
+
+test("a counter a nested loop of its own shadows is not a read of the outer one", () => {
+  // The inner loop declares its own `i`, so the two reads inside it are of that
+  // one and the outer counter is read by neither — which is the shadowing the
+  // walk has to see through, or a counter would be read by every nested loop
+  // that happened to reuse its name.
+  assert.equal(
+    counterOf(
+      [
+        "export function main(n: number): number {",
+        "  let total = 0;",
+        "  for (let i = 0; i < n; i += 1) {",
+        "    for (let i = 0; i < 4; i += 1) {",
+        "      total += i * 0.5;",
+        "    }",
+        "  }",
+        "  return total;",
+        "}",
+        "console.log(main(4));",
+        "",
+      ].join("\n"),
+    ),
+    "i64",
+  );
+});

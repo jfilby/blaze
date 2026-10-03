@@ -516,6 +516,124 @@ export function bodyIsWhole(body: readonly Statement[], counter: string, whole: 
   return true;
 }
 
+/**
+ * Whether a loop body never reads the counter of the loop it is written in.
+ *
+ * A counter the body does not read is a counter whose width reaches no
+ * arithmetic at all: the loop counts with it, and nothing else does. Widening it
+ * therefore changes no answer, whatever the rest of the body is written in — a
+ * body that builds a tree and adds up a checksum calls two functions and is not a
+ * body of whole numbers by any reading, but its counter is read by neither, so
+ * the counter may be a whole number all the same.
+ *
+ * This is what `bodyIsWhole` cannot see. That asks whether the arithmetic is
+ * whole, and answers no for a body that calls anything; this asks the narrower
+ * question of the counter alone, and the two together widen a counter wherever
+ * either holds. A loop whose body does read its counter still needs the whole
+ * body to be whole, because there the counter's width is the width the
+ * arithmetic runs at.
+ *
+ * A loop nested inside this one that declares a name of its own shadows the
+ * counter for its own body, so a read there is not a read of this counter.
+ */
+export function bodyIgnoresCounter(body: readonly Statement[], counter: string, shadowed = false): boolean {
+  for (const statement of body) {
+    switch (statement.kind) {
+      case "loop": {
+        const hides = shadowed || statement.variable === counter;
+        if (expressionReads(statement.from, counter) || expressionReads(statement.to, counter)) return false;
+        if (statement.step !== null && expressionReads(statement.step, counter)) return false;
+        if (!bodyIgnoresCounter(statement.body, counter, hides)) return false;
+        break;
+      }
+      case "forOf": {
+        const hides = shadowed || statement.variable === counter;
+        if (!bodyIgnoresCounter(statement.body, counter, hides)) return false;
+        break;
+      }
+      case "if": {
+        if (!shadowed && expressionReads(statement.condition, counter)) return false;
+        if (!bodyIgnoresCounter(statement.then, counter, shadowed)) return false;
+        if (!bodyIgnoresCounter(statement.otherwise, counter, shadowed)) return false;
+        break;
+      }
+      case "while":
+      case "doWhile":
+        if (!shadowed && expressionReads(statement.condition, counter)) return false;
+        if (!bodyIgnoresCounter(statement.body, counter, shadowed)) return false;
+        break;
+      case "declare":
+      case "assign":
+      case "update":
+      case "result":
+      case "print":
+        if (!statementIgnoresCounter(statement, counter, shadowed)) return false;
+        break;
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+/** Whether a statement reads the counter of a loop, unless something shadows it. */
+function statementIgnoresCounter(statement: Statement, counter: string, shadowed: boolean): boolean {
+  if (shadowed) return true;
+  const values: Expression[] = [];
+  switch (statement.kind) {
+    case "declare":
+      values.push(statement.init);
+      break;
+    case "assign":
+    case "memberAssign":
+    case "result":
+    case "print":
+      values.push(statement.value);
+      break;
+    default:
+      break;
+  }
+  // A read of the counter is a name in one of these, and a read of the name the
+  // statement writes is not one: `total = i` reads it, `i = 2` does not.
+  if (statement.kind === "assign" && statement.target === counter) {
+    values.length = 0;
+  }
+  for (const value of values) {
+    if (expressionReads(value, counter)) return false;
+  }
+  return true;
+}
+
+/** Whether an expression reads a name, wherever in it the name appears. */
+function expressionReads(expression: Expression, counter: string): boolean {
+  switch (expression.k) {
+    case "ident":
+      return expression.name === counter;
+    case "unary":
+      return expressionReads(expression.operand, counter);
+    case "binary":
+      return expressionReads(expression.left, counter) || expressionReads(expression.right, counter);
+    case "conditional":
+      return (
+        expressionReads(expression.condition, counter) ||
+        expressionReads(expression.then, counter) ||
+        expressionReads(expression.otherwise, counter)
+      );
+    case "index":
+      return expressionReads(expression.base, counter) || expressionReads(expression.index, counter);
+    case "member":
+      return expressionReads(expression.base, counter);
+    case "call":
+      return expression.args.some((argument) => expressionReads(argument, counter));
+    case "argv":
+      return expression.index === null ? false : expressionReads(expression.index, counter);
+    case "object":
+      return expression.fields.some((field) => expressionReads(field.value, counter));
+    default:
+      return false;
+  }
+}
+
 /** Whether an expression is written entirely in whole numbers. */
 function expressionIsWhole(expression: Expression, counter: string, whole: ReadonlySet<string>): boolean {
   switch (expression.k) {
