@@ -47,11 +47,35 @@ import { wholeNumberArithmetic } from "./whole-numbers.ts";
 /* Numbers                                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** The whole-number types, and the width each one holds. */
-const WIDTH: Record<string, number> = { i8: 8, i16: 16, i32: 32, i64: 64, u8: 8, u16: 16, u32: 32, u64: 64 };
+/**
+ * The whole-number types, and the width each one holds.
+ *
+ * `usize` and `isize` are here because they are the two the table was missing
+ * and both are reachable: a buffer's offset is a `usize`, so the arithmetic a
+ * window is laid out with — `2 * bytesPerFloat * n` in the spectral norm
+ * example — reached every fold below as an unfoldable tree and reached a
+ * backend as the arithmetic the source wrote. Both are a machine word on every
+ * target this compiler builds for, which is the width `ir-machine.ts` gives
+ * them, so a value folded here wraps exactly as it would have wrapped there.
+ *
+ * A loop counter is not one of these and is not the case this table was
+ * missing: `ir-resolve.ts` types a counted loop `i64` unless its ends are
+ * written at a narrower whole width, so the index a kernel walks an array with
+ * was already folding. What was missing is the arithmetic around the array
+ * rather than over it.
+ */
+const WIDTH: Record<string, number> = {
+  i8: 8, i16: 16, i32: 32, i64: 64,
+  u8: 8, u16: 16, u32: 32, u64: 64,
+  usize: 64, isize: 64,
+};
 const FLOAT_TYPES: Record<string, true> = { f32: true, f64: true };
 /** The name of a numeric type, which is what a fold wraps to a width. */
-type NumericName = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64";
+type NumericName =
+  | "i8" | "i16" | "i32" | "i64"
+  | "u8" | "u16" | "u32" | "u64"
+  | "usize" | "isize"
+  | "f32" | "f64";
 
 /** The type a folded truth is written at, which is the one the IR gives it. */
 const BOOL = { kind: "primitive", name: "bool" } as const;
@@ -107,6 +131,24 @@ function wrapWhole(value: number, name: NumericName): number {
   }
   const bound = modulus / 2n;
   return Number(((((whole + bound) % modulus) + modulus) % modulus) - bound);
+}
+
+/**
+ * The mask every bit of a whole number set is, or null when there is not one
+ * this pass can reason about.
+ *
+ * A 64 bit mask is 18446744073709551615, which is past 2^53 and so is not a
+ * number a double holds exactly: `right` is a literal this pass has already
+ * refused to read as one, so a `u64 & 0xffffffffffffffff` is left as it was
+ * written rather than folded against a mask that has already lost its low bits.
+ * That is the same refusal `asNumber` makes and for the same reason.
+ */
+function allOnesAt(type: SemanticType, name: NumericName): number | null {
+  if (!isInteger(type)) return null;
+  const width = WIDTH[name];
+  if (width === undefined) return null;
+  const mask = 2 ** width - 1;
+  return Number.isSafeInteger(mask) ? mask : null;
 }
 
 /**
@@ -310,12 +352,45 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         return { k: "const", type: value.type, text: asText(folded) };
       }
       // The identities, each of which holds at the type it is written at.
+      //
+      // They are all restricted to whole numbers, and the reason is signed
+      // zero rather than rounding: `x + 0.0` is `-0.0` turned into `0.0`, and
+      // `x * 1.0` is exact, so one float identity is not the same program as
+      // the other and neither is written here. A whole number has no such
+      // value, so all of them are the same program at a whole type.
       if (value.right.k === "const" && right !== null && FLOAT_TYPES[name] !== true) {
         if (value.op === "add" && right === 0) return value.left;
         if (value.op === "sub" && right === 0) return value.left;
         if (value.op === "mul" && right === 1) return value.left;
         if (value.op === "mul" && right === 0 && isInteger(value.type)) return value.left;
         if (value.op === "shl" && right === 0) return value.left;
+        // A right shift by nothing is the value, as a left shift by nothing
+        // is. The three were written together and only the left one was
+        // written down, so `x >> 0` and `x >>> 0` reached a backend as a
+        // shift on every turn of whatever loop counted with them.
+        if ((value.op === "shr" || value.op === "ushr") && right === 0) return value.left;
+        // A whole number divided by one is itself and a whole number
+        // remaindered by one is zero, and neither is a fault: one is never
+        // zero, so the divide the backend would run is one it does not have to.
+        if (value.op === "div" && right === 1) return value.left;
+        if (value.op === "mod" && right === 1) return { k: "const", type: value.type, text: asText(0) };
+        // The bitwise identities, at the width the type holds. An index is
+        // masked and combined more often than anything else in a kernel, and
+        // `x | 0` and `x ^ 0` are how a source spells a value it did not
+        // change.
+        const allOnes = allOnesAt(value.type, name);
+        if (value.op === "or" && right === 0) return value.left;
+        if (value.op === "xor" && right === 0) return value.left;
+        if (value.op === "and" && right === 0) return { k: "const", type: value.type, text: asText(0) };
+        if (allOnes !== null) {
+          if (value.op === "and" && right === allOnes) return value.left;
+          if (value.op === "or" && right === allOnes) return { k: "const", type: value.type, text: asText(allOnes) };
+          // `x ^ allOnes` is the bitwise complement of x, which the IR spells
+          // as a unary rather than as another binary over the same mask.
+          if (value.op === "xor" && right === allOnes) {
+            return { k: "unary", type: value.type, op: "bitNot", operand: value.left };
+          }
+        }
       }
       if (value.left.k === "const" && left !== null) {
         if (value.op === "add" && left === 0) return value.right;
@@ -381,7 +456,28 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       if (name === null) return null;
       const left = literalOf(value.left);
       const right = literalOf(value.right);
-      if (left === null || right === null) return null;
+      if (left === null || right === null) {
+        // A whole number against itself is an answer whatever the operator is:
+        // it equals itself, it is not above or below itself, and it is neither
+        // strictly greater nor strictly less. That is what a loop guard and an
+        // index bounds check compute, so `while (i <= i)` and `if (i > i)` fold
+        // to the truth they already are and the branch goes with them.
+        //
+        // A float is left as it was written, and that is the one case where the
+        // answer is not obvious: IEEE 754 has every NaN compare unequal to
+        // itself, so `x == x` over a `f64` is a test for a NaN rather than a
+        // truth. Folding it to `true` would turn a program that finds its NaNs
+        // into one that does not, so only a whole number is folded here.
+        if (numberType(value.right) === null) return null;
+        if (valueKey(value.left) !== valueKey(value.right)) return null;
+        if (value.op === "eq" || value.op === "ge" || value.op === "le") {
+          return { k: "bool", type: BOOL, value: true };
+        }
+        if (value.op === "ne" || value.op === "lt" || value.op === "gt") {
+          return { k: "bool", type: BOOL, value: false };
+        }
+        return null;
+      }
       if (FLOAT_TYPES[name] === true && (Number.isNaN(left) || Number.isNaN(right))) {
         // A comparison with a NaN is false whatever the operator is, except
         // `ne`, which is true. The backends answer it that way too.
@@ -395,11 +491,21 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       if (value.left.k === "bool" && value.right.k === "bool") {
         return { k: "bool", type: BOOL, value: value.op === "and" ? value.left.value && value.right.value : value.left.value || value.right.value };
       }
-      if (value.left.k === "bool" && value.right.k === "const" && FLOAT_TYPES[numberType(value.right) ?? ""] !== true) {
-        // `false && x` is false and `true || x` is true, and neither runs x.
-        if (value.op === "and" && !value.left.value) return { k: "bool", type: BOOL, value: false };
-        if (value.op === "or" && value.left.value) return { k: "const", type: value.type, text: "1" };
+      // A short circuit whose left side is already a truth is its right side,
+      // whichever way it decides. `false && x` is false and never runs x;
+      // `true && x` is x and runs only x; `true || x` is true and never runs
+      // x; `false || x` is x and runs only x. Each is the other side with the
+      // branch the deciding truth already made taken out of it, which is what
+      // a guard that is already a guard comes to after the fold.
+      if (value.left.k === "bool") {
+        if (value.op === "and") return value.left.value ? value.right : { k: "bool", type: BOOL, value: false };
+        return value.left.value ? { k: "const", type: value.type, text: "1" } : value.right;
       }
+      // A short circuit over the same value twice is that value. `x && x` is x
+      // whether x is a truth or not: a falsy x answers the left side, and a
+      // true one answers the right, and both are x. This is what a name read
+      // twice through a short circuit comes to.
+      if (valueKey(value.left) === valueKey(value.right)) return value.left;
       return null;
     }
     case "coalesce": {
@@ -419,6 +525,17 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         const name = numberType(value);
         if (name === null) return null;
         return { k: "const", type: value.type, text: asText(FLOAT_TYPES[name] === true ? -operand : wrapWhole(-operand, name)) };
+      }
+      // The complement of a number written out is a number written out, which
+      // is how `x ^ allOnes` above is answered and how a source that spells a
+      // mask directly is folded. It is the mask minus the value at a whole
+      // number, and the subtraction wraps exactly as the complement does.
+      if (value.op === "bitNot" && operand !== null) {
+        const name = numberType(value);
+        if (name !== null && FLOAT_TYPES[name] !== true) {
+          const mask = allOnesAt(value.type, name);
+          if (mask !== null) return { k: "const", type: value.type, text: asText(wrapWhole(mask - operand, name)) };
+        }
       }
       if (value.operand.k === "bool") {
         if (value.op === "not") return { k: "bool", type: BOOL, value: !value.operand.value };
@@ -1665,6 +1782,73 @@ function pruneKnownBranches(block: SemanticBlock): boolean {
   return changed;
 }
 
+/**
+ * Drops the statements no execution path reaches.
+ *
+ * A block is a list of statements and a terminator, and a terminator is where
+ * the block ends. Two of the statements a block can hold end it themselves: a
+ * `raise` ends the program, and an `if` whose two arms both leave ends it
+ * whichever way the condition went. Everything written below such a statement
+ * is a statement no processor runs and every backend still emits —
+ * `raise("bad"); sum += a[i]` emits the raise, the load, the add and the store
+ * for the sum of an array nobody ever reaches.
+ *
+ * What makes this exact rather than a guess is that the transfer is inside one
+ * block: a block is entered only at its first statement and its terminator is
+ * the only way out of it, so nothing after a statement that leaves can be
+ * reached from anywhere else. The list is cut at that statement and the
+ * terminator stays, which is what the block ended with either way.
+ *
+ * The releases survive, and have to. A block's releases name what it owns and
+ * are checked against the order it allocated in, so a binding the dropped
+ * statements made is still named there; what allocated them is not among those
+ * dropped, because an allocation is written before the transfer that ends the
+ * block.
+ */
+function dropUnreachable(body: Body): boolean {
+  let changed = false;
+  const walk = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+      if (statement.k === "loop") walk(statement.loop.body);
+    }
+    // The list is cut at the first statement that leaves, so what follows it is
+    // dropped and what precedes it is kept in order. A block with no such
+    // statement is left exactly as it was and reports no change, which is what
+    // stops the fixed point from running on a rewrite that did nothing.
+    const leaving = block.statements.findIndex(leavesHere);
+    if (leaving < 0) return;
+    const kept = block.statements.slice(0, leaving + 1);
+    if (kept.length === block.statements.length) return;
+    block.statements = kept;
+    changed = true;
+  };
+  walk(body.entry);
+  return changed;
+}
+
+/**
+ * Whether control cannot reach the statement after this one.
+ *
+ * A `raise` is the plain case: the IR says nothing after it runs. An `if` is
+ * the other, and only when both of its arms leave, because that is the shape
+ * where taking neither branch is not a path at all.
+ *
+ * A loop is never one of them, and this is worth spelling out because the
+ * naive reading of it is wrong. A loop body ends by jumping back to the loop's
+ * header, so its terminator is a jump rather than a `next` — which looks like
+ * it leaves and is in fact the loop working. A loop is left only through a
+ * `break` or a `return` inside it, and the IR writes those as the terminator of
+ * a block nested inside the body rather than as an ending of the loop
+ * statement, so the loop itself always falls through to what follows it.
+ */
+function leavesHere(statement: SemanticStatement): boolean {
+  if (statement.k === "raise") return true;
+  if (statement.k !== "if") return false;
+  if (statement.otherwise === null) return false;
+  return [statement.then, statement.otherwise].every((block) => block.terminator.k !== "next");
+}
+
 /** Whether a statement declares a name, which is what stops an arm splicing. */
 function claimsAName(statement: SemanticStatement): boolean {
   if (statement.k === "let") return true;
@@ -1750,6 +1934,10 @@ function optimizeBody(body: Body): void {
     if (commonWithin(body)) changed = true;
     if (propagateCopies(body)) changed = true;
     if (inlineSingleUses(body)) changed = true;
+    // Unreachable code goes before the dead stores: a `raise` is what makes the
+    // statements after it unreachable, and a store nothing reaches is not one
+    // the passes below would have counted in the first place.
+    if (dropUnreachable(body)) changed = true;
     // The self-assignment goes before the dead stores, because folding is what
     // turns a compound assignment that changes nothing into one, and the dead
     // stores below are the ones the self-assignment can then leave behind.

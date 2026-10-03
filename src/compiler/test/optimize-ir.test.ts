@@ -24,17 +24,41 @@ import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { run } from "../core/process.ts";
 import { typeText } from "../core/semantic-ir.ts";
 import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { TypeExpr } from "../core/types.ts";
+import { cDeclarationType } from "../toolchain/linker.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const I32: SemanticType = { kind: "primitive", name: "i32" };
 const U32: SemanticType = { kind: "primitive", name: "u32" };
 const BOOL: SemanticType = { kind: "primitive", name: "bool" };
+const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 
 const constOf = (text: string, type: SemanticType = F64): SemanticValue => ({ k: "const", type, text });
 
 const bin = (op: string, left: SemanticValue, right: SemanticValue, type: SemanticType = F64): SemanticValue => ({
   k: "arith", type, op: op as never, left, right,
 });
+
+const cmp = (op: string, left: SemanticValue, right: SemanticValue, type: TypeExpr = { kind: "primitive", name: "f64" }): SemanticValue => ({
+  k: "compare", type, op: op as never, operand: left.type, left, right,
+});
+
+/**
+ * The C spelling of the type a driven expression has. Every case that names a
+ * parameter is over a whole number, so the primitive name is the whole answer
+ * and a type that is not primitive is a case that was written wrong.
+ */
+function primitiveOf(type: SemanticType): string {
+  if (type.kind !== "primitive") throw new Error(`the equivalence harness drives a ${type.kind}, which it has no C spelling for`);
+  return cDeclarationType(type);
+}
+
+/**
+ * A read of the one parameter the equivalence harness drives, at the type it
+ * reads it as. Every identity this reaches is one that only applies to a value
+ * that is not written out, which is why it is a name and not a literal.
+ */
+const paramI = (name: string): SemanticValue => ({ k: "local", type: I32, name });
 
 /** `Math.abs`, which is the shortest call a hand-written fixture can make. */
 function absOf(argument: SemanticValue): SemanticValue {
@@ -109,6 +133,49 @@ test("a division by a power of two that may be negative is left alone", () => {
     [parameter],
   );
   assert.match(printed(before), /\bdiv\b/);
+});
+
+test("a whole number is folded at the width it is written at, whatever that width is", () => {
+  // `usize` and `isize` were the two types missing from the width table, and a
+  // buffer's offset is a `usize` — so the arithmetic a window is laid out with,
+  // `2 * bytesPerFloat * n`, reached a backend as the tree the source wrote
+  // rather than as the fold it was already the shape of. A loop counter is not
+  // this case: `ir-resolve.ts` gives a counted loop `i64`, which was in the
+  // table already. These are the same rewrites a `u32` gets, at the width the
+  // backend gives the type, and they are worth the same.
+  const parameter: SemanticSlot = { kind: "value", name: "j", mutable: false, type: USIZE };
+  const read: SemanticValue = { k: "local", type: USIZE, name: "j" };
+  const returns = (value: SemanticValue): string =>
+    printed(
+      fnOf({ id: "entry", releases: [], terminator: { k: "return", value }, statements: [] }, USIZE, [parameter]),
+    );
+  // `j * 8` is a shift, and a shift is the instruction the machine backend has
+  // and a multiply is not.
+  assert.match(returns(bin("mul", read, constOf("8", USIZE), USIZE)), /\bshl\b/);
+  // `j % 8` is a mask, for the same reason: the backend has an `and`.
+  assert.match(returns(bin("mod", read, constOf("8", USIZE), USIZE)), /\band\b/);
+  // The identities an offset is written with most: `i + 0` and `i * 1`.
+  assert.doesNotMatch(returns(bin("add", read, constOf("0", USIZE), USIZE)), /\badd\b/);
+  assert.doesNotMatch(returns(bin("mul", read, constOf("1", USIZE), USIZE)), /\bmul\b/);
+  // And a whole offset difference, which is what two windows produce.
+  assert.match(returns(bin("sub", read, read, USIZE)), /const\[usize\] 0/);
+});
+
+test("a `usize` divided by a power of two is a shift, because it cannot be negative", () => {
+  // The one case a signed number has to be refused and a `usize` does not: a
+  // `usize` is a machine word, so truncation towards zero and a shift cannot
+  // disagree about it, and the divide becomes the shift the backend has.
+  const parameter: SemanticSlot = { kind: "value", name: "j", mutable: false, type: USIZE };
+  const read: SemanticValue = { k: "local", type: USIZE, name: "j" };
+  const after = printed(
+    fnOf(
+      { id: "entry", releases: [], terminator: { k: "return", value: bin("div", read, constOf("4", USIZE), USIZE) }, statements: [] },
+      USIZE,
+      [parameter],
+    ),
+  );
+  assert.match(after, /\bshr\b/);
+  assert.doesNotMatch(after, /\bdiv\b/);
 });
 
 test("a float is folded to the double it actually is, not to a rounder one", () => {
@@ -482,42 +549,101 @@ test("the folded C computes what the unfolded C computes", async () => {
   // The proof that matters: the same function, lowered twice, once through the
   // pass and once not, run side by side. Every number below is written as an
   // expression the pass can rewrite, and the two binaries have to agree.
-  const cases: { name: string; expression: SemanticValue; expected: string }[] = [
-    { name: "a literal sum", expression: bin("add", constOf("2"), constOf("3")), expected: "5" },
-    { name: "a literal product with an identity", expression: bin("mul", constOf("7"), constOf("1")), expected: "7" },
-    { name: "a whole division by a power of two", expression: bin("div", constOf("64"), constOf("8"), I32), expected: "8" },
-    { name: "a whole remainder by a power of two", expression: bin("mod", constOf("65"), constOf("8"), I32), expected: "1" },
-    { name: "a shifted product", expression: bin("mul", constOf("3"), constOf("4"), I32), expected: "12" },
-    { name: "an exact float sum", expression: bin("add", constOf("0.25"), constOf("0.5")), expected: "0.75" },
-    { name: "a float divided by one", expression: bin("div", constOf("2.5"), constOf("1")), expected: "2.5" },
-    { name: "a value against itself subtracted", expression: bin("sub", constOf("9"), constOf("9")), expected: "0" },
+  // A case is either a constant expression, which the C driver evaluates, or an
+  // expression over a parameter the driver is handed on the command line, so
+  // that a fold which only applies to a value that is not written out is
+  // reached at all. `inputs` are the arguments both binaries are run with, and
+  // `expected` is what each of them has to print for each.
+  interface Case {
+    name: string;
+    expression: SemanticValue;
+    expected: string[];
+    /** The parameter the expression reads, when it reads one. */
+    parameter?: string;
+    /** The values the parameter is given, one run apiece. */
+    inputs?: string[];
+  }
+  const cases: Case[] = [
+    { name: "a literal sum", expression: bin("add", constOf("2"), constOf("3")), expected: ["5"] },
+    { name: "a literal product with an identity", expression: bin("mul", constOf("7"), constOf("1")), expected: ["7"] },
+    { name: "a whole division by a power of two", expression: bin("div", constOf("64"), constOf("8"), I32), expected: ["8"] },
+    { name: "a whole remainder by a power of two", expression: bin("mod", constOf("65"), constOf("8"), I32), expected: ["1"] },
+    { name: "a shifted product", expression: bin("mul", constOf("3"), constOf("4"), I32), expected: ["12"] },
+    { name: "an exact float sum", expression: bin("add", constOf("0.25"), constOf("0.5")), expected: ["0.75"] },
+    { name: "a float divided by one", expression: bin("div", constOf("2.5"), constOf("1")), expected: ["2.5"] },
+    { name: "a value against itself subtracted", expression: bin("sub", constOf("9"), constOf("9")), expected: ["0"] },
+    // The identities below are only reachable over a value that is not written
+    // out, so they are driven from a parameter the C driver supplies rather
+    // than from a literal: `x / 1`, `x % 1`, the bitwise identities and a
+    // value against itself are all folds of two operands where one of them is
+    // a name, and a case written only out of literals would never reach any of
+    // them. Each is checked at a value chosen to break it if it were wrong:
+    // a negative one, where a signed shift and a truncation disagree, and a
+    // large one, where a mask has to have kept all of its bits.
+    { name: "a value divided by one", expression: bin("div", paramI("x"), constOf("1", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["-7", "0", "1", "2147483647"] },
+    { name: "a value remaindered by one", expression: bin("mod", paramI("x"), constOf("1", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["0", "0", "0", "0"] },
+    // `x >>> 0` is the value whatever the signedness of x is, because a shift
+    // by nothing moves no bit: at `i32` the answer for -7 is -7, and not the
+    // 4294967289 an unsigned reading of the same bits would give. The C backend
+    // spells `ushr` as `>>`, which at `i32` is an arithmetic shift, so this
+    // case is what proves the fold is the identity the language states rather
+    // than a conversion the fold happened to introduce.
+    { name: "a value right shifted by nothing", expression: bin("ushr", paramI("x"), constOf("0", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["-7", "0", "1", "2147483647"] },
+    { name: "a value ored with nothing", expression: bin("or", paramI("x"), constOf("0", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["-7", "0", "1", "2147483647"] },
+    { name: "a value xored with nothing", expression: bin("xor", paramI("x"), constOf("0", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["-7", "0", "1", "2147483647"] },
+    { name: "a value masked to nothing", expression: bin("and", paramI("x"), constOf("0", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["0", "0", "0", "0"] },
+    { name: "a value masked to every bit", expression: bin("and", paramI("x"), constOf("255", U32), U32), parameter: "x", inputs: ["-7", "0", "1", "4294967295"], expected: ["249", "0", "1", "255"] },
+    { name: "a value ored to every bit", expression: bin("or", paramI("x"), constOf("255", U32), U32), parameter: "x", inputs: ["0", "1", "4294967295"], expected: ["255", "255", "4294967295"] },
+    { name: "a value xored to its complement", expression: bin("xor", paramI("x"), constOf("255", U32), U32), parameter: "x", inputs: ["0", "1", "255"], expected: ["255", "254", "0"] },
+    { name: "a value against itself, equal", expression: cmp("eq", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
+    { name: "a value against itself, not equal", expression: cmp("ne", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["0", "0", "0"] },
+    { name: "a value against itself, less", expression: cmp("lt", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["0", "0", "0"] },
+    { name: "a value against itself, at most", expression: cmp("le", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
+    { name: "a value against itself, over", expression: cmp("ge", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
   ];
   const directory = await mkdtemp(join(tmpdir(), "blaze-opt-"));
   await writeFile(join(directory, "blaze_rt.h"), runtimeHeaderSource(), "utf8");
   const runtime = await buildStandaloneRuntime(directory);
   for (const one of cases) {
+    const inputs = one.inputs ?? [""];
     for (const folded of [false, true]) {
-      const fn = fnOf({
-        id: "entry", releases: [],
-        statements: [{ k: "printNumber", value: one.expression, line: 1 }, { k: "printNewline", line: 2 }],
-        terminator: { k: "return", value: null },
-      });
+      const fn = fnOf(
+        {
+          id: "entry", releases: [],
+          statements: [{ k: "printNumber", value: one.expression, line: 1 }, { k: "printNewline", line: 2 }],
+          terminator: { k: "return", value: null },
+        },
+        one.parameter === undefined ? { kind: "void" } : one.expression.type,
+        one.parameter === undefined
+          ? []
+          : [{ kind: "value", name: one.parameter, mutable: false, type: one.expression.type }],
+      );
       const source = join(directory, `${folded ? "folded" : "plain"}_${one.name.replace(/\W/g, "_")}.c`);
+      // The C driver reads its argument as the type the contract names, so the
+      // unfolded and the folded binary are handed the very same number and the
+      // only thing being compared is what each computes from it.
+      const main =
+        one.parameter === undefined
+          ? "int main(void) { subject(); return 0; }"
+          : [
+            "#include <stdlib.h>",
+            "int main(int argc, char** argv) {",
+            `  subject((${primitiveOf(one.expression.type)})strtol(argv[1], NULL, 10));`,
+            "  return 0;",
+            "}",
+          ].join("\n");
       await writeFile(
         source,
-        [
-          "#include <stdio.h>",
-          generateFunctionC(folded ? optimizeSemanticFunction(fn) : fn),
-          "int main(void) { subject(); return 0; }",
-          "",
-        ].join("\n"),
+        ["#include <stdio.h>", generateFunctionC(folded ? optimizeSemanticFunction(fn) : fn), main, ""].join("\n"),
         "utf8",
       );
       const binary = source.replace(/\.c$/, "");
       const built = run("gcc", ["-std=c11", "-O2", "-I", directory, source, runtime.objectPath, "-o", binary, "-lm"], { timeoutMs: 120_000 });
       assert.equal(built.code, 0, `the C must build: ${built.stderr}`);
-      const ran = run(binary, [], { timeoutMs: 60_000 });
-      assert.equal(ran.stdout.trimEnd(), one.expected, `${one.name}, ${folded ? "folded" : "unfolded"}`);
+      for (const [at, input] of inputs.entries()) {
+        const ran = run(binary, input === "" ? [] : [input], { timeoutMs: 60_000 });
+        assert.equal(ran.stdout.trimEnd(), one.expected[at], `${one.name} at ${input === "" ? "no argument" : input}, ${folded ? "folded" : "unfolded"}`);
+      }
     }
   }
 });
@@ -905,4 +1031,113 @@ test("a loop over a buffer is not unrolled, because its length is not a number w
   }, { kind: "void" }, [values, { kind: "value", name: "k", mutable: true, type: I32 }]);
   const after = printed(fn);
   assert.match(after, /for_of\[/, `a walk over a buffer stays a walk:\n${after}`);
+});
+
+test("a statement nothing reaches after a raise is not lowered", () => {
+  // A `raise` ends the program, so the store written after it is a load, an
+  // add and a store a backend emits for a value nobody ever sees. The raise
+  // stays — it is the reason the block ends — and what follows it goes.
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const entry: SemanticBlock = {
+    id: "entry", releases: [],
+    statements: [
+      { k: "raise", message: { k: "text", type: { kind: "text" }, parts: [{ k: "text", value: "no" }] }, line: 1 },
+      { k: "set", name: "sum", op: "+=", value: constOf("1"), line: 2 },
+      { k: "printNumber", value: constOf("7"), line: 3 },
+    ],
+    terminator: { k: "return", value: null },
+  };
+  const after = printed(fnOf(entry, F64, [sum]));
+  assert.doesNotMatch(after, /set sum \+=/, "the store after the raise is not lowered");
+  assert.doesNotMatch(after, /const\[f64\] 7/, "nor is the print after it");
+  assert.match(after, /raise/, "the raise itself stays");
+});
+
+test("a statement after an if whose two arms both leave is not lowered", () => {
+  // Both arms return, so no path reaches what follows the `if` — whichever way
+  // the condition went, the block has ended. This is the shape that
+  // `pruneKnownBranches` refuses to splice, because it does not know the
+  // condition, and it is a different question from that one: the arms are kept
+  // and the statement after them is dropped.
+  const arm = (value: string): SemanticBlock => ({
+    id: `b_${value}`, releases: [], statements: [],
+    terminator: { k: "return", value: constOf(value) },
+  });
+  const entry: SemanticBlock = {
+    id: "entry", releases: [],
+    statements: [
+      {
+        k: "if", line: 1,
+        condition: { k: "compare", type: BOOL, op: "lt", operand: F64, left: constOf("1"), right: constOf("2") },
+        then: arm("1"), otherwise: arm("2"),
+      },
+      { k: "printNumber", value: constOf("7"), line: 2 },
+    ],
+    terminator: { k: "return", value: null },
+  };
+  const after = printed(fnOf(entry, F64, []));
+  assert.doesNotMatch(after, /const\[f64\] 7/, "nothing reaches the print");
+  assert.match(after, /if/, "the if stays: its condition is not known here");
+});
+
+test("a statement after an if with a falling arm is kept", () => {
+  // The other half, and the one that matters: an `if` with no `otherwise`, or
+  // with an arm that falls out of it, can be taken the other way, and then the
+  // statement below it runs. Dropping it would delete a live store.
+  const entry: SemanticBlock = {
+    id: "entry", releases: [],
+    statements: [
+      {
+        k: "if", line: 1,
+        condition: { k: "compare", type: BOOL, op: "lt", operand: F64, left: constOf("1"), right: constOf("2") },
+        then: { id: "b1", releases: [], statements: [], terminator: { k: "return", value: constOf("1") } },
+        otherwise: null,
+      },
+      { k: "printNumber", value: constOf("7"), line: 2 },
+    ],
+    terminator: { k: "return", value: null },
+  };
+  assert.match(printed(fnOf(entry, F64, [])), /const\[f64\] 7/, "the else path reaches the print");
+});
+
+test("a loop is not a transfer out of the block it is written in", () => {
+  // The case a rewrite that reads a loop body's terminator gets wrong: a loop
+  // body ends by jumping back to the header, so its terminator is a jump rather
+  // than a fall-through, which looks like a transfer out and is the loop
+  // working. What follows the loop is reached by every turn of it.
+  const entry: SemanticBlock = {
+    id: "entry", releases: [],
+    statements: [
+      {
+        k: "loop", line: 1,
+        loop: {
+          kind: "counted", variable: "i", type: I32,
+          from: constOf("0", I32), to: constOf("4", I32), inclusive: false, down: false, step: null,
+          header: "b1", exit: "entry",
+          body: { id: "b2", releases: [], statements: [], terminator: { k: "jump", target: "b1", releases: [] } },
+        },
+      },
+      { k: "printNumber", value: constOf("7"), line: 2 },
+    ],
+    terminator: { k: "return", value: null },
+  };
+  assert.match(printed(fnOf(entry, F64, [])), /const\[f64\] 7/, "the loop falls through to the print");
+});
+
+test("dropping what a raise makes unreachable still leaves a function the compiler may lower", () => {
+  // The cut removes statements, and the validator reads the block that is left:
+  // its releases name what it owns, and a binding the dropped statements made
+  // is still named there. A cut that broke that would be refused here rather
+  // than in a candidate.
+  const owned: SemanticSlot = { kind: "object", name: "node", mutable: false, type: { kind: "ref", name: "Point", of: null } };
+  const entry: SemanticBlock = {
+    id: "entry", releases: ["node"],
+    statements: [
+      { k: "let", slot: owned, value: { k: "nothing", type: owned.type }, line: 1 },
+      { k: "raise", message: { k: "text", type: { kind: "text" }, parts: [{ k: "text", value: "no" }] }, line: 2 },
+      { k: "storeField", object: { k: "local", type: owned.type, name: "node" }, layout: "Point", field: "x", value: constOf("1"), line: 3 },
+    ],
+    terminator: { k: "return", value: null },
+  };
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(fnOf(entry, { kind: "void" }, []))), []);
 });

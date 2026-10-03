@@ -18,6 +18,7 @@ import { assertMachineTarget, buildObject } from "../toolchain/ir-machine.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
+import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
 import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
@@ -1716,4 +1717,90 @@ test("a whole number accumulator is refused, because the additions are of double
     { kind: "value", name: "n", mutable: false, type: F64 },
   ]);
   assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
+});
+
+/**
+ * One machine object, lowered and run, answering a whole number the driver
+ * hands it. Written here rather than reusing `lowered`, which has no way to
+ * pass an argument, because the point is to run the same expression twice over
+ * a set of arguments: once folded and once not, and to see the same number come
+ * back both times.
+ */
+async function answeredBy(value: SemanticValue, inputs: readonly string[], folded: boolean): Promise<string[]> {
+  const directory = await mkdtemp(join(tmpdir(), "blaze-machine-identity-"));
+  const runtime = await buildStandaloneRuntime(directory);
+  const body = (): SemanticFunction =>
+    subject(
+      I64,
+      { id: "entry", releases: [], statements: [], terminator: { k: "return", value } },
+      [{ kind: "value", name: "x", mutable: false, type: I64 }],
+    );
+  const toLower = folded ? optimizeSemanticFunction(body()) : body();
+  const contract = contracted(toLower);
+  const object = join(directory, "subject.o");
+  await buildObject({ fn: toLower, contract, target: TARGET, callable: new Set(), objectPath: object });
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      "#include <stdlib.h>",
+      "extern long long subject(long long x);",
+      "int main(int argc, char** argv) {",
+      "  printf(\"%lld\\n\", subject(strtoll(argv[1], NULL, 10)));",
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "run");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 120_000 },
+  );
+  assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+  return inputs.map((input) => {
+    const ran = run(binary, [input], { timeoutMs: 60_000 });
+    assert.equal(ran.code, 0, `the machine code must run:\n${ran.stderr}`);
+    return ran.stdout.trimEnd();
+  });
+}
+
+test("the machine code of a folded identity is the machine code of the unfolded one", async () => {
+  // Every identity the pass adds over a value that is not written out, driven
+  // through the machine backend rather than only through C. The two objects are
+  // lowered from the same expression and run over the same arguments, and the
+  // numbers they answer have to agree — which is the whole claim, checked on
+  // the backend the benchmarks are built for.
+  //
+  // The arguments are chosen to break a rewrite that is wrong rather than one
+  // that is merely absent: -7 is where a signed shift and a truncation towards
+  // zero part company, and 4294967295 is where a mask that has lost its high
+  // bits shows.
+  const readX: SemanticValue = local("x", I64);
+  const cases: { name: string; value: SemanticValue }[] = [
+    { name: "x / 1", value: { k: "arith", type: I64, op: "div", left: readX, right: number("1", I64) } },
+    { name: "x % 1", value: { k: "arith", type: I64, op: "mod", left: readX, right: number("1", I64) } },
+    { name: "x >> 0", value: { k: "arith", type: I64, op: "shr", left: readX, right: number("0", I64) } },
+    { name: "x >>> 0", value: { k: "arith", type: I64, op: "ushr", left: readX, right: number("0", I64) } },
+    { name: "x << 0", value: { k: "arith", type: I64, op: "shl", left: readX, right: number("0", I64) } },
+    { name: "x | 0", value: { k: "arith", type: I64, op: "or", left: readX, right: number("0", I64) } },
+    { name: "x ^ 0", value: { k: "arith", type: I64, op: "xor", left: readX, right: number("0", I64) } },
+    { name: "x & 0", value: { k: "arith", type: I64, op: "and", left: readX, right: number("0", I64) } },
+    { name: "x * 1", value: { k: "arith", type: I64, op: "mul", left: readX, right: number("1", I64) } },
+    { name: "x + 0", value: { k: "arith", type: I64, op: "add", left: readX, right: number("0", I64) } },
+    { name: "x - 0", value: { k: "arith", type: I64, op: "sub", left: readX, right: number("0", I64) } },
+    { name: "x - x", value: { k: "arith", type: I64, op: "sub", left: readX, right: local("x", I64) } },
+    { name: "x / 8", value: { k: "arith", type: I64, op: "div", left: readX, right: number("8", I64) } },
+    { name: "x % 8", value: { k: "arith", type: I64, op: "mod", left: readX, right: number("8", I64) } },
+    { name: "x * 8", value: { k: "arith", type: I64, op: "mul", left: readX, right: number("8", I64) } },
+  ];
+  const inputs = ["-7", "-1", "0", "1", "7", "255", "4294967295", "9223372036854775807"];
+  for (const one of cases) {
+    const plain = await answeredBy(one.value, inputs, false);
+    const folded = await answeredBy(one.value, inputs, true);
+    assert.deepEqual(folded, plain, `${one.name}: folding changed what the machine code computes`);
+  }
 });
