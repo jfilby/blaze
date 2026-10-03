@@ -172,6 +172,27 @@ const COMPARISON: Record<"signed" | "unsigned", Record<CompareOp, "e" | "ne" | "
 };
 
 /**
+ * The comparison that answers the opposite of another, which is what a `!` over
+ * a comparison is branched on rather than a number the comparison is first
+ * written down as. Over floats the two answer the same values: a pair that is
+ * not numbers is in no ordered relation, every ordered comparison of one is
+ * false, and the opposite is true of the unordered case too.
+ */
+const OPPOSITE: Record<CompareOp, CompareOp> = {
+  eq: "ne",
+  ne: "eq",
+  lt: "ge",
+  le: "gt",
+  gt: "le",
+  ge: "lt",
+};
+
+/** A comparison the machine answers from the flags, which is one over anything but text. */
+function flagComparison(value: SemanticValue): (SemanticValue & { k: "compare" }) | null {
+  return value.k === "compare" && !isTextType(value.operand) ? value : null;
+}
+
+/**
  * The operations the machine writes with the number in the instruction rather
  * than in a register. A division and a remainder are the two it does not: the
  * machine divides a register by a register, and a literal is not one.
@@ -3322,18 +3343,28 @@ class Machine {
   /**
    * A branch on whether a value is true, and nothing else.
    *
-   * A value that is a comparison is the case this exists for. The comparison
-   * already leaves in the flags the answer every caller of `truth` goes on to
-   * ask about, so the branch reads them where they are: the condition byte is
-   * never widened into the accumulator, and the `test` that asked whether it
-   * was zero never happens. The side that is not a comparison is put in the
-   * accumulator and asked of it as before.
+   * A value that is a comparison, or a comparison under a `!`, is the case this
+   * exists for. The comparison already leaves in the flags the answer every
+   * caller of `truth` goes on to ask about, so the branch reads them where they
+   * are: the condition byte is never widened into the accumulator, and the
+   * `test` that asked whether it was zero never happens. The side that is
+   * neither is put in the accumulator and asked of it as before.
+   *
+   * A `!` is answered by the other sense of the comparison rather than by a
+   * number the comparison is first written down as. Every comparison has an
+   * opposite — `eq` and `ne`, `lt` and `ge`, `le` and `gt` — and over floats
+   * the opposite answers the same values, because a pair that is not numbers
+   * is in no ordered relation and every ordered comparison of one is false, so
+   * the negation of it is true where the opposite is true of the unordered case
+   * too. A loop written on `!(n <= 0)` is the shape this exists for: the loop
+   * condition is a value, and a value read as a truth is four instructions
+   * where a branch is one.
    */
   private truthBranch(value: SemanticValue, whenTrue: boolean, label: string): void {
     if (value.k === "isNull" && !isTextType(value.operand.type)) {
       // A test of a reference is a test of the pointer holding it, and the
-      // answer is a branch on the pointer rather than a truth written down as
-      // a number and tested again. `is_null` is the test itself and
+      // answer is a branch on the pointer rather than a truth written down as a
+      // number and tested again. `is_null` is the test itself and
       // `is_not_null` is its negation, so which of the two conditions the
       // branch reads is the one the test holds under for the sense asked for.
       this.value(value.operand);
@@ -3341,49 +3372,61 @@ class Machine {
       this.code.jcc((whenTrue ? !value.negate : value.negate) ? "e" : "ne", label);
       return;
     }
-    if (value.k === "compare" && !isTextType(value.operand)) {
-      const type = value.operand;
-      // Which form the comparison takes is settled before either side is
-      // written, so that a side is evaluated once whichever form it is. An
-      // other side the program wrote out is carried by the comparison itself
-      // rather than by a slot, so `left > 0` is a compare against a literal
-      // and not a literal stored in the frame and read back out of it.
-      const immediate = this.literalOf(value.right, type);
-      if (immediate !== null) {
-        this.at(value.left, type);
-        this.comparedBranch(type, value.op, immediate, whenTrue, label);
-        return;
-      }
-      const right = this.hold(type, "blaze_right");
-      this.at(value.right, type);
-      this.store(right);
-      this.at(value.left, type);
-      this.comparedBranch(type, value.op, right, whenTrue, label);
+    const underNot = value.k === "unary" && value.op === "not" ? flagComparison(value.operand) : null;
+    const comparison = underNot ?? flagComparison(value);
+    if (comparison === null) {
+      this.truth(value);
+      this.code.jcc(whenTrue ? "ne" : "e", label);
       return;
     }
-    this.truth(value);
-    this.code.jcc(whenTrue ? "ne" : "e", label);
+    const type = comparison.operand;
+    // The value is true exactly when the comparison is false, and the opposite
+    // is true exactly when the comparison is false, so the branch is taken on
+    // the same sense it was asked for.
+    const op = underNot === null ? comparison.op : OPPOSITE[comparison.op];
+    const sense = whenTrue;
+    // Which form the comparison takes is settled before either side is written,
+    // so that a side is evaluated once whichever form it is. An other side the
+    // program wrote out is carried by the comparison itself rather than by a
+    // slot, so `left > 0` is a compare against a literal and not a literal
+    // stored in the frame and read back out of it.
+    const immediate = this.literalOf(comparison.right, type);
+    if (immediate !== null) {
+      this.at(comparison.left, type);
+      this.comparedBranch(type, op, immediate, sense, label);
+      return;
+    }
+    const right = this.hold(type, "blaze_right");
+    this.at(comparison.right, type);
+    this.store(right);
+    this.at(comparison.left, type);
+    this.comparedBranch(type, op, right, sense, label);
   }
 
   /**
-   * `!` over a comparison, read out of the flags the comparison leaves rather
-   * than out of a number the comparison was first written down as.
+   * `!` over a comparison, read out of the number the comparison answers rather
+   * than out of the flags it leaves.
    */
   private comparedNegated(value: SemanticValue & { k: "compare" }): void {
-    const type = value.operand;
-    const immediate = this.immediateOf(value.right, type);
-    if (immediate !== null) {
-      this.at(value.left, type);
-      this.cmpHeld(type, immediate);
-    } else {
-      const right = this.hold(type, "blaze_right");
-      this.at(value.right, type);
-      this.store(right);
-      this.at(value.left, type);
-      this.cmpHeld(type, right);
-    }
-    this.code.setcc(NEGATED[COMPARISON[signedOf(type) ? "signed" : "unsigned"][value.op]], RAX);
-    this.code.movzxReg8(RAX, RAX);
+    // The comparison is written as a number first, and `not` is then the
+    // question of whether that number is zero. The flags the comparison leaves
+    // would be the shorter way round, and for whole numbers they are what
+    // `comparedBranch` reads — but the conditions that read a `UCOMISD` have to
+    // be gated on the parity bit, which is two instructions rather than one, so
+    // there is no single condition to negate. Reading the flags directly also
+    // meant comparing a float as though it were a whole number, against an
+    // accumulator nothing had put a number in: `if (!(n <= 0))` over doubles
+    // answered the base case whatever `n` was.
+    this.comparison(value);
+    // The zero flag is asked of a `test` of the accumulator rather than of
+    // whatever the instruction before it left. The instruction before is a
+    // widening move or a `setcc`, and neither of those leaves a flag that says
+    // whether the answer is zero: `MOVZX` and `MOVSX` do not touch the flags at
+    // all, and a `setcc` sets the zero flag to whether its own condition held.
+    // A `gt` has no parity gate and so no `and` to correct that afterwards,
+    // which is why `!(1 > 2)` answered `1 > 2`.
+    this.code.test(RAX);
+    this.code.setcc("e", RAX);
   }
 
   /**
@@ -3395,9 +3438,10 @@ class Machine {
    * instead made every NaN true, which is what turned `NaN || 0` into the NaN
    * and handed a benchmark a depth of `NaN` where it read `6`.
    *
-   * The `movzx` that turns the two condition bytes into a number sets the
-   * zero flag from that number, so the truth is in the flags once the move is
-   * written and nothing has to ask about it afterwards.
+   * The `movzx` that turns the two condition bytes into a number does not set
+   * the zero flag — a widening move leaves the flags alone — so the truth is
+   * the number in the accumulator and a caller that wants a truth of something
+   * else has to ask about that number itself.
    */
   private floatTruth(type: SemanticType): void {
     this.code.xorFloat(XMM2, XMM2);
@@ -4636,10 +4680,6 @@ class Machine {
         return;
       case "not": {
         if (value.operand.k === "compare" && !isTextType(value.operand.operand)) {
-          // The comparison leaves the answer in the flags and `not` is the
-          // other sense of it, so the condition byte is written from those
-          // flags. The general form writes the answer down as a number first
-          // and then asks whether that number is zero.
           this.comparedNegated(value.operand);
           return;
         }
@@ -4647,6 +4687,12 @@ class Machine {
         // in: it does not have to be written down and read back to be asked
         // about, and `not` is the one operation that changes no bit of it.
         this.truth(value.operand);
+        // A truth of a float is answered as a number, and the move that widens
+        // that number into the accumulator leaves the flags as the `and` that
+        // combined the two condition bytes left them — which is the zero-ness
+        // of a truth, and not of the operand. `not` asks the question of the
+        // operand, so a `test` is what asks it.
+        if (!isTextType(value.operand.type)) this.code.test(RAX);
         this.code.setcc("e", RAX);
         this.code.movzxReg8(RAX, RAX);
         return;

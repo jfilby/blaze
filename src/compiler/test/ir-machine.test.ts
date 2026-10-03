@@ -719,6 +719,69 @@ test("a loop with a step written out runs its counter the right number of times"
   assert.equal(await lowered(down, (name) => `printf("%d", ${name}());`), "22");
 });
 
+test("a loop written on a negated comparison runs the turns the test holds for", async () => {
+  // A loop condition is a value, and a `!` over a comparison used to be
+  // answered by widening the comparison into a number and testing that number
+  // against a flag the widening move had left alone. A loop on `!(n <= 0)` —
+  // which is the loop `semantics/recursion.ts` writes for a tail recursion —
+  // then left on the first turn whatever the flags happened to say. The branch
+  // is now made on the opposite comparison, which is the same question asked
+  // of the flags the comparison already left.
+  const loopOn = (op: "lt" | "le" | "gt" | "ge" | "eq" | "ne", to: string): SemanticFunction =>
+    subject(
+      I32,
+      {
+        id: "entry",
+        statements: [
+          { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+          {
+            k: "loop",
+            line: 2,
+            loop: {
+              kind: "while",
+              condition: {
+                k: "unary",
+                type: BOOL,
+                op: "not",
+                operand: { k: "compare", type: BOOL, op, operand: I32, left: local("i", I32), right: number(to, I32) },
+              },
+              header: "head",
+              exit: "out",
+              body: {
+                id: "body",
+                releases: [],
+                statements: [
+                  { k: "set", name: "total", op: "+=", value: local("i", I32), line: 3 },
+                  { k: "set", name: "i", op: "=", value: { k: "arith", type: I32, op: "add", left: local("i", I32), right: number("1", I32) }, line: 3 },
+                ],
+                terminator: { k: "next" },
+              },
+            },
+          },
+        ],
+        releases: [],
+        terminator: { k: "return", value: local("total", I32) },
+      },
+      [{ kind: "value", name: "i", mutable: true, type: I32 }],
+    );
+
+  // Each loop runs while its test is false, so each answer is the sum of the
+  // counters the test lets through. The counter only goes up, so each case
+  // starts where its own loop ends rather than where it would run forever.
+  const runs: { op: "lt" | "le" | "gt" | "ge" | "eq" | "ne"; from: number; expected: number }[] = [
+    { op: "lt", from: 1, expected: 0 },
+    { op: "le", from: 0, expected: 0 },
+    { op: "gt", from: 0, expected: 10 },
+    { op: "ge", from: 0, expected: 6 },
+    { op: "eq", from: 0, expected: 6 },
+    { op: "ne", from: 0, expected: 0 },
+  ];
+  for (const entry of runs) {
+    const printed = await lowered(loopOn(entry.op, "4"), (name) => `printf("%d", ${name}(${entry.from}));`);
+    assert.equal(printed, `${entry.expected}`, `while (!(i ${entry.op} 4)) from ${entry.from}`);
+  }
+});
+
 test("a loop that counts down counts down", async () => {
   // The step is the signed amount the index moves by, so the direction of a
   // written-out step is already in it and it is added like any other. Taking
@@ -1015,6 +1078,53 @@ test("a comparison of a value that is not a number is false in every ordered way
       handsBack({ k: "compare", type: BOOL, op: entry.op, operand: F64, left: number(entry.left), right: number(entry.right) }),
     );
     assert.equal(await lowered(against, (name) => `printf("%d", ${name}());`), `${entry.expected}`, `${entry.left} ${entry.op} ${entry.right}`);
+  }
+});
+
+test("a negated comparison is the other sense of the comparison it negates", async () => {
+  // The negation was read out of the flags the comparison leaves, through the
+  // conditions whole numbers use. A float leaves no such condition: the
+  // conditions that read a `UCOMISD` have to be gated on the parity bit, so
+  // there was one instruction where a `cmp` was written, against an
+  // accumulator nothing had put a number in. `!(n <= 0)` over doubles therefore
+  // compared whatever the accumulator held, and `if (!(n <= 0))` answered the
+  // base case whatever `n` was.
+  const cases: { op: "eq" | "ne" | "lt" | "le" | "gt" | "ge"; left: string; right: string; expected: number }[] = [
+    { op: "le", left: "1", right: "2", expected: 0 },
+    { op: "le", left: "2", right: "1", expected: 1 },
+    { op: "le", left: "0", right: "0", expected: 0 },
+    { op: "lt", left: "1", right: "2", expected: 0 },
+    { op: "lt", left: "2", right: "1", expected: 1 },
+    { op: "gt", left: "2", right: "1", expected: 0 },
+    { op: "gt", left: "1", right: "2", expected: 1 },
+    { op: "ge", left: "1", right: "1", expected: 0 },
+    { op: "ge", left: "2", right: "1", expected: 0 },
+    { op: "eq", left: "1", right: "1", expected: 0 },
+    { op: "eq", left: "1", right: "2", expected: 1 },
+    { op: "ne", left: "1", right: "2", expected: 0 },
+    { op: "ne", left: "1", right: "1", expected: 1 },
+  ];
+  for (const entry of cases) {
+    const against = subject(
+      BOOL,
+      handsBack({ k: "unary", type: BOOL, op: "not", operand: { k: "compare", type: BOOL, op: entry.op, operand: F64, left: number(entry.left), right: number(entry.right) } }),
+    );
+    assert.equal(await lowered(against, (name) => `printf("%d", ${name}());`), `${entry.expected}`, `!(${entry.left} ${entry.op} ${entry.right})`);
+  }
+  // The negation of a whole-number comparison is the other sense of it too.
+  const whole = subject(
+    BOOL,
+    handsBack({ k: "unary", type: BOOL, op: "not", operand: { k: "compare", type: BOOL, op: "le", operand: I32, left: number("1", I32), right: number("2", I32) } }),
+  );
+  assert.equal(await lowered(whole, (name) => `printf("%d", ${name}());`), "0", "!(1 <= 2) over whole numbers");
+  // A value that is not a number is in no ordered relation, so every ordered
+  // comparison of one is false and its negation is true.
+  for (const op of ["lt", "le", "gt", "ge", "eq"] as const) {
+    const against = subject(
+      BOOL,
+      handsBack({ k: "unary", type: BOOL, op: "not", operand: { k: "compare", type: BOOL, op, operand: F64, left: number("NaN"), right: number("2") } }),
+    );
+    assert.equal(await lowered(against, (name) => `printf("%d", ${name}());`), "1", `!(NaN ${op} 2)`);
   }
 });
 

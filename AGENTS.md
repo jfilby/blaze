@@ -295,6 +295,60 @@ be. A region is entered and left around the body of a marked loop and left early
 on the paths that leave the turn early, so a `break` out of the loop or a
 `return` out of the function does not carry it past the turn.
 
+`semantics/recursion.ts` answers a body's own recursion with a loop, and it runs
+before the rounds in `optimize-ir.ts` because the loop it writes is the loop
+they read: hoisting an invariant out of a recursion, commoning two values in it
+and counting its turns are three things none of them can do while the frames are
+still there. It is one pass over the IR rather than one per backend, so every
+output kind lowers the loop and none of them re-derives it.
+
+There are two shapes, and both are the narrowest that can be proved. A **tail
+call** is the first: the entry block ends in `return f(args)` where `f` is the
+function itself, and the statement before it is the test that ends the
+recursion. Every statement around that test becomes the body of a loop, the
+arguments are bound to fresh names in the order the call wrote them — which is
+the order the call evaluated them in, so a body that prints keeps the print —
+and the parameters are written from those names only once every argument has
+been read. Nothing about the ordering of a turn changes; what is gone is the
+frame between one turn and the next.
+
+```ts
+function count(n: number, acc: number): number {
+  if (n <= 0) return acc;
+  return count(n - 1, acc * n);   // while (!(n <= 0)) { ... n = n - 1; acc = acc * n; }
+}
+```
+
+The second is a **linear recursion whose answer is accumulated**, which is the
+explicit state machine a non-tail recursion is answered with when it can be: the
+entry block ends in `return <something holding exactly one call of itself>`, and
+that call sits at the end of a chain of `+` or `*` over whole numbers. The value
+the turn before was going to hand back is held in a name, the turn combines into
+it, and the loop carries it on. It is restricted to that chain because the loop
+runs the turns *the opposite way round* to the recursion — the recursion nests
+`E0(E1(E2(base)))` where the loop combines `E2` into `base`, then `E1`, then
+`E0` — and the two are the same number only where the combination does not care
+which way round it goes. `+` and `*` over whole numbers are exact however they
+are grouped, the same fact the reductions in `parallel.ts` rest on. A double is
+not exact that way and a subtraction is not the same operation either way
+round, so both are refused rather than approximated.
+
+What is left alone is most of the language's recursion, and that is the point. A
+recursion with two calls of itself in one return — `fib`, or a tree walked with
+a left and a right — is not a state machine this IR can hold: it needs storage
+whose length is not known until the walk has finished, and an array in
+`core/semantic-ir.ts` is allocated where the program wrote it out, at a length
+the program states. There is no push and no growth, so an explicit stack of
+unbounded depth is not a program this IR can be written as, and a traversal is
+not answered with one that would overflow where the recursion did not. Every
+refusal carries its reason and `recursionRefusal` hands it to whoever asks why a
+body kept its calls.
+
+One difference is worth stating because it is the only one: a tail call that
+never reaches its base case was a stack overflow and is now an unbounded loop.
+Both are a program that does not answer, and neither writes anything the other
+does not.
+
 ## Benchmarking
 
 You can use hyperfine to benchmark a program or more than one at a time. E.g.:

@@ -43,6 +43,7 @@ import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementV
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
+import { eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -1903,6 +1904,11 @@ interface Body {
  * writing both out as text is the same answer for far more work.
  */
 export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees = NO_CALLEES): SemanticFunction {
+  // Recursion is answered with a loop before the rounds run, because the loop
+  // it writes is the loop the rounds read: hoisting an invariant out of a
+  // recursion, commoning two values in it and counting its turns are three
+  // things none of them can do while the frames are still there.
+  eliminateRecursion(fn);
   optimizeBody(fn, callees);
   return fn;
 }
@@ -1939,7 +1945,10 @@ export function optimizeSemanticProgram(
   optimizeSemanticEntry(program.entry, callees);
   // A function the program declares is a body of its own, and the rewrites that
   // run over a program run over it: a loop invariant hoisted out of a function
-  // is worth as much there as it is in the block the program starts in.
+  // is worth as much there as it is in the block the program starts in. What a
+  // body of its own recursion becomes is a loop, and it becomes one first, so
+  // that the rounds below are rounds over a loop rather than over frames.
+  for (const fn of program.bodies) eliminateRecursion(fn);
   for (const fn of program.bodies) optimizeSemanticEntry(fn.entry, callees);
   // Whole-number arithmetic is the one rewrite here that is a question about a
   // whole program rather than about one body: what it needs to know is what
