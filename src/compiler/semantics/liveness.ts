@@ -26,7 +26,7 @@
  * one value is carried.
  */
 
-import { isTextType, type SemanticBlock, type SemanticValue } from "../core/semantic-ir.ts";
+import { isTextType, type SemanticBlock, type SemanticStatement, type SemanticValue } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
 /* What a name is                                                               */
@@ -110,6 +110,23 @@ class Graph {
   /** The loops whose blocks are being written, innermost last. */
   private readonly open: { header: string; exit: string; headerNode: Node; exitNode: Node }[] = [];
 
+  /**
+   * The statements that are also a call, which is what a backend that turns a
+   * loop into a call into a runtime says here.
+   *
+   * A loop written as a team of threads is a call: the code stands where the
+   * loop was and calls out, and whatever the convention does not preserve
+   * across a call is gone for the rest of the body. Nothing in the IR says
+   * so, because nothing in the IR knows the loop was not written as a loop —
+   * so the backend that writes it that way says it here, and a name live
+   * across one of these is held in a register a call leaves alone.
+   */
+  private readonly calls: (statement: SemanticStatement) => boolean;
+
+  constructor(calls: (statement: SemanticStatement) => boolean = () => false) {
+    this.calls = calls;
+  }
+
   private make(events: Event[]): Node {
     const node: Node = { events, successors: [], liveIn: new Set(), liveOut: new Set() };
     this.nodes.push(node);
@@ -189,6 +206,10 @@ class Graph {
             events.push({ k: "def", name: loop.index });
             events.push({ k: "def", name: loop.element });
           }
+          // A loop the backend writes as a call into a runtime is a call here
+          // too, and it is made after the bound has been read: what is live
+          // across the call is everything the body after it still reads.
+          if (this.calls(statement)) events.push({ k: "call" });
           node = this.make(events);
           // The test is a place of its own: the body comes back to it on every
           // turn, and a name read or written by it is so on every turn with it.
@@ -408,9 +429,17 @@ class Graph {
  * the first instruction of the body, which is where a register it is given is
  * written, and a run that started at its first read would let another name take
  * that register over the prologue.
+ *
+ * `calls` names the statements that are a call as well as whatever the body
+ * says of them, which is how a backend that writes a loop as a call into a
+ * runtime gets the names live across that call held in registers one survives.
  */
-export function nameLiveness(entry: SemanticBlock, parameters: readonly string[] = []): Map<string, NameLiveness> {
-  const graph = new Graph();
+export function nameLiveness(
+  entry: SemanticBlock,
+  parameters: readonly string[] = [],
+  calls: (statement: SemanticStatement) => boolean = () => false,
+): Map<string, NameLiveness> {
+  const graph = new Graph(calls);
   const root = graph.block(entry, null);
 
   // The nodes in the order control reaches them, which for a body the lowering

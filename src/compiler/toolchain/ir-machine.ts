@@ -37,6 +37,8 @@ import {
   isWide,
   isWideType,
   limbsOf as limbsOfName,
+  isInteger,
+  statementValues,
   WIDE_LIMBS,
   LIMB_BYTES,
   isUnsigned,
@@ -55,6 +57,7 @@ import {
 } from "../core/semantic-ir.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
 import { nameLiveness, overlaps } from "../semantics/liveness.ts";
+import { turnIsTooCheap } from "../semantics/parallel.ts";
 import { describeObject, writeObject, type DataLabel } from "./elf64.ts";
 import { NameScope } from "./names.ts";
 import {
@@ -447,6 +450,13 @@ export interface MachineResult {
   objectSizeBytes: number;
   /** The bytes of code, which is what a size objective weighs. */
   textSizeBytes: number;
+  /**
+   * Whether the object runs any loop's turns on a team of threads, which is a
+   * fact about the lowering rather than about the IR: a loop the rule marked
+   * may still be written in order here, and one written in order needs no
+   * threading runtime at the link.
+   */
+  threads: boolean;
 }
 
 /**
@@ -505,6 +515,7 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
     objectPath: request.objectPath,
     objectSizeBytes: (await stat(request.objectPath)).size,
     textSizeBytes: object.textSizeBytes,
+    threads: object.threads,
   };
 }
 
@@ -953,13 +964,69 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
   if (block.terminator.k === "return") add(block.terminator.value);
   return into;
 }
+
+/**
+ * Every name a loop reads that it does not declare for itself.
+ *
+ * A turn reads these out of the frame it was handed rather than out of a
+ * register, because a turn runs on a thread where the registers of this one
+ * mean nothing. That is the whole reason a loop's body has to be read before
+ * the registers are handed out: a name on this list may not be given one.
+ *
+ * The list is deliberately an over-estimate. A name the loop reads but does
+ * not write could be given a register safely — the turn would only be reading
+ * a value another thread wrote, which is exactly what the mark forbids, so
+ * such a loop is not marked in the first place — and a name that costs a
+ * frame slot it did not need is a far smaller price than a name given a
+ * register the turn cannot read.
+ */
+function namesAViewReads(loop: SemanticLoop): Set<string> {
+  const names = new Set<string>();
+  for (const block of everyBlock(loop.body)) {
+    for (const statement of block.statements) {
+      // A name the body declares is the turn's own: every turn enters the
+      // declaration, so two turns have two of them.
+      if (statement.k === "let") continue;
+      if (statement.k === "set" || statement.k === "step") names.add(statement.name);
+      if (statement.k === "setElement") names.add(statement.buffer);
+      if (statement.k === "fill") names.add(statement.buffer);
+      if (statement.k === "loop" && statement.loop.kind === "each") names.add(statement.loop.of);
+      for (const value of statementValues(statement)) {
+        walkValues(value, (inner) => {
+          if (inner.k === "local") names.add(inner.name);
+        });
+      }
+    }
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      walkValues(block.terminator.value, (inner) => {
+        if (inner.k === "local") names.add(inner.name);
+      });
+    }
+  }
+  if (loop.kind === "each") names.add(loop.of);
+  return names;
+}
+
+/**
+ * Whether a body can return out of the function it is written in, which is a
+ * turn cannot do: the turn is a function of its own that the runtime calls,
+ * and returning from it leaves the team halfway through the loop and hands
+ * the caller a function that has not returned at all.
+ */
+function returnsFromItsBody(body: SemanticBlock): boolean {
+  for (const block of everyBlock(body)) {
+    if (block.terminator.k === "return") return true;
+  }
+  return false;
+}
+
 /** The object a function's machine code is, and the code it carries. */
 function lowerFunction(
   fn: SemanticFunction,
   contract: FunctionContract,
   functionName: string,
   callable: ReadonlySet<string>,
-): { bytes: Uint8Array; textSizeBytes: number } {
+): { bytes: Uint8Array; textSizeBytes: number; threads: boolean } {
   const machine = new Machine(fn, contract);
   const text = machine.emit();
   for (const symbol of machine.externals) {
@@ -980,6 +1047,7 @@ function lowerFunction(
       relocations: machine.code.relocations,
     }).bytes,
     textSizeBytes: text.length,
+    threads: machine.teamed.size > 0,
   };
 }
 
@@ -1045,6 +1113,15 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
 
 /** What a whole number may be combined with, and how. */
 type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "ushr" | "sar" | "and" | "or" | "xor";
+
+/**
+ * A loop whose turns are run on a team of threads: the two kinds that count.
+ *
+ * A `while` or a `do-while` decides from a condition whether the next turn
+ * runs, so the rule never marks one, and neither shape is a range the runtime
+ * could cut into parts.
+ */
+type TeamedLoop = Extract<SemanticLoop, { kind: "counted" | "each" }>;
 
 /**
  * The labels one loop's header and its exit are written under, and the ids the
@@ -1130,6 +1207,30 @@ class Machine {
   private pinnedVectors: VectorSave[] = [];
   /** The register an object being filled lives in, when this function fills one. */
   private objectRegister: number | null = null;
+  /**
+   * The loops this function is writing a team of threads for, and the turns
+   * still to be written out of them.
+   *
+   * A turn cannot be written where the loop stands: it is called by the
+   * runtime from a thread of its own, with a stack that is not this one, so it
+   * is written out here and placed at the end of the code. The set is what
+   * says which loops are written that way, and it is filled before the body is
+   * read because the frame a turn reads is laid out as the body is read.
+   */
+  readonly teamed = new Set<SemanticLoop>();
+  /** The turns written out and waiting to be placed, in the order they were met. */
+  private readonly turns: { readonly label: string; readonly loop: TeamedLoop }[] = [];
+  /**
+   * The names a turn reads out of the frame it was handed, which the register
+   * allocator is told about so that none of them is given a register.
+   *
+   * A name in a register is a name whose value lives in this thread's
+   * registers, and a turn runs on a thread of its own, where those registers
+   * hold whatever that thread was last doing. So a name a turn reads has to be
+   * in the frame, which the turn copies and then reads at the offset it had
+   * here.
+   */
+  private readonly turnNames = new Set<string>();
   /**
    * Where a wide answer is put down before it is copied to the caller, and where
    * the pointer the caller gave for it was kept.
@@ -1435,9 +1536,14 @@ class Machine {
     // reaches can be kept in a register the convention does not ask a callee to
     // preserve, which costs the function nothing; one that has to survive a
     // call has to be in one that does, which costs a push and a pop.
+    // A loop written as a team of threads is a call into the runtime, so the
+    // names live across one are held in registers a call leaves alone. The
+    // graph is told which statements those are rather than left to read the
+    // loop as a loop, which is what it would otherwise see.
     const liveness = nameLiveness(
       this.fn.entry,
       this.fn.params.map((parameter) => parameter.name),
+      (statement) => statement.k === "loop" && this.teamed.has(statement.loop),
     );
     // The register each parameter arrives in, and the ones the parameters after
     // it arrive in. The prologue moves a parameter out of the register it
@@ -1502,6 +1608,15 @@ class Machine {
      * of it shares their register and neither pays for it.
      */
     const assign = (name: string, type: SemanticType): void => {
+      // A name a turn reads is left in the frame whatever it would otherwise
+      // have been worth a register for. A pinned value lives in this thread's
+      // registers and nowhere else — its frame slot is not even reserved, since
+      // every read of it goes through the register — and a turn runs on a
+      // thread where those registers are not this function's. One layout
+      // serves both: the value is in the frame, the turn copies the frame, and
+      // the turn reads its copy at the offset the value has here.
+      if (this.turnNames.has(name)) return;
+
       // A wide number is not pinned, and this is where that is decided rather
       // than worked around further down. Everything this function does below is
       // about one register: `pinned` names a single register, the prologue
@@ -1627,7 +1742,10 @@ class Machine {
     for (const saved of this.pinnedVectors) {
       saved.offset = this.reserve(8, 8);
     }
-    this.mayCall = this.callsAnything();
+    // A loop written as a team of threads is a call into the runtime, so a
+    // function holding one has a frame to keep aligned whether or not the IR
+    // says the body calls anything.
+    this.mayCall = this.callsAnything() || this.teamed.size > 0;
   }
 
   /**
@@ -1647,7 +1765,83 @@ class Machine {
     return false;
   }
 
+  /**
+   * Which loops of this body are written out as a team of threads, and which
+   * names that puts in the frame.
+   *
+   * This runs before the registers are handed out because handing a name a
+   * register decides where its value lives, and a turn reads the frame this
+   * function lays out rather than the registers this thread happens to hold.
+   * A name a turn reads is therefore told to the allocator first, as a name
+   * that is staying in the frame.
+   *
+   * A loop inside a loop that is already a team is left alone whatever it
+   * carries: it is written inside a turn, where the range is one thread's and
+   * a second fan-out inside it has nothing measured to say it pays.
+   */
+  private planTeams(): void {
+    const visit = (block: SemanticBlock, inside: boolean): void => {
+      for (const statement of block.statements) {
+        if (statement.k === "loop") {
+          const team = inside ? null : this.teamFor(statement.loop);
+          if (team !== null) this.teamed.add(team);
+          // Everything read inside a loop that became a turn — and inside any
+          // loop written within one — has to be in the frame rather than in a
+          // register: a thread of the team reads the frame, and the registers
+          // it has are its own.
+          if (inside || team !== null) {
+            for (const name of namesAViewReads(statement.loop)) this.turnNames.add(name);
+          }
+          visit(statement.loop.body, inside || team !== null);
+          continue;
+        }
+        if (statement.k === "if") {
+          visit(statement.then, inside);
+          if (statement.otherwise !== null) visit(statement.otherwise, inside);
+          continue;
+        }
+        if (statement.k === "block") visit(statement.body, inside);
+      }
+    };
+    visit(this.fn.entry, false);
+  }
+
+
+  /**
+   * Why this loop's turns are run on a team of threads here rather than one
+   * after another, or null when they are not.
+   *
+   * The mark on the loop says the turns do not depend on each other; it does
+   * not say this backend can start threads, and starting them costs something
+   * a loop with little in a turn never earns back. So a loop is written as a
+   * team only where this backend can run one correctly and where the turn is
+   * worth the cost. Every refusal below leaves the loop running in order,
+   * which is the same program and what this backend already wrote.
+   */
+  private teamFor(loop: SemanticLoop): TeamedLoop | null {
+    if (loop.kind !== "counted" && loop.kind !== "each") return null;
+    if (loop.parallel !== true) return null;
+    if (turnIsTooCheap(loop.body)) return null;
+    // An accumulator the turns combine is one number every turn writes, and
+    // combining it wants a slot per thread and a pass over them afterwards.
+    // The loops that reduce are the ones this backend already writes a whole
+    // vector at a time, so those are left to that.
+    if ((loop.reductions ?? []).length > 0) return null;
+    // A turn that returns leaves the function from inside a thread of the
+    // team, which is not what returning from the function means.
+    if (returnsFromItsBody(loop.body)) return null;
+    // The turn counts in halves a runtime hands it as whole numbers, so a
+    // counter narrower than that would be asked to compare a bound it cannot
+    // hold.
+    if (loop.kind === "counted" && (!isInteger(loop.type) || widthOf(loop.type) !== 8)) return null;
+    return loop;
+  }
+
   emit(): Uint8Array {
+    // Which loops are written as teams is settled before the registers are
+    // handed out, because a name a turn reads may not be given one: a turn runs
+    // on a thread where this thread's registers mean nothing.
+    this.planTeams();
     this.allocateRegisters();
     // A pinned value is in a register the convention says a callee leaves as it
     // found it, so the register is pushed here and popped there. The pushes are
@@ -1683,6 +1877,10 @@ class Machine {
     // it: the instruction was written before the body was read, because the
     // frame is as large as what the body reserved.
     else this.code.unwriteSub(frameAt);
+    // The turns go after the epilogue, which is where the runtime can call
+    // them: they are functions of their own, entered by address rather than by
+    // falling into them from the code above.
+    this.writeTurns();
     return this.code.finish();
   }
 
@@ -2277,14 +2475,169 @@ class Machine {
   }
 
   /**
-   * A loop marked parallel is written out as the loop it is.
+   * A loop whose turns are run on a team of threads, written where the loop
+   * stands.
    *
-   * The mark says the turns do not depend on each other, not that they must be
-   * run at once, and this backend writes the instructions itself: it has no
-   * thread to start and no atomics to hand a shared counter over with — the
-   * encoder has no `lock`-prefixed instruction at all. Running the turns in
-   * order is the same program, so that is what it does.
+   * The loop itself is not written here at all: it is written out as a turn —
+   * a function of its own that the runtime calls once per thread with the half
+   * open range that thread answers — and what stands here is the call that
+   * starts the team. That is the whole of what a backend without threads of
+   * its own needs: this one has no instruction that starts a thread and no
+   * atomic to hand a counter over with, so the thread is the runtime's, which
+   * is already written to keep a pool per thread for the allocator's sake.
+   *
+   * The counter is left where the loop this replaces would have left it. A
+   * loop written out ends with its counter on the first value that failed the
+   * test, which is the bound for `<` and one past it for `<=`, and a bound read
+   * after the loop is re-read by name, so the value is the same one the loop
+   * would have written.
    */
+  private fanOut(loop: TeamedLoop): void {
+    const label = this.code.label("Lturn");
+    this.turns.push({ label, loop });
+    const from = this.heldAt(USIZE, "blaze_from", loop.kind === "counted" ? loop.from : { k: "const", type: USIZE, text: "0" });
+    const to = this.heldAt(USIZE, "blaze_to", loop.kind === "counted" ? loop.to : loop.length);
+    // The runtime is handed a count of turns and cuts that into as many parts
+    // as there are processors. A counter the loop stops at with `<=` stops one
+    // past the value it stopped at, and that is the end the range runs to.
+    if (loop.kind === "counted" && loop.inclusive) {
+      this.load(to);
+      this.one(USIZE, "add");
+      this.store(to);
+    }
+    // A range whose end is below its start has no turns in it, and the
+    // difference of two counters is not a count when the second is the smaller
+    // of the two. The counter is left at the start, which is where a loop that
+    // turned never leaves it.
+    this.load(from);
+    this.toScratch(USIZE);
+    this.load(to);
+    this.apply("sub", USIZE);
+    this.code.movRegImm(RDX, 0n);
+    this.code.test(RAX, true);
+    this.code.cmov("s", RAX, RDX, true);
+    // The turn is called with the frame to read, and the stack pointer is where
+    // this function's slots are measured from.
+    this.code.movRegReg(RDX, RSP);
+    this.code.movRegReg(RDI, RAX);
+    this.code.leaOwnLabel(RSI, label);
+    this.runtime("_parallel_for");
+    if (loop.kind === "counted") {
+      const counter = this.bind(loop.variable, loop.type);
+      this.load(to);
+      this.store(counter);
+    } else {
+      const index = this.bind(loop.index, USIZE);
+      this.load(to);
+      this.store(index);
+      // The element the walk was holding is only ever read inside the loop, so
+      // what stands here is a slot that nothing reads: it is bound because the
+      // walk declares the name, and left as it was found.
+      this.bind(loop.element, loop.elementType);
+    }
+    this.freeSlot(from);
+    this.freeSlot(to);
+
+  }
+
+  /**
+   * Every turn this function asked for, written out one after another at the
+   * end of the code, where the runtime can call them.
+   *
+   * A turn is a function with a frame of its own, so it begins by taking one
+   * and ends by giving it back, and it is entered with the caller's frame in
+   * `rdi` and the half open range it answers in `rsi` and `rdx`. What it reads
+   * of the caller's frame is copied into its own, so every slot a read is
+   * written against is the offset it had here — which is why the allocator
+   * above was told which names a turn reads, and why none of them was given a
+   * register.
+   *
+   * The copy is what makes the rest of this file unchanged by any of it: a
+   * turn is written by the same code that writes any other loop, over the same
+   * names, reading the same offsets. It runs in a thread rather than in this
+   * one, and everything it reads and writes below that copy is the same as it
+   * would have been.
+   */
+  private writeTurns(): void {
+    for (const turn of this.turns) {
+      const outer = this.used;
+      const spares = this.spareSlots.length;
+      const borrowed = this.borrowed.length;
+      const accumulator = this.accumulator;
+      this.spareSlots.length = 0;
+      this.borrowed.length = 0;
+      this.accumulator = null;
+      this.code.bind(turn.label);
+      // The registers the convention asks a callee to leave as it found them.
+      // A turn is called by the runtime rather than by this function, and it
+      // writes as many of them as the body it was written out of does, so it
+      // hands back exactly what it was given.
+      for (const register of this.pinnedRegisters) this.code.push(register);
+      const frameAt = this.code.subRegImmLater(RSP);
+      // The three arguments, written into slots of the turn's own before the
+      // copy, because the copy is what writes over the slots the caller's
+      // frame held and these are read again on the far side of it.
+      const handed = this.bind("blaze_handed", USIZE);
+      this.code.movMemRegSized(frame(handed.offset), RDI, 8);
+      const begin = this.bind("blaze_begin", USIZE);
+      this.code.movMemRegSized(frame(begin.offset), RSI, 8);
+      const end = this.bind("blaze_end", USIZE);
+      this.code.movMemRegSized(frame(end.offset), RDX, 8);
+      // `rep movsb` reads the frame handed in and writes the turn's own, so
+      // `rsi` is where it reads and `rdi` is where it writes — the two are the
+      // other way round from what the instruction reads like.
+      this.load(handed);
+      this.code.movRegReg(RSI, RAX);
+      this.code.movRegReg(RDI, RSP);
+      this.code.movRegImm(RCX, BigInt(outer));
+      this.code.repMovsb();
+      this.writeTurn(turn.loop);
+      const bytes = this.frameBytes();
+      if (bytes > 0) this.code.patchWord(frameAt, bytes);
+      else this.code.unwriteSub(frameAt);
+      // The turn leaves the way a function leaves: the frame given back, the
+      // registers the convention asks a callee to preserve read off the stack
+      // they were pushed on, and a return. The vector registers are not read
+      // back, because the slots they were spilled into belong to the frame the
+      // turn copied and are gone with it.
+      this.code.epilogue(this.pinnedRegisters, [], bytes);
+      this.used = outer;
+      this.spareSlots.length = spares;
+      this.borrowed.length = borrowed;
+      this.accumulator = accumulator;
+    }
+    this.turns.length = 0;
+  }
+
+  /**
+   * One turn, written as the loop it is over the range the runtime handed it.
+   *
+   * The loop is the same loop with its counter starting at the beginning of
+   * the range rather than at the loop's own first value, and stopping at its
+   * end rather than at the loop's own bound. Everything else — the body, the
+   * region around it, the counter's own type — is the loop's, which is what
+   * makes a turn the same turns the loop would have run, run by several
+   * threads over a slice of the counters between them.
+   */
+  private writeTurn(loop: TeamedLoop): void {
+    const type = loop.kind === "counted" ? loop.type : USIZE;
+    const inner: SemanticLoop =
+      loop.kind === "counted"
+        ? {
+            ...loop,
+            from: { k: "local", type, name: "blaze_begin" },
+            to: { k: "local", type, name: "blaze_end" },
+            inclusive: false,
+            parallel: undefined,
+            reductions: undefined,
+          }
+        : { ...loop, length: { k: "local", type: USIZE, name: "blaze_end" }, parallel: undefined, reductions: undefined };
+    // A walk's range is its index, so a turn's walk starts where its half of
+    // the counters starts rather than at the first element — which is the one
+    // thing that would otherwise leave every thread walking the elements ahead
+    // of its own.
+    this.loop(inner, { k: "local", type: USIZE, name: "blaze_begin" });
+  }
   /**
    * One turn of a loop, between a region's beginning and its end where the loop
    * carries the mark.
@@ -2309,7 +2662,15 @@ class Machine {
     if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
   }
 
-  private loop(loop: SemanticLoop): void {
+  private loop(loop: SemanticLoop, start: SemanticValue | null = null): void {
+    // A loop written as a team of threads is written as a call that starts
+    // one, and the turns it runs are written out elsewhere; see `fanOut`. Every
+    // other loop — a marked one this backend refused, and every loop the rule
+    // never marked — is written as the loop it is, which is the same program.
+    if ((loop.kind === "counted" || loop.kind === "each") && this.teamed.has(loop)) {
+      this.fanOut(loop);
+      return;
+    }
     this.names.enter();
     const labels = this.loopLabels(loop);
     this.loops.push({ header: labels.header, exit: labels.exit, names: { header: loop.header, exit: loop.exit } });
@@ -2335,7 +2696,7 @@ class Machine {
         this.counted(loop, labels);
         break;
       case "each":
-        this.each(loop, labels);
+        this.each(loop, labels, start);
         break;
     }
     this.loops.pop();
@@ -2881,7 +3242,7 @@ class Machine {
    * entered in, and its length is read once, for the same reason a counted
    * loop's bound is.
    */
-  private each(loop: Extract<SemanticLoop, { kind: "each" }>, labels: LoopLabels): void {
+  private each(loop: Extract<SemanticLoop, { kind: "each" }>, labels: LoopLabels, start: SemanticValue | null = null): void {
     this.at(loop.length, USIZE);
     const length = this.holdAcross(USIZE, "blaze_length");
     this.store(length);
@@ -2889,17 +3250,36 @@ class Machine {
     // The index is stepped where it lies, the way a counted loop steps its
     // counter: in the frame it costs a store and a load per turn to hold a
     // value the next turn reads straight back out again, and a register the
-   // callee leaves alone costs neither.
+    // callee leaves alone costs neither.
     const counter = index.register ?? RAX;
-    this.code.movRegImm(counter, 0n);
+    // A walk handed to a team does not start at the first element: it starts
+    // where its half of the counters starts, which is what stops every thread
+    // walking the elements before its own.
+    if (start === null) {
+      this.code.movRegImm(counter, 0n);
+    } else {
+      this.at(start, USIZE);
+      if (counter !== RAX) this.code.movRegReg(counter, RAX);
+    }
+    // The index is a slot as well as a register, and the body reads the slot, so
+    // the value it starts from is written down before the walk leaves this
+    // statement rather than at the header where the step writes it.
     if (index.register === null) this.store(index);
+    // The index is stepped before the test, and the test is where the walk comes
+    // back to, so the first turn runs at the index it was started from and every
+    // turn after it at the next one.
     const test = this.code.label("Ltest");
     this.code.jmp(test);
     this.code.bind(labels.header);
+    // The index is read back out of its slot before the step, because a counter
+    // in the frame is not in a register the body left alone: the body computes
+    // addresses in `rax`, and the step would then be adding one to the last
+    // address rather than to the index. A counter with a register of its own is
+    // stepped where it lies, which is what `counted` does for the same reason.
+    if (index.register === null) this.load(index);
     this.code.aluImm("add", counter, 1);
     if (index.register === null) this.store(index);
     this.code.bind(test);
-    // The count was just written, so the counter is still where it was stepped.
     this.code.aluRegMem("cmp", counter, frame(length.offset), true);
     this.code.jcc("ae", labels.exit);
     this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType);

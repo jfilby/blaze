@@ -914,10 +914,6 @@ test("a program whose function carries a parallel loop links the threading runti
     language: "typescript",
     sourceFile: "main.ts",
     model: { provider: "openai-compatible", model: "stub" },
-    // The `c` backend is named because it is the one that writes the pragma:
-    // the machine and wasm backends run a marked loop's turns in order, so an
-    // object of theirs carries nothing for a link to serve.
-    backend: "c",
     output: "machine",
     generation: { maxCandidates: 1, maxAttempts: 1 },
   });

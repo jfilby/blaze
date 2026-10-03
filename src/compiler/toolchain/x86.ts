@@ -185,6 +185,15 @@ interface Patch {
   readonly value: number;
 }
 
+/**
+ * A word the code is written with a placeholder for and given the place of a
+ * label in this same object, which is what an address of the code itself is.
+ */
+interface Place {
+  readonly at: number;
+  readonly label: string;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Opcode tables                                                                */
 /* -------------------------------------------------------------------------- */
@@ -264,6 +273,8 @@ export class Encoder {
   private readonly fixups: Fixup[] = [];
   /** The words `patchWord` was given, applied once the layout has settled. */
   private readonly patches: Patch[] = [];
+  /** The words an address of this code is held in, applied once the layout has settled. */
+  private readonly places: Place[] = [];
   private serial = 0;
 
   /**
@@ -352,6 +363,15 @@ export class Encoder {
         });
       }
     }
+    for (const place of this.places) {
+      if (!this.labels.has(place.label)) {
+        throw new CompilerError({
+          category: "AssemblyError",
+          stage: "assemble",
+          message: `the machine code takes the address of ${place.label}, which is never bound`,
+        });
+      }
+    }
     // Widening one jump moves everything after it, which can put a later jump
     // out of reach in turn, so the decision is repeated until a sweep changes
     // nothing. It ends because a jump only ever widens once.
@@ -395,6 +415,15 @@ export class Encoder {
     for (const patch of this.patches) {
       const at = shift.at(patch.at);
       for (let index = 0; index < 4; index += 1) code[at + index] = (patch.value >> (index * 8)) & 0xff;
+    }
+    for (const place of this.places) {
+      const at = shift.at(place.at);
+      // An address is measured from the end of its own field, the same place a
+      // jump's displacement is, because the encoding is the relative one.
+      const distance = shift.at(this.labels.get(place.label) as number) - (at + 4);
+      for (let index = 0; index < 4; index += 1) {
+        code[at + index] = (distance >> (index * 8)) & 0xff;
+      }
     }
     for (const relocation of this.relocations) {
       relocation.offset = shift.at(relocation.offset);
@@ -760,6 +789,35 @@ export class Encoder {
     // instruction rather than to a register.
     this.byte(((register & 7) << 3) | 5);
     this.word(0);
+  }
+
+  /**
+   * The address of a label in this same code, which no object has to place.
+   *
+   * The one label a lowering takes the address of rather than jumps to is the
+   * body of a parallel turn: the runtime calls it by the address it is handed,
+   * and the address is where the code stands inside this object already, so it
+   * is settled here rather than left to a linker that is not asked anything.
+   */
+  leaOwnLabel(register: number, label: string): void {
+    this.places.push({ at: this.code.length + 3, label });
+    this.rex(true, register, { base: null, index: null });
+    this.byte(0x8d);
+    this.byte(((register & 7) << 3) | 5);
+    this.word(0);
+  }
+
+  /**
+   * Copies `rcx` bytes from `rdi` to `rsi`, which is what a turn does with the
+   * frame it was handed before it reads a word of it.
+   *
+   * There is no count in the instruction: the three registers are the operands,
+   * and a caller that wants a block copied writes them first. The count is the
+   * whole register, so it is `rcx` that is read and cleared, not `ecx`.
+   */
+  repMovsb(): void {
+    this.byte(0xf3);
+    this.byte(0xa4);
   }
 
   /* ---------------------------------------------------------------------- */

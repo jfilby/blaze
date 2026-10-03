@@ -29,7 +29,7 @@ import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, t
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, FunctionParam, Objective, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
-import { cTargetOptions, linkOptions, threadingOptions } from "../core/target.ts";
+import { cTargetOptions, linkOptions, threadingOptions, type Threading } from "../core/target.ts";
 
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
@@ -602,7 +602,7 @@ export interface LinkRequest {
    * True when the object carries a loop the compiler proved its turns
    * independent, which is what asks for the threading runtime at the link.
    */
-  threads?: boolean;
+  threads?: readonly Threading[];
   functionName: string;
 }
 
@@ -620,7 +620,7 @@ export function link(request: LinkRequest): void {
   // options of this command, so the program that comes out is built the way
   // this line asks and not the way the objects were compiled.
   const target = request.target === undefined ? [] : cTargetOptions(request.target);
-  const result = run("gcc", [...linkOptions(request.mode, request.objective), ...target, ...includes, ...threadingOptions(request.threads === true), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", [...linkOptions(request.mode, request.objective), ...target, ...includes, ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

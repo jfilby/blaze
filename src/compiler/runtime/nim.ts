@@ -450,6 +450,16 @@ proc blaze_rt_region_leave*() {.exportc, cdecl.} =
   ## start again.
   blazeRegionLeave()
 
+proc blaze_rt_parallel_for*(count: csize_t, turn: proc (frame: pointer, begin, end: csize_t) {.cdecl.}, frame: pointer) {.exportc, cdecl.} =
+  ## Run the turn over the counters [0, count). This host runs the turns in
+  ## order, in one part, on the thread that called: a Nim host would need
+  ## --threads:on, which is a compile option of the program rather than
+  ## something a runtime entry can turn on for one call, and it would make
+  ## every allocation the body does one a lock guards. The mark a loop carries
+  ## says its turns do not depend on each other, so running them here is the
+  ## same program, which is what a host without threads of its own does.
+  turn(frame, 0, count)
+
 proc blaze_rt_object_new*(bytes, alignment: csize_t): pointer {.exportc, cdecl.} =
 ${guarded ? `  let align = if alignment == 0: BlazeDefaultAlignment else: alignment.uint64
   if (align and (align - 1)) != 0:

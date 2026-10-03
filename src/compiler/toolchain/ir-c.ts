@@ -1227,7 +1227,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   // `-fopenmp` is asked for only when the function has a loop the compiler
   // proved its turns independent, because it is the flag that makes the pragma
   // a team of threads rather than a line the C compiler ignores.
-  const threads = threadingOptions(entryIsParallel(request.fn.entry));
+  const threads = threadingOptions(entryIsParallel(request.fn.entry) ? ["openmp"] : []);
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or
   // instruction is a model's to choose, on any target. An assembly build

@@ -27,6 +27,7 @@ import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { applyProposal, inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { optimizeSemanticFunction } from "./semantics/optimize-ir.ts";
 import { entryIsParallel } from "./semantics/parallel.ts";
+import type { Threading } from "./core/target.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
@@ -486,12 +487,12 @@ export interface Materialized {
   runner: Runner | null;
   sizeBytes: number;
   /**
-   * Whether the object carries a loop the compiler proved its turns
-   * independent. The C backend writes that loop as a pragma, and only the
-   * OpenMP runtime serves it, so a program that links such an object has to
-   * ask for the runtime whatever its own driver holds.
+   * The threading runtime this object needs at the link, which is nothing
+   * unless one of its loops is written as a team of threads. A program links
+   * the objects of all its functions, so this is what a program asks for
+   * whatever its own driver holds.
    */
-  threads: boolean;
+  threads: Threading[];
   textSizeBytes: number;
   implementationPath: string;
 }
@@ -595,11 +596,14 @@ async function materialize(
    */
   standalone: boolean,
 ): Promise<Materialized> {
-  // Whether the object this candidate is lowered into carries a team-of-threads
-  // pragma. Only the C backend writes one: the machine and wasm backends run a
-  // marked loop's turns in order, which is the same program, so an object of
-  // theirs asks for no threading runtime however it was marked.
-  const threads = request.lowering === "c" && entryIsParallel(fn.entry);
+  // The threading runtime this object needs at the link, which is nothing
+  // unless one of its loops is written as a team of threads. The C backend
+  // writes such a loop as a pragma OpenMP serves; the machine backend writes
+  // its own instructions and calls the runtime for its threads, and it decides
+  // that per loop rather than for the body at large — a marked loop it refused
+  // is written in order and needs nothing. The wasm backend runs the turns in
+  // order however they were marked, which is the same program.
+  let threads: Threading[] = request.lowering === "c" && entryIsParallel(fn.entry) ? ["openmp"] : [];
   if (request.lowering === "wasm") {
     const module = await buildModule({
       fn,
@@ -611,7 +615,7 @@ async function materialize(
     return {
       runner: module.runner,
       sizeBytes: module.moduleSizeBytes,
-      threads: false,
+      threads: [],
       textSizeBytes: (await stat(paths.implementation)).size,
       implementationPath: paths.implementation,
     };
@@ -628,26 +632,31 @@ async function materialize(
   // IR: only the last is the same for every candidate a review changed
   // nothing in, so a size objective weighs the text below instead.
   const deliversAssembly = request.output === "asm" || (request.output === "machine" && request.lowering === "c");
-  const lowered =
-    request.lowering === "machine"
-      ? await buildMachineObject({
-          fn,
-          contract: request.contract,
-          target: request.target,
-          callable: request.callable,
-          objectPath: paths.object,
-          candidate: candidate.id,
-        })
-      : await compileFunctionC({
-          fn,
-          contract: request.contract,
-          mode: request.mode,
-          target: request.target,
-          sourcePath: paths.loweredSource,
-          objectPath: paths.object,
-          ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
-          ...(deliversAssembly ? { assemblyPath: paths.lowered } : {}),
-        });
+  let lowered: Awaited<ReturnType<typeof buildMachineObject>> | Awaited<ReturnType<typeof compileFunctionC>>;
+  if (request.lowering === "machine") {
+    lowered = await buildMachineObject({
+      fn,
+      contract: request.contract,
+      target: request.target,
+      callable: request.callable,
+      objectPath: paths.object,
+      candidate: candidate.id,
+    });
+    // The machine backend answers this per object rather than per body, because
+    // a loop it refused to give a team is written in order and asks for nothing.
+    if (lowered.threads) threads = ["pthread"];
+  } else {
+    lowered = await compileFunctionC({
+      fn,
+      contract: request.contract,
+      mode: request.mode,
+      target: request.target,
+      sourcePath: paths.loweredSource,
+      objectPath: paths.object,
+      ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
+      ...(deliversAssembly ? { assemblyPath: paths.lowered } : {}),
+    });
+  }
   const textSizeBytes = request.output === "ir" ? (await stat(paths.implementation)).size : lowered.textSizeBytes;
   const object = { objectSizeBytes: lowered.objectSizeBytes };
   if (!standalone) {
@@ -952,8 +961,8 @@ async function probeCandidate(
   request: CandidateEvaluationRequest,
   paths: CandidatePaths,
   plan: ProbePlan,
-  /** Whether the object carries a team-of-threads pragma the probe must serve. */
-  threads: boolean,
+  /** The threading runtime the object needs, which the probe's link must serve. */
+  threads: Threading[],
 ): Promise<ProbeOutcome> {
   if (plan.kind === "skip") return { called: false, reason: plan.reason, stderr: "" };
   // The probe links the object the C toolchain links, so it runs for every

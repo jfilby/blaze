@@ -133,7 +133,7 @@ async function main(): Promise<void> {
     workDirectory: work,
     objectPaths,
     runtimeObjectPath: runtime.objectPath,
-    threads: programIsParallel(program.entry, program.bodies),
+    threads: programIsParallel(program.entry, program.bodies) ? ["openmp"] : [],
     outputPath,
   });
   console.log(`  ${outputPath}`);

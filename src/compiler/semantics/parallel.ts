@@ -148,7 +148,7 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): R
     return "the counter is not a whole number counting up one at a time, which is the only shape a parallel loop takes";
   }
   const reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() };
-  if (turnIsTooCheap(loop.body, reach)) {
+  if (turnIsTooCheapIn(loop.body, reach)) {
     return "a turn of this loop computes so little that a team of threads costs more than the turns it runs";
   }
   // A turn that leaves the loop early is a turn that decides whether the next
@@ -358,7 +358,22 @@ function canonicalCounted(loop: Extract<SemanticLoop, { kind: "counted" }>): boo
  */
 const MINIMUM_VALUES_PER_TURN = 8;
 
-function turnIsTooCheap(body: SemanticBlock, reach: Reach): boolean {
+/**
+ * Whether one turn of a loop computes too little to be worth a thread, which
+ * is the same question asked without the bodies a caller happens to hold.
+ *
+ * A backend that runs the turns itself has no program to read a callee out of,
+ * and a callee it cannot read adds one value to the count rather than what the
+ * callee computes. That is the safe direction to be wrong in: a turn that
+ * calls something is measured as cheaper than it is, so it is left to run in
+ * order, and a turn nobody measured is never handed to a thread on a number
+ * this produced.
+ */
+export function turnIsTooCheap(body: SemanticBlock, callees: Callees = NO_CALLEES): boolean {
+  return turnIsTooCheapIn(body, { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() });
+}
+
+function turnIsTooCheapIn(body: SemanticBlock, reach: Reach): boolean {
   const cost: TurnCost = { values: 0, unbounded: false };
   measureTurn(body, reach, cost);
   return !cost.unbounded && cost.values < MINIMUM_VALUES_PER_TURN;

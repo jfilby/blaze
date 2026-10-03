@@ -55,6 +55,7 @@ import { resolveFunction, resolveModule, type FunctionContext } from "./semantic
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
+import type { Threading } from "./core/target.ts";
 
 import { parseSemanticFunction, printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
 import { validateSemanticProgram } from "./semantics/ir-validate.ts";
@@ -1524,13 +1525,19 @@ export async function runBuild(
       // own statements are not the whole of this — its functions are objects of
       // their own, compiled one at a time, and the loop the driver holds nothing
       // of may be in any of them.
-      const threads =
-        programIsParallel(driver.entry, driver.bodies) ||
-        unitsGenerated().some((entry) => {
-          const selected = entry.result.selected;
-          if (selected === null) return false;
-          return entry.result.outcomes.find((outcome) => outcome.candidate === selected)?.threads === true;
-        });
+      // The driver is C, so a parallel loop in its own statements is OpenMP's,
+      // while a function of the program lowered by the machine backend asks for
+      // pthreads beside it. A program can want both, and asks for neither when
+      // nothing of it was written as a team of threads.
+      const threads: Threading[] = [];
+      if (programIsParallel(driver.entry, driver.bodies)) threads.push("openmp");
+      for (const entry of unitsGenerated()) {
+        const selected = entry.result.selected;
+        if (selected === null) continue;
+        for (const threading of entry.result.outcomes.find((outcome) => outcome.candidate === selected)?.threads ?? []) {
+          if (!threads.includes(threading)) threads.push(threading);
+        }
+      }
       const runner =
         runtimeKind === "none"
           ? await buildProgramDriver({

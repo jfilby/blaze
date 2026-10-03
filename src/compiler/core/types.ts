@@ -10,6 +10,7 @@
  * by the build and reaches a backend beside the contract, never inside it.
  */
 
+import type { Threading } from "./target.ts";
 import type { Statement } from "./ir.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -514,14 +515,15 @@ export interface CandidateOutcome {
     detail?: string;
   };
   /**
-   * Whether the object this candidate produced carries a loop the compiler
-   * proved its turns independent, which the C backend writes as a pragma and
-   * which only the OpenMP runtime serves. It is recorded per candidate because
-   * it is a property of the object: a program links the objects of all its
-   * functions, so one object carrying the pragma is what asks for the runtime
-   * at the link, whatever the driver's own statements hold.
+   * The threading runtime the object this candidate produced needs at the link,
+   * which is nothing unless one of its loops is written as a team of threads.
+   * The C backend writes such a loop as a pragma and OpenMP serves it; the
+   * machine backend writes its own and calls the runtime for its threads. It is
+   * recorded per candidate because it is a property of the object: a program
+   * links the objects of all its functions, so one object wanting threads is
+   * what asks for the runtime, whatever the driver's own statements hold.
    */
-  threads?: boolean;
+  threads?: Threading[];
   objectSizeBytes?: number;
   textSizeBytes?: number;
   verification?: VerificationResult;

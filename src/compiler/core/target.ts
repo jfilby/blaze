@@ -266,18 +266,30 @@ export function cTargetOptions(target: TargetSpec): string[] {
 }
 
 /**
- * The option a translation unit carrying a parallel loop is compiled with, and
- * the empty list where there is none.
+ * The threading runtime a program's parallel loops are served by, and the
+ * options that link it in.
  *
- * `-fopenmp` is what makes `#pragma omp parallel for` a team of threads rather
- * than a line the C compiler ignores, and it is the only reason it is here. It
- * links a threading runtime into the program, so a build with no parallel loop
- * in it does not ask for it: an unused `-fopenmp` is a `libgomp` a program
- * never calls into, which is a dependency the delivered binary did not have
- * before for no reason the source gave.
+ * There are two, because two backends write a parallel loop differently. The C
+ * backend writes `#pragma omp parallel for` and the OpenMP runtime is what
+ * makes that a team of threads rather than a line the C compiler ignores. The
+ * machine backend writes its own instructions and calls the runtime for its
+ * threads, which is pthreads and not OpenMP.
+ *
+ * Either links a threading runtime into the program, so a build with no
+ * parallel loop in it asks for neither: an unused one is a dependency the
+ * delivered binary did not have before, for no reason the source gave.
+ *
+ * A program can want both at once. Its driver is C, so a parallel loop in the
+ * driver's own statements is OpenMP's, while a function of the program lowered
+ * by the machine backend asks for pthreads beside it.
  */
-export function threadingOptions(parallel: boolean): string[] {
-  return parallel ? ["-fopenmp"] : [];
+export type Threading = "openmp" | "pthread";
+
+export function threadingOptions(threading: readonly Threading[]): string[] {
+  const options: string[] = [];
+  if (threading.includes("openmp")) options.push("-fopenmp");
+  if (threading.includes("pthread")) options.push("-pthread");
+  return options;
 }
 
 /**

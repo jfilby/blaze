@@ -176,9 +176,23 @@ left alone. The one write it accepts is the element named by the turn's own
 counter — `out[i] = f(values[i])` is the shape nearly every loop worth
 parallelising is — and any other index is refused, because the IR holds no
 length and nothing could say the two turns do not name the same element. A mark
-is a permission and not an instruction: the C backend takes it and writes
-`#pragma omp parallel for`, and the machine and wasm backends run the turns in
-order, which is the same program because nothing about one turn reaches another.
+is a permission and not an instruction. The C backend takes it and writes
+`#pragma omp parallel for`; the machine backend takes it and writes the turns
+out as a function the runtime calls once per thread; the wasm backend runs the
+turns in order, which is the same program because nothing about one turn reaches
+another.
+
+The machine backend has no instruction that starts a thread and no atomic, so
+the thread is the runtime's: `blaze_rt_parallel_for` cuts the counters into as
+many parts as there are processors and calls a turn once per part, which needs
+no lock because each part is cut before any thread starts. A turn is a function
+of its own with a frame of its own, and it reads the frame it was handed rather
+than the registers of the thread it runs on — the register allocator is told
+which names a turn reads and keeps them out of registers for that reason. It
+refuses a loop it cannot run as a turn: one carrying an accumulator the turns
+would have to combine (which is what the vector paths below are for), one whose
+counter is narrower than the halves a range is cut into, and one whose body
+returns, since a turn that returns returns from the turn.
 
 A turn may also call a function, which is the case that needs the whole program
 rather than one body: what a call reaches is the *callee's* body, so the analysis
