@@ -1,4 +1,4 @@
 0-ffi
-go.sum
+go.*
 secp256k1
 
