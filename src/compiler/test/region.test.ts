@@ -150,6 +150,58 @@ test("a turn that hands what it built to a function that only reads it may", () 
   assert.equal(onlyLoop(fn).region, true);
 });
 
+test("a turn that hands what it built to a reader whose answer is computed from it may", () => {
+  // The real `checksum`, not a stub of it: its answer is `1 + walk(left) +
+  // walk(right)`, so a walk of that value reaches the node it was given through
+  // a `loadField` on each side. Reading the tree is what the turn wants to do,
+  // and it is not the same as keeping it — the answer is a number, and a number
+  // carries no block out of the turn.
+  const checksum = reader("checksum");
+  const field = (name: string): SemanticValue => ({
+    k: "loadField",
+    type: REF,
+    object: { k: "local", type: REF, name: "node" },
+    layout: "Node",
+    field: name,
+  });
+  const one: SemanticValue = { k: "const", type: F64, text: "1" };
+  checksum.entry.terminator = {
+    k: "return",
+    value: { k: "arith", type: F64, op: "add", left: one, right: { k: "arith", type: F64, op: "add", left: callValue("checksum", [field("inner")]), right: callValue("checksum", [field("inner")]) } },
+  };
+  const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("checksum", [{ k: "local", type: REF, name: "tree" }]))]));
+  markRegionLoops(fn.entry, new Map([["checksum", checksum]]));
+  assert.equal(onlyLoop(fn).region, true);
+});
+
+test("a turn whose answer is read out of what it built may", () => {
+  // `sum += checksum(tree)` reaches `tree` through both of the calls `checksum`
+  // makes with it, and stores a number. Only a reference can put a block
+  // anywhere, so a store of a number is not an escape whatever the value was
+  // computed from.
+  const checksum = reader("checksum");
+  const fn = functionWith(countedLoop([
+    bind("tree", node()),
+    { k: "set", line: 2, name: "acc", op: "+=", value: callValue("checksum", [{ k: "local", type: REF, name: "tree" }]) },
+  ]));
+  markRegionLoops(fn.entry, new Map([["checksum", checksum]]));
+  assert.equal(onlyLoop(fn).region, true);
+});
+
+test("a turn that hands back a reference it read out of what it was given may not", () => {
+  // The other side of the same gate: an answer that *is* a reference, taken
+  // from the object the caller owns. The turn's storage is in that answer, so
+  // the next turn's rewind would write over a block somebody still holds.
+  const field = reader("firstChild");
+  field.entry.terminator = {
+    k: "return",
+    value: { k: "loadField", type: REF, object: { k: "local", type: REF, name: "node" }, layout: "Node", field: "inner" },
+  };
+  const fn = functionWith(countedLoop([bind("tree", node()), bind("kept", callValue("firstChild", [{ k: "local", type: REF, name: "tree" }]))]));
+  markRegionLoops(fn.entry, new Map([["firstChild", field]]));
+  assert.equal(onlyLoop(fn).region, undefined);
+});
+
 test("a turn that hands what it built to a function that keeps it may not", () => {
   // The callee writes what it was given into a name it found, which is
   // somewhere the caller can still be holding the block.

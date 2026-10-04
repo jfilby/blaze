@@ -18,6 +18,7 @@
 import {
   statementBlocksOf,
   statementValues,
+  valueKind,
   walkValues,
   type SemanticBlock,
   type SemanticFunction,
@@ -301,7 +302,7 @@ function statementRefusal(
     walkValues(value, (inner) => {
       if (refused !== null || inner.k !== "call") return;
       for (const argument of inner.call.args) {
-        if (ownsRegionBlock(argument, held, reach) && !calleeKeepsNothing(inner.call.callee, reach)) {
+        if (storesRegionBlock(argument, held, reach) && !calleeKeepsNothing(inner.call.callee, reach)) {
           refused = "the turn hands something it allocated to a function that keeps what it is given";
         }
       }
@@ -311,6 +312,10 @@ function statementRefusal(
 
   switch (statement.k) {
     case "let":
+      // Read without the reference gate `storesRegionBlock` puts on an escape:
+      // this line records which names hold a block rather than asking whether
+      // one leaves, and a name wrongly in `held` only refuses a mark later. A
+      // call whose declared type is a reference is the shape this exists for.
       if (!ownsRegionBlock(statement.value, held, reach)) return null;
       // A name the turn declares dies with the turn, so a block bound to one is
       // gone before the next turn asks for storage.
@@ -320,14 +325,14 @@ function statementRefusal(
       }
       return "the turn binds something it allocated to a name that outlives it";
     case "set":
-      return ownsRegionBlock(statement.value, held, reach)
+      return storesRegionBlock(statement.value, held, reach)
         ? "the turn writes something it allocated into a name that outlives it"
         : null;
     case "setElement":
     case "fill":
       // An element written into a buffer the turn made is inside the reuse; one
       // written into a buffer the turn found is handed to whatever holds it.
-      if (ownsRegionBlock(statement.value, held, reach) && !(declared.has(statement.buffer) && held.has(statement.buffer))) {
+      if (storesRegionBlock(statement.value, held, reach) && !(declared.has(statement.buffer) && held.has(statement.buffer))) {
         return "the turn writes something it allocated into a buffer that outlives it";
       }
       return null;
@@ -335,7 +340,7 @@ function statementRefusal(
       // A field of a block the turn made is inside the reuse. A field of
       // anything else is not, and putting one there hands the next turn's
       // rewind a value that is still wanted.
-      if (ownsRegionBlock(statement.value, held, reach) && !ownsRegionBlock(statement.object, held, reach)) {
+      if (storesRegionBlock(statement.value, held, reach) && !ownsRegionBlock(statement.object, held, reach)) {
         return "the turn stores something it allocated into an object that outlives it";
       }
       return null;
@@ -349,6 +354,22 @@ function statementRefusal(
       // is this turn's own body.
       return null;
   }
+}
+
+/**
+ * Whether putting `value` where this statement puts it hands a block of the
+ * turn to something that outlives it.
+ *
+ * This is `ownsRegionBlock` with the question of what lands there asked first,
+ * and on a turn that walks a tree the answer is the difference between the
+ * reuse and no reuse at all: `sum += checksum(tree)` *reads* every block the
+ * tree is made of and writes a `f64`, and a walk of the value reaches `tree`
+ * through both of the calls `checksum` makes with it. Only a value that is a
+ * reference can put a block anywhere, so a number is answered before the walk
+ * is asked — a store that stores no block is not an escape.
+ */
+function storesRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach: Reach): boolean {
+  return valueKind(value) === "reference" && ownsRegionBlock(value, held, reach);
 }
 
 /**
@@ -518,7 +539,21 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
           break;
       }
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null && holdsGiven(block.terminator.value)) return true;
+    // A value that is not a reference carries no block at all, so a function
+    // answering with one cannot be handing back what it was given however many
+    // reads of the given its answer is computed from. This is what keeps
+    // `checksum` out of the escape list: it reads a field out of the tree it
+    // was given and answers `1 + left + right`, a number, and a walk of that
+    // answer reaches `node` through every `loadField` in it. Reading the given
+    // is not keeping it; only naming it as the answer is.
+    if (
+      block.terminator.k === "return" &&
+      block.terminator.value !== null &&
+      valueKind(block.terminator.value) === "reference" &&
+      holdsGiven(block.terminator.value)
+    ) {
+      return true;
+    }
   }
   return false;
 }
