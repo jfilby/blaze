@@ -163,9 +163,70 @@ test("Deno names the command line node names", () => {
 
 test("a statement a program cannot run is refused", () => {
   assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
+  // A refused statement names the keyword that was written and what to write
+  // instead, so a `switch` is not reported as the token the parser lost.
   const refused = diagnostic(() => bodyOf("switch (total) {\n}\n"));
-  assert.match(refused, /"switch/);
-  assert.match(refused, /is not a statement of a program/);
+  assert.match(refused, /"switch" is not part of a program/);
+  assert.match(refused, /if \(x === 1\)/);
+});
+
+test("an array written out is the array a typed array of its values would be", () => {
+  // `[1, 2, 3]` is what `new Float64Array([1, 2, 3])` spells out in full: a
+  // `number` is a double whatever it was written next to, and this subset has
+  // one array of numbers rather than the several TypeScript has.
+  assert.deepEqual(bodyOf("const a = [1, 2, 3];\n"), bodyOf("const a = new Float64Array([1, 2, 3]);\n"));
+  assert.deepEqual(bodyOf("const a = [];\n"), bodyOf("const a = new Float64Array([]);\n"));
+
+  const program = resolved({
+    "main.ts": [
+      "const a = [1, 2, 3];",
+      "a[1] = 20;",
+      "const b = [];",
+      "console.log(`${a.length} ${a[0]} ${a[1]} ${a[2]} ${b.length}`);",
+      "",
+    ].join("\n"),
+  });
+  // The IR holds each list as a block of the values written, and the empty one
+  // as a block of no elements: both carry a length the program goes on to read.
+  const lengths = program.entry.statements.flatMap((statement) =>
+    statement.k === "let" && statement.value.k === "buffer" ? [statement.value.length] : [],
+  );
+  assert.deepEqual(lengths, [3, 0]);
+});
+
+test("a list of values holds numbers, and a text among them is refused", () => {
+  assert.match(
+    diagnostic(() => bodyOf('const a = [1, "two"];\n')),
+    /"two" is not a number; an array holds numbers/,
+  );
+});
+
+test("a construct outside the subset is named, with what to write instead", () => {
+  // Each of these used to be reported as whatever token the parser lost its
+  // place at, so a `catch` said "expected the name of a function" and a
+  // `function*` said the same. They are named where they were written.
+  for (const [source, what] of [
+    ["const x = await f();\n", /"await" is not part of a program[\s\S]*no promise to wait for/],
+    ["const x = yield 1;\n", /"yield" is not part of a program[\s\S]*hands back with return/],
+    ["class C { }\n", /"class" is not part of a program[\s\S]*object written where it is made/],
+    ["enum E { A }\n", /"enum" is not part of a program[\s\S]*const RED = 0/],
+    ["try { f(); } catch (e) { }\n", /"catch" is not part of a program[\s\S]*nothing to catch/],
+    ["function* g(): number { yield 1; }\n", /a generator is not supported/],
+    ["async function g(): number { return 1; }\n", /an async function is not supported/],
+  ] as const) {
+    assert.match(diagnostic(() => bodyOf(source)), what);
+  }
+});
+
+test("a construct outside the subset is named in a function body too", () => {
+  for (const [body, what] of [
+    ["try { return 1; } catch (e) { return 0; }", /"catch" is not supported[\s\S]*nothing to catch/],
+    ["return await n;", /"await" is not supported/],
+    ["return yield n;", /"yield" is not supported/],
+  ] as const) {
+    const source = `function f(n: number): number { ${body} }\nmain();\n`;
+    assert.match(diagnostic(() => typeScriptFrontend.analyze(source, "lib.ts")), what);
+  }
 });
 
 test("a declaration after the program is refused, because a program runs last", () => {

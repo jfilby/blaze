@@ -172,6 +172,8 @@ function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isPro
  * files disagree about what exists.
  */
 function validateImports(records: ModuleRecord[], contracts: Map<string, FileContract>): ContractEdge[] {
+  const analyses: Record<string, string | null> = {};
+  for (const record of records) analyses[record.path] = record.analysis.default;
   const edges: ContractEdge[] = [];
   for (const record of records) {
     const declaredHere = new Set(record.analysis.functions.filter((entry) => entry.exported).map((entry) => entry.name));
@@ -183,7 +185,22 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
       if (available.length === 0) {
         throw contractPhaseError(`${record.path} imports "${entry.specifier}" (line ${entry.line}), which exports nothing`);
       }
-      const names = entry.names ?? available;
+      // A default import names no export of its own: it binds whatever the
+      // module it names exports as its default, under the name that function
+      // was declared with, because a program of this subset links by name.
+      let names = entry.names ?? available;
+      if (entry.default) {
+        const offered = analyses[to] ?? null;
+        if (offered === null) {
+          throw contractPhaseError(
+            `${record.path} imports the default export of "${entry.specifier}" (line ${entry.line}), which has none`,
+            `${to} exports: ${available.join(", ")}; write \`export default function ${available[0]}(...)\` to offer one`,
+          );
+        }
+        // `import d, { a }` binds the default and the names beside it, so the
+        // default joins the list rather than standing in for it.
+        names = [...names, offered];
+      }
       const missing = names.filter((name) => target.functions[name] === undefined);
       if (missing.length > 0) {
         throw contractPhaseError(

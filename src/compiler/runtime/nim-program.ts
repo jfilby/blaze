@@ -457,7 +457,7 @@ ${anchor}
     const written = elementNim(contractType(element));
     return [
       `const ${name}_length = (${count}).csize_t`,
-      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate((${name}_length == 0'u64).csize_t * ${elementSize(contractType(element))}))`,
+      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate((if ${name}_length == 0'u64: 1'u64 else: ${name}_length).csize_t * ${elementSize(contractType(element))}))`,
     ];
   }
 

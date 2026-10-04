@@ -807,7 +807,9 @@ export const nimFrontend: Frontend = {
       throw frontendError(`no proc found in ${path}`, "a module declares pure procs");
     }
     // A Nim module of this compiler is a library of procs: nothing in it runs.
-    return { path, imports: parseImports(source), functions, body: [] };
+    // Nim has no default export: every proc of a module is part of its
+    // interface, so `import f from "./other.nim"` has nothing to bind to here.
+    return { path, imports: parseImports(source), functions, default: null, body: [] };
   },
 
   contractFor(analysis, declared, input) {
@@ -863,7 +865,7 @@ function parseImports(source: string): ModuleImport[] {
     for (const piece of match[1].split(",")) {
       const specifier = piece.trim().replace(/^['"]|['"]$/g, "").split(/\s+/)[0];
       // An unqualified import brings every export of the module into scope.
-      imports.push({ specifier, names: null, line: line.number });
+      imports.push({ specifier, names: null, default: false, line: line.number });
     }
   }
   return imports;

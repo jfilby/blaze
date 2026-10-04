@@ -127,6 +127,69 @@ test("one symbol cannot arrive from two files, or under another name", () => {
   );
 });
 
+test("a module may export one function as its default, and an importer may bind it", () => {
+  const program = contract(
+    {
+      "main.ts": [
+        'import scale, { helper } from "./lib.ts";',
+        "export function dot(x: number): number {",
+        "  return 0;",
+        "}",
+        "",
+      ].join("\n"),
+      "lib.ts": [
+        "function helper(x: number): number {",
+        "  return x + 1;",
+        "}",
+        "",
+        "export default function scale(x: number, n: number): number {",
+        "  return x * n;",
+        "}",
+        "",
+        "export { helper };",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+
+  // A default export is offered under the name it was declared with, because
+  // this subset links by name: the local name the importer wrote is not carried.
+  const library = program.files.find((file) => file.path === "lib.ts");
+  assert.deepEqual(Object.keys(library?.functions ?? {}), ["helper", "scale"]);
+  assert.deepEqual(program.edges, [{ from: "main.ts", to: "lib.ts", symbols: ["helper", "scale"] }]);
+});
+
+test("a default export a module does not offer is refused, naming what it offers", () => {
+  assert.match(
+    diagnostic(() =>
+      contract(
+        {
+          "main.ts": 'import scale from "./lib.ts";\nexport function dot(x: number): number {\n  return scale(x, 1);\n}\n',
+          "lib.ts": SCALE,
+        },
+        "main.ts",
+      ),
+    ),
+    /imports the default export of "\.\/lib\.ts".*which has none/s,
+  );
+});
+
+test("an export naming a function the file does not declare is refused", () => {
+  assert.match(
+    diagnostic(() =>
+      contract(
+        {
+          "main.ts": 'import { missing } from "./lib.ts";\nexport function dot(x: number): number {\n  return x;\n}\n',
+          "lib.ts": "function scale(x: number): number {\n  return x;\n}\nexport { missing };\n",
+        },
+        "main.ts",
+      ),
+    ),
+    /"missing" is exported but not declared here/,
+  );
+});
+
 test("a file that imports a symbol it also declares is a conflict", () => {
   // A Nim import brings in every export, so the clash is caught for the reader.
   assert.throws(

@@ -50,9 +50,12 @@
  * the six other builtins.
  *
  * A typed array is a value in three shapes: the values it holds, as in
- * `new Float64Array([1, 2])`; a count the program settles on when it runs, as
- * in `new Float64Array(n)`; and a window of a block the program laid out, as in
+ * `new Float64Array([1, 2])`; a count the program settles on when it runs, as in
+ * `new Float64Array(n)`; and a window of a block the program laid out, as in
  * `new Float64Array(block, offset, n)` over a `new SharedArrayBuffer(bytes)`.
+ * A list written on its own is the first of those, as in `const a = [1, 2]`: a
+ * `number` is a double whatever it was written beside, and this subset has one
+ * array of numbers rather than the several TypeScript has.
  * `a.fill(x)` writes one value into every element of an array and answers the
  * array, and `x.toFixed(d)` answers a number written as text at `d` digits.
  *
@@ -60,10 +63,10 @@
  * escapes in ESCAPES resolved and any other escape left as written. A negative
  * number is a unary `-` over the number, not a number of its own.
  *
- * Anything else — a `switch`, a `try`, a declaration of a function or a class,
- * a call of a method, a `new Uint8Array(n)` with a count — is refused with the
- * line it was written on, and the rest of the file is still read, so one
- * program reports every construct it cannot run.
+ * Anything else — a `switch`, a `try`, a declaration of a class, a generator,
+ * a call of a method the two above are not — is refused with the line it was
+ * written on and what to write instead, and the rest of the file is still read,
+ * so one program reports every construct it cannot run.
  */
 
 import type {
@@ -75,7 +78,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { Diagnostics, Token } from "./typescript.ts";
-import { ARGV, ARGV_LENGTH, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
+import { ARGV, ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
 import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 
@@ -166,6 +169,10 @@ const BLOCK_KEYWORDS: readonly string[] = [
   "with",
 ];
 
+/** What a program may say, as the refusals of what it may not say state it. */
+const PROGRAM_BODY =
+  "a program runs declarations, function declarations, return, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math, process.argv and Deno.args";
+
 /** What the third clause of a counted loop says, or that it says nothing. */
 interface LoopStep {
   /** The step, or null for an index that moves one the way it already travels. */
@@ -215,12 +222,8 @@ class ProgramParser {
     this.fail(`expected "${text}"`, token);
   }
 
-  private fail(message: string, token: Token = this.peek()): void {
-    this.diagnostics.report(
-      message,
-      `near "${token.text}"; a program runs declarations, function declarations, return, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math, process.argv and Deno.args`,
-      token.line,
-    );
+  private fail(message: string, token: Token = this.peek(), detail = PROGRAM_BODY): void {
+    this.diagnostics.report(message, `near "${token.text}"; ${detail}`, token.line);
   }
 
   /**
@@ -284,6 +287,12 @@ class ProgramParser {
     if (this.at("while")) return this.whileLoop();
     if (this.at("do")) return this.doWhileLoop();
     if (this.at("for")) return this.countedLoop();
+    if (this.at("async")) {
+      const at = this.next();
+      this.fail("an async function is not part of a program", at, REFUSED_KEYWORDS.async);
+      this.skipBlock();
+      return null;
+    }
     if (this.at("break")) {
       this.next();
       return { kind: "break", line };
@@ -309,9 +318,18 @@ class ProgramParser {
       const statement = this.named();
       if (statement !== undefined) return statement;
     }
+    const token = this.peek();
+    // Each keyword the subset does not read is named where it was written, with
+    // what to write instead. The generic refusal below it reported the same
+    // sentence for a `switch`, a `class` and a `with`, which named none of them.
+    const refusedKeyword = REFUSED_KEYWORDS[token.text];
+    if (refusedKeyword !== undefined) {
+      this.fail(`"${token.text}" is not part of a program`, token, refusedKeyword);
+      this.skipBlock();
+      return null;
+    }
     // A name with something written after it is a value, and a program runs a
     // value by printing it or by passing it to what it calls.
-    const token = this.peek();
     const member = this.peek(1);
     if (token.kind === "ident" && member.kind === "punct" && (member.text === "." || member.text === "(")) {
       const what = member.text === "." ? `${token.text}.${this.peek(2).text}` : `${token.text}(...)`;
@@ -576,6 +594,15 @@ class ProgramParser {
   private declaredFunction(): ProgramStatement {
     const line = this.peek().line;
     this.expect("function");
+    // `function* name()`: the star is where the generator was written, and it
+    // is refused here rather than reported as the missing name of a function
+    // the source did write.
+    if (this.at("*")) {
+      const star = this.next();
+      this.fail("a generator is not part of a program", star, REFUSED_KEYWORDS.yield);
+      this.skipBlock();
+      return { kind: "invoke", function: "", args: [], line };
+    }
     const name = this.identifier("the name of a function");
     const params: { name: string; type: string | null }[] = [];
     this.expect("(");
@@ -859,6 +886,14 @@ class ProgramParser {
       this.next();
       return { k: "text", parts: this.parts(token) };
     }
+    // `await x` and `yield x` read as the name `await` or `yield` and whatever
+    // came after it, so the build failed on the expression rather than on the
+    // word that was written. They are refused where the word is.
+    if (token.kind === "ident" && (token.text === "await" || token.text === "yield")) {
+      this.next();
+      this.fail(`"${token.text}" is not part of a program`, token, REFUSED_KEYWORDS[token.text]);
+      return this.value();
+    }
     if (token.kind === "ident") {
       if (token.text === "new") {
         this.next();
@@ -891,6 +926,10 @@ class ProgramParser {
       this.next();
       return { k: "name", name: token.text };
     }
+    // `[1, 2, 3]`: an array written out where it is made, which is what
+    // `new Float64Array([1, 2, 3])` spells out in full. An empty list is a
+    // block of no elements, which the runtime still has to hand back.
+    if (this.accept("[")) return this.arrayLiteral();
     if (this.accept("(")) {
       // Brackets end the operand of a unary operator: `-(2 ** 2)` is the
       // negation of a power, and JavaScript reads it as one.
@@ -1035,21 +1074,47 @@ class ProgramParser {
       return this.nothing();
     }
     this.next();
-    const values: ProgramValue[] = [];
-    if (!this.at("]")) {
-      do {
-        const element = this.peek();
-        if (element.kind === "string") {
-          this.fail(`"${element.text}" is not a number; a buffer holds numbers`, element);
-          this.skipArguments();
-          return this.nothing();
-        }
-        values.push(this.value());
-      } while (this.accept(","));
-    }
-    this.expect("]");
+    const values = this.elements();
     this.expect(")");
     return { k: "buffer", element: VIEWS[view] as PrimitiveTypeName, values };
+  }
+
+  /**
+   * `[1, x, 3]`: the values a typed array holds. It is the same list whether it
+   * was written as `new Float64Array([...])` or on its own as `const a = [...]`,
+   * because a `number` is a double whatever it was written next to, and this
+   * subset has one array of numbers rather than the several TypeScript has.
+   */
+  private arrayLiteral(): ProgramValue {
+    return { k: "buffer", element: "f64", values: this.elements() };
+  }
+
+  /**
+   * The elements between the brackets, or what stopped reading them. The left
+   * bracket is already read, because both callers looked at it before deciding
+   * this is a list of elements rather than an index or a block.
+   */
+  private elements(): ProgramValue[] {
+    const values: ProgramValue[] = [];
+    if (this.at("]")) {
+      this.next();
+      return values;
+    }
+    for (;;) {
+      const element = this.peek();
+      if (element.kind === "string") {
+        this.fail(`"${element.text}" is not a number; an array holds numbers`, element);
+        this.synchronize("]");
+        this.accept("]");
+        return values;
+      }
+      values.push(this.value());
+      if (!this.accept(",")) break;
+      // A trailing comma is written in the source and has no element behind it.
+      if (this.at("]")) break;
+    }
+    this.expect("]");
+    return values;
   }
 
   /** The text of a string, split where a template string interpolates. */

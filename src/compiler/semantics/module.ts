@@ -17,10 +17,14 @@ import type { FunctionContract, PrimitiveTypeName, SourceInput, TypeExpr } from 
 /**
  * One import as the source wrote it. `names` is the list of symbols it binds,
  * or null for a language that brings every export into scope unqualified.
+ * `default` binds the module's default export under the name it was declared
+ * with, which is what `import f from "./x.ts"` asks for; `names` is empty then,
+ * because a default import names no export of its own.
  */
 export interface ModuleImport {
   specifier: string;
   names: string[] | null;
+  default: boolean;
   line: number;
 }
 
@@ -173,6 +177,8 @@ export interface ModuleAnalysis {
   path: string;
   imports: ModuleImport[];
   functions: DeclaredFunction[];
+  /** The name the file exports as its default, or null where it exports none. */
+  default: string | null;
   /**
    * The statements the file runs, in order. Only the entry module of a program
    * may have them: a file the program merely imports is a library of

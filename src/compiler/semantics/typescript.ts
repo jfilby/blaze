@@ -15,9 +15,16 @@
  *     return total;
  *   }
  *
- *   - top level: `import { name } from "./other.ts";`, function declarations
- *     with or without `export`, and the statements of a program (see
- *     typescript-program.ts), which come after every declaration
+ *   - top level: `import { name } from "./other.ts";`, `import name from
+ *     "./other.ts";` and `import name, { other } from "./other.ts";`, which
+ *     bind a module's default export and its named ones; `export function`,
+ *     `export default function`, `export { name }`, and the statements of a
+ *     program (see typescript-program.ts), which come after every declaration
+ *
+ *     A default export is bound under the name the function was declared with
+ *     and not the name the importer wrote: this subset links by name, because
+ *     one table holds every function of every file of the program, so a second
+ *     name for one of them would be a second compilation of it.
  *   - statements: let/const/var with an initialiser, counted for loops in
  *     either direction, for-of loops, while, do-while, break, continue,
  *     if/else, assignments, compound assignments, `i++`, calls, returns and
@@ -203,11 +210,32 @@ const CONTRACT_OPERATORS: readonly BinaryOp[] = [
 /** The operators a value an index is built from may use, as a contract states it. */
 const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
 
-const UNSUPPORTED_STATEMENTS = ["switch", "try", "throw", "class", "interface", "type", "enum", "import"];
+/**
+ * The keywords the subset does not read, and what a source writes instead of
+ * each one. They are named here rather than left to the parser reading past
+ * them: a construct refused by a shape error is reported as whatever token
+ * happened to be next, so `catch` said "expected the name of a function" and
+ * `function*` said the same, and neither named the thing that was written.
+ */
+export const REFUSED_KEYWORDS: Record<string, string> = {
+  switch: "a chain of comparisons, as in `if (x === 1) { ... } else { ... }`",
+  try: "nothing to catch: the program has no way to raise, so there is nothing to catch",
+  catch: "nothing to catch: the program has no way to raise, so there is nothing to catch",
+  finally: "nothing to catch: the program has no way to raise, so there is nothing to catch",
+  throw: "a line written out with console.log, and an error as one",
+  class: "an object written where it is made, as in `{ left: null, right: null }`",
+  interface: "nothing: a program names a type with one word, as in `const n: usize = 0`",
+  type: "nothing: a program names a type with one word, as in `const n: usize = 0`",
+  enum: "the values written out, as in `const RED = 0;`",
+  namespace: "the names written as they are",
+  struct: "an object written where it is made, as in `{ left: null, right: null }`",
+  with: "a plain block, as in `{ ... }`",
+  await: "a straight line: a compiled program has no promise to wait for",
+  yield: "a value the function hands back with return",
+  async: "a straight line: a compiled program has nothing to wait for",
+};
 
-/** What a function body may say, as the refusals of what it may not say state it. */
-const FUNCTION_BODY =
-  "a function is declarations, counted loops, while and do-while loops, for-of loops, break and continue, conditionals, calls, assignments, returns and console.log";
+
 
 /* -------------------------------------------------------------------------- */
 /* Type annotations                                                           */
@@ -487,6 +515,9 @@ class TypeScriptParser {
   parseModule(path: string): ModuleAnalysis {
     const imports: ModuleImport[] = [];
     const functions: DeclaredFunction[] = [];
+    /** The names `export { f }` offered, which a declaration may name later. */
+    const namesExported: Record<string, true> = {};
+    let defaultExport: string | null = null;
     while (this.peek().kind !== "end") {
       if (this.at("import")) {
         this.next();
@@ -494,24 +525,71 @@ class TypeScriptParser {
         continue;
       }
       const token = this.peek();
-      if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
-        // The body runs to the end of the file: a declaration after it belongs
-        // to a library, not to a program.
-        return { path, imports, functions, body: parseProgramBody(this.tokens.slice(this.position), path, this.diagnostics) };
-      }
-      const exported = this.accept("export");
-      if (exported && this.at("default")) {
-        this.report("a default export is not supported", "export the function by name", token);
+      // `async` and `export async` both reach a function the subset does not
+      // read. They are named here, where they were written, rather than left
+      // to the declaration parser reporting whatever token it found next.
+      if (this.at("async")) {
+        this.report("an async function is not supported", REFUSED_KEYWORDS.async, token);
         this.skipBlock();
         continue;
       }
+      if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
+        // The body runs to the end of the file: a declaration after it belongs
+        // to a library, not to a program.
+        return {
+          path,
+          imports,
+          functions,
+          default: defaultExport,
+          body: parseProgramBody(this.tokens.slice(this.position), path, this.diagnostics),
+        };
+      }
+      const exported = this.accept("export");
+      if (exported && this.at("async")) {
+        this.report("an async function is not supported", REFUSED_KEYWORDS.async, token);
+        this.skipBlock();
+        continue;
+      }
+      let isDefault = false;
+      if (exported && this.at("default")) {
+        this.next();
+        // `export default function f() {}` offers `f` as the module's default.
+        // It is offered under the name it was declared with, because this
+        // subset links by name: there is one table of functions for the whole
+        // program, so one name cannot stand for two of them.
+        if (!this.at("function")) {
+          this.report(
+            "only a function can be a default export",
+            `as in export default function f(): number { ... }, not ${this.peek().text}`,
+            this.peek(),
+          );
+          this.skipBlock();
+          continue;
+        }
+        isDefault = true;
+      }
+      if (exported && this.at("{")) {
+        for (const name of this.readExportNames()) namesExported[name] = true;
+        continue;
+      }
       if (exported && !this.at("function")) {
-        this.report("only functions can be exported", `a module offers functions, not ${this.peek().text}`, token);
-        this.synchronize();
+        this.report(
+          "only functions can be exported",
+          `a module offers functions, not ${this.peek().text}; a value another module reads is written into a function that returns it`,
+          this.peek(),
+        );
+        this.skipBlock();
         continue;
       }
       this.expect("function");
       const name = this.next();
+      // `function* name()`: a generator is refused by the star, which is where
+      // it was written rather than by the name the parser went looking for.
+      if (name.text === "*") {
+        this.report("a generator is not supported", REFUSED_KEYWORDS.yield, name);
+        this.skipBlock();
+        continue;
+      }
       if (name.kind !== "ident") {
         this.report("expected a function name", `near "${name.text}"`, name);
         this.synchronize();
@@ -526,23 +604,81 @@ class TypeScriptParser {
         returns: parsed.returns,
         handle: parsed,
       });
+      if (isDefault) defaultExport = parsed.name;
     }
-    return { path, imports, functions, body: [] };
+    // `export { f }` may name a function the file declared after it, so the
+    // names are applied once the whole file has been read. A name no
+    // declaration answers is refused here, where every other export is.
+    for (const entry of functions) {
+      if (namesExported[entry.name] === true) entry.exported = true;
+    }
+    for (const name of Object.keys(namesExported)) {
+      if (!functions.some((entry) => entry.name === name)) {
+        this.report(
+          `"${name}" is exported but not declared here`,
+          `a module offers the functions it declares; ${path} declares ${functions.length === 0 ? "none" : functions.map((entry) => `"${entry.name}"`).join(", ")}`,
+        );
+      }
+    }
+    return { path, imports, functions, default: defaultExport, body: [] };
   }
 
-  /** `import { f, g } from "./other.ts";` is the only import form a module has. */
+  /** `export { f, g }`: the names the file offers, and the `from` they may come from. */
+  private readExportNames(): string[] {
+    this.next();
+    const names: string[] = [];
+    while (!this.at("}") && this.peek().kind !== "end") {
+      const name = this.next();
+      if (name.kind !== "ident") {
+        this.report("expected an exported name", `near "${name.text}"`, name);
+        continue;
+      }
+      names.push(name.text);
+      if (!this.accept(",")) break;
+    }
+    this.expect("}");
+    this.accept(";");
+    if (this.at("from")) {
+      this.report(
+        "a module re-exporting another module's functions is not supported",
+        `import ${names.map((name) => `{ ${name} }`).join(", ")} from the other module and call ${names[0] ?? "them"} from here`,
+      );
+      this.synchronize();
+    }
+    return names;
+  }
+
+  /**
+   * The import forms a module has: `import { f, g } from "./other.ts";`, which
+   * binds the exports it names, and `import f from "./other.ts";`, which binds
+   * whatever the module exports as its default.
+   */
   private readImport(): ModuleImport {
     const start = this.peek();
+    // `import d from "./x.ts"` and `import d, { a, b } from "./x.ts"`. The
+    // local name a default import writes is not carried, because the programs
+    // of this subset are linked by the name a function was declared with: one
+    // table holds every function of every file, so a second name for one of
+    // them would be a second compilation of it.
+    if (!this.at("{") && !this.at("*") && (this.peek(1).kind === "ident" || this.peek(1).text === ",")) {
+      this.next();
+      return this.readImportTail(start, this.accept(",") ? this.readImportedNames() : [], true);
+    }
     if (!this.at("{")) {
       this.report(
         "unsupported import form",
-        'a module imports named exports, as in import { f } from "./other.ts"',
+        'a module imports named exports, as in import { f } from "./other.ts", or the default one, as in import f from "./other.ts"',
         start,
       );
       this.synchronize();
-      return { specifier: "", names: [], line: start.line };
+      return { specifier: "", names: [], default: false, line: start.line };
     }
-    this.next();
+    return this.readImportTail(start, this.readImportedNames(), false);
+  }
+
+  /** `{ f, g }`: the exports an import names, which it binds as they are written. */
+  private readImportedNames(): string[] {
+    this.expect("{");
     const names: string[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
       const name = this.next();
@@ -555,20 +691,25 @@ class TypeScriptParser {
       if (!this.accept(",")) break;
     }
     this.expect("}");
+    return names;
+  }
+
+  /** The `from "./other.ts"` every import ends with, and the module it names. */
+  private readImportTail(start: Token, names: string[], isDefault: boolean): ModuleImport {
     if (!this.at("from")) {
       this.report('expected "from" after the imported names', `near "${this.peek().text}"`);
       this.synchronize();
-      return { specifier: "", names, line: start.line };
+      return { specifier: "", names, default: isDefault, line: start.line };
     }
     this.next();
     const specifier = this.next();
     if (specifier.kind !== "string") {
       this.report("expected the imported module as a string", `near "${specifier.text}"`, specifier);
       this.synchronize();
-      return { specifier: "", names, line: start.line };
+      return { specifier: "", names, default: isDefault, line: start.line };
     }
     this.expect(";");
-    return { specifier: specifier.text, names, line: start.line };
+    return { specifier: specifier.text, names, default: isDefault, line: start.line };
   }
 
   private parseFunction(name: Token): TypeScriptFunction | null {
@@ -736,13 +877,10 @@ class TypeScriptParser {
     }
     if (this.at("console")) return this.readPrint();
 
-    if (UNSUPPORTED_STATEMENTS.includes(token.text)) {
-      this.report(
-        `"${token.text}" is not supported`,
-        FUNCTION_BODY,
-        token,
-      );
-      this.synchronize();
+    const refused = REFUSED_KEYWORDS[token.text];
+    if (refused !== undefined) {
+      this.report(`"${token.text}" is not supported`, refused, token);
+      this.skipBlock();
       return { kind: "expression", value: this.hole(), line: token.line };
     }
     if (this.at("{")) {
@@ -1203,6 +1341,14 @@ class TypeScriptParser {
         return { k: "literal", text: "0" };
       }
       return { k: "text", parts: this.text(token) };
+    }
+    // `await x` and `yield x` read as the name `await` or `yield` followed by
+    // whatever came next, and the build failed on the expression after it rather
+    // than on the word that was written.
+    if (token.kind === "ident" && (token.text === "await" || token.text === "yield")) {
+      this.report(`"${token.text}" is not supported`, REFUSED_KEYWORDS[token.text], token);
+      this.readExpression();
+      return this.hole();
     }
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
