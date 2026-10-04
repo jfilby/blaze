@@ -265,3 +265,108 @@ test("a loop marked region in IR text is accepted when it is true", () => {
   onlyLoop(fn).region = true;
   assert.deepEqual(semanticFunctionProblems(fn), []);
 });
+
+/** A factory written the ordinary way: the block it builds is its answer. */
+function factory(name: string): SemanticFunction {
+  return {
+    name,
+    symbol: `blaze_${name}`,
+    params: [],
+    returns: REF,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: true,
+    prints: false,
+    readsArgv: false,
+    objects: {
+      Node: { name: "Node", size: 8, align: 8, fields: [{ name: "inner", type: "ref<any>", offset: 0 }] },
+    },
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: { k: "return", value: node() },
+    },
+  };
+}
+
+test("a block a callee builds in its answer is the turn's block", () => {
+  // A factory builds its object in the value it returns, which is where a
+  // factory written the ordinary way puts it. Reading only the statements of its
+  // body read every factory as building nothing, so the turn below kept its block
+  // in a name that outlived it — and the rewind wrote over it.
+  const make = factory("makeNode");
+  const fn = functionWith(
+    countedLoop([
+      { k: "let", line: 1, slot: { kind: "value", name: "tree", mutable: true, type: REF }, value: callValue("makeNode") },
+      writeOuter({ k: "local", type: REF, name: "tree" }),
+    ]),
+  );
+  markRegionLoops(fn.entry, new Map([["makeNode", make]]));
+  assert.equal(onlyLoop(fn).region, undefined, "the block escapes the turn, so the turn may not reuse the storage");
+});
+
+test("a block a callee builds through another callee is the turn's block", () => {
+  // The same question one call deeper: a factory that delegates builds just as
+  // much as one that builds. Reading only the callee's own statements read a
+  // delegating factory as building nothing.
+  const make = factory("makeNode");
+  const wrap = factory("build");
+  wrap.entry = { ...wrap.entry, terminator: { k: "return", value: callValue("makeNode") } };
+  const fn = functionWith(
+    countedLoop([
+      { k: "let", line: 1, slot: { kind: "value", name: "tree", mutable: true, type: REF }, value: callValue("build") },
+      writeOuter({ k: "local", type: REF, name: "tree" }),
+    ]),
+  );
+  markRegionLoops(fn.entry, new Map([["makeNode", make], ["build", wrap]]));
+  assert.equal(onlyLoop(fn).region, undefined, "the block escapes the turn through two calls");
+});
+
+test("an array written in a turn is as much the turn's as an object is", () => {
+  // The runtime takes every block from the region's cursor while a region is
+  // open, so an array literal written in a turn is the turn's block too. Read as
+  // a window into a block another name holds it is not, which is the one case
+  // that is genuinely not a block of its own.
+  const row: SemanticValue = {
+    k: "buffer",
+    type: { kind: "slice", of: F64 },
+    element: F64,
+    length: 2,
+    count: null,
+    view: null,
+    values: [{ k: "const", type: F64, text: "1" }, { k: "const", type: F64, text: "2" }],
+  };
+  const fn = functionWith(
+    countedLoop([
+      { k: "let", line: 1, slot: { kind: "value", name: "row", mutable: true, type: { kind: "slice", of: F64 } }, value: row },
+      writeOuter({ k: "local", type: { kind: "slice", of: F64 }, name: "row" }),
+    ]),
+  );
+  markRegionLoops(fn.entry);
+  assert.equal(onlyLoop(fn).region, undefined, "the array escapes the turn, so the turn may not reuse the storage");
+});
+
+test("two marked region loops on one path are refused", () => {
+  // The runtime keeps one cursor and rewinds it on entry rather than pushing, so
+  // the inner turn is handed the base block the outer turn is still filling.
+  // Each mark is proved on its own, which cannot see the pair.
+  const inner = countedLoop([bind("leaf", node())]);
+  const innerLoop = inner.loop as CountedLoop;
+  // Distinct block ids: the validator refuses two blocks sharing one before it
+  // ever reaches the marks.
+  innerLoop.header = "h2";
+  innerLoop.exit = "x2";
+  innerLoop.body.id = "b2";
+  innerLoop.region = true;
+  const outer = countedLoop([bind("tree", node()), inner]);
+  (outer.loop as CountedLoop).region = true;
+  const fn = functionWith(outer);
+  const problems = semanticFunctionProblems(fn);
+  assert.ok(
+    problems.some((problem) => /is marked region around a loop that is also marked region/.test(problem)),
+    `nested region marks must be refused: ${JSON.stringify(problems)}`,
+  );
+});

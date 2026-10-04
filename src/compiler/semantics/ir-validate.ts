@@ -44,6 +44,7 @@ import {
   isTextType,
   localNames,
   slotType,
+  statementBlocksOf,
   isWideType,
   UNSTATED_LINE,
   typeEquals,
@@ -255,6 +256,9 @@ interface PlacedBlock {
   /** How many statements the block around this one writes after this one. */
   rest: number;
 }
+
+/** A loop that can carry a mark: the two kinds the runtime runs a turn of. */
+type MarkedLoop = Extract<SemanticLoop, { kind: "counted" | "each" }>;
 
 /** A statement, with the block it is written in and what that block may read. */
 interface PlacedStatement {
@@ -1609,7 +1613,53 @@ function regionProblems(context: Context, tree: Tree): string[] {
     }
   }
 
+  // Each mark above is proved on its own, so two of them on one path are two
+  // marks each of which is individually sound and jointly a corruption: the
+  // runtime keeps one cursor and rewinds it on entry rather than pushing, so the
+  // inner turn is given the base block the outer turn is still filling and every
+  // block that turn took before the inner loop began is handed out a second
+  // time. Proving each separately cannot see it, so the shape is refused here.
+  for (const outer of markedRegionLoops(tree)) {
+    if (firstMarkedRegionWithin(outer.loop.body) !== null) {
+      problems.push(
+        `${label(outer.block.block.id, outer.statement.line)}loop is marked region around a loop that is also marked region, and a rewind inside a marked loop writes over what the outer turn took`,
+      );
+    }
+  }
+
   return problems;
+}
+
+/** Every marked region loop of a tree, paired with the statement that holds it. */
+function markedRegionLoops(tree: Tree): { block: PlacedBlock; statement: SemanticStatement; loop: MarkedLoop }[] {
+  return tree.statements.flatMap((placed) => {
+    const statement = placed.statement;
+    if (statement.k !== "loop") return [];
+    const loop = statement.loop;
+    if (loop.kind !== "counted" && loop.kind !== "each") return [];
+    if (loop.region !== true) return [];
+    return [{ block: placed.block, statement, loop }];
+  });
+}
+
+/** A marked region loop somewhere inside a body, at any depth, or null. */
+function firstMarkedRegionWithin(body: SemanticBlock): MarkedLoop | null {
+  for (const statement of body.statements) {
+    if (statement.k === "loop") {
+      const loop = statement.loop;
+      if (loop.kind === "counted" || loop.kind === "each") {
+        if (loop.region === true) return loop;
+      }
+      const found = firstMarkedRegionWithin(statement.loop.body);
+      if (found !== null) return found;
+      continue;
+    }
+    for (const nested of statementBlocksOf(statement)) {
+      const found = firstMarkedRegionWithin(nested);
+      if (found !== null) return found;
+    }
+  }
+  return null;
 }
 
 function parallelProblems(context: Context, tree: Tree): string[] {

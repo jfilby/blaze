@@ -476,6 +476,25 @@ function bodyRefusal(
   }
   const accesses: ElementAccess[] = [];
   for (const block of blocksWithin(body)) {
+    // What a block ends in is as much of its work as what it does before it,
+    // and for a function that computes an answer that answer is nearly all of
+    // it. A callee that prints, allocates or counts a reference is refused for
+    // the call wherever the call is written, and a body whose only call sits in
+    // its return is a body whose call was never read: the turns of a loop that
+    // calls such a body then print over each other. It is read here for the same
+    // reason `measureTurn` reads it there.
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      let refusal: Refusal | null = null;
+      walkValues(block.terminator.value, (inner) => {
+        if (refusal === null && inner.k === "call") refusal = callRefusal(inner.call, reach);
+      });
+      if (refusal !== null) return refusal;
+      walkValues(block.terminator.value, (inner) => {
+        if (inner.k === "element" && inner.of.k === "local") {
+          accesses.push({ buffer: inner.of.name, index: inner.index, written: false });
+        }
+      });
+    }
     for (const statement of block.statements) {
       const refusal = valueRefusal(statement, reach);
       if (refusal !== null) return refusal;

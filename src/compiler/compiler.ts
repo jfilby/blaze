@@ -73,7 +73,7 @@ import {
   type CodegenWorkspace,
 } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
-import { createJsonStore, flushToDisk, hashValue, type JsonStore } from "./core/json-store.ts";
+import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore } from "./core/json-store.ts";
 import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel, type ModelConfiguration } from "./ai/model.ts";
@@ -88,6 +88,7 @@ import {
 } from "./incremental.ts";
 import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget, optimizationOptions } from "./core/target.ts";
 import { run } from "./core/process.ts";
+
 import { COMPILER_VERSION, engineStamp, toolchainFingerprints } from "./core/version.ts";
 import {
   type ProgramMismatch,
@@ -351,8 +352,43 @@ export function projectIdFor(inputPath: string): string {
   return name === "" ? "project" : name;
 }
 
-function projectPaths(id: string): ProjectPaths {
-  const root = `projects/${id}`;
+/**
+ * The directory one project file's store lives in.
+ *
+ * The name alone is not a directory two projects can share, because a name is
+ * not unique: `a/app.toml` and `b/app.toml` are both `app`, and both were
+ * stored under `.blaze/projects/app` — one project's `incremental.json` erased
+ * by the other's, and a candidate object linked for one under the other. The
+ * readable name is kept and the path is hashed beside it, so the directory
+ * says which project it is and is still unique.
+ */
+function projectStoreId(absoluteInput: string): string {
+  return `${projectIdFor(absoluteInput)}-${hashText(absoluteInput).slice(0, 12)}`;
+}
+
+/**
+ * The store directory a project name refers to.
+ *
+ * A store directory carries the readable name and a hash of the path beside
+ * it, because a name is not unique and two projects sharing one directory
+ * overwrite each other's cache. A command that is handed a bare name rather
+ * than a path therefore looks the directory up by its prefix rather than
+ * computing one: the exact set of directories named for a project is what it
+ * is asked about, and a name with nothing stored under it is the answer the
+ * caller already reports.
+ */
+async function storedPaths(store: JsonStore, project: string): Promise<ProjectPaths> {
+  const prefix = `${project}-`;
+  const found = (await store.list("projects")).filter((entry) => entry.startsWith(prefix));
+  if (found.length === 0) return projectPaths(project, project);
+  // More than one is two projects with the same name, and neither can be told
+  // from the other by the name alone; the first is as good an answer as any and
+  // the build that owns it is the one that wrote it last.
+  return projectPaths(project, found.sort()[0] as string);
+}
+
+function projectPaths(id: string, storeId: string): ProjectPaths {
+  const root = `projects/${storeId}`;
   return {
     id,
     root,
@@ -917,7 +953,7 @@ export async function runBuild(
   const store = createJsonStore(join(options.cwd, STATE_DIRECTORY));
   const absoluteInput = resolve(options.cwd, inputPath);
   const id = projectIdFor(absoluteInput);
-  const paths = projectPaths(id);
+  const paths = projectPaths(id, projectStoreId(absoluteInput));
 
   // These read the project and reject it before there is a build record to
   // reject it in, so a project that no longer names a build that can run used
@@ -1780,7 +1816,7 @@ async function loadStored(
   store: JsonStore,
   project: string,
 ): Promise<{ paths: ProjectPaths; program: ProgramContract; units: CompilationUnit[] }> {
-  const paths = projectPaths(project);
+  const paths = await storedPaths(store, project);
   if (!(await store.exists(paths.contract))) {
     throw new CompilerError({
       category: "StorageError",
@@ -2027,7 +2063,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {
   const store = createJsonStore(join(cwd, STATE_DIRECTORY));
-  const paths = projectPaths(project);
+  const paths = await storedPaths(store, project);
   if (!(await store.exists(paths.build))) {
     throw new CompilerError({
       category: "StorageError",

@@ -26,7 +26,7 @@
  * one value is carried.
  */
 
-import { isTextType, type SemanticBlock, type SemanticStatement, type SemanticValue } from "../core/semantic-ir.ts";
+import { isTextType, isWideType, type SemanticBlock, type SemanticStatement, type SemanticValue } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
 /* What a name is                                                               */
@@ -359,9 +359,19 @@ class Graph {
         this.value(events, value.left);
         this.value(events, value.right);
         // A power is `pow` and a concatenation is the runtime building a string
-        // out of its two sides; every other arithmetic is one instruction the
-        // machine carries out itself.
-        if (value.op === "pow" || value.op === "concat") events.push({ k: "call" });
+        // out of its two sides; every other arithmetic on a number the machine
+        // holds is one instruction the machine carries out itself.
+        //
+        // A whole number wider than a machine word is the exception: it has no
+        // instruction, so a multiplication or a division of one is the runtime
+        // kernel, which is a real call and clobbers every register the caller
+        // saved. Leaving these out pins the names around them to registers that
+        // the kernel overwrites.
+        if (value.op === "pow" || value.op === "concat") {
+          events.push({ k: "call" });
+        } else if ((value.op === "mul" || value.op === "div") && isWideType(value.type)) {
+          events.push({ k: "call" });
+        }
         return;
       case "compare":
         this.value(events, value.left);

@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
-import { scratch } from "./scratch.ts";
+import { scratch, storeDirectory } from "./scratch.ts";
 
 const CLI = new URL("../cli.ts", import.meta.url).pathname;
 const REPLAY = new URL("./fixtures/hello-world-replay.json", import.meta.url).pathname;
@@ -63,7 +63,7 @@ test("init writes a project file that builds machine code", async () => {
   // Machine code is the default, so an object arrives with no toolchain asked
   // for, and it is a program that runs.
   const project = basename(directory);
-  const delivered = join(directory, ".blaze/projects", project, "output", project);
+  const delivered = join(await storeDirectory(directory, project), "output", project);
   const executed = run(delivered, [], { timeoutMs: 60_000 });
   assert.equal(executed.code, 0, executed.stderr);
   assert.equal(executed.stdout, "3\n");
@@ -140,7 +140,7 @@ test("--recompile rebuilds what the last build proved, and refuses to be paired 
 
   // The engine is what a later run compares against, so the record a reader
   // opens says which compiler produced the artifact it names.
-  const record = join(directory, ".blaze/projects/input/build.json");
+  const record = join(await storeDirectory(directory, "input"), "build.json");
   const stored = await readBuildRecord(record);
   assert.match(stored.engine ?? "", /^0\.1\.0\+[0-9a-f]{8}$/, JSON.stringify(stored));
 

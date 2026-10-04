@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { runBuild, runStored, inspectProject, STATE_DIRECTORY, type Reporter } from "../compiler.ts";
+import { runBuild, runStored, inspectProject, type Reporter } from "../compiler.ts";
+import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import type { ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
@@ -159,7 +160,7 @@ test("a function the source named __proto__ is compiled and recorded like any ot
   assert.deepEqual(Object.keys(outcome.build.selectedCandidates ?? {}), ["__proto__"]);
   for (const file of ["candidates.json", "verification.json"]) {
     const record = JSON.parse(
-      await readFile(join(directory, STATE_DIRECTORY, "projects/input", file), "utf8"),
+      await readFile(join(await storeDirectory(directory, "input"), file), "utf8"),
     ) as Record<string, unknown>;
     assert.deepEqual(Object.keys(record), ["__proto__"], `${file} must record the function`);
   }
@@ -178,7 +179,7 @@ test("a function the source named __proto__ is compiled and recorded like any ot
   assert.deepEqual(Object.keys(remeasured.functions), ["__proto__"], "the re-measure keeps the function it measured");
   for (const file of ["verification.json", "benchmark.json"]) {
     const record = JSON.parse(
-      await readFile(join(directory, STATE_DIRECTORY, "projects/input", file), "utf8"),
+      await readFile(join(await storeDirectory(directory, "input"), file), "utf8"),
     ) as Record<string, unknown>;
     assert.deepEqual(Object.keys(record), ["__proto__"], `${file} must record the function after a re-measure`);
   }
@@ -236,23 +237,23 @@ test("a build produces assembly, a native executable and a complete record", asy
   assert.equal(outcome.build.status, "success");
   assert.equal(outcome.build.outputKind, "machine");
   assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c1" });
-  assert.equal(outcome.outputPath, join(directory, STATE_DIRECTORY, "projects/input/output/input"));
+  assert.equal(outcome.outputPath, join(await storeDirectory(directory, "input"), "output/input"));
 
   const program = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/contract.json"), "utf8"),
+    await readFile(join(await storeDirectory(directory, "input"), "contract.json"), "utf8"),
   ) as ProgramContract;
   assert.deepEqual(program.entry, { file: "<inline>", function: "dotProduct" });
   assert.deepEqual(program.files[0].functions.dotProduct.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
 
   const verification = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/verification.json"), "utf8"),
+    await readFile(join(await storeDirectory(directory, "input"), "verification.json"), "utf8"),
   ) as Record<string, VerificationResult[]>;
   assert.equal(verification.dotProduct.length, 1);
   assert.equal(verification.dotProduct[0].passed, true);
   assert.ok(verification.dotProduct[0].cases > 10);
 
   const benchmark = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/benchmark.json"), "utf8"),
+    await readFile(join(await storeDirectory(directory, "input"), "benchmark.json"), "utf8"),
   ) as Record<string, { durationNs: number; iterations: number }[]>;
   assert.equal(benchmark.dotProduct[0].iterations, 200);
   assert.ok(benchmark.dotProduct[0].durationNs > 0);
@@ -286,7 +287,7 @@ test("what a build delivers is the artifact its backend wrote beside the IR it v
   // text it delivers beside the object is that IR itself and not a copy of
   // something else: what the model wrote is what the contract was checked on.
   const stored = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
+    await readFile(join(await storeDirectory(directory, "input"), "candidates.json"), "utf8"),
   ) as Record<string, { text: string }[]>;
   const implementation = await readFile(outcome.outputAssemblyPath.replace(/\.o$/, ".ir"), "utf8");
   assert.equal(implementation, stored.dotProduct[0].text);
@@ -420,13 +421,13 @@ test("a change that leaves a contract alone does not rebuild the function", asyn
  */
 async function storedRecord(directory: string, project: string): Promise<Record<string, unknown>> {
   return JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, `projects/${project}/build.json`), "utf8"),
+    await readFile(join(await storeDirectory(directory, project), "build.json"), "utf8"),
   ) as Record<string, unknown>;
 }
 
 async function writeStoredRecord(directory: string, project: string, record: Record<string, unknown>): Promise<void> {
   await writeFile(
-    join(directory, STATE_DIRECTORY, `projects/${project}/build.json`),
+    join(await storeDirectory(directory, project), "build.json"),
     JSON.stringify(record, null, 2),
     "utf8",
   );
@@ -434,7 +435,7 @@ async function writeStoredRecord(directory: string, project: string, record: Rec
 
 /** The record of what a build proved per function, exactly as it is stored. */
 async function storedIncremental(directory: string, project: string): Promise<string> {
-  return readFile(join(directory, STATE_DIRECTORY, `projects/${project}/incremental.json`), "utf8");
+  return readFile(join(await storeDirectory(directory, project), "incremental.json"), "utf8");
 }
 
 test("a build records the engine that built it", async () => {
@@ -552,7 +553,7 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   const replay = await writableReplay(directory, REPLAY);
   await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
-  await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
+  await rm(join(await storeDirectory(directory, "input"), "work"), { recursive: true, force: true });
   await writeFile(replay, JSON.stringify({ reviews: ["this is not a review"] }), "utf8");
   const log: string[] = [];
   const second = await runBuild(
@@ -588,7 +589,7 @@ test("a rebuild from stored implementations chooses among all of them, not the f
 
   // The same path an edit to the assembler takes: the objects are gone, so the
   // stored implementations are put through the toolchain again.
-  await rm(join(directory, STATE_DIRECTORY, "projects/input/work"), { recursive: true, force: true });
+  await rm(join(await storeDirectory(directory, "input"), "work"), { recursive: true, force: true });
   await writeFile(replay, JSON.stringify({ reviews: ["this is not a review"] }), "utf8");
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, quiet, "build");
 
@@ -756,7 +757,7 @@ test("a function that calls another function of the program is built and checked
   // callee's, so the program is the only thing that can run it. What proved it
   // is that the program printed what the source prints.
   const generation = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+    await readFile(join(await storeDirectory(directory, outcome.project), "generation.json"), "utf8"),
   ) as {
     functions: Record<
       string,
@@ -832,7 +833,7 @@ test("a review that inlines a call has the callee's body put where the call was"
   // the fold did, and what is delivered is the artifact that produced the
   // object either way.
   const generation = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+    await readFile(join(await storeDirectory(directory, outcome.project), "generation.json"), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
   const [mainOutcome] = generation.functions.main.outcomes;
   assert.notEqual(mainOutcome.probe, undefined);
@@ -869,7 +870,7 @@ test("a callee that leaves from more than one block is left as a call, and the p
   // The caller still reaches the program, which is the only thing that can run
   // it: the object it calls is the callee's.
   const generation = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+    await readFile(join(await storeDirectory(directory, outcome.project), "generation.json"), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
   assert.match(generation.functions.main.outcomes[0]?.probe?.reason ?? "", /it calls step/);
 });
@@ -967,7 +968,7 @@ test("a caller of a leaf is built as a function of its own, with no review askin
   assert.equal(execution.stdout, "42\n", "and it prints what the source prints");
 
   const generation = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, `projects/${outcome.project}/generation.json`), "utf8"),
+    await readFile(join(await storeDirectory(directory, outcome.project), "generation.json"), "utf8"),
   ) as { functions: Record<string, { outcomes: { probe?: { called: boolean; reason: string | null } }[] }> };
   assert.notEqual(generation.functions.main.outcomes[0]?.probe, undefined, "the caller is probed on its own");
   assert.equal(generation.functions.main.outcomes[0]?.probe?.called, true);
@@ -1169,7 +1170,8 @@ test("a contract failure stops the build before a model is asked for code", asyn
     /imports "scale" from ".\/scale.ts", which does not export it/,
   );
   // Nothing was generated: the failure came from the contract phase itself.
-  await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"));
+  const store = await storeDirectory(directory, "input");
+  await assert.rejects(() => readFile(join(store, "candidates.json"), "utf8"));
 });
 
 test("an unknown project is reported, not guessed", async () => {
@@ -1186,5 +1188,6 @@ test("generate stops at candidate selection and delivers nothing", async () => {
   const outcome = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, quiet, "generate");
   assert.equal(outcome.outputPath, null);
   assert.equal(outcome.build.status, "success");
-  await assert.rejects(() => readFile(join(directory, STATE_DIRECTORY, "projects/input/output/input"), "utf8"));
+  const store = await storeDirectory(directory, "input");
+  await assert.rejects(() => readFile(join(store, "output/input"), "utf8"));
 });

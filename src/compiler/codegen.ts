@@ -258,8 +258,14 @@ export function reusableFiles(
   // What a build delivers is what its backend wrote: an object the compiler
   // encoded itself is delivered as the object, and everything else is
   // delivered as the text it was lowered into.
+  // Every build delivers the IR beside the target it was lowered from, whatever
+  // the kind is, so it is a file every build consumes rather than an `ir` one.
   const delivered = lowering === "machine" ? paths.object : output === "ir" ? paths.implementation : paths.lowered;
-  if (lowering === "wasm") return [delivered, paths.module];
+  // The wasm backend writes the module and no assembly: naming the assembly here
+  // asked for a file that is never written, so the list could never be complete
+  // and a stored candidate was rebuilt on every build for the life of the
+  // project. The module is what it delivers.
+  if (lowering === "wasm") return [paths.module, paths.implementation];
   // A kind that links a candidate on its own delivers the executable that
   // links, so the executable is a file the build consumes and one that is not
   // there is a candidate that has to be rebuilt. The `machine` branch below
@@ -274,6 +280,7 @@ export function reusableFiles(
   // files are collected and the list is built once.
   const executable = output === "machine" || (output === "ir" && standalone);
   return [
+    paths.implementation,
     delivered,
     ...(executable ? [paths.executable] : []),
     ...(linksObjects ? [paths.object] : []),

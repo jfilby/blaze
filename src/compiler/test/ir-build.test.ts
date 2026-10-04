@@ -15,7 +15,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { STATE_DIRECTORY, runBuild } from "../compiler.ts";
+import { runBuild } from "../compiler.ts";
+import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
@@ -110,7 +111,7 @@ async function project(name: string, model: object, attempts = 1): Promise<strin
 /** The candidates a build recorded for `total`. */
 async function recorded(directory: string): Promise<{ id: string; text: string; proposals?: string[] }[]> {
   const record = JSON.parse(
-    await readFile(join(directory, STATE_DIRECTORY, "projects/input/candidates.json"), "utf8"),
+    await readFile(join(await storeDirectory(directory, "input"), "candidates.json"), "utf8"),
   ) as Record<string, { id: string; text: string; proposals?: string[] }[]>;
   return record.total ?? [];
 }
@@ -255,7 +256,7 @@ test("a function that states a postcondition is reviewed and verified like any o
   assert.match(endpoint.prompts[0] ?? "", /result == \(count \* count\)/, "the postcondition is what the result is held to");
   assert.doesNotMatch(endpoint.prompts[0] ?? "", /C11/, "a postcondition does not send the build back to C");
 
-  const work = (await readdir(join(directory, STATE_DIRECTORY, "projects/input/work/square"))).sort();
+  const work = (await readdir(join(await storeDirectory(directory, "input"), "work/square"))).sort();
   assert.ok(work.includes("c1.ir"), `the IR is what the build delivered: ${work.join(", ")}`);
   assert.ok(work.includes("c1.o"), `the object the compiler lowered it into is in ${work.join(", ")}`);
   // The result is checked against the postcondition, on vectors of its own,

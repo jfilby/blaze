@@ -1411,3 +1411,82 @@ async function machineBackendAnswer(op: DifferentialOp, leftText: string, rightT
   return run(binary, [], { timeoutMs: 60_000 }).stdout.trim();
 }
 
+/**
+ * `function subject(): u256` whose body computes a sum, then a product, then the
+ * sum of the two — the shape a name has to survive a runtime call for.
+ */
+function wideSumThenProductFunction(): SemanticFunction {
+  const literal = (text: string): SemanticValue => ({ k: "const", type: U256, text });
+  const sum: SemanticValue = { k: "arith", type: U256, op: "add", left: literal(WIDE_LEFT), right: literal("01") };
+  const product: SemanticValue = { k: "arith", type: U256, op: "mul", left: literal(WIDE_RIGHT), right: literal("02") };
+  const answer: SemanticValue = { k: "arith", type: U256, op: "add", left: sum, right: product };
+  return {
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: U256,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: { k: "return", value: answer },
+    },
+  };
+}
+
+test("a name computed before a wide product is still there after it", async () => {
+  // A multiplication of a whole number wider than a machine word has no
+  // instruction: it is the runtime kernel, which is a real call and overwrites
+  // every register a call is free to. The graph that decides where each name
+  // lives was told about `pow` and about calls and not about this, so the sum
+  // was pinned to a register the kernel clobbered and the answer was the product
+  // alone.
+  const directory = await scratch("blaze-u256-across-kernel-");
+  const runtime = await buildStandaloneRuntime(directory);
+  const object = join(directory, "subject.o");
+  await buildMachineObject({
+    fn: wideSumThenProductFunction(),
+    contract: wideOperationContract(),
+    target: TARGET,
+    callable: new Set<string>(),
+    objectPath: object,
+  });
+
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      "extern void subject(uint64_t *out);",
+      "int main(void) {",
+      "  uint64_t r[4];",
+      "  subject(r);",
+      '  printf("%016llx%016llx%016llx%016llx\\n", (unsigned long long)r[3], (unsigned long long)r[2], (unsigned long long)r[1], (unsigned long long)r[0]);',
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "subject");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(linked.code, 0, `the object must link:\n${linked.stderr}`);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.code, 0, `the object must run:\n${ran.stderr}`);
+  const left = BigInt(WIDE_LEFT);
+  const right = BigInt(WIDE_RIGHT);
+  const expected = ((left + 1n) + ((right * 2n) & MODULUS)) & MODULUS;
+  assert.equal(ran.stdout.trim(), hexadecimal(expected), "the sum computed before the product is part of the answer");
+});

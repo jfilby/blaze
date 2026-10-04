@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeProject } from "./project.ts";
-import { runBuild, STATE_DIRECTORY } from "../compiler.ts";
+import { runBuild } from "../compiler.ts";
+import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import {
   isRuntimeSymbol,
@@ -71,8 +72,8 @@ async function workspace(name: string, input: SourceInput = INPUT): Promise<stri
 }
 
 /** The compiler state of a project, in the directory the build ran in. */
-function project(directory: string): string {
-  return join(directory, STATE_DIRECTORY, "projects/input");
+function project(directory: string): Promise<string> {
+  return storeDirectory(directory, "input");
 }
 
 /** One header line per vector: two lengths, then the scalar, then both buffers. */
@@ -314,7 +315,7 @@ test("a standalone build links the compiler runtime, and a function that allocat
   // What a lowering reaches for, the runtime object is there to define, so the
   // whole ABI is in it rather than the few entries one candidate happened to
   // use.
-  const runtimeObject = run("nm", ["--defined-only", join(project(directory), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
+  const runtimeObject = run("nm", ["--defined-only", join(await project(directory), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
   for (const item of RUNTIME_ABI) {
     assert.ok(runtimeObject.stdout.includes(item.symbol), `${item.symbol} must be defined by the compiler runtime`);
   }
@@ -335,11 +336,11 @@ test("a standalone build links the compiler runtime, and a function that allocat
     "build",
   );
   assert.equal(built.build.status, "success");
-  const undefinedSymbols = run("nm", ["--defined-only", join(project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
+  const undefinedSymbols = run("nm", ["--defined-only", join(await project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
   assert.doesNotMatch(undefinedSymbols.stdout, /blaze_rt_/, "a call the runtime defines belongs to the runtime object");
-  const asked = run("nm", ["--undefined-only", join(project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
+  const asked = run("nm", ["--undefined-only", join(await project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
   assert.match(asked.stdout, /blaze_rt_object_new/, "a function that allocates must reach the runtime");
-  const beside = run("nm", ["--defined-only", join(project(allocating), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
+  const beside = run("nm", ["--defined-only", join(await project(allocating), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
   for (const line of asked.stdout.split("\n").filter((entry) => /\sU\s/.test(entry))) {
     const symbol = line.trim().split(/\s+/)[1] ?? "";
     assert.ok(beside.stdout.includes(symbol), `the runtime object must define ${symbol}, which the candidate leaves to it`);
@@ -364,7 +365,7 @@ test("the C a build compiles includes the runtime ABI, so a function that alloca
   // its layout is given a block nothing cleared, and one that leaves a field
   // out a cleared block — so what is checked is that what it asks for is an
   // entry point the ABI declares, and that it asks for something.
-  const source = await readFile(join(project(directory), "work/make/c1.c"), "utf8");
+  const source = await readFile(join(await project(directory), "work/make/c1.c"), "utf8");
   assert.match(source, /#include "blaze_rt\.h"/);
   const asked = [...new Set(source.match(/blaze_rt_[a-z_]+/g) ?? [])];
   assert.ok(asked.length > 0, "a function that allocates must reach the runtime");

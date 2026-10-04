@@ -17,7 +17,7 @@
  */
 
 import { rmSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -55,4 +55,21 @@ export async function scratch(prefix: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   directories.push(directory);
   return directory;
+}
+
+/**
+ * The store directory a project's build wrote into.
+ *
+ * A store directory carries the readable project name and a hash of the
+ * project's path beside it, because a name alone is not unique and two
+ * projects sharing a directory would overwrite each other's cache. A test
+ * that reaches into the store therefore asks which directory is the
+ * project's, rather than naming one.
+ */
+export async function storeDirectory(directory: string, project: string): Promise<string> {
+  const projects = join(directory, ".blaze", "projects");
+  const found = (await readdir(projects).catch(() => [] as string[])).filter((entry) =>
+    entry.startsWith(`${project}-`),
+  );
+  return join(projects, found.sort()[0] ?? project);
 }

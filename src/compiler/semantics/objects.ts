@@ -16,8 +16,8 @@
 
 import type { Expression, Statement } from "../core/ir.ts";
 import { CompilerError } from "../core/errors.ts";
-import type { FileContract, FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
-import { isWhole } from "../core/semantic-ir.ts";
+import type { FileContract, FunctionContract, ObjectLayout, PrimitiveTypeName, TypeExpr } from "../core/types.ts";
+import { isWhole, LIMB_BYTES, limbsOf } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 
@@ -52,10 +52,33 @@ function objectsError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "ContractError", stage: "contract", message, detail });
 }
 
-/** The size of one field in bytes: a scalar is its width, anything else a pointer. */
-function fieldSize(type: TypeExpr): number {
-  if (type.kind !== "primitive") return POINTER_SIZE;
-  switch (type.name) {
+/**
+ * The size of one field in bytes, and the alignment it is placed at.
+ *
+ * A scalar is its width, a whole number wider than a machine word is its limbs,
+ * and anything else a pointer. The wide case is the one that cannot be left to
+ * the default: a `u256` is four limbs of eight bytes and every backend holds it
+ * that way, so a layout that gave it the default reserved eight bytes for a
+ * thirty-two byte value and placed every field after it twenty-four bytes too
+ * early — the backends write the field at the offset the contract names, so
+ * they wrote over their neighbours.
+ *
+ * A wide number is a sequence of limbs rather than one indivisible thing, so it
+ * is placed at the alignment of a limb and not at its own size: aligning a
+ * thirty-two byte field to thirty-two would pad every object holding one so
+ * that most of it is addressable memory nothing was ever written to.
+ */
+function fieldLayout(type: TypeExpr): { size: number; align: number } {
+  if (type.kind !== "primitive") return { size: POINTER_SIZE, align: POINTER_SIZE };
+  const limbs = limbsOf(type.name);
+  if (limbs !== null) return { size: limbs * LIMB_BYTES, align: LIMB_BYTES };
+  const size = scalarSize(type.name);
+  return { size, align: size };
+}
+
+/** The width of a scalar, which is also the alignment it is placed at. */
+function scalarSize(name: PrimitiveTypeName): number {
+  switch (name) {
     case "bool":
     case "i8":
     case "u8":
@@ -979,9 +1002,9 @@ function layOut(
   for (const field of ordered) {
     const type: TypeExpr =
       field.value.kind === "object" ? { kind: "ref", of: null, name: names.get(field.value.key) } : field.value.type;
-    const size = fieldSize(type);
-    align = Math.max(align, size);
-    offset = alignUp(offset, size);
+    const { size, align: fieldAlign } = fieldLayout(type);
+    align = Math.max(align, fieldAlign);
+    offset = alignUp(offset, fieldAlign);
     fields.push({ name: field.name, type: typeToString(type), offset });
     offset += size;
   }

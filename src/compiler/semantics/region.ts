@@ -73,6 +73,15 @@ export function markRegionLoops(entry: SemanticBlock, callees: Callees = NO_CALL
 }
 
 /**
+ * A loop that can carry a mark at all. Only the two kinds the runtime runs a
+ * turn of carry one, so reading the mark off any other kind is reading a field
+ * that is not there.
+ */
+function isMarkedLoop(loop: SemanticLoop): loop is Extract<SemanticLoop, { kind: "counted" | "each" }> {
+  return loop.kind === "counted" || loop.kind === "each";
+}
+
+/**
  * Marks the loops of a body innermost first, and answers whether any of them
  * was marked — which is what stops the loop around it being marked too.
  */
@@ -86,7 +95,18 @@ function markWithin(block: SemanticBlock, callees: Callees): boolean {
         marked = true;
         continue;
       }
-      if ((loop.kind === "counted" || loop.kind === "each") && loop.region !== true && refusalFor(loop, callees) === null) {
+      // An inner loop that is already marked is one this pass did not mark — it
+      // arrived in the IR text, or an earlier pass over this body marked it — and
+      // the loop around it must not be marked too. The region runtime keeps one
+      // cursor and rewinds it on entry rather than pushing, so two marked loops
+      // on one path hand the inner turn the base block the outer turn is still
+      // filling, and every block the outer turn took before it is handed out a
+      // second time.
+      if (isMarkedLoop(loop) && loop.region === true) {
+        marked = true;
+        continue;
+      }
+      if ((loop.kind === "counted" || loop.kind === "each") && refusalFor(loop, callees) === null) {
         loop.region = true;
         marked = true;
       }
@@ -248,9 +268,19 @@ function ownsRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach:
   let found = false;
   walkValues(value, (inner) => {
     if (found) return;
-    if (inner.k === "newObject") found = true;
-    else if (inner.k === "local" && held.has(inner.name)) found = true;
-    else if (inner.k === "call" && calleeBuilds(inner.call.callee, reach)) found = true;
+    if (inner.k === "newObject") {
+      found = true;
+    } else if (inner.k === "buffer") {
+      // A window into a block another name holds is not a block of its own, so
+      // it is not the turn's to reuse. Every other array is: the runtime takes
+      // every one of them from the region's cursor while a region is open, so an
+      // array literal written in a turn is as much the turn's as an object is.
+      found = inner.view === null;
+    } else if (inner.k === "local" && held.has(inner.name)) {
+      found = true;
+    } else if (inner.k === "call" && calleeBuilds(inner.call.callee, reach)) {
+      found = true;
+    }
   });
   return found;
 }
@@ -259,9 +289,19 @@ function ownsRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach:
  * Whether a function builds a block of its own.
  *
  * A function called from a thousand turns is read once, and recursion is broken
- * by assuming: a function that reaches itself is taken to build nothing while
- * its own body is still being read, which is the safe direction because it
- * refuses the loops that would otherwise be admitted.
+ * by assuming. The assumption here is that a function reaching itself builds
+ * nothing while its own body is still being read. That is the safe direction:
+ * the answer decides whether a block is reused, so answering "no" admits fewer
+ * blocks into the turn's own — it never lets a block that outlives its turn be
+ * taken for one that does not. Answering the other way for a function that
+ * reaches itself would let its blocks out, which is why this says false and not
+ * true.
+ *
+ * A function that writes a block in its answer builds it, and a block written
+ * in its return is written all the same — the ordinary way to write a factory is
+ * `return { ... }`, so reading only the statements of its blocks reads every
+ * factory as building nothing. What it calls is read the same way, or a factory
+ * that delegates to another is read as building nothing either.
  */
 function calleeBuilds(name: string, reach: Reach): boolean {
   const known = reach.makes.get(name);
@@ -272,14 +312,23 @@ function calleeBuilds(name: string, reach: Reach): boolean {
   reach.reading.add(name);
   let builds = false;
   for (const block of blocksWithin(callee.entry)) {
-    builds = block.statements.some((statement) =>
-      statementValues(statement).some((value) => {
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      walkValues(block.terminator.value, (inner) => {
+        if (builds) return;
+        if (inner.k === "newObject") builds = true;
+        else if (inner.k === "call") builds = calleeBuilds(inner.call.callee, reach);
+      });
+    }
+    for (const statement of block.statements) {
+      if (builds) break;
+      for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
+          if (builds) return;
           if (inner.k === "newObject") builds = true;
+          else if (inner.k === "call") builds = calleeBuilds(inner.call.callee, reach);
         });
-        return builds;
-      }),
-    );
+      }
+    }
     if (builds) break;
   }
   reach.reading.delete(name);

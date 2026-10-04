@@ -718,3 +718,78 @@ test("a turn that combines what a call answers is not marked when the call does 
   markParallelLoops(fn.entry, new Map([["halved", { ...halved, entry }]]));
   assert.equal(onlyLoop(fn).parallel, undefined);
 });
+
+test("a loop calling a function whose only impure call is its answer is refused", () => {
+  // A function's answer is nearly all of its work, and a callee written the
+  // ordinary way calls from its return. Reading only the statements of its body
+  // read such a callee as writing nothing, so a loop calling it was marked and
+  // every turn printed over the others.
+  const noisy = callee("noisy", []);
+  noisy.prints = true;
+  noisy.effects = ["io"];
+  noisy.entry = {
+    id: "entry",
+    statements: [],
+    releases: [],
+    terminator: {
+      k: "return",
+      value: {
+        k: "call",
+        type: F64,
+        call: {
+          callee: "printIt",
+          signature: { name: "printIt", symbol: "blaze_printIt", params: [], returns: "f64" },
+          args: [],
+          argTypes: [],
+          returns: F64,
+          effects: ["io"],
+          ownership: "none",
+          retain: false,
+          builtin: false,
+        },
+      },
+    },
+  };
+  // Twenty terms, so the turn clears the cost floor: a turn refused as cheap is
+  // refused for the wrong reason and the test would pass without proving this.
+  const fn = functionWith(countedLoop([call("noisy"), chain(20)]));
+  const callees = new Map([
+    ["noisy", noisy],
+    ["printIt", callee("printIt", [chain(20)])],
+  ]);
+  markParallelLoops(fn.entry, callees);
+  assert.equal(onlyLoop(fn).parallel, undefined, "a turn that prints may not run beside another turn that prints");
+});
+
+test("a loop calling a function this build holds no body for is refused", () => {
+  // The same hole swallowed the call to a function nobody read: the refusal for
+  // an unknown callee lives where the purity check is, and the purity check is
+  // where the answer of a function was not being read.
+  const opaque = callee("opaque", []);
+  opaque.entry = {
+    id: "entry",
+    statements: [],
+    releases: [],
+    terminator: {
+      k: "return",
+      value: {
+        k: "call",
+        type: F64,
+        call: {
+          callee: "missing",
+          signature: { name: "missing", symbol: "blaze_missing", params: [], returns: "f64" },
+          args: [],
+          argTypes: [],
+          returns: F64,
+          effects: [],
+          ownership: "none",
+          retain: false,
+          builtin: false,
+        },
+      },
+    },
+  };
+  const fn = functionWith(countedLoop([call("opaque"), chain(20)]));
+  markParallelLoops(fn.entry, new Map([["opaque", opaque]]));
+  assert.equal(onlyLoop(fn).parallel, undefined, "a body this build does not hold is a body nobody has read");
+});

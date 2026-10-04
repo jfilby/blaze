@@ -23,6 +23,18 @@ import type { FunctionContract, PrimitiveTypeName, Runner, TypeExpr } from "../c
 /** The bytes a reference takes in the memory the host provides: one pointer. */
 const POINTER_SIZE = 8;
 
+/**
+ * The global a module exports to say where its own memory ends.
+ *
+ * The lowering lays its wide-number scratch and its pooled constants down at
+ * fixed low addresses, and this host hands out memory for the vectors it reads
+ * above them. Neither end can guess the other's size — the host would have to
+ * read the data segment back out of the binary to learn it — so the module
+ * publishes the first address above everything it owns and the host starts
+ * there.
+ */
+export const DATA_BASE_EXPORT = "__blaze_data_base";
+
 /** WebAssembly value types of the contract types, keyed by contract type. */
 const WASM_TYPES: Record<string, string> = {
   bool: "i32",
@@ -369,7 +381,16 @@ const instance = new WebAssembly.Instance(module, { env: { memory } });
 const entry = instance.exports[functionName];
 if (typeof entry !== "function") fail("the module does not export " + functionName);
 
-let breakOffset = 1024;
+// The first address above everything the module owns. The module lays its
+// scratch and its pooled constants down at fixed low addresses and publishes
+// where they end, so a vector handed out here never writes over a limb of a
+// wide number in flight. A module that publishes nothing (an older one, or a
+// hand-written candidate) is given a page of its own, which is past anything
+// the lowering reserves.
+const published = instance.exports[${JSON.stringify(DATA_BASE_EXPORT)}];
+let breakOffset = typeof published === "object" && published !== null && typeof published.value === "number"
+  ? published.value
+  : 65536;
 let sink = 0;
 
 function allocate(bytes) {

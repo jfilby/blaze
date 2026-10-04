@@ -1557,14 +1557,17 @@ class Machine {
     // reaches can be kept in a register the convention does not ask a callee to
     // preserve, which costs the function nothing; one that has to survive a
     // call has to be in one that does, which costs a push and a pop.
-    // A loop written as a team of threads is a call into the runtime, so the
-    // names live across one are held in registers a call leaves alone. The
-    // graph is told which statements those are rather than left to read the
-    // loop as a loop, which is what it would otherwise see.
+    // A loop written as a team of threads is a call into the runtime, and so is
+    // a loop marked for a region: it opens and closes one around the body, and
+    // both are calls. The graph is told which statements those are rather than
+    // left to read the loop as a loop, which is what it would otherwise see.
     const liveness = nameLiveness(
       this.fn.entry,
       this.fn.params.map((parameter) => parameter.name),
-      (statement) => statement.k === "loop" && this.teamed.has(statement.loop),
+      (statement) =>
+        statement.k === "loop" &&
+        (statement.loop.kind === "counted" || statement.loop.kind === "each") &&
+        (this.teamed.has(statement.loop) || statement.loop.region === true),
     );
     // The register each parameter arrives in, and the ones the parameters after
     // it arrive in. The prologue moves a parameter out of the register it

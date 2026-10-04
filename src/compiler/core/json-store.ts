@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { CompilerError } from "./errors.ts";
 
@@ -31,6 +31,8 @@ export interface JsonStore {
    * is reported as one: no record at all would have the next write destroy it.
    */
   readIfValid<T>(relativePath: string): Promise<T | undefined>;
+  /** The names of the entries directly inside a directory of the store. */
+  list(relativePath: string): Promise<string[]>;
 }
 
 export function serializeJson(value: unknown): string {
@@ -243,6 +245,22 @@ export function createJsonStore(root: string): JsonStore {
           category: "StorageError",
           stage: "storage",
           message: `cannot create ${relativePath}`,
+          detail: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    },
+
+    async list(relativePath: string): Promise<string[]> {
+      try {
+        return (await readdir(resolveInStore(relativePath), { withFileTypes: true })).map((entry) => entry.name);
+      } catch (cause) {
+        // A directory nobody created is a directory with nothing in it: the
+        // caller is asking what projects exist, and one that does not is none.
+        if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw new CompilerError({
+          category: "StorageError",
+          stage: "storage",
+          message: `cannot list ${relativePath}`,
           detail: cause instanceof Error ? cause.message : String(cause),
         });
       }

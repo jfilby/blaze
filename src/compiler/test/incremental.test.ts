@@ -392,39 +392,45 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   ): string[] =>
     reusableFiles(workspace, "c1", output, lowering, linksObjects, standalone).map((file) => file.slice("/w/c1".length));
 
+  // Every kind delivers the IR beside the target it was lowered from, so it is
+  // named by every list: a build that took the object-level short-circuit and
+  // then found no IR to deliver failed after having linked and verified
+  // everything else.
   // A `machine` candidate is always linked on its own, so its executable is
   // always a file the build consumes.
-  assert.deepEqual(names("machine", false, true), [".s", ""]);
+  assert.deepEqual(names("machine", false, true), [".ir", ".s", ""]);
   // A standalone `ir` candidate delivers the executable it links.
-  assert.deepEqual(names("ir", false, true), [".ir", ""]);
+  assert.deepEqual(names("ir", false, true), [".ir", ".ir", ""]);
   // One that calls into the program is never linked on its own, so it has no
   // executable and demanding one would make it a cache miss for ever.
-  assert.deepEqual(names("ir", false, false), [".ir"]);
+  assert.deepEqual(names("ir", false, false), [".ir", ".ir"]);
   // Every kind that assembles produces an object, and a program build links it.
-  assert.deepEqual(names("asm", true, true), [".s", ".o"]);
-  assert.deepEqual(names("c", true, true), [".c", ".o"]);
-  assert.deepEqual(names("c", false, true), [".c"]);
-  // A module is the whole deliverable of a wasm build, and it links nothing.
-  assert.deepEqual(names("wasm", false, true, "wasm"), [".s", ".wasm"]);
+  assert.deepEqual(names("asm", true, true), [".ir", ".s", ".o"]);
+  assert.deepEqual(names("c", true, true), [".ir", ".c", ".o"]);
+  assert.deepEqual(names("c", false, true), [".ir", ".c"]);
+  // A wasm build writes the module and no assembly at all, so naming the
+  // assembly here asked for a file that was never written and the object half
+  // of the cache was unreachable for that backend for the life of the project.
+  assert.deepEqual(names("wasm", false, true, "wasm"), [".wasm", ".ir"]);
   // A backend that writes the object itself delivers that object, which is also
   // what a program build links, so the two questions name the same file twice
   // and the list is still one list.
-  assert.deepEqual(names("machine", true, true, "machine"), [".o", "", ".o"]);
-  assert.deepEqual(names("machine", false, true, "machine"), [".o", ""]);
+  assert.deepEqual(names("machine", true, true, "machine"), [".ir", ".o", "", ".o"]);
+  assert.deepEqual(names("machine", false, true, "machine"), [".ir", ".o", ""]);
   // The same output kind through the `c` backend delivers the assembly the tool
   // chain made of the C, which is a file of its own beside the object.
-  assert.deepEqual(names("machine", true, true), [".s", "", ".o"]);
+  assert.deepEqual(names("machine", true, true), [".ir", ".s", "", ".o"]);
   // A program build links the object of every function it holds, whatever the
   // output kind and whether or not the candidate also links on its own. The
   // executable question and the object question are separate: a standalone
   // `ir` or `machine` candidate delivers an executable AND is linked as an
   // object, and asking the first question must not swallow the second.
-  assert.deepEqual(names("ir", true, true), [".ir", "", ".o"]);
-  assert.deepEqual(names("ir", true, false), [".ir", ".o"]);
-  assert.deepEqual(names("machine", true, true), [".s", "", ".o"]);
-  assert.deepEqual(names("machine", true, false), [".s", "", ".o"]);
-  assert.deepEqual(names("asm", true, false), [".s", ".o"]);
+  assert.deepEqual(names("ir", true, true), [".ir", ".ir", "", ".o"]);
+  assert.deepEqual(names("ir", true, false), [".ir", ".ir", ".o"]);
+  assert.deepEqual(names("machine", true, true), [".ir", ".s", "", ".o"]);
+  assert.deepEqual(names("machine", true, false), [".ir", ".s", "", ".o"]);
+  assert.deepEqual(names("asm", true, false), [".ir", ".s", ".o"]);
   // A wasm build links no object at all, whatever the program around it does.
-  assert.deepEqual(names("wasm", true, true, "wasm"), [".s", ".wasm"]);
+  assert.deepEqual(names("wasm", true, true, "wasm"), [".wasm", ".ir"]);
 });
 

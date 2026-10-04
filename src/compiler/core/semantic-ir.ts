@@ -527,7 +527,11 @@ function makesCall(value: SemanticValue): boolean {
       // the code; one with anything computed in it is built at run time.
       return value.parts.some((part) => part.k === "value");
     case "arith":
-      return value.op === "pow";
+      // A power is `pow`, and a multiplication or a division of a whole number
+      // wider than a machine word is the runtime kernel — there is no
+      // instruction for thirty-two bytes, so it is a call like any other and
+      // clobbers every register a call is free to.
+      return value.op === "pow" || ((value.op === "mul" || value.op === "div") && isWideType(value.type));
     case "compare":
       return isTextType(value.operand);
     default:

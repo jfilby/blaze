@@ -23,7 +23,7 @@
 import { stat, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { boundaryProblems, generateWasmHost, wasmValueType } from "./wasm.ts";
+import { boundaryProblems, DATA_BASE_EXPORT, generateWasmHost, wasmValueType } from "./wasm.ts";
 import type { Runner } from "../core/types.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import type { FunctionContract } from "../core/types.ts";
@@ -436,7 +436,7 @@ function facts(type: SemanticType): TypeFacts {
 const BINARY: Record<number, Record<string, number>> = {
   [I32]: {
     add: 0x6a, sub: 0x6b, mul: 0x6c, div: 0x6d, mod: 0x6f, and: 0x71, or: 0x72, xor: 0x73,
-    shl: 0x74, shr: 0x75, ushr: 0x77, eq: 0x46, ne: 0x47, lt: 0x48, gt: 0x4a, le: 0x4c, ge: 0x4e,
+    shl: 0x74, shr: 0x75, ushr: 0x76, eq: 0x46, ne: 0x47, lt: 0x48, gt: 0x4a, le: 0x4c, ge: 0x4e,
   },
   [I64]: {
     add: 0x7c, sub: 0x7d, mul: 0x7e, div: 0x7f, mod: 0x81, and: 0x83, or: 0x84, xor: 0x85,
@@ -464,8 +464,8 @@ const BINARY: Record<number, Record<string, number>> = {
  * is in `BINARY` and is not repeated here.
  */
 const UNSIGNED_BINARY: Record<number, Record<string, number>> = {
-  [I32]: { div: 0x6e, mod: 0x70, shr: 0x76, ushr: 0x77, lt: 0x49, gt: 0x4b, le: 0x4d, ge: 0x4f },
-  [I64]: { div: 0x80, mod: 0x82, shr: 0x87, ushr: 0x88, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
+  [I32]: { div: 0x6e, mod: 0x70, shr: 0x76, ushr: 0x76, lt: 0x49, gt: 0x4b, le: 0x4d, ge: 0x4f },
+  [I64]: { div: 0x80, mod: 0x82, shr: 0x88, ushr: 0x88, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
   [F32]: {},
   [F64]: {},
 };
@@ -858,8 +858,14 @@ class Body {
 
   private get(name: string): Local {
     const local = this.resolve(name);
-    this.readAt = this.code.length;
     this.op(0x20);
+    // Where the read begins, which is the `local.get` opcode itself: the
+    // opcode byte and the index after it are one instruction, and the index is
+    // not written yet, so the position is the one byte just written. It is
+    // taken after the opcode, because `op` clears the mark it keeps — reading
+    // it first leaves a position of no instruction at all, and a statement that
+    // reads a name into itself then truncates the body behind it.
+    this.readAt = this.code.length - 1;
     this.code.varuint(local.index);
     this.readLocal = local.index;
     return local;
@@ -2255,7 +2261,12 @@ class Body {
       this.get(loop.variable);
       this.read(bound);
       const stop = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
-      this.op(BINARY[facts(loop.type).held][stop] as number);
+      // The counter is ordered the way it was declared, which is what the
+      // `each` walk below does: a loop counting up to a `u32` bound past the
+      // signed range ends before it begins under the signed comparison, because
+      // the same bits are a negative number.
+      const unsignedStop = facts(loop.type).unsigned ? UNSIGNED_BINARY[facts(loop.type).held][stop] : undefined;
+      this.op((unsignedStop ?? BINARY[facts(loop.type).held][stop]) as number);
       // The exit is tested against the falsity of the comparison, for the
       // reason the `while` above gives.
       this.op(0x45);
@@ -2483,27 +2494,45 @@ export function moduleBytes(
   // sections in order, and a global is read by the index the body handed it out
   // at, so the order they were laid down in is the order they are numbered in.
   //
-  // A global is a value type, a mutability byte and a constant expression that
+  // A global is its value type, a mutability byte and a constant expression that
   // initialises it. The expression is the constant itself followed by `end`, and
   // the mutability is immutable because nothing here can write one.
+  // The constants the body pooled, one global each, and after them the address
+  // the host may first hand out memory from. That last one is a global rather
+  // than a constant the host is told, because the host does not know how much
+  // data the module laid down: it would have to read the segment back out of the
+  // binary. The module is the only thing that knows where its own memory ends,
+  // so it says so, and a host that allocated below it would write a vector over
+  // the limbs of a wide number in flight.
   module.section(6, (globals) =>
-    globals.counted(body.pooledFloats.length, (each) => {
+    globals.counted(body.pooledFloats.length + 1, (each) => {
       for (const pooled of body.pooledFloats) {
-        // A global is its value type and its mutability, and nothing else: the
-        // counted form is a table's element type, which is not what this is.
+        // A global is its value type, a mutability byte and a constant expression
+        // that initialises it. The expression is the constant itself followed by
+        // `end`, and the mutability is immutable because nothing here can write one.
         each.byte(pooled.type);
         each.byte(0x00);
         each.byte(pooled.opcode);
         each.raw(pooled.bytes);
         each.byte(0x0b);
       }
+      each.byte(I32);
+      each.byte(0x00);
+      each.byte(0x41);
+      each.varuint(WIDE_DATA_BASE + body.pooledWides.reduce((whole, bytes) => whole + bytes.length, 0));
+      each.byte(0x0b);
     }),
   );
   module.section(7, (exports) =>
-    exports.counted(1, (one) => {
-      one.name(symbolOf(contract));
-      one.byte(0x00);
-      one.varuint(0);
+    exports.counted(2, (each) => {
+      each.name(symbolOf(contract));
+      each.byte(0x00);
+      each.varuint(0);
+      // The global the host reads to learn where it may allocate from. `0x03`
+      // is a global export; the index is past every pooled float.
+      each.name(DATA_BASE_EXPORT);
+      each.byte(0x03);
+      each.varuint(body.pooledFloats.length);
     }),
   );
   module.section(10, (bodies) =>

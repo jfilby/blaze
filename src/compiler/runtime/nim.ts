@@ -450,7 +450,7 @@ proc blaze_rt_region_leave*() {.exportc, cdecl.} =
   ## start again.
   blazeRegionLeave()
 
-proc blaze_rt_parallel_for*(count: csize_t, turn: proc (frame: pointer, begin, end: csize_t) {.cdecl.}, frame: pointer) {.exportc, cdecl.} =
+proc blaze_rt_parallel_for*(count: csize_t, turn: proc (frame: pointer, first, last: csize_t) {.cdecl.}, frame: pointer) {.exportc, cdecl.} =
   ## Run the turn over the counters [0, count). This host runs the turns in
   ## order, in one part, on the thread that called: a Nim host would need
   ## --threads:on, which is a compile option of the program rather than

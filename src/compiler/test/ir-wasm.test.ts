@@ -89,6 +89,21 @@ test("a loop that counts down ends rather than counting past its bound", async (
   );
 });
 
+test("a statement that reads a name into itself leaves the ones around it alone", async () => {
+  // `x = x` is the one statement whose read and write cancel: the value is
+  // already on the stack, so both instructions go and one name is left. Where
+  // the read begins has to be the `local.get` itself, taken after the opcode is
+  // written — a position read before the opcode is written down is a position of
+  // no instruction at all, and truncating the body to it drops every instruction
+  // before the read, so the module does not answer this at all.
+  await compute(
+    "a: Float64Array",
+    ["  let x = a[0];", "  let y = x;", "  x = x;", "  return x + y;"],
+    "run\n1\n7\n",
+    "RESULT 14\n",
+  );
+});
+
 test("a for-of walks a buffer by element and stops at its length", async () => {
   const walk = ["  let total = 0;", "  for (const value of a) { total += value; }", "  return total;"];
   await compute("a: Float64Array", walk, "run\n3\n1 2 3\n", "RESULT 6\n");
@@ -958,6 +973,11 @@ function wideComparison(type: SemanticType, op: CompareOp, left: string, right: 
   };
 }
 
+/** The contract for a function of no arguments answering a whole number. */
+function numberContract(returns: string): FunctionContract {
+  return { ...boolContract(), function: { name: "subject", symbol: "subject", params: [], returns } };
+}
+
 /** The contract for a function of no arguments answering a truth. */
 function boolContract(): FunctionContract {
   return {
@@ -1078,5 +1098,51 @@ test("a whole number moves by a number of bits, a limb at a time", () => {
       assert.equal(limbs, expected.toString(16).padStart(64, "0"), `a shift ${op === "shl" ? "left" : "right"} by ${count}`);
     }
   }
+});
+
+/**
+ * A function whose whole body is one shift of two literals, held at the width
+ * the shift is at. The opcode is chosen by the carrier, so this is the shape
+ * that says which instruction the module has to emit for it.
+ */
+function scalarShifted(type: SemanticType, op: "shr" | "ushr", left: string, right: string): SemanticFunction {
+  return {
+    name: "subject", symbol: "subject", params: [], returns: type,
+    requires: [], ensures: [], effects: [], allocates: false, prints: false, readsArgv: false, objects: {}, calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: { k: "arith", type, op, left: { k: "const", type, text: left }, right: { k: "const", type, text: right } },
+      },
+    },
+  };
+}
+
+/** What a body of one shift answers, run on the engine the build runs on. */
+function shifted(fn: SemanticFunction, contract: FunctionContract): number {
+  const here = engine;
+  assert.ok(here !== undefined);
+  const bytes = moduleBytes(fn, contract);
+  assert.ok(here.validate(bytes), "the engine accepts the module");
+  const memory = new here.Memory({ initial: 1 });
+  const instance = new here.Instance(new here.Module(bytes), { env: { memory } });
+  return (instance.exports as { subject: () => number }).subject();
+}
+
+test("a whole number of thirty-two bits moves by a number of bits", () => {
+  // The opcode beside the shift is a rotate: rotating forty-eight left by two
+  // pushes the low two bits out of the top and leaves nothing behind, so the
+  // answer is zero where the shift is twelve. A right shift of a whole number
+  // the module reads as unsigned clears the top bit, where the signed one
+  // carries the negativity out — the two differ on exactly the numbers above
+  // the signed range, which is the whole of what this covers.
+  const S32: SemanticType = { kind: "primitive", name: "i32" };
+  const U32Type: SemanticType = { kind: "primitive", name: "u32" };
+  assert.equal(shifted(scalarShifted(S32, "ushr", "48", "2"), numberContract("i32")), 12);
+  assert.equal(shifted(scalarShifted(U32Type, "ushr", "-2", "1"), numberContract("u32")), 2147483647);
+  assert.equal(shifted(scalarShifted(S32, "shr", "-2", "1"), numberContract("i32")), -1);
 });
 

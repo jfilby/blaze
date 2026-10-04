@@ -66,6 +66,40 @@ test("an object a program allocates is laid out once, and named in the type that
   assert.deepEqual(checksum.effects, []);
 });
 
+test("a field wider than a machine word is laid out as its limbs, not as one pointer", () => {
+  // A `u256` is four limbs of eight bytes and every backend holds it that way,
+  // so a layout that reserved the default eight bytes for it gave a thirty-two
+  // byte field eight bytes of room — and the backends write at the offset the
+  // contract names, so writing the wide field went over whatever followed it.
+  // It is placed at the alignment of a limb rather than of itself: a field is a
+  // sequence of limbs, and aligning the whole of one to thirty-two would pad
+  // most of the object out with addressable memory nothing was written to.
+  const contracts = contractsOf(
+    {
+      "make.ts": [
+        "export function make(big: u256): any {",
+        "  const tail: number = 7;",
+        "  return { big: big, tail: tail };",
+        "}",
+        "console.log(`${make(1n)}`);",
+        "",
+      ].join("\n"),
+    },
+    "make.ts",
+  );
+  const object = (contracts.make.definition?.objects ?? {}).Object1;
+  assert.ok(object !== undefined, "the object the body writes is laid out");
+  assert.deepEqual(
+    object.fields.map((field) => [field.name, field.type, field.offset]),
+    [
+      ["big", "u256", 0],
+      ["tail", "f64", 32],
+    ],
+  );
+  assert.equal(object.size, 40);
+  assert.equal(object.align, 8);
+});
+
 test("fields of different widths are laid out at their own alignment", () => {
   const analysis = typeScriptFrontend.analyze(
     [

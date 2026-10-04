@@ -478,3 +478,39 @@ test("a loop nested in a team is written as the loop it is", async () => {
   assert.equal(team.printed, inOrder.printed);
   assert.equal(team.printed, "every element");
 });
+
+test("a loop marked for a region answers for every element", async () => {
+  // A region-marked loop opens and closes a region around its body, and both are
+  // calls into the runtime. The graph that decides which registers a name may
+  // live in was told about the loops written as a team of threads and not about
+  // these, so a name defined before the region was entered and read inside it
+  // was pinned to a register the runtime call overwrites. The driver checks every
+  // element, because a name clobbered by the call is wrong on every turn after
+  // the first, and sampling three of them would miss it.
+  // The mark is written on the loop rather than left to the rule: the rule needs
+  // a loop that allocates to reuse its storage, and this one is about what
+  // survives the region, not about what it reuses.
+  const loop = counted([
+        // `base` was defined before the region was entered and is read inside
+        // it, so it has to survive the runtime call the region is.
+        {
+          k: "let",
+          line: 2,
+          slot: { kind: "value", name: "scaled", mutable: false, type: F64 },
+          value: { k: "arith", type: F64, op: "add", left: chain(9, element("out", local("i", I64))), right: local("base") },
+        },
+        { k: "setElement", line: 3, op: "=", buffer: "out", index: local("i", I64), value: local("scaled") },
+  ], { region: true });
+  const body: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: null },
+    statements: [
+      { k: "let", line: 1, slot: { kind: "value", name: "base", mutable: false, type: F64 }, value: number("0") },
+      loop,
+    ],
+  };
+  const ran = await runOver(body, PARAMS, 9);
+  assert.match(ran.listing, /blaze_rt_region_enter/, "the region is opened around the body");
+  assert.equal(ran.printed, "every element");
+});
