@@ -1177,11 +1177,36 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   const context: RepairContext = { functions: new Map(Object.entries(request.functions)) };
 
   const { maxAttempts, maxCandidates, candidateConcurrency } = request.generation;
-  // Candidate records are numbered from the stored ones and from whatever a
-  // previous round of this build already wrote, so a build that regenerates
-  // after a program mismatch never writes over the candidates it is replacing.
+  // A review's position in the build's record. It is computed rather than
+  // counted because it decides which recorded answer a replay serves, and a
+  // replay file is written against these positions.
   const firstSequence = request.existing.length + (request.sequenceStart ?? 0);
   let modelDurationNs = 0n;
+
+  // A candidate's id is what every later stage resolves it by — selection, the
+  // stored record, `blaze test`, and the files it is written to — so it is
+  // allocated here and never derived from anything. Deriving it from the chain
+  // and attempt arithmetic handed the target review the id of the last
+  // candidate a chain had already produced, and counting the stored candidates
+  // to decide where to start handed a rebuild ids the stored ones already
+  // held. Either way two different implementations answered to one name and
+  // the first match won: a stored object verified as one thing was linked and
+  // delivered as another.
+  const takenIds = new Set(request.existing.map((entry) => entry.id));
+  let nextId = 1 + Math.max(
+    request.sequenceStart ?? 0,
+    ...request.existing.map((entry) => Number(/^c(\d+)$/.exec(entry.id)?.[1] ?? 0)),
+  );
+  const allocateId = (): string => {
+    let id = `c${nextId}`;
+    while (takenIds.has(id)) {
+      nextId += 1;
+      id = `c${nextId}`;
+    }
+    nextId += 1;
+    takenIds.add(id);
+    return id;
+  };
 
   // Each candidate owns a contiguous block of records and collects its own, so
   // the build reads the same way whatever order the candidates finish in.
@@ -1259,7 +1284,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
         refusals.splice(0, refusals.length, ...revision.refused);
 
         const regenerated: Candidate = {
-          id: `c${sequence}`,
+          id: allocateId(),
           text: revision.text,
           model: generationBackend().id,
           modelConfig: generationBackend().id,
@@ -1346,7 +1371,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
   }
   const revised: Candidate = {
-    id: `c${firstSequence + maxCandidates * maxAttempts}`,
+    id: allocateId(),
     text: revision.text,
     model: generationBackend().id,
     modelConfig: generationBackend().id,

@@ -22,7 +22,7 @@ import { resolveModel } from "../ai/model.ts";
 import { chatEndpoint, type ChatEndpoint } from "./model-endpoint.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
-import type { ProgramMismatch, SourceInput } from "../core/types.ts";
+import type { FunctionContract, ProgramMismatch, SourceInput } from "../core/types.ts";
 import { scratch } from "./scratch.ts";
 
 const SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -50,6 +50,40 @@ function doubling(): SemanticFunction {
   return fn;
 }
 
+/**
+ * A program with a callee beside the unit under test, so `inline-call` is a
+ * proposal the rules hold and a review that proposes it is applied rather than
+ * refused. A body nothing can rewrite cannot show what is under test here: the
+ * target review adds a candidate only when it changed something.
+ */
+const CALLING_FILES: Record<string, string> = {
+  "main.ts": "import { work, twice } from './lib.ts';\nconsole.log(work(2));\n",
+  "lib.ts": [
+    "export function twice(x: number): number {",
+    "  return x + x;",
+    "}",
+    "",
+    "export function work(scale: number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < 4; i += 1) {",
+    "    total += i * scale;",
+    "  }",
+    "  return total + twice(scale);",
+    "}",
+    "",
+  ].join("\n"),
+};
+
+const ownPhase = phaseOf("typescript", CALLING_FILES, "main.ts");
+const ownSemantics = semanticsOf(ownPhase);
+const ownWork = ownPhase.program.files
+  .flatMap((file) => Object.entries(file.functions))
+  .find(([name]) => name === "work")?.[1] as FunctionContract;
+const ownContracts: Record<string, FunctionContract> = Object.fromEntries(
+  ownPhase.program.files.flatMap((file) => Object.entries(file.functions)),
+);
+const work = resolveFunction(ownWork, { objectNames: ownPhase.objectNames, functions: ownContracts });
+
 const TARGET = { arch: "x86_64" as const, os: "linux" as const, abi: "sysv" as const, cpu: "", features: [] };
 
 /** A project pointed at the endpoint the test opened, with the artifact under test. */
@@ -57,13 +91,18 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
   const endpoint: ChatEndpoint = await chatEndpoint(t, [], { answer: () => SOUND });
   const directory = await scratch("blaze-review-loop-");
   const model = resolveModel("openai-compatible/stub", { AI_API_KEY: "test-key", AI_BASE_URL: endpoint.url });
+  // The unit under test, unless the test brings its own program: a contract, the
+  // phase it came from and the IR of every function beside it are one choice,
+  // and a test that drives a different function drives all four.
+  const unit = over.contract ?? contract;
+  const own = unit === contract ? phase : ownPhase;
   return {
-    contract,
-    parsed: parseContract(contract),
-    unitFile: "main.ts",
-    program: phase.program,
+    contract: unit,
+    parsed: over.parsed ?? parseContract(unit),
+    unitFile: over.unitFile ?? (unit === contract ? "main.ts" : "lib.ts"),
+    program: over.program ?? own.program,
     base,
-    functions: semantics,
+    functions: over.functions ?? (unit === contract ? semantics : ownSemantics),
     target: TARGET,
     output: "ir",
     runtime: "none",
@@ -71,7 +110,7 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
     generation: { maxCandidates: 1, maxAttempts: 2, maxRetries: 0, candidateConcurrency: 1, functionConcurrency: 1 },
     test: { randomCases: 3, maxLength: 8, seed: 1 },
     benchmark: { iterations: 10 },
-    workspace: { workDirectory: directory, functionName: "square" },
+    workspace: { workDirectory: directory, functionName: unit.function.name },
     existing: [],
     callable: new Set(),
     // The runtime the candidate links against, built once for the whole loop.
@@ -80,9 +119,12 @@ async function request(t: TestContext, base: SemanticFunction, over: Partial<Cod
       lowering: "c",
       runtime: "none",
       target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-      workspace: { workDirectory: directory, functionName: "square" },
+      workspace: { workDirectory: directory, functionName: unit.function.name },
     }),
     machine: machine(),
+    // What the test overrides is what the request asks for, so it is spread
+    // last: a test that brings its own output kind or lowering is not answered
+    // with the default one.
     ...over,
     __endpoint: endpoint,
   } as CodegenRequest & { __endpoint: ChatEndpoint };
@@ -169,6 +211,66 @@ test("a build reports its candidates in the order it numbered them, whichever fi
     (left, right) => (left.benchmark?.durationNs ?? Number.POSITIVE_INFINITY) - (right.benchmark?.durationNs ?? Number.POSITIVE_INFINITY),
   )[0];
   assert.equal(result.selected, fastest.candidate, "the winner is the fastest candidate in the record");
+});
+
+test("every candidate a build writes answers to a name of its own", async (t) => {
+  // A candidate's id is how selection, the stored record, `blaze test` and the
+  // files it is lowered into all find it, and each of those resolves it by
+  // name with the first match winning. So one id standing for two
+  // implementations is a build that verified one thing and delivered another.
+  // The target review was numbered from the same arithmetic as a chain's
+  // candidates and took the id of the last one, and a rebuild that counted the
+  // stored candidates rather than reading their numbers restarted inside the
+  // range they held. Both are answered by the record naming each candidate once.
+  const answer = (prompt: string): string =>
+    /THE TARGET CODE THE COMPILER LOWERED/.test(prompt)
+      ? // The target review applying a proposal is what adds the candidate
+        // whose number used to collide with a chain's.
+        "verdict: repaired\nreason: the callee is a leaf\nproposal: inline-call entry callee=twice"
+      : SOUND;
+  const endpoint: ChatEndpoint = await chatEndpoint(t, [], { answer });
+  const model = resolveModel("openai-compatible/stub", { AI_API_KEY: "test-key", AI_BASE_URL: endpoint.url });
+  const generated = await request(t, work, {
+    contract: ownWork,
+    output: "machine",
+    lowering: "machine",
+    mode: "debug",
+    backend: () => createBackend(model),
+    generation: { maxCandidates: 1, maxAttempts: 1, maxRetries: 0, candidateConcurrency: 1, functionConcurrency: 1 },
+  });
+
+  const result = await reviewCandidates(generated);
+
+  const ids = result.candidates.map((candidate) => candidate.id);
+  assert.ok(ids.length > 1, "the target review added a candidate of its own");
+  assert.equal(new Set(ids).size, ids.length, `two candidates answered to one name: ${ids.join(", ")}`);
+  // Every outcome names a candidate that is in the record, and the winner is
+  // one of them: an id nothing answers to is a candidate nothing can be found
+  // by, and a first match on a shared one finds the wrong implementation.
+  for (const outcome of result.outcomes) {
+    assert.ok(ids.includes(outcome.candidate), `an outcome names ${outcome.candidate}, which is not in the record`);
+  }
+  assert.ok(result.selected === null || ids.includes(result.selected), `the winner ${result.selected} is not in the record`);
+
+  // A build that regenerates from stored candidates numbers beside them rather
+  // than among them, whatever the stored numbers are.
+  const again = await reviewCandidates(
+    await request(t, work, {
+      contract: ownWork,
+      output: "machine",
+      lowering: "machine",
+      mode: "debug",
+      backend: () => createBackend(model),
+      generation: { maxCandidates: 1, maxAttempts: 1, maxRetries: 0, candidateConcurrency: 1, functionConcurrency: 1 },
+      existing: result.candidates,
+    }),
+  );
+  const stored = new Set(ids);
+  const fresh = again.candidates.filter((candidate) => !stored.has(candidate.id)).map((candidate) => candidate.id);
+  assert.ok(
+    fresh.every((id) => !stored.has(id)),
+    `a regenerated candidate took a stored name: ${fresh.filter((id) => stored.has(id)).join(", ")}`,
+  );
 });
 
 /** What a project of this shape is, for the record the compiler writes. */

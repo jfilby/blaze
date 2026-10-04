@@ -403,7 +403,17 @@ function returnedName(value: SemanticValue | null): string | null {
   return value.k === "local" ? value.name : null;
 }
 
-/** Every value a statement computes, in the order the statement writes them. */
+/**
+ * Every value a statement computes, in the order the statement writes them.
+ *
+ * This is the validator's own list rather than the shared one in
+ * `core/semantic-ir.ts`, and it answers a different question: it is what the
+ * rules below have to reach, so a value a statement computes and this omits is
+ * a value no rule reads at all. `fill` writes one and `call` writes its
+ * arguments, and both were missing — which left the value of a fill, every
+ * name it mentions and every call written into an argument outside the scope
+ * check, the type check, the call rules and the effect rules.
+ */
 function statementValues(statement: SemanticStatement): SemanticValue[] {
   switch (statement.k) {
     case "let":
@@ -411,6 +421,8 @@ function statementValues(statement: SemanticStatement): SemanticValue[] {
     case "printText":
     case "printNumber":
     case "retain":
+      return [statement.value];
+    case "fill":
       return [statement.value];
     case "raise":
       return [statement.message];
@@ -420,6 +432,11 @@ function statementValues(statement: SemanticStatement): SemanticValue[] {
       return [statement.condition];
     case "storeField":
       return [statement.object, statement.value];
+    case "call":
+      // The arguments are what the call is made of, and a call written into one
+      // is a call the body makes. The call itself is checked where it is
+      // written rather than here, so it is not listed again.
+      return [...statement.call.args];
     case "loop":
       if (statement.loop.kind === "while" || statement.loop.kind === "doWhile") return [statement.loop.condition];
       if (statement.loop.kind === "counted") {
@@ -573,7 +590,7 @@ function valueProblems(tree: Tree): string[] {
     const prefix = label(block.block.id, statement.line);
     const writes: string[] = [];
     if (statement.k === "set" || statement.k === "step") writes.push(statement.name);
-    if (statement.k === "setElement") {
+    if (statement.k === "setElement" || statement.k === "fill") {
       const buffer = scope.slots.get(statement.buffer);
       if (buffer === undefined) {
         problems.push(`${prefix}"${statement.buffer}" is not declared where it is written`);
@@ -584,6 +601,12 @@ function valueProblems(tree: Tree): string[] {
         // written the same way.
         problems.push(`${prefix}"${statement.buffer}" is a ${typeText(slotType(buffer))}, which has no elements to write`);
       }
+      // The count a `fill` writes from is not checked here. A `fill` written as
+      // `array.fill(value)` fills from the first element, and the position it
+      // starts at is a name the compiler made rather than one the source
+      // declared, so asking whether it is in scope refuses every fill a program
+      // writes. The value a fill writes is a value like any other, and is
+      // checked above with the calls written into it.
     }
     if (statement.k === "loop" && statement.loop.kind === "each") {
       if (!scope.visible.has(statement.loop.of)) {

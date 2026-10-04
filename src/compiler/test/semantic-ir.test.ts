@@ -481,6 +481,96 @@ test("a jump that leaves for a block no loop names is refused", () => {
   assert.match(semanticIrProblems(astray, contract).join("\n"), /b99/);
 });
 
+test("a value a statement writes is a value the validator reads", () => {
+  // The list of what a statement computes is what every rule below is fed, so
+  // a value this omits is a value none of them reads. `fill` writes one and
+  // `call` writes its arguments, and neither was listed: a fill carrying a call
+  // written with the wrong number of arguments, and a call written into the
+  // argument of a call statement, were programs the validator answered nothing
+  // about.
+  const { program, contract } = resolved({
+    "main.ts": ["const a = new Int32Array(4);", "a[0] = 1;", ""].join("\n"),
+  });
+  const written = program.entry.statements.find((statement) => statement.k === "setElement");
+  assert.ok(written !== undefined && written.k === "setElement", "the program writes an element");
+  const value = structuredClone(written.value);
+
+  // A fill naming a buffer nothing declares writes nothing the compiler knows.
+  const filled = structuredClone(program);
+  const declared = filled.entry.statements[0];
+  if (declared.k !== "let") throw new Error("expected the buffer to be declared first");
+  filled.entry.statements = [
+    declared,
+    { k: "fill", buffer: "ghost", index: "0", type: value.type, value, line: 2 },
+  ];
+  assert.match(
+    semanticIrProblems(filled, contract).join("\n"),
+    /"ghost" is not declared/,
+    "the buffer a fill names is a name it writes",
+  );
+
+
+  // A call written into the value a fill writes is a call the body makes, and
+  // is held to the signature of the function it names.
+  const { program: callingProgram, contract: callingContract } = resolved({
+    "main.ts": 'import { twice } from "./lib.ts";\nconst a = new Int32Array(4);\na[0] = twice(1, 2);\n',
+    "lib.ts": "export function twice(a: number, b: number): number {\n  return a + b;\n}\n",
+  });
+  const calling = structuredClone(callingProgram);
+  const element = calling.entry.statements.find((statement) => statement.k === "setElement");
+  assert.ok(element !== undefined && element.k === "setElement", "the program writes an element");
+  const declaredCall = structuredClone(element.value);
+  if (declaredCall.k !== "call") throw new Error("expected a call written into the element");
+  declaredCall.call.args = declaredCall.call.args.slice(0, 1);
+  calling.entry.statements = [
+    ...calling.entry.statements.slice(0, -1),
+    { k: "fill", buffer: "a", index: "0", type: declaredCall.type, value: declaredCall, line: 3 },
+  ];
+  assert.match(
+    semanticIrProblems(calling, callingContract).join("\n"),
+    /twice is called with 1 arguments and takes 2/,
+    "a call written into a fill is held to the signature it names",
+  );
+});
+
+test("a call written into an argument is a call the validator holds", () => {
+  // A `call` statement was checked as a call and nothing else, so the arguments
+  // it was made of reached no rule at all: a call written into one of them with
+  // the wrong number of arguments passed validation, and the backend wrote a
+  // call the signature does not describe.
+  const { program, contract } = resolved({
+    "main.ts": 'import { sum, take } from "./lib.ts";\nconsole.log(take(sum(1, 2)));\n',
+    "lib.ts": [
+      "export function sum(a: number, b: number): number {",
+      "  return a + b;",
+      "}",
+      "export function take(x: number): number {",
+      "  return x;",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  assert.deepEqual(semanticIrProblems(program, contract), []);
+
+  const printed = program.entry.statements[0];
+  if (printed.k !== "printNumber") throw new Error("expected a printed call");
+  if (printed.value.k !== "call") throw new Error("expected a printed call");
+  // The call the statement makes, with the call written into its argument
+  // reduced to one argument where the program declares two.
+  const outer = structuredClone(printed.value.call);
+  const argument = outer.args[0];
+  if (argument.k !== "call") throw new Error("expected a call written into the argument");
+  argument.call.args = argument.call.args.slice(0, 1);
+
+  const astray = structuredClone(program);
+  astray.entry.statements = [{ k: "call", line: 2, call: outer }];
+  assert.match(
+    semanticIrProblems(astray, contract).join("\n"),
+    /sum is called with 1 arguments and takes 2/,
+    "a call written into the argument of a call statement is held to its signature",
+  );
+});
+
 test("an allocation is freed once, and only on the path that leaves it", () => {
   const { program, contract } = resolved({
     "main.ts": [

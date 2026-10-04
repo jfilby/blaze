@@ -1075,11 +1075,18 @@ static void* blaze_rt_run_part(void* argument) {
 
 /* How many parts the counters are cut into. One part per processor, and never
    more parts than there are counters to cut, because a part of nothing is a
-   thread that was started to do no work at all. */
+   thread that was started to do no work at all.
+
+   The cap is the cap the two arrays below are sized to, and it is applied here
+   rather than trusted. A processor count is read from the host and nothing
+   bounds it: a machine reporting more than BLAZE_RT_PARALLEL_PARTS online
+   processors made this write a part past the end of each of the two arrays,
+   over the caller's stack and into a frame that was live. */
 static size_t blaze_rt_parts_for(size_t count) {
   long processors = sysconf(_SC_NPROCESSORS_ONLN);
   if (processors < 1) processors = 1;
   if ((size_t)processors > count) processors = (long)count;
+  if ((size_t)processors > BLAZE_RT_PARALLEL_PARTS) processors = BLAZE_RT_PARALLEL_PARTS;
   return (size_t)processors;
 }
 

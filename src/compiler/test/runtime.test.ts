@@ -595,3 +595,55 @@ test("an object alignment that leaves the allocator no budget is refused, not wr
   assert.equal(worked.stdout.trim(), "ok");
 });
 
+test("a processor count past the stack arrays does not write past them", async () => {
+  // The jobs and the thread handles of a team are two arrays on the stack of
+  // whoever asked for the team, and the part count came from a processor count
+  // read out of the host with nothing bounding it. A machine reporting more
+  // processors than the arrays hold wrote one part past the end of each, over
+  // the caller's frame: a segfault rather than a team. The count the host
+  // reports is stubbed here, because a test machine has four of them and the
+  // bound is what is under test.
+  const directory = await scratch("blaze-parts-");
+  const runtime = await buildStandaloneRuntime(directory);
+  await writeFile(
+    join(directory, "stub.c"),
+    ["#include <unistd.h>", "long sysconf(int name) { (void)name; return 4096; }", ""].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "parts.c"),
+    [
+      "#include <stdio.h>",
+      `#include "${RUNTIME_NAME}.h"`,
+      "static double* out;",
+      "static void turn(void* frame, size_t begin, size_t end) {",
+      "  (void)frame;",
+      "  for (size_t at = begin; at < end; at += 1) out[at] = (double)at * 2.0;",
+      "}",
+      "int main(void) {",
+      "  setbuf(stdout, NULL);",
+      "  const size_t count = 512;",
+      `  out = (double*)${RUNTIME_NAME}_allocate(count * sizeof(double));`,
+      `  ${RUNTIME_NAME}_parallel_for(count, turn, 0);`,
+      "  for (size_t at = 0; at < count; at += 1) {",
+      "    if (out[at] != (double)at * 2.0) { printf(\"wrong at %zu\\n\", at); return 1; }",
+      "  }",
+      '  printf("ok\\n");',
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "parts");
+  const built = run(
+    "gcc",
+    ["-std=c11", "-O1", "-I", directory, "-o", binary, join(directory, "parts.c"), join(directory, "stub.c"), runtime.objectPath, "-lpthread", "-lm"],
+    { timeoutMs: 120_000 },
+  );
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 120_000 });
+  assert.equal(result.code, 0, `a team is cut into what the stack holds:\n${result.stderr}`);
+  assert.equal(result.stdout.trim(), "ok");
+});
+
