@@ -199,9 +199,18 @@ test("a turn that stores what it built into an object it did not build may not",
   assert.equal(onlyLoop(fn).region, undefined);
 });
 
-test("a turn that builds nothing may reuse whatever the region has", () => {
-  // There is nothing to reuse, but nothing is at risk either.
+test("a turn that builds nothing is left unmarked", () => {
+  // There is no cursor to rewind, so the mark would cost the two calls that
+  // open and close a region on every turn and buy nothing.
   const fn = functionWith(countedLoop([bind("sum", { k: "const", type: F64, text: "1" })]));
+  markRegionLoops(fn.entry);
+  assert.equal(onlyLoop(fn).region, undefined);
+});
+
+test("a turn that calls a function this build does not hold is marked", () => {
+  // A body nobody has read is a body that may allocate, so the mark stays: it
+  // costs two calls and it is what keeps the memory a region saves.
+  const fn = functionWith(countedLoop([bind("sum", callValue("unknown"))]));
   markRegionLoops(fn.entry);
   assert.equal(onlyLoop(fn).region, true);
 });

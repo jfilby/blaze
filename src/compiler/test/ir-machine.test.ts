@@ -1915,3 +1915,21 @@ test("the machine code of a folded identity is the machine code of the unfolded 
   }
 });
 
+test("a quotient by a power of two is a product by its reciprocal", async () => {
+  // Both forms are the same number, so what the test reads is the instruction:
+  // a division is three times the latency of a multiply and is not pipelined,
+  // and the quotient is usually on a chain the next turn waits for.
+  const parameter = [{ kind: "value", name: "x", mutable: false, type: F64 }] as const;
+  const quotient = (right: string) =>
+    subject(F64, handsBack({ k: "arith", type: F64, op: "div", left: local("x", F64), right: number(right) }), [...parameter]);
+  const instructions = await emitted(quotient("16777216"));
+  assert.match(instructions, /\bmulsd\b/, "the reciprocal is carried by the instruction");
+  assert.doesNotMatch(instructions, /\bdivsd\b/, "nothing divides where a multiply answers");
+
+  // A divisor that is not a power of two has no reciprocal that is exact, so it
+  // is left as the division it is.
+  const third = quotient("3");
+  assert.match(await emitted(third), /\bdivsd\b/);
+  assert.equal(await lowered(third, (name) => `printf("%.17g", ${name}(1e300));`), (1e300 / 3).toExponential(16));
+});
+

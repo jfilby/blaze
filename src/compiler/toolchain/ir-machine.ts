@@ -38,6 +38,7 @@ import {
   isWideType,
   limbsOf as limbsOfName,
   isInteger,
+  statementBlocksOf,
   statementValues,
   WIDE_LIMBS,
   LIMB_BYTES,
@@ -109,6 +110,7 @@ import {
 
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
+const I64: SemanticType = { kind: "primitive", name: "i64" };
 const TEXT = { kind: "text" } as const;
 const POINTER: SemanticType = { kind: "primitive", name: "usize" };
 
@@ -317,6 +319,22 @@ const CALLER_SAVED: readonly number[] = [RDI, RSI, R8, R9, R10, R11];
  * kept here does not survive the call that writes them.
  */
 const VECTOR_CALLER_SAVED: readonly number[] = [XMM2, XMM3, XMM4, XMM5];
+
+/**
+ * How many registers the values of one expression may be held in at once.
+ *
+ * They come out of `VECTOR_CALLEE_SAVED`: a value held in a register the
+ * convention does not preserve is gone the moment the expression calls
+ * anything, and an expression holds one side of an arithmetic while the other
+ * side — which is often the call — is written. A callee-saved register costs
+ * the prologue a store and the epilogue a load, which is worth paying once for
+ * a loop that turns thousands of times and is not worth paying for a function
+ * that computes nothing in floats, which is given none.
+ */
+const TEMPORARY_VECTORS = 3;
+
+/** How many counters of one function may be held as whole numbers at once. */
+const INDEX_REGISTERS = 2;
 
 /**
  * How often a name has to be read before it is worth a register of its own.
@@ -1109,6 +1127,127 @@ function firstArgumentOnStack(types: readonly SemanticType[]): number {
   return types.length;
 }
 
+/**
+ * The reciprocal of a power of two, or null when the number is not one.
+ *
+ * A quotient by a power of two is the same number as a product by its
+ * reciprocal, and both are exact: scaling by a power of two moves the exponent
+ * and never the significand, so neither form rounds where the other does — not
+ * for a subnormal either, where the two round the one exact value the same way.
+ * What differs is the instruction. A division has three times the latency of a
+ * multiply and is not pipelined, and the quotient is usually on a chain the
+ * next turn of the loop is waiting for.
+ *
+ * The answer is taken from the log so that a fraction of a power of two is
+ * found as readily as the whole number is, and the power is read back to be
+ * sure it is the one the number is: a log of its own has been rounded.
+ */
+function reciprocalOfTwo(value: number): number | null {
+  if (!Number.isFinite(value) || value === 0) return null;
+  const exponent = Math.log2(Math.abs(value));
+  if (!Number.isInteger(exponent) || Math.abs(exponent) > 1022) return null;
+  if (Math.pow(2, exponent) !== Math.abs(value)) return null;
+  return Math.sign(value) * Math.pow(2, -exponent);
+}
+
+/**
+ * How far a loop is written out, in turns and in statements.
+ *
+ * Twelve turns is where a loop over a field element's limbs is written whole,
+ * which is the shape that pays: the turns of a short loop are dominated by the
+ * test and the step rather than by the work, and the counter of each turn is a
+ * number in the instruction rather than a value kept and added to. A longer
+ * loop is left rolled, because what it does not need the trip count for is what
+ * it is spending its turns on.
+ */
+const UNROLLABLE_TURNS = 12;
+
+/**
+ * How many statements a body may hold and still be written out. A body written
+ * out twelve times is twelve bodies in the object, which is a trade worth
+ * making for a body of a few instructions and not for a body of many.
+ */
+const UNROLLABLE_STATEMENTS = 6;
+
+/**
+ * How many turns of a counted loop are written for every trip of the loop that
+ * is left, and how far the counter moves on each of them, or null when the loop
+ * is written the way it is today.
+ *
+ * The turns have to be known before the first of them is written, so all three
+ * of what the loop counts by are numbers the program wrote out. What each turn
+ * has then is a number this pass can put in the loop rather than a counter it
+ * has to keep and add to.
+ *
+ * A body that calls is left alone. Unrolling a body of calls turns a loop over a
+ * thousand calls into a thousand copies of the same call and saves nothing:
+ * what such a loop costs is the call, and the call is the same either way.
+ *
+ * A body that leaves early is left alone for the other reason: a `continue`
+ * belongs to the next turn of the loop, and in a loop written out the turns of
+ * one trip stand one after another with nothing between them for it to skip to.
+ *
+ * A body that writes the counter is left alone because the turns written out
+ * are the loop's own and the counter is the loop's own: a turn that moves it
+ * somewhere else is a turn the unrolled loop cannot have written.
+ */
+function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor: number; step: number } | null {
+  if (loop.region === true || loop.parallel !== undefined) return null;
+  if (loop.body.terminator.k !== "next") return null;
+  if (loop.body.statements.length > UNROLLABLE_STATEMENTS) return null;
+  if (bodyCalls(loop.body)) return null;
+  if (writesCounter(loop.body, loop.variable)) return null;
+  const from = wholeLiteral(loop.from);
+  const to = wholeLiteral(loop.to);
+  if (from === null || to === null) return null;
+  // A step written out carries its own sign, and a step left out is one turn in
+  // the direction the loop counts in: both are what the rolled loop steps by.
+  const written = loop.step === null ? null : wholeLiteral(loop.step);
+  if (loop.step !== null && written === null) return null;
+  const step = written ?? (loop.down ? -1 : 1);
+  if (step === 0) return null;
+  const span = loop.down ? from - to : to - from;
+  const towards = loop.down ? -step : step;
+  if (towards <= 0 || span < 0) return null;
+  const turns = loop.inclusive ? Math.floor(span / towards) + 1 : Math.ceil(span / towards);
+  if (!Number.isSafeInteger(turns) || turns < 2) return null;
+  let chosen: number | null = null;
+  for (const factor of [8, 4, 2]) {
+    if (turns % factor === 0) { chosen = factor; break; }
+  }
+  chosen ??= turns <= UNROLLABLE_TURNS ? turns : null;
+  return chosen === null ? null : { factor: chosen, step };
+}
+
+/** The number a whole literal writes down, or null when it is not one. */
+function wholeLiteral(value: SemanticValue): number | null {
+  if (value.k !== "const") return null;
+  const number = isFloat(value.type) ? Number(decimalText(value.text)) : Number(integerText(value.text));
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+/** Whether anything in a body is a call, which is what a body is not unrolled for. */
+function bodyCalls(body: SemanticBlock): boolean {
+  for (const statement of body.statements) {
+    if (statementValues(statement).some(hasCall)) return true;
+    for (const inner of statementBlocksOf(statement)) {
+      if (bodyCalls(inner)) return true;
+    }
+  }
+  return false;
+}
+
+/** Whether a loop's body writes the name the loop counts by, which the loop owns. */
+function writesCounter(body: SemanticBlock, name: string): boolean {
+  for (const statement of body.statements) {
+    if ((statement.k === "set" || statement.k === "step") && statement.name === name) return true;
+    for (const inner of statementBlocksOf(statement)) {
+      if (writesCounter(inner, name)) return true;
+    }
+  }
+  return false;
+}
+
 /** What the linker sees in the object that was written. */
 function inspectWrittenObject(objectPath: string, functionName: string): { defined: string[]; undefined: string[] } {
   const definedResult = run("nm", ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
@@ -1162,6 +1301,14 @@ interface Held {
   /** Where in the frame it is: a distance up from the bottom of it. */
   readonly offset: number;
   readonly type: SemanticType;
+  /**
+   * The register holding this value as a whole number, where it is a counter a
+   * loop steps by whole ones and is read as an index. A counter of this program
+   * is a double, so reading it as an index is a conversion; holding the same
+   * number in a register of its own is the conversion done once for the loop
+   * rather than once for every element the counter reaches.
+   */
+  readonly index: number | null;
   /**
    * The register a value that never changes lives in, or null where it lives in
    * the frame. A name that is written once and read after is in a register that
@@ -1323,7 +1470,119 @@ class Machine {
     return this.used - bytes;
   }
 
-  private bind(name: string, type: SemanticType): Held {
+  /**
+   * The vector registers a value of an expression may be held in, and how many
+   * of them are free. A register is taken for the length of one statement and
+   * given back when the statement that took it has been written, so this is a
+   * stack rather than a set: the last register to be given back is the first to
+   * be taken again, which keeps the same one in play across a nested
+   * expression and leaves the frame for the values that have to cross a call.
+   */
+  private readonly spareVectors: number[] = [];
+
+  /**
+   * The whole-number registers a counter may be read as an index out of, taken
+   * one at a time by the loop that owns one. They are callee-saved for the same
+   * reason the vector registers are: a loop whose body calls anything would find
+   * the counter's index gone the first time it did.
+   */
+  private readonly spareIndexes: number[] = [];
+
+  /**
+   * One of the registers above, when one is free and no name has been pinned
+   * into it, or null when there is none to give. A register a name is pinned
+   * into is not free whatever the stack says, so the two pools are asked
+   * together.
+   */
+  private takeSpareVector(): number | null {
+    const spoken = new Set(this.pinned.values());
+    for (const register of this.spareVectors) {
+      if (spoken.has(register)) continue;
+      this.spareVectors.splice(this.spareVectors.indexOf(register), 1);
+      return register;
+    }
+    return null;
+  }
+
+  /**
+   * The callee-saved vector registers the values of this function's expressions
+   * may be held in, up to what its arithmetic is deep enough to want. A body
+   * that computes nothing in floats is given none, which is what keeps the
+   * prologue of a small function free of them.
+   *
+   * How many are worth having is how many one expression can hold at once: a
+   * side of an arithmetic is held while the other side is written, so three is
+   * as deep as an expression of ordinary shape goes. Anything deeper than that
+   * is answered out of the frame, which is what every value was answered out of
+   * before.
+   */
+  private reserveTemporaryVectors(): number[] {
+    // Only arithmetic a loop turns over pays for the registers: a prologue that
+    // saves three and an epilogue that reads them back are worth a few
+    // instructions per call, and a function that computes a sum once has one
+    // call to spend them on.
+    let arithmetic = 0;
+    const turning = (block: SemanticBlock, depth: number): void => {
+      for (const statement of block.statements) {
+        for (const inner of statementBlocksOf(statement)) turning(inner, depth + (statement.k === "loop" ? 1 : 0));
+        if (depth === 0) continue;
+        for (const value of statementValues(statement)) {
+          if (isFloat(value.type) && (value.k === "arith" || value.k === "compare")) arithmetic += 1;
+        }
+      }
+    };
+    turning(this.fn.entry, 0);
+    if (arithmetic === 0) return [];
+    const spoken = new Set(this.pinned.values());
+    const free = VECTOR_CALLEE_SAVED.filter((register) => !spoken.has(register));
+    return free.slice(Math.max(free.length - Math.min(arithmetic, TEMPORARY_VECTORS), 0));
+  }
+
+  /**
+   * The registers a counter of one of this function's loops may be read as an
+   * index out of, or none where no loop counts by whole ones over a double.
+   *
+   * One is enough for a program that counts one loop at a time, and a second for
+   * one that nests them: a loop inside a loop has both counters live at once, and
+   * an inner counter read through the outer's register would be an address built
+   * from the wrong number.
+   */
+  private reserveIndexRegisters(): number[] {
+    let deepest = 0;
+    const counting = (body: SemanticBlock, depth: number): void => {
+      for (const statement of body.statements) {
+        if (statement.k === "loop") {
+          const loop = statement.loop;
+          if (
+            loop.kind === "counted" &&
+            isFloat(loop.type) &&
+            wholeLiteral(loop.from) !== null &&
+            !writesCounter(loop.body, loop.variable)
+          ) {
+            deepest = Math.max(deepest, depth + 1);
+          }
+          counting(statement.loop.body, depth + 1);
+          continue;
+        }
+        for (const inner of statementBlocksOf(statement)) counting(inner, depth);
+      }
+    };
+    counting(this.fn.entry, 0);
+    if (deepest === 0) return [];
+    const spoken = new Set(this.pinned.values());
+    const free = CALLEE_SAVED.filter((register) => !spoken.has(register));
+    return free.slice(0, Math.min(deepest, INDEX_REGISTERS));
+  }
+
+  /** One of the registers above, given back to whatever needs one next. */
+  private giveSpareVector(register: number): void {
+    // A register that is already free is here twice only if a value was freed
+    // twice, and two values in one register is a program that computes one of
+    // them out of the other.
+    if (!this.spareVectors.includes(register)) this.spareVectors.push(register);
+  }
+
+  private bind(name: string, type: SemanticType, index: number | null = null): Held {
     const emitted = this.names.declare(name, type);
     const register = this.pinned.get(emitted) ?? null;
     // A pinned value is in a register and never in the frame, so the frame slot
@@ -1332,7 +1591,7 @@ class Machine {
     // a held value goes through `load`, `store` or `scratchFrom`, and those
     // three read the register.
     const offset = register === null ? this.reserve(frameBytes(type)) : 0;
-    const held: Held = { offset, type, register };
+    const held: Held = { offset, type, register, index };
     this.slots.set(emitted, held);
     return held;
   }
@@ -1346,7 +1605,9 @@ class Machine {
 
   /**
    * A slot the lowering binds for itself, of the type it holds, which is free
-   * again when the statement that bound it has been written.
+   * again when the statement that bound it has been written. A value of a
+   * float is held in a register where one has been given this function, and in
+   * the frame otherwise.
    *
    * Almost every slot a lowering binds for itself is written and read within
    * the one statement that needed it — the right side of an arithmetic, the
@@ -1358,7 +1619,19 @@ class Machine {
    * than four, which is a byte on every instruction that reads one.
    */
   private hold(type: SemanticType, prefix: string): Held {
-    const held = this.reserveSlot(type, prefix);
+    const held = this.reserveSlot(type, prefix, true);
+    this.borrowed.push(held);
+    return held;
+  }
+
+  /**
+   * A slot the statement being written has to have whatever else it does, which
+   * is what a value written past the end of the expression it belongs to asks
+   * for: an argument parked beside the frame while the arguments after it are
+   * read, and the value `Math.round` keeps beside what it rounds.
+   */
+  private holdSlot(type: SemanticType, prefix: string): Held {
+    const held = this.reserveSlot(type, prefix, false);
     this.borrowed.push(held);
     return held;
   }
@@ -1367,17 +1640,23 @@ class Machine {
    * A slot that outlives the statement that bound it. A loop's bound and its
    * step are read before the body and never inside it, but the body is written
    * between the two, so these are handed back by hand rather than at the end
-   * of the statement the loop is.
+   * of the statement the loop is. A value read on every turn of a loop outlives
+   * every call the body makes, so these are in the frame whatever the statement
+   * the loop is.
    */
   private holdAcross(type: SemanticType, prefix: string): Held {
-    return this.reserveSlot(type, prefix);
+    return this.reserveSlot(type, prefix, false);
   }
 
-  private reserveSlot(type: SemanticType, prefix: string): Held {
+  private reserveSlot(type: SemanticType, prefix: string, borrowable: boolean): Held {
     this.temporaries += 1;
     const name = this.names.reserve(`${prefix}_${this.temporaries}`);
+    // A wide number is carried in four registers of its own and is written from
+    // those rather than from the accumulator, so there is nothing here to hold
+    // it in.
+    const register = borrowable && isFloat(type) && !isWideType(type) ? this.takeSpareVector() : null;
     const offset = this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8));
-    const held: Held = { offset, type, register: null };
+    const held: Held = { offset, type, register, index: null };
     this.slots.set(name, held);
     return held;
   }
@@ -1385,10 +1664,13 @@ class Machine {
   /**
    * Hands one slot back, so that the next statement that needs one takes it.
    * Only the slots a statement bound for itself are handed back, and only once
-   * the statement that bound them has been written.
+   * the statement that bound them has been written. A value held in a register
+   * hands the register back rather than the slot, which is still there and is
+   * what the next statement that wants a frame slot will take.
    */
   private freeSlot(held: Held): void {
-    this.spareSlots.push(held.offset);
+    if (held.register === null) this.spareSlots.push(held.offset);
+    else this.giveSpareVector(held.register);
   }
 
   /**
@@ -1398,7 +1680,9 @@ class Machine {
    */
   private freeSlotsSince(mark: number): void {
     for (let at = this.borrowed.length - 1; at >= mark; at -= 1) {
-      this.spareSlots.push(this.borrowed[at].offset);
+      const held = this.borrowed[at];
+      if (held.register === null) this.spareSlots.push(held.offset);
+      else this.giveSpareVector(held.register);
     }
     this.borrowed.length = mark;
     // A slot handed back here goes to whatever needs one next, and no
@@ -1757,6 +2041,22 @@ class Machine {
       this.objectRegister = OBJECT_POINTER;
       this.pinnedRegisters.push(OBJECT_POINTER);
     }
+    // The registers the values of an expression are held in are taken from what
+    // the names have not taken, and they are callee-saved ones: a value held
+    // across a call is gone in a register the convention does not preserve, and
+    // an expression holds one side while the other side — which may be the call
+    // — is written. A function that computes nothing in floats reserves none,
+    // which is what keeps the prologue of a small one free of them.
+    for (const register of this.reserveTemporaryVectors()) {
+      this.pinnedVectors.push({ register, offset: 0, single: false });
+      this.spareVectors.push(register);
+    }
+    // The same is true of a counter read as an index: the register holding it as
+    // a whole number has to survive every call the loop's body makes.
+    for (const register of this.reserveIndexRegisters()) {
+      this.pinnedRegisters.push(register);
+      this.spareIndexes.push(register);
+    }
     // The prologue pushes the registers above the frame and the lowering binds
     // its slots from there downwards, so a slot's address does not depend on
     // whether a register was pinned. A vector register has no push and is
@@ -2019,8 +2319,8 @@ class Machine {
     // arrives in `rdi` ahead of every other argument, so it is taken out of the
     // register the body is about to use for something else.
     if (isWideType(this.fn.returns)) {
-      this.wideResult = this.reserveSlot(this.fn.returns, "blaze_wide_result");
-      this.wideSret = this.reserveSlot(POINTER, "blaze_wide_sret");
+      this.wideResult = this.reserveSlot(this.fn.returns, "blaze_wide_result", false);
+      this.wideSret = this.reserveSlot(POINTER, "blaze_wide_sret", false);
       this.code.movMemRegSized(frame(this.wideSret.offset), RDI, 8);
     }
     const arrivals = this.arrivals();
@@ -2251,6 +2551,16 @@ class Machine {
   }
 
   private statement(statement: SemanticStatement): void {
+    // The values an expression writes for itself are read inside that same
+    // expression and nowhere else, so they are handed back when the statement
+    // that wrote them is done rather than at the end of the block. That is what
+    // keeps a block of ten statements needing one register rather than ten.
+    const mark = this.borrowed.length;
+    this.writeStatement(statement);
+    this.freeSlotsSince(mark);
+  }
+
+  private writeStatement(statement: SemanticStatement): void {
     switch (statement.k) {
       case "let": {
         const type = slotType(statement.slot);
@@ -2420,7 +2730,7 @@ class Machine {
     this.store(right);
     this.load(target);
     if (isFloat(target.type)) {
-      this.code.movsLoad(XMM1, frame(right.offset), widthOf(target.type) === 4);
+      this.scratchFrom(right);
     } else this.readInto(right, RCX);
     this.apply(operation, target.type);
     this.normalizeArithmetic(target.type);
@@ -3128,12 +3438,31 @@ class Machine {
     // addition itself one turn at a time.
     const sum = packedSumOf(loop);
     if (sum !== null && this.packedSum(sum, loop, labels)) return;
+    // A loop whose turns are known before the first of them is written out as
+    // the turns it is, each with the counter at the value that turn has.
+    const plan = unrollPlan(loop);
+    if (plan !== null && this.unrolledCounted(loop, labels, plan.factor, plan.step)) return;
     // The variable is bound before the loop's own values are read, because
     // whether it has a register decides whether the value the loop starts from
     // needs a slot of its own: a counter in a register is written straight from
     // the value the loop starts at, where a counter in the frame is written from
     // a slot that holds that value and nothing else ever reads.
-    const variable = this.bind(loop.variable, type);
+    // A counter of this program is a double, and an index is a whole number, so
+    // a counter read as an index is converted on every element it reaches. Where
+    // one is to hand, the loop keeps the same number in a register of its own and
+    // steps it beside the double: the conversion is done once for the loop.
+    const writtenName = (value: SemanticValue): boolean => value.k === "local" && writesCounter(loop.body, value.name);
+    const shadow =
+      isFloat(type) &&
+      this.spareIndexes.length > 0 &&
+      wholeLiteral(loop.from) !== null &&
+      (loop.step === null || wholeLiteral(loop.step) !== null) &&
+      !writtenName(loop.to) &&
+      (loop.step === null || !writtenName(loop.step)) &&
+      !writesCounter(loop.body, loop.variable)
+        ? this.spareIndexes.pop() ?? null
+        : null;
+    const variable = this.bind(loop.variable, type, shadow);
     let from: Held | null = null;
     if (variable.register === null) {
       this.at(loop.from, type);
@@ -3183,6 +3512,10 @@ class Machine {
       this.load(from);
       this.store(variable);
     }
+    // The counter holds its first value by now, whichever of the two ways above
+    // put it there, so the whole-number copy of it is taken from the counter and
+    // not from the slot the loop started from.
+    if (variable.index !== null) this.startIndex(variable, type, variable.index);
     const test = this.code.label("Ltest");
     this.code.jmp(test);
     this.code.bind(labels.header);
@@ -3208,6 +3541,7 @@ class Machine {
       // counts, which is the only place `down` decides the arithmetic.
       if (variable.register === null) this.load(variable);
       this.one(type, loop.down ? "sub" : "add", counter);
+      if (variable.index !== null) this.code.aluImm("add", variable.index, loop.down ? -1 : 1, true);
     } else if (typeof step === "number") {
       // A step that is written down is the signed amount the index moves by,
       // so it is added whatever its sign is: the direction is already in it,
@@ -3219,6 +3553,7 @@ class Machine {
         // into the scratch and the counter is advanced in the register it lies in.
         this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(step, widthOf(type) === 4)), widthOf(type) === 4);
         this.code.sse("add", counter, XMM1, widthOf(type) === 4);
+        if (variable.index !== null) this.code.aluImm("add", variable.index, step, true);
       } else this.code.aluImm("add", counter, step, operationWidth(type) === 8);
     } else {
       this.scratchFrom(step);
@@ -3259,6 +3594,111 @@ class Machine {
     if (from !== null) this.freeSlot(from);
     if (typeof to !== "number") this.freeSlot(to);
     if (typeof step !== "number" && step !== null) this.freeSlot(step);
+  }
+
+  /**
+   * A counted loop written `factor` turns for every trip of the loop that is
+   * left, each turn with the counter at the number that turn has.
+   *
+   * The counter is stepped between the turns and once more after the last of
+   * them, so the value the loop leaves it at is the one the rolled loop would
+   * have left it at. What is saved is the test and the step: a trip of eleven
+   * turns over a field element's limbs is eleven bodies in the code rather
+   * than a test, a counter and a jump eleven times, and the counter of each turn
+   * is a constant in the code rather than a value kept somewhere and added to.
+   *
+   * What is spent is the object: the body is written `factor` times over. That
+   * is why `unrollPlan` only answers for a body that calls nothing and
+   * leaves no block early — the two shapes where the code written again is not
+   * the cost.
+   */
+  private unrolledCounted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels, factor: number, step: number): boolean {
+    const type = loop.type;
+    const from = wholeLiteral(loop.from);
+    const to = wholeLiteral(loop.to);
+    if (from === null || to === null) return false;
+    const span = loop.down ? from - to : to - from;
+    const turns = loop.inclusive ? Math.floor(span / Math.abs(step)) + 1 : Math.ceil(span / Math.abs(step));
+    if (!Number.isSafeInteger(turns) || turns < factor) return false;
+    // The loop's own scope was entered by the caller, as it is for the rolled
+    // loop, and is left when the caller leaves it. A counter of this program is
+    // a double and an index is a whole number, so each turn is given a register
+    // holding the number it has as well as the value itself.
+    const shadow = this.spareIndexes.length > 0 ? this.spareIndexes.pop() ?? null : null;
+    const variable = this.bind(loop.variable, type, shadow);
+    this.constantCounter(variable, type, from);
+    // The turns left are counted in a whole number whatever the counter is, so
+    // the test is one instruction wide whatever precision the loop counts in.
+    const trips = this.holdAcross(I64, "blaze_trips");
+    this.code.movRegImm(RAX, BigInt(Math.floor(turns / factor)));
+    this.store(trips);
+    const test = this.code.label("Ltest");
+    this.code.jmp(test);
+    this.code.bind(test);
+    this.code.bind(labels.header);
+    // The turns left are tested before they are spent, so that a loop of any
+    // number of trips writes its bodies the same number of times.
+    this.load(trips);
+    this.code.test(RAX);
+    this.code.jcc("e", labels.exit);
+    this.code.aluImm("sub", RAX, 1, true);
+    this.store(trips);
+    // Each turn is written with the counter at the value that turn has. A loop
+    // that runs once is written out whole, so each of its turns has a counter
+    // this pass counted and the counter is a number in the instruction rather
+    // than a value kept somewhere and converted back into an index. A loop that
+    // runs several trips has the same counter at a different number on each of
+    // them, so its turns are written as so many steps of the loop's own.
+    const once = turns === factor;
+    for (let turn = 0; turn < factor; turn += 1) {
+      if (turn > 0) {
+        if (once) this.constantCounter(variable, type, from + turn * step);
+        else this.stepCounter(variable, type, step);
+      }
+      this.block(loop.body);
+    }
+    // One step after the last turn, so that the value the loop leaves the
+    // counter at is the one the rolled loop would have left it at.
+    this.stepCounter(variable, type, step);
+    this.code.jmp(labels.header);
+    this.code.bind(labels.exit);
+    this.freeSlot(trips);
+    return true;
+  }
+
+  /**
+   * The whole-number copy of a counter started at the value the loop starts from,
+   * which is the one conversion the loop's own arithmetic does not do again.
+   */
+  private startIndex(variable: Held, type: SemanticType, shadow: number): void {
+    this.load(variable);
+    this.code.cvtFloatToInt(shadow, XMM0, widthOf(type) === 4, true);
+  }
+
+  /** A counter put at a number the loop counted out before it was run. */
+  private constantCounter(variable: Held, type: SemanticType, value: number): void {
+    if (isFloat(type)) this.floatConstant(value, type, XMM0);
+    else this.code.movRegImm(RAX, BigInt(value));
+    this.store(variable);
+    if (variable.index !== null) this.code.movRegImm(variable.index, BigInt(value));
+  }
+
+  /**
+   * A counter moved on by the amount the loop steps it by, in the register it is
+   * in or in the frame slot it is in, which is what the rolled loop above does
+   * with the same value.
+   */
+  private stepCounter(variable: Held, type: SemanticType, step: number): void {
+    const register = variable.register ?? RAX;
+    if (variable.register === null) this.load(variable);
+    if (isFloat(type)) {
+      this.floatConstant(step, type, XMM1);
+      this.code.sse("add", register, XMM1, widthOf(type) === 4);
+    } else {
+      this.code.aluImm("add", register, step, operationWidth(type) === 8);
+    }
+    if (variable.index !== null) this.code.aluImm("add", variable.index, step, true);
+    if (variable.register === null) this.store(variable);
   }
 
   /**
@@ -3399,7 +3839,9 @@ class Machine {
       this.comparedBranch(type, op, immediate, sense, label);
       return;
     }
-    const right = this.hold(type, "blaze_right");
+    // The side held is read back after the other one has been written, so a
+    // register serves it exactly as long as nothing calls in between.
+    const right = hasCall(comparison.left) ? this.hold(type, "blaze_right") : this.hold(type, "blaze_right");
     this.at(comparison.right, type);
     this.store(right);
     this.at(comparison.left, type);
@@ -3749,6 +4191,7 @@ class Machine {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
+      else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
       else this.code.movsLoad(XMM1, frame(right.offset), single);
       this.code.sseCompare(XMM0, XMM1, single, true);
       switch (op) {
@@ -4038,8 +4481,19 @@ class Machine {
     const onRight = this.floatOperand(value.right, type, value.op);
     const literal = onRight ?? (commutative ? this.floatOperand(value.left, type, value.op) : null);
     if (literal !== null) {
+      // A quotient by a power of two is the same number as a product by the
+      // reciprocal, and the product is three times quicker. A difference and a
+      // quotient may not take their sides either way round, so the literal here
+      // is always the divisor and the value is already in the accumulator.
+      const reciprocal =
+        value.op === "div" && value.right.k === "const" ? reciprocalOfTwo(Number(decimalText(value.right.text))) : null;
       this.at(onRight === null ? value.right : value.left, type);
-      this.code.sseMemLabel(value.op as "add" | "sub" | "mul" | "div", XMM0, literal, widthOf(type) === 4);
+      this.code.sseMemLabel(
+        reciprocal === null ? (value.op as "add" | "sub" | "mul" | "div") : "mul",
+        XMM0,
+        reciprocal === null ? literal : this.floatLiteral(floatBits(reciprocal, widthOf(type) === 4)),
+        widthOf(type) === 4,
+      );
       this.normalizeArithmetic(type);
       return;
     }
@@ -4061,7 +4515,12 @@ class Machine {
     if (isFloat(type)) {
       const commutative = value.op === "add" || value.op === "mul";
       this.at(commutative ? value.left : value.right, type);
-      const memory = this.hold(type, commutative ? "blaze_left" : "blaze_right");
+      // This side is held in the frame rather than in a register of its own,
+      // which is the one place a value of an expression is better off in the
+      // frame: the instruction below reads it out of memory as its own operand,
+      // so a slot is one instruction where a register is a move into the
+      // scratch and then the operation.
+      const memory = this.holdSlot(type, commutative ? "blaze_left" : "blaze_right");
       this.store(memory);
       this.at(commutative ? value.right : value.left, type);
       if (memory.register === null) {
@@ -5053,8 +5512,10 @@ class Machine {
     // pinned to is numbered out of the vector file, so handing it to a whole
     // number register the way a frame slot is handed over reads a different
     // register altogether — number seven being rdi and not xmm7. A float index
-    // takes the general form, which converts it into the accumulator first.
-    if (isFloat(held.type)) return null;
+    // takes the general form, which converts it into the accumulator first,
+    // unless the loop that counts it holds the same number in a register of its
+    // own, which is what an index is then read out of.
+    if (isFloat(held.type)) return held.index === null ? null : { offset: 0, type: USIZE, register: held.index, index: null };
     if (held.register !== null) return held;
     return widthOf(held.type) !== 8 ? null : held;
   }
@@ -5331,7 +5792,7 @@ class Machine {
     }
     if (call.callee === "Math.round") {
       this.at(argument, NUMBER);
-      const operand = this.hold(NUMBER, "blaze_rounded");
+      const operand = this.holdSlot(NUMBER, "blaze_rounded");
       this.store(operand);
       this.floatConstant(0.5, NUMBER, XMM1);
       this.code.sse("add", XMM0, XMM1, false);
@@ -5475,7 +5936,7 @@ class Machine {
       if (at === -1) {
         const move = moves[0] as Move;
         const source = move.source as number;
-        const parked = this.hold(move.held.type, "blaze_call_argument");
+        const parked = this.holdSlot(move.held.type, "blaze_call_argument");
         if (isFloat(move.held.type)) this.code.movsStore(frame(parked.offset), source, widthOf(move.held.type) === 4);
         else this.code.movMemRegSized(frame(parked.offset), source, widthOf(move.held.type));
         move.held = parked;

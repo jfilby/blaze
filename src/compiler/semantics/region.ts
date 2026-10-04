@@ -106,7 +106,14 @@ function markWithin(block: SemanticBlock, callees: Callees): boolean {
         marked = true;
         continue;
       }
-      if ((loop.kind === "counted" || loop.kind === "each") && refusalFor(loop, callees) === null) {
+      // A loop whose turns build nothing has no cursor to rewind, so the mark
+      // would cost the two calls that open and close a region on every turn of
+      // every such loop in the program and buy nothing at all.
+      if (
+        (loop.kind === "counted" || loop.kind === "each") &&
+        turnBuilds(loop, callees) &&
+        refusalFor(loop, callees) === null
+      ) {
         loop.region = true;
         marked = true;
       }
@@ -117,6 +124,100 @@ function markWithin(block: SemanticBlock, callees: Callees): boolean {
     }
   }
   return marked;
+}
+
+/**
+ * Whether a turn of a loop builds a block of its own, which is the one thing
+ * the reuse acts on.
+ *
+ * The answer is read over every block inside the loop, nested loops included: a
+ * turn builds whatever the body builds, and a block built by a loop inside it
+ * is a block this turn built. Whether the loop around a marked one is then
+ * marked is a different question, asked above this one, and answered by which
+ * of the two is the innermost that can be.
+ *
+ * A call to a function this build does not hold is read as building a block,
+ * which is the direction that keeps the reuse: a body nobody has read is a
+ * body that may allocate, and a loop that loses its mark loses the memory the
+ * region saves. Every other answer here can only add a mark, never drop one the
+ * program would otherwise have had.
+ */
+function turnBuilds(loop: SemanticLoop, callees: Callees): boolean {
+  const reach: Builds = { callees, reading: new Set(), builds: new Map() };
+  for (const block of blocksWithin(loop.body)) {
+    for (const statement of block.statements) {
+      for (const value of statementValues(statement)) {
+        if (buildsIn(value, reach)) return true;
+      }
+    }
+    if (block.terminator.k === "return" && block.terminator.value !== null && buildsIn(block.terminator.value, reach)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** What one walk of the callees of a loop's body is holding. */
+interface Builds {
+  readonly callees: Callees;
+  /** The callees already being read, so a recursive one is not read forever. */
+  readonly reading: Set<string>;
+  /** What each callee was found to build, kept so a shared callee is read once. */
+  readonly builds: Map<string, boolean>;
+}
+
+/** Whether a value is, or reaches, a block built where the value was written. */
+function buildsIn(value: SemanticValue, reach: Builds): boolean {
+  let found = false;
+  walkValues(value, (inner) => {
+    if (found) return;
+    if (inner.k === "newObject") {
+      found = true;
+    } else if (inner.k === "buffer") {
+      // A window into a block another name holds is a block of that name's, not
+      // one this turn made.
+      found = inner.view === null;
+    } else if (inner.k === "call") {
+      // A function the compiler itself provides computes its answer out of what
+      // it is handed and builds nothing, so it is not a body nobody has read.
+      found = !inner.call.builtin && calleeMayBuild(inner.call.callee, reach);
+    }
+  });
+  return found;
+}
+
+/**
+ * Whether a function builds a block of its own, read the way `calleeBuilds`
+ * above reads it and answering the other way round for a body this build does
+ * not hold.
+ */
+function calleeMayBuild(name: string, reach: Builds): boolean {
+  const known = reach.builds.get(name);
+  if (known !== undefined) return known;
+  const callee = reach.callees.get(name);
+  // A body nobody has read is a body that may allocate. Assuming and checking
+  // afterwards is what breaks a recursion: the answer is what the body holds
+  // once the loop of the reading has been cut, which is a body this build can
+  // only answer for where it has one.
+  if (callee === undefined) return true;
+  if (reach.reading.has(name)) return false;
+  reach.reading.add(name);
+  let builds = false;
+  for (const block of blocksWithin(callee.entry)) {
+    for (const statement of block.statements) {
+      for (const value of statementValues(statement)) {
+        if (buildsIn(value, reach)) builds = true;
+      }
+      if (builds) break;
+    }
+    if (!builds && block.terminator.k === "return" && block.terminator.value !== null) {
+      builds = buildsIn(block.terminator.value, reach);
+    }
+    if (builds) break;
+  }
+  reach.reading.delete(name);
+  reach.builds.set(name, builds);
+  return builds;
 }
 
 /* -------------------------------------------------------------------------- */
