@@ -158,6 +158,16 @@ proc programFixed(value: float64, digits: int): string =
     ## to write: -0.004 at two digits is -0.00 in the language as well.
     (if value == 0.0 and classify(value) == fcNegZero: written[1 .. ^1] else: written)
 
+## Whether a number holds. A value that is not a number holds nothing, and
+## NaN != 0 is true here as it is in C, so the test asks for a number that is a
+## number. It is a proc rather than the expression written out because the value
+## is read twice inside it and a value the IR calls is a call: writing the
+## expression at each of the two places ran it twice where the C driver this is
+## the twin of runs it once. The C driver binds it in a block for the same
+## reason.
+proc programTruth(value: float64): bool =
+  value == value and value != 0.0
+
 ## The values a counted loop takes, in the order it takes them, as the source
 ## counts: the index is added to, as the source adds, because a multiplication
 ## would not give the same doubles, and the loop stops on the bound rather
@@ -510,8 +520,12 @@ ${anchor}
     if (kind === "reference") return `(${expression}) != nil`;
     if (kind === "boolean") return `(${expression})`;
     // A value that is not a number holds nothing, and `NaN != 0` is true here as
-    // it is in C, so the test asks for a number that is a number.
-    if (isFloat(type)) return `((${expression}) == (${expression}) and (${expression}) != 0.0)`;
+    // it is in C, so the test asks for a number that is a number. It is written
+    // as a call rather than as the expression repeated: the value is read twice
+    // inside that, and a value the IR calls is a call, so writing the expression
+    // at each of the two places ran it twice where the C driver this is the twin
+    // of runs it once.
+    if (isFloat(type)) return `programTruth(${expression})`;
     return `(${expression}) != 0`;
   }
 

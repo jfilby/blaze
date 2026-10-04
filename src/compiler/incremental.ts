@@ -34,7 +34,9 @@
 
 import { hashValue, type JsonStore } from "./core/json-store.ts";
 import { contractsByName, writtenOut } from "./semantics/calls.ts";
+import { inlineRefusal } from "./semantics/repair.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
+import type { SemanticFunction } from "./core/semantic-ir.ts";
 import type {
   Candidate,
   BackendKind,
@@ -111,6 +113,16 @@ export interface UnitKeyInput {
   review: string;
   /** The sources that decide what the IR is lowered into. */
   lowering: string;
+  /**
+   * Every function of the program as the IR holds it. A build folds each
+   * candidate through `inlineCalls` before it lowers it, so what lands inside
+   * the object is decided by `inlineRefusal` and not by the call strategy
+   * alone, and the key has to ask the same question the fold does. A caller
+   * that does not resolve the IR passes nothing, which is the answer that keys
+   * this function on no extra body: the direction that discards work rather
+   * than keeping an object whose inlined body has moved.
+   */
+  semantics?: ReadonlyMap<string, SemanticFunction>;
 }
 
 /**
@@ -149,13 +161,29 @@ function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
  */
 export function unitKeys(input: UnitKeyInput): UnitKeys {
   const own = input.contract.function.name;
+  const contracts = contractsByName(input.program.files);
   // The whole closure, not the direct callees: a body written out carries the
   // calls it made, so what ends up inside this object is everything below it.
+  const closure = writtenOut(contracts, input.contract);
   const written = new Set(
-    writtenOut(contractsByName(input.program.files), input.contract)
-      .map((contract) => contract.function.name)
-      .filter((name) => name !== own),
+    closure.map((contract) => contract.function.name).filter((name) => name !== own),
   );
+  // What the fold writes into the object beside what the outline does. The two
+  // rules do not answer the same question: the outline refuses to write out a
+  // callee that states what it returns, because a copy of a proved body is a
+  // body nothing has proved, and the fold has no such rule. A callee the
+  // outline calls and the fold can inline is therefore a body this object
+  // carries, and the key has to carry it too — or an edit to that body rebuilds
+  // the callee and leaves this caller holding the copy it was given before the
+  // edit, which is the whole reason the body of a written-out callee is here at
+  // all. Only a direct callee is asked: an inlined body holds no call of its
+  // own, so nothing below one can be inlined into it either.
+  for (const body of closure) {
+    for (const edge of body.definition.calls) {
+      const callee = edge.strategy === "inline" ? undefined : input.semantics?.get(edge.callee);
+      if (callee !== undefined && inlineRefusal(callee) === null) written.add(edge.callee);
+    }
+  }
   const others = input.program.files
     .flatMap((file) => Object.entries(file.functions))
     .filter(([name]) => name !== own)

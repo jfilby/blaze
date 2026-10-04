@@ -647,3 +647,179 @@ test("a processor count past the stack arrays does not write past them", async (
   assert.equal(result.stdout.trim(), "ok");
 });
 
+test("a string appended to itself is that string twice, and the block it left is not read", async () => {
+  // The emitter binds one temporary per interpolated part, so a string written
+  // into itself is one block named on both sides of the append. When the block
+  // has no room to grow into, the append allocates, copies the left side, gives
+  // the left side back and only then reads the right one — which is that block,
+  // already released. A block too large for the pool is handed straight back to
+  // the host, so the read after the release is not a value that happens to still
+  // be there: it is memory the allocator took, and it faulted.
+  const probe = [
+    "#include <stdio.h>",
+    "#include <stdlib.h>",
+    "#include <string.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    "  const size_t n = 400000;",
+    "  char* big = (char*)malloc(n + 1);",
+    "  memset(big, 'A', n);",
+    "  big[n] = 0;",
+    `  const char* s = ${RUNTIME_NAME}_string_new((const unsigned char*)big, n);`,
+    "  free(big);",
+    `  const char* joined = ${RUNTIME_NAME}_string_append(s, s);`,
+    `  if (${RUNTIME_NAME}_string_length(joined) != 2 * n) { printf("length %zu\\n", ${RUNTIME_NAME}_string_length(joined)); return 1; }`,
+    "  for (size_t at = 0; at < 2 * n; at += 1) {",
+    "    if (joined[at] != 'A') { printf(\"byte %zu is %c\\n\", at, joined[at]); return 2; }",
+    "  }",
+    `  ${RUNTIME_NAME}_release((void*)joined);`,
+    `  ${RUNTIME_NAME}_finalize();`,
+    '  printf("ok\\n");',
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-self-append-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("release"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, `a string appended to itself must answer that string twice: ${result.stderr}`);
+  assert.equal(result.stdout.trim(), "ok");
+});
+
+test("a region hands out a block whose read past the end is a zero, as the language answers it", async () => {
+  // The alignment is added to a block on top of the payload rather than taken
+  // out of the slack the allocator leaves, and those bytes are what a read past
+  // the end of an array lands on: the program is allowed to make that read and
+  // the language answers it as a zero. A region allocates with a call that
+  // clears nothing, so it has to clear the slack as well as the payload — and
+  // the region is rewound at the top of every turn, so the slack is exactly the
+  // bytes the previous turn wrote there. Clearing the payload alone left a
+  // fresh array reading back what the last one wrote past its end.
+  const probe = [
+    "#include <stdio.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    "  double seen[2] = {0.0, 0.0};",
+    "  for (int turn = 0; turn < 2; turn += 1) {",
+    `    ${RUNTIME_NAME}_region_enter();`,
+    `    double* a = (double*)${RUNTIME_NAME}_array_new(4, sizeof(double));`,
+    "    if (a == NULL) return 1;",
+    "    a[0] = 1.0;",
+    "    if (turn == 0) a[4] = 42.0;",
+    "    seen[turn] = a[4];",
+    `    ${RUNTIME_NAME}_region_leave();`,
+    "  }",
+    `  ${RUNTIME_NAME}_finalize();`,
+    '  printf("%g %g\\n", seen[0], seen[1]);',
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-region-slack-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("release"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "42 0", "the second turn's array is a fresh one, so it reads zero past its end");
+});
+
+test("the Nim adapter joins and clears strings as the C runtime does", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // Three things the two runtimes have to answer alike, and did not.
+  //
+  // A joined string's length: both branches of the append leave a header
+  // carrying the room the block has rather than the length of the string, and
+  // `blaze_rt_text_length` answers `length - 1`, so `"a" + "b"` measured 17.
+  //
+  // A string handed to both sides: the emitter binds one temporary per
+  // interpolated part, so a string written into itself is one block named
+  // twice, and the append released the left side before it read the right one.
+  //
+  // Bytes of text that are not terminated: `$text` scans for the terminator
+  // before the slice is taken, so a literal carrying an escape the language
+  // writes as a byte of text was cut at that byte.
+  const probe = [
+    "let joined = blaze_rt_string_append(\"a\", \"b\")",
+    "if blaze_rt_string_length(joined) != 2:",
+    "  echo \"LENGTH \", blaze_rt_string_length(joined)",
+    "var big = newString(400000)",
+    "for i in 0 ..< 400000: big[i] = 'A'",
+    "let s = blaze_rt_string_new(unsafeAddr big[0], 400000)",
+    "let twice = blaze_rt_string_append(s, s)",
+    "if blaze_rt_string_length(twice) != 800000:",
+    "  echo \"SELFLEN \", blaze_rt_string_length(twice)",
+    "for i in 0 ..< 800000:",
+    "  if twice[i] != 'A':",
+    "    echo \"SELFBYTE \", i",
+    "    break",
+    "blaze_rt_print_text_n(\"a\\0b\", 3)",
+    "echo \"\"",
+    "echo \"done\"",
+  ].join("\n");
+  const directory = await scratch("blaze-nim-strings-");
+  const source = join(directory, "strings.nim");
+  await writeFile(source, `${generateRuntimeAdapterSource()}\n${probe}\n`, "utf8");
+  const binary = join(directory, "strings");
+  const built = run("nim", ["c", "--hints:off", "--warnings:off", "-d:release", `--nimcache:${join(directory, "cache")}`, `-o:${binary}`, source], {
+    timeoutMs: 300_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const out = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(out.code, 0, out.stderr);
+  assert.equal(out.stdout, "a\0b\ndone\n");
+});
+
+test("a block released inside an open region is not handed out again by the slab", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // The region is rewound at the top of every turn, so a block released inside
+  // it is still wanted: the rewind takes the whole region back, and the next
+  // turn's block is the same bytes on purpose. What must not happen is that
+  // block reaching the slab's released list, where an allocation made outside
+  // the region is handed those bytes while the region is still rewound over
+  // them — two live blocks in one piece of memory.
+  const probe = [
+    "blaze_rt_region_enter()",
+    "let held = blaze_rt_object_new(64, 8)",
+    "blaze_rt_release(cast[pointer](held))",
+    "blaze_rt_region_leave()",
+    "let outside = blaze_rt_object_new(64, 8)",
+    "if cast[uint](held) == cast[uint](outside):",
+    "  echo \"ALIASED\"",
+    "else:",
+    "  echo \"distinct\"",
+    "blaze_rt_release(cast[pointer](outside))",
+  ].join("\n");
+  const directory = await scratch("blaze-nim-region-");
+  const source = join(directory, "region.nim");
+  await writeFile(source, `${generateRuntimeAdapterSource()}\n${probe}\n`, "utf8");
+  const binary = join(directory, "region");
+  const built = run("nim", ["c", "--hints:off", "--warnings:off", "-d:release", `--nimcache:${join(directory, "cache")}`, `-o:${binary}`, source], {
+    timeoutMs: 300_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const out = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(out.code, 0, out.stderr);
+  assert.equal(out.stdout.trim(), "distinct");
+});
+

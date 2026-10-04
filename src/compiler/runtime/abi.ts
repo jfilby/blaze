@@ -1038,7 +1038,16 @@ ${guarded ? '    if (fresh == NULL) blaze_rt_refuse("out of memory");' : ""}
   header->capacity = bytes;
   header->magic = BLAZE_RT_MAGIC;
   header->base = NULL;
-  if (cleared) memset(aligned, 0, bytes);
+  /* Cleared as a whole block rather than as a payload: aligned_alloc clears
+     nothing, and the bytes between the payload and the end of the block are
+     what a read past the end of an array lands on, which the language answers
+     as a zero. Every other cleared path here -- the recycled block above and
+     the host calloc below -- zeroes them with the payload, and a region that
+     left them holding whatever the previous turn wrote there turns a
+     "while (a[i]) i++" into a run off the end of the array. The end of the
+     block is where the cursor now is, so the clear never reaches into the
+     block after it. */
+  if (cleared) memset(aligned, 0, (size_t)((char*)header + total) - (size_t)aligned);
   return aligned;
 }
 
@@ -1253,6 +1262,7 @@ const char* blaze_rt_string_append(const char* left, const char* right) {
      instead, and it is that copy which the later appends grow. */
   blaze_rt_header* header = (blaze_rt_header*)((const char*)left - BLAZE_RT_HEADER_SIZE);
   char* joined;
+  int tail_copied = 0;
   if (header->magic == BLAZE_RT_MAGIC && header->references == 1) {
     if (wanted <= header->capacity) {
       joined = (char*)left;
@@ -1264,6 +1274,17 @@ const char* blaze_rt_string_append(const char* left, const char* right) {
       joined = (char*)blaze_rt_block(total, header->alignment, 0);
       blaze_rt_header_of(joined)->capacity = total;
       memcpy(joined, left, left_length);
+      /* The right side is copied before the left one is given back, because a
+         program may hand the same string to both: the emitter binds one
+         temporary per interpolated part, so a string interpolated into itself
+         is one block named twice, and the release below is the last reference
+         to it. Reading it after that is a read of memory the allocator has
+         already taken, and a block big enough to be handed straight back to the
+         host is a fault rather than a value that happens to still be there.
+         A right side that is the left one is read out of the copy this branch
+         has just made rather than out of the block being released. */
+      memcpy(joined + left_length, right == left ? joined : right, right_length);
+      tail_copied = 1;
       blaze_rt_release((void*)left);
     }
   } else {
@@ -1272,7 +1293,7 @@ const char* blaze_rt_string_append(const char* left, const char* right) {
     memcpy(joined, left, left_length);
   }
   blaze_rt_header_of(joined)->length = wanted;
-  memcpy(joined + left_length, right, right_length);
+  if (!tail_copied) memcpy(joined + left_length, right, right_length);
   joined[left_length + right_length] = '\\0';
   return joined;
 }

@@ -300,3 +300,37 @@ test("an increment used as a value hands back the value its side says it does", 
   assert.match(c("i--"), /double t\d+ = i;\n {2}i--;/);
 });
 
+test("a name declared in a block is not a name outside it", () => {
+  // `arm` builds the block for an `if` and for the body of a loop, and each of
+  // those declares names that belong to it. A name left bound when the block
+  // ended was a name every later read in the function resolved to the block's
+  // own declaration: two variables under one IR name, and the outer one read at
+  // the inner one's type. The types are what makes it visible — a whole number
+  // written inside the arm and a double outside it, so the arithmetic the
+  // return states was done at the width of the name it happened to find.
+  const body = [
+    "export function f(n: number): number {",
+    "  let v = 1;",
+    "  if (n > 0) {",
+    "    let v = 2n;",
+    "    v = v + 1;",
+    "  }",
+    "  return v + 0.5;",
+    "}",
+    "",
+  ].join("\n");
+  const entry = ['import { f } from "./lib.ts";', "console.log(f(3));", ""].join("\n");
+  const phase = phaseOf("typescript", { "lib.ts": body, "main.ts": entry }, "main.ts");
+  const fn = semanticsOf(phase).f as SemanticFunction;
+
+  // The outer `v` is still the outer `v`, at the type it was declared at.
+  assert.match(printSemanticFunction(fn), /return \[add\[f64\] local\[f64\] v const\[f64\] 0\.5\]/);
+  // And the C it lowers into adds the two as doubles rather than truncating the
+  // half away at the width of the name inside the arm.
+  const c = generateFunctionC(fn);
+  assert.match(c, /double v = 1\.0;/);
+  assert.match(c, /int64_t v_2 = 2LL;/);
+  assert.match(c, /return \(v \+ 0\.5\);/);
+  assert.doesNotMatch(c, /int64_t\)\(0\.5\)/, "the outer value was read at the arm's width");
+});
+

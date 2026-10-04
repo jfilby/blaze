@@ -1077,8 +1077,19 @@ function slotTypesOf(fn: SemanticFunction): Map<string, SemanticType> {
   return types;
 }
 
-/** Why a callee may not be put where its call was, or null when it may. */
-function inlineRefusal(callee: SemanticFunction): string | null {
+/**
+ * Why a callee may not be put where its call was, or null when it may.
+ *
+ * Exported because it decides what lands inside an object, and `incremental.ts`
+ * keys a caller on the bodies its object carries: a build folds every candidate
+ * through `inlineCalls` before it lowers it, so a callee this answers null for is
+ * a callee whose whole definition belongs in the caller's key, whatever
+ * `semantics/calls.ts:strategyFor` decided about the call itself. The two rules
+ * answer different questions and they do not agree — `strategyFor` refuses to
+ * write out a callee that states what it returns, and this has no such rule — so
+ * the key asks this one.
+ */
+export function inlineRefusal(callee: SemanticFunction): string | null {
   if (callee.entry.terminator.k !== "return") return "ends by leaving for another block, which is not this function's control flow";
   if (callee.allocates) return "allocates an object, whose ownership the blocks it is put into would have to account for";
   if (callee.prints) return "prints, which is an effect the contract of the function it is put into does not state";

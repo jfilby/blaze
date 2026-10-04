@@ -382,7 +382,12 @@ proc blazeRegionTake(total, bytes, alignment: uint64, cleared: bool): pointer =
     magic: BlazeMagic, base: nil, length: bytes, alignment: alignment,
     refs: 1, capacity: bytes)
   if cleared:
-    zeroMem(aligned, int(bytes))
+    ## Cleared as a whole block rather than as a payload, which is what the C
+    ## runtime does and what the comment on blazeBlock below is about: the
+    ## bytes between the payload and the end of the block are what a read past
+    ## the end of an array lands on. The end of the block is where the cursor
+    ## now is, so the clear never reaches into the block after it.
+    zeroMem(aligned, int(cast[uint](header) + uint(total) - cast[uint](aligned)))
   cast[pointer](aligned)
 
 proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
@@ -393,11 +398,21 @@ proc blazeBlock(bytes, alignment: uint64, cleared: bool): pointer =
   ## of the slack the allocator leaves: those bytes are what a read past the
   ## end of an array lands on, the program is allowed to make that read, and
   ## the source language answers it as a zero.
+${guarded ? `  ## The budget the line below checks against is the cap less the alignment
+  ## less the header, and an alignment at the cap leaves that subtraction to
+  ## wrap: the guard would read as the whole uint64 range, every request is
+  ## under it, and the total computed from it wraps into a small allocation
+  ## whose payload is then placed a long way from the block that was mapped.
+  ## The check is here rather than after the region branch below because a region
+  ## allocation is an allocation, and the C runtime this is the twin of checks
+  ## it before it hands the request to the region.
+  if align > BlazeMaxAllocation - BlazeHeaderSize:
+    blazeStop("allocation: object alignment is too large")
+  if bytes > BlazeMaxAllocation - align - BlazeHeaderSize:
+    blazeStop("allocation: request too large")` : ""}
   let total = bytes + align + BlazeHeaderSize
   if blazeRegionOn:
     return blazeRegionTake(total, bytes, align, cleared)
-${guarded ? `  if total > BlazeMaxAllocation:
-    blazeStop("allocation: request too large")` : ""}
   let cls = if cleared: blazeClassOf(total, align) else: 0
   if cls != 0:
     ## The header of a pooled block is at the start of its class, so the
@@ -494,6 +509,14 @@ proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
   if pointer == nil:
     return
   let header = check(pointer, "blaze_rt_release")
+  ## A block of an open region is not recycled on its own. A block put on the
+  ## released list of its class would be handed out again by the slab path
+  ## while the region is rewound over the same memory, and two blocks would be
+  ## live in one piece of it. The rewind takes the whole region instead, which
+  ## is what the region exists for and what every block in it is there for.
+  if blazeRegionOn:
+    header[].refs = 0
+    return
   if header[].refs > 1:
     dec header[].refs
     return
@@ -514,8 +537,12 @@ ${guarded ? "  header[].magic = BlazeFreed" : ""}
   dealloc(base)
 
 proc blaze_rt_reallocate*(pointer: pointer, bytes: csize_t): pointer {.exportc, cdecl.} =
-${guarded ? `  if pointer == nil:
-    return blaze_rt_allocate(bytes)` : ""}
+  ## The ABI promises this in every mode, as the C runtime this is the twin of
+  ## does: a null pointer is a value that is nothing rather than a check the
+  ## program makes of itself, and a danger build that read the header of one
+  ## dereferenced nil - 48. It sits outside the guards here for that reason.
+  if pointer == nil:
+    return blaze_rt_allocate(bytes)
   let header = check(pointer, "blaze_rt_reallocate")
   let previous = header[]
   ## A block asked to grow into room it already has is already that block, which
@@ -581,17 +608,31 @@ proc blaze_rt_string_append*(left, right: cstring): cstring {.exportc, cdecl.} =
   let wanted = leftLength + rightLength + 1
   let header = headerOf(cast[pointer](left))
   var owner: cstring
+  var tailCopied = false
   if header[].magic == BlazeMagic and header[].refs == 1:
     ## This block is the caller's alone, so it can be written into. A resize
     ## that fits the capacity it has is the same block, and one that does not
     ## grows it to at least half again as much.
     owner = cast[cstring](blaze_rt_reallocate(cast[pointer](left), wanted))
+    ## A string handed to both sides is one block named twice, so the right side
+    ## is read out of the block the resize left rather than out of the one it
+    ## gave back, which the resize has already released.
+    if right == left:
+      if rightLength > 0:
+        copyMem(cast[pointer](cast[uint](owner) + leftLength), owner, int(rightLength))
+      tailCopied = true
   else:
     let room = leftLength * 2 + 16
     owner = cast[cstring](blaze_rt_allocate_uninitialized(if wanted < room: room.csize_t else: wanted))
     copyMem(cast[pointer](owner), left, int(leftLength))
-  if rightLength > 0:
+  if rightLength > 0 and not tailCopied:
     copyMem(cast[pointer](cast[uint](owner) + leftLength), right, int(rightLength))
+  ## The length of the string, not the size of the block it was put in: both
+  ## branches above leave a header carrying the room the block has, and
+  ## blaze_rt_text_length answers length - 1, so a joined string measured by
+  ## the program came back as the room it was given rather than as its own
+  ## bytes. The C runtime records the same length in the same place.
+  headerOf(cast[pointer](owner))[].length = wanted.uint64
   cast[ptr UncheckedArray[char]](owner)[int(wanted - 1)] = '\\0'
   owner
 
@@ -648,7 +689,11 @@ proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
 proc blaze_rt_print_text_n*(text: cstring, length: csize_t) {.exportc, cdecl.} =
   ## The count is the length rather than where the zero is: a compiler that laid
   ## the text out knows how long it is, and the text need not be terminated.
-  if text != nil: stdout.write(($text)[0 ..< int(length)])
+  ## The bytes are read as bytes rather than as the NUL terminated string the
+  ## cstring also is: it scans for the terminator before the slice is taken,
+  ## so a literal carrying an escape the language writes as a byte of text was
+  ## cut at that byte. The C runtime this is the twin of writes the count.
+  if text != nil: discard stdout.writeBuffer(cast[pointer](text), int(length))
 
 ## The shortest decimal that reads back as the value, placed the way the source
 ## language places it: in full from 1e-6 up to 1e21, and in exponential form

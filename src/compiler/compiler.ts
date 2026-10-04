@@ -1180,6 +1180,11 @@ export async function runBuild(
         compilerVersion: COMPILER_VERSION,
         review: toolchain.review,
         lowering: toolchain.lowering,
+        // A candidate is folded before it is lowered, so a callee the fold can
+        // write out is a body this object's key has to carry whatever the call
+        // strategy decided about that call. The IR is resolved above, before
+        // this is called, so the question is answerable here.
+        semantics: new Map(Object.entries(semantics)),
       });
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too.
@@ -1191,10 +1196,25 @@ export async function runBuild(
       workspace: { workDirectory: base, functionName: program.entry.file },
     });
     // The machine, one measurement at a time however many functions are being
-    // generated, and the incremental record, one writer at a time. Both are
-    // shared by everything a build does, so both live here.
+    // generated.
     const machines = machine();
-    const records = machine();
+    // The incremental record, one writer at a time. It is a queue of its own
+    // rather than a second machine: `Machine.run` admits shared work alongside
+    // other shared work and `Machine.measure` is the timing phase, so neither is
+    // a writer. Two of these writes overlap and each is a rename that wins
+    // outright, so the earlier snapshot can land last and drop the entry of
+    // whichever function finished first.
+    let writing: Promise<void> = Promise.resolve();
+    const records = {
+      run<T>(task: () => T | Promise<T>): Promise<T> {
+        const next = writing.then(task, task);
+        writing = next.then(
+          () => {},
+          () => {},
+        );
+        return next;
+      },
+    };
     const generation = generationConfigFor(input, options);
     /** The functions this build took from an earlier one, by function name. */
     const reusedByFunction = new Map<string, string>();

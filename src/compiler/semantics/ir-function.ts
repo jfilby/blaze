@@ -431,11 +431,21 @@ class FunctionBody {
     return `b${this.blockCount}`;
   }
 
-  /** A block of its own, which a name declared in it is not a name outside it. */
+  /**
+   * A block of its own, which a name declared in it is not a name outside it.
+   *
+   * The block is a scope as well as a place control can be in: an `if` arm and
+   * a loop body each declare names that belong to them, and a name left bound
+   * when the block ends is a name every later read in the function resolves to
+   * the block's own declaration rather than the one around it — two variables
+   * sharing one IR name, and the outer one read at the inner one's type.
+   */
   private arm(body: readonly Statement[], loop: LoopTarget | null, ofLoop = false): SemanticBlock {
     const block: SemanticBlock = { id: this.blockId(), statements: [], releases: [], terminator: { k: "next" } };
     this.enter(block, loop, ofLoop);
+    this.open();
     this.statements(body);
+    this.close();
     this.leave();
     return block;
   }

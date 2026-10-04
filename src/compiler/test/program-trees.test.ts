@@ -17,11 +17,15 @@ import { frontendFor } from "../semantics/frontend.ts";
 import { runContractPhase } from "../semantics/program.ts";
 import { CompilerError } from "../core/errors.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { printSemanticProgram } from "../semantics/ir-text.ts";
 import { generateProgramDriver } from "../toolchain/driver.ts";
 import { generateProgramHostSource } from "../runtime/nim-program.ts";
 import { irOf } from "./phase.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
-import { RUNTIME_ABI, RUNTIME_NAME } from "../runtime/abi.ts";
+import { RUNTIME_ABI, RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "../runtime/abi.ts";
+import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
+import { run } from "../core/process.ts";
+import { mkdir } from "node:fs/promises";
 import { scratch } from "./scratch.ts";
 
 const TREES = new URL("../../benchmarks/c_backend/binarytrees/1.ts", import.meta.url).pathname;
@@ -370,5 +374,141 @@ test("a function named after a C keyword is declared under another name and boun
   // declaration is the only place the symbol is written, and it writes the name
   // the declaration took.
   assert.doesNotMatch(driver, /[^_\w]short\(/);
+});
+
+test("a function of a program is given every name of the scope it touches", () => {
+  // A function declared in a program is compiled on its own, so every name it
+  // reads of the scope around it is a parameter of its own. Two walks decide
+  // that list, and a statement kind either walk does not read is a name the
+  // function is not handed at the call — which the resolver then refuses the
+  // body for, on a program the language accepts.
+  //
+  // Here a name is written rather than read (`total += n`, `total++`), a buffer
+  // is written through its own name (`data[0] = 9`), a loop walks a name rather
+  // than a value (`for (const v of data)`), and a call is written as the value
+  // of a declaration rather than as a statement — the last one is the transitive
+  // half: `outer` must be given whatever `inner` reads, or it cannot pass it on.
+  const source = [
+    "const data = new Float64Array([1, 2, 3]);",
+    "let total = 0;",
+    "const base = 5;",
+    "",
+    "function inner(x: number): number {",
+    "  return x + base;",
+    "}",
+    "",
+    "function add(n: number): void {",
+    "  total += n;",
+    "}",
+    "",
+    "function bump(): void {",
+    "  total++;",
+    "}",
+    "",
+    "function poke(): void {",
+    "  data[0] = 9;",
+    "}",
+    "",
+    "function walk(): void {",
+    "  for (const v of data) { total += v; }",
+    "}",
+    "",
+    "function outer(x: number): number {",
+    "  const y = inner(x);",
+    "  return y;",
+    "}",
+    "",
+    "add(1);",
+    "bump();",
+    "poke();",
+    "walk();",
+    "console.log(outer(1), total, data[0]);",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program));
+
+  // Each is handed the name it touches, and `outer` the name `inner` reads:
+  // reaching the program at all is what these are for, and a name missing from
+  // one of them refused the body for reading something nothing declared.
+  assert.match(printed, /function add\(n: f64, total: f64\) -> void/);
+  assert.match(printed, /function bump\(total: f64\) -> void/);
+  assert.match(printed, /function poke\(data: \[\]f64\) -> void/);
+  assert.match(printed, /function walk\(data: \[\]f64, total: f64\) -> void/);
+  assert.match(printed, /function inner\(x: f64, base: f64\) -> f64/);
+  assert.match(printed, /function outer\(x: f64, base: f64\) -> f64/);
+
+  // The call passes what the callee reads, so the two agree.
+  assert.match(printed, /call\[f64\] outer \[arg\[f64\] const\[f64\] 1 arg\[f64\] local\[f64\] base\]/);
+});
+
+test("a truth that is a call is asked of it once, by either driver", async (t) => {
+  if (run("nim", ["--version"], { timeoutMs: 30_000 }).code !== 0) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // `NaN != 0` is true in C and in Nim, so the test for a number that is a
+  // number reads the value twice — and a value the IR calls is a call. The C
+  // driver binds it in a block; the Nim one wrote the expression out at each of
+  // the two places, so `if (tick())` printed its line three times under one
+  // runtime and once under the other. Both drivers are built here from the same
+  // program and run against the same callee, which is what makes the difference
+  // visible rather than a matter of how the text reads.
+  const source = [
+    "function tick(): number {",
+    "  console.log(`tick`);",
+    "  return 1.5;",
+    "}",
+    "let seen = 0;",
+    "if (tick()) { seen = 1; }",
+    "console.log(seen);",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const resolved = resolveProgram(phase.body!, phase.program);
+
+  // The callee both drivers call, which counts nothing itself: the program's own
+  // print is the count.
+  const callee = ["#include <stdio.h>", "double tick(void) { printf(\"tick\\n\"); return 1.5; }", ""].join("\n");
+  const root = await scratch("blaze-truth-");
+
+  const plain = join(root, "c");
+  await mkdir(plain);
+  await writeFile(join(plain, "tick.c"), callee, "utf8");
+  await writeFile(join(plain, "driver.c"), generateProgramDriver(resolved), "utf8");
+  await writeFile(join(plain, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(plain, `${RUNTIME_NAME}.c`), runtimeSourceSource(), "utf8");
+  const builtC = run("gcc", ["-std=c11", "-O1", "-o", "driver", "driver.c", "tick.c", `${RUNTIME_NAME}.c`, "-lm"], { cwd: plain, timeoutMs: 120_000 });
+  assert.equal(builtC.code, 0, builtC.stderr);
+  const fromC = run(join(plain, "driver"), [], { cwd: plain, timeoutMs: 60_000 });
+  assert.equal(fromC.code, 0, fromC.stderr);
+
+  const hosted = join(root, "nim");
+  await mkdir(hosted);
+  await writeFile(join(hosted, "tick.c"), callee, "utf8");
+  await writeFile(join(hosted, `${RUNTIME_NAME}.nim`), generateRuntimeAdapterSource(), "utf8");
+  await writeFile(join(hosted, "host.nim"), generateProgramHostSource(resolved), "utf8");
+  const object = run("gcc", ["-std=c11", "-O1", "-c", "-o", "tick.o", "tick.c"], { cwd: hosted, timeoutMs: 120_000 });
+  assert.equal(object.code, 0, object.stderr);
+  const builtNim = run("nim", ["c", "--hints:off", "--warnings:off", `--nimcache:${join(hosted, "cache")}`, `--passL:${join(hosted, "tick.o")}`, `--out:${join(hosted, "host")}`, "host.nim"], {
+    cwd: hosted,
+    timeoutMs: 600_000,
+  });
+  assert.equal(builtNim.code, 0, builtNim.stderr);
+  const fromNim = run(join(hosted, "host"), [], { cwd: hosted, timeoutMs: 60_000 });
+  assert.equal(fromNim.code, 0, fromNim.stderr);
+
+  assert.equal(fromC.stdout, "tick\n1\n", "the C driver must ask the call once");
+  assert.equal(fromNim.stdout, fromC.stdout, "the two drivers must run the same program");
 });
 

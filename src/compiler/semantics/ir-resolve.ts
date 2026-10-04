@@ -570,7 +570,70 @@ const EXTREMES: Record<string, "min" | "max"> = { "Math.min": "min", "Math.max":
 /* What a function reads of the scope around it                               */
 /* -------------------------------------------------------------------------- */
 
-/** The names a body calls, which is what a function is given for. */
+/** The functions one value of a program calls, in the order it first calls them. */
+function callsInValue(value: ProgramValue, called: string[]): void {
+  switch (value.k) {
+    case "call":
+      if (!called.includes(value.function)) called.push(value.function);
+      value.args.forEach((argument) => callsInValue(argument, called));
+      return;
+    case "unary":
+      callsInValue(value.operand, called);
+      return;
+    case "binary":
+      callsInValue(value.left, called);
+      callsInValue(value.right, called);
+      return;
+    case "conditional":
+      callsInValue(value.condition, called);
+      callsInValue(value.then, called);
+      callsInValue(value.otherwise, called);
+      return;
+    case "text":
+      for (const part of value.parts) if (part.k === "value") callsInValue(part.value, called);
+      return;
+    case "fixed":
+      callsInValue(value.of, called);
+      return;
+    case "shared":
+      callsInValue(value.count, called);
+      return;
+    case "sized":
+      callsInValue(value.count, called);
+      return;
+    case "view":
+      callsInValue(value.of, called);
+      callsInValue(value.offset, called);
+      callsInValue(value.count, called);
+      return;
+    case "fill":
+      callsInValue(value.buffer, called);
+      callsInValue(value.value, called);
+      return;
+    case "element":
+      callsInValue(value.index, called);
+      return;
+    case "name":
+    case "length":
+    case "number":
+    case "bigint":
+    case "boolean":
+    case "null":
+    case "buffer":
+      return;
+  }
+}
+
+/**
+ * The names a body calls, which is what a function is given for.
+ *
+ * Every statement is walked, not only the ones that are a call of their own: a
+ * call written as `let y = inner(x)` makes the same call as `inner(x)`, and one
+ * that is not seen here is a call whose captures are never handed on to the
+ * function that makes it — `closure` reads this list to decide what the caller
+ * of a callee has to be given in turn, so a name it misses is a name the
+ * caller is not handed and a body refused for reading it.
+ */
 function calledNames(body: readonly ProgramStatement[]): string[] {
   const called: string[] = [];
   const walk = (statements: readonly ProgramStatement[]): void => {
@@ -578,22 +641,49 @@ function calledNames(body: readonly ProgramStatement[]): string[] {
       switch (statement.kind) {
         case "invoke":
           if (!called.includes(statement.function)) called.push(statement.function);
-          break;
+          statement.args.forEach((argument) => callsInValue(argument, called));
+          continue;
+        case "declare":
+          callsInValue(statement.value, called);
+          continue;
+        case "assign":
+          callsInValue(statement.value, called);
+          continue;
+        case "elementAssign":
+          callsInValue(statement.index, called);
+          callsInValue(statement.value, called);
+          continue;
+        case "print":
+          statement.values.forEach((value) => callsInValue(value, called));
+          continue;
+        case "result":
+          callsInValue(statement.value, called);
+          continue;
         case "if":
+          callsInValue(statement.condition, called);
           walk(statement.then);
           walk(statement.otherwise);
-          break;
+          continue;
         case "while":
         case "doWhile":
+          callsInValue(statement.condition, called);
+          walk(statement.body);
+          continue;
+        case "for":
+          callsInValue(statement.from, called);
+          callsInValue(statement.to, called);
+          if (statement.step !== null) callsInValue(statement.step, called);
+          walk(statement.body);
+          continue;
+        case "forOf":
         case "block":
           walk(statement.body);
-          break;
-        case "for":
-        case "forOf":
-          walk(statement.body);
-          break;
-        default:
-          break;
+          continue;
+        case "update":
+        case "break":
+        case "continue":
+        case "function":
+          continue;
       }
     }
   };
@@ -632,14 +722,22 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
           value(statement.value);
           scopes[scopes.length - 1].add(statement.name);
           continue;
+        // The name a statement writes to is read to write it: `total += n`
+        // reads `total` and writes it, and `n` is not the only name the turn
+        // touches. A name that is not noted here is a name the function is not
+        // handed at the call, and the body that wrote it is then refused for
+        // reading a name nothing declared.
         case "assign":
+          note(statement.name);
           value(statement.value);
           continue;
         case "elementAssign":
+          note(statement.buffer);
           value(statement.index);
           value(statement.value);
           continue;
         case "update":
+          note(statement.name);
           continue;
         case "print":
           statement.values.forEach(value);
@@ -664,17 +762,22 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
           scopes.pop();
           continue;
         case "for":
-          // The index is a name of the loop, and the loop reads it in its own
-          // condition: `for (let i = 0; i < n; i++)` reads the `i` it declared,
-          // and `n` is the one name the loop reads of the scope around it.
-          scopes.push(new Set([statement.variable]));
+          // The bounds are read before the counter is declared, which is the
+          // order the resolver writes them in: a loop that counts from a value
+          // of the counter's own name counts from the one around it
+          // (`for (let limit = limit; ...)`). Opening the counter's scope first
+          // would hide that name from itself and drop it from the parameters.
           value(statement.from);
           value(statement.to);
           if (statement.step !== null) value(statement.step);
+          scopes.push(new Set([statement.variable]));
           walk(statement.body);
           scopes.pop();
           continue;
         case "forOf":
+          // What is walked is read where the walk is written, so the counter
+          // the walk declares does not hide it.
+          note(statement.of);
           scopes.push(new Set([statement.variable]));
           walk(statement.body);
           scopes.pop();

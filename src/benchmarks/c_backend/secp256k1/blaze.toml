@@ -1,0 +1,25 @@
+language = "typescript"
+sourceFile = "1.ts"
+output = "machine"
+backend = "c"
+mode = "danger"
+
+[model]
+# provider = "openrouter"
+model = "stealth/space-bunny-alpha"
+
+provider = "commandcode"
+# model = "stealth/pixel-canary"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+
+[optimize]
+primary = "throughput"
+secondary = "size"
+
+[generation]
+maxCandidates = 2
+maxAttempts = 3

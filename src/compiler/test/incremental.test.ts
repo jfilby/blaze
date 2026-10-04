@@ -9,6 +9,7 @@ import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprint
 import { join } from "node:path";
 import { returns as returnsValue } from "./definition.ts";
 import { scratch } from "./scratch.ts";
+import { programWithSemantics } from "./phase.ts";
 
 function contractOf(name: string, returns: string, objects: Record<string, ObjectLayout> = {}): FunctionContract {
   return {
@@ -116,6 +117,72 @@ test("a callee whose body changed does not invalidate the caller", () => {
   const before = programOf(contractOf("main", "f64"), contractOf("helper", "f64"));
   const after = programOf(contractOf("main", "f64"), { ...contractOf("helper", "f64"), ensures: ["result == (x + 1)"] });
   assert.equal(keyOf({ program: after }).review, keyOf({ program: before }).review);
+});
+
+test("a callee the fold writes into the caller is keyed on its body", () => {
+  // Two rules answer what may be put where a call was written, and they are not
+  // the same rule: the outline refuses to write out a callee that states what it
+  // returns, because a copy of a proved body is a body nothing has proved, and
+  // the fold a build runs over every candidate before lowering it has no such
+  // rule. So the object of `use` carries the body of `scale` even though the
+  // outline calls it, and a key that followed the outline alone left that body
+  // out: editing `scale` rebuilt `scale` and delivered the caller holding the
+  // copy it was given before the edit.
+  const keyFor = (scaleBody: string): string => {
+    const { program, semantics } = programWithSemantics(
+      "typescript",
+      {
+        "main.ts": [
+          `export function scale(n: number): number {`,
+          `  return ${scaleBody};`,
+          `}`,
+          `export function use(n: number): number {`,
+          `  return scale(n);`,
+          `}`,
+          `use(2);`,
+          ``,
+        ].join("\n"),
+      },
+      "main.ts",
+    );
+    return unitKeys({
+      ...INPUT,
+      contract: program.files[0].functions.use,
+      program,
+      semantics: new Map(Object.entries(semantics)),
+    }).review;
+  };
+
+  // `scale` states what it returns, so the outline calls it...
+  assert.notEqual(keyFor("n * 2"), keyFor("n * 3"), "an edit to an inlined body left the caller's key alone");
+  // ...and a callee the fold refuses still contributes its ABI alone, which is
+  // what keeps the cache from being thrown away on every edit to a callee.
+  const printing = (body: string): string => {
+    const { program, semantics } = programWithSemantics(
+      "typescript",
+      {
+        "main.ts": [
+          `function noisy(n: number): number {`,
+          `  console.log(\`x\`);`,
+          `  return ${body};`,
+          `}`,
+          `export function use(n: number): number {`,
+          `  return noisy(n);`,
+          `}`,
+          `use(2);`,
+          ``,
+        ].join("\n"),
+      },
+      "main.ts",
+    );
+    return unitKeys({
+      ...INPUT,
+      contract: program.files[0].functions.use,
+      program,
+      semantics: new Map(Object.entries(semantics)),
+    }).review;
+  };
+  assert.equal(printing("n * 2"), printing("n * 3"), "a callee that cannot be inlined was keyed on its body");
 });
 
 test("a callee whose signature or object layout changed invalidates the caller", () => {
