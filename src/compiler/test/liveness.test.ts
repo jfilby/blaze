@@ -26,6 +26,7 @@ import type {
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const BOOL: SemanticType = { kind: "primitive", name: "bool" };
 const ANY_REF: SemanticType = { kind: "ref", of: null };
+const TEXT: SemanticType = { kind: "text" };
 
 const local = (name: string): SemanticValue => ({ k: "local", type: F64, name });
 const number = (text: string): SemanticValue => ({ k: "const", type: F64, text });
@@ -177,4 +178,37 @@ test("a loop that calls leaves what it accumulates live across the call", () => 
   const facts = nameLiveness(entry);
   assert.equal(facts.get("sum")?.acrossCall, true, "the accumulator is carried from one turn to the next over the call");
   assert.equal(facts.get("i")?.acrossCall, true, "the counter is stepped after the call that reads it");
+});
+
+test("a name the left of a difference names is read after the call its right makes", () => {
+  // `v - f()` is written right side first: the answer is written down and `v` is
+  // read against it, so the call happens first and `v` has to still be there
+  // afterwards. A name marked dead before that call is given a register the
+  // callee is free to write over before it is read.
+  const facts = nameLiveness(
+    block([letOf("v", number("1"))], { k: "arith", type: F64, op: "sub", left: local("v"), right: callOf(number("0")) }),
+  );
+  assert.equal(facts.get("v")?.acrossCall, true, "the value is read after the call, so the call cannot take it");
+});
+
+test("a name a concatenation reads after its first part is live across that part", () => {
+  // A concatenation is laid out a part at a time from the left, and each part
+  // is measured before the buffer that holds them is laid out — a call per
+  // part. So the second part is read after the first has been measured, and a
+  // name it reads has to still be there: given a register the call writes over
+  // it, the join measures the pointer that call left in its place.
+  const written: SemanticValue = { k: "text", type: TEXT, parts: [{ k: "text", value: "ab" }] };
+  const facts = nameLiveness(
+    block([letOf("v", number("1"))], { k: "arith", type: TEXT, op: "concat", left: written, right: local("v") }),
+  );
+  assert.equal(facts.get("v")?.acrossCall, true, "the part behind the first one is read after the first is measured");
+});
+
+test("a name the left of a minimum names is read before the right one is", () => {
+  // Both sides of a minimum are taken and then compared, so a name on the left
+  // is read before anything on the right — including a call there.
+  const facts = nameLiveness(
+    block([letOf("v", number("1"))], { k: "arith", type: F64, op: "min", left: local("v"), right: callOf(number("0")) }),
+  );
+  assert.equal(facts.get("v")?.acrossCall, false, "the value is read before the call on the other side");
 });

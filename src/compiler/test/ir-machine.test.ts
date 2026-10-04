@@ -1931,23 +1931,30 @@ test("the machine code of a folded identity is the machine code of the unfolded 
   }
 });
 
-test("a value rounded down is the library's answer or one instruction of its own", async () => {
-  // `Math.floor` is the one maths call a field element's limbs are made of, and
-  // it is a call into the C library where the target has the instruction that
-  // rounds. The two answers are the same number, so what differs is the
-  // instruction and what the machine was asked for.
+test("a value rounded down is the same number whatever the target rounds with", async () => {
+  // `Math.floor` is the one maths call a field element's limbs are made of, so
+  // it is written as instructions here rather than as a call into the C library:
+  // a conversion to a whole number and the correction that turns dropping the
+  // fraction towards zero into dropping it towards minus infinity. Where the
+  // target has the one instruction that rounds, that instruction is the whole
+  // of it; where it has not, these are. The answers are the same number either
+  // way, which is what the test reads.
   const floor = subject(
     F64,
     handsBack({ k: "call", type: F64, call: floorCall(local("x", F64)) }),
     [{ kind: "value", name: "x", mutable: false, type: F64 }],
   );
-  const values = ["-1.5", "-0.5", "0", "0.5", "1.5", "2.5", "-3", "1e18", "-0.0001"];
-  const print = (name: string): string =>
-    values.map((value) => `printf("%.17g ", ${name}(${value}));`).join("");
+  // The three values the form below has to answer without converting them: a
+  // negative zero, which a conversion answers with a positive one; a value
+  // larger than a whole number can hold; and the bound on either side of it.
+  const values = [
+    "-1.5", "-0.5", "-0", "0", "0.5", "1.5", "2.5", "-3", "1e18", "-0.0001",
+    "1e300", "-1e300", "4503599627370496", "-4503599627370496", "4503599627370495.5",
+  ];
+  const print = (name: string): string => values.map((value) => `printf("%.17g ", ${name}(${value}));`).join("");
 
   const called = await emitted(floor);
-  assert.match(called, /\bcall\b/, "a target that has not said it can round calls the library");
-  assert.doesNotMatch(called, /\broundsd\b/);
+  assert.doesNotMatch(called, /\broundsd\b/, "a target that has not named the instruction is not given it");
 
   const SSE41: TargetSpec = { ...TARGET, features: ["sse4.1"] };
   const own = await emitted(floor, ["f", "g", "h9"], SSE41);
@@ -1957,7 +1964,7 @@ test("a value rounded down is the library's answer or one instruction of its own
   assert.equal(
     await lowered(floor, print, SSE41),
     await lowered(floor, print),
-    "the instruction rounds what the library rounds",
+    "the instruction rounds what the conversion and its correction round",
   );
 });
 

@@ -349,6 +349,55 @@ never reaches its base case was a stack overflow and is now an unbounded loop.
 Both are a program that does not answer, and neither writes anything the other
 does not.
 
+
+## What the machine backend decides
+
+The backend keeps no machine-level IR: it walks the semantic IR and writes
+instructions as it goes, so every decision about a register, an address and an
+instruction is one it makes while writing rather than one a pass makes
+afterwards. Four of them are worth knowing about, because each of them is worth
+getting wrong exactly once.
+
+**A rounding is not a call.** `Math.floor` and `Math.round` are written as
+instructions — a conversion to a whole number, and the correction that turns
+dropping the fraction towards zero into dropping it towards minus infinity — and
+so is the argument they are called with. A target that names `sse4.1` gets the
+one instruction that rounds; a target that has not gets these, which are as
+exact as the library over every double: a value above `2^52` in either
+direction, a NaN and a negative zero are each their own answer, and everything
+else is a conversion and a subtraction. The register allocator is told which
+builtins are written this way (`INLINE_BUILTINS`), which is what lets a body
+whose only call is a rounding keep its names in registers the convention does
+not ask a callee to preserve.
+
+**The order of an expression is the order the lowering writes it in.**
+`semantics/liveness.ts` decides what is live across a call from the order it
+reads the body in, and a name it thinks is dead before a call is given a
+register the callee is free to write over. So the order there is the order in
+`ir-machine.ts` and nothing else: a difference and a quotient of machine
+numbers are written right side first, because the side that is not the
+instruction's own immediate is written first and parked; a concatenation, a
+minimum and a maximum are written left side first, because they take both
+sides and then work on them; a wide product, quotient or shift is a kernel
+handed both sides and writes the left one first. Getting one of these wrong is
+a miscompile rather than a lost register, which is what the tests in
+`liveness.test.ts` about the order are for.
+
+**An element is addressed by the read or the write itself.** `base + index *
+scale` is one address the machine has, so where the buffer is in a register of
+its own and the index is in one — a counter held as a whole number beside the
+double it is stepped as, a number the program wrote out, a name the allocator
+pinned — an element read or written is one instruction. The general form is
+still there for the cases where either side is computed, and it puts the
+address in the accumulator.
+
+**Two loops one after another may share a counter.** `for (let i ...)` written
+twice in one function declares `i` twice, and the lowering writes the two
+declarations as two names. They are still the same counter as far as the source
+is concerned, because the first is dead before the second is bound, so one
+register serves both. Two loops that are *inside* one another cannot share one,
+which is the case the allocator still refuses.
+
 ## Benchmarking
 
 You can use hyperfine to benchmark a program or more than one at a time. E.g.:

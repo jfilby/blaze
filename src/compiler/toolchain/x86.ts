@@ -1275,6 +1275,34 @@ export class Encoder {
   }
 
   /**
+   * A comparison of a float against a literal in the read-only data, which is
+   * the same comparison against a register with the register not needed: the
+   * instruction reads the other side out of memory as its own operand.
+   *
+   * A body that rounds a value down asks three questions of it — whether it is
+   * nothing, and whether it is above or below the size a whole number reaches —
+   * and each is one instruction with the bound as its operand where it is two
+   * where a register is loaded first. Nothing is given up to hold the bound,
+   * which is what lets the value being rounded stay in the accumulator and the
+   * scratch beside it.
+   */
+  sseCompareLabel(destination: number, label: string, single: boolean, ordered: boolean): void {
+    // The comparison of two doubles is the one that takes the operand size
+    // prefix; the comparison of two single precision values is the one that
+    // does not.
+    if (!single) this.byte(0x66);
+    this.rex(false, destination, { base: null, index: null });
+    this.byte(0x0f);
+    this.byte(ordered ? 0x2e : 0x2f);
+    // `mod = 00, rm = 101` is the one address that is relative to the
+    // instruction rather than to a register, which is how a literal in
+    // another section is reached.
+    this.byte(((destination & 7) << 3) | 5);
+    this.relocations.push({ offset: this.code.length, symbol: label, kind: "address" });
+    this.word(0);
+  }
+
+  /**
    * A float read out of the read-only data, at an address no object knows
    * until the linker places them together.
    *

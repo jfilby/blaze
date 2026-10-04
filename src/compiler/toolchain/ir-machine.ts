@@ -374,9 +374,35 @@ const FLOAT_OPERATION: Record<string, true> = { add: true, sub: true, mul: true,
 const MATH_LIBRARY: Record<string, string> = {
   "Math.abs": "fabs",
   "Math.sqrt": "sqrt",
-  "Math.floor": "floor",
   "Math.trunc": "trunc",
 };
+
+/**
+ * The smallest float that is a whole number whatever it is multiplied by, and
+ * so the bound above which there is no fraction left to drop.
+ *
+ * Every double at or above two to the fifty-second carries no bits below one,
+ * so rounding one down is the number itself, and a conversion of one to a
+ * sixty-four bit whole number is the overflow the instruction answers with the
+ * smallest number there is. The bound is therefore what a value that may be one
+ * of those is tested against rather than converted.
+ */
+const WHOLE_FLOATS = 2 ** 52;
+
+/**
+ * The builtins this backend writes as instructions rather than as a call, by
+ * the name the IR gives them.
+ *
+ * A rounding is the only one so far, and it is here twice over: the code it is
+ * written as is arithmetic on the accumulator and the scratch beside it, and
+ * the register allocator is told so that a name live across a rounding is not
+ * held in a register the convention asks a callee to preserve. A body whose
+ * only call is a rounding is a body that calls nothing, and every name it
+ * reaches for may sit in a register that costs the function no prologue at all
+ * — which on a loop that rounds once per element is the difference between an
+ * array read costing a move out of the frame and costing an address.
+ */
+const INLINE_BUILTINS: Record<string, true> = { "Math.floor": true, "Math.round": true };
 
 /** How wide a value of this type is, which is the width a slot holds it at. */
 /**
@@ -1607,7 +1633,13 @@ class Machine {
 
   private bind(name: string, type: SemanticType, index: number | null = null): Held {
     const emitted = this.names.declare(name, type);
-    const register = this.pinned.get(emitted) ?? null;
+    // The register a name was given is recorded under the name the source wrote
+    // it as. Where a loop declares the name a second time the declaration is
+    // written as another name, and the register the first one was given is
+    // where the second one is read out of — the two counters are written one
+    // after the other and the first is dead before the second is bound, which
+    // is what the allocator established when it gave the name one register.
+    const register = this.pinned.get(emitted) ?? this.pinned.get(name) ?? null;
     // A pinned value is in a register and never in the frame, so the frame slot
     // that reads and writes go through is not reserved: its distance is zero,
     // which is the first slot's own address, and it is never read — every use of
@@ -1875,6 +1907,10 @@ class Machine {
         statement.k === "loop" &&
         (statement.loop.kind === "counted" || statement.loop.kind === "each") &&
         (this.teamed.has(statement.loop) || statement.loop.region === true),
+      // A rounding is written here as instructions rather than as a call, so a
+      // name live across one of them is live across arithmetic and not across
+      // a callee writing over the registers the convention does not preserve.
+      (callee) => INLINE_BUILTINS[callee] !== true,
     );
     // The register each parameter arrives in, and the ones the parameters after
     // it arrive in. The prologue moves a parameter out of the register it
@@ -2023,22 +2059,44 @@ class Machine {
     // why it used to be left in the frame, and why a loop that turns a million
     // times was paying for it on every turn instead.
     //
-    // A name declared more than once is left out too. Two loops both written
-    // `for (let i ...)` share the name and would share the register, and the
-    // inner one would go on stepping the outer one's counter.
+    // A name two loops declare is left out only where the two loops are inside
+    // one another: they share the name and would share the register, and the
+    // inner one would go on stepping the outer one's counter. Two loops one
+    // after the other are the other shape the name is declared twice in, and
+    // they are written one after the other too — the first counter is dead
+    // before the second is bound — so one register serves both and each turn of
+    // each loop steps it where it lies.
     const counters = new Map<string, { depth: number; type: SemanticType }>();
     const declarations = new Map<string, number>();
-    const walkCounters = (block: SemanticBlock, depth: number): void => {
+    const shared = new Set<string>();
+    const walkCounters = (block: SemanticBlock, depth: number, enclosing: ReadonlySet<string>): void => {
       for (const statement of block.statements) {
-        if (statement.k !== "loop") continue;
-        const loop = statement.loop;
-        if (loop.kind === "counted") {
-          declarations.set(loop.variable, (declarations.get(loop.variable) ?? 0) + 1);
+        const declare = (name: string, type: SemanticType): void => {
+          declarations.set(name, (declarations.get(name) ?? 0) + 1);
+          // A counter inside a loop of the same name is stepped while the
+          // outer one is still counting, so the two cannot have one register.
+          if (enclosing.has(name)) shared.add(name);
+          const found = counters.get(name);
+          // Nor can two that count in different types: the register one is
+          // given is the register both are read out of.
+          if (found !== undefined && !typeEquals(found.type, type)) shared.add(name);
           // The inner loop of a nested pair turns the most, so depth is what
           // says which counter is worth a register first.
-          counters.set(loop.variable, { depth: Math.max(counters.get(loop.variable)?.depth ?? 0, depth), type: loop.type });
+          counters.set(name, { depth: Math.max(found?.depth ?? 0, depth), type });
+        };
+        if (statement.k !== "loop") {
+          // A loop in an arm of an `if` is a loop like any other, and the
+          // census above counted it: a name this walk did not reach is a name
+          // it would answer for the wrong number of declarations.
+          for (const inner of statementBlocksOf(statement)) walkCounters(inner, depth, enclosing);
+          continue;
+        }
+        const loop = statement.loop;
+        let inside: Set<string> | null = null;
+        if (loop.kind === "counted") {
+          declare(loop.variable, loop.type);
+          inside = new Set(enclosing).add(loop.variable);
         } else if (loop.kind === "each") {
-          declarations.set(loop.index, (declarations.get(loop.index) ?? 0) + 1);
           declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
           // A walk over an array steps its index once per turn and reads it
           // twice — once for the address and once for whatever the body does
@@ -2046,14 +2104,18 @@ class Machine {
           // given a register for the same reason. Only the index is a candidate:
           // the element is the loop's own value and is written once per turn
           // from whatever the address produced.
-          counters.set(loop.index, { depth: Math.max(counters.get(loop.index)?.depth ?? 0, depth), type: INDEX });
+          declare(loop.index, INDEX);
+          inside = new Set(enclosing).add(loop.index);
         }
-        walkCounters(loop.body, depth + 1);
+        walkCounters(loop.body, depth + 1, inside ?? enclosing);
       }
     };
-    walkCounters(this.fn.entry, 0);
+    walkCounters(this.fn.entry, 0, new Set());
+    // A name anything other than a loop declares is left out as it was: it is
+    // two bindings under one spelling, and which register either of them is in
+    // cannot be said from here.
     const ordered = [...counters.entries()]
-      .filter(([name]) => (declarations.get(name) ?? 0) === 1 && declarationCount.get(name) === 1)
+      .filter(([name]) => !shared.has(name) && declarationCount.get(name) === declarations.get(name))
       .sort((left, right) => right[1].depth - left[1].depth);
     for (const [name, counter] of ordered) assign(name, counter.type);
     // The register an object is filled in is claimed after every name that could
@@ -2445,11 +2507,21 @@ class Machine {
    * of the address, an addition to it, and the write.
    */
   private storeInto(type: SemanticType, address: number, displacement = 0): void {
+    this.storeAt(type, mem(address, displacement));
+  }
+
+  /**
+   * The value the accumulator has, written at an address the instruction
+   * carries. The displacement is the offset of a field in the object that
+   * address points at, which is what makes a write to a field one instruction
+   * rather than a move of the address, an addition to it, and the write.
+   */
+  private storeAt(type: SemanticType, where: Memory): void {
     if (isFloat(type)) {
-      this.code.movsStore(mem(address, displacement), XMM0, widthOf(type) === 4);
+      this.code.movsStore(where, XMM0, widthOf(type) === 4);
       return;
     }
-    this.code.movMemRegSized(mem(address, displacement), RAX, widthOf(type));
+    this.code.movMemRegSized(where, RAX, widthOf(type));
   }
 
   /**
@@ -2479,11 +2551,21 @@ class Machine {
    * an addition to the address and then the read.
    */
   private readAt(type: SemanticType, displacement = 0): void {
+    this.readFrom(type, mem(RAX, displacement));
+  }
+
+  /**
+   * The value at an address the instruction carries, read as the type it is
+   * read at. The address is the pair the read itself takes rather than one put
+   * together in the accumulator beforehand, so an element whose buffer and
+   * index are both in registers is read without a register written at all.
+   */
+  private readFrom(type: SemanticType, where: Memory): void {
     if (isFloat(type)) {
-      this.code.movsLoad(XMM0, mem(RAX, displacement), widthOf(type) === 4);
+      this.code.movsLoad(XMM0, where, widthOf(type) === 4);
       return;
     }
-    this.code.movRegMemSized(RAX, mem(RAX, displacement), widthOf(type), signedOf(type));
+    this.code.movRegMemSized(RAX, where, widthOf(type), signedOf(type));
   }
 
   /** The value in a slot of the frame, read as the type it is declared at. */
@@ -2615,24 +2697,48 @@ class Machine {
       case "setElement": {
         const buffer = this.slot(statement.buffer);
         const element = elementTypeOf(buffer.type) ?? statement.value.type;
+        // A write of a value the program computed is the one write whose value
+        // is finished before its address is needed, so the two can be written in
+        // that order and the address can be the pair the write itself carries.
+        // A compound write reads what the element holds first, which is the
+        // other order, so it keeps the general form below.
+        if (statement.op === "=") {
+          this.at(statement.value, element);
+          const where = this.elementAddress(statement.buffer, statement.index, element);
+          if (where !== null) {
+            this.storeAt(element, where);
+            return;
+          }
+          const written = this.hold(element, "blaze_element");
+          this.store(written);
+          // The address is left in the accumulator and written down, because
+          // the value it is for is in a slot the loading of it takes the
+          // accumulator back from.
+          this.addressOf(statement.buffer, statement.index, element);
+          const place = this.hold(POINTER, "blaze_place");
+          this.store(place);
+          this.load(written);
+          this.code.movRegMem(RCX, frame(place.offset));
+          this.storeInto(element, RCX);
+          return;
+        }
         const place = this.hold(POINTER, "blaze_place");
         this.at(statement.value, element);
         const written = this.hold(element, "blaze_element");
         this.store(written);
-        this.addressOf(statement.buffer, statement.index, element);
+        // The address is read twice here — once for what the element holds and
+        // once for the write — so it is put together in the accumulator and
+        // written down rather than carried by the instruction that reads it.
+        this.builtAddress(statement.buffer, statement.index, element);
         this.store(place);
-        if (statement.op !== "=") {
-          this.readSlotAt(element, place.offset);
-          const read = this.hold(element, "blaze_read");
-          this.store(read);
-          this.load(written);
-          this.toScratch(element);
-          this.load(read);
-          this.apply(COMPOUND[statement.op.slice(0, -1)], element);
-          this.normalizeArithmetic(element);
-        } else {
-          this.load(written);
-        }
+        this.readSlotAt(element, place.offset);
+        const read = this.hold(element, "blaze_read");
+        this.store(read);
+        this.load(written);
+        this.toScratch(element);
+        this.load(read);
+        this.apply(COMPOUND[statement.op.slice(0, -1)], element);
+        this.normalizeArithmetic(element);
         this.code.movRegMem(RCX, frame(place.offset));
         this.storeInto(element, RCX);
         return;
@@ -3617,6 +3723,14 @@ class Machine {
     if (from !== null) this.freeSlot(from);
     if (typeof to !== "number") this.freeSlot(to);
     if (typeof step !== "number" && step !== null) this.freeSlot(step);
+    // The register the counter was read as an index out of goes back too, and
+    // the counter is dead with the loop. A loop after this one is a loop one
+    // after the other for the length of a function far more often than it is a
+    // loop inside this one, and the second of the two was converting the
+    // counter on every element it reached — a load and a conversion and an
+    // address built out of the two — because the first had not handed the
+    // register back when it was done with it.
+    if (shadow !== null) this.spareIndexes.push(shadow);
   }
 
   /**
@@ -3686,6 +3800,7 @@ class Machine {
     this.code.jmp(labels.header);
     this.code.bind(labels.exit);
     this.freeSlot(trips);
+    if (shadow !== null) this.spareIndexes.push(shadow);
     return true;
   }
 
@@ -3769,8 +3884,7 @@ class Machine {
     this.code.bind(test);
     this.code.aluRegMem("cmp", counter, frame(length.offset), true);
     this.code.jcc("ae", labels.exit);
-    this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType);
-    this.readAt(loop.elementType);
+    this.readFrom(loop.elementType, this.addressOf(loop.of, { k: "local", type: USIZE, name: loop.index }, loop.elementType));
     this.store(this.bind(loop.element, loop.elementType));
     this.turn(loop, labels);
     this.code.bind(labels.exit);
@@ -4024,8 +4138,7 @@ class Machine {
         // that widens it converts it afterwards: an array of single precision
         // numbers read as a double is one element widened, not two.
         const element = elementTypeOf(value.of.type) ?? value.type;
-        this.addressOf(value.of, value.index, element);
-        this.readAt(element);
+        this.readFrom(element, this.addressOf(value.of, value.index, element));
         this.convert(element, value.type);
         return;
       }
@@ -4293,10 +4406,21 @@ class Machine {
   private comparedBranch(type: SemanticType, op: CompareOp, right: Held | number, whenTrue: boolean, label: string, left = RAX): void {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
-      // The comparison reads XMM0 and XMM1, so a side the build gave a register
-      // of its own is moved into one of those rather than read out of the frame
-      // it is not in. `left` is XMM0 already whenever it is the accumulator,
-      // which is what the whole-number default register is.
+      // The comparison reads two registers, and a side the build gave one of
+      // its own is read out of that rather than out of the frame it is not in.
+      // `left` is the accumulator already whenever it is that, which is what
+      // the whole-number default register is.
+      //
+      // A side that is a number the program wrote out goes in the accumulator
+      // and the named side is compared where it lies, which is the one
+      // arrangement where a counter of a loop costs a comparison and nothing
+      // else: a copy of the counter into the accumulator is an instruction on
+      // every turn of the loop, and the test is one of them.
+      if (left !== XMM0 && typeof right === "number") {
+        this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(right, single)), single);
+        this.floatBranch(op, single, whenTrue, label, XMM0, left);
+        return;
+      }
       if (left !== XMM0) this.code.movsMove(XMM0, left, single);
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
       else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
@@ -4345,8 +4469,8 @@ class Machine {
    * as a jump of its own rather than as an instruction that combines it with a
    * condition afterwards.
    */
-  private floatBranch(op: CompareOp, single: boolean, whenTrue: boolean, label: string): void {
-    this.code.sseCompare(XMM1, XMM0, single, true);
+  private floatBranch(op: CompareOp, single: boolean, whenTrue: boolean, label: string, right = XMM1, left = XMM0): void {
+    this.code.sseCompare(right, left, single, true);
     const condition =
       op === "lt" ? "a"
       : op === "le" ? "ae"
@@ -5556,23 +5680,24 @@ class Machine {
     this.code.movRegMem(register, frame(held.offset));
   }
 
-  private addressOf(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): void {
-    const scale = widthOf(element);
+  private addressOf(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): Memory {
+    const carried = this.elementAddress(sequence, index, element);
+    if (carried !== null) return carried;
+    this.builtAddress(sequence, index, element);
+    return mem(RAX);
+  }
+
+  /**
+   * The address of one element, put together in the accumulator.
+   *
+   * This is the form every address can be written in, and the one a caller that
+   * has to read the address twice takes: the index may be a value the IR
+   * computes, and so may the sequence, so both are written where they are
+   * computed and read back where the address is built from them.
+   */
+  private builtAddress(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): void {
+    const scale = widthOf(element) as 1 | 2 | 4 | 8;
     const base = typeof sequence === "string" ? this.slot(sequence) : sequence.k === "local" ? this.slot(sequence.name) : null;
-    // The sequence is a pointer wherever it came from: an array reaches a
-    // function as a pointer to its elements, so it is one whole-register read.
-    const readable = base !== null && widthOf(base.type) === 8 && !isFloat(base.type);
-    const at = readable ? this.plainIndex(index) : null;
-    if (readable && base !== null && at !== null) {
-      // Both sides are read rather than computed, so neither of them writes a
-      // register the other is holding: the address is two reads and one `lea`,
-      // where the general form reserves a slot, writes the index into it and
-      // reads it back out again.
-      this.load(base);
-      this.readInto(at, RCX);
-      this.code.lea(RAX, indexed(RAX, RCX, scale));
-      return;
-    }
     const held = this.hold(USIZE, "blaze_index");
     this.at(index, USIZE);
     this.store(held);
@@ -5580,6 +5705,51 @@ class Machine {
     this.code.movRegReg(RCX, RAX);
     this.code.movRegMem(RAX, frame(held.offset));
     this.code.lea(RAX, indexed(RCX, RAX, scale));
+  }
+
+  /**
+   * The address of one element as the instruction that reads or writes it can
+   * carry, where both sides of it are already in registers.
+   *
+   * `base + index * scale` is one address the machine has: two registers and a
+   * scale, written inside the read or the write rather than before it. So an
+   * element whose buffer is in a register of its own and whose index is in one
+   * — a loop counter held as a whole number, a name the allocator pinned, a
+   * number the program wrote out — costs one instruction, where the general
+   * form spends three that answer nothing on the way there: a move of the
+   * buffer into the accumulator, a move of the index into the scratch, and the
+   * addition of the two.
+   *
+   * Only the registers the lowering is not using for a value in flight may be
+   * written here, so an index in the frame is read into the scratch — which
+   * holds nothing at that point — and an index that would land in the same
+   * register as the buffer is refused rather than answered with an address that
+   * reads a different element.
+   */
+  private elementAddress(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): Memory | null {
+    const scale = widthOf(element) as 1 | 2 | 4 | 8;
+    const base = typeof sequence === "string" ? this.slot(sequence) : sequence.k === "local" ? this.slot(sequence.name) : null;
+    // The sequence is a pointer wherever it came from: an array reaches a
+    // function as a pointer to its elements, so it is one whole-register read.
+    if (base === null || base.register === null || widthOf(base.type) !== 8 || isFloat(base.type)) return null;
+    const register = base.register;
+    const at = this.plainIndex(index);
+    if (at === null) return null;
+    if (typeof at === "bigint") {
+      const offset = at * BigInt(scale);
+      if (offset < -0x8000_0000n || offset > 0x7fff_ffffn) return null;
+      return mem(register, Number(offset));
+    }
+    if (at.register !== null) {
+      // `rsp` is the one register an address cannot name as its index, and the
+      // pools a value is given a register out of are not it. An index that
+      // would land in the buffer's own register is refused for the same reason:
+      // the address would be the buffer scaled by one number twice.
+      if (at.register === RSP || at.register === register) return null;
+      return indexed(register, at.register, scale);
+    }
+    this.code.movRegMem(RCX, frame(at.offset));
+    return indexed(register, RCX, scale);
   }
 
   /**
@@ -5799,6 +5969,69 @@ class Machine {
   }
 
   /**
+   * A float in the accumulator with everything below one dropped, which is what
+   * rounding down is and what the C library is called in to do.
+   *
+   * Rounding down is a conversion to a whole number and the correction that
+   * turns dropping the fraction towards zero into dropping it towards minus
+   * infinity. A conversion answers with the whole part; the correction is one
+   * taken off that answer where the whole part is above the value, which is a
+   * value below zero and nothing else.
+   *
+   * Three values are answered without a conversion, and each is its own answer:
+   * a value too large for a sixty-four bit whole number has no fraction in it,
+   * a NaN is the floor of a NaN, and a zero is the floor of itself — which is
+   * the one a conversion gets wrong, because it answers a negative zero with a
+   * positive one, and `-0` is a number the language has and compares equal to
+   * `0` without being it.
+   *
+   * So nothing here is a call, which is the whole of what this is for. A call
+   * costs every name live across it a register the convention preserves, and on
+   * a body that rounds down once per element of an array on every turn of a
+   * loop that is the difference between one name kept in a register and four
+   * kept in the frame.
+   */
+  private roundDown(): void {
+    // Where the target has the instruction that rounds, it is the whole of it.
+    if (this.rounds) {
+      this.code.roundToInteger(XMM0, XMM0, 0x09, false);
+      return;
+    }
+    const answer = this.code.label("Lrounded");
+    // Only the accumulator, the scratch beside it and the whole number the
+    // conversion answers in are written here: a value the allocator gave a
+    // register of its own is in none of the three, and a rounding that took one
+    // would take it. The value itself is kept in the scratch because the
+    // conversion below writes over the accumulator.
+    this.code.movsMove(XMM1, XMM0, false);
+    // A zero is the floor of itself, and the conversion below answers a
+    // negative zero with a positive one.
+    this.code.sseCompareLabel(XMM0, this.floatLiteral(floatBits(0, false)), false, false);
+    this.code.jcc("e", answer);
+    this.code.sseCompareLabel(XMM0, this.floatLiteral(floatBits(WHOLE_FLOATS, false)), false, false);
+    // What is left of a value inside the bound is a number, and a number that
+    // size is a whole number already: rounding it down is the value. A value
+    // that is not a number leaves every flag a comparison sets, so parity is
+    // asked before the bound is. The bound is asked about on both sides for the
+    // same reason a literal of it is not enough on one: a comparison against the
+    // upper one alone says every value below it is below it too, which is every
+    // value that is not whole enough.
+    this.code.jcc("p", answer);
+    this.code.jcc("a", answer);
+    this.code.sseCompareLabel(XMM0, this.floatLiteral(floatBits(-WHOLE_FLOATS, false)), false, false);
+    this.code.jcc("b", answer);
+    this.code.cvtFloatToInt(RAX, XMM0, false, true);
+    this.code.cvtIntToFloat(XMM0, RAX, false);
+    this.code.sseCompare(XMM0, XMM1, false, false);
+    // The conversion drops towards zero, so it can only have rounded up — which
+    // is a whole number one too many for a value below zero, and is the answer
+    // itself for every other value.
+    this.code.jcc("be", answer);
+    this.code.sseMemLabel("sub", XMM0, this.floatLiteral(floatBits(1, false)), false);
+    this.code.bind(answer);
+  }
+
+  /**
    * A call the compiler itself provides. Each is what the C library has by the
    */
   private builtin(call: SemanticCall): void {
@@ -5813,16 +6046,9 @@ class Machine {
       this.runtime("_argv");
       return;
     }
-    // A value rounded down is one instruction where the target has one, and the
-    // call is the only thing that stops it being one: the library rounds exactly
-    // what the instruction rounds, so the answer is the same either way.
-    const roundDown = (): void => {
-      if (!this.rounds) this.library("floor");
-      else this.code.roundToInteger(XMM0, XMM0, 0x09, false);
-    };
     if (call.callee === "Math.floor") {
       this.at(argument, NUMBER);
-      roundDown();
+      this.roundDown();
       return;
     }
     if (call.callee === "Math.round") {
@@ -5831,7 +6057,7 @@ class Machine {
       this.store(operand);
       this.floatConstant(0.5, NUMBER, XMM1);
       this.code.sse("add", XMM0, XMM1, false);
-      roundDown();
+      this.roundDown();
       // The answer is kept beside the value it was made of: a value that rounds
       // to zero from below keeps its sign, which is what the language does and
       // what a round of the C library rounds away, and every other answer is

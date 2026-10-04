@@ -26,7 +26,19 @@
  * one value is carried.
  */
 
-import { isTextType, isWideType, type SemanticBlock, type SemanticStatement, type SemanticValue } from "../core/semantic-ir.ts";
+import { isFloat, isTextType, isWideType, type SemanticBlock, type SemanticStatement, type SemanticValue } from "../core/semantic-ir.ts";
+
+/**
+ * The arithmetic whose two sides are written left one first, by the name the
+ * IR gives the operator.
+ *
+ * Every other arithmetic is written right side first, because the side that is
+ * not the instruction's own immediate is written first and parked while the
+ * other side is written. These three are not that: a concatenation is laid out
+ * a part at a time from the left, and a minimum and a maximum are two values
+ * taken and then compared.
+ */
+const LEFT_FIRST_ARITH: Record<string, true> = { concat: true, min: true, max: true };
 
 /* -------------------------------------------------------------------------- */
 /* What a name is                                                               */
@@ -98,6 +110,7 @@ interface Node {
  *
  *   - an object or an array is **allocated first** and its fields written
  *     afterwards, so the runtime call comes before every value that fills it;
+ *
  *   - the condition of a `select` is asked **before** either arm, so a name
  *     read only by the condition is already dead by the time an arm calls.
  *
@@ -122,9 +135,32 @@ class Graph {
    * across one of these is held in a register a call leaves alone.
    */
   private readonly calls: (statement: SemanticStatement) => boolean;
+  /**
+   * The values that are a call, for a backend that writes some of them without
+   * one.
+   *
+   * A builtin the compiler answers itself is written as instructions where the
+   * IR says a call, and nothing it does takes a register away: a rounding is
+   * arithmetic on the accumulator and the scratch beside it, which is what the
+   * rest of the lowering writes with either. A body that rounds down once per
+   * element of an array on every turn of a loop is then a body that calls
+   * nothing at all, and every name it reaches for is one the convention does
+   * not ask a callee to preserve — a register that costs the function nothing
+   * to enter and leave, where a callee-saved one costs a push and a pop on
+   * every one of the millions of calls it is written inside.
+   *
+   * What says it is the backend that lowers the call: the IR is written once
+   * and every backend reads it, and only this one knows which of its builtins
+   * are instructions here.
+   */
+  private readonly valueCalls: (callee: string) => boolean;
 
-  constructor(calls: (statement: SemanticStatement) => boolean = () => false) {
+  constructor(
+    calls: (statement: SemanticStatement) => boolean = () => false,
+    valueCalls: (callee: string) => boolean = () => true,
+  ) {
     this.calls = calls;
+    this.valueCalls = valueCalls;
   }
 
   private make(events: Event[]): Node {
@@ -249,7 +285,7 @@ class Graph {
           break;
         case "call":
           for (const argument of statement.call.args) this.value(events, argument);
-          events.push({ k: "call" });
+          if (this.valueCalls(statement.call.callee)) events.push({ k: "call" });
           node = this.make(events);
           break;
         case "raise":
@@ -337,7 +373,10 @@ class Graph {
         return;
       case "call":
         for (const argument of value.call.args) this.value(events, argument);
-        events.push({ k: "call" });
+        // A builtin the backend answers with instructions is a call the IR
+        // states and the code does not make, and a name live across one of
+        // those is live across arithmetic.
+        if (this.valueCalls(value.call.callee)) events.push({ k: "call" });
         return;
       case "newObject":
       case "buffer": {
@@ -355,9 +394,38 @@ class Graph {
         this.value(events, value.of);
         this.value(events, value.index);
         return;
-      case "arith":
-        this.value(events, value.left);
-        this.value(events, value.right);
+      case "arith": {
+        // The two sides are written in the order the lowering writes them in,
+        // and it is not the same for every operation. A concatenation is laid
+        // out a part at a time from the left, and so is a minimum and a
+        // maximum, whose two values are taken and then compared. A float sum or
+        // a float product takes its sides either way round and writes the left
+        // one first, since either may be the instruction's own literal. A wide
+        // product, quotient or shift is a kernel that is handed both sides as
+        // pointers, and the left one is written first.
+        //
+        // Everything else is written right side first: the side that is not the
+        // instruction's own immediate is written first and parked while the
+        // other side is written.
+        //
+        // The order decides what is live across a call, so an order that does
+        // not match this one marks a name dead before a call the lowering makes
+        // after reading it, and hands it a register the callee is free to
+        // overwrite first. Being wrong that way is a miscompile; being right
+        // costs a register a callee would have preserved.
+        const commutative = value.op === "add" || value.op === "mul";
+        const wide = isWideType(value.type);
+        const leftFirst =
+          LEFT_FIRST_ARITH[value.op] === true ||
+          (commutative && isFloat(value.type)) ||
+          (wide && (value.op === "mul" || value.op === "div" || value.op === "shl" || value.op === "shr"));
+        if (leftFirst) {
+          this.value(events, value.left);
+          this.value(events, value.right);
+        } else {
+          this.value(events, value.right);
+          this.value(events, value.left);
+        }
         // A power is `pow` and a concatenation is the runtime building a string
         // out of its two sides; every other arithmetic on a number the machine
         // holds is one instruction the machine carries out itself.
@@ -373,13 +441,26 @@ class Graph {
           events.push({ k: "call" });
         }
         return;
-      case "compare":
-        this.value(events, value.left);
-        this.value(events, value.right);
+      }
+      case "compare": {
+        // A comparison of two numbers is written right side first: it is
+        // written down and the left one is compared against it. A comparison of
+        // two strings and a comparison of two whole numbers wider than a machine
+        // word are written left side first, so where the two orders disagree
+        // this is the order the lowering writes the one that is not a number
+        // in.
+        if (isWideType(value.operand) || isTextType(value.operand)) {
+          this.value(events, value.left);
+          this.value(events, value.right);
+        } else {
+          this.value(events, value.right);
+          this.value(events, value.left);
+        }
         // Two numbers are compared by the machine itself; anything else is
         // compared by the C library, which is a call.
         if (value.operand.kind !== "primitive") events.push({ k: "call" });
         return;
+      }
       case "logical":
       case "coalesce":
         this.value(events, value.left);
@@ -443,13 +524,18 @@ class Graph {
  * `calls` names the statements that are a call as well as whatever the body
  * says of them, which is how a backend that writes a loop as a call into a
  * runtime gets the names live across that call held in registers one survives.
+ *
+ * `valueCalls` answers the same question of a value: it says which of the IR's
+ * calls the backend is writing as instructions rather than as a call, and a
+ * name live across one of those is not across a call at all.
  */
 export function nameLiveness(
   entry: SemanticBlock,
   parameters: readonly string[] = [],
   calls: (statement: SemanticStatement) => boolean = () => false,
+  valueCalls: (callee: string) => boolean = () => true,
 ): Map<string, NameLiveness> {
-  const graph = new Graph(calls);
+  const graph = new Graph(calls, valueCalls);
   const root = graph.block(entry, null);
 
   // The nodes in the order control reaches them, which for a body the lowering
