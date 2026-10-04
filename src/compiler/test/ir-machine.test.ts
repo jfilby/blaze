@@ -166,6 +166,18 @@ const roundCall = (argument: SemanticValue): SemanticCall => ({
   retain: false,
 });
 
+const floorCall = (argument: SemanticValue): SemanticCall => ({
+  callee: "Math.floor",
+  builtin: true,
+  signature: { name: "Math.floor", symbol: "Math.floor", params: [{ name: "v", type: "f64" }], returns: "f64" },
+  args: [argument],
+  argTypes: [F64],
+  returns: F64,
+  effects: [],
+  ownership: "none",
+  retain: false,
+});
+
 const NUMBERS: SemanticSlot[] = [
   { kind: "value", name: "v", mutable: false, type: F64 },
   { kind: "value", name: "w", mutable: false, type: F64 },
@@ -178,7 +190,7 @@ const NUMBERS: SemanticSlot[] = [
  * into one: the count is what the program did, whatever the C compiler could
  * prove about it.
  */
-async function lowered(fn: SemanticFunction, driver: (name: string) => string): Promise<string> {
+async function lowered(fn: SemanticFunction, driver: (name: string) => string, target: TargetSpec = TARGET): Promise<string> {
   const directory = await scratch("blaze-machine-");
   const contract = contracted(fn);
   const runtime = await buildStandaloneRuntime(directory);
@@ -211,7 +223,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
   const built = await buildObject({
     fn,
     contract,
-    target: TARGET,
+    target,
     callable: new Set(["f", "g", "h9", "two", "mix"]),
     objectPath: object,
   });
@@ -1680,10 +1692,14 @@ function reference(a: readonly number[], turns: number, weight: (i: number) => n
 }
 
 /** What the instructions say, so a test can see which path the lowering took. */
-async function emitted(fn: SemanticFunction, callable: readonly string[] = ["f", "g", "h9"]): Promise<string> {
+async function emitted(
+  fn: SemanticFunction,
+  callable: readonly string[] = ["f", "g", "h9"],
+  target: TargetSpec = TARGET,
+): Promise<string> {
   const directory = await scratch("blaze-census-");
   const objectPath = join(directory, "subject.o");
-  await buildObject({ fn, contract: contracted(fn), target: TARGET, callable: new Set(callable), objectPath });
+  await buildObject({ fn, contract: contracted(fn), target, callable: new Set(callable), objectPath });
   return run("objdump", ["-d", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 }).stdout;
 }
 
@@ -1913,6 +1929,36 @@ test("the machine code of a folded identity is the machine code of the unfolded 
     const folded = await answeredBy(one.value, inputs, true);
     assert.deepEqual(folded, plain, `${one.name}: folding changed what the machine code computes`);
   }
+});
+
+test("a value rounded down is the library's answer or one instruction of its own", async () => {
+  // `Math.floor` is the one maths call a field element's limbs are made of, and
+  // it is a call into the C library where the target has the instruction that
+  // rounds. The two answers are the same number, so what differs is the
+  // instruction and what the machine was asked for.
+  const floor = subject(
+    F64,
+    handsBack({ k: "call", type: F64, call: floorCall(local("x", F64)) }),
+    [{ kind: "value", name: "x", mutable: false, type: F64 }],
+  );
+  const values = ["-1.5", "-0.5", "0", "0.5", "1.5", "2.5", "-3", "1e18", "-0.0001"];
+  const print = (name: string): string =>
+    values.map((value) => `printf("%.17g ", ${name}(${value}));`).join("");
+
+  const called = await emitted(floor);
+  assert.match(called, /\bcall\b/, "a target that has not said it can round calls the library");
+  assert.doesNotMatch(called, /\broundsd\b/);
+
+  const SSE41: TargetSpec = { ...TARGET, features: ["sse4.1"] };
+  const own = await emitted(floor, ["f", "g", "h9"], SSE41);
+  assert.match(own, /\broundsd\b/, "the instruction the target named is the one written");
+  assert.doesNotMatch(own, /\bcall\b/, "nothing is called where the instruction rounds");
+
+  assert.equal(
+    await lowered(floor, print, SSE41),
+    await lowered(floor, print),
+    "the instruction rounds what the library rounds",
+  );
 });
 
 test("a quotient by a power of two is a product by its reciprocal", async () => {

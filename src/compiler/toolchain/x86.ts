@@ -1184,6 +1184,25 @@ export class Encoder {
     this.modrm(source, destination);
   }
 
+  /**
+   * A float rounded to a whole number by one of the four directions the
+   * instruction carries: nearest, towards minus infinity, towards plus
+   * infinity, and towards zero. The mode is the instruction's own immediate, so
+   * the direction is in the instruction rather than in the code around it.
+   *
+   * The operand size prefix is the one both precisions take whatever the
+   * precision is, and the opcode differs between them.
+   */
+  roundToInteger(destination: number, source: number, mode: number, single: boolean): void {
+    this.byte(0x66);
+    this.rex(false, destination, source);
+    this.byte(0x0f);
+    this.byte(0x3a);
+    this.byte(single ? 0x0a : 0x0b);
+    this.modrm(source, destination);
+    this.byte(mode);
+  }
+
   /** A whole number read as a float, which is a signed conversion. */
   cvtIntToFloat(destination: number, source: number, single: boolean): void {
     this.precision(single);

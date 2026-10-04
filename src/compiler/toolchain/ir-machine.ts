@@ -530,7 +530,7 @@ export function assertMachineTarget(target: TargetSpec): void {
 export async function buildObject(request: MachineRequest): Promise<MachineResult> {
   assertMachineTarget(request.target);
   const functionName = symbolOf(request.contract);
-  const object = lowerFunction(request.fn, request.contract, functionName, request.callable);
+  const object = lowerFunction(request.fn, request.contract, functionName, request.callable, request.target);
   await writeFile(request.objectPath, object.bytes);
   const written = inspectWrittenObject(request.objectPath, functionName);
   if (written.defined.length !== 1 || written.defined[0] !== functionName) {
@@ -1065,8 +1065,9 @@ function lowerFunction(
   contract: FunctionContract,
   functionName: string,
   callable: ReadonlySet<string>,
+  target: TargetSpec,
 ): { bytes: Uint8Array; textSizeBytes: number; threads: boolean } {
-  const machine = new Machine(fn, contract);
+  const machine = new Machine(fn, contract, roundsOnItsOwn(target));
   const text = machine.emit();
   for (const symbol of machine.externals) {
     if (isRuntimeSymbol(symbol) || LIBRARY[symbol] === true || symbol === functionName || callable.has(symbol)) continue;
@@ -1246,6 +1247,21 @@ function writesCounter(body: SemanticBlock, name: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Whether a target runs the rounding instruction, which is where a value rounded
+ * to a whole number stops being a call into the C library.
+ *
+ * It is SSE4.1, which is not part of the instruction set every processor of this
+ * machine runs: `assertMachineTarget` above promises the code every one of them
+ * runs, so a target that has not said it has the instruction is answered with
+ * the library, as it was before this instruction was written. A project that
+ * names it in `target.features` gets the one instruction; a project that does
+ * not is no worse off than before.
+ */
+function roundsOnItsOwn(target: TargetSpec): boolean {
+  return target.features.includes("sse4.1") || target.features.includes("sse4.2");
 }
 
 /** What the linker sees in the object that was written. */
@@ -1442,9 +1458,16 @@ class Machine {
   private lastLiteral = "";
 
   private readonly fn: SemanticFunction;
+  /**
+   * Whether this machine rounds a value to a whole number with an instruction of
+   * its own, which is a fact about the target the build was asked for and not
+   * about the function being written.
+   */
+  private readonly rounds: boolean;
 
-  constructor(fn: SemanticFunction, contract: FunctionContract) {
+  constructor(fn: SemanticFunction, contract: FunctionContract, rounds = false) {
     this.fn = fn;
+    this.rounds = rounds;
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
     this.layouts = { ...contract.definition.objects, ...fn.objects };
@@ -5790,13 +5813,25 @@ class Machine {
       this.runtime("_argv");
       return;
     }
+    // A value rounded down is one instruction where the target has one, and the
+    // call is the only thing that stops it being one: the library rounds exactly
+    // what the instruction rounds, so the answer is the same either way.
+    const roundDown = (): void => {
+      if (!this.rounds) this.library("floor");
+      else this.code.roundToInteger(XMM0, XMM0, 0x09, false);
+    };
+    if (call.callee === "Math.floor") {
+      this.at(argument, NUMBER);
+      roundDown();
+      return;
+    }
     if (call.callee === "Math.round") {
       this.at(argument, NUMBER);
       const operand = this.holdSlot(NUMBER, "blaze_rounded");
       this.store(operand);
       this.floatConstant(0.5, NUMBER, XMM1);
       this.code.sse("add", XMM0, XMM1, false);
-      this.library("floor");
+      roundDown();
       // The answer is kept beside the value it was made of: a value that rounds
       // to zero from below keeps its sign, which is what the language does and
       // what a round of the C library rounds away, and every other answer is
