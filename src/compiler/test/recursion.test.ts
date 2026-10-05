@@ -245,6 +245,32 @@ const REFUSED: readonly Refused[] = [
     why: /ends in a call of another function/,
   },
   {
+    // The chain runs down the right of every node to the call of itself, and it
+    // stops at a call *of itself* and at nothing else. This body makes exactly
+    // one call of itself and none of them is on the chain: the chain ends in
+    // `wrap`, and the call sits inside that call's arguments. Answering `wrap`
+    // with the carried name and carrying the recursion off as a turn of the loop
+    // deletes `wrap` and answers 3 where the program answers 153.
+    about: "a chain that runs down to a call of another function",
+    fn: "f",
+    source: library(
+      [
+        "function wrap(x: bigint, y: bigint): bigint {",
+        "  return x * 10n + y;",
+        "}",
+        "",
+        "function f(n: bigint, acc: bigint): bigint {",
+        "  if (n <= 0n) {",
+        "    return 1n;",
+        "  }",
+        "  return acc + wrap(f(n - 1n, acc + 2n), 3n);",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /not combined into a sum or a product/,
+  },
+  {
     // Only the accumulated shape carries the base case's answer from a name
     // bound above the loop. A tail call leaves the base case where the source
     // wrote it, so `base()` there still runs only on the call that reaches it.
@@ -267,6 +293,54 @@ const REFUSED: readonly Refused[] = [
       ].join("\n"),
     ),
     why: /the answer is carried from before the loop/,
+  },
+  {
+    // The loop runs the test before the statements of a turn, and the recursion
+    // ran them before the test as well — so a statement written above the test
+    // runs on the call that reaches the base case in the recursion and does not
+    // in the loop. `walk` prints the depth it was entered at, so the rewritten
+    // body answered a run one line shorter than the source wrote: the `enter 0`
+    // was gone.
+    about: "a statement before the test that ends the recursion",
+    fn: "walk",
+    source: library(
+      [
+        "function walk(n: number, acc: number): number {",
+        "  console.log(`enter ${n}`);",
+        "  if (n <= 0) {",
+        "    return acc;",
+        "  }",
+        "  return walk(n - 1, acc + n);",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /the loop does not run it on the call that reaches the base case/,
+  },
+  {
+    // The same hole through a name: `tick` writes what it prints, so binding it
+    // is not the whole of the statement, and the call it makes is a call whether
+    // it is bound or kept.
+    about: "a call bound above the test that ends the recursion",
+    fn: "walk",
+    source: library(
+      [
+        "function tick(): number {",
+        "  console.log(1);",
+        "  return 1;",
+        "}",
+        "",
+        "function walk(n: number, acc: number): number {",
+        "  let x = tick();",
+        "  if (n <= 0) {",
+        "    return acc;",
+        "  }",
+        "  return walk(n - 1, acc + x);",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /the loop does not run it on the call that reaches the base case/,
   },
 ];
 

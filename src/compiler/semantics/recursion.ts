@@ -111,7 +111,23 @@ interface Plan {
  */
 type Shape =
   | { readonly kind: "tail"; readonly plan: Plan }
-  | { readonly kind: "accumulated"; readonly plan: Plan; readonly carried: string; readonly combined: SemanticValue };
+  | {
+      readonly kind: "accumulated";
+      readonly plan: Plan;
+      readonly carried: string;
+      readonly combined: SemanticValue;
+      /**
+       * The one call of itself the chain was read down to. It is carried rather
+       * than looked up again, because a second search finds a call the walk never
+       * checked: a body whose chain runs down to a call of *another* function with
+       * its own call buried in that call's arguments has one call of itself and no
+       * call of itself on the chain, and a search over the terminator would hand
+       * back the buried one — a different call with different arguments, so the
+       * turn written from it carries the recursion while the value the chain
+       * answered with is thrown away.
+       */
+      readonly call: SemanticCall;
+    };
 
 /* -------------------------------------------------------------------------- */
 /* The pass                                                                    */
@@ -221,9 +237,33 @@ function readPlan(fn: SemanticFunction): Plan | Refusal {
     // written as an arm, and the pass carries it as one. The next arm is read.
     if (answer !== null && answer.k === "call" && answer.call.callee === fn.name) continue;
 
-    const turns = [...statements.slice(0, at), ...statements.slice(at + 1)];
+    const before = statements.slice(0, at);
+    const turns = [...before, ...statements.slice(at + 1)];
     const written = namesWrittenIn(turns);
     if (testEffect(test.condition)) return "the test that ends the recursion runs something of its own";
+    // The loop runs the test *before* the statements of a turn, and the
+    // recursion ran them before the test as well — so the statements written
+    // above it run on every call in the recursion and on every call but the one
+    // that reaches the base case in the loop. The call that reaches the base
+    // case is the one whose effects the program cannot do without: `walk` that
+    // prints the depth it was entered at printed it on the last call too, and a
+    // loop that skips that call answers a run one line shorter than the source
+    // wrote.
+    //
+    // A statement that only binds a name or writes one is invisible there,
+    // because the two refusals below cover the only things that read it: the
+    // test cannot read what a turn writes, and neither can the answer the base
+    // case gives back. Anything else — a print, a call kept for what it does, a
+    // write to memory, a `raise` that ends the program — is something the loop
+    // would leave out, so the body keeps its calls.
+    for (const statement of before) {
+      if (statement.k !== "let" && statement.k !== "set" && statement.k !== "step") {
+        return "a statement written before the test that ends the recursion runs on every call, and the loop does not run it on the call that reaches the base case";
+      }
+      if ((statement.k === "let" || statement.k === "set") && testEffect(statement.value)) {
+        return "a statement written before the test that ends the recursion runs something of its own, and the loop does not run it on the call that reaches the base case";
+      }
+    }
     const read = namesReadBy(test.condition);
     for (const name of written) {
       if (read.has(name)) return `the test that ends the recursion reads "${name}", which a turn writes`;
@@ -317,9 +357,15 @@ function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Sh
   // The chain is read before the types are, so a body whose call is combined
   // the wrong way round is told what is wrong with the way round rather than
   // with the numbers it happens to be written at.
+  // The walk stops at a call *of this function* and at nothing else. A call of
+  // another function is where the chain ends without the call of itself ever
+  // appearing on it — `acc + wrap(f(n - 1, acc + 2), 3)` has one call of itself
+  // in the body and none on the chain — and stopping there would answer that
+  // call with the carried name and carry the recursion off as a turn of the
+  // loop, which deletes `wrap` and answers a number the program never computed.
   const returns = typeText(fn.returns);
   let node: SemanticValue = value;
-  while (node.k !== "call") {
+  while (node.k !== "call" || node.call.callee !== fn.name) {
     if (node.k !== "arith" || (node.op !== "add" && node.op !== "mul")) {
       return "the call of itself is not combined into a sum or a product";
     }
@@ -334,7 +380,7 @@ function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Sh
   if (refusal !== null) return refusal;
 
   const carried = freshName(namesOf(fn), "blaze_acc");
-  return { kind: "accumulated", plan, carried, combined: answeredWith(value, node, fn.returns, carried) };
+  return { kind: "accumulated", plan, carried, combined: answeredWith(value, node, fn.returns, carried), call: node.call };
 }
 
 /**
@@ -435,14 +481,19 @@ function tailTurns(fn: SemanticFunction, plan: Plan, header: string, taken: Set<
  * arguments, before anything moved on.
  */
 function accumulatedTurns(fn: SemanticFunction, shape: Extract<Shape, { kind: "accumulated" }>, taken: Set<string>): SemanticStatement[] {
-  const end = fn.entry.terminator;
-  if (end.k !== "return" || end.value === null) return [];
-  const call = selfCallsInValue(end.value, fn.name)[0] as SemanticCall;
+  // The call is the one the chain was read down to, which is the call the
+  // combination answered with — so the arguments this turn carries are the
+  // arguments that call was made with. Finding it again over the terminator
+  // would be a second search over a tree the first one has already read, and it
+  // answers a different question: a body whose chain runs down to a call of
+  // another function holds its own call inside that call's arguments, and the
+  // second search finds that one instead — a call whose arguments are not the
+  // chain's, carried as though they were.
   const combined = freshName(taken, "blaze_combined");
   return [
     ...shape.plan.turns,
     { k: "let", slot: slotFor(shape.combined, combined), value: shape.combined, line: UNSTATED_LINE },
-    ...argumentsCarried(call, fn, taken),
+    ...argumentsCarried(shape.call, fn, taken),
     { k: "set", name: shape.carried, op: "=", value: { k: "local", type: fn.returns, name: combined }, line: UNSTATED_LINE },
   ];
 }
