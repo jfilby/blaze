@@ -4695,6 +4695,36 @@ class Machine {
   }
 
   /**
+   * The vector register a value is already sitting in, or null when it is not
+   * something an instruction may name as its own operand.
+   *
+   * Only a name the build gave a register of its own answers, and only where
+   * that register is one the instruction may name and the other side does not
+   * overwrite while it is being written. `xmm0` is the accumulator this side is
+   * combined into, `xmm1` is its scratch, and `xmm2` belongs to the sequences
+   * written in place of a call the library would make, so none of the three is
+   * ever a place a name is kept and none is named here.
+   *
+   * Whether the register survives the other side is what `survives` answers. A
+   * register the convention preserves outlives anything, so it is named
+   * whatever the other side is; one it does not preserve is a register a call
+   * writes its arguments into, so it is named only where the other side calls
+   * nothing. A value at the other precision than the operation reads is left to
+   * the general form, because naming its register would read it at a width the
+   * instruction has none of.
+   */
+  private registerOperand(value: SemanticValue, type: SemanticType, survives: boolean): number | null {
+    if (value.k !== "local" || !isFloat(value.type) || !isFloat(type)) return null;
+    if (widthOf(value.type) !== widthOf(type)) return null;
+    const held = this.slot(value.name);
+    const register = held.register;
+    if (register === null) return null;
+    if (register === XMM0 || register === XMM1 || register === XMM2) return null;
+    if (!survives && !VECTOR_CALLEE_SAVED.includes(register)) return null;
+    return register;
+  }
+
+  /**
    * The label a float the program wrote out is read at, or null when this
    * value cannot be reached there: it is not a literal, it is at the other
    * precision than the operation reads — which would need a conversion the
@@ -4864,6 +4894,74 @@ class Machine {
     // which also means the right side is never written down: a call that
     // answers into the accumulator is consumed where it lands. A difference
     // and a quotient may not, so they keep the order they had.
+
+    // Where the other side already lies, the instruction is named at it rather
+    // than at a copy of it: a side read out of an array is carried as the
+    // instruction's own memory operand, exactly as a comparison already carries
+    // one, and a side the build gave a register of its own is carried as that
+    // register. Either way the side is never copied into the frame and read
+    // back out of it, and the accumulator holds the other side.
+    //
+    // Which side is carried decides which one the accumulator takes, so this is
+    // settled before either side is written. A sum and a product take their
+    // sides either way round, so either may be the one carried; a difference
+    // and a quotient may not, so only their right side can be.
+    //
+    // A carried side is never evaluated at all. That is sound for an element
+    // because `carriedOperand` answers only where the address can be named
+    // outright — a base and an index and nothing else, with no call and no
+    // effect in either — and sound for a register because the register is one
+    // the convention preserves, or is named only where the other side calls
+    // nothing and so writes nothing over it.
+    if (isFloat(type) && FLOAT_OPERATION[value.op] === true) {
+      const operation = value.op as "add" | "sub" | "mul" | "div";
+      const commutative = operation === "add" || operation === "mul";
+      const single = widthOf(type) === 4;
+      // The side the accumulator does not take, which is the only one a
+      // difference and a quotient can carry.
+      const carriedSide = commutative ? value.left : value.right;
+      const carried = this.carriedOperand(carriedSide, type);
+      if (carried !== null) {
+        this.at(commutative ? value.right : value.left, type);
+        this.code.sseMem(operation, XMM0, carried, single);
+        this.normalizeArithmetic(type);
+        return;
+      }
+      // A sum and a product may hand the other side over instead, which is the
+      // same instruction with the element on the other side of it.
+      if (commutative) {
+        const other = this.carriedOperand(value.right, type);
+        if (other !== null) {
+          this.at(value.left, type);
+          this.code.sseMem(operation, XMM0, other, single);
+          this.normalizeArithmetic(type);
+          return;
+        }
+      }
+      // A side the build already gave a register of its own is carried by that
+      // register instead, which is the same instruction with the copy into the
+      // frame and the read back out of it left out.
+      const parkedSide = commutative ? value.left : value.right;
+      const parkedOther = commutative ? value.right : value.left;
+      const parked = this.registerOperand(parkedSide, type, !hasCall(parkedOther));
+      if (parked !== null) {
+        this.at(parkedOther, type);
+        this.code.sse(operation, XMM0, parked, single);
+        this.normalizeArithmetic(type);
+        return;
+      }
+      // A sum and a product may hand the other side over instead, which is the
+      // same instruction with the name on the other side of it.
+      if (commutative) {
+        const other = this.registerOperand(value.right, type, !hasCall(value.left));
+        if (other !== null) {
+          this.at(value.left, type);
+          this.code.sse(operation, XMM0, other, single);
+          this.normalizeArithmetic(type);
+          return;
+        }
+      }
+    }
     if (isFloat(type)) {
       const commutative = value.op === "add" || value.op === "mul";
       this.at(commutative ? value.left : value.right, type);
