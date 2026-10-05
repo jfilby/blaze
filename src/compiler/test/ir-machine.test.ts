@@ -2222,3 +2222,249 @@ test("a quotient by a power of two is a product by its reciprocal", async () => 
   assert.equal(await lowered(third, (name) => `printf("%.17g", ${name}(1e300));`), (1e300 / 3).toExponential(16));
 });
 
+
+test("a loop whose body rounds is written out", async () => {
+  // `Math.floor` is written as an instruction on the accumulator, so a body whose
+  // only call is one has nothing in it that writing it out would duplicate but
+  // arithmetic — which is the shape a modular addition keeps its limbs in, where
+  // every turn rounds once. Counting a rounding as a call left that loop rolled,
+  // and rolled it kept the counter a double in a register, converted it to an
+  // index on every element it reached, and spent a test and a step per turn.
+  const rounded = subject(F64, {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: number("11"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: F64 }, value: { k: "call", type: F64, call: floorCall(local("i")) }, line: 3 },
+              { k: "set", name: "total", op: "+=", value: local("whole"), line: 4 },
+            ],
+          },
+        },
+      },
+    ],
+    terminator: { k: "return", value: local("total") },
+  });
+  // The rounding is an instruction only where the target has it, and a target
+  // that has not is one where the body calls and the loop is left rolled for the
+  // other reason as well.
+  const native = { ...TARGET, cpu: "skylake" };
+  assert.equal(
+    (await emitted(rounded, ["f", "g", "h9"], native)).match(/\broundsd\b/g)?.length,
+    11,
+    "a body that rounds once a turn is written out once a turn",
+  );
+  assert.equal(
+    await lowered(rounded, (name) => `printf("%.17g", ${name}());`),
+    "55",
+    "the written-out body is still the sum of the eleven turnings",
+  );
+});
+
+test("a loop that runs more than one trip still counts its trips", async () => {
+  // A note about what the accumulator holds is a fact about the path that fell
+  // through to where it was taken, and a loop header is reached again on its
+  // second trip with whatever the body left behind. Reading the trip counter
+  // where the note says it already is makes the loop answer its first trip over
+  // and over: `fZero` over eleven limbs spun in a secp256k1 that never finished.
+  // The trip count here is what a written-out body cannot fold into the
+  // instructions, because the same eleven turns are written once and run twice.
+  const twice = subject(I32, {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "seen", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("0", I32),
+          to: number("22", I32),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "head",
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [{ k: "set", name: "seen", op: "+=", value: number("1", I32), line: 3 }],
+          },
+        },
+      },
+    ],
+    terminator: { k: "return", value: local("seen", I32) },
+  });
+  assert.equal(
+    await lowered(twice, (name) => `printf("%d", ${name}());`),
+    "22",
+    "a written-out body of eleven turns is run for both trips and answers all twenty-two",
+  );
+});
+
+test("a name given a value is not read back out of the register it was given", async () => {
+  // `let whole = floor(x)` and then a use of `whole` is one value, and the
+  // general form makes it three: compute it into the accumulator, copy the
+  // accumulator into the register the build gave the name, and copy that
+  // register back into the accumulator to read it. A vector register to vector
+  // register has a single port to issue from, so on a loop over a field value's
+  // limbs those copies are measured against the loop's own arithmetic. The note
+  // that answers the second read is about the value and not about the place it
+  // was written, so it survives a statement boundary — a slot handed back is a
+  // different value, and the identity on the note is what says so.
+  const named = subject(F64, {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: F64 }, value: { k: "call", type: F64, call: floorCall(local("x")) }, line: 1 },
+      { k: "let", slot: { kind: "value", name: "scaled", mutable: true, type: F64 }, value: mul(local("whole"), number("2")), line: 2 },
+    ],
+    terminator: { k: "return", value: add(local("whole"), local("scaled")) },
+  });
+  const parameter = [{ kind: "value", name: "x", mutable: false, type: F64 }] as const;
+  // The value is rounded once and read three times, and a read that the note
+  // answers is no instruction at all — so the copies out of the register the
+  // general form makes are what is left to count.
+  const instructions = await emitted({ ...named, params: [...parameter] }, ["f", "g", "h9"], { ...TARGET, cpu: "skylake" });
+  assert.equal(
+    instructions.match(/roundsd/g)?.length,
+    1,
+    "the value is rounded once however many names read it",
+  );
+  // The multiply that reads the value is the instruction after the one that
+  // wrote it: the note answers the read, so the copy back out of the register
+  // the general form makes is not there. The read after the multiply is a
+  // different question — the multiply took the accumulator and the note with it
+  // — and is answered by a copy that is owed.
+  assert.match(
+    instructions,
+    /roundsd[^\n]*\n[^\n]*movsd\s+%xmm0,%xmm3[^\n]*\n[^\n]*mulsd/,
+    "the read that follows the write is answered without copying the value out of its own register",
+  );
+  assert.equal(
+    Number(await lowered({ ...named, params: [...parameter] }, (name) => `printf("%.17g", ${name}(7.9));`)),
+    3 * Math.floor(7.9),
+    "the three reads are the one value the rounding answered",
+  );
+});
+
+test("a name given the value another name holds is one copy", async () => {
+  // `carry = whole` is a move between two registers the build gave names of its
+  // own. The general form reads one into the accumulator and writes the
+  // accumulator into the other, which is the same number by two instructions
+  // instead of one — and the second of them is on the one port a vector move
+  // issues from.
+  const copied = subject(F64, {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: F64 }, value: local("x"), line: 1 },
+      { k: "let", slot: { kind: "value", name: "carry", mutable: true, type: F64 }, value: local("whole"), line: 2 },
+    ],
+    terminator: { k: "return", value: add(local("whole"), local("carry")) },
+  });
+  const parameter = [{ kind: "value", name: "x", mutable: false, type: F64 }] as const;
+  const withParameter = { ...copied, params: [...parameter] };
+  assert.equal(
+    Number(await lowered(withParameter, (name) => `printf("%.17g", ${name}(2.5));`)),
+    5,
+    "the copy is the value it copied",
+  );
+});
+
+test("a comparison reads the element it is compared against where it lies", async () => {
+  // `a[i] > b[i]` is a read of one element and a comparison against the other,
+  // and `UCOMISD` reads its source and writes no register but the flags. The
+  // general form holds one side in a register or a slot and reads the other out
+  // of that, which is three instructions and a register move a comparison does
+  // not need. The side in memory is the left one, because the right one is
+  // already in the destination the general form compares out of: naming the
+  // memory as the source compares the two sides in the same order and leaves
+  // every condition after it as it was.
+  const compared = (op: "lt" | "le" | "gt" | "ge" | "eq" | "ne") =>
+    subject(
+      BOOL,
+      {
+        id: "entry",
+        releases: [],
+        statements: [
+          {
+            k: "let",
+            slot: { kind: "value", name: "answer", mutable: true, type: BOOL },
+            value: { k: "compare", type: BOOL, op, operand: F64, left: at("a", local("i")), right: at("b", local("i")) },
+            line: 1,
+          },
+        ],
+        terminator: { k: "return", value: local("answer", BOOL) },
+      },
+      [
+        { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+        { kind: "value", name: "b", mutable: false, type: ARRAY_OF_F64 },
+        { kind: "value", name: "i", mutable: false, type: I64 },
+      ],
+    );
+  const driver = (left: number, right: number) => (name: string) => [
+    `  double a[1];`,
+    `  double b[1];`,
+    `  a[0] = ${Number.isNaN(left) ? "(0.0/0.0)" : left};`,
+    `  b[0] = ${Number.isNaN(right) ? "(0.0/0.0)" : right};`,
+    `  printf("%d", ${name}(a, b, 0));`,
+  ].join("\n");
+
+  for (const op of ["lt", "le", "gt", "ge", "eq", "ne"] as const) {
+    const instructions = await emitted(compared(op), ["f", "g", "h9"]);
+    assert.match(
+      instructions,
+      /ucomisd\s+\(%\w+,%\w+,8\),%xmm0/,
+      `${op}: the element is the operand of the comparison rather than a copy of it`,
+    );
+    assert.doesNotMatch(
+      instructions,
+      /movs?d?\s+%xmm[0-9]+,%xmm[0-9]+/,
+      `${op}: neither side of the comparison is copied between registers to be read`,
+    );
+  }
+  // Every operator, on the two cases that separate them: an ordered pair, and a
+  // value that is not a number. A comparison against one is false whichever way
+  // it is read, and `!=` is the operator where it really is different.
+  const expected: Record<string, [number, number, string][]> = {
+    lt: [[1, 2, "1"], [2, 1, "0"], [1, 1, "0"], [0, 0, "0"]],
+    le: [[1, 2, "1"], [2, 1, "0"], [1, 1, "1"], [0, 0, "1"]],
+    gt: [[2, 1, "1"], [1, 2, "0"], [1, 1, "0"], [0, 0, "0"]],
+    ge: [[2, 1, "1"], [1, 2, "0"], [1, 1, "1"], [0, 0, "1"]],
+    eq: [[1, 1, "1"], [1, 2, "0"], [1, 2, "0"]],
+    ne: [[1, 1, "0"], [1, 2, "1"], [1, 2, "1"]],
+  };
+  for (const [op, cases] of Object.entries(expected)) {
+    for (const [left, right, answer] of cases) {
+      const notNumbers = Number.isNaN(left) || Number.isNaN(right);
+      assert.equal(
+        await lowered(compared(op as "lt"), driver(left, right)),
+        answer,
+        `${op}(${left}, ${right})${notNumbers ? " with a value that is not a number" : ""}`,
+      );
+    }
+  }
+});

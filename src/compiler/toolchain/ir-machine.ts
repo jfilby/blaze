@@ -1287,15 +1287,38 @@ function wholeLiteral(value: SemanticValue): number | null {
   return Number.isSafeInteger(number) ? number : null;
 }
 
-/** Whether anything in a body is a call, which is what a body is not unrolled for. */
+/**
+ * Whether anything in a body is a call, which is what a body is not unrolled
+ * for.
+ *
+ * A rounding is not a call. `INLINE_BUILTINS` is written as instructions on the
+ * accumulator, so a body whose only call is one has nothing a turn of the loop
+ * written out could duplicate but a few arithmetic instructions, and the
+ * register allocator already treats a name live across a rounding as live
+ * across arithmetic. The loop a modular addition keeps its limbs in is exactly
+ * such a body: every turn rounds once, and refusing to write it out left the
+ * counter a double in a register, the index a conversion on every turn, and
+ * eleven copies of nothing but a test and a step.
+ */
 function bodyCalls(body: SemanticBlock): boolean {
   for (const statement of body.statements) {
-    if (statementValues(statement).some(hasCall)) return true;
+    if (statementValues(statement).some(callsOut)) return true;
     for (const inner of statementBlocksOf(statement)) {
       if (bodyCalls(inner)) return true;
     }
   }
   return false;
+}
+
+/** Whether one value reaches a callee, which a rounding written here does not. */
+function callsOut(value: SemanticValue): boolean {
+  let called = false;
+  walkValues(value, (inner) => {
+    if (called) return;
+    if (inner.k === "call" && INLINE_BUILTINS[inner.call.callee] === true) return;
+    if (hasCall(inner)) called = true;
+  });
+  return called;
 }
 
 /** Whether a loop's body writes the name the loop counts by, which the loop owns. */
@@ -1391,6 +1414,13 @@ interface LoopLabels {
 
 /** A value the lowering keeps in the frame while it builds another. */
 interface Held {
+  /**
+   * What tells this value from every other the function binds. A register is
+   * handed back and given to another value, and a slot in the frame is handed
+   * back and taken again, so neither the register nor the offset says on its
+   * own which value a note about the accumulator is about.
+   */
+  readonly id: number;
   /** Where in the frame it is: a distance up from the bottom of it. */
   readonly offset: number;
   readonly type: SemanticType;
@@ -1513,7 +1543,10 @@ class Machine {
    * The slot whose value the accumulator holds, and where the code stood when
    * it last did — which is what `load` reads, and what nothing else may.
    */
-  private accumulator: { offset: number; at: number } | null = null;
+  private accumulator: { id: number; at: number } | null = null;
+
+  /** The next identity a bound value is given, which no other value has. */
+  private heldCount = 0;
 
   /**
    * Whether this function allocates an object or writes an array out, which is
@@ -1548,6 +1581,13 @@ class Machine {
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
     this.layouts = { ...contract.definition.objects, ...fn.objects };
+    // A bound label is a place control reaches from somewhere other than the
+    // instruction in front of it, so what the accumulator held before one is a
+    // fact about the path that fell through and about no other. That is what
+    // makes a note about the accumulator safe to read on the far side of one.
+    this.code.onBind = () => {
+      this.accumulator = null;
+    };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1697,7 +1737,8 @@ class Machine {
     // a held value goes through `load`, `store` or `scratchFrom`, and those
     // three read the register.
     const offset = register === null ? this.reserve(frameBytes(type)) : 0;
-    const held: Held = { offset, type, register, index };
+    this.heldCount += 1;
+    const held: Held = { id: this.heldCount, offset, type, register, index };
     this.slots.set(emitted, held);
     return held;
   }
@@ -1762,7 +1803,8 @@ class Machine {
     // it in.
     const register = borrowable && isFloat(type) && !isWideType(type) ? this.takeSpareVector() : null;
     const offset = this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8));
-    const held: Held = { offset, type, register, index: null };
+    this.heldCount += 1;
+    const held: Held = { id: this.heldCount, offset, type, register, index: null };
     this.slots.set(name, held);
     return held;
   }
@@ -1792,9 +1834,14 @@ class Machine {
     }
     this.borrowed.length = mark;
     // A slot handed back here goes to whatever needs one next, and no
-    // instruction written says so: what says which value a slot holds is where
-    // it sits in the frame, and the next slot to take this one holds another.
-    this.accumulator = null;
+    // instruction written says so. It used to be that this had to take the note
+    // about the accumulator with it, because what said which value a slot held
+    // was where it sat in the frame and the next slot to take that place held
+    // another. What says it now is the identity on the note: the value that was
+    // handed back is not the value the next slot is given, so a note naming it
+    // is never read again and has nothing to be wrong about. Keeping it is what
+    // lets `let whole = a + b` be followed by a read of `whole` that is no
+    // instruction at all.
   }
 
   private scratch(bytes: number, prefix: string): number {
@@ -2513,7 +2560,7 @@ class Machine {
       // what the first read of that parameter is answered by.
       if (isFloat(type)) {
         this.code.movsStore(frame(offset), register, widthOf(type) === 4);
-        if (register === XMM0) this.accumulator = { offset, at: this.code.written };
+        if (register === XMM0) this.accumulator = { id: held.id, at: this.code.written };
       }
     }
   }
@@ -2537,18 +2584,20 @@ class Machine {
    * code cannot be read at a later one.
    */
   private load(held: Held): void {
+    if (this.accumulator?.id === held.id && this.accumulator.at === this.code.written) return;
     if (held.register !== null) {
       if (isFloat(held.type)) this.code.movsMove(XMM0, held.register, widthOf(held.type) === 4);
       else this.code.movRegReg(RAX, held.register);
+      this.accumulator = { id: held.id, at: this.code.written };
       return;
     }
-    if (this.accumulator?.offset === held.offset && this.accumulator.at === this.code.written) return;
+    if (this.accumulator?.id === held.id && this.accumulator.at === this.code.written) return;
     if (isFloat(held.type)) {
       this.code.movsLoad(XMM0, frame(held.offset), widthOf(held.type) === 4);
     } else {
       this.code.movRegMemSized(RAX, frame(held.offset), widthOf(held.type), signedOf(held.type));
     }
-    this.accumulator = { offset: held.offset, at: this.code.written };
+    this.accumulator = { id: held.id, at: this.code.written };
   }
 
   /**
@@ -2586,6 +2635,7 @@ class Machine {
     if (held.register !== null) {
       if (isFloat(held.type)) this.code.movsMove(held.register, XMM0, widthOf(held.type) === 4);
       else this.code.movRegReg(held.register, RAX);
+      this.accumulator = { id: held.id, at: this.code.written };
       return;
     }
     if (isFloat(held.type)) {
@@ -2873,6 +2923,7 @@ class Machine {
       return;
     }
     if (op === "=") {
+      if (this.copyBetween(value, target)) return;
       this.at(value, target.type);
       this.store(target);
       return;
@@ -2915,6 +2966,38 @@ class Machine {
     this.apply(operation, target.type);
     this.normalizeArithmetic(target.type);
     this.store(target);
+  }
+
+  /**
+   * A name given the value another name holds, written as the one copy it is.
+   *
+   * `carry = whole` is a move, and it is a move between two registers the build
+   * gave names of its own, so it is written as the register to register copy it
+   * is. The general form reads the name into the accumulator and writes the
+   * accumulator back out into the other, which is the same number by two
+   * instructions instead of one — and a vector register to vector register has a
+   * single port to issue from, so on a loop over a field value's eleven limbs
+   * those two instructions are two of the handful the loop's own arithmetic is
+   * measured against.
+   *
+   * It answers whether it did, so every other shape is left to the general form.
+   * A value in the frame is a store out of the register rather than a pair of
+   * moves, which is the same question asked of the other side.
+   */
+  private copyBetween(value: SemanticValue, target: Held): boolean {
+    if (value.k !== "local") return false;
+    const source = this.slot(value.name);
+    if (!typeEquals(source.type, target.type)) return false;
+    if (source.register === null) return false;
+    const narrow = widthOf(target.type) === 4;
+    if (target.register !== null) {
+      if (isFloat(target.type)) this.code.movsMove(target.register, source.register, narrow);
+      else this.code.movRegReg(target.register, source.register);
+      return true;
+    }
+    if (isFloat(target.type)) this.code.movsStore(frame(target.offset), source.register, narrow);
+    else this.code.movMemRegSized(frame(target.offset), source.register, widthOf(target.type));
+    return true;
   }
 
   /**
@@ -4044,6 +4127,15 @@ class Machine {
     }
     // The side held is read back after the other one has been written, so a
     // register serves it exactly as long as nothing calls in between.
+    // A left side the comparison reads where it lies costs no slot and no copy:
+    // the right side goes into the accumulator, which is the destination the
+    // general form compares out of, and the element is the source.
+    const carried = isFloat(type) ? this.carriedOperand(comparison.left, type) : null;
+    if (carried !== null) {
+      this.at(comparison.right, type);
+      this.floatBranch(op, widthOf(type) === 4, sense, label, XMM0, carried);
+      return;
+    }
     const right = hasCall(comparison.left) ? this.hold(type, "blaze_right") : this.hold(type, "blaze_right");
     this.at(comparison.right, type);
     this.store(right);
@@ -4542,7 +4634,7 @@ class Machine {
    * as a jump of its own rather than as an instruction that combines it with a
    * condition afterwards.
    */
-  private floatBranch(op: CompareOp, single: boolean, whenTrue: boolean, label: string, right = XMM1, left = XMM0): void {
+  private floatBranch(op: CompareOp, single: boolean, whenTrue: boolean, label: string, right = XMM1, left: number | Memory = XMM0): void {
     this.code.sseCompare(right, left, single, true);
     const condition =
       op === "lt" ? "a"
@@ -4560,6 +4652,39 @@ class Machine {
     // is not numbers, the second for the condition the language does answer.
     this.code.jcc("p", label);
     this.code.jcc(whenTrue ? condition : NEGATED[condition], label);
+  }
+
+  /**
+   * The address a value is read at by the instruction that wants it, or null
+   * when there is no such address and the value has to be brought somewhere
+   * first.
+   *
+   * A comparison reads one side and writes no register but the flags, so the
+   * side it reads can be the element itself: `a[i] > b[i]` is a read of one of
+   * them and a comparison against the other, where the general form reads both
+   * sides, holds one of them in a register or in the frame, and reads the other
+   * out of that to compare it. On a loop that walks a field value's limbs
+   * comparing each limb against another, that is three instructions and two
+   * vector register moves out of five instructions and two moves.
+   *
+   * Which side it is that is carried is not a choice about which side is
+   * cheaper. `UCOMISD` compares its destination against its source, and the two
+   * forms this serves disagree about which side they put in the destination: a
+   * comparison that answers a branch holds the right side in the destination,
+   * and one that answers a number holds the left side there. Each of them names
+   * memory as the source and so compares the two sides in the order the general
+   * form would have, which is what leaves every condition read after it exactly
+   * as it was.
+   */
+  private carriedOperand(value: SemanticValue, type: SemanticType): Memory | null {
+    if (value.k !== "element") return null;
+    const element = elementTypeOf(value.of.type) ?? value.type;
+    // A use that widens what the array holds is a conversion the instruction has
+    // none of, so it is left to the general form rather than read at the wrong
+    // width.
+    if (!typeEquals(element, value.type)) return null;
+    if (!typeEquals(element, type)) return null;
+    return this.elementAddress(value.of, value.index, element);
   }
 
   /**
@@ -5226,6 +5351,19 @@ class Machine {
       this.normalize(value.type);
       return;
     }
+    // An other side the comparison reads where it lies, for the same reason as
+    // the branch above and in the same operand order as the general form just
+    // below it: here the left side is the destination and the other one is the
+    // source, which is the other way round from the branch, where the side held
+    // is the destination.
+    const carried = isFloat(type) ? this.carriedOperand(value.right, type) : null;
+    if (carried !== null) {
+      this.at(value.left, type);
+      this.code.sseCompare(XMM0, carried, widthOf(type) === 4, true);
+      this.floatCondition(value.op);
+      this.normalize(value.type);
+      return;
+    }
     const right = this.hold(type, "blaze_right");
     this.at(value.right, type);
     this.store(right);
@@ -5234,6 +5372,45 @@ class Machine {
     // to a slot and reading it back is two instructions that answer nothing.
     this.compare(type, value.op, right);
     this.normalize(value.type);
+  }
+
+  /**
+   * The number a float comparison answers, taken from the flags it left.
+   *
+   * The conditions are the unordered ones the instruction raises the parity bit
+   * for, and every comparison of a value that is not a number is false whichever
+   * way it is read: a pair of them is excluded rather than let through as an
+   * answer, and `!=` is the one operator where a value that is not a number
+   * really is different from the other side.
+   */
+  private floatCondition(op: CompareOp): void {
+    switch (op) {
+      case "lt":
+      case "le":
+        this.code.setcc(op === "lt" ? "b" : "be", RAX);
+        this.code.setcc("np", RCX);
+        this.code.alu8("and", RAX, RCX);
+        break;
+      case "gt":
+        this.code.setcc("a", RAX);
+        break;
+      case "ge":
+        this.code.setcc("ae", RAX);
+        break;
+      case "eq":
+        // Equal and ordered: a value that is not a number compares equal to
+        // nothing at all, and the parity bit is what says so.
+        this.code.setcc("e", RAX);
+        this.code.setcc("np", RCX);
+        this.code.alu8("and", RAX, RCX);
+        break;
+      case "ne":
+        this.code.setcc("ne", RAX);
+        this.code.setcc("p", RCX);
+        this.code.alu8("or", RAX, RCX);
+        break;
+    }
+    this.code.movzxReg8(RAX, RAX);
   }
 
   /**
@@ -5735,7 +5912,14 @@ class Machine {
     // takes the general form, which converts it into the accumulator first,
     // unless the loop that counts it holds the same number in a register of its
     // own, which is what an index is then read out of.
-    if (isFloat(held.type)) return held.index === null ? null : { offset: 0, type: USIZE, register: held.index, index: null };
+    if (isFloat(held.type)) {
+      if (held.index === null) return null;
+      // A value of its own rather than the counter's own identity: it stands in
+      // for the index register and not for the counter, and a note about what
+      // the accumulator holds must not answer a read of the counter with it.
+      this.heldCount += 1;
+      return { id: this.heldCount, offset: 0, type: USIZE, register: held.index, index: null };
+    }
     if (held.register !== null) return held;
     return widthOf(held.type) !== 8 ? null : held;
   }
@@ -5804,9 +5988,13 @@ class Machine {
     const base = typeof sequence === "string" ? this.slot(sequence) : sequence.k === "local" ? this.slot(sequence.name) : null;
     // The sequence is a pointer wherever it came from: an array reaches a
     // function as a pointer to its elements, so it is one whole-register read.
-    if (base === null || base.register === null || widthOf(base.type) !== 8 || isFloat(base.type)) return null;
+    if (base === null || base.register === null || widthOf(base.type) !== 8 || isFloat(base.type)) {
+      if (process.env.BLAZE_DBG) console.error(`elementAddress ${this.fn.symbol} base=${typeof sequence === "string" ? sequence : sequence.k} index=${index.k === "local" ? index.name : index.k} -> null(base)`);
+      return null;
+    }
     const register = base.register;
     const at = this.plainIndex(index);
+    if (process.env.BLAZE_DBG) console.error(`elementAddress ${this.fn.symbol} base=${typeof sequence === "string" ? sequence : sequence.k} index=${index.k === "local" ? index.name : index.k} baseReg=${register} at=${at === null ? "null" : typeof at === "bigint" ? String(at) : `reg${at.register}/off${at.offset}`}`);
     if (at === null) return null;
     if (typeof at === "bigint") {
       const offset = at * BigInt(scale);

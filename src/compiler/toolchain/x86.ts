@@ -308,6 +308,22 @@ export class Encoder {
   private pendingBinds = 0;
   private binds = 0;
 
+  /**
+   * Told that a name has been bound to the place the code has reached.
+   *
+   * A bound name is a place control can arrive at from somewhere other than the
+   * instruction in front of it — the target of a jump, and a loop header that
+   * is entered again on its second turn — so whatever a caller worked out about
+   * the state of the machine at the end of the instruction before it holds only
+   * on the path that fell through, and not at all on the way back round.
+   *
+   * This is how that caller is told rather than by its counting instructions. A
+   * jump written and then taken back out moves no code at all, so a count reads
+   * a closed loop as though nothing had happened on it, and a jump is exactly
+   * what closes one.
+   */
+  onBind: (() => void) | null = null;
+
   /** Binds a name to the place the code has reached. */
   bind(name: string): void {
     // A jump to the address this binds is a jump to the instruction after it:
@@ -325,6 +341,7 @@ export class Encoder {
     }
     this.binds += 1;
     this.labels.set(name, this.code.length);
+    this.onBind?.();
   }
 
   /**
@@ -1173,10 +1190,17 @@ export class Encoder {
    * ordered one raises the parity bit on operands that are not numbers, which
    * is what keeps every comparison of a NaN false.
    */
-  sseCompare(destination: number, source: number, single: boolean, ordered: boolean): void {
+  sseCompare(destination: number, source: number | Memory, single: boolean, ordered: boolean): void {
     // The comparison of two doubles is the one that takes the operand size
     // prefix; the comparison of two single precision values is the one that
     // does not.
+    //
+    // The source may be an address, because a comparison reads its source and
+    // writes no register but the flags: one that is already in memory is
+    // compared where it lies rather than through a copy of it in a register. The
+    // destination still has to be a register, and what is in it does not matter
+    // — which is what lets the side that is in memory be the one a caller wants
+    // it to be without either side being moved.
     if (!single) this.byte(0x66);
     this.rex(false, destination, source);
     this.byte(0x0f);
