@@ -253,6 +253,40 @@ test("a turn that hands what it built to a function that hands an alias back may
   assert.equal(onlyLoop(fn).region, undefined);
 });
 
+test("a turn that hands what it built to a function that forwards it may not", () => {
+  // The callee keeps what it is given by passing it to another function, and
+  // that other function stores it. The escape walk read calls written as
+  // statements and continued past a call written as a value, so `held =
+  // store(node)` was answered as keeping nothing and the loop was marked for a
+  // reuse that writes over a block the caller still holds.
+  const store = reader("store");
+  store.entry = {
+    id: "entry",
+    statements: [{ k: "set", line: 1, name: "slot", op: "=", value: { k: "local", type: REF, name: "node" } }],
+    releases: [],
+    terminator: { k: "return", value: null },
+  };
+  const forwarder = reader("forwarder");
+  forwarder.entry = {
+    id: "entry",
+    statements: [{ k: "call", line: 1, call: (callValue("store", [{ k: "local", type: REF, name: "node" }]) as Extract<SemanticValue, { k: "call" }>).call }],
+    releases: [],
+    terminator: { k: "return", value: null },
+  };
+  const asValue = reader("asValue");
+  asValue.entry = {
+    id: "entry",
+    statements: [{ k: "set", line: 1, name: "held", op: "=", value: callValue("store", [{ k: "local", type: REF, name: "node" }]) }],
+    releases: [],
+    terminator: { k: "return", value: null },
+  };
+  for (const [name, callee] of [["store", store], ["forwarder", forwarder], ["asValue", asValue]] as const) {
+    const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("keeper", [{ k: "local", type: REF, name: "tree" }]))]));
+    markRegionLoops(fn.entry, new Map([["keeper", callee], ["store", store]]));
+    assert.equal(onlyLoop(fn).region, undefined, `a callee that forwards through ${name} keeps what it is given`);
+  }
+});
+
 test("a turn that hands what it built to a function this build does not hold may not", () => {
   // A body nobody has read is a body that might keep anything.
   const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("unknown", [{ k: "local", type: REF, name: "tree" }]))]));

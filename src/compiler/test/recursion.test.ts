@@ -310,6 +310,33 @@ test("a recursion with effects of its own keeps them", () => {
   assert.deepEqual(namesIn(loop.body.statements).slice(-4), ["blaze_arg1", "blaze_arg2", "n", "acc"]);
 });
 
+test("a base case answering with a name a turn writes keeps its frames", () => {
+  // The loop leaves the function holding what the base case answered, and it is
+  // read where the base case was — after every turn has run. A name the turns
+  // write holds what the last turn left there rather than what the base case
+  // read, so an answer reading one is a different number: this body answers 0
+  // and was rewritten to answer 5.
+  const source = library(
+    [
+      "function clash(n: number): number {",
+      "  let y = 0;",
+      "  if (n <= 0) {",
+      "    return y;",
+      "  }",
+      "  y = 5;",
+      "  return clash(n - 1);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(callsItself(answered(source, "clash")), true, "the body keeps its frames");
+  assert.equal(
+    recursionRefusal(bodiesOf(source).get("clash") as SemanticFunction),
+    'the base case answers with "y", which a turn writes',
+    "the refusal says which name the answer cannot read",
+  );
+});
+
 test("a body with a second call of itself carries both", () => {
   const source = library(
     [

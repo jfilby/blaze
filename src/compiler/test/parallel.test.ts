@@ -235,6 +235,33 @@ test("a loop reading a written array at another index is not marked", () => {
   assert.equal(onlyLoop(fn).parallel, undefined);
 });
 
+test("a write through a name bound to a written array is not marked", () => {
+  // The element rule reads a buffer by the name it was written under, so a
+  // write at `mine[i]` and a read at `out[j]` were two buffers rather than one:
+  // every turn writes its own element of the same array, and a read at an index
+  // of its own meets what another turn wrote.
+  const fn = functionWith(
+    countedLoop([
+      {
+        k: "let",
+        line: 2,
+        slot: { kind: "value", name: "mine", mutable: false, type: { kind: "array", of: F64, length: 4 } },
+        value: { k: "local", type: { kind: "array", of: F64, length: 4 }, name: "out" },
+      },
+      { k: "setElement", line: 3, buffer: "mine", index: { k: "local", type: USIZE, name: "i" }, op: "=", value: { k: "local", type: F64, name: "x" } },
+      {
+        k: "let",
+        line: 4,
+        slot: { kind: "value", name: "neighbour", mutable: false, type: F64 },
+        value: { k: "element", type: F64, of: { k: "local", type: { kind: "array", of: F64, length: 4 }, name: "out" }, index: { k: "local", type: USIZE, name: "j" } },
+      },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry);
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
 test("a loop that allocates is marked, because the allocator pools per thread", () => {
   const fn = functionWith(
     countedLoop([

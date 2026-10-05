@@ -1135,6 +1135,25 @@ class FunctionEmitter {
   private number(read: string, type: SemanticType | null): { text: string; length: string } {
     const buffer = this.temporary("blaze_number");
     const written = this.temporary("blaze_written");
+    // A wide number is four limbs and not one integer, so it is formatted by the
+    // kernel that already reads one: the machine-integer path below casts it to
+    // `unsigned long long`, which is a C error rather than a number, so a program
+    // printing or interpolating one did not build.
+    if (type !== null && isWideType(type)) {
+      this.pending.push(`char ${buffer}[80];`);
+      this.pending.push(`size_t ${written};`);
+      // The value is bound before the kernel is handed a pointer to it, because
+      // a compound literal and a call answer are rvalues and `&` of either is a C
+      // error. A call that ran once per use of the value is bound for the same
+      // reason the whole-number path binds it.
+      const wide = this.temporary("blaze_wide_value");
+      return {
+        text:
+          `({ blaze_u256 ${wide} = ${read}; ${written} = ${RUNTIME_NAME}_u256_format(&${wide}, 10u, ` +
+          `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`,
+        length: written,
+      };
+    }
     if (type !== null && isInteger(type)) {
       // A whole number is written by dividing it by ten, not by handing it to
       // snprintf: a locale-aware printf call is a dozen instructions more than

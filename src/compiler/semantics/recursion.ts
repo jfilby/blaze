@@ -222,10 +222,22 @@ function readPlan(fn: SemanticFunction): Plan | Refusal {
     if (answer !== null && answer.k === "call" && answer.call.callee === fn.name) continue;
 
     const turns = [...statements.slice(0, at), ...statements.slice(at + 1)];
+    const written = namesWrittenIn(turns);
     if (testEffect(test.condition)) return "the test that ends the recursion runs something of its own";
     const read = namesReadBy(test.condition);
-    for (const name of namesWrittenIn(turns)) {
+    for (const name of written) {
       if (read.has(name)) return `the test that ends the recursion reads "${name}", which a turn writes`;
+    }
+    // The loop leaves the function holding what the base case answered, and the
+    // answer is read where the base case was — after every turn has run. A name
+    // the turns write holds whatever the last turn left there, not what the base
+    // case read, so an answer reading one is a different number. A parameter is
+    // not caught by this and does not need to be: the parameters a turn writes
+    // are written from the arguments the call carried, so the loop leaves them
+    // holding the values the base case was called with, which is what that call
+    // read.
+    for (const name of answer === null ? [] : namesReadBy(answer)) {
+      if (written.has(name)) return `the base case answers with "${name}", which a turn writes`;
     }
     return { turns, guard: test.condition, answer };
   }
@@ -547,6 +559,8 @@ function namesWrittenIn(statements: readonly SemanticStatement[]): Set<string> {
       if (statement.k === "let") names.add(statement.slot.name);
       else if (statement.k === "set" || statement.k === "step") names.add(statement.name);
       else if (statement.k === "setElement") names.add(statement.buffer);
+      else if (statement.k === "fill") names.add(statement.buffer);
+      else if (statement.k === "storeField") for (const name of namesReadBy(statement.object)) names.add(name);
     }
   }
   return names;

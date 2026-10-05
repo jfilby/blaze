@@ -349,13 +349,24 @@ function countsWhole(value: DraftValue): boolean {
  * language's own rule, which keeps a whole pair unsigned, would answer a very
  * large unsigned number. `core/semantic-ir.ts:wholeOf` is that rule, and is
  * what a contract is evaluated with.
+ *
+ * That exception is about signedness and says nothing about width, so it is
+ * asked only of a pair that has a length in it. Answering it by the first
+ * signed name present made `u32 << i8` an `i8` — a 32 bit value computed at
+ * eight, with its high bits gone before the shift — and every `>>`, `&`, `|`,
+ * `^` and `%` over a mixed pair with the narrow side signed.
  */
 function programWholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTypeName {
   if (a === b) return a;
-  for (const signed of ["i64", "isize", "i32", "i16", "i8"]) {
-    if (a === signed || b === signed) return signed as PrimitiveTypeName;
-  }
+  const names: readonly PrimitiveTypeName[] = [a, b];
+  const length = names.some((name) => name === "usize" || name === "isize");
+  if (length && names.some((name) => name !== "usize" && name !== "isize" && isSigned(name))) return "isize";
   return wholeOf(a, b);
+}
+
+/** Whether a whole number is a signed one, which is what a length meets. */
+function isSigned(name: PrimitiveTypeName): boolean {
+  return name === "i8" || name === "i16" || name === "i32" || name === "i64" || name === "isize";
 }
 
 
@@ -3190,7 +3201,12 @@ function readsArgvOf(block: SemanticBlock): boolean {
     }
     for (const nested of statementBlocksOf(statement)) if (readsArgvOf(nested)) return true;
   }
-  return false;
+  // What a block answers is a value of the block like any other, and a function
+  // that reads the command line only to answer it reads it: `return
+  // Number(process.argv[1])`. Leaving the terminator out is what answered "this
+  // body has no effect" for it, and a body with no effect is one a caller may
+  // run on two threads and one the inliner may fold into either.
+  return block.terminator.k === "return" && block.terminator.value !== null && printsValue(block.terminator.value);
 }
 
 /** Every call a body makes, in the order it first makes each. */

@@ -3,25 +3,19 @@
  *
  * A build reuses what an earlier build already proved. What makes a stored
  * implementation reusable is a key over everything that determines it: the
- * contract of the function itself, the ABI of every other function of the
- * program, the target, the output and runtime kinds, the test and benchmark
+ * contract of the function itself, the definition of every function it reaches,
+ * the target, the output and runtime kinds, the test and benchmark
  * configuration, the model, the compiler version, and a hash of the compiler's
  * own sources. A key that still matches means the stored object was built from
  * exactly the same inputs, so it is linked again as it stands rather than
  * resolved, assembled and verified once more.
  *
- * A key covers the ABI of the other functions rather than their whole
- * contracts, because an object only depends on what it is linked against: a
- * callee whose body changed is regenerated, and the caller that calls its
- * symbol is not. A signature or an object layout is part of the ABI, so a
- * change to either does invalidate the caller, which is the one change that
- * can break an object that is not rebuilt.
- *
- * A callee whose body this one writes out rather than calls is the exception,
- * and the key follows the outline's decision: that body would be inside this
- * object, so its whole definition is part of the key rather than its ABI
- * alone. Without that, a fix to a callee would rebuild the callee and leave
- * every caller keyed against the body it was given before the fix.
+ * What that covers is wider than the text inside this object. Deciding whether a
+ * loop of this function may run its turns on more than one thread, and whether a
+ * turn may rewind the storage it allocated, is read out of the bodies this
+ * function calls: keying a caller on a callee's ABI alone left its stored
+ * object holding a threaded loop over a callee that had been edited into one
+ * that writes, and that object is the one the build links and delivers.
  *
  * The record is one file that a build adds each function to as soon as that
  * function is verified, so a build that fails on a later function still leaves
@@ -33,10 +27,8 @@
  */
 
 import { hashValue, type JsonStore } from "./core/json-store.ts";
-import { contractsByName, writtenOut } from "./semantics/calls.ts";
-import { inlineRefusal } from "./semantics/repair.ts";
+import { contractsByName } from "./semantics/calls.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
-import type { SemanticFunction } from "./core/semantic-ir.ts";
 import type {
   Candidate,
   BackendKind,
@@ -111,18 +103,9 @@ export interface UnitKeyInput {
    * candidates an earlier build reviewed.
    */
   review: string;
+
   /** The sources that decide what the IR is lowered into. */
   lowering: string;
-  /**
-   * Every function of the program as the IR holds it. A build folds each
-   * candidate through `inlineCalls` before it lowers it, so what lands inside
-   * the object is decided by `inlineRefusal` and not by the call strategy
-   * alone, and the key has to ask the same question the fold does. A caller
-   * that does not resolve the IR passes nothing, which is the answer that keys
-   * this function on no extra body: the direction that discards work rather
-   * than keeping an object whose inlined body has moved.
-   */
-  semantics?: ReadonlyMap<string, SemanticFunction>;
 }
 
 /**
@@ -139,19 +122,44 @@ export interface UnitKeys {
 }
 
 /**
- * What another function of the program contributes to this one: the ABI of a
- * function this one calls, and the body of a function this one writes out.
+ * What another function of the program contributes to this one.
  *
- * A call is a symbol, so a callee's implementation cannot change what the
- * caller's object does and only its signature and object layouts matter. A
- * body written out is the opposite: the text of the callee is inside the
- * caller's object, so a callee whose body changes leaves a stored caller
- * holding the old one, and the caller has to be regenerated. That is the whole
- * reason the strategy is read here rather than treated as a note on the graph.
+ * The ABI of a function — its signature and its object layouts — is what an
+ * object is linked against, so a change to either is a change to this one.
+ *
+ * Its whole definition is here as well, and not only for a callee this one
+ * writes out: the compiler *reads* the bodies a function calls when it decides
+ * what this function's own IR is. `optimizeSemanticFunction` asks
+ * `parallel.ts` and `region.ts` whether a loop's turns may run at once and
+ * whether a turn may rewind its region, and both answers are read out of the
+ * bodies this function calls. A callee edited into one that writes or one that
+ * keeps what it is given therefore removes a mark from this function's loops, and
+ * the C backend writes `#pragma omp parallel for` or a region enter and leave
+ * because of it — so the stored object of this function is a different program
+ * from the one the edited source describes, and it is the one that gets linked.
  */
 function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
   const abi = { function: contract.function, objects: contract.definition.objects };
   return holdsTheBody ? { ...abi, definition: contract.definition } : abi;
+}
+
+/**
+ * Every function whose body this one's own IR is decided against: itself, and
+ * everything it reaches through a call, whatever the call strategy is.
+ */
+function bodiesRead(contracts: ReadonlyMap<string, FunctionContract>, contract: FunctionContract): Set<string> {
+  const read = new Set<string>();
+  const stack = [contract];
+  while (stack.length > 0) {
+    const current = stack.pop() as FunctionContract;
+    if (read.has(current.function.name)) continue;
+    read.add(current.function.name);
+    for (const edge of current.definition.calls) {
+      const reached = contracts.get(edge.callee);
+      if (reached !== undefined) stack.push(reached);
+    }
+  }
+  return read;
 }
 
 /**
@@ -162,32 +170,18 @@ function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
 export function unitKeys(input: UnitKeyInput): UnitKeys {
   const own = input.contract.function.name;
   const contracts = contractsByName(input.program.files);
-  // The whole closure, not the direct callees: a body written out carries the
-  // calls it made, so what ends up inside this object is everything below it.
-  const closure = writtenOut(contracts, input.contract);
-  const written = new Set(
-    closure.map((contract) => contract.function.name).filter((name) => name !== own),
-  );
-  // What the fold writes into the object beside what the outline does. The two
-  // rules do not answer the same question: the outline refuses to write out a
-  // callee that states what it returns, because a copy of a proved body is a
-  // body nothing has proved, and the fold has no such rule. A callee the
-  // outline calls and the fold can inline is therefore a body this object
-  // carries, and the key has to carry it too — or an edit to that body rebuilds
-  // the callee and leaves this caller holding the copy it was given before the
-  // edit, which is the whole reason the body of a written-out callee is here at
-  // all. Only a direct callee is asked: an inlined body holds no call of its
-  // own, so nothing below one can be inlined into it either.
-  for (const body of closure) {
-    for (const edge of body.definition.calls) {
-      const callee = edge.strategy === "inline" ? undefined : input.semantics?.get(edge.callee);
-      if (callee !== undefined && inlineRefusal(callee) === null) written.add(edge.callee);
-    }
-  }
+  // Every body this function's own IR is decided against, and not only the ones
+  // whose text lands inside this object: `parallel.ts` and `region.ts` read the
+  // bodies a function calls to decide whether its loops may be threaded and
+  // whether a turn may rewind, so a callee whose body changed changes what is
+  // emitted here even though its text is nowhere in this object. Keying on the
+  // ABI alone left the stored object of a caller holding a loop that is threaded
+  // over a callee that no longer can be.
+  const read = bodiesRead(contracts, input.contract);
   const others = input.program.files
     .flatMap((file) => Object.entries(file.functions))
     .filter(([name]) => name !== own)
-    .map(([name, contract]): readonly [string, unknown] => [name, abiOf(contract, written.has(name))])
+    .map(([name, contract]): readonly [string, unknown] => [name, abiOf(contract, read.has(name))])
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   const review = hashValue({
     contract: input.contract,

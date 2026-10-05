@@ -111,33 +111,27 @@ test("an edit to the lowering leaves the review standing and the object behind",
   assert.notEqual(reviewed.object, before.object, "an edit to the review left the object key alone");
 });
 
-test("a callee whose body changed does not invalidate the caller", () => {
-  // The caller is linked against the callee's ABI, and a body is not part of
-  // it: the callee is regenerated, and the object that calls it still is right.
-  const before = programOf(contractOf("main", "f64"), contractOf("helper", "f64"));
-  const after = programOf(contractOf("main", "f64"), { ...contractOf("helper", "f64"), ensures: ["result == (x + 1)"] });
-  assert.equal(keyOf({ program: after }).review, keyOf({ program: before }).review);
-});
-
-test("a callee the fold writes into the caller is keyed on its body", () => {
-  // Two rules answer what may be put where a call was written, and they are not
-  // the same rule: the outline refuses to write out a callee that states what it
-  // returns, because a copy of a proved body is a body nothing has proved, and
-  // the fold a build runs over every candidate before lowering it has no such
-  // rule. So the object of `use` carries the body of `scale` even though the
-  // outline calls it, and a key that followed the outline alone left that body
-  // out: editing `scale` rebuilt `scale` and delivered the caller holding the
-  // copy it was given before the edit.
-  const keyFor = (scaleBody: string): string => {
-    const { program, semantics } = programWithSemantics(
+test("a callee whose body changed invalidates the caller", () => {
+  // The key covers more than what this object is linked against. Whether a loop
+  // of this function may run its turns on more than one thread, and whether a
+  // turn may rewind the storage it allocated, is read out of the bodies this
+  // function calls, so an edit to one of them changes what is emitted here: the
+  // stored object of a caller keyed on a callee's ABI alone was a threaded loop
+  // over a callee that had been edited into one that writes.
+  //
+  // Both callees are here because the two rules that read a body are not the same
+  // rule: a callee the fold can inline is written into this object, and one it
+  // cannot is still read by the analyses that mark this caller's own loops.
+  const keyFor = (callee: readonly string[], calleeBody: string): string => {
+    const { program } = programWithSemantics(
       "typescript",
       {
         "main.ts": [
-          `export function scale(n: number): number {`,
-          `  return ${scaleBody};`,
+          ...callee,
+          `  return ${calleeBody};`,
           `}`,
           `export function use(n: number): number {`,
-          `  return scale(n);`,
+          `  return helper(n);`,
           `}`,
           `use(2);`,
           ``,
@@ -145,44 +139,16 @@ test("a callee the fold writes into the caller is keyed on its body", () => {
       },
       "main.ts",
     );
-    return unitKeys({
-      ...INPUT,
-      contract: program.files[0].functions.use,
-      program,
-      semantics: new Map(Object.entries(semantics)),
-    }).review;
+    return unitKeys({ ...INPUT, contract: program.files[0].functions.use, program }).review;
   };
-
-  // `scale` states what it returns, so the outline calls it...
-  assert.notEqual(keyFor("n * 2"), keyFor("n * 3"), "an edit to an inlined body left the caller's key alone");
-  // ...and a callee the fold refuses still contributes its ABI alone, which is
-  // what keeps the cache from being thrown away on every edit to a callee.
-  const printing = (body: string): string => {
-    const { program, semantics } = programWithSemantics(
-      "typescript",
-      {
-        "main.ts": [
-          `function noisy(n: number): number {`,
-          `  console.log(\`x\`);`,
-          `  return ${body};`,
-          `}`,
-          `export function use(n: number): number {`,
-          `  return noisy(n);`,
-          `}`,
-          `use(2);`,
-          ``,
-        ].join("\n"),
-      },
-      "main.ts",
-    );
-    return unitKeys({
-      ...INPUT,
-      contract: program.files[0].functions.use,
-      program,
-      semantics: new Map(Object.entries(semantics)),
-    }).review;
-  };
-  assert.equal(printing("n * 2"), printing("n * 3"), "a callee that cannot be inlined was keyed on its body");
+  const plain = ["function helper(n: number): number {"];
+  const printing = ["function helper(n: number): number {", "  console.log(`x`);"];
+  assert.notEqual(keyFor(plain, "n * 2"), keyFor(plain, "n * 3"), "an edit to a called body left the caller's key alone");
+  assert.notEqual(
+    keyFor(printing, "n * 2"),
+    keyFor(printing, "n * 3"),
+    "an edit to a callee that cannot be inlined left the caller's key alone",
+  );
 });
 
 test("a callee whose signature or object layout changed invalidates the caller", () => {

@@ -14,10 +14,11 @@ import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { validateCSource } from "../toolchain/csource.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { run } from "../core/process.ts";
-import type { ObjectLayout } from "../core/types.ts";
+import type { FunctionContract, ObjectLayout } from "../core/types.ts";
 import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 import { scratch } from "./scratch.ts";
 
@@ -58,6 +59,42 @@ function runs(statements: SemanticBlock["statements"]): SemanticBlock {
 }
 
 const local = (name: string, type: SemanticType = F64): SemanticValue => ({ k: "local", type, name });
+
+test("a candidate reaching for inline assembly is refused however it spells it", () => {
+  // The C a candidate delivers is compiled by the C compiler, which reads
+  // `asm`, `__asm` and `__asm__` as the same keyword and takes whitespace before
+  // its parenthesis. A scan for one spelling let the others through to the
+  // compiler, which is the one thing the subset exists to keep out.
+  const contract: FunctionContract = {
+    version: "1",
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    function: { name: "f", symbol: "blaze_f", params: [{ name: "x", type: "f64" }], returns: "f64" },
+    optimize: { primary: "latency", secondary: "size" },
+    effects: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    requires: [],
+    ensures: [],
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  };
+  for (const spelling of [
+    `asm ("nop");`,
+    `asm("nop");`,
+    `asm volatile ("nop");`,
+    `__asm ("nop");`,
+    `__asm__("nop");`,
+  ]) {
+    const source = `double blaze_f(double x) { ${spelling} return x; }`;
+    assert.throws(
+      () => validateCSource(source, contract),
+      (error: unknown) => {
+        assert.match((error as { detail?: string }).detail ?? "", /inline assembly is not allowed/);
+        return true;
+      },
+      `"${spelling}" must be refused`,
+    );
+  }
+  validateCSource("double blaze_f(double x) { return x + 1; }", contract);
+});
 
 /** A call to `f`, which the driver counts, so a value written twice shows. */
 const counted = (): SemanticValue => ({

@@ -89,6 +89,24 @@ test("a loop that counts down ends rather than counting past its bound", async (
   );
 });
 
+test("a loop counts from the name its own index shadows", async () => {
+  // The prologue declares the index in the block the body is, and the bound and
+  // the start are read where the source wrote them: a local declared and not yet
+  // written is a zero, so a prologue that declared the index first started this
+  // loop at zero and answered the sum of 0, 1 and 2 rather than of 10, 11 and 12.
+  await compute(
+    "n: number",
+    [
+      "  let limit = 10;",
+      "  let total = 0;",
+      "  for (let limit = limit; limit < 13; limit += 1) { total += limit; }",
+      "  return total;",
+    ],
+    "run\n0\n",
+    "RESULT 33\n",
+  );
+});
+
 test("a statement that reads a name into itself leaves the ones around it alone", async () => {
   // `x = x` is the one statement whose read and write cancel: the value is
   // already on the stack, so both instructions go and one name is left. Where

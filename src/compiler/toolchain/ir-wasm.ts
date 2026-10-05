@@ -1607,6 +1607,29 @@ class Body {
     const offset = this.borrow(I32);
     const address = this.borrow(I32);
     const limbValue = this.borrow(I64);
+    // A count of two hundred and fifty six bits or more moves every limb of the
+    // number off the end, and the answer is a whole number of zero limbs. The
+    // walk cannot reach that answer on its own: the padded run holds a limb and
+    // a half on each side of the copy, which covers every count below the width
+    // and none above it, so the count the walk is given is held below the width
+    // — which keeps every address inside the run whatever the count was — and
+    // what the walk made of it is masked away.
+    const bounded = this.borrow(I32);
+    this.localAt(countAt);
+    this.i32(255);
+    this.localAt(countAt);
+    this.i32(256);
+    this.op(0x49); // `i32.lt_u`
+    this.op(0x1b); // `select`
+    this.keep(bounded);
+    const mask = this.borrow(I64);
+    this.i64(-1n);
+    this.i64(0n);
+    this.localAt(countAt);
+    this.i32(256);
+    this.op(0x49); // `i32.lt_u`
+    this.op(0x1b); // `select`
+    this.keep(mask);
     // Ninety-six bytes: a limb of zero on each side of the four that are copied
     // in, so a count that moves the walk off either end still reads a limb
     // rather than a neighbour of the copy.
@@ -1634,7 +1657,7 @@ class Body {
     // so the limb it reads is `k` below the one being written, and the index
     // only counts up, so `k` is negated here rather than at every use.
     if (op === "shl") this.i32(0);
-    this.localAt(countAt);
+    this.localAt(bounded);
     this.i32(6);
     this.op(0x76); // `i32.shr_u`
     this.i32(3);
@@ -1644,7 +1667,7 @@ class Body {
     // after it.
     if (op === "shl") this.op(0x6b); // `i32.sub`
     this.keep(offset);
-    this.localAt(countAt);
+    this.localAt(bounded);
     this.i32(63);
     this.op(0x71); // `i32.and`
     this.keep(bits);
@@ -1700,11 +1723,14 @@ class Body {
       this.op(0x1b); // `select`
       this.localAt(limbValue);
       this.op(0x84); // `i64.or`
+      this.localAt(mask);
+      this.op(0x83); // `i64.and`
       this.op(0x37); // `i64.store`
       this.code.varuint(3);
       this.code.varuint(0);
     }
-    for (const at of [valueAt, countAt]) this.release(I32, at);
+    for (const at of [valueAt, countAt, bounded]) this.release(I32, at);
+    this.release(I64, mask);
     this.i32(out);
   }
 
@@ -2177,22 +2203,31 @@ class Body {
     let end = -1;
     if (loop.kind === "counted") {
       const held = facts(loop.type).held;
-      this.holdLocal(loop.variable, loop.type);
+      // The bound, the step and the index it starts at are read before the index
+      // is declared, because after it the name resolves to the loop's own
+      // declaration: a loop counting from `for (let limit = limit; ...)` reads
+      // the `limit` around it, and a local declared and not yet written is a
+      // zero. The C backend reads them in this order for the same reason.
       bound = this.borrow(held);
       this.value(loop.to, loop.type);
       this.keep(bound);
       step = this.borrow(held);
       this.countedStep(loop);
       this.keep(step);
+      const start = this.borrow(held);
+      this.value(loop.from, loop.type);
+      this.keep(start);
+      this.holdLocal(loop.variable, loop.type);
       // A counted loop moves its index at the head of the turn rather than at
       // the foot, because a `continue` branches to the head: a step at the foot
       // is a step a `continue` skips, and a loop whose index never moves is a
       // loop that never ends. The turn before the first is a turn of its own,
       // so the index starts one step short of the value the source wrote.
-      this.value(loop.from, loop.type);
+      this.read(start);
       this.read(step);
       this.op(BINARY[held].sub as number);
       this.set(loop.variable);
+      this.release(held, start);
     }
     if (loop.kind === "each") {
       // A for-of walks a buffer by a cursor: the index of the element the turn

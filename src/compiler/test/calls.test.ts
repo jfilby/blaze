@@ -217,14 +217,18 @@ test("a caller's stored object is keyed on the body of a callee it writes out", 
   assert.notEqual(before, after);
 });
 
-test("a caller's stored object is keyed on the body of a callee it calls", () => {
-  // The converse, and the reason the two tests are a pair: a callee that is
-  // called by symbol is not in the caller's object, so a change to what it
-  // does rebuilds it and leaves the caller reusable. Keying on every callee's
-  // body would make each fix invalidate the whole program behind it.
+test("a caller's stored object is keyed on the body of a callee it calls too", () => {
+  // The text of a called callee is not inside the caller's object, but the
+  // compiler reads that body when it decides what the caller's own IR is:
+  // `parallel.ts` and `region.ts` mark the caller's loops by reading the
+  // functions they call. A callee edited into one that writes, or one that keeps
+  // what it is given, therefore changes what is emitted for the caller, and a
+  // key that stopped at the ABI left the caller linked with the object it was
+  // built from before the edit — a threaded loop over a callee that may not be
+  // threaded, and a rewind over a block that is still held.
   const before = keyOf(overCallee(["  return n * 2;"]), "report", "main.ts");
   const after = keyOf(overCallee(["  return n * 3;"]), "report", "main.ts");
-  assert.equal(before, after);
+  assert.notEqual(before, after);
 });
 
 test("what a candidate has to write out is the whole closure, not the direct callees", () => {

@@ -1157,6 +1157,89 @@ test("the backends write a whole number as the same limbs in the same order", ()
   assert.equal(wasmBackendAnswer("add", left, "0".repeat(64)), expected, "the WebAssembly backend writes the limbs least significant first");
 });
 
+test("a wide shift count of the width or more answers zero rather than walking off the number", () => {
+  // The C runtime answers a count of the width or more with a whole number of
+  // zero limbs, and the language agrees: nothing of the number survives a move
+  // past its own width. The WebAssembly backend walked a padded copy of the
+  // number instead, and the padding covers a count below the width and nothing
+  // above it, so such a count read outside the module's memory and the module
+  // trapped rather than answering.
+  const left = "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
+  const value = BigInt(`0x${left}`);
+  for (const op of ["shl", "shr"] as const) {
+    for (const count of [0, 63, 64, 65, 255, 256, 257, 320, 1000]) {
+      const answer = wasmAnswerOf({
+        k: "arith",
+        type: U256,
+        op,
+        left: { k: "const", type: U256, text: `0x${left}` },
+        right: { k: "const", type: { kind: "primitive", name: "usize" }, text: String(count) },
+      });
+      const expected = count >= 256 ? 0n : op === "shl" ? (value << BigInt(count)) & MODULUS : value >> BigInt(count);
+      assert.equal(answer, expected.toString(16).padStart(64, "0"), `the WebAssembly backend's ${op} of a number by ${count}`);
+    }
+  }
+});
+
+
+test("the C backend writes a wide number the program printed", async () => {
+  // A whole number is written as the integer it is, and the machine-integer path
+  // casts to `unsigned long long` — which is a C error over four limbs rather
+  // than a number, so a program printing or interpolating a wide number did not
+  // build at all.
+  const U = U256;
+  const value: SemanticValue = {
+    k: "arith",
+    type: U,
+    op: "add",
+    left: { k: "const", type: U, text: "0x0123456789abcdeffedcba9876543210" },
+    right: { k: "const", type: U, text: "0x1" },
+  };
+  const directory = await scratch("blaze-u256-print-c-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("danger"), "utf8");
+  const subject = generateFunctionC({
+    name: "subject",
+    symbol: "subject",
+    params: [],
+    returns: U,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: true,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [{ k: "printNumber", value, line: 1 }],
+      releases: [],
+      terminator: { k: "return", value: { k: "const", type: U, text: "0x0" } },
+    },
+  });
+  await writeFile(
+    join(directory, "print.c"),
+    ["#include <stdio.h>", subject, "int main(void) { subject(); return 0; }", ""].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "print");
+  const built = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "print.c"), join(directory, "runtime.c"), "-o", binary],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(built.code, 0, `the C must build:\n${built.stderr}`);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(
+    result.stdout,
+    `${BigInt("0x0123456789abcdeffedcba9876543210") + 1n}`,
+    "the program printed the number it was given",
+  );
+});
+
+
 test("the C, machine and WebAssembly backends answer one vector set the same way", async () => {
   // Two backends that lower the same IR to two different languages will drift,
   // and the drift is invisible to a test that checks each against a literal: the
@@ -1272,13 +1355,8 @@ async function cBackendAnswer(op: DifferentialOp, leftText: string, rightText: s
 
 /** The same operation, lowered to machine code, linked and run. */
 /**
- * The same operation answered by the WebAssembly backend, run as a module.
- *
- * A wide number is a pointer into the module's own memory here rather than a
- * struct the host passes in, so the answer is read off that memory at the address
- * the module returns.
+ * What the WebAssembly backend has answered of the set, and what it has not.
  */
-/** What the WebAssembly backend has answered of the set, and what it has not. */
 const wasmAnswered = new Set<DifferentialOp>();
 const wasmRefused = new Set<DifferentialOp>();
 
@@ -1291,6 +1369,25 @@ const wasmRefused = new Set<DifferentialOp>();
  * how the caller learns it is not answered.
  */
 function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): string {
+  return wasmAnswerOf({
+    k: "arith",
+    type: U256,
+    op: op as ArithOp,
+    left: { k: "const", type: U256, text: `0x${leftText}` },
+    right: rightOperand(op, U256, rightText),
+  });
+}
+
+/**
+ * The module's answer to a body that is one wide operation, read back off the
+ * memory it wrote it into.
+ *
+ * A wide number is a pointer into the module's own memory here rather than a
+ * struct the host passes in, so the answer is read off that memory at the address
+ * the module returns. An operation this backend has not written raises, which is
+ * how the caller learns it is not answered.
+ */
+function wasmAnswerOf(value: SemanticValue): string {
   const memory = new engine.Memory({ initial: 1 });
   const bytes = moduleBytes(
     {
@@ -1310,16 +1407,7 @@ function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: stri
         id: "entry",
         statements: [],
         releases: [],
-        terminator: {
-          k: "return",
-          value: {
-            k: "arith",
-            type: U256,
-            op: op as ArithOp,
-            left: { k: "const", type: U256, text: `0x${leftText}` },
-            right: rightOperand(op, U256, rightText),
-          },
-        },
+        terminator: { k: "return", value },
       },
     } as unknown as SemanticFunction,
     {

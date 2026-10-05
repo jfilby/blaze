@@ -36,16 +36,23 @@ const ALLOWED_INCLUDES = [
 ];
 
 const FORBIDDEN_TOKENS = [
-  "__asm__",
   "__attribute__",
   "__builtin_",
   "__declspec",
-  "asm(",
   "_Pragma",
   "#pragma",
   "#import",
   "#embed",
 ];
+
+/**
+ * The spellings of inline assembly, whichever way they are punctuated: `asm`,
+ * `__asm` and `__asm__` are the same keyword to the C compiler, and it takes
+ * whitespace between the keyword and its parenthesis. A scan for `asm(` alone
+ * let `asm ("mov %0, %1", ...)` reach the compiler, which is the one thing this
+ * subset exists to keep out.
+ */
+const INLINE_ASSEMBLY: RegExp = /\b(?:__)?asm(?:__)?(?:\s+(?:__)?volatile(?:__)?)?\s*[("]/;
 
 function cError(message: string, detail: string | undefined, functionName: string, candidate?: string): CompilerError {
   return new CompilerError({
@@ -83,6 +90,9 @@ export function validateCSource(source: string, contract: FunctionContract, cand
       return;
     }
     if (line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) return;
+    if (INLINE_ASSEMBLY.test(line)) {
+      problems.push(`line ${offset + 1}: inline assembly is not allowed, the function must be pure C`);
+    }
     for (const token of FORBIDDEN_TOKENS) {
       if (line.includes(token)) {
         problems.push(`line ${offset + 1}: "${token}" is not allowed, the function must be pure C`);

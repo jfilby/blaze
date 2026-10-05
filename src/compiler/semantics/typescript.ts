@@ -1492,6 +1492,12 @@ function usageOf(declaration: TypeScriptFunction): {
         readsArgv = true;
         return;
       case "call":
+        // The length of the command line is read under a name of the compiler's
+        // own, so it arrives here as a call rather than as an `argv`: reading
+        // `process.argv.length` is reading the command line, and a contract
+        // that answered "this body touches nothing outside its parameters"
+        // because of that is what makes the body inlinable and parallel.
+        if (value.name === ARGV_LENGTH) readsArgv = true;
         for (const argument of value.args) expression(argument);
         return;
       case "text":

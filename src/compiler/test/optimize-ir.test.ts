@@ -437,6 +437,33 @@ test("a value a block computes twice that one of them writes between is not comm
   assert.doesNotMatch(after, /common/);
 });
 
+test("a value a block computes twice that a nested block writes between is not commoned", () => {
+  // The write is inside a nested block, which the block's own statements do not
+  // hold: the binding goes at the top of the outer block and the reads it
+  // replaces are rewritten inside the nested blocks too, so a name a nested
+  // block writes is a name the binding may not read. `a` is written between the
+  // two products here, so the second one is a different number.
+  const a: SemanticSlot = { kind: "value", name: "a", mutable: true, type: F64 };
+  const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
+  const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "a" } },
+    statements: [
+      { k: "set", name: "sum", op: "+=", value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 1 },
+      {
+        k: "block",
+        line: 2,
+        body: {
+          id: "inner", releases: [], terminator: { k: "next" },
+          statements: [{ k: "set", name: "a", op: "=", value: constOf("2"), line: 2 }],
+        },
+      },
+      { k: "set", name: "sum", op: "+=", value: bin("mul", { k: "local", type: F64, name: "a" }, { k: "local", type: F64, name: "b" }), line: 3 },
+    ],
+  }, F64, [a, b, sum]));
+  assert.doesNotMatch(after, /common/);
+});
+
 test("a copy of a name nothing writes is read as the name it copies", () => {
   const a: SemanticSlot = { kind: "value", name: "a", mutable: false, type: F64 };
   const b: SemanticSlot = { kind: "value", name: "b", mutable: false, type: F64 };
@@ -451,6 +478,29 @@ test("a copy of a name nothing writes is read as the name it copies", () => {
   }, F64, [a, b, sum]));
   assert.doesNotMatch(after, /copy/);
   assert.match(after, /set sum \+= local\[f64\] a/);
+});
+
+test("a copy of a name a fill writes is left bound", () => {
+  // A fill names the buffer it writes as a bare string, the same as an element
+  // write, so a substitution over values cannot reach it: dropping the copy and
+  // keeping the fill leaves the fill naming a name the function does not have.
+  const ARRAY: SemanticType = { kind: "array", of: F64, length: 4 };
+  const USIZE: SemanticType = { kind: "primitive", name: "usize" };
+  const values: SemanticSlot = { kind: "value", name: "values", mutable: false, type: ARRAY };
+  const total: SemanticSlot = { kind: "value", name: "total", mutable: true, type: F64 };
+  const fn = fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "total" } },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "copy", mutable: false, type: ARRAY }, value: { k: "local", type: ARRAY, name: "values" }, line: 1 },
+      { k: "fill", buffer: "copy", index: "blaze_fill", value: constOf("1"), type: F64, line: 2 },
+      {
+        k: "set", name: "total", op: "+=", line: 3,
+        value: { k: "element", type: F64, of: { k: "local", type: ARRAY, name: "copy" }, index: constOf("0", USIZE) },
+      },
+    ],
+  }, F64, [values, total]);
+  assert.match(printed(fn), /let value\[\[f64; 4\]\] copy/, "the binding the fill names is kept");
+  assert.deepEqual(semanticFunctionProblems(fn), [], "the rewritten body still names what it declares");
 });
 
 test("a copy of a copy is read as the name the first copy names", () => {

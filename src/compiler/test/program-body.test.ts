@@ -828,6 +828,34 @@ test("a program runs the shapes a number and a name decide", async (t) => {
   await agreesWithNode(SHAPES, "nim");
 });
 
+test("a whole operation over a mixed pair keeps the wider of the two", async (t) => {
+  // `length - 10` is signed because a length is read as a `usize`, and that is
+  // the only pair that exception answers. Answering it by the first signed name
+  // present made `u32 << i8` an `i8`, so the 4096 was 0 before the shift and the
+  // program printed zero.
+  const source = [
+    "const wide = new Uint32Array(4);",
+    "const narrow = new Int8Array(4);",
+    "wide[0] = 4096;",
+    "narrow[0] = 4;",
+    "console.log(wide[0] << narrow[0]);",
+    "console.log(wide[0] & 255);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.stdout, original.stdout, "the program answers what the language answers");
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["65536", "0"]);
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  await agreesWithNode(source, "nim");
+});
+
 test("a maximum of two zeros is a positive zero and a minimum a negative one", async (t) => {
   // `fmax(0.0, -0.0)` is -0.0 in C and `+0` in the source, and the two numbers
   // compare equal, so the sign is the only thing that tells the two apart: a

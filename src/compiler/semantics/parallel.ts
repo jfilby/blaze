@@ -460,7 +460,7 @@ function measureCall(name: string, reach: Reach, cost: TurnCost): void {
 
 /** One element of an array the body reaches, and whether the body writes it. */
 interface ElementAccess {
-  readonly buffer: string;
+  buffer: string;
   readonly index: SemanticValue;
   readonly written: boolean;
 }
@@ -508,6 +508,25 @@ function bodyRefusal(
       if (statement.k === "let") declared.add(statement.slot.name);
     }
   }
+  // A name a turn binds to another name is the same buffer under two names, and
+  // the element rule below reads a buffer by its name: `let mine = out;` then a
+  // write at `mine[i]` and a read at `out[j]` would be two buffers, and two
+  // turns could write `out[i]` through one name and read what the other wrote.
+  const aliases = new Map<string, string>();
+  for (const block of blocksWithin(body)) {
+    for (const statement of block.statements) {
+      if (statement.k === "let" && statement.value.k === "local" && statement.value.name !== statement.slot.name) {
+        aliases.set(statement.slot.name, statement.value.name);
+      }
+    }
+  }
+  // A name bound to a name bound to a name is the first name's, so the chain is
+  // followed until it ends at a name nothing else is bound to.
+  const bufferOf = (name: string): string => {
+    let at = name;
+    while (aliases.has(at)) at = aliases.get(at) as string;
+    return at;
+  };
   const accesses: ElementAccess[] = [];
   for (const block of blocksWithin(body)) {
     // What a block ends in is as much of its work as what it does before it,
@@ -543,6 +562,10 @@ function bodyRefusal(
       }
     }
   }
+  // Every access is renamed to the buffer its name stands for before the rule
+  // below reads them, so a write through one name and a read through another are
+  // one buffer rather than two.
+  for (const access of accesses) access.buffer = bufferOf(access.buffer);
   if (counter === null) {
     return accesses.some((access) => access.written)
       ? "the body writes an element of an array, and nothing here says which turn writes which"

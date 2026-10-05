@@ -737,7 +737,7 @@ function readCounts(body: Body): Map<string, number> {
       // name holding the elements is read to find which element is written,
       // and a binding read only that way is one this would otherwise drop,
       // leaving the write naming a name the function never declared.
-      if (statement.k === "setElement") count(statement.buffer);
+      if (statement.k === "setElement" || statement.k === "fill") count(statement.buffer);
     }
   };
   walk(body.entry);
@@ -1255,13 +1255,29 @@ function commonOne(block: SemanticBlock): boolean {
   return true;
 }
 
-/** Every name the statements of a block write, which a binding may not read. */
+/**
+ * Every name a block's statements write, nested blocks included.
+ *
+ * The bindings go at the top of the block and the reads they replace are
+ * rewritten inside the nested blocks as well, so a name a nested block writes is
+ * a name a binding above it may not read: a value computed once above a nested
+ * block and once below it is two numbers if the block writes something the
+ * value reads, and binding it at the top makes the lower one the upper one.
+ */
 function namesWrittenHere(block: SemanticBlock): Set<string> {
   const written = new Set<string>();
-  for (const statement of block.statements) {
-    if (statement.k === "set" || statement.k === "step") written.add(statement.name);
-    if (statement.k === "setElement") written.add(statement.buffer);
-    if (statement.k === "let") written.add(statement.slot.name);
+  for (const nested of nestedSemanticBlocks(block)) {
+    for (const statement of nested.statements) {
+      if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+      if (statement.k === "setElement") written.add(statement.buffer);
+      if (statement.k === "fill") written.add(statement.buffer);
+      if (statement.k === "storeField") {
+        walkSemanticValue(statement.object, (part) => {
+          if (part.k === "local") written.add(part.name);
+        });
+      }
+      if (statement.k === "let") written.add(statement.slot.name);
+    }
   }
   return written;
 }
@@ -1292,7 +1308,7 @@ function propagateCopies(body: Body): boolean {
   for (const block of nestedSemanticBlocks(body.entry)) {
     for (const statement of block.statements) {
       if (statement.k === "set" || statement.k === "step") writes.add(statement.name);
-      if (statement.k === "setElement") {
+      if (statement.k === "setElement" || statement.k === "fill") {
         writes.add(statement.buffer);
         buffers.add(statement.buffer);
       }
@@ -1389,6 +1405,14 @@ function inlineSingleUses(body: Body): boolean {
     valuesOf(block, (one) => {
       if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
     });
+    // A name a buffer write names is read by that write, and a binding dropped
+    // while the write stands leaves the write naming a name the block does not
+    // have. The buffer is a bare string, so no walk of the values reaches it.
+    for (const statement of block.statements) {
+      if (statement.k === "setElement" || statement.k === "fill") {
+        reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + 1);
+      }
+    }
   }
   let changed = false;
   for (const block of nestedSemanticBlocks(body.entry)) {

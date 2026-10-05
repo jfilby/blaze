@@ -313,12 +313,16 @@ const CALLER_SAVED: readonly number[] = [RDI, RSI, R8, R9, R10, R11];
  * The vector registers the convention does not ask a callee to preserve, which
  * answer the same question as `CALLER_SAVED` does for a whole number.
  *
- * `xmm0` is the accumulator and `xmm1` the scratch, so the four left are the
- * ones a name can be kept in. They are also the fourth to eighth of the
- * argument registers, which is the same fact as for the whole numbers: a value
- * kept here does not survive the call that writes them.
+ * `xmm0` is the accumulator and `xmm1` the scratch, and `xmm2` is the scratch of
+ * the two sequences written out in place of a call the library would make: the
+ * truth of a double (`UCOMISD` against a zero it has to have somewhere) and
+ * `Math.round`'s sign repair. A name kept in it is gone the moment either runs,
+ * and neither is a call the liveness pass models, so `xmm2` is not a place a
+ * name is kept: `kept(3)` answered `14.75` twice because the value the round
+ * wrote over it was a different name's. The three left are the ones a name can
+ * be kept in, which are also the fourth to seventh of the argument registers.
  */
-const VECTOR_CALLER_SAVED: readonly number[] = [XMM2, XMM3, XMM4, XMM5];
+const VECTOR_CALLER_SAVED: readonly number[] = [XMM3, XMM4, XMM5];
 
 /**
  * How many registers the values of one expression may be held in at once.
@@ -1221,6 +1225,21 @@ const UNROLLABLE_STATEMENTS = 6;
 function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor: number; step: number } | null {
   if (loop.region === true || loop.parallel !== undefined) return null;
   if (loop.body.terminator.k !== "next") return null;
+  // A `continue` in a nested arm is the same early leave as one at the foot of
+  // the body, and the body's own terminator does not show it: written out, the
+  // turns of one trip stand one after another with nothing between them, and the
+  // branch a `continue` takes lands on the trip counter this loop counts down
+  // rather than on the next turn — so the counter never moves and the trip ends
+  // after its first turn. `semantics/optimize-ir.ts` refuses the same body.
+  let earlyLeave = false;
+  const walkBlocks = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      for (const inner of statementBlocksOf(statement)) walkBlocks(inner);
+    }
+    if (block.terminator.k === "jump") earlyLeave = true;
+  };
+  walkBlocks(loop.body);
+  if (earlyLeave) return null;
   if (loop.body.statements.length > UNROLLABLE_STATEMENTS) return null;
   if (bodyCalls(loop.body)) return null;
   if (writesCounter(loop.body, loop.variable)) return null;
@@ -3277,7 +3296,7 @@ class Machine {
   ): boolean {
     const type: SemanticType = { kind: "primitive", name: "f64" };
     const whole: SemanticType = { kind: "primitive", name: "i64" };
-    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED], 3);
+    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED, ...VECTOR_CALLEE_SAVED], 3);
     const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 3);
     if (vectors === null || registers === null) return false;
     const [sum, lane, spare] = vectors;
@@ -3417,7 +3436,7 @@ class Machine {
     // in, and the one the other side borrows in turn. None of them is the
     // accumulator's, which the build gave a name this loop adds into a register
     // of its own and which is therefore not free to write through.
-    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED], 3);
+    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED, ...VECTOR_CALLEE_SAVED], 3);
     // One register for the cursor the pair load is written against, and one for
     // each array's first element: a load is written against a base and a
     // displacement, so two arrays cannot share one register however little they

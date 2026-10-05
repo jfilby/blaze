@@ -516,6 +516,19 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
         if (holdsGiven(statement.value)) given.add(statement.slot.name);
         continue;
       }
+      // A call the function was handed a block as an argument hands it on
+      // whoever receives it, whether the call is written as a statement or as a
+      // value: `let kept = store(node)` is as much a place the block lands as
+      // `store(node);` is, and reading only the statement form answered a callee
+      // that keeps what it is given as keeping nothing.
+      for (const value of statementValues(statement)) {
+        let handsOn = false;
+        walkValues(value, (inner) => {
+          if (handsOn || inner.k !== "call") return;
+          if (inner.call.args.some(holdsGiven) && !calleeKeepsNothing(inner.call.callee, reach)) handsOn = true;
+        });
+        if (handsOn) return true;
+      }
       switch (statement.k) {
         case "set":
           // A name of its own is as safe as anything else; a name it found is
@@ -537,11 +550,6 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
         case "retain":
           if (holdsGiven(statement.value)) return true;
           break;
-        case "call":
-          for (const argument of statement.call.args) {
-            if (holdsGiven(argument) && !calleeKeepsNothing(statement.call.callee, reach)) return true;
-          }
-          break;
         default:
           break;
       }
@@ -560,6 +568,17 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
       holdsGiven(block.terminator.value)
     ) {
       return true;
+    }
+    // A call written in the answer hands the block on whoever receives it, so
+    // answering `store(node)` is as much a place the block lands as calling it
+    // and handing the answer back.
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      let handsOn = false;
+      walkValues(block.terminator.value, (inner) => {
+        if (handsOn || inner.k !== "call") return;
+        if (inner.call.args.some(holdsGiven) && !calleeKeepsNothing(inner.call.callee, reach)) handsOn = true;
+      });
+      if (handsOn) return true;
     }
   }
   return false;

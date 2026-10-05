@@ -524,6 +524,34 @@ test("a float is computed at the precision it is written at", async () => {
   assert.equal(await lowered(rounded, (name) => `printf("%.17g", ${name}());`), "-0");
 });
 
+test("a double kept in a register is still there after a round is written out", async () => {
+  // `Math.round` is written out rather than called, and its sign repair needs a
+  // zero and a sign bit in registers of its own. `xmm2` was both that scratch
+  // and the first register a double was kept in, and neither the round nor the
+  // truth of a double is a call the liveness pass models — so a double kept
+  // there was gone the moment either ran.
+  const fn = subject(F64, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "scaled", mutable: false, type: F64 }, value: { k: "arith", type: F64, op: "mul", left: local("x", F64), right: number("3.25") }, line: 1 },
+      { k: "let", slot: { kind: "value", name: "other", mutable: false, type: F64 }, value: { k: "arith", type: F64, op: "mul", left: local("x", F64), right: number("1.75") }, line: 2 },
+      { k: "let", slot: { kind: "value", name: "first", mutable: false, type: F64 }, value: { k: "call", type: F64, call: roundCall({ k: "arith", type: F64, op: "mul", left: local("x", F64), right: number("1.5") }) }, line: 3 },
+      { k: "let", slot: { kind: "value", name: "second", mutable: false, type: F64 }, value: { k: "call", type: F64, call: roundCall({ k: "arith", type: F64, op: "mul", left: local("x", F64), right: number("2.5") }) }, line: 4 },
+    ],
+    releases: [],
+    terminator: {
+      k: "return",
+      value: {
+        k: "arith", type: F64, op: "add",
+        left: { k: "arith", type: F64, op: "add", left: local("scaled", F64), right: local("first", F64) },
+        right: { k: "arith", type: F64, op: "add", left: local("other", F64), right: local("second", F64) },
+      },
+    },
+  }, [{ kind: "value", name: "x", mutable: false, type: F64 }]);
+  // 3 * 3.25 + round(4.5) + 3 * 1.75 + round(7.5) = 9.75 + 5 + 5.25 + 8.
+  assert.equal(await lowered(fn, (name) => `printf("%.17g", ${name}(3));`), "28");
+});
+
 test("a loop counts, walks and repeats as many times as the IR states", async () => {
   const counted = subject(F64, {
     id: "entry",
@@ -2119,6 +2147,61 @@ test("a body of nothing but conditionals is left rolled", async () => {
     "396",
     "the arithmetic body is still written out and answers what it answered rolled",
   );
+});
+
+test("a body that leaves the loop early is not written out", async () => {
+  // A `continue` in a nested arm is the same early leave as one at the foot of
+  // the body, and the body's own terminator does not show it. Written out, the
+  // turns of one trip stand one after another with nothing between them, and the
+  // branch a `continue` takes lands on the trip counter rather than on the next
+  // turn: the counter never moves, the trip ends after its first turn, and this
+  // loop answered zero rather than the sum of the even turns.
+  const header = "head";
+  const fn = subject(I32, {
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I32,
+          from: number("0", I32),
+          to: number("8", I32),
+          inclusive: false,
+          down: false,
+          step: null,
+          header,
+          exit: "out",
+          body: {
+            id: "body",
+            releases: [],
+            statements: [
+              {
+                k: "if",
+                line: 3,
+                condition: {
+                  k: "compare", type: { kind: "primitive", name: "bool" }, op: "eq", operand: I32,
+                  left: local("i", I32), right: number("3", I32),
+                },
+                then: { id: "arm", releases: [], statements: [], terminator: { k: "jump", target: header, releases: [] } },
+                otherwise: null,
+
+              },
+              { k: "set", name: "total", op: "+=", value: local("i", I32), line: 4 },
+            ],
+            terminator: { k: "next" },
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("total", I32) },
+  });
+  // The sum of every turn but the one the `continue` skips.
+  assert.equal(await lowered(fn, (name) => `printf("%d", ${name}());`), "25");
 });
 
 test("a quotient by a power of two is a product by its reciprocal", async () => {

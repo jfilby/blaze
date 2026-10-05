@@ -1180,11 +1180,6 @@ export async function runBuild(
         compilerVersion: COMPILER_VERSION,
         review: toolchain.review,
         lowering: toolchain.lowering,
-        // A candidate is folded before it is lowered, so a callee the fold can
-        // write out is a body this object's key has to carry whatever the call
-        // strategy decided about that call. The IR is resolved above, before
-        // this is called, so the question is answerable here.
-        semantics: new Map(Object.entries(semantics)),
       });
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too.
