@@ -263,9 +263,18 @@ export function isInteger(type: SemanticType): boolean {
  * a `usize` is over everything, an `isize` over the rest, and at one width the
  * unsigned of the pair, because a value above the signed range of that width is
  * above it as an unsigned number and a negative number as a signed one.
+ *
+ * A wide number is above all of that, and it is asked before the length rule
+ * rather than after it: `usize` is over every value a machine word holds and a
+ * wide number holds values no machine word holds, so a pair of one of each is
+ * a wide number and nothing else. Answering `usize` there demoted the type of
+ * the value to a width its high three limbs do not fit in, which is the one
+ * answer here that is never what the source wrote.
  */
 export function wholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTypeName {
   if (a === b) return a;
+  if (isWide(a)) return a;
+  if (isWide(b)) return b;
   if (a === "usize" || b === "usize") return "usize";
   if (a === "isize" || b === "isize") return "isize";
   const rank = Math.max(WHOLE_RANK[a] ?? 0, WHOLE_RANK[b] ?? 0);
@@ -683,7 +692,21 @@ export type SemanticTerminator =
    * The block is left for another one, after freeing what it owns on the way
    * out. A jump names a loop header (`continue`) or a loop exit (`break`).
    */
-  | { k: "jump"; target: string; releases: string[] };
+  | { k: "jump"; target: string; releases: string[] }
+  /**
+   * Control does not continue past this block, because every way through it
+   * leaves: an `if` whose two arms each return, say. It is not a jump and there
+   * is no block to jump to.
+   *
+   * It is what says a function that returns from every path returns, rather
+   * than falling off its last block. Without it the block after such an `if` is
+   * written as falling through, and a function declared to return a number ends
+   * by handing back whatever the register held — a number the program never
+   * computed. A block that ends this way holds nothing that is run, so a
+   * backend writes no code for it: WebAssembly has an instruction for it, and
+   * the others have nothing to emit because there is nowhere to go.
+   */
+  | { k: "unreachable" };
 
 /** A run of statements, and where control goes when they are done. */
 export interface SemanticBlock {
@@ -860,8 +883,16 @@ export type SemanticStatement =
   | { k: "block"; body: SemanticBlock; line: number }
   /** Writes text, the way the runtime writes text. */
   | { k: "printText"; value: SemanticValue; line: number }
-  /** Writes a number, the way the runtime writes a number. */
-  | { k: "printNumber"; value: SemanticValue; line: number }
+  /**
+   * Writes a number, the way the runtime writes a number.
+   *
+   * `bigint` is what the language's own `1n` is written as: the same sixty-four
+   * bit whole number, with the `n` after it that says it is a bigint and not a
+   * number. It is a flag on the statement rather than a type on the value
+   * because the value is the `i64` a bigint is, and what the flag adds is
+   * written after the digits rather than held in them.
+   */
+  | { k: "printNumber"; value: SemanticValue; line: number; bigint: boolean }
   | { k: "printNewline"; line: number }
   /** Keeps an owned reference alive across a release of it. */
   | { k: "retain"; value: SemanticValue; line: number }

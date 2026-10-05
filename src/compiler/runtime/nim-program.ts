@@ -324,6 +324,24 @@ function contractType(type: SemanticType): TypeExpr {
 }
 
 
+/**
+ * The C type a prototype in the host's emit block names, which is the C
+ * compiler's declaration of what the program's own functions return.
+ *
+ * A reference to an object is `void*` here rather than the `struct Object1*`
+ * every other declaration of it uses. The host holds a Nim object type, and Nim
+ * gives that type a C name of its own — `tyObject_Object1__<hash>` — rather than
+ * the one the contract gives the struct, so the two declarations are of two
+ * unrelated C types and the compiler refuses the call: it assigned
+ * `struct Object1 *` to `tyObject_Object1 *` and stopped. `void*` is the same
+ * pointer under C's own rules, and what it points at is the object the C side
+ * laid out — the layout the C declaration above still checks.
+ */
+function hostCType(type: TypeExpr): string {
+  if (type.kind === "ref" && type.name !== undefined) return "void*";
+  return cDeclarationType(type);
+}
+
 /** The Nim driver of one program: how the host language spells the walk. */
 class NimDriver implements ProgramTarget {
   private counter = 0;
@@ -409,10 +427,9 @@ ${anchor}
         `${typeToString(returns)} is returned, and a program holds numbers and strings`,
       );
     }
-    const parameters = signature.params.map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`);
-    return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}(${parameters.join(", ") || "void"})${cSymbolLabel(signature.symbol)};`;
+    const parameters = signature.params.map((param) => `${hostCType(parseType(param.type))} ${param.name}`);
+    return `extern ${hostCType(returns)} ${cSymbolName(signature.symbol)}(${parameters.join(", ") || "void"})${cSymbolLabel(signature.symbol)};`;
   }
-
   private importc(signature: FunctionSignature): string {
     const parameters = signature.params.map((param) => `${param.name}: ${nimParameter(parseType(param.type))}`);
     const returns = parseType(signature.returns);
@@ -639,10 +656,13 @@ ${anchor}
     return returnsNothing ? expression : `discard ${expression}`;
   }
 
-  print(value: string, type: SemanticType | null, kind: ValueKind): string[] {
+  print(value: string, type: SemanticType | null, kind: ValueKind, bigint: boolean): string[] {
     if (kind === "text") return [`stdout.write(${value})`];
     if (kind === "null") return [`stdout.write("null")`];
     if (kind === "boolean") return [`stdout.write(if ${value}: "true" else: "false")`];
+    // A bigint is written with the `n` after it that says which of the two it is,
+    // and it is the same sixty-four bit whole number either way.
+    if (bigint) return [`stdout.write($(${value}) & "n")`];
     if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number(${value})`];
     return [`stdout.write($(${value}))`];
   }
@@ -750,9 +770,16 @@ ${anchor}
     // An object is one value the program holds, so it is allocated and filled
     // where it is written: a block expression is how Nim spells several
     // statements as one value.
+    //
+    // The allocation is the runtime's, cast to the type the contract laid out,
+    // and it was `create(...)` — which in Nim takes an initialisation procedure
+    // and not a block, so the call it wrote was of a pointer where a procedure
+    // belongs. The cast is the same one the C driver writes over the same
+    // `object_new`, and `sizeof` of a plain object is the payload the runtime
+    // allocates rather than a cell in front of it.
     const name = this.fresh("blaze_object");
     const written = fields.map((one) => `(cast[${layout}](${name})).${one.field} = ${one.value}`);
-    return `(block: let ${name} = create(${RUNTIME_NAME}_object_new(sizeof(${layout}), alignof(${layout}))); ${written.join("; ")}; ${name})`;
+    return `(block: let ${name} = cast[${layout}](${RUNTIME_NAME}_object_new(sizeof(${layout}), alignof(${layout}))); ${written.join("; ")}; ${name})`;
   }
 
   raise(message: string): string {

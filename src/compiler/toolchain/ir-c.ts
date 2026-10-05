@@ -555,6 +555,10 @@ class FunctionEmitter {
   private terminator(block: SemanticBlock, depth: number): void {
     const terminator = block.terminator;
     if (terminator.k === "next") return;
+    // A block nothing arrives at writes nothing: there is no return to write,
+    // no block to leave for, and no path that reaches the end of the function
+    // from here — every way through the block has already left.
+    if (terminator.k === "unreachable") return;
     if (terminator.k === "return") {
       this.leaveRegion(depth);
       // A body that falls off its end says so with a return carrying nothing,

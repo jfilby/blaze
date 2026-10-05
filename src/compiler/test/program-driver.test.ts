@@ -259,12 +259,15 @@ test("a length the program settles on that is not a number is no length", async 
 test("a whole number the source wrote as a bigint is whole to the width it was resolved at", async () => {
   // `1 << 62` is a shift x86 masks to 5 bits, so a 64 bit whole operator over
   // literals written as bare C ints is evaluated at 32 and the program prints
-  // 1073741824 where the source prints 4611686018427387904.
+  // 1073741824 where the source prints 4611686018427387904. The source writes it
+  // as a bigint, so it is written with the `n` after it — the number is the
+  // point of the test and the spelling is the language's own.
   const source = "console.log(1n << 62n);\n";
-  const { binary } = await deliver(source);
+  const { binary, original } = await deliver(source);
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
-  assert.equal(delivered.stdout, "4611686018427387904\n");
+  assert.equal(delivered.stdout, "4611686018427387904n\n");
+  assert.equal(delivered.stdout, original);
 });
 
 test("a program that counts to a length prints what the source prints", async () => {

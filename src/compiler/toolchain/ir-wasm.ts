@@ -1980,6 +1980,13 @@ class Body {
 
   private terminator(terminator: SemanticTerminator): void {
     if (terminator.k === "next") return;
+    // A block nothing arrives at is the one instruction WebAssembly has for it:
+    // `unreachable` traps if control ever gets here, which is the honest answer
+    // for a path the program does not take.
+    if (terminator.k === "unreachable") {
+      this.op(0x00);
+      return;
+    }
     if (terminator.k === "return") {
       if (terminator.value !== null) this.value(terminator.value, this.returns);
       else if (this.returns.kind !== "void") this.answer();

@@ -613,10 +613,14 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `${expression};`;
   }
 
-  print(value: string, type: SemanticType | null, kind: ValueKind): string[] {
+  print(value: string, type: SemanticType | null, kind: ValueKind, bigint: boolean): string[] {
     if (kind === "text") return [`program_print_string(${value});`];
     if (kind === "null") return [`program_print_string("null");`];
     if (kind === "boolean") return [`fputs((${value}) ? "true" : "false", stdout);`];
+    // A bigint is written with the `n` after it that says which of the two it is,
+    // and it is the same sixty-four bit whole number either way — so the format
+    // is the whole number's and the suffix is part of it.
+    if (bigint) return [`printf("%lldn", (long long)(${value}));`];
     if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
     const format = type !== null && isUnsigned(type) ? "%llu" : "%lld";
     const cast = type !== null && isUnsigned(type) ? "unsigned long long" : "long long";

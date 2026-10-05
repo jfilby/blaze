@@ -436,6 +436,10 @@ export function printSemanticValue(value: SemanticValue): string {
 function terminatorText(terminator: SemanticTerminator, indent: number): string | null {
   const pad = " ".repeat(indent);
   if (terminator.k === "next") return null;
+  // A block nothing arrives at is written as the one word for it, and it is a
+  // word rather than nothing because a block that falls out of itself and a
+  // block nothing reaches are different programs.
+  if (terminator.k === "unreachable") return `${pad}unreachable`;
   if (terminator.k === "return") {
     return terminator.value === null ? `${pad}return` : `${pad}return ${printSemanticValue(terminator.value)}`;
   }
@@ -587,8 +591,12 @@ function statementText(statement: SemanticStatement, indent: number): string[] {
       return blockLines(statement.body, indent, statement.line);
     case "printText":
       return [`${pad}print_text ${printSemanticValue(statement.value)}${mark}`];
-    case "printNumber":
-      return [`${pad}print_number ${printSemanticValue(statement.value)}${mark}`];
+    case "printNumber": {
+      // The word `bigint` is what a printed number is when the language writes
+      // an `n` after it, and a number no word is written is one of its own.
+      const bigint = statement.bigint ? " bigint" : "";
+      return [`${pad}print_number ${printSemanticValue(statement.value)}${bigint}${mark}`];
+    }
     case "printNewline":
       return [`${pad}print_newline${mark}`];
     case "retain":
@@ -1574,9 +1582,13 @@ class BlockReader {
     const line = this.peek();
     if (line === null || line.indent !== indent) return { k: "next" };
     const head = headOf(line);
-    if (head !== "return" && head !== "jump") return { k: "next" };
+    if (head !== "return" && head !== "jump" && head !== "unreachable") return { k: "next" };
     this.at += 1;
     const scanner = this.scanner(line);
+    if (head === "unreachable") {
+      scanner.end();
+      return { k: "unreachable" };
+    }
     if (head === "return") {
       scanner.skip();
       const value = scanner.peek() === "" ? null : scanner.value();
@@ -1751,8 +1763,15 @@ class BlockReader {
         return { k: "printText", value: scanner.value(), line: scanner.mark() };
       case "print_newline":
         return { k: "printNewline", line: scanner.mark() };
-      case "print_number":
-        return { k: "printNumber", value: scanner.value(), line: scanner.mark() };
+      case "print_number": {
+        const value = scanner.value();
+        let bigint = false;
+        if (scanner.peekWord() === "bigint") {
+          scanner.keyword("bigint");
+          bigint = true;
+        }
+        return { k: "printNumber", value, line: scanner.mark(), bigint };
+      }
       case "retain":
         return { k: "retain", value: scanner.value(), line: scanner.mark() };
       case "call": {

@@ -17,6 +17,8 @@
  */
 import assert from "node:assert/strict";
 import { isInteger, isWhole, limbsOf, wholeOf } from "../core/semantic-ir.ts";
+import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { phaseOf, semanticsOf } from "./phase.ts";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -51,6 +53,30 @@ const U256: SemanticType = { kind: "primitive", name: "u256" };
 const U64: SemanticType = { kind: "primitive", name: "u64" };
 const BOOL: SemanticType = { kind: "primitive", name: "bool" };
 const TARGET: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
+
+/**
+ * One function of a module, resolved the way a build resolves it, so a rule
+ * about the IR is read on the IR a build hands a backend rather than on one a
+ * test wrote by hand.
+ */
+function functionNamed(language: string, files: Record<string, string>, entry: string, name: string): SemanticFunction {
+  const phase = phaseOf(language, files, entry);
+  const fn = semanticsOf(phase)[name];
+  assert.ok(fn !== undefined, `the module declares ${name}`);
+  return fn;
+}
+
+/**
+ * One function of a program, resolved the way a build resolves a program's own
+ * functions, for the shapes a library entry cannot state: a function that only
+ * shifts states no postcondition, and the contract phase asks for a program.
+ */
+function programNamed(language: string, files: Record<string, string>, entry: string, name: string): SemanticFunction {
+  const phase = phaseOf(language, files, entry);
+  const fn = semanticsOf(phase)[name];
+  assert.ok(fn !== undefined, `the program declares ${name}`);
+  return fn;
+}
 
 /** Two wide literals whose limbs carry into one another in every position. */
 const WIDE_LEFT = "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
@@ -257,7 +283,99 @@ test("a wide number is a whole number and is never narrowed to a machine word", 
   assert.equal(wholeOf("u256", "u64"), "u256");
   assert.equal(wholeOf("u64", "u256"), "u256");
   assert.equal(wholeOf("u256", "u256"), "u256");
+  // A length is over every value a machine word holds and a wide number holds
+  // values no machine word holds, so the length rule does not apply to a pair
+  // one of each: `usize` used to win, and the type it answered was a width the
+  // high three limbs do not fit in.
+  assert.equal(wholeOf("u256", "usize"), "u256");
+  assert.equal(wholeOf("usize", "u256"), "u256");
+  assert.equal(wholeOf("u256", "isize"), "u256");
+  assert.equal(wholeOf("isize", "u256"), "u256");
+  // The length rule is unchanged for a pair of machine words.
+  assert.equal(wholeOf("usize", "i64"), "usize");
+  assert.equal(wholeOf("isize", "i32"), "isize");
 });
+
+test("a wide number is only computed with another wide number", () => {
+  // Every backend answers a wide operation by calling the kernel, and the
+  // kernel is over two `u256`. A narrower operand beside one has no form there:
+  // the C backend wrote a cast from a scalar to a struct, which is a source that
+  // does not compile, and the machine backend asked for the single-register
+  // width a wide number does not have. So each of these is refused at the last
+  // point before a backend is handed the tree, naming what is wrong with it.
+  const pairs: [string, readonly string[], RegExp][] = [
+    ["add", ["export function f(a: u256, b: bigint): u256 {", "  return a + b;", "}"], /kernel every backend answers a wide number with is over two of them/],
+    ["mul", ["export function f(a: u256, b: number): u256 {", "  return a * b;", "}"], /kernel every backend answers a wide number with is over two of them/],
+    // A comparison is read as the operand the IR names, and a double beside a
+    // wide number makes the operand the double: which is the demotion this pair
+    // used to be, and the reason it is named rather than left to a backend.
+    ["gt", ["export function f(a: u256, b: number): boolean {", "  return a > b;", "}"], /a wide number is not a machine word/],
+    ["lt", ["export function f(a: number, b: u256): boolean {", "  return a < b;", "}"], /a wide number is not a machine word/],
+    // The other side of the same comparison: here the wide number is on the left
+    // and the operand is the `i64` a whole number is read at, so the kernel is
+    // what is missing rather than the width.
+    ["ge", ["export function f(a: u256, b: bigint): boolean {", "  return a >= b;", "}"], /kernel every backend answers a wide number with is over two of them/],
+  ];
+  for (const [what, lines, said] of pairs) {
+    const fn = functionNamed("typescript", { "module.ts": [...lines, ""].join("\n") }, "module.ts", "f");
+    const problems = semanticFunctionProblems(fn);
+    assert.equal(problems.length, 1, `${what} of a wide number and a machine word: ${problems.join("; ")}`);
+    assert.match(problems[0]!, said, what);
+  }
+
+  // The count of a shift is the machine word the source wrote the shift by, and
+  // it is the one narrower number a wide number may be beside. A shift states no
+  // postcondition, so a function that is only a shift is contracted as a program.
+  const shiftProgram = programNamed(
+    "typescript",
+    { "main.ts": ["function f(a: u256, b: bigint): u256 {", "  return a << b;", "}", "console.log(f(1n, 2n));", ""].join("\n") },
+    "main.ts",
+    "f",
+  );
+  assert.deepEqual(semanticFunctionProblems(shiftProgram), []);
+
+  // Two wide numbers are what the kernel is over, and a pair of them is left
+  // exactly as it was.
+  const pair = functionNamed(
+    "typescript",
+    { "module.ts": ["export function f(a: u256, b: u256): u256 {", "  return a + b;", "}", ""].join("\n") },
+    "module.ts",
+    "f",
+  );
+  assert.deepEqual(semanticFunctionProblems(pair), []);
+});
+
+test("a whole operator over a wide number answers a wide number", () => {
+  // A shift and a remainder are operations on whole numbers, and the answer was
+  // the pair's common type with a side that is not one naming an `i64` — three
+  // limbs dropped before a backend was handed the value. A bitwise pair says the
+  // same thing and is not here only because the program's own reader has no
+  // token for `&`, `|` or `^`.
+  for (const [what, body] of [["<<", "a << b"], [">>", "a >> b"], ["% ", "a % b"]] as const) {
+    const fn = programNamed(
+      "typescript",
+      {
+        "main.ts": [
+          "function f(a: u256, b: number): number {",
+          `  return ${body};`,
+          "}",
+          "console.log(f(1n, 2));",
+          "",
+        ].join("\n"),
+      },
+      "main.ts",
+      "f",
+    );
+    const term = fn.entry.terminator;
+    assert.equal(term.k, "return", what);
+    if (term.k !== "return" || term.value === null || term.value.k !== "arith") {
+      assert.fail(`${what} did not lower to an arithmetic value`);
+    }
+    const answered = term.value.type;
+    assert.equal(answered.kind === "primitive" ? answered.name : "", "u256", `${what} of a u256 and a double`);
+  }
+});
+
 /* ------------------------------------------------------------------------ */
 /* The C backend                                                               */
 /* ------------------------------------------------------------------------ */
@@ -1213,7 +1331,7 @@ test("the C backend writes a wide number the program printed", async () => {
     calls: [],
     entry: {
       id: "entry",
-      statements: [{ k: "printNumber", value, line: 1 }],
+      statements: [{ k: "printNumber", value, line: 1, bigint: false }],
       releases: [],
       terminator: { k: "return", value: { k: "const", type: U, text: "0x0" } },
     },

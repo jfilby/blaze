@@ -78,6 +78,7 @@ import {
   TEXT,
   VOID,
   isBoolean,
+  isFloat,
   isReference,
   isWide,
   isTextType,
@@ -101,7 +102,17 @@ import {
 /* What a name holds                                                          */
 /* -------------------------------------------------------------------------- */
 
-/** A number, whole or not. `type` stays null until a use fixes it. */
+/**
+ * A number, whole or not. `type` stays null until a use fixes it.
+ *
+ * `bigint` is what the language's own `1n` is and nothing else: a whole number
+ * the program wrote with an `n` beside it. It is a flag rather than a type of
+ * its own because the IR holds it as the `i64` it is, and what the flag adds is
+ * the two things a machine word does not say on its own — the arithmetic is
+ * whole rather than floating, and the value is written with an `n` after it.
+ * A whole number that is not a bigint is one a whole operator produced, and it
+ * prints and computes as the number the language prints and computes.
+ */
 interface NumberHeld {
   kind: "number";
   /** The name the program declares it under. */
@@ -109,6 +120,7 @@ interface NumberHeld {
   mutable: boolean;
   type: PrimitiveTypeName | null;
   text: string;
+  bigint?: true;
 }
 
 /** An array the program allocated, written out element by element. */
@@ -197,14 +209,16 @@ type DraftValue =
   | { k: "compare"; how: "number" | "string"; negate: boolean; left: DraftValue; right: DraftValue }
   /** `a === null`. */
   | { k: "isNull"; operand: DraftValue; negate: boolean }
-  | { k: "binary"; op: ProgramBinaryOp; left: DraftValue; right: DraftValue; type: TypeExpr | null }
-  | { k: "unary"; op: ProgramUnaryOp; operand: DraftValue; type: TypeExpr | null }
+  /** A binary operation, and the whole number it is a bigint over when it is one. */
+  | { k: "binary"; op: ProgramBinaryOp; left: DraftValue; right: DraftValue; type: TypeExpr | null; bigint?: true }
+  | { k: "unary"; op: ProgramUnaryOp; operand: DraftValue; type: TypeExpr | null; bigint?: true }
   | {
       k: "conditional";
       condition: DraftValue;
       then: DraftValue;
       otherwise: DraftValue;
       type: TypeExpr | null;
+      bigint?: true;
     };
 
 /** A statement the program runs, before it is written down as blocks. */
@@ -390,6 +404,33 @@ function numericResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName 
   if (left !== null && isWide(left)) return left;
   if (right !== null && isWide(right)) return right;
   return "f64";
+}
+
+/**
+ * The type an operation on two bigints has: the `i64` a bigint is.
+ *
+ * A bigint is the one number in a program that is not a double, and the reason
+ * is arithmetic rather than spelling: `9007199254740993n + 1n` is
+ * 9007199254740994, and a double answers 9007199254992 for it because it holds
+ * a whole number exactly only up to 2^53. So the answer here is the whole
+ * number the operands already are, which is what `wholeResult` gives for a
+ * whole operator and what a bigint needs for the rest.
+ */
+const BIGINT_TYPE: PrimitiveTypeName = "i64";
+
+/** True when the value is a bigint, which is a whole number the program wrote an `n` beside. */
+function isBigint(value: DraftValue): boolean {
+  switch (value.k) {
+    case "literal":
+    case "reference":
+      return value.held.kind === "number" && value.held.bigint === true;
+    case "binary":
+    case "unary":
+    case "conditional":
+      return value.bigint === true;
+    default:
+      return false;
+  }
 }
 
 /** True when the value is a string, which is the one type a number is not. */
@@ -934,6 +975,56 @@ interface ProgramFunctions {
   readonly used: Set<string>;
 }
 
+/**
+ * Every `return` in a body, in the order the program wrote them, however deep
+ * in a branch it is. A return inside a loop is one of them: what a function
+ * hands back is what every path hands back, and a loop that may run no turns
+ * is a path that falls off the end — the one that hands back nothing at all.
+ */
+function returnsIn(statements: readonly DraftStatement[]): (DraftStatement & { kind: "result" })[] {
+  const found: (DraftStatement & { kind: "result" })[] = [];
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "result":
+        found.push(statement);
+        break;
+      case "if":
+        found.push(...returnsIn(statement.then), ...returnsIn(statement.otherwise));
+        break;
+      case "block":
+      case "while":
+      case "doWhile":
+      case "for":
+      case "forOf":
+        found.push(...returnsIn(statement.body));
+        break;
+      default:
+        break;
+    }
+  }
+  return found;
+}
+
+/** The type a number is, as the semantic IR states a type rather than as text. */
+function isNumberType(type: TypeExpr): boolean {
+  const name = primitive(type);
+  return name !== null && NUMERIC.includes(name);
+}
+
+/** The wide number a type is, as the semantic IR states a type rather than as text. */
+function isWideType(type: TypeExpr): boolean {
+  const name = primitive(type);
+  return name !== null && isWide(name);
+}
+
+/**
+ * Whether control leaves a block rather than continuing past it, which is what
+ * an `if` with two arms that each leave means for the block it is written in.
+ */
+function leaves(block: SemanticBlock): boolean {
+  return block.terminator.k !== "next";
+}
+
 /* -------------------------------------------------------------------------- */
 /* Resolver                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -1115,9 +1206,38 @@ class ProgramResolver {
     this.functions.waiting = this.functions.waiting.filter((one) => one !== draft);
     try {
       const body = this.read(draft);
-      const result = body.statements.find((statement) => statement.kind === "result");
-      const returns = result === undefined ? "void" : typeToString(this.returned(result));
-      draft.signature = { ...(draft.signature as FunctionSignature), returns };
+      // What a function hands back is read from every `return` in its body and
+      // not from the one at the top of it, because a return is a statement a
+      // branch may hold: `if (x > 0) return 1; else return 2;` returns from both
+      // arms and has no return at the top at all. Every return is a path out, so
+      // the return type is the one they have in common, and two that have none
+      // is a function the contract language cannot state.
+      const results = returnsIn(body.statements);
+      const answered = results.map((result) => this.returned(result));
+      const first = answered[0];
+      let returns = { kind: "void" } as TypeExpr;
+      if (first === undefined) {
+        // A body with no return at all hands back nothing, and that is the
+        // answer a fold over no paths must not invent one for.
+      } else if (results.every((result) => isBigint(result.value))) {
+        returns = numeric(BIGINT_TYPE);
+      } else if (answered.every((type) => isNumberType(type))) {
+        // Every number in a program is a double, and the one exception is a wide
+        // number: a wide number beside a double is the wide one rather than the
+        // three limbs above the first dropped before a backend is handed it.
+        const wide = answered.find((type) => isWideType(type));
+        returns = wide ?? numeric("f64");
+      } else if (answered.some((type) => typeToString(type) !== typeToString(first ?? type))) {
+        throw programError(
+          `"${draft.name}" returns more than one type`,
+          this.body,
+          draft.line,
+          `line ${draft.line} of ${this.body.file}: the function returns ${answered.map((type) => typeToString(type)).join(" and ")}, and a call is written against one return type; return the same type from every path`,
+        );
+      } else {
+        returns = first;
+      }
+      draft.signature = { ...(draft.signature as FunctionSignature), returns: typeToString(returns) };
       draft.compiled = body;
     } finally {
       this.functions.settling.delete(draft);
@@ -1128,9 +1248,21 @@ class ProgramResolver {
     for (const waiting of [...this.functions.waiting]) this.settle(waiting);
   }
 
-  /** What a function hands back, read as the type the body made it. */
+  /**
+   * What a function hands back, read as the type the body made it.
+   *
+   * A literal the return did not fix a type for is the thing it was written as:
+   * `return 2` hands back a number and `return true` hands back a truth, and a
+   * return that reads as nothing at all would settle the function as one that
+   * returns nothing — which is a different function from the one written.
+   */
   private returned(result: DraftStatement & { kind: "result" }): TypeExpr {
-    return draftType(result.value) ?? { kind: "void" };
+    const written = draftType(result.value);
+    if (written !== null) return written;
+    const value = result.value;
+    if (value.k === "literal") return numeric(isBigint(value) ? BIGINT_TYPE : "f64");
+    if (value.k === "boolean") return { kind: "primitive", name: "bool" };
+    return { kind: "void" };
   }
 
   /**
@@ -1421,7 +1553,7 @@ class ProgramResolver {
       case "reference": {
         const held = value.held;
         if (held.kind === "number") {
-          return declare({ kind: "number", mutable, type: held.type, text: held.text });
+          return declare({ kind: "number", mutable, type: held.type, text: held.text, ...(held.bigint === true ? { bigint: true } : {}) });
         }
         if (held.kind === "array") {
           const alias: ArrayHeld = {
@@ -1450,7 +1582,13 @@ class ProgramResolver {
       case "element":
         return declare({ kind: "number", mutable, type: value.type, text: "" });
       case "literal":
-        return declare({ kind: "number", mutable, type: value.held.type, text: value.held.text });
+        return declare({
+          kind: "number",
+          mutable,
+          type: value.held.type,
+          text: value.held.text,
+          ...(value.held.bigint === true ? { bigint: true } : {}),
+        });
       case "compare":
       case "isNull":
         return declare({ kind: "number", mutable, type: "bool", text: "" });
@@ -1483,7 +1621,7 @@ class ProgramResolver {
             `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
           );
         }
-        return declare({ kind: "number", mutable, type: name, text: "" });
+        return declare({ kind: "number", mutable, type: name, text: "", ...(value.bigint === true ? { bigint: true } : {}) });
       }
     }
   }
@@ -1593,11 +1731,15 @@ class ProgramResolver {
     const to = this.value(statement.to, type, statement.line);
     const step = written === null ? null : this.value(statement.step as ProgramValue, type, statement.line);
     this.open();
+    // A counter written as a bigint is one: `for (let i = 0n; ...)` counts in
+    // bigints, so the counter is flagged the way the value it starts at is.
+    const bigint = isBigint(from) || (step !== null && isBigint(step));
     const variable = this.declareName(statement.variable, statement.line, {
       kind: "number",
       mutable: true,
       type: primitive(type),
       text: "",
+      ...(bigint ? { bigint: true } : {}),
     });
     const body = this.looped(statement.body);
     this.close();
@@ -1659,6 +1801,37 @@ class ProgramResolver {
   /* Values                                                                  */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * True when a bigint is anywhere in the value as the source wrote it, which
+   * is the question the language answers when it refuses to mix the two.
+   *
+   * It is asked of the value before it is resolved, because the two operators
+   * that read both sides as something other than what they are — `>>>` and `**`
+   * — are answered before the sides are resolved at all. It walks a name and
+   * the two operations that compute a value out of other values, and answers
+   * false for everything else: a length, an element and a call are numbers the
+   * program read rather than wrote, and a function's own `bigint` is the `i64`
+   * the contract states it as.
+   */
+  private bigintWritten(value: ProgramValue, line: number): boolean {
+    switch (value.k) {
+      case "bigint":
+        return true;
+      case "name": {
+        const held = this.held(value.name, line);
+        return held.kind === "number" && held.bigint === true;
+      }
+      case "binary":
+        return this.bigintWritten(value.left, line) || this.bigintWritten(value.right, line);
+      case "unary":
+        return this.bigintWritten(value.operand, line);
+      case "conditional":
+        return this.bigintWritten(value.then, line) || this.bigintWritten(value.otherwise, line);
+      default:
+        return false;
+    }
+  }
+
   /** A condition: the truth of a value, which need not be a boolean. */
   private condition(value: ProgramValue, line: number): DraftValue {
     const resolved = this.value(value, null, line);
@@ -1667,6 +1840,23 @@ class ProgramResolver {
   }
 
   private value(value: ProgramValue, expect: TypeExpr | null, line: number): DraftValue {
+    // A bigint read where a double is expected is the one conversion a program
+    // makes that is never the same number: a double holds a whole number
+    // exactly only up to 2^53, so reading 9007199254740993n as one answers
+    // 9007199254992. The language refuses the use rather than rounding it, and
+    // so does this, at the one place every use passes through: a call's
+    // argument, a name written, an element written, a counter stepped and a
+    // chosen arm all arrive here with the type their use fixed them at.
+    const wanted = primitive(expect);
+    if (this.bigintWritten(value, line) && wanted !== null && isFloat(numeric(wanted))) {
+      const read = numeric(wanted);
+      throw programError(
+        `a bigint is read as a ${typeToString(read)}`,
+        this.body,
+        line,
+        `line ${line} of ${this.body.file}: a bigint is a whole number and a ${typeToString(read)} is not, and a bigint above 2^53 is not the number a double holds; write it as a number, or keep it a bigint`,
+      );
+    }
     switch (value.k) {
       case "number": {
         const held: NumberHeld = { kind: "number", name: "", mutable: false, type: null, text: value.text };
@@ -1687,7 +1877,10 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: a bigint is an i64, which runs from ${I64_MIN} to ${I64_MAX}`,
           );
         }
-        return { k: "literal", held: { kind: "number", name: "", mutable: false, type: "i64", text: value.text } };
+        return {
+          k: "literal",
+          held: { kind: "number", name: "", mutable: false, type: "i64", text: value.text, bigint: true },
+        };
       }
       case "boolean":
         return { k: "boolean", value: value.value };
@@ -1828,6 +2021,10 @@ class ProgramResolver {
         const then = this.value(value.then, null, line);
         const otherwise = this.value(value.otherwise, expect, line);
         const type = expect ?? this.common(then, otherwise, line);
+        // A choice between two bigints is a bigint: `x > 0 ? 1n : 2n` is the
+        // whole number the arms are, and the flag is what writes it with the
+        // `n` the language writes it with.
+        if (isBigint(then) && isBigint(otherwise)) return { k: "conditional", condition, then, otherwise, type, bigint: true };
         return { k: "conditional", condition, then, otherwise, type };
       }
       case "binary":
@@ -1970,6 +2167,17 @@ class ProgramResolver {
       // them as, whatever they are, and what it answers is one of those. A
       // number written in a program is a double, so `x >>> 1` is the shift of
       // a double truncated to a whole number, which is what the source means.
+      // A bigint is the one value it does not answer: the language reads both
+      // sides as 32 bit numbers and a bigint is not one, so it raises rather
+      // than truncating, and so does this.
+      if (this.bigintWritten(value.left, line) || this.bigintWritten(value.right, line)) {
+        throw programError(
+          `"${op}" needs numbers`,
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: both sides are read as 32 bit numbers, and a bigint is a whole number of sixty-four bits; use >> , which shifts a bigint as it is written`,
+        );
+      }
       const type = numeric("u32");
       return {
         k: "binary",
@@ -1993,6 +2201,17 @@ class ProgramResolver {
       return { k: "binary", op: "+", left, right, type: null };
     }
     if (op === "**") {
+      // A power is a double's operation: the language raises on a bigint rather
+      // than computing one, and a bigint read as a double is not the number the
+      // source wrote.
+      if (isBigint(left) || isBigint(right)) {
+        throw programError(
+          '"**" needs numbers',
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: a power is a double and a bigint is a whole number, and the language raises on one raised to another; multiply it out, or convert it with Number()`,
+        );
+      }
       return {
         k: "binary",
         op,
@@ -2027,6 +2246,20 @@ class ProgramResolver {
         );
       }
     }
+    // A bigint is not a number the language adds to another, and the reason is
+    // the one the arithmetic is refused for rather than the one it is rounded
+    // for: `1n + 1.5` is a type error in the language, and a program that
+    // answered it as a whole number would be answering a different program.
+    const leftBig = isBigint(left);
+    const rightBig = isBigint(right);
+    if (leftBig !== rightBig) {
+      throw programError(
+        `"${op}" cannot mix a bigint and ${leftBig ? "a number" : "a bigint"}`,
+        this.body,
+        line,
+        `line ${line} of ${this.body.file}: the language adds, subtracts, multiplies, divides and compares a bigint with another bigint and raises on a number beside one; convert it with Number() and say which of the two you meant`,
+      );
+    }
     const leftName = primitive(draftType(left));
     const rightName = primitive(draftType(right));
     // A comparison holds or it does not. A whole operator needs whole numbers
@@ -2034,10 +2267,12 @@ class ProgramResolver {
     const whole = WHOLE_OPERATORS.includes(op);
     const type = COMPARISONS[op] !== null
       ? numeric("bool")
-      : whole
-        ? numeric(wholeResult(leftName, rightName))
-        : numeric(numericResult(leftName, rightName, op === "/"));
-    return { k: "binary", op, left, right, type };
+      : leftBig
+        ? numeric(BIGINT_TYPE)
+        : whole
+          ? numeric(wholeResult(leftName, rightName))
+          : numeric(numericResult(leftName, rightName, op === "/"));
+    return leftBig ? { k: "binary", op, left, right, type, bigint: true } : { k: "binary", op, left, right, type };
   }
 
   private equality(
@@ -2715,6 +2950,14 @@ class ProgramLowering {
         const then = this.arm(statement.then, this.frame().loop);
         const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop);
         this.statement({ k: "if", condition, then, otherwise, line: statement.line });
+        // An `if` with an arm on each side, each of which leaves, is a statement
+        // nothing after it can be reached from. The block says so, rather than
+        // falling out of itself into a return of nothing: a function declared to
+        // return a number does not end by handing back whatever the register
+        // held, and a function that returns from every path returns.
+        if (otherwise !== null && this.frame().block.terminator.k === "next" && leaves(then) && leaves(otherwise)) {
+          this.frame().block.terminator = { k: "unreachable" };
+        }
         return;
       }
       case "while": {
@@ -2849,19 +3092,19 @@ class ProgramLowering {
       if (position > 0) {
         this.statement({ k: "printText", value: { k: "text", type: TEXT, parts: [{ k: "text", value: " " }] }, line: statement.line });
       }
-      this.printed(value, statement.line);
+      this.printed(value, isBigint(item), statement.line);
     });
     this.statement({ k: "printNewline", line: statement.line });
   }
 
   /** One printed value, the way the runtime writes what it holds. */
-  private printed(value: SemanticValue, line: number): void {
+  private printed(value: SemanticValue, bigint: boolean, line: number): void {
     switch (valueKind(value)) {
       case "text":
         this.statement({ k: "printText", value, line });
         return;
       case "number":
-        this.statement({ k: "printNumber", value, line });
+        this.statement({ k: "printNumber", value, line, bigint });
         return;
       case "boolean":
       case "reference":
@@ -2946,7 +3189,14 @@ class ProgramLowering {
           k: "compare",
           type: BOOLEAN,
           op: value.negate ? "ne" : "eq",
-          operand: value.how === "string" ? TEXT : this.operand,
+          // Two bigints are compared as the whole numbers they are, and anything
+          // else as the double every number in a program is.
+          operand:
+            value.how === "string"
+              ? TEXT
+              : isBigint(value.left) && isBigint(value.right)
+                ? numeric(BIGINT_TYPE)
+                : this.operand,
           left: this.value(value.left, null, line),
           right: this.value(value.right, null, line),
         };
@@ -2979,6 +3229,13 @@ class ProgramLowering {
    * `Uint32Array` holding 4000000000 is above every signed 32 bit number, and
    * read as a signed one it is negative, so `a[0] > b[0]` is false where the
    * source says true.
+   *
+   * A bigint is the one value a program holds that is not a double, and it is
+   * compared as the whole number it is: `9007199254740993n === 9007199254740995n`
+   * is false, and read as two doubles the two are the same number and it is
+   * true. The two sides of a comparison that mixes one with a number are
+   * refused by the resolver, because the language compares them exactly and an
+   * `i64` beside a fraction is not that comparison.
    */
   private readonly operand: TypeExpr = numeric("f64");
 
@@ -3108,10 +3365,11 @@ class ProgramLowering {
       };
     }
     // The two sides of a comparison are compared as the double they are, which
-    // is what a number in a program is whichever array it was read out of.
+    // is what a number in a program is whichever array it was read out of — and
+    // as the whole number they are when both of them are bigints.
     const comparison = COMPARISONS[op];
     if (comparison !== null) {
-      const operand = this.operand;
+      const operand = isBigint(value.left) && isBigint(value.right) ? numeric(BIGINT_TYPE) : this.operand;
       return {
         k: "compare",
         type: BOOLEAN,

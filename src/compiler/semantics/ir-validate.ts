@@ -73,7 +73,21 @@ import { refusalFor as regionRefusalFor } from "./region.ts";
 /* -------------------------------------------------------------------------- */
 
 /** The ways a block may end. A block that ends in none of them ends nowhere. */
-const TERMINATOR_KINDS: Record<string, true> = { next: true, return: true, jump: true };
+const TERMINATOR_KINDS: Record<string, true> = { next: true, return: true, jump: true, unreachable: true };
+
+/**
+ * Whether a block's last statement is one that leaves whatever its test says:
+ * an `if` with an arm on each side and each arm leaving, or a `raise`. It is
+ * the proof a block ending where nothing arrives has to carry, so that the
+ * claim is checked here rather than trusted from the text that made it.
+ */
+function endsByLeaving(block: SemanticBlock): boolean {
+  const last = block.statements[block.statements.length - 1];
+  if (last === undefined) return false;
+  if (last.k === "raise") return true;
+  if (last.k !== "if" || last.otherwise === null) return false;
+  return last.then.terminator.k !== "next" && last.otherwise.terminator.k !== "next";
+}
 
 /** The effects a call may say it has, as the contract language names them. */
 const EFFECT_NAMES: Record<Effect, true> = {
@@ -128,6 +142,46 @@ const WIDE_ARITHMETIC: ReadonlySet<string> = new Set([
   "shl",
   "shr",
 ]);
+
+/**
+ * The operations whose second operand is a count rather than a value of the
+ * type being operated on.
+ *
+ * A shift is the one operation where that is true by definition rather than by
+ * accident: `a u256` moved by `a u256` bits is not a number, and the count is
+ * the machine word the source wrote the shift by. It is the only place a wide
+ * number is allowed a narrower number beside it.
+ */
+const COUNTED_OPERATIONS: ReadonlySet<string> = new Set(["shl", "shr"]);
+
+/**
+ * What is wrong with pairing a wide number with a narrower one, or null when
+ * nothing is.
+ *
+ * The kernel the wide number is answered by takes two of them, and every
+ * backend lowers a wide operation to a call into it — the C backend to a
+ * `blaze_u256` compound value, the machine backend to four limb registers. A
+ * narrower operand has no such form: the C backend writes a cast from a scalar
+ * to a struct, which is a source that does not compile, and the machine backend
+ * asks for the single-register width a wide number does not have. Neither is a
+ * lowering, so a pair like that is refused here rather than carried to a target
+ * that cannot answer it — the same place, and for the same reason, as the
+ * operation a wide number does not have at all.
+ */
+function widePairProblem(left: SemanticType, right: SemanticType, result: SemanticType, counted: boolean): string | null {
+  if (!isWideType(left) && !isWideType(right) && !isWideType(result)) return null;
+  if (!isWideType(result)) {
+    return `a ${typeText(left)} and a ${typeText(right)} are read as a ${typeText(result)}, and a wide number is not a machine word`;
+  }
+  // The left side is the value being operated on and the right one is the
+  // value it is operated with, except in a shift, where the right one is a
+  // count of bits: that is the machine word the source wrote the shift by, and
+  // it is the one narrower number a wide number may be beside.
+  if (isWideType(left) && (counted || isWideType(right))) return null;
+  const narrow = isWideType(left) ? right : left;
+  const wide = isWideType(left) ? left : right;
+  return `a ${typeText(narrow)} is computed with a ${typeText(wide)}, and the kernel every backend answers a wide number with is over two of them`;
+}
 
 /* -------------------------------------------------------------------------- */
 /* What a body is checked against                                              */
@@ -518,8 +572,13 @@ function structureProblems(body: Body): string[] {
     if (terminator.k === "return" && body.single && !isEntry) {
       problems.push(`${where}only the entry block ends ${body.own}`);
     }
-    if (terminator.k === "jump" && isEntry) {
-      problems.push(`${where}${body.own} body leaves for ${terminator.target} rather than ending`);
+    if (terminator.k === "unreachable" && !endsByLeaving(placed.block)) {
+      // A block that ends where nothing arrives is a claim, and a claim a model
+      // or a person writes into IR text is proved here rather than believed:
+      // something in the block has to leave, or control does continue past it
+      // and the block is ordinary.
+      problems.push(`${where}the block ends where nothing arrives, but nothing in it leaves`);
+      continue;
     }
     if (terminator.k === "jump" && !ids.has(terminator.target) && !headers.has(terminator.target)) {
       problems.push(`${where}jumps to ${terminator.target}, which is not a block of the program`);
@@ -861,6 +920,8 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
             `${prefix}${value.op} is not defined over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}; a wide number has an add, a subtraction, a product, the logical operations and the shifts`,
           );
         }
+        const pair = widePairProblem(value.left.type, value.right.type, value.type, COUNTED_OPERATIONS.has(value.op));
+        if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
         return problems;
       }
       if (value.op === "concat") {
@@ -940,6 +1001,15 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       if (!comparableTo(value.right, value.operand)) {
         problems.push(`${prefix}${value.op} compares a ${typeText(value.right.type)} as a ${typeText(value.operand)}`);
       }
+      // A wide number is compared by the kernel, over two of them. The operand
+      // is what the comparison is read at, so a wide number beside an operand
+      // that is not one is a comparison no backend has an instruction for: the
+      // C backend casts a struct to whatever the operand is and writes it into a
+      // C comparison, and the machine backend asks for the width a wide number
+      // does not have. The count of a shift is the one narrower number a wide
+      // number may be beside, and it is not a comparison.
+      const pair = widePairProblem(value.left.type, value.right.type, value.operand, false);
+      if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
       return problems;
     case "logical": {
       // `&&` and `||` hand back one of their arms rather than a truth, so what
@@ -1093,6 +1163,16 @@ function typeProblems(context: Context, tree: Tree): string[] {
     }
     if (statement.k === "printNumber" && !isNumber(statement.value.type)) {
       problems.push(`${prefix}a number is printed as a ${typeText(statement.value.type)}`);
+    }
+    // A bigint is the `i64` the language's `1n` is, and the `n` after it says
+    // so. A value of any other width has no such spelling: a double is written
+    // as the number it is and a whole number wider than a machine word is
+    // written as its digits.
+    if (statement.k === "printNumber" && statement.bigint) {
+      const printed = statement.value.type;
+      if (printed.kind !== "primitive" || printed.name !== "i64") {
+        problems.push(`${prefix}a bigint is printed as a ${typeText(printed)}, which is not the sixty-four bit whole number a bigint is`);
+      }
     }
     if (statement.k === "raise" && !isTextType(statement.message.type)) {
       problems.push(`${prefix}a program is raised with a ${typeText(statement.message.type)}, which is not text`);
@@ -1602,11 +1682,21 @@ export function semanticIrProblems(
     // signatures it is called by in hand.
     ...program.bodies.flatMap((fn) => {
       const own = readFunctionTree(fn, fn.entry);
-      return bodyProblems(
-        { objects: program.objects, functions: program.functions, callees, contract, declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)] },
-        functionBody(fn.entry, own),
-        own,
-      ).map((problem) => `${fn.symbol}: ${problem}`);
+      const own_context = {
+        objects: program.objects,
+        functions: program.functions,
+        callees,
+        contract,
+        declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)],
+      };
+      return [
+        ...bodyProblems(own_context, functionBody(fn.entry, own), own),
+        // A function a program declares returns what it declared, and the rule
+        // is the one a function of a module is held to. It was not asked of a
+        // program's own bodies, so a body that fell off its last block ended by
+        // handing back whatever the register held.
+        ...returnProblems(fn, own_context, own),
+      ].map((problem) => `${fn.symbol}: ${problem}`);
     }),
   ];
 }
@@ -1798,7 +1888,11 @@ function wayOutProblems(fn: SemanticFunction, tree: Tree): string[] {
     const where = label(placed.block.id);
     if (placed.block === fn.entry) {
       const terminator = placed.block.terminator;
-      if (terminator.k !== "return") {
+      // An entry block that ends where nothing arrives returns from every path,
+      // which is what a return is: the two say the same thing about a function,
+      // and the statements the block holds after the `if` that proved it are the
+      // ones the program never runs.
+      if (terminator.k !== "return" && terminator.k !== "unreachable") {
         problems.push(`entry: the entry block ends in ${terminator.k} rather than in a return`);
       }
       continue;

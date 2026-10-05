@@ -209,8 +209,12 @@ export interface ProgramTarget {
   /** A call kept for what it does, which may return nothing at all. */
   discard(expression: string, returnsNothing: boolean): string;
 
-  /** One printed value, read the way printing reads it. */
-  print(value: string, type: SemanticType | null, kind: ValueKind): string[];
+  /**
+   * One printed value, read the way printing reads it. `bigint` is what the
+   * language writes an `n` after, and it is a word rather than a type because
+   * the value is the same whole number either way.
+   */
+  print(value: string, type: SemanticType | null, kind: ValueKind, bigint: boolean): string[];
   /** The newline that ends a line of output. */
   newline(): string;
   /** A call of a function the program compiled, and one the compiler provides. */
@@ -332,10 +336,12 @@ class ProgramEmitter {
     this.returns = fn.returns;
     for (const statement of fn.entry.statements) this.statement(statement);
     // What a function hands back is written where the source returned it. A body
-    // that returns a value has written its return above; one that falls off the
-    // end returns the zero of a type it never returns, which is what the closing
-    // line says for it.
-    const returned = fn.entry.terminator.k === "return" && fn.entry.terminator.value !== null;
+    // that falls off the end is the one case that needs a line for it, and the
+    // line says what the closing brace would: a body that returns from every
+    // path — its last block an `if` whose two arms each return — has written
+    // every return it has, and a `return;` after them is a statement C refuses
+    // in a function that returns something.
+    const returned = fn.entry.terminator.k !== "next";
     this.terminator(fn.entry.terminator, null, true);
     const body = this.lines;
     this.lines = [];
@@ -410,11 +416,16 @@ class ProgramEmitter {
         this.write(this.target.update(this.names.read(statement.name), statement.op, statement.prefix));
         return;
       case "printText":
+        for (const line of this.target.print(this.expression(statement.value), statement.value.type, valueKind(statement.value), false)) {
+          this.write(line);
+        }
+        return;
       case "printNumber":
         for (const line of this.target.print(
           this.expression(statement.value),
           statement.value.type,
           valueKind(statement.value),
+          statement.bigint,
         )) {
           this.write(line);
         }

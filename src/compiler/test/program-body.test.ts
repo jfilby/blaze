@@ -15,8 +15,8 @@ import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
-import { semanticIrProblems } from "../semantics/ir-validate.ts";
-import { typeText, type SemanticValue } from "../core/semantic-ir.ts";
+import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-validate.ts";
+import { typeText, type SemanticFunction, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
 import type { BuildMode } from "../core/types.ts";
@@ -544,6 +544,198 @@ test("a program prints numbers the way the language it was written in prints the
   // difference rather than only at some later build.
   assert.deepEqual(delivered.stdout.trimEnd().split("\n"), PRINTED);
   assert.equal(delivered.stdout, source.stdout);
+});
+
+test("a program prints and computes a bigint the way the language it was written in does", async () => {
+  // A bigint is the one number in a program that is not a double, and the two
+  // ways that shows are the two this covers: the arithmetic is whole, so
+  // 9007199254740993n + 1n is 9007199254740994 rather than the 9007199254992 a
+  // double answers for it, and it is written with the `n` after it that says
+  // which of the two it is. The comparison is the third: two bigints above 2^53
+  // are the same number read as doubles and two different ones as bigints.
+  const source = [
+    "const big = 9007199254740993n;",
+    "console.log(big);",
+    "console.log(big + 1n);",
+    "console.log(big * 2n - 1n);",
+    "console.log(big / 3n, big % 7n, big >> 2n);",
+    "console.log(big === 9007199254740993n, big === 9007199254740995n, big < 9007199254740995n);",
+    "let total = 0n;",
+    "for (let i = 0n; i < 4n; i += 1n) total += i * 10000000000n;",
+    "console.log(total);",
+    // A number is still a number: it computes in doubles and is written without
+    // an `n`, and the two beside each other are what the language prints.
+    "console.log(7 / 2, 4000000000 + 1, 1 << 4, `${big}`);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const expected = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(expected.code, 0, expected.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, expected.stdout, "the built program prints what the source prints");
+  assert.deepEqual(
+    delivered.stdout.trimEnd().split("\n"),
+    [
+      "9007199254740993n",
+      "9007199254740994n",
+      "18014398509481985n",
+      "3002399751580331n 5n 2251799813685248n",
+      "true false true",
+      "60000000000n",
+      "3.5 4000000001 16 9007199254740993",
+    ],
+    "a bigint is whole and is written with an n, and a number is neither",
+  );
+});
+
+test("a bigint the language will not mix with a number is refused", () => {
+  // The language raises on a bigint beside a number rather than rounding one into
+  // the other, and a program that answered the expression would be answering a
+  // different program: a bigint above 2^53 is not the number a double holds.
+  const refusals: [string, readonly string[]][] = [
+    ["added", ["console.log(1n + 1);"]],
+    ["compared", ["console.log(1n < 2);"]],
+    ["raised", ["console.log(2n ** 3n);"]],
+    ["shifted unsigned", ["console.log(2n >>> 1n);"]],
+    ["given to a number", ["function half(n: number): number {", "  return n / 2;", "}", "console.log(half(9007199254740993n));"]],
+    ["declared a number", ["const n: number = 9007199254740993n;", "console.log(n);"]],
+  ];
+  for (const [what, lines] of refusals) {
+    assert.match(
+      diagnostic(() => resolved({ "main.ts": [...lines, ""].join("\n") })),
+      /bigint/,
+      `${what} is refused for what it is rather than answered as a number`,
+    );
+  }
+});
+
+test("a function that returns from every path is compiled", async () => {
+  // `if (x > 0) return 1; else return 2;` returns from both arms and has no
+  // return at the top of the body at all, so what the function hands back is
+  // read from the arms and its last block ends where nothing arrives rather than
+  // falling out of itself. Before that it could not be compiled at all: the
+  // block after the `if` was written as falling through, and a function
+  // declared to return a number then ended by handing back whatever the register
+  // held.
+  const source = [
+    "const reach = 8;",
+    "function pick(x: number): number {",
+    "  if (x > 0) {",
+    "    return 1;",
+    "  } else {",
+    "    return 2;",
+    "  }",
+    "}",
+    "function firstOver(x: number): number {",
+    "  for (let i = 0; i < x; i += 1) {",
+    "    if (i > 2) {",
+    "      return i;",
+    "    } else {",
+    "      return 0;",
+    "    }",
+    "  }",
+    "  return -1;",
+    "}",
+    "console.log(pick(reach), pick(-reach), firstOver(reach), firstOver(-reach));",
+    "",
+  ].join("\n");
+
+  // The IR says so rather than leaving it to a backend to notice: the block the
+  // `if` was written in ends where nothing arrives, because both its arms leave,
+  // and the loop's body does the same. What is left of `firstOver` is the return
+  // the source wrote after the loop, for the turns that never run.
+  const built = resolved({ "main.ts": source });
+  const pick = built.bodies.find((one) => one.name === "pick");
+  assert.equal(pick?.entry.terminator.k, "unreachable", "both arms return, so nothing arrives after the if");
+  const first = built.bodies.find((one) => one.name === "firstOver");
+  assert.equal(first?.entry.terminator.k, "return", "the loop may run no turns, so the return after it stands");
+  const turn = first?.entry.statements[0];
+  assert.equal(
+    turn?.k === "loop" ? turn.loop.body.terminator.k : null,
+    "unreachable",
+    "the loop's body returns on its first turn either way",
+  );
+  const { directory, binary } = await program(source);
+  const expected = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(expected.code, 0, expected.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, expected.stdout, "the built program prints what the source prints");
+  // The loop's body returns on its first turn whatever the counter is, so the
+  // answer is the else arm's 0; a bound below zero runs no turn at all, so the
+  // body falls through to the return that follows the loop.
+  assert.equal(delivered.stdout, "1 2 0 -1\n");
+});
+
+test("a function that falls off the end of a path is refused", () => {
+  // The other half of the rule: an `if` with one arm that returns is not a
+  // function that returns from every path, and the path that falls off the end
+  // of the body has nothing to hand back. That is a build the compiler refuses
+  // with the reason, rather than one that answers with a register's contents.
+  const source = [
+    "const reach = 8;",
+    "function maybe(x: number): number {",
+    "  if (x > 0) {",
+    "    return 1;",
+    "  }",
+    "}",
+    "console.log(maybe(reach));",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const program = resolveProgram(phase.body!, phase.program);
+  assert.deepEqual(semanticIrProblems(program, phase.program), [
+    "maybe: entry: the body returns nothing and is declared to return a f64",
+  ]);
+});
+
+test("a block that ends where nothing arrives is proved rather than believed", () => {
+  // The word is one a model or a person can write into IR text, and a block that
+  // claims it while nothing in it leaves is a block that control does continue
+  // past — so the claim is proved where every other claim about a body is. The
+  // block here is an arm, because that is where a resolver writes one: an entry
+  // block that returns from every path is a function that returns, not a claim.
+  const fn: SemanticFunction = {
+    name: "subject",
+    symbol: "subject",
+    params: [{ kind: "value", name: "n", mutable: false, type: { kind: "primitive", name: "f64" } }],
+    returns: { kind: "primitive", name: "f64" },
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: true,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      releases: [],
+      statements: [
+        {
+          k: "if",
+          condition: { k: "local", type: { kind: "primitive", name: "f64" }, name: "n" },
+          then: {
+            id: "b1",
+            releases: [],
+            statements: [{ k: "printNumber", value: { k: "const", type: { kind: "primitive", name: "f64" }, text: "1" }, line: 2, bigint: false }],
+            // Nothing in this block leaves: it prints, and then claims that
+            // control does not continue past it.
+            terminator: { k: "unreachable" },
+          },
+          otherwise: null,
+          line: 2,
+        },
+      ],
+      terminator: { k: "return", value: { k: "const", type: { kind: "primitive", name: "f64" }, text: "0" } },
+    },
+  };
+  assert.deepEqual(semanticFunctionProblems(fn), [
+    "subject: b1: the block ends where nothing arrives, but nothing in it leaves",
+  ]);
 });
 
 test("the Nim driver runs a program the way the C driver does", async (t) => {

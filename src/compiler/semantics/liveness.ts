@@ -344,6 +344,11 @@ class Graph {
         if (freeing) events.push({ k: "call" });
         return this.make(events);
       }
+      // A block nothing arrives at links to nothing: it holds no name live
+      // across a call, because no call runs after it and nothing reads what it
+      // would have held.
+      case "unreachable":
+        return this.make([]);
       case "jump": {
         const node = this.make(freeing ? [{ k: "call" }] : []);
         // A jump names the header or the exit of a loop it is inside, and the

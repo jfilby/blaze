@@ -401,7 +401,7 @@ test("purity is transitive: a call to a pure function is pure", () => {
 test("purity is transitive both ways: one impure step refuses the whole chain", () => {
   // The step is impure because it prints, which is what output order is: a
   // callee that writes an argument of its own is no longer a step that refuses.
-  const impure = callee("impure", [{ k: "printNumber", line: 2, value: { k: "const", type: F64, text: "1" } }, chain(8)]);
+  const impure = callee("impure", [{ k: "printNumber", line: 2, value: { k: "const", type: F64, text: "1" }, bigint: false }, chain(8)]);
   const middle = callee("middle", [call("impure"), chain(8)]);
   const fn = functionWith(countedLoop([call("middle"), chain(8)]));
   markParallelLoops(fn.entry, new Map([["middle", middle], ["impure", impure]]));
@@ -446,7 +446,7 @@ test("a loop whose body reads the accumulator it combines is not marked", () => 
 
 test("a loop whose body prints is not marked, because output order is the program's", () => {
   const fn = functionWith(
-    countedLoop([{ k: "printNumber", line: 2, value: { k: "local", type: F64, name: "x" } }]),
+    countedLoop([{ k: "printNumber", line: 2, value: { k: "local", type: F64, name: "x" }, bigint: false }]),
   );
   markParallelLoops(fn.entry);
   assert.equal(onlyLoop(fn).parallel, undefined);

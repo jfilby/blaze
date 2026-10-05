@@ -1084,7 +1084,10 @@ function namesAViewReads(loop: SemanticLoop): Set<string> {
  */
 function returnsFromItsBody(body: SemanticBlock): boolean {
   for (const block of everyBlock(body)) {
-    if (block.terminator.k === "return") return true;
+    // A block nothing arrives at is one whose every path has already returned,
+    // so a turn that reaches it returns out of the function on every one of them
+    // — which is what this rule is about.
+    if (block.terminator.k === "return" || block.terminator.k === "unreachable") return true;
   }
   return false;
 }
@@ -4194,6 +4197,10 @@ class Machine {
 
   private terminator(terminator: SemanticTerminator): void {
     if (terminator.k === "next") return;
+    // A block nothing arrives at writes nothing. The instructions that would
+    // follow it are the epilogue's, and the epilogue is reached only by a return
+    // — a fall-through here would hand back whatever the accumulator held.
+    if (terminator.k === "unreachable") return;
     if (terminator.k === "return") {
       this.leaveRegion();
       // A wide number is returned through a pointer the caller passes rather

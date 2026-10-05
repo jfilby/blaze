@@ -167,6 +167,80 @@ other direction is kept: `whole-numbers.ts` narrows a parameter to a whole numbe
 and reads it as the double past the reach that narrowing holds for, which is
 every value the slot can hold said as the wider of the two.
 
+## What a wide number, a bigint and a block nothing arrives at are
+
+Three things in the IR answer a question a type alone does not, and each of them
+is a place a wrong answer is a *number the program never computed* rather than a
+lost register.
+
+**A wide number is only computed with another wide number.** `u256` is four
+limbs, and every backend answers a wide operation by calling the kernel, which
+is over two of them. A narrower operand beside one has no form there: the C
+backend wrote a cast from a scalar to a struct — a source that does not compile
+— and the machine backend asked for the single-register width a wide number does
+not have. So `wholeOf` answers the wide number whenever one side is wide, *before*
+the length rule (`usize` is over every value a machine word holds, and a wide
+number holds values none of them do), and `ir-validate.ts` refuses a pair the
+kernel cannot answer, naming which of the two is not a wide number. The count of a
+shift is the one exception, because a shift count is the machine word the source
+wrote the shift by.
+
+**A bigint is a whole number and an `n` after it.** In a program every number is
+a double, which holds a whole number exactly only up to 2^53 — so
+`9007199254740993n + 1n` was answered as 9007199254992, and `console.log(1n)`
+printed `1` where the language prints `1n`. The resolver marks a value the source
+wrote an `n` beside, and everything follows from that mark: the arithmetic is
+the `i64` a bigint is, a comparison of two bigints is an `i64` comparison, and
+`print_number` carries `bigint` so the driver writes the `n`. A bigint the
+language will not mix with a number — in arithmetic, in a comparison, in a
+`>>>` or a `**`, or where a `number` is expected — is refused with the reason
+rather than rounded, because rounding a bigint above 2^53 is a different number.
+The one thing it does not reach is a `bigint` *parameter of a compiled function*:
+the contract states it as the `i64` it is, so a function that prints one writes
+it without the `n`.
+
+**A block that ends where nothing arrives says so.** `if (c) return 1; else
+return 2;` returns from both arms and has no return at the top of the body, so
+what the function hands back is read from *every* return in the body, and the
+block the `if` was written in ends `unreachable` rather than falling out of
+itself into a return of nothing — which is a function declared to return a number
+ending by handing back whatever the register held. The word is a claim, and
+`ir-validate.ts` proves it the way it proves a `parallel` mark: something in the
+block has to leave, or control does continue past it. WebAssembly has an
+instruction for such a block and the other backends write nothing, because there
+is nowhere for it to go.
+
+
+## What an object is on each side
+
+An object is one block the runtime allocated and every side reads the same bytes
+of, so what each language says about its type has to agree on the bytes rather
+than on the name. The C side declares the contract's layout as a `struct` and
+the fields are at the offsets the contract states. The Nim side had
+`ref object of RootObj`, and that is two things in front of the fields: Nim gives
+an object that inherits from a supertype a **vtable pointer**, and a `ref` is a
+cell whose first word is a **reference count** — so the field the contract puts
+at `0` was read at `8`, the one at `8` at `16`, and the pointer the C backend
+returned was not the pointer the host held. A Nim `object` is neither, and that
+is what the declaration is now.
+
+The prototype the host hands the C compiler names a `void*` where the C side
+declares `struct Object1*`, because Nim gives its own object type a C name of its
+own (`tyObject_Object1__<hash>`): two names for one type, and the C compiler
+refused the call with "assignment to `tyObject_Object1 *` from incompatible
+pointer type `struct Object1 *`" — a Nim-hosted program that builds an object
+could not be built at all. `void*` is the same pointer under C's own rules, and
+what it points at is the layout the C declaration still checks.
+
+The lifetime is the runtime's on both sides, which is why nothing in the Nim type
+is traced: a value the program keeps is kept by the count in the runtime's own
+header, not by a collector walking these objects. A program cannot read a field
+(`node.left` is refused) or build an object literal, so the only thing a program
+does with one is hand it to a compiled function — which is why the object type
+and the prototype are the whole of the Nim side, and why the `create(...)` that
+allocated one in the driver's own object path was never reached: it took an
+initialisation procedure where a block belongs. It is a cast of the same
+`object_new` the C driver writes.
 
 ## The rules a review may propose
 

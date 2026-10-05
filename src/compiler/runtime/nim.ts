@@ -187,14 +187,31 @@ export function nimName(name: string): string {
   return NIM_RESERVED[identifier] === true ? `${identifier}_` : identifier;
 }
 
-/** The Nim object types a contract lays out, in the order the contract names them. */
+/**
+ * The Nim object types a contract lays out, in the order the contract names them.
+ *
+ * They are written as plain objects rather than as references, and that is what
+ * makes them the same bytes on both sides. A Nim `ref object` is a pointer to a
+ * cell whose first word is a reference count, so a field the contract puts at `0`
+ * is read at `8` and the pointer the C backend returned — a payload, with nothing
+ * in front of it — is not the pointer the host holds. Inheriting from `RootObj`
+ * adds a vtable in front of the fields on top of that, which put two fields at
+ * `8` and `16` where the contract states `0` and `8`.
+ *
+ * A plain object has neither: its fields are at the offsets the contract states,
+ * `sizeof` is the size the runtime allocates, and the extern declaration of a
+ * function that builds one — `struct Object1*` — is the same type. The lifetime
+ * is the runtime's, exactly as it is on the C side: nothing here is traced,
+ * because a value the program keeps is kept by the count in the runtime's own
+ * header rather than by a collector walking these objects.
+ */
 export function nimObjectDeclarations(objects: Record<string, ObjectLayout>): string {
   return Object.values(objects)
     .map((object) => {
       const fields = object.fields
         .map((field) => `    ${nimName(field.name)}*: ${nimType(parseType(field.type))}`)
         .join("\n");
-      return `type\n  ${object.name}* = ref object of RootObj\n${fields}`;
+      return `type\n  ${object.name}* = object\n${fields}`;
     })
     .join("\n");
 }

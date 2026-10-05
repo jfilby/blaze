@@ -580,7 +580,7 @@ test("a whole number is written as the integer it is, above the width of a doubl
     const parameter: SemanticSlot = { kind: "value", name: "n", mutable: false, type: shape.type };
     const read: SemanticValue = { k: "local", type: shape.type, name: "n" };
     const printed = await lowered(
-      subject(VOID, runs([{ k: "printNumber", value: read, line: 1 }]), [parameter]),
+      subject(VOID, runs([{ k: "printNumber", value: read, line: 1, bigint: false }]), [parameter]),
       (name) => `${name}(${shape.argument});`,
     );
     assert.equal(printed.trimEnd(), shape.written, shape.name);

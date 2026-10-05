@@ -59,7 +59,7 @@ import { parseType, typeToString } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
-import { isWhole, wholeOf } from "../core/semantic-ir.ts";
+import { isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 import type { AssignOperator, BinaryOp, Expression, Statement, UnaryOp as SourceUnaryOp } from "../core/ir.ts";
@@ -161,10 +161,21 @@ const WHOLE_OPERATORS: Record<string, true> = { "%": true, "<<": true, ">>": tru
  * The whole number a whole operator yields: the one both operands already are,
  * and an i64 otherwise, because a shift, a remainder or a bitwise operator over
  * a double is not an operation any target has.
+ *
+ * A wide number is asked before either of those, and it wins over a side that
+ * is not one: the operator is on whole numbers, a wide number is one, and
+ * answering an `i64` here is a number the high three limbs do not fit in. What
+ * the narrower side then does is the validator's rule rather than this one's —
+ * a wide number is only answered by the kernel, which is over two of them.
  */
 function wholeResult(left: Inferred, right: Inferred): TypeExpr {
   const whole = (side: Inferred): PrimitiveTypeName | null =>
     side.kind === "type" && side.type.kind === "primitive" && isWhole(side.type.name) ? side.type.name : null;
+  for (const side of [left, right]) {
+    if (side.kind === "type" && side.type.kind === "primitive" && isWide(side.type.name)) {
+      return { kind: "primitive", name: side.type.name };
+    }
+  }
   const a = whole(left);
   const b = whole(right);
   return { kind: "primitive", name: a !== null && b !== null ? wholeOf(a, b) : "i64" };
@@ -752,7 +763,11 @@ class FunctionBody {
         this.write({ k: "printText", value, line: statement.line });
         break;
       case "number":
-        this.write({ k: "printNumber", value, line: statement.line });
+        // A function's own body holds no bigint: the contract states a bigint as
+        // the `i64` it is, and a printed `i64` is a whole number. What a program
+        // writes with an `n` beside it is a value the program's own statements
+        // hold, and those are written by the program pass.
+        this.write({ k: "printNumber", value, line: statement.line, bigint: false });
         break;
       case "boolean":
       case "reference":

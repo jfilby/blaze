@@ -212,7 +212,7 @@ test("a name read narrower than the slot it names is refused", () => {
       releases: [],
       statements: [
         { k: "let", line: 1, slot: { kind: "value", name: "n", mutable: true, type: NUMBER }, value: { k: "const", type: NUMBER, text: "1.75" } },
-        { k: "printNumber", line: 2, value: { k: "local", type: I64, name: "n" } },
+        { k: "printNumber", line: 2, value: { k: "local", type: I64, name: "n" }, bigint: false },
       ],
       terminator: { k: "return", value: null },
     },
@@ -244,6 +244,7 @@ test("a buffer is read as itself whatever length it is written at", () => {
         {
           k: "printNumber",
           line: 1,
+          bigint: false,
           value: {
             k: "element",
             type: NUMBER,
@@ -980,7 +981,7 @@ test("the objects and the errors the IR states are what the runtime is asked for
         },
         { k: "storeField", object: node, layout: "Object1", field: "value", value: { k: "const", type: NUMBER, text: "7" }, line: 2 },
         { k: "retain", value: node, line: 3 },
-        { k: "printNumber", value: { k: "loadField", type: NUMBER, object: node, layout: "Object1", field: "value" }, line: 4 },
+        { k: "printNumber", value: { k: "loadField", type: NUMBER, object: node, layout: "Object1", field: "value" }, line: 4, bigint: false },
         { k: "printNewline", line: 4 },
         { k: "raise", message: { k: "text", type: { kind: "text" }, parts: [{ k: "text", value: "boom" }] }, line: 5 },
       ],
@@ -1023,7 +1024,14 @@ test("the objects and the errors the IR states are what the runtime is asked for
         },
         {
           k: "printNumber",
-          value: { k: "loadField", type: NUMBER, object: node, layout: "Object1", field: "value" },
+          bigint: false,
+          value: {
+            k: "loadField",
+            type: NUMBER,
+            object: node,
+            layout: "Object1",
+            field: "value",
+          },
           line: 2,
         },
         { k: "printNewline", line: 2 },

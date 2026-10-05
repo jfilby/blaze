@@ -260,7 +260,7 @@ test("a binding nothing reads is dropped", () => {
     id: "entry", releases: [],
     statements: [
       { k: "let", slot: { kind: "value", name: "unused", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
-      { k: "printNumber", value: constOf("2"), line: 2 },
+      { k: "printNumber", value: constOf("2"), line: 2, bigint: false },
     ],
     terminator: { k: "return", value: null },
   });
@@ -277,7 +277,7 @@ test("a binding read only as a call argument reaches the call", () => {
     id: "entry", releases: [],
     statements: [
       { k: "let", slot: { kind: "value", name: "argument", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
-      { k: "printNumber", value: absOf({ k: "local", type: F64, name: "argument" }), line: 2 },
+      { k: "printNumber", value: absOf({ k: "local", type: F64, name: "argument" }), line: 2, bigint: false },
     ],
     terminator: { k: "return", value: null },
   });
@@ -294,7 +294,7 @@ test("a binding a statement writes between it and the one read is left alone", (
     statements: [
       { k: "let", slot: { kind: "value", name: "s", mutable: true, type: F64 }, value: constOf("1"), line: 1 },
       { k: "set", name: "s", op: "+=", value: constOf("2"), line: 2 },
-      { k: "printNumber", value: { k: "local", type: F64, name: "s" }, line: 3 },
+      { k: "printNumber", value: { k: "local", type: F64, name: "s" }, line: 3, bigint: false },
     ],
     terminator: { k: "return", value: null },
   });
@@ -307,7 +307,7 @@ test("a number written out inside a call argument is one number", () => {
   // way the same arithmetic anywhere else in the value is.
   const before = fnOf({
     id: "entry", releases: [], terminator: { k: "return", value: null },
-    statements: [{ k: "printNumber", value: absOf(bin("mul", constOf("2"), constOf("4"))), line: 1 }],
+    statements: [{ k: "printNumber", value: absOf(bin("mul", constOf("2"), constOf("4"))), line: 1, bigint: false }],
   });
   assert.match(printed(before), /Math\.abs \[arg\[f64\] const\[f64\] 8\]/);
 });
@@ -320,7 +320,7 @@ test("a binding something reads is kept", () => {
     id: "entry", releases: [],
     statements: [
       { k: "let", slot: { kind: "value", name: "used", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
-      { k: "printNumber", value: { k: "local", type: F64, name: "used" }, line: 2 },
+      { k: "printNumber", value: { k: "local", type: F64, name: "used" }, line: 2, bigint: false },
     ],
     terminator: { k: "return", value: null },
   });
@@ -544,7 +544,7 @@ test("a chain of bindings read once is inlined whole", () => {
     });
     value = { k: "local", type: I32, name };
   }
-  body.statements.push({ k: "printNumber", value, line: 20 });
+  body.statements.push({ k: "printNumber", value, line: 20, bigint: false });
   const fn = fnOf({ id: "entry", releases: [], terminator: { k: "return", value: null }, statements: [loop] }, { kind: "void" }, [n, i]);
   const after = printed(fn);
   // Every name of the chain is bound once and read nowhere else, so none of them
@@ -642,7 +642,7 @@ test("what the pass produces is a function the compiler may lower", () => {
     id: "entry", releases: [], terminator: { k: "return", value: null },
     statements: [
       { k: "let", slot: { kind: "value", name: "unused", mutable: false, type: F64 }, value: constOf("1"), line: 1 },
-      { k: "printNumber", value: bin("add", constOf("2"), constOf("3")), line: 2 },
+      { k: "printNumber", value: bin("add", constOf("2"), constOf("3")), line: 2, bigint: false },
       countedLoop(bin("mul", readN, constOf("2"), I32)),
     ],
   }, { kind: "void" }, [n, i]);
@@ -714,7 +714,7 @@ test("the folded C computes what the unfolded C computes", async () => {
       const fn = fnOf(
         {
           id: "entry", releases: [],
-          statements: [{ k: "printNumber", value: one.expression, line: 1 }, { k: "printNewline", line: 2 }],
+          statements: [{ k: "printNumber", value: one.expression, line: 1, bigint: false }, { k: "printNewline", line: 2 }],
           terminator: { k: "return", value: null },
         },
         one.parameter === undefined ? { kind: "void" } : one.expression.type,
@@ -1147,7 +1147,7 @@ test("a statement nothing reaches after a raise is not lowered", () => {
     statements: [
       { k: "raise", message: { k: "text", type: { kind: "text" }, parts: [{ k: "text", value: "no" }] }, line: 1 },
       { k: "set", name: "sum", op: "+=", value: constOf("1"), line: 2 },
-      { k: "printNumber", value: constOf("7"), line: 3 },
+      { k: "printNumber", value: constOf("7"), line: 3, bigint: false },
     ],
     terminator: { k: "return", value: null },
   };
@@ -1175,7 +1175,7 @@ test("a statement after an if whose two arms both leave is not lowered", () => {
         condition: { k: "compare", type: BOOL, op: "lt", operand: F64, left: constOf("1"), right: constOf("2") },
         then: arm("1"), otherwise: arm("2"),
       },
-      { k: "printNumber", value: constOf("7"), line: 2 },
+      { k: "printNumber", value: constOf("7"), line: 2, bigint: false },
     ],
     terminator: { k: "return", value: null },
   };
@@ -1197,7 +1197,7 @@ test("a statement after an if with a falling arm is kept", () => {
         then: { id: "b1", releases: [], statements: [], terminator: { k: "return", value: constOf("1") } },
         otherwise: null,
       },
-      { k: "printNumber", value: constOf("7"), line: 2 },
+      { k: "printNumber", value: constOf("7"), line: 7, bigint: false },
     ],
     terminator: { k: "return", value: null },
   };
@@ -1221,7 +1221,7 @@ test("a loop is not a transfer out of the block it is written in", () => {
           body: { id: "b2", releases: [], statements: [], terminator: { k: "jump", target: "b1", releases: [] } },
         },
       },
-      { k: "printNumber", value: constOf("7"), line: 2 },
+      { k: "printNumber", value: constOf("7"), line: 7, bigint: false },
     ],
     terminator: { k: "return", value: null },
   };

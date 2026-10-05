@@ -1021,7 +1021,7 @@ test("text is written, measured, joined and compared by what it says", async () 
     id: "entry",
     statements: [
       { k: "printText", line: 1, value: literal("value ") },
-      { k: "printNumber", line: 2, value: local("v") },
+      { k: "printNumber", line: 2, value: local("v"), bigint: false },
       { k: "printNewline", line: 3 },
       { k: "printText", line: 4, value: { k: "text", type: TEXT, parts: [{ k: "text", value: "n=" }, { k: "value", value: local("v") }] } },
       { k: "printNewline", line: 5 },

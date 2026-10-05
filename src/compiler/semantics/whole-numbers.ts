@@ -50,6 +50,7 @@ import {
   isFloat,
   isInteger,
   isUnsigned,
+  isWideType,
   slotType,
   statementValues,
   walkValues,
@@ -344,7 +345,13 @@ export function wholeNumberArithmetic(program: SemanticProgram): void {
     // A function nothing calls is not asked: a body no caller reaches is one
     // the pass cannot improve and one whose parameters no test speaks for.
     if (calls.length === 0 || fn.params.length === 0) continue;
-    if (!fn.params.every((param) => param.kind === "value" && (isFloat(slotType(param)) || isInteger(slotType(param))))) continue;
+    // A wide number is a whole number this pass may not take: it is four limbs,
+    // and the whole number a parameter is declared as here is one machine word,
+    // so rewriting one would read eight bytes of a thirty-two byte value and
+    // answer for it. `WHOLE_BITS` refuses a wide *name* on its own, so this is
+    // the other half of the same rule: the parameter is what the arm reads, and
+    // nothing about it is left to a table further down.
+    if (!fn.params.every((param) => param.kind === "value" && !isWideType(slotType(param)) && (isFloat(slotType(param)) || isInteger(slotType(param))))) continue;
     if (!calls.every(({ call, declared: types }) =>
       call.args.length === fn.params.length && fn.params.every((_, index) => wholeArgument(call.args[index], types) !== null),
     )) continue;

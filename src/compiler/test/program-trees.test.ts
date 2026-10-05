@@ -28,6 +28,8 @@ import { run } from "../core/process.ts";
 import { mkdir } from "node:fs/promises";
 import { scratch } from "./scratch.ts";
 
+const nimAvailable = run("nim", ["--version"], { timeoutMs: 30_000 }).code === 0;
+
 const TREES = new URL("../../benchmarks/c_backend/binarytrees/1.ts", import.meta.url).pathname;
 
 async function trees() {
@@ -108,13 +110,40 @@ test("the Nim host runs the same program the C driver does", async () => {
   const { resolved } = await trees();
   const host = generateProgramHostSource(resolved);
 
-  assert.match(host, /type\n {2}Object1\* = ref object of RootObj\n {4}left\*: pointer\n {4}right\*: pointer/);
   assert.match(host, /proc blaze_main\(\) \{\.importc: "blaze_main", nodecl\.\}/);
   assert.match(host, /proc createTree\(depth: float64\): ptr Object1 \{\.importc: "createTree", nodecl\.\}/);
   // A call that returns nothing is a statement, and the arguments are the
   // numbers the source reads them as.
   assert.match(host, /\n {2}blaze_main\(\)\n/);
   assert.match(host, new RegExp(`${RUNTIME_NAME}_arguments_set\\(`));
+});
+
+test("a Nim object is the payload the C side wrote, and not a cell in front of it", async (t) => {
+  // The layout is the whole of it: an object is one block the runtime allocated
+  // and every side reads the same bytes of it. A Nim object written `ref object
+  // of RootObj` inherited from the root of the type hierarchy, which puts a
+  // vtable pointer in front of the fields — a field the contract puts at 0 was
+  // read at 8, and at 16 the next one — and a `ref object` puts a reference-count
+  // cell in front of the payload, so the pointer the C backend returned was not
+  // the pointer the host held. A plain object is neither.
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  const { resolved } = await trees();
+  const host = generateProgramHostSource(resolved);
+  assert.match(host, /type\n {2}Object1\* = object\n {4}left\*: pointer\n {4}right\*: pointer/);
+  // The prototype the host hands the C compiler names a `void*` for it, because
+  // Nim gives its own object type a C name of its own: the C compiler refused
+  // the call with "assignment to `tyObject_Object1 *` from incompatible pointer
+  // type `struct Object1 *`", which is what a host could not be built from.
+  assert.match(host, /extern void\* createTree\(double depth\);/);
+  // And the host builds, which is the whole of what those two lines are for.
+  const directory = await scratch("blaze-nim-layout-");
+  await writeFile(join(directory, "host.nim"), host, "utf8");
+  await writeFile(join(directory, `${RUNTIME_NAME}.nim`), generateRuntimeAdapterSource("debug"), "utf8");
+  const built = run("nim", ["c", "--hints:off", "--warnings:off", "-d:danger", "--compileOnly", "host.nim"], { cwd: directory, timeoutMs: 300_000 });
+  assert.equal(built.code, 0, built.stderr);
 });
 
 test("the runtime offers what a function needs to allocate, print and read the command line", () => {
