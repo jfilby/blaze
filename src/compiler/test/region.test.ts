@@ -217,6 +217,42 @@ test("a turn that hands what it built to a function that keeps it may not", () =
   assert.equal(onlyLoop(fn).region, undefined);
 });
 
+test("a turn that hands what it built to a function that keeps it through an alias may not", () => {
+  // `const copy = node; held = copy;` is the shape a reference binding takes —
+  // an `object` slot rather than a `value` one — and reading only the value
+  // bindings left every alias out of what the callee was holding, so the callee
+  // was answered as keeping nothing and the loop was marked for a reuse that
+  // writes over a block the caller still holds.
+  const keeper = reader("keeper");
+  keeper.entry = {
+    id: "entry",
+    statements: [
+      { k: "let", line: 1, slot: { kind: "object", name: "copy", mutable: false, type: REF }, value: { k: "local", type: REF, name: "node" } },
+      { k: "set", line: 2, name: "held", op: "=", value: { k: "local", type: REF, name: "copy" } },
+    ],
+    releases: [],
+    terminator: { k: "return", value: null },
+  };
+  const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("keeper", [{ k: "local", type: REF, name: "tree" }]))]));
+  markRegionLoops(fn.entry, new Map([["keeper", keeper]]));
+  assert.equal(onlyLoop(fn).region, undefined);
+});
+
+test("a turn that hands what it built to a function that hands an alias back may not", () => {
+  // The other side of the same gate: the answer is a reference, so the block the
+  // turn built is in it, and the next turn's rewind would write over it.
+  const alias = reader("alias");
+  alias.entry = {
+    id: "entry",
+    statements: [{ k: "let", line: 1, slot: { kind: "object", name: "copy", mutable: false, type: REF }, value: { k: "local", type: REF, name: "node" } }],
+    releases: [],
+    terminator: { k: "return", value: { k: "local", type: REF, name: "copy" } },
+  };
+  const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("alias", [{ k: "local", type: REF, name: "tree" }]))]));
+  markRegionLoops(fn.entry, new Map([["alias", alias]]));
+  assert.equal(onlyLoop(fn).region, undefined);
+});
+
 test("a turn that hands what it built to a function this build does not hold may not", () => {
   // A body nobody has read is a body that might keep anything.
   const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("unknown", [{ k: "local", type: REF, name: "tree" }]))]));

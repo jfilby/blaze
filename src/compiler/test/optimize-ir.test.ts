@@ -563,7 +563,11 @@ test("what the new rewrites produce is a function the compiler may lower", () =>
   const i: SemanticSlot = { kind: "value", name: "i", mutable: false, type: I32 };
   const sum: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: F64 };
   const readN: SemanticValue = { k: "local", type: F64, name: "n" };
-  const loop = countedLoop({ k: "local", type: I32, name: "n" });
+  // The bound is read at the type the slot is declared as: `n` is an `f64`
+  // here, and a bound read as an `i32` narrows it, which the validator refuses
+  // — a rewrite that produced one would not be a function the compiler may
+  // lower, and this test is what says the rewrites produce one.
+  const loop = countedLoop(readN);
   const body = loop.k === "loop" ? loop.loop.body : { id: "b2", releases: [], statements: [], terminator: { k: "jump" as const, target: "b1", releases: [] } };
   body.statements = [
     { k: "let", slot: { kind: "value", name: "dead", mutable: false, type: F64 }, value: readN, line: 3 },

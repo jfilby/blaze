@@ -638,11 +638,93 @@ function valueProblems(tree: Tree): string[] {
       for (const read of localNames(value)) {
         if (!scope.visible.has(read)) problems.push(`${prefix}"${read}" is not declared where it is read`);
       }
+      problems.push(...readTypeProblems(prefix, value, scope));
     }
+  }
+
+  for (const placed of tree.blocks) {
+    const end = placed.block.terminator;
+    if (end.k !== "return" || end.value === null) continue;
+    problems.push(...readTypeProblems(label(placed.block.id), end.value, placed.final));
   }
 
   return problems;
 }
+
+/**
+ * A name a value reads is a slot, and the type the read states is the width a
+ * backend reads it at. A read narrower than the slot holds is a value the
+ * program lost: `print_number local[i32] n` over an `f64` slot lowers to
+ * `printf("%lld", (long long)(n))` and answers 1 where the program holds 1.75,
+ * and the width was decided here, so nothing downstream recovers it.
+ *
+ * A read wider than the slot holds is the other direction and is kept:
+ * `semantics/whole-numbers.ts` narrows a parameter to a whole number and its
+ * arm past the reach reads that same slot as the double the source wrote, which
+ * is every value the slot can hold said as the wider of the two.
+ */
+function readTypeProblems(prefix: string, value: SemanticValue, scope: Scope): string[] {
+  const problems: string[] = [];
+  walkValues(value, (inner) => {
+    if (inner.k !== "local") return;
+    const slot = scope.slots.get(inner.name);
+    if (slot === undefined) return;
+    const held = slotType(slot);
+    if (!narrowsTo(held, inner.type)) {
+      problems.push(`${prefix}"${inner.name}" holds a ${typeText(held)} and is read as a ${typeText(inner.type)}, which cannot hold it`);
+    }
+  });
+  return problems;
+}
+
+/**
+ * Whether a slot of one type may be read as the other, which is not the same
+ * question as whether the two are the same type.
+ *
+ * A buffer is one buffer whatever length it is written at — a slot whose length
+ * the program settled on reads as a slice of its elements, and `typeEquals`
+ * says `[f64; 4]` and `[]f64` are two types where a backend reads both as the
+ * same pointer. Two numbers are one question of width: a whole number held in a
+ * wider slot than it is read at has lost its high bits, and a double read as a
+ * whole number has lost its fraction. A reference or a text read as something
+ * else is a value nothing in the program can carry, whichever is wider.
+ */
+function narrowsTo(held: SemanticType, read: SemanticType): boolean {
+  if (typeEquals(held, read)) return true;
+  if (isSequence(held) && isSequence(read)) {
+    const left = elementTypeOf(held);
+    const right = elementTypeOf(read);
+    return left !== null && right !== null && narrowsTo(left, right);
+  }
+  if (!isNumber(held) || !isNumber(read)) return false;
+  // A whole number held as a double is every value the slot can hold, said as
+  // the wider of the two — which is the arm `whole-numbers.ts` writes past the
+  // reach its narrowing holds for. A double read as a whole number is the
+  // fraction dropped, so that one is refused and this is not.
+  if (!isFloat(held) && isFloat(read)) return true;
+  return isFloat(held) === isFloat(read) && wholeRank(read) <= wholeRank(held);
+}
+
+/** How wide a whole number is, so a read at a narrower width is told from one at a wider. */
+function wholeRank(type: SemanticType): number {
+  if (type.kind !== "primitive") return 0;
+  return WHOLE_RANK[type.name] ?? 0;
+}
+
+/** The width of each whole number, ranked so a pair is compared by size. */
+const WHOLE_RANK: Record<string, number> = {
+  i8: 1,
+  u8: 1,
+  i16: 2,
+  u16: 2,
+  i32: 3,
+  u32: 3,
+  i64: 4,
+  u64: 4,
+  isize: 4,
+  usize: 4,
+  u256: 5,
+};
 
 /* -------------------------------------------------------------------------- */
 /* Rule 4: types                                                              */

@@ -1589,13 +1589,13 @@ const at = (array: string, index: SemanticValue): SemanticValue => ({
  * The shape is the one the backend is asked about: one statement, one addition
  * into a name, and everything under that addition a function of the counter.
  */
-function sumLoop(added: (counter: SemanticValue) => SemanticValue): SemanticBlock {
+function sumLoop(added: (counter: SemanticValue) => SemanticValue, seed = "0"): SemanticBlock {
   return {
     id: "entry",
     releases: [],
     terminator: { k: "return", value: local("total") },
     statements: [
-      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number(seed), line: 2 },
       {
         k: "loop",
         line: 3,
@@ -1624,11 +1624,11 @@ function sumLoop(added: (counter: SemanticValue) => SemanticValue): SemanticBloc
   };
 }
 
-function sumSubject(added: (counter: SemanticValue) => SemanticValue, second = false): SemanticFunction {
+function sumSubject(added: (counter: SemanticValue) => SemanticValue, second = false, seed = "0"): SemanticFunction {
   const params: SemanticSlot[] = [{ kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 }];
   if (second) params.push({ kind: "value", name: "b", mutable: false, type: ARRAY_OF_F64 });
   params.push({ kind: "value", name: "n", mutable: false, type: F64 });
-  return subject(F64, sumLoop(added), params);
+  return subject(F64, sumLoop(added, seed), params);
 }
 
 /** Lays an array down, calls the function and prints what it answered in full. */
@@ -1716,6 +1716,37 @@ test("the arithmetic under an addition is written a pair of counters at a time",
     Number(await lowered(fn, sumDriver(turns, a))),
     reference(a, turns, (i) => i * i + c),
     "the pair of turns answers what the two scalar turns would have",
+  );
+});
+
+test("a packed loop adds to the value the accumulator already held", async () => {
+  // `total += ...` adds to what `total` held, and the vector accumulator the
+  // loop is written with used to start at zero instead: a loop seeded with
+  // anything but zero answered the sum of the loop rather than the value the
+  // source wrote. `let total = 0` is the shape every other test here wrote, so
+  // the two forms agree on it and the bug was invisible.
+  const turns = 6;
+  const a = [1, 2, 3, 4, 5, 6];
+  const c = 7;
+  const fn = sumSubject((i) => divide(at("a", i), add(mul(i, i), number(String(c)))), false, "1000");
+  assert.match(await emitted(fn), /\bmovups\b/, "the loop took the packed path");
+  assert.equal(
+    Number(await lowered(fn, sumDriver(turns, a))),
+    1000 + reference(a, turns, (i) => i * i + c),
+    "the answer is what the source holds, seed included",
+  );
+});
+
+test("a packed dot product adds to the value the accumulator already held", async () => {
+  // The other packed path, which builds its accumulator in a register of its
+  // own rather than in the one the build gave the name, and seeded it the same
+  // wrong way.
+  const fn = sumSubject((i) => mul(at("a", i), at("b", i)), true, "5");
+  assert.match(await emitted(fn), /\bmulpd\b/, "the loop took the packed dot path");
+  assert.equal(
+    Number(await lowered(fn, sumDriver(6, [1, 2, 3, 4, 5, 6], [10, 20, 30, 40, 50, 60]))),
+    5 + 1 * 10 + 2 * 20 + 3 * 30 + 4 * 40 + 5 * 50 + 6 * 60,
+    "the answer is what the source holds, seed included",
   );
 });
 

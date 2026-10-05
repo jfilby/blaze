@@ -497,13 +497,20 @@ test("a name declared in a block is a variable of its own", () => {
   const declared = inner.body.statements[0];
   assert.equal(declared.k, "let");
   if (declared.k !== "let") throw new Error("expected a declaration");
-  // The block keeps the name the source wrote, and the two `total` are two
-  // variables because each block declares its own. A target whose blocks do
-  // not shadow is the one that has to tell them apart.
-  assert.equal(declared.slot.name, "total");
+  // The two `total` are two variables: the block's own declaration is not the
+  // one outside it, and the outer read after the block is still the outer one.
+  // The IR names a value by one name, so the shadowing declaration is written
+  // down under a name of its own rather than leaving the two to be told apart
+  // downstream — which is what lets a capture carry the binding it took instead
+  // of the name it shares with this one.
+  assert.notEqual(declared.slot.name, "total");
   assert.notEqual(inner.body.id, program.entry.id);
   const outer = program.entry.statements[0];
   assert.equal(outer.k === "let" ? outer.slot.name : "", "total");
+  const read = program.entry.statements[2];
+  assert.equal(read?.k, "printNumber");
+  assert.equal(read?.k === "printNumber" ? read.value.k : "", "local");
+  assert.equal(read?.k === "printNumber" && read.value.k === "local" ? read.value.name : "", "total");
 });
 
 test("a value declared with const cannot be changed", () => {

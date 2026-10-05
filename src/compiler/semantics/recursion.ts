@@ -289,6 +289,18 @@ function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Sh
   if (plan.answer === null) return "the body answers with nothing to carry an answer in";
   if (selfCallsIn(fn.entry, fn.name).length !== 1) return "the body makes more than one call of itself";
   if (namesReadBy(plan.answer).size > 0) return "the base case answers with something the turns move";
+  // The answer is carried from a name bound *before* the loop rather than
+  // computed where the base case was, so it is evaluated on every call instead
+  // of only on the one that reaches the base case. Reading a name is what
+  // `namesReadBy` catches, and it is the same wrongness one step further on: a
+  // call reads nothing and would be hoisted, so `if (n <= 0) return tick();`
+  // printed once per call instead of once per recursion. A base case whose
+  // answer is a call is only the same program if the call is one the compiler
+  // provides, which computes its answer out of what it is handed and is the
+  // same number whenever it is evaluated.
+  if (plan.answer !== null && callsIn(plan.answer).some((call) => !call.builtin)) {
+    return "the base case answers with a call, and the answer is carried from before the loop, so the call would run on every call";
+  }
 
   // The chain is read before the types are, so a body whose call is combined
   // the wrong way round is told what is wrong with the way round rather than
@@ -498,6 +510,15 @@ function selfCallsIn(entry: SemanticBlock, name: string): SemanticCall[] {
       if (inner.k === "call" && inner.call.callee === name) found.push(inner.call);
     });
   }
+}
+
+/** Every call one value makes, of any function. */
+function callsIn(value: SemanticValue): SemanticCall[] {
+  const found: SemanticCall[] = [];
+  walkValues(value, (inner) => {
+    if (inner.k === "call") found.push(inner.call);
+  });
+  return found;
 }
 
 /** Every call one value makes of the function the body belongs to. */

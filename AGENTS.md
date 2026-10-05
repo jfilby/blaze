@@ -131,6 +131,42 @@ fixes themselves. Instead, they inspect an artifact and propose fixes. The
 rule-based compiler evaluates those proposals and, when they are valid, applies
 them by regenerating the artifact.
 
+## What a name means across the two scopes it is read in
+
+A function of a program has no environment to close over: it is compiled on its
+own and called, so what it reads of the scope it is written in is passed to it at
+every call, after the arguments the source wrote. That makes the call the only
+place the two scopes meet, and it makes the *binding* the thing that has to cross
+— not the name. A declaration that shadows a name between the function's
+declaration and its call is a different binding that answers to the same name,
+and resolving the capture there handed the call the inner one:
+
+```ts
+let base = 1;
+function twice(x: number): number { return x + base + base; }
+console.log(twice(10));            // 12
+{ let base = 100; console.log(twice(10)); }   // 12, not 210
+```
+
+The IR names a value by one name and has no scope chain of its own, so two
+bindings answering to one name are one name to everything downstream. A
+shadowing declaration is therefore written down under a name of its own, and the
+outer keeps the name the source wrote. That is what lets a capture carry the
+binding rather than the name: the outer binding is named `base` at every call
+site whatever scope the call is written in, and the inner is `base_2`. A target
+that has to disambiguate anyway does so for declarations of its own, in
+`toolchain/names.ts`; this is the same question asked one stage earlier, because
+the IR is what a target reads.
+
+The validator is where the other half of this lives. A name a value reads is a
+slot, and the type the read states is the width a backend reads it at, so a read
+narrower than the slot holds is a number the program lost —
+`print_number local[i32] n` over an `f64` slot lowers to
+`printf("%lld", (long long)(n))` and answers 1 where the program holds 1.75. The
+other direction is kept: `whole-numbers.ts` narrows a parameter to a whole number
+and reads it as the double past the reach that narrowing holds for, which is
+every value the slot can hold said as the wider of the two.
+
 
 ## The rules a review may propose
 
@@ -293,7 +329,24 @@ than it had — and is never copied, because a block holds pointers to the block
 beside it and moving them would leave every one aimed at where a block used to
 be. A region is entered and left around the body of a marked loop and left early
 on the paths that leave the turn early, so a `break` out of the loop or a
-`return` out of the function does not carry it past the turn.
+`return` out of the function does not carry it past the turn. Leaving is not the
+same as leaving *that* loop: a `break` out of a loop inside the marked one lands
+still inside its body, and the region stays open across it, because the turn is
+not over.
+
+Regions nest, and only the outermost one rewinds. The mark is a statement about
+one body, and a turn of a marked loop may call a function whose own turn is
+marked too — nothing in `region.ts` looks at a callee for this, because what the
+caller proved is about the blocks that turn made and not about the cursor. A
+rewind inside that call handed the outer turn's blocks out a second time while
+the outer turn was still reading them, so `blaze_rt_region_enter` counts the
+nesting and only the outermost one rewinds; the inner loop loses its own reuse
+and keeps its blocks sound. `blaze_rt_region_leave` saturates for the same
+reason the closing call is written on the path out of a body as well as at the
+bottom of it: a turn that leaves early leaves the region early, and one call too
+many ends the outermost region rather than taking the count below zero, where
+the next enter would read as a nested one and the cursor would never be rewound
+again.
 
 `semantics/recursion.ts` answers a body's own recursion with a loop, and it runs
 before the rounds in `optimize-ir.ts` because the loop it writes is the loop
@@ -397,6 +450,18 @@ declarations as two names. They are still the same counter as far as the source
 is concerned, because the first is dead before the second is bound, so one
 register serves both. Two loops that are *inside* one another cannot share one,
 which is the case the allocator still refuses.
+
+**A packed loop starts from the accumulator, not from zero.** A loop that adds up
+what two arrays hold is written a whole vector at a time, which means its
+accumulator is a register holding two sums rather than a name holding one — and
+`total += a[i] * b[i]` adds to what `total` already held, so the low lane is
+seeded with that value and the high lane is nothing. Zeroing the accumulator
+instead answered the sum of the loop rather than the value the source wrote, and
+`let total = 0` is the shape every test of this shape wrote, so the two forms
+agree on it and the bug was invisible. The seed is written after the loop counter
+is stored, because that store goes through `XMM0` and the accumulator this
+borrows may be `XMM0`; and the two paths differ in where the accumulator lives,
+which is why one seeds from a register and the other from the frame.
 
 ## Benchmarking
 

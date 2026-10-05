@@ -188,6 +188,76 @@ test("the index an argument is read at is a value the walk reaches", () => {
   ]);
 });
 
+test("a name read narrower than the slot it names is refused", () => {
+  // The IR states the type every value is read as, and a backend takes that as
+  // the width to read it at. `print_number local[i32] n` over an `f64` slot
+  // lowers to `printf("%lld", (long long)(n))` and answers 1 where the program
+  // holds 1.75 — and the width was decided here, so nothing downstream can
+  // recover the number it lost.
+  const fn: SemanticFunction = {
+    name: "widened",
+    symbol: "widened",
+    params: [],
+    returns: { kind: "void" },
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: true,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", line: 1, slot: { kind: "value", name: "n", mutable: true, type: NUMBER }, value: { k: "const", type: NUMBER, text: "1.75" } },
+        { k: "printNumber", line: 2, value: { k: "local", type: I64, name: "n" } },
+      ],
+      terminator: { k: "return", value: null },
+    },
+  };
+  assert.deepEqual(semanticFunctionProblems(fn), ['widened: entry: line 2: "n" holds a f64 and is read as a i64, which cannot hold it']);
+});
+
+test("a buffer is read as itself whatever length it is written at", () => {
+  // The same pointer under two spellings, so this is not a mismatch: a slot
+  // whose length the program settled on is read as a slice of its elements, and
+  // refusing that would refuse every array a program hands to a function.
+  const fn: SemanticFunction = {
+    name: "reader",
+    symbol: "reader",
+    params: [{ kind: "value", name: "values", mutable: false, type: { kind: "array", of: NUMBER, length: 4 } }],
+    returns: { kind: "primitive", name: "f64" },
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      releases: [],
+      statements: [
+        {
+          k: "printNumber",
+          line: 1,
+          value: {
+            k: "element",
+            type: NUMBER,
+            of: { k: "local", type: { kind: "slice", of: NUMBER }, name: "values" },
+            index: { k: "const", type: { kind: "primitive", name: "usize" }, text: "0" },
+          },
+        },
+      ],
+      terminator: { k: "return", value: { k: "const", type: NUMBER, text: "0" } },
+    },
+  };
+  assert.deepEqual(semanticFunctionProblems(fn), []);
+});
+
 test("a use converts inside a kind and never across kinds", () => {
   assert.equal(convertibleTo(I64, NUMBER), true);
   assert.equal(convertibleTo({ kind: "text" }, { kind: "text" }), true);

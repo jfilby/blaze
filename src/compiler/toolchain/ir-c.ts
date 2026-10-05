@@ -579,9 +579,16 @@ class FunctionEmitter {
       throw backendError(`${this.fn.symbol} jumps for a block no loop around it names`, terminator.target);
     }
     // A `continue` is another turn of the same loop, so the region is still the
-    // right one after it. A `break` is not, and neither is a jump out of a loop
-    // further out, so both leave the region on the way.
-    if (terminator.target !== open.header) this.leaveRegion(depth);
+    // right one after it; a jump out of the loop the region belongs to is not,
+    // and leaves it on the way.
+    //
+    // Only that loop's own exit ends it. A `break` out of a loop *inside* the
+    // marked one lands still inside its body, and leaving there ended the turn's
+    // region early: the rest of the turn then allocated from the slab rather than
+    // the cursor, and a block released on that path reached the slab's released
+    // list while the region was still rewound over the same bytes — two live
+    // blocks in one piece of memory from the next turn on.
+    if (terminator.target !== open.header && this.region?.header === open.header) this.leaveRegion(depth);
     this.write([`${pad(depth)}${terminator.target === open.header ? "continue;" : "break;"}`]);
   }
 

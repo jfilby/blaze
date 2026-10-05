@@ -199,6 +199,12 @@ function leavesItself(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>)
  * the total is has made its answer depend on which turn ran last, which no
  * combining afterwards repairs.
  *
+ * A name a turn also reads is not a reduction either. The combining is what
+ * makes the accumulator private to the turn, so a read inside the body would
+ * read the turn's own partial sum rather than the total the turns are building
+ * towards: `total += input[i]; out[i] = total;` is the prefix sum, and the
+ * element each turn writes is the total only up to that turn.
+ *
  * Whether the combining is the same number in any order is decided per
  * accumulator, by whether every value a turn combines is a whole number. Whole
  * numbers are exact however they are grouped, so a sum or a product of them is
@@ -214,12 +220,40 @@ function reductionsFor(body: SemanticBlock, counter: string): Map<string, Semant
       if (statement.k === "let") declared.add(statement.slot.name);
     }
   }
+  // What a turn reads, which is the other half of what a reduction has to be.
+  // The turns of a parallel loop each keep a total of their own and the totals
+  // are combined once the loop is done, so a name one turn writes and another
+  // turn reads is a name whose value depends on which turn is running — and the
+  // combining is the whole reason it does: the C backend writes
+  // `#pragma omp parallel for reduction(+:total)`, which holds `total` private
+  // to the thread for the length of the body, so a read of it inside the body
+  // sees that thread's partial sum rather than the running total the program
+  // means. Read anywhere in the body, an accumulator is refused rather than
+  // marked: `total += input[i]; out[i] = total;` is the prefix sum, and no
+  // reordering of it is the same array.
+  const read = new Set<string>();
+  for (const block of blocksWithin(body)) {
+    for (const statement of block.statements) {
+      for (const value of statementValues(statement)) {
+        walkValues(value, (inner) => {
+          if (inner.k === "local") read.add(inner.name);
+        });
+      }
+    }
+    if (block.terminator.k === "return" && block.terminator.value !== null) {
+      walkValues(block.terminator.value, (inner) => {
+        if (inner.k === "local") read.add(inner.name);
+      });
+    }
+  }
+
   const combined = new Map<string, SemanticReduction>();
   for (const block of blocksWithin(body)) {
     for (const statement of block.statements) {
       if (statement.k !== "set") continue;
       if (declared.has(statement.name) || statement.name === counter) continue;
       if (statement.op !== "+=" && statement.op !== "*=") continue;
+      if (read.has(statement.name)) continue;
       // A name two turns both accumulate into with the same operator combines;
       // one written `+=` in a turn and `*=` in another does not, so the first
       // operator seen is the one that must hold for all of them.
@@ -233,7 +267,7 @@ function reductionsFor(body: SemanticBlock, counter: string): Map<string, Semant
     }
   }
   return combined;
- }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Purity                                                                      */

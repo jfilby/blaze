@@ -102,7 +102,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "void",
     [],
     "Begins a region: every block the program allocates until it leaves is taken from this thread's region cursor.",
-    "A region exists so that a turn which builds something and drops it can take the same storage again on the next turn, rather than asking for memory that has to be faulted in afresh. The compiler emits this around a loop it proved every allocation of whose turns is dead by the end of the turn. One region at a time per thread: a rewind takes the whole region, so a loop inside another region loop is not given one of its own.",
+    "A region exists so that a turn which builds something and drops it can take the same storage again on the next turn, rather than asking for memory that has to be faulted in afresh. The compiler emits this around a loop it proved every allocation of whose turns is dead by the end of the turn. Regions nest: a turn of one marked loop may call a function whose own turn is marked too, and only the outermost one rewinds, because a rewind inside the call would hand the outer turn's blocks out a second time while it is still reading them.",
     { tags: ["memory"] },
   ),
   entry(
@@ -110,7 +110,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "void",
     [],
     "Ends the region begun by blaze_rt_region_enter.",
-    "Nothing is freed: the storage goes back to being this thread's cursor, and the next region begins at its start again. A block allocated in a region is never referenced after the turn that made it — that is what the compiler proved before it emitted this — so there is nothing to hand back and nothing that still points at it.",
+    "Nothing is freed: the storage goes back to being this thread's cursor, and the next region begins at its start again. A block allocated in a region is never referenced after the turn that made it — that is what the compiler proved before it emitted this — so there is nothing to hand back and nothing that still points at it. Leaving more often than entering ends the outermost region rather than underflowing, which is what the paths that leave a turn early make necessary.",
     { tags: ["memory"] },
   ),
   entry(
@@ -899,7 +899,7 @@ static _Thread_local char* blaze_rt_region_base = NULL;
 static _Thread_local char* blaze_rt_region_at = NULL;
 static _Thread_local char* blaze_rt_region_end = NULL;
 static _Thread_local size_t blaze_rt_region_room = 0;
-static _Thread_local int blaze_rt_region_on = 0;
+static _Thread_local unsigned blaze_rt_region_depth = 0;
 
 /* How much a region asks for when it starts. It is big enough that the tree of
    a benchmark run is built without ever reaching for a second one, and small
@@ -951,7 +951,7 @@ ${guarded ? `  /* The payload is placed with a mask, which only places it for a 
   if (alignment > BLAZE_RT_MAX_ALLOCATION - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("object alignment is too large");
   if (bytes > BLAZE_RT_MAX_ALLOCATION - alignment - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("request too large");` : ""}
   const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
-  if (blaze_rt_region_on) return blaze_rt_region_take(total, bytes, alignment, cleared);
+  if (blaze_rt_region_depth > 0) return blaze_rt_region_take(total, bytes, alignment, cleared);
   const size_t cls = cleared ? blaze_rt_class_of(total, alignment) : 0;
   if (cls != 0) {
     /* The header of a pooled block is at the start of its class, so the payload
@@ -1056,15 +1056,23 @@ void blaze_rt_initialize(void) {}
 void blaze_rt_finalize(void) {}
 
 void blaze_rt_region_enter(void) {
-  blaze_rt_region_on = 1;
-  blaze_rt_region_at = blaze_rt_region_base;
+  /* The rewind is the whole of what a region is for, and it is only sound at
+     the outermost one. A turn of a marked loop may call a function whose own
+     turn is marked too — the compiler marks the innermost loop it can on a
+     path, which is a statement about one body and says nothing about a call
+     into another — and a rewind inside that call hands the outer turn's blocks
+     out a second time while the outer turn is still reading them. So a nested
+     enter shares the cursor the outer region is filling rather than rewinding
+     it, and the inner loop loses its own reuse and keeps its blocks sound. */
+  if (blaze_rt_region_depth++ == 0) blaze_rt_region_at = blaze_rt_region_base;
 }
 
 void blaze_rt_region_leave(void) {
-  /* The cursor is left where the turn finished rather than sent back to the
-     start, so the next block of the same turn-sized region is the next one the
-     program asks for rather than the one it just gave away. */
-  blaze_rt_region_on = 0;
+  /* Saturating, because a turn that leaves early leaves the region early and
+     the compiler writes the closing call on the path out of the body as well.
+     One call too many ends the outermost region; one call too few would leave
+     the thread allocating from a cursor nothing rewinds again. */
+  if (blaze_rt_region_depth > 0) blaze_rt_region_depth -= 1;
 }
 
 /* What one thread of a team is handed: the turn to run, the frame to read it
@@ -1188,7 +1196,7 @@ void blaze_rt_release(void* pointer) {
      while the region is rewound over the same memory, and two blocks would be
      live in one piece of it. The rewind takes the whole region instead, which
      is what the region exists for and what every block in it is there for. */
-  if (blaze_rt_region_on) {
+  if (blaze_rt_region_depth > 0) {
     blaze_rt_header_of(pointer)->references = 0;
     return;
   }

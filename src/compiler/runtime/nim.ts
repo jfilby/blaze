@@ -343,16 +343,23 @@ var
   blazeRegionAt: pointer = nil
   blazeRegionEnd: pointer = nil
   blazeRegionRoom: uint64 = 0
-  blazeRegionOn: bool = false
+  blazeRegionDepth: uint32 = 0
 
 const BlazeRegionBytes = 4'u64 * 1024'u64 * 1024'u64
 
 proc blazeRegionEnter() =
-  blazeRegionOn = true
-  blazeRegionAt = blazeRegionBase
+  ## Only the outermost region rewinds: a turn of a marked loop may call a
+  ## function whose own turn is marked too, and rewinding inside that call hands
+  ## the outer turn's blocks out a second time while it is still reading them.
+  if blazeRegionDepth == 0:
+    blazeRegionAt = blazeRegionBase
+  inc blazeRegionDepth
 
 proc blazeRegionLeave() =
-  blazeRegionOn = false
+  ## Saturating, because a turn that leaves early leaves the region early and
+  ## the compiler writes the closing call on the path out of the body as well.
+  if blazeRegionDepth > 0:
+    dec blazeRegionDepth
 
 ## A block out of the region that is open, laid out as a block out of a slab is.
 proc blazeRegionTake(total, bytes, alignment: uint64, cleared: bool): pointer =
@@ -411,7 +418,7 @@ ${guarded ? `  ## The budget the line below checks against is the cap less the a
   if bytes > BlazeMaxAllocation - align - BlazeHeaderSize:
     blazeStop("allocation: request too large")` : ""}
   let total = bytes + align + BlazeHeaderSize
-  if blazeRegionOn:
+  if blazeRegionDepth > 0:
     return blazeRegionTake(total, bytes, align, cleared)
   let cls = if cleared: blazeClassOf(total, align) else: 0
   if cls != 0:
@@ -514,7 +521,7 @@ proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
   ## while the region is rewound over the same memory, and two blocks would be
   ## live in one piece of it. The rewind takes the whole region instead, which
   ## is what the region exists for and what every block in it is there for.
-  if blazeRegionOn:
+  if blazeRegionDepth > 0:
     header[].refs = 0
     return
   if header[].refs > 1:

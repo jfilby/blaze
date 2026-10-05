@@ -244,6 +244,30 @@ const REFUSED: readonly Refused[] = [
     ),
     why: /ends in a call of another function/,
   },
+  {
+    // Only the accumulated shape carries the base case's answer from a name
+    // bound above the loop. A tail call leaves the base case where the source
+    // wrote it, so `base()` there still runs only on the call that reaches it.
+    about: "a base case that answers with a call",
+    fn: "tick",
+    source: library(
+      [
+        "function base(): number {",
+        "  console.log(99);",
+        "  return 0;",
+        "}",
+        "",
+        "function tick(n: number, acc: number): number {",
+        "  if (n <= 0) {",
+        "    return base();",
+        "  }",
+        "  return acc + tick(n - 1, acc + n);",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /the answer is carried from before the loop/,
+  },
 ];
 
 for (const subject of REFUSED) {

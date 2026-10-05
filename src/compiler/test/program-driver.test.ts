@@ -429,6 +429,32 @@ test("a name the emitter writes a temporary under is declared under another", as
   assert.equal(delivered.stdout, original);
 });
 
+test("a captured name is passed from the binding it was captured from", async () => {
+  // A function of a program is compiled on its own and handed what it reads of
+  // the scope it is written in, at every call. A declaration that shadows the
+  // name between the declaration and the call is a different binding that
+  // answers to the same name, and resolving the capture there handed the call
+  // the inner one: the program below printed 12 and 12, and the delivered
+  // binary printed 12 and 210.
+  const source = [
+    "let base = 1;",
+    "function twice(x: number): number {",
+    "  return x + base + base;",
+    "}",
+    "console.log(twice(10));",
+    "{",
+    "  let base = 100;",
+    "  console.log(twice(10));",
+    "}",
+    "",
+  ].join("\n");
+  const { binary, original } = await deliver(source);
+  assert.equal(original, "12\n12\n", "the source answers the same at both call sites");
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+});
+
 test("a for-of element that shadows the buffer reads the buffer, not itself", () => {
   // The buffer is read in the scope the loop was entered in. Read after the
   // element is declared, an element under the buffer's own name made the

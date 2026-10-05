@@ -514,3 +514,48 @@ test("a loop marked for a region answers for every element", async () => {
   assert.match(ran.listing, /blaze_rt_region_enter/, "the region is opened around the body");
   assert.equal(ran.printed, "every element");
 });
+
+test("a break out of a loop inside a region leaves the region open", async () => {
+  // The region belongs to the loop it was opened for. A `break` out of a loop
+  // *inside* that one lands still inside its body, and ending the region there
+  // meant the rest of the turn allocated from the slab rather than the cursor,
+  // while a block released on that path reached the slab's released list and the
+  // next turn's rewind handed the same bytes out again.
+  const inner: SemanticStatement = {
+    k: "loop",
+    line: 4,
+    loop: {
+      kind: "while",
+      // Always true, so the turn reaches the body and always breaks out of it:
+      // what is under test is the jump, not the loop.
+      condition: { k: "compare", type: { kind: "primitive", name: "bool" }, op: "ge", operand: I64, left: local("i", I64), right: number("0", I64) },
+      header: "h2",
+      exit: "b3",
+      body: {
+        id: "b3",
+        releases: [],
+        terminator: { k: "jump", target: "b3", releases: [] },
+        statements: [],
+      },
+    },
+  };
+  const loop = counted([
+    { k: "let", line: 2, slot: { kind: "value", name: "scaled", mutable: false, type: F64 }, value: chain(9, element("out", local("i", I64))) },
+    { k: "setElement", line: 3, op: "=", buffer: "out", index: local("i", I64), value: local("scaled") },
+    inner,
+  ], { region: true });
+  const body: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: null },
+    statements: [
+      { k: "let", line: 1, slot: { kind: "value", name: "base", mutable: false, type: F64 }, value: number("0") },
+      loop,
+    ],
+  };
+  const ran = await runOver(body, PARAMS, 9);
+  const entered = (ran.listing.match(/blaze_rt_region_enter/g) ?? []).length;
+  const left = (ran.listing.match(/blaze_rt_region_leave/g) ?? []).length;
+  assert.equal(entered, left, "the turn opens one region and closes it once");
+  assert.equal(ran.printed, "every element");
+});

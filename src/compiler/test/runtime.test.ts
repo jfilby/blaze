@@ -738,6 +738,96 @@ test("a region hands out a block whose read past the end is a zero, as the langu
   assert.equal(result.stdout.trim(), "42 0", "the second turn's array is a fresh one, so it reads zero past its end");
 });
 
+test("a region opened inside an open region does not take the outer turn's blocks", async () => {
+  // A turn of a marked loop may call a function whose own turn is marked too:
+  // the compiler marks the innermost loop it can on a path, which is a
+  // statement about one body and says nothing about a call into another. The
+  // inner region rewinding the shared cursor handed the outer turn's blocks out
+  // a second time while the outer turn was still reading them, so a node written
+  // before the call read back as whatever the callee built after it.
+  const probe = [
+    "#include <stdio.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    "  double seen[2] = {0.0, 0.0};",
+    "  for (int turn = 0; turn < 2; turn += 1) {",
+    `    ${RUNTIME_NAME}_region_enter();`,
+    `    double* node = (double*)${RUNTIME_NAME}_array_new(4, sizeof(double));`,
+    "    if (node == NULL) return 1;",
+    "    node[0] = 7.0;",
+    `    ${RUNTIME_NAME}_region_enter();`,
+    `    double* scratch = (double*)${RUNTIME_NAME}_array_new(4, sizeof(double));`,
+    "    if (scratch == NULL) return 1;",
+    "    scratch[0] = 99.0;",
+    `    ${RUNTIME_NAME}_region_leave();`,
+    "    seen[turn] = node[0];",
+    `    ${RUNTIME_NAME}_region_leave();`,
+    "  }",
+    `  ${RUNTIME_NAME}_finalize();`,
+    '  printf("%g %g\\n", seen[0], seen[1]);',
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-region-nested-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("release"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "7 7", "the outer turn keeps its own block across the nested region");
+});
+
+test("a region left more often than it was entered does not underflow", async () => {
+  // A turn that leaves early — a break, or a return out of the function — has
+  // the compiler write the closing call on that path as well as at the bottom
+  // of the body, so one leave can arrive for no enter. Counting the depth
+  // rather than holding a flag is what makes the extra leave end the region
+  // instead of taking the count below zero, where the next enter would read as
+  // nested one and the cursor would never be rewound again.
+  const probe = [
+    "#include <stdio.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    `  ${RUNTIME_NAME}_region_enter();`,
+    `  ${RUNTIME_NAME}_region_leave();`,
+    `  ${RUNTIME_NAME}_region_leave();`,
+    `  ${RUNTIME_NAME}_region_enter();`,
+    `    double* a = (double*)${RUNTIME_NAME}_array_new(4, sizeof(double));`,
+    `    double* b = (double*)${RUNTIME_NAME}_array_new(4, sizeof(double));`,
+    "  if (a == NULL || b == NULL) return 1;",
+    "  a[0] = 1.0; b[0] = 2.0;",
+    `  ${RUNTIME_NAME}_region_leave();`,
+    "  a[0] = 5.0;",
+    `  double* c = (double*)${RUNTIME_NAME}_array_new(4, sizeof(double));`,
+    "  if (c == NULL) return 1;",
+    '  printf("%d\\n", c == a);',
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-region-underflow-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("release"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "0", "the region is rewound, so the block after it is fresh memory");
+});
+
 test("the Nim adapter joins and clears strings as the C runtime does", async (t) => {
   if (!nimAvailable) {
     t.skip("the Nim compiler is not installed");

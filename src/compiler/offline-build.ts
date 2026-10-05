@@ -42,11 +42,28 @@ import { symbolOf } from "./semantics/contract.ts";
 import type { TargetSpec } from "./core/types.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
 
-const TARGET: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
+
+/**
+ * What the project file asks of the target, which the machine backend reads:
+ * `sse4.1` in `[target] features` is what turns `Math.floor` into the one
+ * instruction that rounds instead of the sequence, so a harness that hardcoded
+ * an empty feature list measured a program the project had not asked for.
+ */
+function targetFor(project: ProjectFile): TargetSpec {
+  const target = project.target ?? {};
+  return {
+    arch: target.arch ?? "x86_64",
+    os: target.os ?? "linux",
+    abi: target.abi ?? "sysv",
+    cpu: target.cpu ?? "",
+    features: target.features ?? [],
+  };
+}
 
 /** What a project file names that this harness reads. */
 interface ProjectFile {
   language: string;
+  target?: Partial<TargetSpec>;
   sourceFile: string;
 }
 
@@ -60,6 +77,7 @@ async function main(): Promise<void> {
   await mkdir(work, { recursive: true });
 
   const project = parseToml(await readFile(join(directory, "blaze.toml"), "utf8")) as unknown as ProjectFile;
+  const target = targetFor(project);
   const source = await readFile(join(directory, project.sourceFile), "utf8");
   const phase = runContractPhase({
     frontend: frontendFor(project.language),
@@ -113,7 +131,7 @@ async function main(): Promise<void> {
       const result = await buildMachineObject({
         fn: lowered,
         contract,
-        target: TARGET,
+        target,
         callable,
         objectPath: join(work, `${name}.o`),
       });
@@ -123,12 +141,12 @@ async function main(): Promise<void> {
   }
   console.log(`  ${objectPaths.length} object(s), ${textBytes} bytes of code`);
 
-  const runtime = await buildStandaloneRuntime(work, "danger", TARGET);
+  const runtime = await buildStandaloneRuntime(work, "danger", target);
   const outputPath = join(work, "program");
   await buildProgramDriver({
     mode: "danger",
     objective: "throughput",
-    target: TARGET,
+    target,
     program,
     workDirectory: work,
     objectPaths,

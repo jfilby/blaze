@@ -506,7 +506,14 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
     for (const statement of block.statements) {
       if (statement.k === "let") {
         declared.add(statement.slot.name);
-        if (statement.slot.kind === "value" && holdsGiven(statement.value)) given.add(statement.slot.name);
+        // Any binding of what the function was given is an alias of it, and
+        // which slot kind it was written as does not change that. `const copy =
+        // node;` is an `object` slot rather than a `value` one, and reading
+        // only the value bindings missed every reference alias — so a callee
+        // that kept the caller's block through one was answered as keeping
+        // nothing, and the loop above it was marked for a reuse that would
+        // write over a block the caller still holds.
+        if (holdsGiven(statement.value)) given.add(statement.slot.name);
         continue;
       }
       switch (statement.k) {

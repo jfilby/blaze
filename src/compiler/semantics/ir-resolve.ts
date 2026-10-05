@@ -884,8 +884,15 @@ function heldOf(text: string): Held {
 /** A function the program declared, and what has been settled about it. */
 interface ProgramFunctionDraft {
   name: string;
-  /** The names the body reads of the scope it is declared in, and their types. */
-  captured: { name: string; type: TypeExpr }[];
+  /**
+   * The names the body reads of the scope it is declared in, each with the
+   * binding it was read from and not only its name. A name is resolved at every
+   * call site, and a declaration that shadows it between the function's
+   * declaration and its call is a different binding that happens to answer to
+   * the same name — passing that one changes what the call computes without
+   * anything being wrong with it visibly.
+   */
+  captured: { name: string; type: TypeExpr; held: Held }[];
   /** The parameters the source wrote, in the order it wrote them. */
   params: { name: string; type: TypeExpr }[];
   body: ProgramStatement[];
@@ -986,7 +993,7 @@ class ProgramResolver {
     // function, of the type the scope holds it at: a function of a program is
     // compiled on its own, so what it reads from around it is passed to it at
     // every call, and the call is where that scope is.
-    const captures: { name: string; type: TypeExpr }[] = [];
+    const captures: { name: string; type: TypeExpr; held: Held }[] = [];
     for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
       const held = this.lookup(name);
       if (held === undefined) {
@@ -1009,7 +1016,7 @@ class ProgramResolver {
           `line ${statement.line} of ${this.body.file}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
         );
       }
-      captures.push({ name, type });
+      captures.push({ name, type, held });
     }
     const draft: ProgramFunctionDraft = {
       name: statement.name,
@@ -1184,10 +1191,31 @@ class ProgramResolver {
     if (this.scopes[this.scopes.length - 1].has(name)) {
       throw programError(`"${name}" is declared twice in the same block`, this.body, line);
     }
-    const declared = { ...held, name } as Held;
+    // A name that shadows one outside this block is written down under a name
+    // of its own. The IR names a value by the name the source wrote and has no
+    // scope chain of its own, so two bindings answering to one name are one name
+    // to everything downstream — and a function that captured the outer one is
+    // handed the inner at its call site, because the call site is a different
+    // scope and reads the name there. Renaming the shadowing declaration is what
+    // keeps the two apart: the outer keeps the name the source wrote, and the
+    // capture carries the binding rather than the name, so the call still passes
+    // the binding it took.
+    const bound = this.lookup(name) === undefined ? name : this.freshName(name);
+    const declared = { ...held, name: bound } as Held;
     this.functions.used.add(name);
     this.scopes[this.scopes.length - 1].set(name, declared);
     return declared;
+  }
+
+  /**
+   * A name no declaration of this program is written under, for a binding that
+   * shadows another one of the same name.
+   */
+  private freshName(name: string): string {
+    for (let index = 2; ; index += 1) {
+      const candidate = `${name}_${index}`;
+      if (this.scopes.every((scope) => !scope.has(candidate))) return candidate;
+    }
   }
 
   private open(): void {
@@ -2137,13 +2165,17 @@ class ProgramResolver {
       const written = value.args.map((argument, position) =>
         this.value(argument, parseType(signature.params[position].type), line),
       );
-      const captured = declared.captured.map((capture, position) =>
-        this.value(
-          { k: "name", name: capture.name },
-          parseType(signature.params[value.args.length + position].type),
-          line,
-        ),
-      );
+      // The binding the capture was taken from, not a name looked up here: the
+      // call is in a different scope from the declaration, and a declaration
+      // that shadows the name between the two is a different binding that
+      // answers to the same one. `let base = 1; function f(x) { return x + base;
+      // } { let base = 100; console.log(f(10)); }` answers 11, and passing the
+      // inner binding answered 110.
+      const captured = declared.captured.map((capture, position) => {
+        const expected = parseType(signature.params[value.args.length + position].type);
+        if (capture.held.kind === "array") this.expectArray(expected, capture.held, line);
+        return { k: "reference", name: capture.held.name, held: capture.held } satisfies DraftValue;
+      });
       return {
         name: signature.symbol,
         signature,

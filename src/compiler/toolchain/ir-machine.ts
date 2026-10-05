@@ -3269,10 +3269,21 @@ class Machine {
     this.readInto(this.slot(dot.left), left);
     this.readInto(this.slot(dot.right), right);
     this.code.movRegImm(cursor, BigInt(dot.from * 8));
-    // The accumulator of a vector of two sums starts at zero in both its halves.
-    this.code.xorFloat(sum, sum);
     this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(dot.from, false)), false);
     this.store(variable);
+
+    // `total += a[i] * b[i]` adds to what the name already held, so the vector
+    // starts from that value and not from zero: the low lane carries it and the
+    // high lane is nothing, which is what the fold at the end of the loop adds.
+    // `let total = 0` is the shape that hid this — every test wrote it — and a
+    // loop seeded with anything else answered the sum of the loop rather than
+    // the value the source wrote.
+    //
+    // Seeded after the counter is stored rather than before, because the store
+    // above writes through XMM0 and the accumulator this borrows may be XMM0.
+    const accumulator = this.slot(dot.accumulator);
+    if (accumulator.register !== null) this.code.movsMove(sum, accumulator.register, false);
+    else this.code.movsLoad(sum, frame(accumulator.offset), false);
 
     const paired = this.code.label("Lpaired");
     this.code.bind(labels.header);
@@ -3295,7 +3306,6 @@ class Machine {
     this.code.packedMove(spare, sum);
     this.code.unpackHigh(spare, sum);
     this.code.packed("add", sum, spare);
-    const accumulator = this.slot(dot.accumulator);
     if (accumulator.register !== null) this.code.movsMove(accumulator.register, sum, false);
     else this.code.movsStore(frame(accumulator.offset), sum, false);
 
@@ -3425,9 +3435,14 @@ class Machine {
     // so the base of each is the same on every turn.
     for (const [at, name] of sum.arrays.entries()) this.readInto(this.slot(name), bases[at]);
     this.code.movRegImm(cursor, BigInt(sum.from * 8));
-    // A sum taken one turn at a time starts at nothing, in the register the
-    // additions will be made into.
-    this.code.xorFloat(total, total);
+    // `total += ...` adds to what the name already held, and the register the
+    // build gave that name is still holding it: the zeroing that stood here
+    // discarded it, so a loop seeded with anything but zero answered the sum of
+    // the loop rather than the value the source wrote. Only the low lane carries
+    // it, and the high lane is cleared rather than left as it was — the pairs
+    // below add into both lanes, so a lane holding a value nothing put there
+    // would be one this cannot account for.
+    this.code.movsMove(total, total, false);
 
     const paired = this.code.label("Lsummed");
     this.code.bind(labels.header);
@@ -4061,9 +4076,16 @@ class Machine {
       throw machineError(`${this.fn.symbol} jumps for a block no loop around it names`, terminator.target);
     }
     // A `continue` is another turn of the same loop, so the region is still the
-    // right one after it; a `break`, and a jump out of a loop further out, are
-    // not, and both leave the region on the way.
-    if (terminator.target !== open.names.header) this.leaveRegion();
+    // right one after it; a jump out of the loop the region belongs to is not,
+    // and leaves it on the way.
+    //
+    // Only that loop's own exit ends it. A `break` out of a loop *inside* the
+    // marked one lands still inside its body, and leaving there ended the turn's
+    // region early: the rest of the turn then allocated from the slab rather than
+    // the cursor, and a block released on that path reached the slab's released
+    // list while the region was still rewound over the same bytes — two live
+    // blocks in one piece of memory from the next turn on.
+    if (terminator.target !== open.names.header && this.region?.header === open.header) this.leaveRegion();
     this.code.jmp(terminator.target === open.names.header ? open.header : open.exit);
   }
 

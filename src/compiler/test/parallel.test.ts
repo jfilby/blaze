@@ -402,6 +402,21 @@ test("a loop accumulating a whole number written as a double is marked", () => {
   assert.deepEqual(onlyLoop(fn).reductions, [{ name: "total", op: "+", exact: true }]);
 });
 
+test("a loop whose body reads the accumulator it combines is not marked", () => {
+  // The prefix sum: `out[i] = total` is the total only up to that turn, and the
+  // combining is what makes `total` private to the turn — the C backend writes
+  // `reduction(+:total)`, so the read sees the owning thread's partial sum.
+  const fn = functionWith(
+    countedLoop([
+      { k: "set", line: 2, name: "total", op: "+=", value: { k: "const", type: F64, text: "1" } },
+      { k: "setElement", line: 3, buffer: "out", index: { k: "local", type: I64, name: "i" }, op: "=", value: { k: "local", type: F64, name: "total" } },
+      chain(8),
+    ]),
+  );
+  markParallelLoops(fn.entry, new Map());
+  assert.equal(onlyLoop(fn).parallel, undefined);
+});
+
 test("a loop whose body prints is not marked, because output order is the program's", () => {
   const fn = functionWith(
     countedLoop([{ k: "printNumber", line: 2, value: { k: "local", type: F64, name: "x" } }]),
