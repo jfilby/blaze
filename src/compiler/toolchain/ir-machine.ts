@@ -1224,6 +1224,21 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
   if (loop.body.statements.length > UNROLLABLE_STATEMENTS) return null;
   if (bodyCalls(loop.body)) return null;
   if (writesCounter(loop.body, loop.variable)) return null;
+  // A body that is nothing but conditionals is left rolled, which is the one
+  // shape writing it out does not pay for. Unrolling buys the removal of a
+  // loop's test and step, and what it removes them from is the body's own work.
+  // A body of nothing but conditionals has no work of its own to amortise them
+  // against: each turn is a test the body already had, plus the work under
+  // whichever of its arms is taken. Writing it out N times leaves every one of
+  // those tests standing and only moves the counter's test and step out of the
+  // loop. The shape that pays is the opposite one — the loop over a field
+  // element's limbs in a modular addition, a chain of arithmetic whose turns
+  // share nothing — and it is a chain of `let` and `set`, not of `if`. The two
+  // are told apart here rather than by counting statements, because the count
+  // cannot: `fCmp` over eleven limbs is a single `if` whose arms assign to one
+  // name, and unrolling it put 284 instructions of duplicated guard into the
+  // middle of an `fAddMod` called 1.7 million times per scalar multiplication.
+  if (loop.body.statements.length > 0 && loop.body.statements.every((statement) => statement.k === "if")) return null;
   const from = wholeLiteral(loop.from);
   const to = wholeLiteral(loop.to);
   if (from === null || to === null) return null;
@@ -1283,12 +1298,29 @@ function writesCounter(body: SemanticBlock, name: string): boolean {
  * machine runs: `assertMachineTarget` above promises the code every one of them
  * runs, so a target that has not said it has the instruction is answered with
  * the library, as it was before this instruction was written. A project that
- * names it in `target.features` gets the one instruction; a project that does
+ * named it in `target.features` gets the one instruction; a project that does
  * not is no worse off than before.
+ *
+ * A named `target.cpu` answers the same question, because that is what the C
+ * backend is already handed: `cTargetOptions` passes it straight to gcc as
+ * `-march`, and a program built for a cpu is a program its author has said may
+ * assume that cpu's instruction set. Every cpu gcc names from Nehalem on has
+ * SSE4.1, so a project that named one and was still answered with the library
+ * here was reading a target the C half of the same build had already believed.
  */
 function roundsOnItsOwn(target: TargetSpec): boolean {
-  return target.features.includes("sse4.1") || target.features.includes("sse4.2");
+  if (target.features.includes("sse4.1") || target.features.includes("sse4.2")) return true;
+  return target.cpu !== "" && CPU_HAS_SSE41.test(target.cpu);
 }
+
+/**
+ * The cpu names that carry SSE4.1, which is every processor gcc has accepted as
+ * a `-march` from Nehalem on, plus the feature levels that name it directly. A
+ * project that writes one of these has said what it may assume, and this is the
+ * list that says what each of them means.
+ */
+const CPU_HAS_SSE41: RegExp =
+  /^(nehalem|westmere|sandybridge|ivybridge|haswell|broadwell|skylake|skylake-avx512|cooperlake|cannonlake|cascadelake|icelake-client|icelake-server|rocketlake|alderlake|raptorlake|sapphirerapids|graniterapids|tigerlake|amdgpu|znver[1-9]|bdver[1-9]|btver[1-9]|x86-64-v[3-9])$/;
 
 /** What the linker sees in the object that was written. */
 function inspectWrittenObject(objectPath: string, functionName: string): { defined: string[]; undefined: string[] } {

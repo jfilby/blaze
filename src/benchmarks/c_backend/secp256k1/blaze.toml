@@ -15,6 +15,7 @@ provider = "commandcode"
 arch = "x86_64"
 os = "linux"
 abi = "sysv"
+features = ["sse4.1"]
 
 [optimize]
 primary = "throughput"

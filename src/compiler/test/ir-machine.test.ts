@@ -1999,6 +1999,128 @@ test("a value rounded down is the same number whatever the target rounds with", 
   );
 });
 
+test("a named cpu is asked for the rounding instruction it has", async () => {
+  // `target.cpu` is what the C backend already hands gcc as `-march`, so a
+  // project that named one has said what the delivered program may assume.
+  // Every cpu from Nehalem on carries SSE4.1, and a project naming one was
+  // still answered with the library's rounding here — reading a target the C
+  // half of the same build had already believed. A cpu older than the
+  // instruction must still be refused it, or that promise is worth nothing.
+  const floor = subject(
+    F64,
+    handsBack({ k: "call", type: F64, call: floorCall(local("x", F64)) }),
+    [{ kind: "value", name: "x", mutable: false, type: F64 }],
+  );
+  for (const cpu of ["haswell", "skylake", "znver3", "x86-64-v3"]) {
+    const own = await emitted(floor, ["f", "g", "h9"], { ...TARGET, cpu });
+    assert.match(own, /\broundsd\b/, `${cpu} has the instruction and is not given it`);
+    assert.doesNotMatch(own, /\bcall\b/, `${cpu}: nothing is called where the instruction rounds`);
+  }
+  for (const cpu of ["core2", "k8"]) {
+    const library = await emitted(floor, ["f", "g", "h9"], { ...TARGET, cpu });
+    assert.doesNotMatch(library, /\broundsd\b/, `${cpu} predates the instruction and must not be given it`);
+  }
+});
+
+test("a body of nothing but conditionals is left rolled", async () => {
+  // Writing a loop out buys the removal of its test and step, and what it
+  // removes them from is the body's own work. A body that is all conditionals
+  // has none to amortise them against: each turn is a test the body already
+  // had, so writing it out eleven times leaves all eleven standing. The shape
+  // is `fCmp` over a field element's limbs — one `if` per turn, guarded on a
+  // name the loop never changes — and unrolling it put 284 duplicated
+  // instructions inside an `fAddMod` that secp256k1 calls 1.7 million times per
+  // scalar multiplication. Both loops below answer the same number, so what
+  // the test reads is the instruction: the arithmetic one is written out, the
+  // conditional one is not.
+  const counted = (statements: SemanticStatement[]): SemanticFunction =>
+    subject(I32, {
+      id: "entry",
+      statements: [
+        { k: "let", slot: { kind: "value", name: "seen", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted",
+            variable: "i",
+            type: I32,
+            from: number("11", I32),
+            to: number("0", I32),
+            inclusive: true,
+            down: true,
+            step: null,
+            header: "head",
+            exit: "out",
+            body: { id: "body", releases: [], statements, terminator: { k: "next" } },
+          },
+        },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("seen", I32) },
+    });
+
+  // The compare `fCmp` is: guarded on a name the loop does not write, so no
+  // two turns of it do the same work.
+  const guarded = counted([
+    {
+      k: "if",
+      line: 3,
+      condition: { k: "compare", type: BOOL, op: "eq", operand: I32, left: local("seen", I32), right: number("0", I32) },
+      then: {
+        id: "then",
+        releases: [],
+        statements: [
+          { k: "set", name: "seen", op: "=", value: number("1", I32), line: 4 },
+          { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 5 },
+          { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 6 },
+          { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 7 },
+          { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 8 },
+          { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 9 },
+        ],
+        terminator: { k: "next" },
+      },
+      otherwise: null,
+    },
+  ]);
+  // The shape unrolling is for, which must still be written out: a chain of
+  // arithmetic whose turns share nothing.
+  const arithmetic = counted([
+    { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 3 },
+    { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 4 },
+    { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 5 },
+    { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 6 },
+    { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 7 },
+    { k: "set", name: "seen", op: "+=", value: local("i", I32), line: 8 },
+  ]);
+
+  const rolled = await emitted(guarded);
+  const written = await emitted(arithmetic);
+  // Both loops run the same eleven turns of a body, so what separates them is
+  // only whether the body was written out, and instruction count is what that
+  // is. The arithmetic body is written out whole, so its eleven copies of one
+  // turn's work are what its size is made of. The conditional body is rolled,
+  // so it carries one copy of a body six statements long beside a loop test —
+  // which is what takes it from 136 instructions to 41. The two numbers are
+  // what the gate is worth on this shape, and they were measured rather than
+  // assumed: the ratio is the whole of the assertion.
+  const size = (assembly: string): number => (assembly.match(/^\s+[0-9a-f]+:/gm) ?? []).length;
+  assert.ok(
+    size(rolled) * 2 < size(written),
+    `a conditional body left rolled (${size(rolled)} instructions) is not markedly smaller than one written out (${size(written)})`,
+  );
+  assert.equal(
+    await lowered(guarded, (name) => `printf("%d", ${name}());`),
+    "56",
+    "the guarded body still runs every turn: the first sets `seen`, the rest add their counter to it",
+  );
+  assert.equal(
+    await lowered(arithmetic, (name) => `printf("%d", ${name}());`),
+    "396",
+    "the arithmetic body is still written out and answers what it answered rolled",
+  );
+});
+
 test("a quotient by a power of two is a product by its reciprocal", async () => {
   // Both forms are the same number, so what the test reads is the instruction:
   // a division is three times the latency of a multiply and is not pipelined,
