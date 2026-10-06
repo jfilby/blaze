@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReviewRequest } from "../ai/review.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
-import { resolveModel, OPENROUTER_BASE_URL } from "../ai/model.ts";
+import { resolveModel, OPENROUTER_BASE_URL, OPENCODE_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
 import { createBackend, ReplayBackend, VercelAiBackend } from "../ai/backend.ts";
 import { scratch } from "./scratch.ts";
@@ -48,6 +48,31 @@ test("OPENCODE_API_KEY is read as a generic credential", () => {
   );
   // The compiler's own generic credential is read first where both are set.
   assert.equal(resolveModel("openrouter/openai/gpt-5", { AI_API_KEY: "a", OPENCODE_API_KEY: "b" }).apiKey, "a");
+});
+
+test("OPENCODE_API_KEY configures the opencode provider", () => {
+  const configuration = resolveModel("opencode/grok-code", { OPENCODE_API_KEY: "oc_test" });
+  assert.equal(configuration.provider, "opencode");
+  assert.equal(configuration.id, "opencode/grok-code");
+  assert.equal(configuration.model, "grok-code");
+  assert.equal(configuration.apiKey, "oc_test");
+  assert.equal(configuration.baseUrl, OPENCODE_BASE_URL);
+});
+
+test("opencode is pointable at a stand-in endpoint", () => {
+  const configuration = resolveModel("opencode/grok-code", {
+    OPENCODE_API_KEY: "oc_test",
+    OPENCODE_BASE_URL: "http://127.0.0.1:9/zen/v1",
+  });
+  assert.equal(configuration.baseUrl, "http://127.0.0.1:9/zen/v1");
+});
+
+test("an opencode model object is constructible without contacting it", () => {
+  // The endpoint is only reached on a request, so this proves the provider
+  // package accepts the configuration the resolver produced.
+  const backend = createBackend(resolveModel("opencode/grok-code", { OPENCODE_API_KEY: "oc_test" }));
+  assert.ok(backend instanceof VercelAiBackend);
+  assert.equal(backend.id, "opencode/grok-code");
 });
 
 test("openrouter without a key fails with the names to set", () => {

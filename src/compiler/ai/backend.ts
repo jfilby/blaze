@@ -256,7 +256,7 @@ export class VercelAiBackend implements AiBackend {
 
     if (configuration.provider === "openai") {
       this.model = createOpenAI(apiKey === "" ? undefined : { apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
-    } else if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible") {
+    } else if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible" || configuration.provider === "opencode") {
       if (baseURL === undefined) throw reviewError(`${configuration.provider} has no endpoint`);
       this.model = createOpenAICompatible({
         name: configuration.provider,
