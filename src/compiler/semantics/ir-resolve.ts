@@ -172,6 +172,13 @@ interface DraftCall {
   effects: Effect[];
   /** A function the compiler itself provides, as `Math.abs` is. */
   builtin: boolean;
+  /**
+   * True when what the call hands back is a bigint, which is what the callee
+   * declared: `function f(): bigint` hands back a bigint and one declared
+   * `: number` hands back a double, and the language prints the first with an
+   * `n` after it and the second without.
+   */
+  bigint: boolean;
 }
 
 /** One piece of a string: text as written, or a value interpolated into it. */
@@ -235,6 +242,8 @@ type DraftStatement =
       line: number;
     }
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; type: TypeExpr; line: number }
+  /** `a.fill(x)`: the array is written from its first element, as one value. */
+  | { kind: "fill"; buffer: DraftValue; value: DraftValue; held: ArrayHeld; line: number }
   | { kind: "print"; values: DraftValue[]; line: number }
   | { kind: "invoke"; call: DraftCall; line: number }
   | { kind: "if"; condition: DraftValue; then: DraftStatement[]; otherwise: DraftStatement[]; line: number }
@@ -428,9 +437,25 @@ function isBigint(value: DraftValue): boolean {
     case "unary":
     case "conditional":
       return value.bigint === true;
+    case "call":
+      // What a call hands back is what the callee declared it returns. Without
+      // this `console.log(f())` for a `f(): bigint` printed the number without
+      // the `n` that is what says it is a bigint, and `f() + 1n` was refused as
+      // a bigint mixed with a number.
+      return value.call.bigint;
     default:
       return false;
   }
+}
+
+/**
+ * Whether what a function hands back is a bigint, which is what its signature
+ * declares: a source spells a bigint `bigint` and every other number `number`,
+ * and the contract type those two map to is `i64` and `f64`. Nothing else a
+ * function can declare returns a bare `i64`.
+ */
+function returnsBigint(returns: string): boolean {
+  return parseType(returns).kind === "primitive" && returns.trim() === "i64";
 }
 
 /** True when the value is a string, which is the one type a number is not. */
@@ -1438,6 +1463,8 @@ class ProgramResolver {
         return this.assignment(statement);
       case "elementAssign":
         return this.elementAssignment(statement);
+      case "fill":
+        return this.filled(statement);
       case "update": {
         const held = this.held(statement.name, statement.line);
         this.mutable(held, statement.name, statement.line);
@@ -1692,6 +1719,33 @@ class ProgramResolver {
       op: statement.op,
       value: this.value(statement.value, type, statement.line),
       type,
+      line: statement.line,
+    };
+  }
+
+  /**
+   * `a.fill(x)` written for what it does: every element of the array written as
+   * one value. The array is written from its first element, which is a name the
+   * compiler makes rather than one the program declared, so two fills in one
+   * block do not count with the same one.
+   */
+  private filled(statement: ProgramStatement & { kind: "fill" }): DraftStatement {
+    const held = this.held(statement.buffer, statement.line);
+    if (held.kind !== "array") {
+      throw programError(
+        `"${statement.buffer}" is not a buffer`,
+        this.body,
+        statement.line,
+        `line ${statement.line} of ${this.body.file}: only an array has elements to fill`,
+      );
+    }
+    const element = held.element ?? "f64";
+    held.element ??= element;
+    return {
+      kind: "fill",
+      buffer: this.reference(statement.buffer, statement.line),
+      value: this.value(statement.value, numeric(element), statement.line),
+      held: { ...held, mutable: true },
       line: statement.line,
     };
   }
@@ -2073,6 +2127,7 @@ class ProgramResolver {
       returns: builtin.returns,
       effects: [],
       builtin: true,
+      bigint: false,
     };
   }
 
@@ -2279,8 +2334,21 @@ class ProgramResolver {
     const leftBig = isBigint(left);
     const rightBig = isBigint(right);
     if (leftBig !== rightBig) {
+      // What each side is, rather than which of the two is a bigint: a `u256`
+      // is held at sixty-four bits and so reads as one here, and naming the two
+      // as "a bigint and a bigint" says of a program that nothing is wrong.
+      // What the language calls the value, which is not the contract's name for
+      // it: every number that is not a bigint is a number to a program, and it
+      // is held at sixty-four bits here without being one.
+      const side = (value: DraftValue, big: boolean): string => {
+        if (big) return "a bigint";
+        if (holdsText(value)) return "a string";
+        const name = primitive(draftType(value));
+        if (name !== null && isWide(name)) return `a ${name}`;
+        return "a number";
+      };
       throw programError(
-        `"${op}" cannot mix a bigint and ${leftBig ? "a number" : "a bigint"}`,
+        `"${op}" cannot mix ${side(left, leftBig)} and ${side(right, rightBig)}`,
         this.body,
         line,
         `line ${line} of ${this.body.file}: the language adds, subtracts, multiplies, divides and compares a bigint with another bigint and raises on a number beside one; convert it with Number() and say which of the two you meant`,
@@ -2407,6 +2475,7 @@ class ProgramResolver {
         returns: builtin.returns,
         effects: [],
         builtin: true,
+        bigint: false,
       };
     }
     // A function the program declared is called like any other: it is compiled
@@ -2455,6 +2524,7 @@ class ProgramResolver {
         returns: parseType(signature.returns),
         effects: [],
         builtin: false,
+        bigint: returnsBigint(signature.returns),
       };
     }
     const contract = this.contracts.get(value.function);
@@ -2484,6 +2554,7 @@ class ProgramResolver {
       returns: parseType(signature.returns),
       effects: contract.effects,
       builtin: false,
+      bigint: returnsBigint(signature.returns),
     };
   }
 
@@ -2965,6 +3036,30 @@ class ProgramLowering {
       case "update":
         this.statement({ k: "step", name: statement.name, op: statement.op, prefix: statement.prefix, line: statement.line });
         return;
+      case "fill": {
+        // The same statement `a.fill(x)` writes when it is bound to a name: the
+        // array is written from an index the compiler names, so two fills in one
+        // block do not count with the same one.
+        const array = this.value(statement.buffer, null, statement.line);
+        if (array.k !== "local") {
+          throw new CompilerError({
+            category: "ContractError",
+            stage: "program",
+            message: "a fill is written of an array the program did not name",
+            detail: "fill an array a name holds",
+          });
+        }
+        const element = numeric(statement.held.element ?? "f64");
+        this.pending.push({
+          k: "fill",
+          buffer: array.name,
+          index: this.generated("i"),
+          value: this.value(statement.value, element, statement.line),
+          type: element,
+          line: statement.line,
+        });
+        return;
+      }
       case "print":
         this.print(statement);
         return;

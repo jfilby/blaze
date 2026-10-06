@@ -321,6 +321,19 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["output"] },
   ),
   entry(
+    "blaze_rt_format_number_fixed",
+    "size_t",
+    [
+      ["value", "double"],
+      ["digits", "int"],
+      ["buffer", "unsigned char*"],
+      ["size", "size_t"],
+    ],
+    "Writes a number as text at a fixed number of digits after the point.",
+    "What x.toFixed(d) writes: the same digits every time, rounded at the last of them, and never the exponent form the shortest writing falls back on. A value that is not finite, and one of a million million million and over, is written as the language writes it rather than at the digits asked for.",
+    { tags: ["output"] },
+  ),
+  entry(
     "blaze_rt_print_newline",
     "void",
     [],
@@ -374,6 +387,7 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_from_u64(blaze_u256* out, uint64_t value)",
   "uint64_t blaze_rt_u256_to_u64(const blaze_u256* value)",
   "size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size)",
+  "int blaze_rt_u256_parse(blaze_u256* out, const char* text, size_t length)",
   "void blaze_rt_print_u256(const blaze_u256* value)",
   "void blaze_rt_print_u256_hex(const blaze_u256* value)",
 ];
@@ -705,6 +719,50 @@ uint64_t blaze_rt_u256_to_u64(const blaze_u256* value) {
    Only decimal and hexadecimal are answered. A base outside them is refused by
    the caller rather than answered in base ten, which would print a different
    number from the one the source wrote. */
+/* The inverse of blaze_rt_u256_format for base ten: the decimal a wide number
+   is written as, read back into its limbs. The verification harness takes a
+   test vector as text and has to turn it into the value it names, and a cast
+   from a parsed 64 bit number is C the compiler rejects as "conversion to
+   non-scalar type requested" — so the whole 256 bits have to be read here,
+   digit by digit, which is the inverse of the division the formatter does. */
+int blaze_rt_u256_parse(blaze_u256* out, const char* text, size_t length) {
+  blaze_u256 value = blaze_u256_zero();
+  const blaze_u256 ten = blaze_u256_of_u64(10u);
+  size_t at = 0;
+  int negative = 0;
+  if (length > 0 && (text[0] == '-' || text[0] == '+')) {
+    negative = text[0] == '-';
+    at = 1;
+  }
+  int digits = 0;
+  for (; at < length; at += 1) {
+    const char character = text[at];
+    if (character < '0' || character > '9') return 0;
+    /* value * 10 + digit, over the four limbs, carrying as it goes. */
+    unsigned __int128 carry = (unsigned __int128)(unsigned)(character - '0');
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 current = (unsigned __int128)value.limbs[i] * 10u + carry;
+      value.limbs[i] = (uint64_t)current;
+      carry = current >> 64;
+    }
+    if (carry != 0) return 0;
+    digits += 1;
+  }
+  if (digits == 0) return 0;
+  if (negative) {
+    /* Two's complement over the four limbs, which is the whole of what a
+       negative wide number is. */
+    unsigned __int128 borrow = 1;
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 current = (unsigned __int128)(~value.limbs[i]) + borrow;
+      value.limbs[i] = (uint64_t)current;
+      borrow = current >> 64;
+    }
+  }
+  *out = value;
+  return 1;
+}
+
 size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size) {
   if (base != 10u && base != 16u) return 0;
   char text[80];
@@ -1542,6 +1600,101 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
   }
 
   return blaze_rt_write_number(written, (size_t)used, buffer, size);
+}
+
+/* Whether "value", written at "digits" digits after the point, is a tie the C
+   library breaks downwards — that is, one whose even neighbour is the smaller
+   of the two and so has to be written the other way round.
+
+   See the note above the caller for the derivation: a tie at "f" digits is a
+   value "m * 2^e" whose twos are exactly "-(e + f + 1)" of them, and it breaks
+   downwards exactly when "(m / 2^d) * 5^f" is one more than a multiple of
+   four. */
+static int blaze_fixed_breaks_down(double value, int digits) {
+  if (value == 0.0 || !isfinite(value)) return 0;
+  int exponent = 0;
+  /* The magnitude, because a tie is written away from zero and the two numbers
+     it stands between are the same whichever side of it the value is on. A
+     negative double has a negative mantissa, and reading one as an unsigned
+     whole number is not a number at all. */
+  const double fraction = frexp(fabs(value), &exponent);
+  /* "value" as a whole number times a power of two: the mantissa is exact at
+     53 bits, which is every bit a double carries. */
+  uint64_t mantissa = (uint64_t)ldexp(fraction, 53);
+  const int twos = -(exponent - 53 + digits + 1);
+  if (twos < 0) return 0;
+  uint64_t whole = mantissa;
+  for (int at = 0; at < twos; at += 1) {
+    if (whole % 2 != 0) return 0;
+    whole /= 2;
+  }
+  /* "5^digits" is one more than a multiple of four however large it is, so the
+     residue of "(mantissa / 2^d) * 5^digits" is the residue of the quotient. */
+  return whole % 4 == 1;
+}
+
+size_t blaze_rt_format_number_fixed(double value, int digits, unsigned char* buffer, size_t size) {
+  /* What x.toFixed(d) writes: the same digits every time, rounded at the last of
+     them, and never the exponent form the shortest writing falls back on. A
+     value that is not finite, and one of a million million million and over, is
+     written as the language writes it rather than at the digits asked for:
+     (1e21).toFixed(2) is 1e+21 and not the twenty two digits that follow the
+     point, and what follows the point of a value that is not a number is
+     nothing at all. */
+  if (isnan(value) || isinf(value) || fabs(value) >= 1e21) {
+    return blaze_rt_format_number(value, buffer, size);
+  }
+  char text[512];
+  const int wanted = digits < 0 ? 0 : (digits > 400 ? 400 : digits);
+  int written = snprintf(text, sizeof text, "%.*f", wanted, value);
+  if (written < 0) return blaze_rt_format_number(NAN, buffer, size);
+  /* A tie is written away from zero and the C library breaks one to even, so
+     "(2.5).toFixed(0)" is 3 and "(0.5).toFixed(0)" is 1 where "%.*f" writes 2
+     and 0 — and "(3.5).toFixed(0)" is 4 where both write 4. A program that
+     prints a number at a fixed number of digits prints what its source
+     prints, so the break is corrected here rather than left to the library.
+
+     A tie is decided on the exact value rather than on the digits, because the
+     digits cannot tell one: "1.005" is written "1.005" at three digits by a
+     library rounding it correctly, and it is not a tie, because the double
+     under it is a hair below 1.005.
+
+     Write the value as "m * 2^e", which every double can be written as with
+     "m" a whole number. It is a tie at "f" digits exactly when
+     "m * 5^f * 2^(e + f + 1)" is an odd whole number — which it can only be
+     when "e + f + 1" is negative, and then only when the twos in "m" are
+     exactly as many as cancel them. That test is "blaze_fixed_breaks_down".
+
+     Of the two numbers a tie stands between, the library wrote the even one.
+     Away from zero is the other one exactly when the even one is the smaller,
+     which is when "(m / 2^d) * 5^f" is one more than a multiple of four —
+     "5^f" being one more than a multiple of four however large "f" is. */
+  if (blaze_fixed_breaks_down(value, wanted)) {
+    int at = 0;
+    while (at < written && text[written - 1 - at] == '9') {
+      text[written - 1 - at] = '0';
+      at += 1;
+    }
+    if (at == written) {
+      /* Every digit was a nine, so the value grew by a whole digit. */
+      memmove(text + 1, text, (size_t)written);
+      text[0] = '1';
+      written += 1;
+    } else {
+      text[written - 1 - at] = (char)(text[written - 1 - at] + 1);
+    }
+  }
+  /* A number that needs more of the buffer than it has is written at the width
+     of the buffer rather than past the end of it. */
+  const size_t used = (size_t)written > size - 1 ? size - 1 : (size_t)written;
+  /* The sign of a zero is not written, and only a value that is one has none to
+     write: (-0).toFixed(9) is 0.000000000, while -0.004 at two digits is -0.00
+     in the language as well. */
+  if (used > 0 && text[0] == '-' && value == 0.0) {
+    memmove(text, text + 1, used - 1);
+    return blaze_rt_write_number(text, used - 1, buffer, size);
+  }
+  return blaze_rt_write_number(text, used, buffer, size);
 }
 
 void blaze_rt_print_number(double value) {

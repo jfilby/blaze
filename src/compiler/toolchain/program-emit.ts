@@ -22,6 +22,7 @@ import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import type { FunctionSignature, TypeExpr } from "../core/types.ts";
 import { contractText } from "../semantics/contract.ts";
+import { isWideType } from "../core/semantic-ir.ts";
 import {
   elementTypeOf,
   isNumber,
@@ -141,6 +142,8 @@ export interface ProgramTarget {
   element(buffer: string, index: string): string;
   /** The line that changes what a name holds. */
   assign(name: string, operator: string, value: string, type: SemanticType | null): string;
+  /** An operation over a wide number, which is a call into the shared kernel. */
+  wideBinary(op: string, left: string, right: string): string;
   /** The line that changes one element of a buffer. */
   elementAssign(buffer: string, index: string, operator: string, value: string): string;
   /** The line that moves a number up or down. */
@@ -894,6 +897,11 @@ class ProgramEmitter {
       case "xor": {
         const left = this.expression(value.left, value.type);
         const right = this.expression(value.right, value.type);
+        // A wide number is four limbs and no C operator, so an operation over
+        // one is a call into the kernel every backend shares. Written as a C
+        // operator it is `invalid operands to binary + (have 'blaze_u256' and
+        // 'blaze_u256')`, and the build failed at the link rather than here.
+        if (isWideType(value.type)) return this.target.wideBinary(value.op, left, right);
         return `(${left} ${this.target.operator(ARITH_OPERATORS[value.op])} ${right})`;
       }
     }

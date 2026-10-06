@@ -1419,3 +1419,328 @@ test("`>>>` is the shift the language defines, and `toFixed` writes at the digit
   assert.equal(delivered.stdout, sourceRun.stdout);
 });
 
+test("a loop counter is not hoisted out of the loop that declares it", async () => {
+  // `j === 1` is computed on every turn of the inner loop and is the same value
+  // on every turn of the *outer* one as far as the outer loop can see — the
+  // name it reads is written by a loop nested inside it. Hoisting it left a
+  // binding above the outer loop reading a counter that was never declared
+  // there, which the validator refuses by name.
+  const source = [
+    "let s = 0;",
+    "for (let i = 0; i < 4; i++) {",
+    "  for (let j = 0; j < 4; j++) {",
+    "    if (j === 1) {",
+    "      break;",
+    "    }",
+    "    s += 1;",
+    "  }",
+    "}",
+    "console.log(s);",
+    "let t = 0;",
+    "for (let i = 0; i < 4; i++) {",
+    "  for (let j = 0; j < 4; j++) {",
+    "    if (j === 1) {",
+    "      continue;",
+    "    }",
+    "    t += 1;",
+    "  }",
+    "}",
+    "console.log(t);",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("an update of a name nothing reads is a statement the compiler keeps", async () => {
+  // `dropUnread` removes a binding nothing reads, which is a slot and a store on
+  // every target. The name an update writes is one of those: removing the
+  // declaration and keeping the increment left a statement writing a slot the
+  // block never declared.
+  const source = [
+    "function bump(n: number): number {",
+    "  let i = 0;",
+    "  i++;",
+    "  return n;",
+    "}",
+    "console.log(bump(1));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a square root in a compiled function is the C library's, not an unknown name", async () => {
+  // `Math.sqrt` is lowered as a call to the C library's `sqrt`, and a compiled
+  // function is the one path that emits that call: a program body is written
+  // into the driver and `gcc` resolves it there. The table of library names the
+  // machine backend allows did not carry `sqrt`, so the name was refused at the
+  // end of the build as one that is "neither the runtime, the C library, nor a
+  // function of this program".
+  const source = [
+    "export function root(x: number): number {",
+    "  return Math.sqrt(x);",
+    "}",
+    "console.log(root(2));",
+    "console.log(root(0));",
+    "console.log(root(1e12));",
+    "console.log(Math.sqrt(2) * Math.sqrt(2));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("arithmetic over a loop counter keeps the fraction beside it", async () => {
+  // A loop counter the resolver cannot type more precisely is an `i64`, and the
+  // rule that kept an `i64` beside a double — the `i64` a bigint is — read that
+  // width as a bigint. So `i + 0.5` inside a loop was answered at sixty-four
+  // bits and the half was dropped before any backend saw it: the array it was
+  // written into held `i`, and `i / 2` became an integer division.
+  const source = [
+    "export function spread(n: number): number {",
+    "  let a = new Float64Array(n);",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i++) {",
+    "    a[i] = i * 1.5;",
+    "  }",
+    "  for (let i = 0; i < n; i++) {",
+    "    total += a[i];",
+    "  }",
+    "  return total;",
+    "}",
+    "console.log(spread(5));",
+    "console.log(spread(1));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("the width a bigint is computed at survives a call", async () => {
+  // `i64` is what a bigint is, and a function declared `: bigint` hands one
+  // back. Without that, `fact(20n)` was computed as a double and printed
+  // without the `n` that is what says it is a bigint — and `fact(20n) + 1n` was
+  // refused as a bigint mixed with a number.
+  const source = [
+    "export function fact(n: bigint): bigint {",
+    "  if (n <= 1n) {",
+    "    return 1n;",
+    "  }",
+    "  return n * fact(n - 1n);",
+    "}",
+    "export function keep(n: bigint): bigint {",
+    "  return n;",
+    "}",
+    "export function widen(n: number): number {",
+    "  return n;",
+    "}",
+    "console.log(fact(20n));",
+    "console.log(keep(5n));",
+    "console.log(keep(5n) + 1n);",
+    "console.log(widen(5));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a compiled function allocates the array it was written to build", async () => {
+  // `export function` is how a module offers a function, and the contract
+  // frontend read no `new` at all: `new Float64Array(n)` parsed as a call to a
+  // function named `new`, and the build refused the program with `unknown
+  // identifier "new"`. The same two spellings the program body has always read
+  // are read here, and the machine backend sizes the array from the count.
+  const source = [
+    "export function sized(n: number): number {",
+    "  let a = new Float64Array(n);",
+    "  for (let i = 0; i < n; i++) {",
+    "    a[i] = i * 1.5;",
+    "  }",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i++) {",
+    "    total += a[i];",
+    "  }",
+    "  return total;",
+    "}",
+    "export function literal(): number {",
+    "  let a = new Float64Array([1, 2, 3, 4]);",
+    "  return a[0] + a[1] + a[2] + a[3];",
+    "}",
+    "export function narrow(n: number): number {",
+    "  let a = new Int32Array(n);",
+    "  for (let i = 0; i < n; i++) {",
+    "    a[i] = i * i;",
+    "  }",
+    "  return a[0] + a[3];",
+    "}",
+    "console.log(sized(5));",
+    "console.log(sized(0));",
+    "console.log(literal());",
+    "console.log(narrow(4));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a declared function reads the bitwise operators where JavaScript puts them", async () => {
+  // `&`, `^` and `|` bind looser than a shift and tighter than a comparison,
+  // and the program body has always read them there. A function the module
+  // declared could not use one at all: the token reached the expression reader
+  // and the build stopped on `unexpected "&" in an expression`.
+  const source = [
+    "export function bits(i: number): number {",
+    "  return i & 3;",
+    "}",
+    "export function mixed(a: number, b: number, c: number): number {",
+    "  return a & b ^ c;",
+    "}",
+    "export function looser(a: number, b: number, c: number): number {",
+    "  return a ^ b | c;",
+    "}",
+    "export function withShift(a: number): number {",
+    "  return a << 1 | 1;",
+    "}",
+    "export function withAdd(a: number): number {",
+    "  return a + 1 & 3;",
+    "}",
+    "console.log(bits(10));",
+    "console.log(mixed(1, 3, 1));",
+    "console.log(looser(6, 1, 2));",
+    "console.log(withShift(2));",
+    "console.log(withAdd(6));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a number written at a fixed number of digits is written at them", async () => {
+  // The machine backend lowered `toFixed` by ignoring the digits it was given,
+  // so a compiled function wrote the shortest form of the number and a program
+  // body wrote the digits — the same source, two answers. And a tie is written
+  // away from zero in the language where the C library breaks one to even, so
+  // `(2.5).toFixed(0)` is 3 and the library answers 2. Both backends now ask
+  // the runtime for it, which is where the break is corrected on the exact
+  // value: `1.005` is written `1.005` by a library rounding it correctly and is
+  // not a tie, because the double under it is a hair below it.
+  const source = [
+    "export function show(x: number): void {",
+    "  console.log(x.toFixed(0));",
+    "  console.log(x.toFixed(2));",
+    "  console.log(x.toFixed(6));",
+    "}",
+    "const k = 0;",
+    "show(2.5);",
+    "show(-2.5);",
+    "show(0.5);",
+    "show(-0.5);",
+    "show(3.5);",
+    "show(1.5);",
+    "show(0.25);",
+    "show(1.25);",
+    "show(1.75);",
+    "show(-0.75);",
+    "show(1.005);",
+    "show(2.675);",
+    "show(9.5);",
+    "show(0.125);",
+    "show(-0.004);",
+    "show(1 / 3);",
+    "show(1e21);",
+    "console.log((2.5).toFixed(0));",
+    "console.log((0.5).toFixed(0));",
+    "console.log((-2.5).toFixed(0));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a wide number is written by the kernel every backend shares", async () => {
+  // A `u256` is four limbs and no machine register, so an operation over one is
+  // a call into the kernel rather than a C operator. The program driver had no
+  // such call: `a + b` was written as C `+` over two structs, and a print was
+  // `(unsigned long long)(a_u256)`, which gcc refuses as "aggregate value used
+  // where an integer was expected". Both failed at the link, with the C
+  // compiler's complaint rather than the compiler's own.
+  const source = [
+    "export function wide(a: u256, b: u256): u256 {",
+    "  return a + b;",
+    "}",
+    "export function less(a: u256, b: u256): boolean {",
+    "  return a < b;",
+    "}",
+    "const k = 1;",
+    "let a: u256 = 12;",
+    "let b: u256 = 30;",
+    "console.log(a + b);",
+    "console.log(a * b);",
+    "console.log(a & b);",
+    "console.log(a | b);",
+    "console.log(a ^ b);",
+    "console.log(wide(5, 7));",
+    "console.log(less(5, 7));",
+    "console.log(less(9, 7));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a refusal names what each side of the operation is", async () => {
+  // A `u256` is held at sixty-four bits, so it reads as a bigint here, and the
+  // refusal said a program could not "mix a bigint and a bigint". What each
+  // side is, in the language's own words, is what a person reading the message
+  // needs.
+  const phase = phaseOf("typescript", { "main.ts": "const k = 1;\nlet a: u256 = 3;\nconsole.log(a << 70n);\n" }, "main.ts");
+  assert.throws(
+    () => resolveProgram(phase.body!, phase.program),
+    /cannot mix a u256 and a bigint/,
+  );
+  const plain = phaseOf("typescript", { "main.ts": "const k = 1;\nconsole.log(1n + 1.5);\n" }, "main.ts");
+  assert.throws(() => resolveProgram(plain.body!, plain.program), /cannot mix a bigint and a number/);
+});
+
+test("a fill written for what it does is a statement a program runs", async () => {
+  // `a.fill(x)` bound to a name is an expression, because it hands the array
+  // back. Written on its own there is nowhere to hand it to, and the statement
+  // was refused by name: `"a.fill" is not a statement of a program; a program
+  // calls what it compiles`. It is the one the semantic IR already has.
+  const source = [
+    "const n = 5;",
+    "let a = new Float64Array(n);",
+    "a.fill(0);",
+    "for (let i = 0; i < n; i++) {",
+    "  a[i] = a[i] + i * 0.5;",
+    "}",
+    "console.log(a[0]);",
+    "console.log(a[4]);",
+    "let b = new Uint8Array(4);",
+    "b.fill(200);",
+    "console.log(b[0]);",
+    "let c = new Float64Array(3);",
+    "c.fill(1.5);",
+    "c[1] += 2;",
+    "console.log(c[0]);",
+    "console.log(c[1]);",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("an element is written by the operator the source wrote", async () => {
+  // `a[i] += x` reads the element and writes the sum back. The statement the
+  // frontend read carried no operator at all, so the compound forms were a
+  // parse error in a declared function — `unexpected "+=" in an expression`.
+  const source = [
+    "export function accumulate(n: number): number {",
+    "  let a = new Float64Array(n);",
+    "  a[0] = 1;",
+    "  a[1] += 5;",
+    "  a[2] *= 3;",
+    "  a[3] -= 0.5;",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i++) {",
+    "    total += a[i];",
+    "  }",
+    "  return total;",
+    "}",
+    "console.log(accumulate(4));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+

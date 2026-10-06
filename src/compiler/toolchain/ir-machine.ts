@@ -131,6 +131,12 @@ const LIBRARY: Record<string, true> = {
   fabs: true,
   floor: true,
   trunc: true,
+  // `MATH_LIBRARY` writes `Math.sqrt` as a call to the C library's `sqrt`, so a
+  // program that takes a square root names an external this table has to allow.
+  // Without it the name was refused at the end of the build as one that is
+  // "neither the runtime, the C library, nor a function of this program" —
+  // the linker resolves every other name `MATH_LIBRARY` produces.
+  sqrt: true,
 };
 
 /** The operator each compound assignment is, by the name the IR gives it. */
@@ -4303,7 +4309,10 @@ class Machine {
         this.text(value);
         return;
       case "toText":
-        this.asText(value.of);
+        // The digits are part of what `toFixed(d)` means, so they are passed
+        // on: dropping them answered the number as the shortest writing of it,
+        // which is the number the source asked not to write.
+        this.asText(value.of, null, value.digits);
         return;
       case "call":
         this.callValue(value.call, value.type);
@@ -5875,7 +5884,7 @@ class Machine {
    * return says which of the two happened, so the caller reads a part that
    * arrived measured for nothing and measures the rest.
    */
-  private asText(value: SemanticValue, measured: Held | null = null): boolean {
+  private asText(value: SemanticValue, measured: Held | null = null, digits: number | null = null): boolean {
     /** A word written in place of a value, which is as long as the word is. */
     const word = (text: string): void => {
       if (measured !== null) {
@@ -5917,7 +5926,7 @@ class Machine {
       this.code.test(RAX);
       this.code.jcc("e", otherwise);
       this.code.movdXmm(XMM0, RAX);
-      this.formatNumber(measured);
+      this.formatNumber(measured, digits);
       this.code.jmp(end);
       this.code.bind(otherwise);
       word("null");
@@ -5925,7 +5934,7 @@ class Machine {
       return true;
     }
     this.at(value, NUMBER);
-    this.formatNumber(measured);
+    this.formatNumber(measured, digits);
     return true;
   }
 
@@ -5935,11 +5944,22 @@ class Machine {
    * counting it again over the result reads it a second time for an answer the
    * first read already gave.
    */
-  private formatNumber(measured: Held | null): void {
+  private formatNumber(measured: Held | null, digits: number | null = null): void {
     const buffer = this.scratch(64, "blaze_number");
-    this.code.lea(RDI, frame(buffer));
-    this.code.movRegImm(RSI, 64n);
-    this.runtime("_format_number");
+    if (digits === null) {
+      this.code.lea(RDI, frame(buffer));
+      this.code.movRegImm(RSI, 64n);
+      this.runtime("_format_number");
+    } else {
+      // `blaze_rt_format_number_fixed(value, digits, buffer, size)`. The value
+      // is already in the first floating point register; the whole arguments
+      // are assigned over the integer registers from the first of them, which
+      // the floating point argument does not take one of.
+      this.code.movRegImm(RDI, BigInt(digits));
+      this.code.lea(RSI, frame(buffer));
+      this.code.movRegImm(RDX, 64n);
+      this.runtime("_format_number_fixed");
+    }
     // The formatter writes a terminator of its own, and one is written here as
     // well: the buffer is this function's own, and the length it is given is
     // where the string ends.
@@ -6170,13 +6190,24 @@ class Machine {
    * it already had and reloads the address for a call-valued element.
    */
   private buffer(value: SemanticValue & { k: "buffer" }): void {
+    // A count the program settled on when it runs is a value like any other:
+    // it is read into the first argument register the same way every other
+    // runtime call is handed its arguments. Refusing it here meant a compiled
+    // function could not size an array, so every helper that built its own
+    // scratch space had to be written in the program body instead.
     if (value.length === null) {
-      throw machineError(
-        `${this.fn.symbol} holds an array whose length the program settled on`,
-        "a function is given its arrays, and allocates none of its own",
-      );
+      const count = value.count;
+      if (count === null) {
+        throw machineError(
+          `${this.fn.symbol} holds an array with neither a length nor a count`,
+          "an array is written either with its elements or with the number of them",
+        );
+      }
+      this.at(count, USIZE);
+      this.code.movRegReg(RDI, RAX);
+    } else {
+      this.code.movRegImm(RDI, BigInt(value.length));
     }
-    this.code.movRegImm(RDI, BigInt(value.length));
     this.code.movRegImm(RSI, BigInt(widthOf(value.element)));
     this.runtime("_array_new");
     const held = this.objectRegister;

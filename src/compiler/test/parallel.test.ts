@@ -10,7 +10,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { SemanticCall, SemanticFunction, SemanticLoop, SemanticSlot, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
+import { statementBlocksOf } from "../core/semantic-ir.ts";
+import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticLoop, SemanticSlot, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
 import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { entryIsParallel, markParallelLoops, refusalFor } from "../semantics/parallel.ts";
 import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-validate.ts";
@@ -554,6 +555,54 @@ test("a loop marked parallel in IR text is proved, and a false one is refused", 
   const problems = semanticFunctionProblems(fn);
   assert.equal(problems.length > 0, true);
   assert.match(problems[0], /marked parallel/);
+});
+
+test("a loop whose body returns out of the function is not marked", () => {
+  // A turn that returns returns from the team rather than from the loop: the
+  // other turns are still running and the function is gone from under them. The
+  // machine backend already refused to write such a turn, so only the C backend
+  // saw it — and it wrote `#pragma omp parallel for` around a `return`, which
+  // gcc refuses as "invalid branch to/from OpenMP structured block".
+  //
+  // Unlike a `break`, which leaves the loop it is written in, a `return` leaves
+  // the function whichever loop it is written in, so a loop above one that
+  // returns has the same turn to lose and the nested loop is read too.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "const n = 20;",
+        "for (let i = 0; i < n; i++) {",
+        "  for (let j = 0; j < n; j++) {",
+        "    if (i * j > 30) {",
+        "      return i * 1000 + j;",
+        "    }",
+        "  }",
+        "}",
+        "return -1;",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const program = resolveProgram(phase.body!, phase.program);
+  markParallelLoops(program.entry);
+  const marked: string[] = [];
+  const walk = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      if (statement.k === "loop") {
+        const loop = statement.loop;
+        if (loop.kind === "counted" || loop.kind === "each") {
+          if (loop.parallel === true) marked.push(loop.kind === "counted" ? loop.variable : loop.index);
+        }
+        walk(loop.body);
+        continue;
+      }
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+  };
+  walk(program.entry);
+  assert.deepEqual(marked, [], "no loop of a body that returns runs its turns at once");
 });
 
 test("the word survives being printed and read back", () => {

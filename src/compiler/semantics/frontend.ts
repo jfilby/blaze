@@ -349,6 +349,7 @@ function nimStatements(statements: readonly Stmt[]): Statement[] {
           kind: "indexAssign",
           buffer: statement.base,
           index: nimExpression(statement.index),
+          op: "=",
           value: nimExpression(statement.value),
           line: statement.line,
         };

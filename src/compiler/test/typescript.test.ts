@@ -399,3 +399,37 @@ test("an escaped `\\${` is the text it writes, not an interpolation", () => {
     { kind: "print", values: [{ k: "text", parts: [{ k: "text", value: "${n}" }] }], line: 2 },
   ]);
 });
+
+test("a function that returns nothing is contracted by what it does, not refused for returning nothing", () => {
+  // A body of declarations and assignments is the one shape that reaches the
+  // end of the contract analysis without having already been uncontractable:
+  // every other statement — a branch, a call, a print, an update — leaves it
+  // there first. `void` is what the source declared, so there is no expression
+  // the result must equal and none is asked for.
+  const contract = contractOfExport(
+    [
+      "export function tally(n: number): void {",
+      "  let i = 0;",
+      "  i = i + 1;",
+      "  i = i * n;",
+      "}",
+    ].join("\n"),
+    "tally",
+  );
+  assert.equal(contract.function.returns, "void");
+  assert.deepEqual(contract.ensures, [], "a void function has no postcondition to meet");
+  assert.equal(contract.definition.statements.length, 3, "the body travels as what the function is");
+});
+
+test("a function that declares a value and returns none is still refused", () => {
+  // The other side of the same question: `void` is what makes the absence of a
+  // result an answer rather than a fault.
+  assert.throws(
+    () =>
+      contractOfExport(
+        ["export function tally(n: number): number {", "  let i = 0;", "  i = i + 1;", "}"].join("\n"),
+        "tally",
+      ),
+    /tally never returns a value/,
+  );
+});

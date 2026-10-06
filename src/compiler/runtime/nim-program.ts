@@ -810,6 +810,21 @@ ${anchor}
     return `not (${value})`;
   }
 
+  wideBinary(op: string, _left: string, _right: string): string {
+    // The wide kernel is four limbs of carry and borrow propagation, written
+    // once in C and shared by every backend that has it. This runtime has no
+    // `u256` at all, so a program that computes one here is refused by name
+    // rather than written as an operation on a type this target does not have.
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: `the Nim driver cannot write a wide number's ${op}`,
+      detail:
+        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel",
+    });
+  }
+
   operator(op: string): string {
     const written = NIM_OPERATORS[op];
     if (written === undefined) throw hostError(`the driver cannot write ${op} down`);

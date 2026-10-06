@@ -23,7 +23,7 @@
 
 import { parseType, preconditionFailures, type ParsedContract, type Value } from "../semantics/contract.ts";
 import type { FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
-import { cMemberName } from "./c-names.ts";
+import { cLiteral, cMemberName } from "./c-names.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
 
 /** The C statements that build one argument, and the expression the call passes. */
@@ -75,7 +75,13 @@ function cType(type: TypeExpr): string {
 
 /** The value a scalar of the type holds when nothing is known about it. */
 function defaultScalar(type: TypeExpr): string {
-  return type.kind === "primitive" && type.name === "bool" ? "false" : "0";
+  if (type.kind === "primitive" && type.name === "bool") return "false";
+  // A wide number is four limbs and no C scalar, so the zero it defaults to is
+  // the initializer list that says which limb is which. Written as `0` it is
+  // `passing argument 1 of 'wide' from incompatible pointer type`, and the
+  // candidate was faulted for a call the harness wrote.
+  if (type.kind === "primitive" && type.name === "u256") return cLiteral("0", "u256");
+  return "0";
 }
 
 /**

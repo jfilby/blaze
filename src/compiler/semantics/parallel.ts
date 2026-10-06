@@ -160,6 +160,9 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): R
   if (leavesItself(loop)) {
     return "the body leaves the loop with a break, and a turn that leaves decides whether the next one runs";
   }
+  if (returnsOutOfIt(loop)) {
+    return "the body returns out of the function, and a turn that returns returns from the team";
+  }
   const counter = loop.kind === "counted" ? loop.variable : loop.index;
   // What the turns combine is worked out before the body is read, because it is
   // the one shared write the body is allowed and everything else about the body
@@ -189,6 +192,20 @@ function leavesItself(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>)
     return block.terminator.k === "jump" && block.terminator.target === loop.exit;
   };
   return inside(loop.body);
+}
+
+/**
+ * Whether a turn of this loop can return out of the function it is written in,
+ * which is a turn that returns out of the team rather than out of the loop: the
+ * other turns are still running, and the function is gone from under them.
+ *
+ * Unlike `leavesItself`, this reads the loops nested inside this one as well. A
+ * `break` there leaves that loop, so the loop around it may still run its turns
+ * at once — but a `return` leaves the function whichever loop it is written in,
+ * so a loop anywhere above it has the same turn to lose.
+ */
+function returnsOutOfIt(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): boolean {
+  return blocksWithin(loop.body).some((block) => block.terminator.k === "return");
 }
 
 /**

@@ -755,6 +755,12 @@ function readCounts(body: Body): Map<string, number> {
       // and a binding read only that way is one this would otherwise drop,
       // leaving the write naming a name the function never declared.
       if (statement.k === "setElement" || statement.k === "fill") count(statement.buffer);
+      // The name a `step` writes is a bare string for the same reason, and the
+      // write is the only thing in a body like `let i = 0; i++;` that keeps
+      // the slot alive. Dropping the declaration there left the increment
+      // naming a slot the block never declared, which the validator refuses by
+      // name.
+      if (statement.k === "step") count(statement.name);
     }
   };
   walk(body.entry);
@@ -1073,7 +1079,22 @@ function namesWrittenIn(block: SemanticBlock): Set<string> {
         case "setElement": written.add(statement.buffer); break;
         case "fill": written.add(statement.buffer); break;
         case "let": written.add(statement.slot.name); break;
-        default: break;
+        // A loop written inside the block writes its own counter, and a value
+        // that reads one is not the same value on every turn of the loop
+        // around it. Without this the counter was invisible to the loop
+        // enclosing the one that declared it: hoisting `j === 1` out of an
+        // inner loop looked impossible (the inner loop writes `j`) but it was
+        // hoisted out of the *outer* one instead, into a block where `j` was
+        // never declared.
+        case "loop": {
+          const inner = statement.loop;
+          if (inner.kind === "counted") written.add(inner.variable);
+          else if (inner.kind === "each") {
+            written.add(inner.index);
+            written.add(inner.element);
+          }
+          break;
+        }
       }
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }

@@ -287,6 +287,24 @@ class BodyTypes {
       }
       case "object":
         return { kind: "object", key: this.object(expression.fields) };
+      case "fixed":
+        // The number is read to write it out, so the value it is written of is
+        // walked: a name it reads is a name the body has to have declared.
+        this.expression(expression.of);
+        return { kind: "type", type: F64 };
+      case "sized":
+        // The count is read to size the block, and the elements are the names
+        // the body reaches through the array afterwards, so both are walked: a
+        // count that reads an object the body has not declared yet is the same
+        // fault here as anywhere else.
+        this.expression(expression.count);
+        return { kind: "type", type: { kind: "array", of: parseType(expression.element), length: null } };
+      case "buffer":
+        for (const value of expression.values) this.expression(value);
+        return {
+          kind: "type",
+          type: { kind: "array", of: parseType(expression.element), length: expression.values.length },
+        };
       case "text":
         for (const part of expression.parts) {
           if (part.k === "value") this.expression(part.value);
@@ -709,8 +727,19 @@ export function numeric(left: Inferred, right: Inferred): TypeExpr {
   // before a backend is handed the expression at all.
   if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "u256") return left.type;
   if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "u256") return right.type;
-  if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64") return I64;
-  if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64") return I64;
+  // An `i64` is kept beside another whole number, which is the `i64` a bigint
+  // is: `2n * 3n` is computed at sixty-four bits because both of its sides
+  // are. It is not kept beside a double, because an `i64` is not only a
+  // bigint — it is the width a loop counter is counted at, and every counter
+  // the resolver cannot type more precisely is an `i64`. So `i + 0.5` inside a
+  // loop was answered at sixty-four bits, and the half was dropped before any
+  // backend saw it: the array it was written into held `i`.
+  const leftWhole = left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64";
+  const rightWhole = right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64";
+  const leftFloat = left.kind === "type" && left.type.kind === "primitive" && isFloatType(left.type.name);
+  const rightFloat = right.kind === "type" && right.type.kind === "primitive" && isFloatType(right.type.name);
+  if (leftWhole && !rightFloat) return I64;
+  if (rightWhole && !leftFloat) return I64;
   if (left.kind === "type" && left.type.kind === "primitive" && right.kind === "type" && right.type.kind === "primitive") {
     if (isFloatType(left.type.name) && left.type.name === right.type.name) return left.type;
   }

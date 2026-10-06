@@ -123,6 +123,13 @@ export type ProgramStatement =
   | { kind: "declare"; name: string; mutable: boolean; type: string | null; value: ProgramValue; line: number }
   | { kind: "assign"; name: string; op: ProgramAssignOp; value: ProgramValue; line: number }
   | { kind: "elementAssign"; buffer: string; index: ProgramValue; op: ProgramAssignOp; value: ProgramValue; line: number }
+  /**
+   * `a.fill(x)` written for what it does: every element of the array written as
+   * one value. The same spelling bound to a name is an expression, because it
+   * hands the array back; this is the statement of it, where there is nowhere to
+   * hand it to.
+   */
+  | { kind: "fill"; buffer: string; value: ProgramValue; line: number }
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; line: number }
   | { kind: "print"; values: ProgramValue[]; line: number }
   | { kind: "if"; condition: ProgramValue; then: ProgramStatement[]; otherwise: ProgramStatement[]; line: number }

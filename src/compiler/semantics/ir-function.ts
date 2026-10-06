@@ -192,6 +192,9 @@ const ARITHMETIC: Record<BinaryOp, ArithOp | null> = {
   "<<": "shl",
   ">>": "shr",
   ">>>": "ushr",
+  "&": "and",
+  "|": "or",
+  "^": "xor",
   "<": null,
   "<=": null,
   ">": null,
@@ -216,6 +219,9 @@ const COMPARISONS: Record<BinaryOp, CompareOp | null> = {
   "<<": null,
   ">>": null,
   ">>>": null,
+  "&": null,
+  "|": null,
+  "^": null,
   "<": "lt",
   "<=": "le",
   ">": "gt",
@@ -539,14 +545,16 @@ class FunctionBody {
         return this.fieldAssignment(statement);
       case "indexAssign": {
         const buffer = this.read(statement.buffer, statement.line);
+        const element = asType(elementOf(buffer.inferred));
         this.write({
           k: "setElement",
           buffer: buffer.name,
           index: this.typed(statement.index, WHOLE, statement.line).value,
-          // A function body writes one element of a sequence or writes none:
-          // the statement the frontend reads carries no operator.
-          op: "=",
-          value: this.typed(statement.value, asType(elementOf(buffer.inferred)), statement.line).value,
+          // `a[i] += x` reads the element and writes the sum back, and the
+          // operator it applies is the one the source wrote: the same rule a
+          // whole-name assignment follows, over one element rather than a slot.
+          op: statement.op,
+          value: this.typed(statement.value, element, statement.line).value,
           line: statement.line,
         });
         return;
@@ -835,6 +843,59 @@ class FunctionBody {
         return this.call(expression, line);
       case "object":
         return this.allocated(expression, line);
+      case "sized": {
+        // `new Float64Array(n)` is a block of `n` elements the program sizes
+        // when it runs, cleared: a read past what the program filled is the
+        // zero the language answers it with.
+        const element = parseType(expression.element);
+        const type: TypeExpr = { kind: "array", of: element, length: null };
+        return {
+          value: {
+            k: "buffer",
+            type,
+            element,
+            length: null,
+            count: this.typed(expression.count, WHOLE, line).value,
+            view: null,
+            values: [],
+          },
+          inferred: asType(type),
+        };
+      }
+      case "buffer": {
+        // `new Float64Array([1, 2, 3])` is a block whose length the program
+        // wrote down, and the elements take the type of the array they are
+        // written into rather than the type they were written at.
+        const element = parseType(expression.element);
+        const type: TypeExpr = { kind: "array", of: element, length: expression.values.length };
+        return {
+          value: {
+            k: "buffer",
+            type,
+            element,
+            length: expression.values.length,
+            count: null,
+            view: null,
+            values: expression.values.map((value) => this.typed(value, { kind: "type", type: element }, line).value),
+          },
+          inferred: asType(type),
+        };
+      }
+      case "fixed": {
+        // What is written at a fixed number of digits is text. A string is
+        // already that text, and the digits would be dropped rather than
+        // refused, so it is refused here for the reason the program body
+        // refuses it.
+        const of = this.typed(expression.of, null, line).value;
+        if (isText(of.type)) {
+          throw this.error(
+            "a string is not written at a fixed number of digits",
+            line,
+            "a string is already text; write it as it is",
+          );
+        }
+        return { value: { k: "toText", type: TEXT, of, digits: expression.digits }, inferred: asType(USIZE) };
+      }
       case "text": {
         const parts: SemanticTextPart[] = [];
         for (const part of expression.parts) {

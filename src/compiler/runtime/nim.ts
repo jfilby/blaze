@@ -798,6 +798,52 @@ proc blaze_rt_format_number*(value: float64, buffer: ptr uint8, size: csize_t): 
   cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
   written
 
+# Whether the value, written at that many digits, is a tie the library breaks
+# downwards — its even neighbour being the smaller of the two, so that the
+# language, which writes a tie away from zero, has to write the other one.
+#
+# A tie at f digits is a value m * 2^e whose twos are exactly -(e + f + 1) of
+# them, and it breaks downwards exactly when (m / 2^d) * 5^f is one more than a
+# multiple of four. The test is on the exact value because the digits cannot
+# tell one: a library rounding 1.005 correctly writes 1.005, and it is not a
+# tie, because the double under it is a hair below 1.005.
+proc blazeFixedBreaksDown(value: float64, digits: int): bool =
+  if value == 0.0 or classify(value) != fcNormal:
+    return false
+  var exponent = 0
+  let fraction = frexp(abs(value), exponent)
+  # 2^53 is the whole number a fraction of a double is held as, exactly.
+  var mantissa = uint64(fraction * 9007199254740992.0)
+  let twos = -(exponent - 53 + digits + 1)
+  if twos < 0:
+    return false
+  for _ in 0 ..< twos:
+    if (mantissa and 1) != 0:
+      return false
+    mantissa = mantissa shr 1
+  # 5^digits is one more than a multiple of four however large it is, so the
+  # residue of the product is the residue of the quotient.
+  (mantissa and 3) == 1
+
+proc blaze_rt_format_number_fixed*(value: float64, digits: cint, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =
+  let wanted = int(digits)
+  var text = formatFloat(value, ffDecimal, wanted)
+  if blazeFixedBreaksDown(value, wanted):
+    var at = text.len - 1
+    while at >= 0 and text[at] == '9':
+      text[at] = '0'
+      at -= 1
+    if at < 0:
+      text = "1" & text
+    else:
+      text[at] = chr(ord(text[at]) + 1)
+  if size == 0:
+    return 0
+  let written = min(csize_t(text.len), size - 1)
+  if written > 0: copyMem(buffer, unsafeAddr text[0], int(written))
+  cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
+  written
+
 proc blaze_rt_print_newline*() {.exportc, cdecl.} =
   stdout.write("\\n")
 

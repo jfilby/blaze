@@ -34,6 +34,7 @@ import { cTargetOptions, linkOptions, threadingOptions, type Threading } from ".
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName, cSymbolLabel, cSymbolName } from "./c-names.ts";
+import { isWide } from "../core/semantic-ir.ts";
 
 const INTEGER_ARGUMENT_REGISTERS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 const SSE_ARGUMENT_REGISTERS = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
@@ -71,6 +72,11 @@ function isBuffer(type: TypeExpr): type is BufferType {
 
 function isSignedScalar(type: TypeExpr): boolean {
   return type.kind === "primitive" && isSignedIntegerType(type.name);
+}
+
+/** A wide number, which is four limbs and no machine register. */
+function isWideScalar(type: TypeExpr): boolean {
+  return type.kind === "primitive" && isWide(type.name);
 }
 
 /** C type used in the harness declaration for a contract type. */
@@ -297,7 +303,14 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[], labe
       body.push("  {");
       body.push(`    char* token = next_token(&cursor);`);
       body.push(`    if (token == NULL) fail("missing value for ${label}");`);
-      body.push(`    ${name} = (${cDeclarationType(type)})${scalarReadExpression(type, "token")};`);
+      // A wide number is read digit by digit into its limbs: a cast from a
+      // parsed 64 bit number is C the compiler rejects, and a vector written as
+      // decimal text names 256 bits of it.
+      if (isWideScalar(type)) {
+        body.push(`    if (!blaze_rt_u256_parse(&${name}, token, strlen(token))) fail("malformed value for ${label}");`);
+      } else {
+        body.push(`    ${name} = (${cDeclarationType(type)})${scalarReadExpression(type, "token")};`);
+      }
       body.push("  }");
       return;
     }
@@ -359,6 +372,17 @@ function vectorStorage(types: readonly TypeExpr[], names: readonly string[]): st
 }
 
 function resultPrint(returns: TypeExpr): string {
+  // A wide number is four limbs and no C scalar, so it is written by the
+  // kernel's own formatter: `printf("%llu", (unsigned long long)(value))` is C
+  // the compiler rejects as "aggregate value used where an integer was
+  // expected", and the candidate was faulted for a harness the compiler wrote.
+  if (isWideScalar(returns)) {
+    return [
+      "{ char wide_text[80];",
+      "  const size_t wide_written = blaze_rt_u256_format(&value, 10, (unsigned char*)wide_text, sizeof wide_text);",
+      '  printf("RESULT %.*s\\n", (int)wide_written, wide_text); }',
+    ].join("\n  ");
+  }
   // 17 significant digits read back as the same double, so the comparison
   // against the reference is exact up to the contract's tolerance.
   if (isFloatScalar(returns)) return 'printf("RESULT %.17g\\n", (double)value);';
@@ -472,7 +496,7 @@ int main(void) {
   const long long start = now_ns();
   for (long long iteration = 0; iteration < iterations; iteration += 1) {
     ${invocation}
-    sink += (double)value;
+    sink += ${isWideScalar(returns) ? "(double)blaze_rt_u256_to_u64(&value)" : "(double)value"};
   }
   const long long elapsed = now_ns() - start;
   printf("BENCH %lld %.17g\\n", elapsed, (double)sink);

@@ -23,6 +23,7 @@ import {
   isFloat,
   isTextType,
   isUnsigned,
+  isWideType,
   type SemanticCall,
   type SemanticReduction,
   type SemanticType,
@@ -79,31 +80,34 @@ static const char* program_number_text(double value) {
   return program_string(text, written);
 }
 
+/* A wide number as the language writes it, which is every limb of it in
+   decimal: four limbs and no machine register, so the runtime's own formatter
+   is what writes it. */
+static void program_print_wide(const blaze_u256* value) {
+  ${RUNTIME_NAME}_print_u256(value);
+}
+
+/* The same number as text, for a string that interpolates it or for the length
+   a caller measures. */
+static const char* program_wide_text(const blaze_u256* value) {
+  char text[80];
+  const size_t written = ${RUNTIME_NAME}_u256_format(value, 10, (unsigned char*)text, sizeof text);
+  return program_string(text, written);
+}
+
 /* A number written at a fixed number of digits after the point, which is what
    x.toFixed(d) is: the same digits every time, rounded at the last of them,
-   and never the exponent form the shortest writing falls back on. The digits
-   are bounded by the buffer, and a number that needs more of them than it is
-   given is written at the width of the buffer rather than past the end of it. */
+   and never the exponent form the shortest writing falls back on.
+
+   The runtime writes it rather than this driver repeating it, because the two
+   have to agree exactly and one of them is the machine backend's: the C
+   library this would otherwise call breaks a tie to even, and the language
+   writes one away from zero, so (2.5).toFixed(0) is 3 here and 2 there until
+   both ask the same function. */
 static const char* program_number_fixed(double value, int digits) {
-  /* A number that is not a number, and one of a million million million and
-     over, is written as the language writes it rather than at the digits asked
-     for: (1e21).toFixed(2) is 1e+21 and not the twenty two digits that follow
-     the point, and what follows the point of a value that is not a number is
-     nothing at all. */
-  if (isnan(value) || isinf(value) || fabs(value) >= 1e21) return program_number_text(value);
   char text[512];
-  const int wanted = digits < 0 ? 0 : (digits > 400 ? 400 : digits);
-  int written = snprintf(text, sizeof text, "%.*f", wanted, value);
-  if (written < 0) return program_string("NaN", 3);
-  if (written > (int)sizeof text - 1) written = (int)sizeof text - 1;
-  /* The sign of a zero is not written, and only a value that is one has none
-     to write: (-0).toFixed(9) is 0.000000000, while -0.004 at two digits is
-     -0.00 in the language as well. */
-  if (written > 0 && text[0] == '-' && value == 0.0) {
-    memmove(text, text + 1, (size_t)written);
-    written -= 1;
-  }
-  return program_string(text, (size_t)written);
+  const size_t written = ${RUNTIME_NAME}_format_number_fixed(value, digits, (unsigned char*)text, sizeof text);
+  return program_string(text, written);
 }
 
 /* A whole number written out, without the locale-aware formatting snprintf
@@ -291,6 +295,22 @@ function driverError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "LinkError", stage: "link", message, detail });
 }
 
+
+/* The kernel each operation over a wide number is one call of, by the name the
+   runtime gives it. A wide number has no quotient or remainder: the kernel
+   carries four limbs and answers addition, subtraction, a product, the shifts
+   and the bitwise operators, and the driver says so rather than writing a C
+   operator the compiler would reject. */
+const WIDE_KERNELS: Record<string, string> = {
+  add: "add",
+  sub: "sub",
+  mul: "mul",
+  shl: "shl",
+  shr: "shr",
+  and: "and",
+  or: "or",
+  xor: "xor",
+};
 
 /** The C driver of one program. */
 class CDriver implements ProgramTarget {
@@ -622,6 +642,14 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // is the whole number's and the suffix is part of it.
     if (bigint) return [`printf("%lldn", (long long)(${value}));`];
     if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
+    // A wide number is four limbs and no machine register, so it is never cast
+    // to a scalar: `printf("%llu", (unsigned long long)(a_u256))` is C the
+    // compiler rejects as "aggregate value used where an integer was
+    // expected", and the build failed at the link rather than at the print.
+    // The value is written into a temporary first, because the formatter wants
+    // its address and a call is not an lvalue: `&(f(x))` is C the compiler
+    // rejects as "lvalue required as unary '&' operand".
+    if (type !== null && isWideType(type)) return [`({ blaze_u256 blaze_wide_value = ${value}; program_print_wide(&blaze_wide_value); });`];
     const format = type !== null && isUnsigned(type) ? "%llu" : "%lld";
     const cast = type !== null && isUnsigned(type) ? "unsigned long long" : "long long";
     return [`printf("${format}", (${cast})(${value}));`];
@@ -719,6 +747,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // writing gives it.
     if (digits !== null) return `program_number_fixed((double)(${value}), ${digits})`;
     if (isFloat(type)) return `program_number_text((double)(${value}))`;
+    if (isWideType(type)) return `({ blaze_u256 blaze_wide_value = ${value}; program_wide_text(&blaze_wide_value); })`;
     return isUnsigned(type)
       ? `program_unsigned_text((unsigned long long)(${value}))`
       : `program_integer_text((long long)(${value}))`;
@@ -746,6 +775,18 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 
   logicalNot(value: string): string {
     return `!(${value})`;
+  }
+
+  wideBinary(op: string, left: string, right: string): string {
+    // The kernel is the one copy of the carry and borrow propagation every
+    // backend shares, so a wide operation in a program body is the same call a
+    // compiled function makes.
+    const kernel = WIDE_KERNELS[op];
+    if (kernel === undefined) {
+      throw driverError(`a wide number has no ${op}, and the kernel has no answer for it`);
+    }
+    const out = `blaze_wide_${(this.builds += 1)}`;
+    return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_${kernel}(&${out}, &${left}, &${right}); ${out}; })`;
   }
 
   operator(op: string): string {

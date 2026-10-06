@@ -673,6 +673,19 @@ class ProgramParser {
       }
       return { kind: "elementAssign", buffer: name.text, index, op, value: this.value(), line: name.line };
     }
+    // `a.fill(x)` written for what it does rather than for the array it hands
+    // back: the same spelling bound to a name is an expression, and a statement
+    // has nowhere to put the array it answers with.
+    if (token.text === "." && this.peek(2).text === "fill" && this.peek(3).text === "(") {
+      this.next();
+      this.next();
+      this.next();
+      this.next();
+      const value = this.value();
+      this.expect(")");
+      this.accept(";");
+      return { kind: "fill", buffer: name.text, value, line: name.line };
+    }
     if (token.text === "(" && !BLOCK_KEYWORDS.includes(name.text)) {
       this.next();
       this.next();

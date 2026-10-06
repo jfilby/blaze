@@ -841,11 +841,45 @@ class FunctionEmitter {
       }
       case "select":
         return `((${this.condition(value.condition, depth)}) ? ${this.expression(value.then, value.type, depth)} : ${this.expression(value.otherwise, value.type, depth)})`;
+
       case "buffer":
-        // A function is given an array as a pointer to its first element, so a
-        // whole array is a value it is not handed one of.
-        throw backendError(`${this.fn.symbol} reads an array the IR holds whole`);
+        return this.buffer(value, depth);
     }
+  }
+
+  /**
+   * A typed array, as the two forms it is written in.
+   *
+   * A count the program settled on when it runs is a block the runtime lays
+   * out, exactly as it is in a program body: the count is read as a length and
+   * the block is cleared, so a read of an element the program never wrote is the
+   * zero the language answers it with. The elements written out are a block of
+   * a length the source states, and it is the initializer list that says which
+   * limb of a wide one is which.
+   *
+   * A view is a window of a block another name holds rather than a block of its
+   * own, so the bytes it looks into belong to that name and are freed with it.
+   */
+  private buffer(value: SemanticValue & { k: "buffer" }, depth: number): string {
+    const element = declaredType(value.element);
+    if (value.view !== null) {
+      const base = this.raw(value.view.of, depth);
+      const offset = this.raw(value.view.offset, depth);
+      return `(((${element}*)((char*)(${base}) + (size_t)(${offset}) * sizeof(${element}))))`;
+    }
+    if (value.count !== null) {
+      const count = this.raw(value.count, depth);
+      const block = this.temporary(`${element}_block`);
+      return (
+        `({ const size_t ${block}_length = (size_t)(${count}); ` +
+        `${element}* ${block} = (${element}*)${RUNTIME_NAME}_allocate((${block}_length == 0 ? 1 : ${block}_length) * sizeof(${element})); ` +
+        `if (${block} == NULL) ${RUNTIME_NAME}_raise("out of memory"); ${block}; })`
+      );
+    }
+    // The elements written out: a braced initializer is the only spelling that
+    // says which element is which, and it carries the length with it.
+    const initialised = value.values.map((one) => `(${this.raw(one, depth)})`).join(", ");
+    return `(((${element}[]){${initialised}}))`;
   }
 
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {

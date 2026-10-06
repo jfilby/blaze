@@ -948,13 +948,22 @@ class TypeScriptParser {
     this.next();
     const index = this.readExpression();
     this.expect("]");
-    if (!this.accept("=")) {
+    const operator = this.peek();
+    if (operator.kind !== "punct" || (operator.text !== "=" && !(operator.text in COMPOUND_OPERATORS))) {
       this.position = start;
       return null;
     }
+    this.next();
     const value = this.readExpression();
     this.accept(";");
-    return { kind: "indexAssign", buffer: buffer.text, index, value, line: buffer.line };
+    return {
+      kind: "indexAssign",
+      buffer: buffer.text,
+      index,
+      op: operator.text as AssignOperator,
+      value,
+      line: buffer.line,
+    };
   }
 
   private readMemberAssignment(): Statement | null {
@@ -1193,11 +1202,30 @@ class TypeScriptParser {
   }
 
   private readLogicalAnd(): Expression {
-    return this.readBinaryLevel(["&&"], () => this.readEquality());
+    return this.readBinaryLevel(["&&"], () => this.readBitwiseOr());
   }
 
   private readEquality(): Expression {
     return this.readBinaryLevel(["===", "!==", "==", "!="], () => this.readComparison());
+  }
+
+  /**
+   * `&`, `^` and `|`, loosest of the three in that order, which is where
+   * JavaScript puts them: `a & b ^ c` is `(a & b) ^ c`, and `a ^ b | c` is
+   * `(a ^ b) | c`. They bind looser than a shift and tighter than a
+   * comparison, and the program body has always read them in exactly this
+   * place — a function the module declared could not use one at all.
+   */
+  private readBitwiseOr(): Expression {
+    return this.readBinaryLevel(["|"], () => this.readBitwiseXor());
+  }
+
+  private readBitwiseXor(): Expression {
+    return this.readBinaryLevel(["^"], () => this.readBitwiseAnd());
+  }
+
+  private readBitwiseAnd(): Expression {
+    return this.readBinaryLevel(["&"], () => this.readEquality());
   }
 
   private readComparison(): Expression {
@@ -1313,6 +1341,10 @@ class TypeScriptParser {
           base = { k: "length", buffer: base.name };
           continue;
         }
+        if (field.text === "toFixed" && this.at("(")) {
+          base = this.fixed(base);
+          continue;
+        }
         if (field.text === "length" && base.k === "argv") {
           base = { k: "call", name: ARGV_LENGTH, args: [] };
           continue;
@@ -1322,6 +1354,38 @@ class TypeScriptParser {
       }
       return base;
     }
+  }
+
+  /**
+   * `x.toFixed(d)`: the number written as text at `d` digits after the point.
+   *
+   * The digits are written out in the source, so they are a number this reads
+   * rather than a value it evaluates — the same rule the program body reads
+   * them by, so `x.toFixed(2)` means the same thing wherever it is written. A
+   * string is refused rather than silently answered: it is already the text
+   * the digits would have been written into, and dropping them would answer
+   * with a different program than the source wrote.
+   */
+  private fixed(of: Expression): Expression {
+    const open = this.next();
+    const digits = this.next();
+    if (digits.kind !== "number" || !/^\d+$/.test(digits.text)) {
+      this.report(
+        "the digits a number is written at are written out, as in x.toFixed(2)",
+        `near "${digits.text}"`,
+        digits,
+      );
+      while (!this.at(")") && this.peek().kind !== "end") this.next();
+      this.expect(")");
+      return of;
+    }
+    if (!this.at(")")) this.report("x.toFixed takes one number of digits", `near "${this.peek().text}"`, this.peek());
+    this.expect(")");
+    if (of.k === "text" || of.k === "fixed") {
+      this.report("a number is what is written at a fixed number of digits", "a string is already text; write it as it is", open);
+      return of;
+    }
+    return { k: "fixed", of, digits: Number(digits.text) };
   }
 
   private readPrimary(): Expression {
@@ -1353,6 +1417,7 @@ class TypeScriptParser {
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
       if (token.text === "null" || token.text === "undefined") return { k: "null" };
+      if (token.text === "new") return this.readAllocation();
       if (token.text === "process" && this.at(".") && this.peek(1).text === "argv") {
         this.next();
         this.next();
@@ -1385,6 +1450,50 @@ class TypeScriptParser {
     }
     this.expect("}");
     return { k: "object", fields };
+  }
+
+  /**
+   * `new Float64Array(n)` and `new Float64Array([1, 2, 3])`: a typed array
+   * allocated where it is written.
+   *
+   * The same two spellings the program body reads, for the same reason: a
+   * function the module declares is compiled on its own, and a function that
+   * cannot allocate an array cannot do the work the module asks of it. The
+   * element type is the view written, because that is what says how wide an
+   * element is — an `Int32Array` is four bytes an element and a `Float64Array`
+   * eight, and an array lowered at the wrong stride reads each element out of
+   * the middle of the one before it.
+   */
+  private readAllocation(): Expression {
+    const view = this.next();
+    if (view.kind !== "ident" || !(view.text in TYPED_ARRAYS)) {
+      this.report(
+        `a program allocates a typed array, not "${view.text}"`,
+        `as in new Float64Array(n); the arrays are ${Object.keys(TYPED_ARRAYS).join(", ")}`,
+        view,
+      );
+      this.skipBlock();
+      return this.hole();
+    }
+    const element = TYPED_ARRAYS[view.text] as string;
+    if (!this.accept("(")) {
+      this.report("a typed array is allocated with a count", "as in new Float64Array(n)", view);
+      return this.hole();
+    }
+    if (this.at("[")) {
+      this.next();
+      const values: Expression[] = [];
+      while (!this.at("]") && this.peek().kind !== "end") {
+        values.push(this.readExpression());
+        if (!this.accept(",")) break;
+      }
+      this.expect("]");
+      this.expect(")");
+      return { k: "buffer", element, values };
+    }
+    const count = this.readExpression();
+    this.expect(")");
+    return { k: "sized", element, count };
   }
 
   /** The text of a template string, split where it interpolates a value. */
@@ -1692,7 +1801,14 @@ class BodyAnalysis {
       if (!(error instanceof Uncontractable)) throw error;
       return { result: null, accesses: this.accesses };
     }
-    if (this.result === null) {
+    // A function that returns nothing has no expression the result must equal,
+    // which is the same `null` every body that prints, calls or branches
+    // already hands the contract. Only a function that declares a value has to
+    // produce one: `function f(x: number): void { let i = 0; i = i + 1; }`
+    // returns exactly what it declares and was refused for returning nothing,
+    // because a straight-line body of declarations and assignments is the one
+    // shape that reaches here without having already been uncontractable.
+    if (this.result === null && this.declaration.returns.kind !== "void") {
       throw frontendError(
         `${this.declaration.name} never returns a value`,
         "the contract needs an expression the result must equal",
@@ -1944,6 +2060,19 @@ class BodyAnalysis {
         );
       case "object":
         this.uncontractable("allocates an object", line, "a contracted function allocates nothing");
+      case "fixed":
+        this.uncontractable(
+          "writes a number as text",
+          line,
+          "a contract states what a function returns, which is a number",
+        );
+      case "sized":
+      case "buffer":
+        this.uncontractable(
+          "allocates an array",
+          line,
+          "a contracted function allocates nothing; a function that builds its own array is contracted by the statements it runs",
+        );
       case "text":
         this.uncontractable("prints text", line, "a contracted function returns a number and prints nothing");
       case "conditional":
@@ -1982,6 +2111,12 @@ function dependsOn(expression: Expression, name: string): boolean {
       return expression.args.some((argument) => dependsOn(argument, name));
     case "object":
       return expression.fields.some((field) => dependsOn(field.value, name));
+    case "sized":
+      return dependsOn(expression.count, name);
+    case "fixed":
+      return dependsOn(expression.of, name);
+    case "buffer":
+      return expression.values.some((value) => dependsOn(value, name));
     case "text":
       return expression.parts.some((part) => part.k === "value" && dependsOn(part.value, name));
     case "conditional":
@@ -2012,6 +2147,11 @@ function describe(expression: Expression): string {
       return "process.argv";
     case "object":
       return "an object";
+    case "sized":
+    case "buffer":
+      return "a typed array";
+    case "fixed":
+      return "a number written as text";
     case "update":
       return `${expression.name}${expression.op}`;
     case "text":

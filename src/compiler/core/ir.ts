@@ -19,6 +19,9 @@ export type BinaryOp =
   | "<<"
   | ">>"
   | ">>>"
+  | "&"
+  | "|"
+  | "^"
   | "<"
   | "<="
   | ">"
@@ -54,8 +57,23 @@ export type Expression =
   | { k: "member"; base: Expression; field: string }
   | { k: "call"; name: string; args: Expression[] }
   | { k: "object"; fields: { name: string; value: Expression }[] }
+  /**
+   * `new Float64Array(n)`: a typed array of a count the program settles on when
+   * it runs. `element` is the contract type its elements are held at, which is
+   * the view written, so an `Int32Array` is four bytes an element and not eight.
+   */
+  | { k: "sized"; element: string; count: Expression }
+  /** `new Float64Array([1, 2, 3])`: a typed array of the elements written out. */
+  | { k: "buffer"; element: string; values: Expression[] }
   /** A template string: text as written, with the values it interpolates. */
   | { k: "text"; parts: TextPart[] }
+  /**
+   * `x.toFixed(d)`: the number written as text at `d` digits after the point.
+   * The count is written out in the source, so it is a number the parser reads
+   * rather than a value it evaluates — the same reason the program body reads it
+   * that way.
+   */
+  | { k: "fixed"; of: Expression; digits: number }
   | { k: "binary"; op: BinaryOp; left: Expression; right: Expression }
   | { k: "unary"; op: UnaryOp; operand: Expression }
   | { k: "conditional"; condition: Expression; then: Expression; otherwise: Expression }
@@ -92,7 +110,8 @@ export type Statement =
   | { kind: "print"; value: Expression; line: number }
   /** A call kept for what it does, as in `main();`. */
   | { kind: "expression"; value: Expression; line: number }
-  | { kind: "indexAssign"; buffer: string; index: Expression; value: Expression; line: number };
+  /** An element written, by `=` or by one of the compound operators. */
+  | { kind: "indexAssign"; buffer: string; index: Expression; op: AssignOperator; value: Expression; line: number };
 
 /** Every operator `op=` accepts, and the operator it applies. */
 export const COMPOUND_OPERATORS: Record<string, BinaryOp> = {

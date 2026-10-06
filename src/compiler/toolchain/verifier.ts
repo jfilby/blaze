@@ -166,8 +166,15 @@ function randomScalar(random: () => number, type: ScalarType): ScalarValue {
     // The everyday values stay everyday, so a plan is still readable, but
     // they are not the only ones: a candidate whose arithmetic does not wrap
     // at the width of the type agrees with the contract over every other
-    // value and disagrees on these.
-    if (choice < 0.45) return BigInt(Math.floor(random() * 66)) - 32n;
+    // value and disagrees on these. They are also brought inside the type,
+    // because -32 is not a value a `u256` holds and the reference would
+    // compare the signed number the vector names while the kernel compares
+    // the four limbs the candidate was handed — the two answers differ
+    // wherever the wrap crosses zero, which is nearly everywhere.
+    if (choice < 0.45) {
+      const everyday = BigInt(Math.floor(random() * 66)) - 32n;
+      return everyday < low ? low : everyday > high ? high : everyday;
+    }
     if (choice < 0.6) {
       const edges = [low, high, low + 1n, high - 1n, low + 2n, high - 2n];
       return edges[Math.floor(random() * edges.length)];
