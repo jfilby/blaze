@@ -13,7 +13,7 @@
  *   AI_MODEL=commandcode/stealth/pixel-canary  CommandCode, see commandcode.ts
  *   AI_MODEL=replay:./candidate.json      offline backend, see backend.ts
  *
- *   AI_API_KEY      generic credential
+ *   AI_API_KEY, OPENCODE_API_KEY      generic credential
  *   OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY
  *   OPENROUTER_API_KEY  enables the openrouter provider
  *   AI_BASE_URL     endpoint for openai-compatible providers
@@ -44,21 +44,28 @@ export interface ModelConfiguration {
 }
 
 const ENV_KEYS: Record<ProviderName, readonly string[]> = {
-  openai: ["OPENAI_API_KEY", "AI_API_KEY"],
-  anthropic: ["ANTHROPIC_API_KEY", "AI_API_KEY"],
-  google: ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "AI_API_KEY"],
-  openrouter: ["OPENROUTER_API_KEY", "AI_API_KEY"],
-  "openai-compatible": ["AI_API_KEY"],
-  commandcode: ["COMMANDCODE_API_KEY", "COMMAND_CODE_API_KEY", "AI_API_KEY"],
+  openai: ["OPENAI_API_KEY"],
+  anthropic: ["ANTHROPIC_API_KEY"],
+  google: ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  "openai-compatible": [],
+  commandcode: ["COMMANDCODE_API_KEY", "COMMAND_CODE_API_KEY"],
   replay: [],
 };
+
+/**
+ * A provider with no key of its own set reads one of these, in this order:
+ * the compiler's own generic credential and then the one the environment
+ * already carries. Read after every provider key in `ENV_KEYS`.
+ */
+const GENERIC_ENV_KEYS: readonly string[] = ["AI_API_KEY", "OPENCODE_API_KEY"];
 
 function generationError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "AiReviewError", stage: "review", message, detail });
 }
 
-function firstEnvKey(provider: ProviderName, env: NodeJS.ProcessEnv): string | undefined {
-  for (const key of ENV_KEYS[provider]) {
+function firstEnvKey(env: NodeJS.ProcessEnv, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
     const value = env[key];
     if (value !== undefined && value !== "") return value;
   }
@@ -104,11 +111,11 @@ export function resolveModel(spec: string | undefined, env: NodeJS.ProcessEnv = 
     );
   }
   const name = provider as ProviderName;
-  const apiKey = firstEnvKey(name, env);
+  const apiKey = firstEnvKey(env, ENV_KEYS[name]) ?? firstEnvKey(env, GENERIC_ENV_KEYS);
   if (apiKey === undefined) {
     throw generationError(
       `missing API key for provider "${provider}"`,
-      `set one of ${ENV_KEYS[name].join(", ")}`,
+      `set one of ${[...ENV_KEYS[name], ...GENERIC_ENV_KEYS].join(", ")}`,
     );
   }
   const baseUrl =

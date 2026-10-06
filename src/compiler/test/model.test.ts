@@ -40,6 +40,16 @@ test("openrouter falls back to the generic credential", () => {
   assert.equal(configuration.apiKey, "sk-generic");
 });
 
+test("OPENCODE_API_KEY is read as a generic credential", () => {
+  assert.equal(resolveModel("openrouter/openai/gpt-5", { OPENCODE_API_KEY: "sk-opencode" }).apiKey, "sk-opencode");
+  assert.equal(
+    resolveModel("openai-compatible/local", { OPENCODE_API_KEY: "k", AI_BASE_URL: "http://localhost:1234/v1" }).apiKey,
+    "k",
+  );
+  // The compiler's own generic credential is read first where both are set.
+  assert.equal(resolveModel("openrouter/openai/gpt-5", { AI_API_KEY: "a", OPENCODE_API_KEY: "b" }).apiKey, "a");
+});
+
 test("openrouter without a key fails with the names to set", () => {
   const message = diagnostic(() => resolveModel("openrouter/openai/gpt-5", {}));
   assert.match(message, /missing API key for provider "openrouter"/);
