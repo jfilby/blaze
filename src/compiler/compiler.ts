@@ -573,6 +573,11 @@ export function modelSpec(selection: SourceInput["model"], path: string): string
     }
     return `replay:${file}`;
   }
+  // A table that names nothing is a project with no model configured: the
+  // commented-out provider lines kept between builds leave exactly this
+  // behind, and a build runs the rules alone. One half of the pair named and
+  // the other not is a selection gone wrong, and is reported.
+  if (provider === undefined && model === undefined && file === undefined) return undefined;
   if (provider === undefined || provider === "" || model === undefined || model === "") {
     throw new CompilerError({
       category: "InputError",
@@ -997,6 +1002,27 @@ export async function runBuild(
 
   // --model wins over the project file, which wins over AI_MODEL.
   const requested = options.model ?? modelSpec(input.model, absoluteInput);
+  // Whether a model is configured at all, the same reading resolveModel
+  // makes. A build with none still runs: it lowers the IR the rules resolved
+  // and verified, and reviews nothing.
+  const modelRequested = (requested ?? process.env.AI_MODEL ?? "") !== "";
+  // A generate exists to show what a model made of the IR, so with none
+  // configured there is nothing to show: it refuses rather than handing back
+  // the IR as it stands under a generate's name.
+  if (mode === "generate" && !modelRequested) {
+    throw await recordRejected(
+      store,
+      paths,
+      id,
+      previousBuild,
+      new CompilerError({
+        category: "InputError",
+        stage: "input",
+        message: "generate asks a model",
+        detail: "set AI_MODEL or pass --model provider/model; blaze build runs the rules alone without one",
+      }),
+    );
+  }
   // A reused build is answered by the model that reviewed the stored candidate,
   // so that is the model to name.
   const modelName = options.reuse ? previousBuild?.model : (requested ?? process.env.AI_MODEL);
@@ -1333,34 +1359,40 @@ export async function runBuild(
         output: outputKind,
         lowering: backendKind,
         runtime: runtimeKind,
-        backend: () => {
-          if (options.reuse) {
-            throw new CompilerError({
-              category: "StorageError",
-              stage: "reuse",
-              message: `the stored implementation of ${functionName} no longer satisfies its contract`,
-              detail: "run blaze build without --reuse to review it again",
-            });
-          }
-          return createBackend(requireModel(), {
-            timeoutMs: requestTimeoutMs(input),
-            retries: generation.maxRetries,
-            onRetry: ({ stage, candidate, attempt, retry, retries, reason, stop }) => {
-              // An answer that could not be read is also told how its request
-              // ended and what the request cost: one cut short by the output
-              // limit, one a content filter took and one the model finished on
-              // its own are not the same failure to wait out, and a gateway
-              // that reports the tokens is the only place they are counted.
-              const finish = stop === undefined ? "" : `, ${describeProviderStop(stop)}`;
-              reporter.stage(
-                "review",
-                "info",
-                `Asking again: ${functionName}, ${stage} of candidate ${candidate}, round ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
-              );
-            },
-            ...(options.debug === true ? { onPrompt: printPrompt } : {}),
-          });
-        },
+        // A build with no model configured runs the rules alone, so there is
+        // no backend to build and nothing here to ask.
+        ...(modelRequested
+          ? {
+              backend: () => {
+                if (options.reuse) {
+                  throw new CompilerError({
+                    category: "StorageError",
+                    stage: "reuse",
+                    message: `the stored implementation of ${functionName} no longer satisfies its contract`,
+                    detail: "run blaze build without --reuse to review it again",
+                  });
+                }
+                return createBackend(requireModel(), {
+                  timeoutMs: requestTimeoutMs(input),
+                  retries: generation.maxRetries,
+                  onRetry: ({ stage, candidate, attempt, retry, retries, reason, stop }) => {
+                    // An answer that could not be read is also told how its request
+                    // ended and what the request cost: one cut short by the output
+                    // limit, one a content filter took and one the model finished on
+                    // its own are not the same failure to wait out, and a gateway
+                    // that reports the tokens is the only place they are counted.
+                    const finish = stop === undefined ? "" : `, ${describeProviderStop(stop)}`;
+                    reporter.stage(
+                      "review",
+                      "info",
+                      `Asking again: ${functionName}, ${stage} of candidate ${candidate}, round ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
+                    );
+                  },
+                  ...(options.debug === true ? { onPrompt: printPrompt } : {}),
+                });
+              },
+            }
+          : {}),
         generation,
         test,
         benchmark: benchmarkConfig,

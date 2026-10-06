@@ -134,9 +134,11 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
   output: OutputKind;
   /**
    * Built on demand: a build that reuses stored candidates must not need model
-   * configuration, because it never asks a model anything.
+   * configuration, because it never asks a model anything. Absent when no
+   * model is configured at all: the build runs the rules alone, lowers the IR
+   * it resolved and reviews nothing.
    */
-  backend: () => AiBackend;
+  backend?: () => AiBackend;
   generation: GenerationConfig;
   test: TestConfig;
   benchmark: BenchmarkConfig;
@@ -1180,10 +1182,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     return { candidates, outcomes, selected: reused, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
   }
 
-  // One backend per run: it carries the state a session needs, such as which
-  // recorded answer to serve next, but is not built until a review happens.
-  let backend: AiBackend | null = null;
-  const generationBackend = (): AiBackend => (backend ??= request.backend());
+  const backendOf = request.backend;
   const context: RepairContext = { functions: new Map(Object.entries(request.functions)) };
 
   const { maxAttempts, maxCandidates, candidateConcurrency } = request.generation;
@@ -1217,6 +1216,39 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     takenIds.add(id);
     return id;
   };
+
+  // A build with no model configured runs the rules alone: the IR the
+  // compiler resolved is the one candidate, folded the way a round that
+  // proposed nothing leaves it, and verified and measured the way every
+  // candidate is. There is no reviewer to ask, so there are no rounds and no
+  // review of the target either.
+  if (backendOf === undefined) {
+    const candidate: Candidate = {
+      id: allocateId(),
+      text: printSemanticFunction(optimizeSemanticFunction(structuredClone(request.base), context.functions)),
+      model: "compiler",
+      modelConfig: "compiler",
+      generatedAt: new Date().toISOString(),
+      candidate: 1,
+      round: 1,
+    };
+    candidates.push(candidate);
+    outcomes.push(await evaluateCandidate(request, candidate, vectors));
+    return {
+      candidates,
+      outcomes,
+      selected: selectCandidate(outcomes, request.contract),
+      benchmarkVector: vectors?.benchmark ?? null,
+      modelDurationNs: 0n,
+    };
+  }
+
+  // One backend per run: it carries the state a session needs, such as which
+  // recorded answer to serve next, but is not built until a review happens.
+  // The no-model build returned above, so a request that reaches here has a
+  // backend to build.
+  let backend: AiBackend | null = null;
+  const generationBackend = (): AiBackend => (backend ??= backendOf());
 
   // Each candidate owns a contiguous block of records and collects its own, so
   // the build reads the same way whatever order the candidates finish in.

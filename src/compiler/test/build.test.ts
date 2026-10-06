@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runBuild, runStored, inspectProject, type Reporter } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
-import type { ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
+import type { Candidate, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
 import { irOf } from "./phase.ts";
@@ -202,6 +202,66 @@ test("a project that names a target cpu builds against it", async () => {
     runBuild("input.toml", { cwd: refused, reuse: false, model: `replay:${REPLAY}` }, quiet, "build"),
     /the assembler does not support target\.cpu "not-a-cpu"/,
   );
+});
+
+test("a build with no model configured runs the rules alone", async (t) => {
+  // The environment must not name a model: the build under test has none
+  // anywhere, which is the whole of what it proves.
+  const previous = process.env.AI_MODEL;
+  delete process.env.AI_MODEL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AI_MODEL;
+    else process.env.AI_MODEL = previous;
+  });
+  const directory = await workspace("unreviewed");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+
+  // No endpoint was configured, so a success can only have come from the
+  // rules: the IR the compiler resolved is the candidate it verified, and the
+  // record says so on the candidate itself.
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.model, "unset");
+  assert.deepEqual(outcome.build.selectedCandidates, { dotProduct: "c1" });
+  const candidates = JSON.parse(
+    await readFile(join(await storeDirectory(directory, "input"), "candidates.json"), "utf8"),
+  ) as Record<string, Candidate[]>;
+  assert.deepEqual(
+    candidates.dotProduct.map((candidate) => [candidate.id, candidate.model, candidate.proposals, candidate.feedback]),
+    [["c1", "compiler", undefined, undefined]],
+  );
+  const verification = JSON.parse(
+    await readFile(join(await storeDirectory(directory, "input"), "verification.json"), "utf8"),
+  ) as Record<string, VerificationResult[]>;
+  assert.equal(verification.dotProduct.length, 1);
+  assert.equal(verification.dotProduct[0].passed, true);
+});
+
+test("generate without a model refuses rather than delivering nothing", async (t) => {
+  const previous = process.env.AI_MODEL;
+  delete process.env.AI_MODEL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AI_MODEL;
+    else process.env.AI_MODEL = previous;
+  });
+  const directory = await workspace("generate-unreviewed");
+  await assert.rejects(() => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "generate"), /generate asks a model/);
+});
+
+test("an empty model table is a project with no model configured", async (t) => {
+  // The provider lines a project keeps commented out between builds leave an
+  // empty [model] table behind, and that names nothing: a build runs the
+  // rules alone rather than reporting a selection that was never made.
+  const previous = process.env.AI_MODEL;
+  delete process.env.AI_MODEL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AI_MODEL;
+    else process.env.AI_MODEL = previous;
+  });
+  const directory = await workspace("no-model-table");
+  await writeProject(join(directory, "input.toml"), { ...INPUT, model: {} });
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.model, "unset");
 });
 
 test("a build says that it resolved and validated the IR before it asked for anything", async () => {

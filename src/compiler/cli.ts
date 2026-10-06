@@ -85,7 +85,9 @@ build waits as long as the model takes.
 
 Options:
   --model <provider/model>  overrides AI_MODEL, which the project also sets;
-                            the credential comes from the environment
+                            the credential comes from the environment. With no
+                            model anywhere, a build runs the rules alone: it
+                            lowers the IR as resolved and reviews nothing
   --reuse                   build only from what an earlier build verified
   --recompile               rebuild every function, without asking
   --from <file>             read the IR from a file instead of resolving the
