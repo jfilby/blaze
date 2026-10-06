@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReviewRequest } from "../ai/review.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
-import { resolveModel, OPENROUTER_BASE_URL, OPENCODE_BASE_URL } from "../ai/model.ts";
+import { resolveModel, OPENROUTER_BASE_URL, OPENCODE_GO_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
 import { createBackend, ReplayBackend, VercelAiBackend } from "../ai/backend.ts";
 import { scratch } from "./scratch.ts";
@@ -50,29 +50,35 @@ test("OPENCODE_API_KEY is read as a generic credential", () => {
   assert.equal(resolveModel("openrouter/openai/gpt-5", { AI_API_KEY: "a", OPENCODE_API_KEY: "b" }).apiKey, "a");
 });
 
-test("OPENCODE_API_KEY configures the opencode provider", () => {
-  const configuration = resolveModel("opencode/grok-code", { OPENCODE_API_KEY: "oc_test" });
-  assert.equal(configuration.provider, "opencode");
-  assert.equal(configuration.id, "opencode/grok-code");
-  assert.equal(configuration.model, "grok-code");
+test("OPENCODE_API_KEY configures the opencode-go provider", () => {
+  const configuration = resolveModel("opencode-go/glm-5.3-flash:max", { OPENCODE_API_KEY: "oc_test" });
+  assert.equal(configuration.provider, "opencode-go");
+  assert.equal(configuration.id, "opencode-go/glm-5.3-flash:max");
+  assert.equal(configuration.model, "glm-5.3-flash:max");
   assert.equal(configuration.apiKey, "oc_test");
-  assert.equal(configuration.baseUrl, OPENCODE_BASE_URL);
+  assert.equal(configuration.baseUrl, OPENCODE_GO_BASE_URL);
+  // The gateway routes by the session a request belongs to and refuses one
+  // that names none, so a build carries an id of its own.
+  assert.match(
+    configuration.headers?.["x-opencode-session"] ?? "",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  );
 });
 
-test("opencode is pointable at a stand-in endpoint", () => {
-  const configuration = resolveModel("opencode/grok-code", {
+test("opencode-go is pointable at a stand-in endpoint", () => {
+  const configuration = resolveModel("opencode-go/glm-5.3-flash:max", {
     OPENCODE_API_KEY: "oc_test",
-    OPENCODE_BASE_URL: "http://127.0.0.1:9/zen/v1",
+    OPENCODE_GO_BASE_URL: "http://127.0.0.1:9/zen/go/v1",
   });
-  assert.equal(configuration.baseUrl, "http://127.0.0.1:9/zen/v1");
+  assert.equal(configuration.baseUrl, "http://127.0.0.1:9/zen/go/v1");
 });
 
-test("an opencode model object is constructible without contacting it", () => {
+test("an opencode-go model object is constructible without contacting it", () => {
   // The endpoint is only reached on a request, so this proves the provider
   // package accepts the configuration the resolver produced.
-  const backend = createBackend(resolveModel("opencode/grok-code", { OPENCODE_API_KEY: "oc_test" }));
+  const backend = createBackend(resolveModel("opencode-go/glm-5.3-flash:max", { OPENCODE_API_KEY: "oc_test" }));
   assert.ok(backend instanceof VercelAiBackend);
-  assert.equal(backend.id, "opencode/grok-code");
+  assert.equal(backend.id, "opencode-go/glm-5.3-flash:max");
 });
 
 test("openrouter without a key fails with the names to set", () => {

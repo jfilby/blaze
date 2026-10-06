@@ -112,7 +112,7 @@ Model providers, selected by the AI_MODEL prefix:
   anthropic/claude-sonnet-4-5     ANTHROPIC_API_KEY or AI_API_KEY
   google/gemini-2.5-pro           GOOGLE_GENERATIVE_AI_API_KEY or AI_API_KEY
   openrouter/<vendor>/<model>     OPENROUTER_API_KEY or AI_API_KEY
-  opencode/<model>                OPENCODE_API_KEY or AI_API_KEY
+  opencode-go/<model>             OPENCODE_API_KEY or AI_API_KEY
   commandcode/<model>             COMMANDCODE_API_KEY, COMMAND_CODE_API_KEY or AI_API_KEY
   openai-compatible/<model>       OPENCODE_API_KEY or AI_API_KEY and AI_BASE_URL
   replay:<file>                   no credential, offline
@@ -121,7 +121,7 @@ Environment:
   AI_MODEL, AI_API_KEY, OPENCODE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
   GOOGLE_GENERATIVE_AI_API_KEY, OPENROUTER_API_KEY, AI_BASE_URL, AI_REPLAY_FILE
   COMMANDCODE_API_KEY, COMMAND_CODE_API_KEY, COMMANDCODE_BASE_URL,
-  OPENCODE_BASE_URL
+  OPENCODE_GO_BASE_URL
   OPENROUTER_SITE_URL, OPENROUTER_APP_NAME   optional OpenRouter attribution
 `;
 
