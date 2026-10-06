@@ -1051,11 +1051,12 @@ class FunctionEmitter {
     }
     const lines: string[] = [];
     // The first part becomes the string the rest are appended to, and it is
-    // handed over rather than copied: the runtime appends in place only when
-    // the block carries one reference, which is exactly the case where nothing
-    // else can be looking at it. A part the program still holds a reference to
-    // is copied instead, and the reference it carried is the one the result
-    // takes over.
+    // handed over rather than copied. That is safe because the runtime appends
+    // into a block of its own every time, so whatever is left behind is
+    // untouched — and it was written as an optimisation the runtime could not
+    // make: it appended *in place* when the block carried one reference, and a
+    // text block always carries one because nothing ever retains or releases
+    // one, so appending to a name a program still held wrote through to it.
     lines.push(`const char* ${joined} = ${parts[0]};`);
     for (const part of parts.slice(1)) {
       lines.push(`${joined} = ${RUNTIME_NAME}_string_append(${joined}, ${part});`);

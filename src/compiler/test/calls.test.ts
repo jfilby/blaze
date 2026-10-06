@@ -200,6 +200,7 @@ function keyOf(of: ProgramContract, name: string, file: string): string {
     runtime: "none",
     test: { randomCases: 0, maxLength: 0, seed: 0 },
     benchmark: { iterations: 1 },
+    generation: { maxCandidates: 2, maxAttempts: 3, maxRetries: 2, candidateConcurrency: 2, functionConcurrency: 2, timeoutSeconds: 120 },
     model: "test",
     compilerVersion: "0.0.0",
     review: "test",

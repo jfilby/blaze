@@ -16,6 +16,7 @@
  */
 
 import {
+  isReference,
   statementBlocksOf,
   statementValues,
   valueKind,
@@ -368,8 +369,35 @@ function statementRefusal(
  * reference can put a block anywhere, so a number is answered before the walk
  * is asked — a store that stores no block is not an escape.
  */
+/**
+ * Whether this value can put a block anywhere at all.
+ *
+ * `valueKind` answers "number" for a value of an `array` type, because a
+ * printer and a truth test are what mostly read it and neither of those wants a
+ * buffer handled as a reference. An array is nevertheless held as a pointer to
+ * its first element and lands in a name exactly as a `ptr` does, so asking
+ * `valueKind` here is what made every array a turn allocates invisible to the
+ * escape walk: `ownsRegionBlock` below counts a buffer written in a turn as the
+ * turn's own block, and this gate then answered "number" and never asked.
+ */
+function carriesRegionBlock(value: SemanticValue): boolean {
+  return valueKind(value) === "reference" || isReference(value.type) || value.type.kind === "array";
+}
+
+/**
+ * Whether putting `value` where this statement puts it hands a block of the
+ * turn to something that outlives it.
+ *
+ * This is `ownsRegionBlock` with the question of what lands there asked first,
+ * and on a turn that walks a tree the answer is the difference between the
+ * reuse and no reuse at all: `sum += checksum(tree)` *reads* every block the
+ * tree is made of and writes a `f64`, and a walk of the value reaches `tree`
+ * through both of the calls `checksum` makes with it. Only a value that can
+ * carry a block can put one anywhere, so a number is answered before the walk
+ * is asked — a store that stores no block is not an escape.
+ */
 function storesRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach: Reach): boolean {
-  return valueKind(value) === "reference" && ownsRegionBlock(value, held, reach);
+  return carriesRegionBlock(value) && ownsRegionBlock(value, held, reach);
 }
 
 /**
@@ -502,6 +530,23 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
     return found;
   };
 
+  // A call the function was handed a block as an argument hands it on whoever
+  // receives it, whatever the call is written as. `let kept = store(node)` is
+  // as much a place the block lands as `store(node);` is, and the check this
+  // holds was below the `continue` the `let` case returns through — so the one
+  // form its own comment names was the one form never read, and a callee whose
+  // only hand-off was a bound call was answered as keeping nothing. The loop
+  // above it marks its loop for a reuse that hands the block straight back out
+  // of the region.
+  const handsOn = (value: SemanticValue): boolean => {
+    let handed = false;
+    walkValues(value, (inner) => {
+      if (handed || inner.k !== "call") return;
+      if (inner.call.args.some(holdsGiven) && !calleeKeepsNothing(inner.call.callee, reach)) handed = true;
+    });
+    return handed;
+  };
+
   for (const block of blocksWithin(callee.entry)) {
     for (const statement of block.statements) {
       if (statement.k === "let") {
@@ -514,20 +559,13 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
         // nothing, and the loop above it was marked for a reuse that would
         // write over a block the caller still holds.
         if (holdsGiven(statement.value)) given.add(statement.slot.name);
+        // The hand-off below is read here as well. The `continue` used to skip
+        // it, and the comment above it named this very form.
+        if (handsOn(statement.value)) return true;
         continue;
       }
-      // A call the function was handed a block as an argument hands it on
-      // whoever receives it, whether the call is written as a statement or as a
-      // value: `let kept = store(node)` is as much a place the block lands as
-      // `store(node);` is, and reading only the statement form answered a callee
-      // that keeps what it is given as keeping nothing.
       for (const value of statementValues(statement)) {
-        let handsOn = false;
-        walkValues(value, (inner) => {
-          if (handsOn || inner.k !== "call") return;
-          if (inner.call.args.some(holdsGiven) && !calleeKeepsNothing(inner.call.callee, reach)) handsOn = true;
-        });
-        if (handsOn) return true;
+        if (handsOn(value)) return true;
       }
       switch (statement.k) {
         case "set":
@@ -564,7 +602,7 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
     if (
       block.terminator.k === "return" &&
       block.terminator.value !== null &&
-      valueKind(block.terminator.value) === "reference" &&
+      carriesRegionBlock(block.terminator.value) &&
       holdsGiven(block.terminator.value)
     ) {
       return true;

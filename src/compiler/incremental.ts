@@ -35,6 +35,7 @@ import type {
   BuildMode,
   BenchmarkConfig,
   CandidateOutcome,
+  GenerationConfig,
   FunctionContract,
   OutputKind,
   ProgramContract,
@@ -94,6 +95,17 @@ export interface UnitKeyInput {
   model: string;
   compilerVersion: string;
   /**
+   * How hard the build was asked to look for an answer: how many candidates it
+   * may write, how many rounds of review each gets, and how many times a failed
+   * round is taken again. These decide which of the answers a build settles on,
+   * and none of them is named by a contract or a target, so a build that raised
+   * `max_candidates` from two to six and left everything else alone reused the
+   * two-candidate selection and delivered the one an earlier configuration had
+   * chosen — an answer a build with the new configuration would never have
+   * looked at.
+   */
+  generation: GenerationConfig;
+  /**
    * The hashes of the compiler's own sources, split by what each decides. The
    * prompt, the resolver, the optimizer and the rules that decide whether a
    * candidate is valid are named by neither a contract nor a target and decide
@@ -139,7 +151,19 @@ export interface UnitKeys {
  * from the one the edited source describes, and it is the one that gets linked.
  */
 function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
-  const abi = { function: contract.function, objects: contract.definition.objects };
+  // `effects` is here whatever the body is. The effects a function's contract
+  // declares are read out of the *callee's* contract when this function's own IR
+  // is built: `ir-function.ts` copies them onto the call edge, `parallel.ts`
+  // refuses a loop whose turn calls something with an effect other than `memory`,
+  // and `repair.ts` refuses to inline one. None of that is visible in the
+  // definition, which records what the body *does* rather than what it says it
+  // may do, and none of it is visible in the printed IR either — the text a
+  // candidate is read back from re-derives the effects from the contract rather
+  // than carrying them. A callee whose contract gained an effect and kept its
+  // body therefore removed the thread from this function's loops while every
+  // input hashed here stayed the same, and the stored object — the one with the
+  // loop threaded — is the one that gets linked.
+  const abi = { function: contract.function, objects: contract.definition.objects, effects: contract.effects };
   return holdsTheBody ? { ...abi, definition: contract.definition } : abi;
 }
 
@@ -194,6 +218,7 @@ export function unitKeys(input: UnitKeyInput): UnitKeys {
     runtime: input.runtime,
     test: input.test,
     benchmark: input.benchmark,
+    generation: input.generation,
     model: input.model,
     compilerVersion: input.compilerVersion,
     toolchain: input.review,

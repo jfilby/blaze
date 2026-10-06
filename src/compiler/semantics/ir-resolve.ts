@@ -1075,7 +1075,7 @@ class ProgramResolver {
    * reads of the scope it is written in is passed to it at every call, and the
    * call site is where that scope is.
    */
-  private declared(statement: ProgramStatement & { kind: "function" }): void {
+  private declared(statement: ProgramStatement & { kind: "function" }, declaredHere: readonly string[] = []): void {
     // A function bound to the block it is declared in is bound once, whatever
     // the statement it is written at: the block hoists it and the statement
     // that reached it finds it already there.
@@ -1098,6 +1098,14 @@ class ProgramResolver {
     const captures: { name: string; type: TypeExpr; held: Held }[] = [];
     for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
       const held = this.lookup(name);
+      if (declaredHere.includes(name)) {
+        throw programError(
+          `${statement.name} reads "${name}", which the block it is declared in declares`,
+          this.body,
+          statement.line,
+          `line ${statement.line} of ${this.body.file}: a name a block declares shadows the one around it for the whole of the block, so this function would have to be given the block's "${name}" and a function of a program is declared before the block is read; declare it outside the block, or give it the name as a parameter`,
+        );
+      }
       if (held === undefined) {
         throw programError(
           `"${name}" is not declared`,
@@ -1391,9 +1399,21 @@ class ProgramResolver {
     // the body holds, which is where they are declared. The top of a program is
     // the one block read in the order it runs, because what a function declared
     // there reads is whatever the program has declared by the time it is called.
+    //
+    // Reading that pass in order is what makes the block's *own* declarations
+    // invisible to it, and a name the block declares shadows the one around it
+    // for the whole of the block — a function declared beside it reads the
+    // block's, not the one outside. So the names this block declares are
+    // collected first and handed to the pass, which refuses a function that
+    // reads one rather than resolving it to the binding outside. Answering 12
+    // where the language answers 210 is not a shape worth carrying.
     if (hoisted) {
+      const declaredHere: string[] = [];
+      for (const statement of list) if (statement.kind === "declare") declaredHere.push(statement.name);
       for (const statement of list) {
-        if (statement.kind === "function" && !this.functions.table.has(statement.name)) this.declared(statement);
+        if (statement.kind === "function" && !this.functions.table.has(statement.name)) {
+          this.declared(statement, declaredHere);
+        }
       }
     }
     return list.flatMap((statement) => {
@@ -2132,10 +2152,16 @@ class ProgramResolver {
       // bits of 3 inverted are -4, and not a very large unsigned number.
       const name = primitive(draftType(operand));
       if (name !== null && !isWhole(name)) throw programError("~ needs a whole number", this.body, line);
-      return { k: "unary", op: value.op, operand, type: numeric("i64") };
+      // `-` and `~` answer a bigint as a bigint: `~5n` is `-6n` in the language
+      // and not `-6`, and the difference is the `n` the printer writes after the
+      // digits. The mark is on the operand rather than on the operator, so a
+      // number with an `n` beside it keeps it and a number without one does not
+      // gain it — and the validator's bigint rule only fires in the other
+      // direction, so nothing downstream would have objected.
+      return isBigint(operand) ? { k: "unary", op: value.op, operand, type: numeric("i64"), bigint: true } : { k: "unary", op: value.op, operand, type: numeric("i64") };
     }
     const type = primitive(draftType(operand)) ?? "f64";
-    return { k: "unary", op: value.op, operand, type: numeric(type) };
+    return isBigint(operand) ? { k: "unary", op: value.op, operand, type: numeric(type), bigint: true } : { k: "unary", op: value.op, operand, type: numeric(type) };
   }
 
   private binary(value: ProgramValue & { k: "binary" }, expect: TypeExpr | null, line: number): DraftValue {

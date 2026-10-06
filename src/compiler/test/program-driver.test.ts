@@ -458,6 +458,45 @@ test("a captured name is passed from the binding it was captured from", async ()
   assert.equal(delivered.stdout, original);
 });
 
+test("a function declared beside the name its own block shadows is refused", () => {
+  // The other side of the test above, and the other statement order. A name a
+  // block declares shadows the one around it for the whole of the block, so a
+  // function declared in that block reads the *block's* name and not the one
+  // outside it — but the block hoists its function declarations before it reads
+  // its own, so resolving the capture there found the binding outside and
+  // answered 12 where the language answers 210. There is no reading of that
+  // capture which is right without reading the block's declarations first, so
+  // the body keeps its shape and is refused rather than answered.
+  const refused = diagnostic(() =>
+    resolved(
+      [
+        "let base = 1;",
+        "{",
+        "  function inner(x: number): number {",
+        "    return x + base + base;",
+        "  }",
+        "  let base = 100;",
+        "  console.log(inner(10));",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+  );
+  assert.match(refused, /inner reads "base", which the block it is declared in declares/);
+});
+
+test("a bigint under a unary operator is still written with its n", async () => {
+  // The mark is what says the digits are a bigint and not a number, and the
+  // printer writes the `n` from it. A binary operator carried it and a unary one
+  // dropped it, so `~5n` printed `-6` where the language prints `-6n`: the number
+  // was right and the word after it was not.
+  const { binary, original } = await deliver(["console.log(~5n);", "console.log(-5n);", "console.log(5n + 1n);", ""].join("\n"));
+  assert.equal(original, "-6n\n-5n\n6n\n", "the source writes the n after every one of them");
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+});
+
 test("a for-of element that shadows the buffer reads the buffer, not itself", () => {
   // The buffer is read in the scope the loop was entered in. Read after the
   // element is declared, an element under the buffer's own name made the

@@ -569,15 +569,25 @@ export function foldedCandidate(
   // A candidate whose text does not parse is one the reader refuses, and that
   // refusal is reported with the reason the parser gave. The fold is left out
   // rather than failing here, where the reason would be a different one.
+  let parsed: SemanticFunction;
   try {
-    // Inlining comes before the rewrites, because the callee spliced in was
-    // resolved from the source and has not been through them yet.
-    const callees = new Map(Object.entries(functions));
-    const inlined = inlineCalls(parseSemanticFunction(candidate.text, program), { functions: callees });
-    return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined, callees)) };
+    parsed = parseSemanticFunction(candidate.text, program);
   } catch {
     return candidate;
   }
+  // Everything past the parser is outside that bargain. A fold that throws is
+  // this compiler declining to rewrite IR it was asked to rewrite, and delivering
+  // the candidate unfolded in its place is a different program from the one the
+  // build describes: the folds are what re-derive the `parallel` and `region`
+  // marks from the bodies the function calls, and the validator only proves a
+  // mark the IR text claims. A candidate carrying one therefore reaches an object
+  // on the strength of a claim no rule in this build checked.
+  //
+  // Inlining comes before the rewrites, because the callee spliced in was
+  // resolved from the source and has not been through them yet.
+  const callees = new Map(Object.entries(functions));
+  const inlined = inlineCalls(parsed, { functions: callees });
+  return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined, callees)) };
 }
 
 /**

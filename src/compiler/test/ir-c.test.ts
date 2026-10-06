@@ -352,6 +352,39 @@ test("a string grows by concatenation rather than by adding to a pointer", async
   assert.equal(stdout, "abcd");
 });
 
+test("appending to a string leaves the string the program still holds alone", async () => {
+  // The runtime appended in place whenever the block carried one reference,
+  // and a text block always carries one: a text value is never retained and
+  // never released, so the count never rises. That made the count a statement
+  // about whether *this call* had reached the block before and never about
+  // whether anything else was looking at it, and `b = a + "!"` wrote the joined
+  // string into the bytes of `a` — two names over one block, so the next
+  // append to either of them rewrote the other. The answer below is what each
+  // name holds, read back one at a time.
+  const stdout = await lowered(
+    subject(
+      VOID,
+      runs([
+        { k: "let", slot: { kind: "text", name: "a", mutable: true }, value: joined(literal("x"), literal("y")), line: 1 },
+        { k: "let", slot: { kind: "text", name: "b", mutable: true }, value: { k: "text", type: { kind: "text" }, parts: [{ k: "value", value: local("a", { kind: "text" }) }, { k: "text", value: "!" }] }, line: 2 },
+        { k: "printText", value: local("a", { kind: "text" }), line: 3 },
+        { k: "printNewline", line: 3 },
+        { k: "printText", value: local("b", { kind: "text" }), line: 4 },
+        { k: "printNewline", line: 4 },
+        { k: "let", slot: { kind: "text", name: "c", mutable: true }, value: joined(local("a", { kind: "text" }), literal("?")), line: 5 },
+        { k: "printText", value: local("a", { kind: "text" }), line: 6 },
+        { k: "printNewline", line: 6 },
+        { k: "printText", value: local("b", { kind: "text" }), line: 7 },
+        { k: "printNewline", line: 7 },
+        { k: "printText", value: local("c", { kind: "text" }), line: 8 },
+        { k: "printNewline", line: 8 },
+      ]),
+    ),
+    (name) => `${name}();`,
+  );
+  assert.equal(stdout, "xy\nxy!\nxy\nxy!\nxy?\n");
+});
+
 test("two strings are compared by what they say rather than by where they are", async () => {
   // A string built at run time and one written out are two addresses that say
   // the same thing. The comparison used to be a pointer comparison, so

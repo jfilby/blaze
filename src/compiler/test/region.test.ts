@@ -287,6 +287,35 @@ test("a turn that hands what it built to a function that forwards it may not", (
   }
 });
 
+test("a callee whose only hand-off is a call bound to a name still keeps what it is given", () => {
+  // The test above drives a callee that forwards as a statement and as a value
+  // assigned with `set`, which is the form the check was written for. The form
+  // its own comment names — `let kept = store(node)` — sat below the `continue`
+  // the `let` case returns through, so it was never read: a callee whose only
+  // hand-off was a bound call was answered as keeping nothing, and the loop
+  // above it was marked for a reuse that hands the block straight back out of
+  // the region.
+  const store = reader("store");
+  store.entry = {
+    id: "entry",
+    statements: [{ k: "set", line: 1, name: "slot", op: "=", value: { k: "local", type: REF, name: "node" } }],
+    releases: [],
+    terminator: { k: "return", value: null },
+  };
+  const bound = reader("bound");
+  bound.entry = {
+    id: "entry",
+    statements: [
+      { k: "let", line: 1, slot: { kind: "value", name: "kept", mutable: true, type: F64 }, value: callValue("store", [{ k: "local", type: REF, name: "node" }]) },
+    ],
+    releases: [],
+    terminator: { k: "return", value: null },
+  };
+  const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("bound", [{ k: "local", type: REF, name: "tree" }]))]));
+  markRegionLoops(fn.entry, new Map([["bound", bound], ["store", store]]));
+  assert.equal(onlyLoop(fn).region, undefined, "a callee that forwards through a bound call keeps what it is given");
+});
+
 test("a turn that hands what it built to a function this build does not hold may not", () => {
   // A body nobody has read is a body that might keep anything.
   const fn = functionWith(countedLoop([bind("tree", node()), bind("sum", callValue("unknown", [{ k: "local", type: REF, name: "tree" }]))]));
@@ -474,6 +503,34 @@ test("an array written in a turn is as much the turn's as an object is", () => {
     countedLoop([
       { k: "let", line: 1, slot: { kind: "value", name: "row", mutable: true, type: { kind: "slice", of: F64 } }, value: row },
       writeOuter({ k: "local", type: { kind: "slice", of: F64 }, name: "row" }),
+    ]),
+  );
+  markRegionLoops(fn.entry);
+  assert.equal(onlyLoop(fn).region, undefined, "the array escapes the turn, so the turn may not reuse the storage");
+});
+
+test("an array of the type the frontend writes is as much the turn's as an object is", () => {
+  // The test above writes the array's type as a `slice`, which is a reference,
+  // so the escape gate opened. The type the frontend actually gives a
+  // program-built array is `array`, and `valueKind` answers "number" for one —
+  // so `ownsRegionBlock` counted the buffer as the turn's own block and the
+  // gate in front of it answered "number" and never asked. Every escape sink in
+  // the walk is gated on that one question, so `saved` was left pointing into
+  // region memory and the next turn's rewind handed it out again.
+  const arrayOfF64 = { kind: "array", of: F64, length: null } as const;
+  const row: SemanticValue = {
+    k: "buffer",
+    type: arrayOfF64,
+    element: F64,
+    length: 2,
+    count: null,
+    view: null,
+    values: [{ k: "const", type: F64, text: "1" }, { k: "const", type: F64, text: "2" }],
+  };
+  const fn = functionWith(
+    countedLoop([
+      { k: "let", line: 1, slot: { kind: "value", name: "row", mutable: true, type: arrayOfF64 }, value: row },
+      writeOuter({ k: "local", type: arrayOfF64, name: "row" }),
     ]),
   );
   markRegionLoops(fn.entry);

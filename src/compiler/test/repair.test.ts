@@ -54,6 +54,19 @@ const LIBRARY: Record<string, string> = {
     "  return total;",
     "}",
     "",
+    "export function shadow(t: number, u: number): number {",
+    "  let total = t;",
+    "  if (t > 3) {",
+    "    let t = 100;",
+    "    total = t + u;",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+    "export function caller(x: number, u: number): number {",
+    "  return shadow(x, u) + shadow(x + 1, u);",
+    "}",
+    "",
   ].join("\n"),
 };
 
@@ -174,6 +187,20 @@ test("inline-call refuses a callee the program does not have", () => {
   const outcome = apply("work", proposalsIn(repaired("inline-call entry callee=thrice"))[0] as Proposal);
   assert.ok("refused" in outcome);
   assert.match(outcome.refused, /thrice is not a function of this program/);
+});
+
+test("inline-call refuses a callee that declares a name one of its blocks shadows", () => {
+  // The substitution that puts a callee's body where the call was is by name,
+  // and a name a block declares over another name of the same function is two
+  // bindings under one spelling. Renaming the shadow sends the parameter's own
+  // reads to it and leaving it sends the shadow's reads to the argument:
+  // `caller(10, 5)` answered 31 where the program answers 210, because the
+  // inlined `let t = 100` was read as the caller's `x` and `10 + 5` was written
+  // where `100 + 5` was. The pass the compiler runs on its own does this too,
+  // and nothing downstream reports it.
+  const outcome = apply("caller", proposalsIn(repaired("inline-call entry callee=shadow"))[0] as Proposal);
+  assert.ok("refused" in outcome);
+  assert.match(outcome.refused, /shadow declares "t" in a block of its own/);
 });
 
 test("inline-call refuses a block that does not call the callee", () => {

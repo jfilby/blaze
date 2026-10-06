@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readIncremental, reusable, unitKeys, type IncrementalEntry, type UnitKeyInput, type UnitKeys } from "../incremental.ts";
 import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
-import type { Candidate, CandidateOutcome, FunctionContract, ObjectLayout, ProgramContract } from "../core/types.ts";
+import type { Candidate, CandidateOutcome, FunctionContract, GenerationConfig, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore } from "../core/json-store.ts";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprints } from "../core/version.ts";
@@ -40,6 +40,16 @@ function programOf(...functions: FunctionContract[]): ProgramContract {
   };
 }
 
+/** How hard the build was asked to look, which the reuse key is over. */
+const GENERATION: GenerationConfig = {
+  maxCandidates: 2,
+  maxAttempts: 3,
+  maxRetries: 2,
+  candidateConcurrency: 2,
+  functionConcurrency: 2,
+  timeoutSeconds: 120,
+};
+
 const INPUT: UnitKeyInput = {
   contract: contractOf("main", "f64"),
   file: "main.ts",
@@ -51,6 +61,7 @@ const INPUT: UnitKeyInput = {
   runtime: "none",
   test: { randomCases: 24, maxLength: 1024, seed: 7 },
   benchmark: { iterations: 2000 },
+  generation: GENERATION,
   model: "openai/gpt-5",
   compilerVersion: "0.1.0",
   review: "fingerprint-of-the-sources",
@@ -161,6 +172,50 @@ test("a callee whose signature or object layout changed invalidates the caller",
     contractOf("helper", "f64", { node: { name: "node", size: 8, align: 8, fields: [] } }),
   );
   assert.notEqual(keyOf({ program: layout }).review, keyOf({}).review);
+});
+
+test("a callee whose declared effects changed invalidates the caller", () => {
+  // The effects a function's contract declares are read out of the *callee's*
+  // contract when the caller's own IR is built: `parallel.ts` refuses to thread a
+  // loop whose turn calls something with an effect other than `memory`, and
+  // `repair.ts` refuses to inline one. The definition records what the body
+  // does, not what it says it may do, and the printed IR re-derives the effects
+
+  // from the contract rather than carrying them — so a callee whose contract
+  // gained an effect while its body stood still changed what the caller emits,
+  // and nothing the key hashed moved. The stored object was the one with the
+  // loop threaded, and it is the one that gets linked.
+  const effectful = { ...contractOf("helper", "f64"), effects: ["io" as const] };
+  assert.notEqual(
+    keyOf({ program: programOf(contractOf("main", "f64"), effectful) }).review,
+    keyOf({}).review,
+    "a callee that gained an effect left the caller's key alone",
+  );
+});
+
+test("a build asked to look harder invalidates what an easier one stored", () => {
+  // How many candidates a build may write, how many rounds each gets and how
+  // many times a failed round is taken again decide which answer the build
+  // settles on, and none of them is named by a contract or a target. Raising
+  // `max_candidates` from two to six left every key where it was, so the build
+  // reused the two-candidate selection and delivered the one the earlier
+  // configuration had chosen — an answer a build with the new configuration
+  // would never have looked at.
+  assert.notEqual(
+    keyOf({ generation: { ...GENERATION, maxCandidates: 6 } }).review,
+    keyOf({}).review,
+    "raising the number of candidates left the key alone",
+  );
+  assert.notEqual(
+    keyOf({ generation: { ...GENERATION, maxAttempts: 5 } }).review,
+    keyOf({}).review,
+    "raising the attempts per candidate left the key alone",
+  );
+  assert.notEqual(
+    keyOf({ generation: { ...GENERATION, timeoutSeconds: 600 } }).review,
+    keyOf({}).review,
+    "raising the time a round may take left the key alone",
+  );
 });
 
 function entry(overrides: Partial<IncrementalEntry> = {}): IncrementalEntry {

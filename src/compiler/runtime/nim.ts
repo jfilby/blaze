@@ -616,13 +616,19 @@ proc blaze_rt_string_clone*(text: cstring): cstring {.exportc, cdecl.} =
   blaze_rt_string_new(cast[pointer](text), blaze_rt_string_length(text))
 
 proc blaze_rt_string_append*(left, right: cstring): cstring {.exportc, cdecl.} =
-  ## The left string is a value the program can still be holding, so it is only
-  ## written into when it is a managed block nothing else refers to. A literal
-  ## the compiler wrote out has no block to grow and a shared one has a reader
-  ## that would see the append, so both are copied into a block of their own,
-  ## and it is that copy which the later appends grow. Growing a block in place
-  ## is what makes a loop of appends linear rather than quadratic in the bytes
-  ## copied.
+  ## The result is always a block of its own. The left string is a value the
+  ## program may still be holding, and the runtime cannot tell whether it is: a
+  ## text value is never retained and never released, so every text block's
+  ## count is permanently one, and a count of one says only that this call is
+  ## the first to have reached it — never that nothing else is looking at it.
+  ## Writing into the block when the count is one is how a program that joined
+  ## two literals and then interpolated that name with a "!" at the end printed
+  ## the longer string for the name: the append landed in the bytes of a string
+  ## two names were pointing at, and every later append to either of them
+  ## rewrote the other.
+  ##
+  ## The room is still grown geometrically, so a loop of appends copies its
+  ## bytes a linear number of times rather than a quadratic one.
   if left == nil:
     return if right == nil: blaze_rt_string_new(nil, 0) else: blaze_rt_string_new(cast[pointer](right), blaze_rt_text_length(right))
   if right == nil:
@@ -630,32 +636,17 @@ proc blaze_rt_string_append*(left, right: cstring): cstring {.exportc, cdecl.} =
   let leftLength = blaze_rt_text_length(left)
   let rightLength = blaze_rt_text_length(right)
   let wanted = leftLength + rightLength + 1
-  let header = headerOf(cast[pointer](left))
-  var owner: cstring
-  var tailCopied = false
-  if header[].magic == BlazeMagic and header[].refs == 1:
-    ## This block is the caller's alone, so it can be written into. A resize
-    ## that fits the capacity it has is the same block, and one that does not
-    ## grows it to at least half again as much.
-    owner = cast[cstring](blaze_rt_reallocate(cast[pointer](left), wanted))
-    ## A string handed to both sides is one block named twice, so the right side
-    ## is read out of the block the resize left rather than out of the one it
-    ## gave back, which the resize has already released.
-    if right == left:
-      if rightLength > 0:
-        copyMem(cast[pointer](cast[uint](owner) + leftLength), owner, int(rightLength))
-      tailCopied = true
-  else:
-    let room = leftLength * 2 + 16
-    owner = cast[cstring](blaze_rt_allocate_uninitialized(if wanted < room: room.csize_t else: wanted))
-    copyMem(cast[pointer](owner), left, int(leftLength))
-  if rightLength > 0 and not tailCopied:
-    copyMem(cast[pointer](cast[uint](owner) + leftLength), right, int(rightLength))
-  ## The length of the string, not the size of the block it was put in: both
-  ## branches above leave a header carrying the room the block has, and
+  let room = leftLength * 2 + 16
+  let owner = cast[cstring](blaze_rt_allocate_uninitialized(if wanted < room: room.csize_t else: wanted))
+  copyMem(cast[pointer](owner), left, int(leftLength))
+  ## A string handed to both sides is one block named twice, so the right side
+  ## is read out of the copy just made rather than out of the block it came from.
+  if rightLength > 0:
+    copyMem(cast[pointer](cast[uint](owner) + leftLength), if right == left: owner else: right, int(rightLength))
+  ## The length of the string, not the size of the block it was put in, and
   ## blaze_rt_text_length answers length - 1, so a joined string measured by
-  ## the program came back as the room it was given rather than as its own
-  ## bytes. The C runtime records the same length in the same place.
+  ## the program would otherwise come back as the room it was given rather than
+  ## as its own bytes. The C runtime records the same length in the same place.
   headerOf(cast[pointer](owner))[].length = wanted.uint64
   cast[ptr UncheckedArray[char]](owner)[int(wanted - 1)] = '\\0'
   owner
@@ -770,6 +761,31 @@ proc blaze_rt_print_number*(value: float64) {.exportc, cdecl.} =
     stdout.write("-0")
     return
   stdout.write(blazeShortest(value))
+
+proc blaze_rt_print_whole*(value: int64, bigint: cint) {.exportc, cdecl.} =
+  ## A whole number above 2^53 is not a number a double holds, so handing one
+  ## to the formatter answers a different number than the program wrote: a
+  ## bigint literal of 9007199254740993 printed as 9007199254740992. The digits
+  ## are therefore written from the integer itself. The magnitude is taken
+  ## unsigned because the most negative value negates to itself as a signed one
+  ## and its digits would then never come out. The n of a bigint is written
+  ## after the digits when the value is one.
+  var magnitude = if value < 0: 0'u64 - cast[uint64](value) else: cast[uint64](value)
+  var digits: array[20, char]
+  var count = 0
+  while true:
+    digits[count] = chr(ord('0') + int(magnitude mod 10'u64))
+    inc count
+    magnitude = magnitude div 10'u64
+    if magnitude == 0'u64:
+      break
+  if value < 0:
+    stdout.write('-')
+  while count > 0:
+    dec count
+    stdout.write(digits[count])
+  if bigint != 0:
+    stdout.write('n')
 
 proc blaze_rt_format_number*(value: float64, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =
   let text = blazeShortest(value)

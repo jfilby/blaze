@@ -298,6 +298,17 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["output"] },
   ),
   entry(
+    "blaze_rt_print_whole",
+    "void",
+    [
+      ["value", "long long"],
+      ["bigint", "int"],
+    ],
+    "Writes a whole number to the output as its own digits.",
+    "A double holds every whole number only up to 2^53, so a larger one is written from the integer itself rather than through the formatter the floating numbers use. The n of a bigint is written after the digits when the value is one.",
+    { tags: ["output"] },
+  ),
+  entry(
     "blaze_rt_format_number",
     "size_t",
     [
@@ -1263,45 +1274,27 @@ const char* blaze_rt_string_append(const char* left, const char* right) {
   const size_t left_length = blaze_rt_text_length(left);
   const size_t right_length = blaze_rt_text_length(right);
   const size_t wanted = left_length + right_length + 1;
-  /* The left string is a value the program can still be holding, so it is only
-     written into when it is a managed block nothing else refers to. A literal
-     the compiler wrote out has no block to grow, and a shared one has a reader
-     that would see the append, so both are copied into a block of their own
-     instead, and it is that copy which the later appends grow. */
-  blaze_rt_header* header = (blaze_rt_header*)((const char*)left - BLAZE_RT_HEADER_SIZE);
-  char* joined;
-  int tail_copied = 0;
-  if (header->magic == BLAZE_RT_MAGIC && header->references == 1) {
-    if (wanted <= header->capacity) {
-      joined = (char*)left;
-    } else {
-      /* Half again as much as the block had, so a loop of appends copies its
-         bytes a linear number of times rather than a quadratic one. */
-      const size_t room = header->capacity + header->capacity / 2 + 16;
-      const size_t total = wanted < room ? room : wanted;
-      joined = (char*)blaze_rt_block(total, header->alignment, 0);
-      blaze_rt_header_of(joined)->capacity = total;
-      memcpy(joined, left, left_length);
-      /* The right side is copied before the left one is given back, because a
-         program may hand the same string to both: the emitter binds one
-         temporary per interpolated part, so a string interpolated into itself
-         is one block named twice, and the release below is the last reference
-         to it. Reading it after that is a read of memory the allocator has
-         already taken, and a block big enough to be handed straight back to the
-         host is a fault rather than a value that happens to still be there.
-         A right side that is the left one is read out of the copy this branch
-         has just made rather than out of the block being released. */
-      memcpy(joined + left_length, right == left ? joined : right, right_length);
-      tail_copied = 1;
-      blaze_rt_release((void*)left);
-    }
-  } else {
-    const size_t room = left_length * 2 + 16;
-    joined = (char*)blaze_rt_allocate_uninitialized(wanted < room ? room : wanted);
-    memcpy(joined, left, left_length);
-  }
+  /* The result is always a block of its own. The left string is a value the
+     program may still be holding, and the runtime cannot tell whether it is:
+     a text value is never retained and never released, so every text block's
+     count is permanently one, and a count of one says only that this call is
+     the first to have reached it — never that nothing else is looking at it.
+     Writing into the block when the count is one is how a program that joined
+     two literals into "x" + "y" and then interpolated that name with a "!" at
+     the end printed the longer string for the name: the append landed in the
+     bytes of a string two names were pointing at, and every later append to
+     either of them rewrote the other.
+
+     The room is still grown geometrically, so a string built in a loop copies
+     its bytes a linear number of times rather than a quadratic one. */
+  const size_t room = left_length * 2 + 16;
+  char* joined = (char*)blaze_rt_allocate_uninitialized(wanted < room ? room : wanted);
+  memcpy(joined, left, left_length);
+  /* The right side is copied before anything is handed back, and a right side
+     that is the left one is read out of the copy just made rather than out of
+     the block being released. */
+  memcpy(joined + left_length, right == left ? joined : right, right_length);
   blaze_rt_header_of(joined)->length = wanted;
-  if (!tail_copied) memcpy(joined + left_length, right, right_length);
   joined[left_length + right_length] = '\\0';
   return joined;
 }
@@ -1563,6 +1556,27 @@ void blaze_rt_print_number(double value) {
   }
   const size_t written = blaze_rt_format_number(value, (unsigned char*)text, sizeof text);
   fwrite(text, 1, written, stdout);
+}
+
+void blaze_rt_print_whole(long long value, int bigint) {
+  /* A whole number above 2^53 is not a number a double holds, so handing one to
+     the formatter above answers a different number than the program wrote: a
+     bigint literal of 9007199254740993 printed as 9007199254740992. The digits
+     are therefore written from the integer itself. The magnitude is taken
+     unsigned because the most negative value negates to itself as a signed one
+     and its digits would then never come out. The n of a bigint is the word the
+     language prints after the digits, and it is written here rather than by the
+     backend because the backend has no way to write one character. */
+  char digits[20];
+  int count = 0;
+  unsigned long long magnitude = value < 0 ? 0ULL - (unsigned long long)value : (unsigned long long)value;
+  do {
+    digits[count++] = (char)('0' + (int)(magnitude % 10));
+    magnitude /= 10;
+  } while (magnitude > 0);
+  if (value < 0) fputc('-', stdout);
+  while (count > 0) fputc(digits[--count], stdout);
+  if (bigint) fputc('n', stdout);
 }
 void blaze_rt_print_newline(void) {
   fputc('\\n', stdout);

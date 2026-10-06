@@ -53,6 +53,9 @@ function primitiveOf(type: SemanticType): string {
   return cDeclarationType(type);
 }
 
+/** A read of the driven parameter as a double, which is the type that has NaNs. */
+const paramF = (name: string): SemanticValue => ({ k: "local", type: F64, name });
+
 /**
  * A read of the one parameter the equivalence harness drives, at the type it
  * reads it as. Every identity this reaches is one that only applies to a value
@@ -327,6 +330,43 @@ test("a binding something reads is kept", () => {
   assert.match(printed(before), /print_number const\[f64\] 1/);
 });
 
+test("two loops at the same place in two blocks bind two names", () => {
+  // The hoister counted its names out of the statement the loop sat at, so an
+  // outer loop that is the third statement of the entry block and a loop nested
+  // in it that is the third statement of the outer's own body both said
+  // `invariant2_0`. The inner declaration shadowed the outer one for the rest of
+  // the block, and a read the source made of the outer value came back as the
+  // inner one: a body that hoisted `x * 2` above its outer loop and `k + 1` above
+  // its inner one answered 87 where it says 78. The commoning pass counted out
+  // of the block and the order the same way, and one body came to hold two
+  // bindings both called `commonentry_1` — one for `x * 2` and one for `x / 2`.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: false, type: F64 };
+  const i: SemanticSlot = { kind: "value", name: "i", mutable: false, type: I32 };
+  const x: SemanticSlot = { kind: "value", name: "x", mutable: true, type: F64 };
+  const readN: SemanticValue = { k: "local", type: F64, name: "n" };
+  const setX = (value: SemanticValue, line: number): SemanticBlock["statements"][number] => ({
+    k: "set", name: "x", op: "=", value, line,
+  });
+  const loopOver = (body: SemanticBlock["statements"]): SemanticBlock["statements"][number] => {
+    const statement = countedLoop(constOf("4", I32)) as Extract<SemanticBlock["statements"][number], { k: "loop" }>;
+    return { ...statement, loop: { ...statement.loop, body: { ...statement.loop.body, statements: body } } };
+  };
+  const inner = loopOver([setX(bin("div", readN, constOf("2")), 4)]);
+  // The stores are read back by the answer, so none of them is dropped as dead.
+  const entry: SemanticBlock = {
+    id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "x" } },
+    statements: [
+      setX(bin("mul", readN, constOf("2")), 1),
+      setX(bin("div", readN, constOf("2")), 2),
+      loopOver([setX(bin("mul", readN, constOf("2")), 3), setX(bin("mul", readN, constOf("3")), 4), inner]),
+    ],
+  };
+  const after = printed(fnOf(entry, F64, [n, i, x]));
+  const names = [...after.matchAll(/let value\[\w+\] (\w+) immutable/g)].map((one) => one[1]);
+  assert.ok(names.length >= 2, `the body binds a name for each loop:\n${after}`);
+  assert.equal(new Set(names).size, names.length, `two bindings answered to one name:\n${after}`);
+});
+
 test("a loop bound computed every turn is computed once above the loop", () => {
   // `i < n * 2` recomputes the bound on every turn, and `n * 2` is the same
   // number on every one of them. This is the rewrite the catalogue's
@@ -343,11 +383,13 @@ test("a loop bound computed every turn is computed once above the loop", () => {
   // The bound is bound above the loop and the loop reads the name. What it is
   // bound to is whatever the fold left behind: `n * 2` became `n << 1` on the
   // way, and the hoist moved that, which is the order the two run in.
-  assert.match(after, /let value\[i32\] invariant0_0 immutable = /);
-  assert.match(after, /to local\[i32\] invariant0_0/);
+  // The name is one nothing in the body holds, so a second hoist written in a
+  // nested block cannot answer to the same spelling and shadow this one.
+  assert.match(after, /let value\[i32\] invariant\d+ immutable = /);
+  assert.match(after, /to local\[i32\] invariant\d+/);
   // The counter is written by the loop and the step is already a name the
   // program has, so neither is given another.
-  assert.doesNotMatch(after, /invariant\d+_\d+ = const\[i32\] 1\b/);
+  assert.doesNotMatch(after, /invariant\d+ = const\[i32\] 1\b/);
 });
 
 test("a loop bound that reads memory is left where it is", () => {
@@ -379,7 +421,7 @@ test("a loop body that computes the same thing every turn computes it once", () 
     { k: "set", name: "sum", op: "+=", value: bin("mul", readN, constOf("2")), line: 4 },
   ];
   const after = printed(fnOf({ id: "entry", releases: [], terminator: { k: "return", value: null }, statements: [loop] }, F64, [n, i, sum]));
-  assert.match(after, /let value\[f64\] invariant0_\d+ immutable = \[mul\[f64\] local\[f64\] n const\[f64\] 2\]/);
+  assert.match(after, /let value\[f64\] invariant\d+ immutable = \[mul\[f64\] local\[f64\] n const\[f64\] 2\]/);
   // The loop body reads the name rather than computing the product twice.
   const inside = after.slice(after.indexOf("for["));
   assert.doesNotMatch(inside, /\[mul\[f64\] local\[f64\] n const\[f64\] 2\]/);
@@ -676,6 +718,19 @@ test("the folded C computes what the unfolded C computes", async () => {
     { name: "an exact float sum", expression: bin("add", constOf("0.25"), constOf("0.5")), expected: ["0.75"] },
     { name: "a float divided by one", expression: bin("div", constOf("2.5"), constOf("1")), expected: ["2.5"] },
     { name: "a value against itself subtracted", expression: bin("sub", constOf("9"), constOf("9")), expected: ["0"] },
+    // The identities above are over a value that is not written out, and there
+    // they hold only where the value is a number. `x / x` is NaN at every zero
+    // and every infinity, and `x - x` is NaN wherever `x` itself is one, so a
+    // float folded here is a program that computed a NaN and is handed a one or
+    // a zero instead. `literalOf` answers null for a name and null is not zero,
+    // so the test this replaces — `literalOf(left) !== 0` — let every name
+    // through, and `f(x) { return x / x }` answered 1 at `x = 0`.
+    { name: "a float divided by itself", expression: bin("div", paramF("x"), paramF("x")), parameter: "x", inputs: ["0", "1", "2.5", "-4"], expected: ["NaN", "1", "1", "1"] },
+    { name: "a float minus itself", expression: bin("sub", paramF("x"), paramF("x")), parameter: "x", inputs: ["0", "1", "2.5", "-4"], expected: ["0", "0", "0", "0"] },
+    // A whole number has no NaN and no infinity to divide by, so the fold is
+    // still taken there: this is what keeps the identity the backend's own
+    // short-circuit already answers.
+    { name: "a whole number divided by itself", expression: bin("div", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["1", "2", "7", "-9"], expected: ["1", "1", "1", "1"] },
     // The identities below are only reachable over a value that is not written
     // out, so they are driven from a parameter the C driver supplies rather
     // than from a literal: `x / 1`, `x % 1`, the bitwise identities and a

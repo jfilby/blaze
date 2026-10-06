@@ -349,6 +349,82 @@ test("a call takes every argument where the convention puts it", async () => {
   assert.equal(await lowered(spare, callAndCount), "11|1", "one argument, left in the accumulator");
 });
 
+test("an argument left where it is read out of the accumulator, not out of the slot it is named by", async () => {
+  // A function whose float arithmetic is inside a loop lends the values of its
+  // expressions the spare callee-saved vector registers, and a slot it binds for
+  // itself may be given one. The last argument of a call is left in the
+  // accumulator rather than written down, and the slot it is named by is bound
+  // all the same — so the slot carries a register nothing ever wrote the argument
+  // into, and reading the argument out of *that* hands the callee whatever the
+  // last use of the register left there. `sum` over `f(a[i])` answered 18 where
+  // the program answers 58: `f` was called with a stale register instead of the
+  // element the loop had just read.
+  const body: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              {
+                k: "set",
+                name: "total",
+                op: "=",
+                line: 4,
+                value: {
+                  k: "arith",
+                  type: F64,
+                  op: "add",
+                  left: local("total"),
+                  right: {
+                    k: "call",
+                    type: F64,
+                    call: {
+                      callee: "f",
+                      builtin: false,
+                      signature: { name: "f", symbol: "f", params: [{ name: "v", type: "f64" }], returns: "f64" },
+                      args: [{ k: "element", type: F64, of: local("a", ARRAY_OF_F64), index: local("i") }],
+                      argTypes: [F64],
+                      returns: F64,
+                      effects: [],
+                      ownership: "none",
+                      retain: false,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  const fn = subject(F64, body, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: F64 },
+  ]);
+  // (2+1) + (5+1) + (7+1) + (9+1)
+  assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 4));`), "27");
+});
+
 test("an argument the build gave a register of its own is read before that register is written", async () => {
   // A value the census weighs as worth a register is kept in one, and the
   // register it is kept in is very often one the call it is an argument of is
@@ -1016,6 +1092,82 @@ test("a loop leaves for another block, and the names it declared go with it", as
   assert.equal(await lowered(fn, (name) => `printf("%d", ${name}());`), "6");
 });
 
+test("a whole number is printed from the integer it is", async () => {
+  // Every number went through the runtime's formatter, which takes a double,
+  // and a double holds a whole number only up to 2^53. The bigint literal
+  // 9007199254740993 came out as 9007199254740992 — a number the program never
+  // computed. The C backend already wrote the digits of an integer rather than
+  // handing it over; this is the same answer on this backend, and the `n` of a
+  // bigint is written after them.
+  const printed = subject(VOID, {
+    id: "entry",
+    statements: [
+      { k: "printNumber", line: 1, value: { k: "const", type: I64, text: "9007199254740993" }, bigint: true },
+      { k: "printNewline", line: 1 },
+      { k: "printNumber", line: 2, value: { k: "const", type: I64, text: "-9007199254740993" }, bigint: true },
+      { k: "printNewline", line: 2 },
+      { k: "printNumber", line: 3, value: { k: "const", type: I64, text: "9007199254740993" }, bigint: false },
+      { k: "printNewline", line: 3 },
+      { k: "printNumber", line: 4, value: { k: "const", type: I32, text: "-7" }, bigint: false },
+      { k: "printNewline", line: 4 },
+    ],
+    releases: [],
+    terminator: { k: "return", value: null },
+  });
+  assert.equal(
+    await lowered(printed, (name) => `${name}();`),
+    "9007199254740993n\n-9007199254740993n\n9007199254740993\n-7\n",
+  );
+});
+
+test("a string joined to itself in a loop is read out of the frame, not out of a register a call took", async () => {
+  // Laying a string out measures each part with `strlen`, and a name the build
+  // gave a register of its own — a text local no call reaches, which the
+  // liveness the allocator works from is happy to pin to one of the registers
+  // a call is written through — is gone once `strlen` has run. The second part
+  // of `c = c + c` was read out of `rdi` after the first measure, so the
+  // answer depended on what `strlen` left there: under 64 bytes it happened to
+  // be the pointer, and over it the call had overwritten the register and the
+  // program died in `strlen` on whatever the call returned.
+  const body: SemanticBlock = {
+    id: "entry",
+    statements: [
+      { k: "let", line: 1, slot: { kind: "text", name: "c", mutable: true }, value: literal("x") },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "set", line: 3, name: "c", op: "=", value: { k: "arith", type: TEXT, op: "concat", left: local("c", TEXT), right: local("c", TEXT) } },
+            ],
+          },
+        },
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: { k: "length", type: USIZE, of: local("c", TEXT) } },
+  };
+  const fn = subject(USIZE, body, [{ kind: "value", name: "n", mutable: false, type: F64 }]);
+  // A string of 64 bytes is where `strlen` stops leaving the register alone,
+  // so the length is what is asked for: 2^6 turns is 64 characters.
+  assert.equal(await lowered(fn, (name) => `printf("%zu", ${name}(6));`), "64");
+  assert.equal(await lowered(fn, (name) => `printf("%zu", ${name}(3));`), "8");
+});
+
 test("text is written, measured, joined and compared by what it says", async () => {
   const printed = subject(VOID, {
     id: "entry",
@@ -1166,6 +1318,52 @@ test("a negated comparison is the other sense of the comparison it negates", asy
     );
     assert.equal(await lowered(against, (name) => `printf("%d", ${name}());`), "1", `!(NaN ${op} 2)`);
   }
+});
+
+test("a field read out of a nested object literal is read out of that literal", async () => {
+  // The object being built is addressed through the register the fields are
+  // written through, and anything a field's value reads that builds an object
+  // of its own takes that register for itself and does not hand it back. So
+  // every field of a literal with a nested literal in it was written into the
+  // *nested* block, and the block the outer literal allocated kept whatever the
+  // allocation before it had put there: `r.x` answered 30 where the source says
+  // 100, and 10 where it says 100 again.
+  const literal = (x: string, y: string): SemanticValue => ({
+    k: "newObject",
+    type: POINT,
+    layout: "Point",
+    fields: [{ name: "x", value: number(x) }, { name: "y", value: number(y) }],
+  });
+  const fn = subject(
+    POINT,
+    {
+      id: "entry",
+      statements: [
+        {
+          k: "let",
+          line: 1,
+          slot: { kind: "object", name: "r", mutable: true, type: POINT },
+          value: {
+            k: "newObject",
+            type: POINT,
+            layout: "Point",
+            fields: [
+              { name: "x", value: { k: "loadField", type: F64, object: literal("100", "200"), layout: "Point", field: "x" } },
+              { name: "y", value: { k: "loadField", type: F64, object: literal("300", "400"), layout: "Point", field: "y" } },
+            ],
+          },
+        },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("r", POINT) },
+    },
+    [],
+    { Point: POINT_LAYOUT },
+  );
+  assert.equal(
+    await lowered(fn, (name) => `struct Point* r = ${name}(); printf("%.17g %.17g", r->x, r->y);`),
+    "100 400",
+  );
 });
 
 test("an object is allocated, written and read back through its own layout", async () => {

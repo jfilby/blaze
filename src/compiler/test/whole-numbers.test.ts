@@ -115,7 +115,7 @@ test("a function every caller hands whole numbers to computes in whole numbers",
   assert.match(arm, /return \(double\)\(\(\(\(int64_t\)/);
   assert.match(arm, /\(uint32_t\)\(\(\(x \+ y\) \* \(\(x \+ y\) \+ 1LL\)\)\) >> /);
   // The arm the reach refuses is the one the source wrote, unchanged.
-  assert.match(arm, /commonentry_1 = \(x \+ y\);/);
+  assert.match(arm, /common\w+ = \(x \+ y\);/);
 });
 
 test("a function one caller hands a double to is left as the source wrote it", () => {
@@ -125,7 +125,7 @@ test("a function one caller hands a double to is left as the source wrote it", (
   const c = written(programOf("  for (let i = 0; i < reach; i += 1) console.log(triangle(i + 0.5, i));"));
 
   assert.match(c, /^extern double triangle\(double x, double y\);$/m);
-  assert.match(c, /commonentry_1 = \(x \+ y\);/);
+  assert.match(c, /common\w+ = \(x \+ y\);/);
   assert.doesNotMatch(c, /uint64_t/);
 });
 

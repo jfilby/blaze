@@ -987,7 +987,17 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   });
   for (const inner of nestedBlocks(callee.entry)) {
     for (const name of declaredNames(inner)) {
-      if (bindings.has(name)) continue;
+      // A name a nested block declares that something already answers to is a
+      // *different* binding under the same name, and the substitution below is
+      // by name: there is one spelling for both of them and either answer is
+      // wrong. Renaming the shadow sends the parameter's own reads to it, and
+      // leaving it sends the shadow's reads to the argument — which is what
+      // `helper(t, u)` whose `if` arm declares `let t` did, inlined into a
+      // caller: `use(10, 5)` answered 31 where the program answers 210. A
+      // callee that shadows a name is left as a call.
+      if (bindings.has(name)) {
+        return { refused: `${callee.name} declares "${name}" in a block of its own, which shadows another name of the function, and a name answers for one binding` };
+      }
       const renamed = freshName(taken, "inlined");
       bindings.set(name, { k: "local", type: types.get(name) ?? { kind: "primitive", name: "f64" }, name: renamed });
       writes.set(name, renamed);

@@ -383,8 +383,8 @@ test("a review of the IR and a review of the target each regenerate the artifact
   // it answers with has nothing left to hoist: the artifact is the folded one
   // and the candidate records no proposal, because none changed anything.
   assert.equal(candidate.proposals, undefined, "the review changed nothing the rules had not already done");
-  assert.match(candidate.text, /invariant\d+_\d+/, "the artifact is the one the compiler's own rewrites produced");
-  assert.match(candidate.text, /let value\[f64\] invariant\d+_\d+ immutable = \[mul\[f64\] local\[f64\] n local\[f64\] n\]/, "`n * n` is bound above the loop");
+  assert.match(candidate.text, /invariant\d+/, "the artifact is the one the compiler's own rewrites produced");
+  assert.match(candidate.text, /let value\[f64\] invariant\d+ immutable = \[mul\[f64\] local\[f64\] n local\[f64\] n\]/, "`n * n` is bound above the loop");
   assert.match(candidate.text, /set total \+= \[add\[f64\] local\[f64\] common\w+ local\[f64\] common\w+\]/, "the body reads the bound name and one name for the expression it computes twice");
   // The second review proposed the same rule for the same loop, and there was
   // nothing left for it to hoist, so it changed nothing and the candidate is

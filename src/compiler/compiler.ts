@@ -857,9 +857,13 @@ interface UnitReuseRequest {
  * Whether a stored implementation calls out of the program it belongs to.
  *
  * Every output kind answers in the IR, so this reads the same text the build
- * that stored it decided on. A record that cannot be read is a candidate whose
- * files are not known, and is treated as one that links on its own so the
- * demand for its executable fails the reuse rather than the whole build.
+ * that stored it decided on. A record whose text cannot be read is one nothing
+ * can say the calls of, and it is answered as one that *does* call out: `false`
+ * is the answer that asks for no executable, and a candidate whose files are not
+ * known is exactly the one whose executable has not been checked. Answering it
+ * that way fails the demand for the executable, which fails this unit's reuse
+ * and builds it again — the refusal stays inside the unit, which is what the
+ * lenient reading was reaching for.
  */
 function callsOutOfProgram(
   text: string,
@@ -869,7 +873,7 @@ function callsOutOfProgram(
   try {
     return parseSemanticFunction(text, program).calls.some((edge) => callable.has(edge.callee));
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -1164,6 +1168,7 @@ export async function runBuild(
     // is lowered into. An edit to the second leaves the first standing, so the
     // candidates an earlier build reviewed are put through the toolchain as it
     // is now rather than asked for again.
+    const generation = generationConfigFor(input, options);
     const keyOf = (unit: CompilationUnit): UnitKeys =>
       unitKeys({
         contract: unit.contract,
@@ -1176,6 +1181,7 @@ export async function runBuild(
         runtime: runtimeKind,
         test,
         benchmark: benchmarkConfig,
+        generation,
         model: modelKey,
         compilerVersion: COMPILER_VERSION,
         review: toolchain.review,
@@ -1210,7 +1216,6 @@ export async function runBuild(
         return next;
       },
     };
-    const generation = generationConfigFor(input, options);
     /** The functions this build took from an earlier one, by function name. */
     const reusedByFunction = new Map<string, string>();
     /**

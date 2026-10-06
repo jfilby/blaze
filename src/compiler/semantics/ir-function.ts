@@ -763,11 +763,13 @@ class FunctionBody {
         this.write({ k: "printText", value, line: statement.line });
         break;
       case "number":
-        // A function's own body holds no bigint: the contract states a bigint as
-        // the `i64` it is, and a printed `i64` is a whole number. What a program
-        // writes with an `n` beside it is a value the program's own statements
-        // hold, and those are written by the program pass.
-        this.write({ k: "printNumber", value, line: statement.line, bigint: false });
+        // A bigint *parameter* of a function is stated as the `i64` it is, so a
+        // function that prints one writes it without the `n` beside it. A bigint
+        // the body wrote out is not a parameter — `9007199254740993n` is a
+        // bigint the source spelled, and the language prints it with the `n` —
+        // and reading the mark off the expression is what tells the two apart.
+        // Reading it off nothing hardcoded every one of them as the parameter.
+        this.write({ k: "printNumber", value, line: statement.line, bigint: statement.value.k === "bigint" });
         break;
       case "boolean":
       case "reference":

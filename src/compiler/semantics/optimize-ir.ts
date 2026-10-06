@@ -411,14 +411,31 @@ function foldValue(value: SemanticValue): SemanticValue | null {
           return { k: "const", type: value.type, text: asText(0) };
         }
       }
-      // A value against itself is zero, one, or false, and never a fault: the
-      // backends short-circuit the division of equal operands where the fault
-      // would otherwise be, so this is the same answer they give.
+      // A value against itself is zero, one, or false — and only where the
+      // value is a number, which is the whole of the condition. `NaN - NaN` is
+      // NaN and `NaN / NaN` is NaN, and `0 / 0` and `inf / inf` are both NaN as
+      // well, so a float folded here is a program that computed a NaN and is
+      // handed a zero or a one instead. The comparison folds further down are
+      // guarded the same way, for the same reason and in the same words.
+      //
+      // So the fold is taken where the operand is written out — a literal is a
+      // number the source can see, and a finite one is not a NaN — and over a
+      // whole number, which has no NaN and no infinity to divide by.
       if (valueKey(value.left) === valueKey(value.right)) {
-        if (value.op === "sub") return { k: "const", type: value.type, text: asText(0) };
-        if (value.op === "div" && isInteger(value.type) && numberType(value.left) === null) return null;
-        if (value.op === "div" && literalOf(value.left) !== 0) {
-          return { k: "const", type: value.type, text: asText(1) };
+        // `literalOf` answers null for anything that is not written out, and
+        // null is not zero: the test this replaces asked `!== 0` of it, so a
+        // *variable* against itself satisfied it and every `x / x` the
+        // compiler lowered was a one — including the `x / x` of a program that
+        // had found a zero there and was asking for the NaN.
+        const literal = literalOf(value.left);
+        const written = literal !== null && Number.isFinite(literal);
+        if (value.op === "sub") {
+          return written || isInteger(value.type) ? { k: "const", type: value.type, text: asText(0) } : null;
+        }
+        if (value.op === "div") {
+          if (written && literal !== 0) return { k: "const", type: value.type, text: asText(1) };
+          if (!isInteger(value.type)) return null;
+          if (numberType(value.left) === null) return null;
         }
         if (value.op === "min" || value.op === "max") return value.left;
         if (value.op === "and" || value.op === "or") return value.left;
@@ -799,12 +816,24 @@ function dropUnread(body: Body): boolean {
  * out of a turn that did not read it is a read the source never performed.
  */
 function hoistLoopInvariants(body: Body): boolean {
+  // The names a binding is written under are taken from a set every binding in
+  // the body is checked against, and not counted out of the statement the hoist
+  // sat at: two loops at the same place in two different blocks — an outer loop
+  // and one nested in it — both said `invariant2_0`, and the inner declaration
+  // shadowed the outer one for the rest of the block. A body that hoisted `x * 2`
+  // above its outer loop and `k + 1` above its inner one then read the *inner*
+  // name where the source read the outer value, and answered 87 where it says
+  // 78. One set for the whole body is what makes a name answer for one binding.
+  const taken = new Set<string>(body.params.map((param) => param.name));
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    for (const statement of block.statements) if (statement.k === "let") taken.add(statement.slot.name);
+  }
   let changed = false;
   const walk = (block: SemanticBlock): void => {
     // A hoist inserts a statement above the loop it hoisted out of, so the
     // index moves under the walk and it is stepped rather than mapped.
     for (let at = 0; at < block.statements.length; at += 1) {
-      if (hoistOne(block, at)) {
+      if (hoistOne(block, at, taken)) {
         changed = true;
         at += 1;
       }
@@ -1078,17 +1107,18 @@ function readsMemoryOrChanges(value: SemanticValue, written: ReadonlySet<string>
  * each name is in scope for the loop and for whatever follows it that read the
  * value the loop read.
  */
-function hoistOne(owner: SemanticBlock, at: number): boolean {
+function hoistOne(owner: SemanticBlock, at: number, taken: Set<string>): boolean {
   const statement = owner.statements[at];
   if (statement === undefined || statement.k !== "loop") return false;
   const written = namesWrittenBy(statement.loop);
   const bindings: SemanticStatement[] = [];
   const reads = new Map<string, SemanticValue>();
-  let serial = 0;
   const bind = (value: SemanticValue): void => {
     if (reads.has(valueKey(value))) return;
-    const name = `invariant${at}_${serial}`;
-    serial += 1;
+    // A name the whole body is asked about, so two bindings written in two
+    // different blocks cannot answer to one spelling — which is what made an
+    // outer loop's hoisted value read back as the inner loop's.
+    const name = freshName(taken, "invariant");
     reads.set(valueKey(value), { k: "local", type: value.type, name });
     bindings.push({ k: "let", slot: slotFor(value, name), value, line: statement.line });
   };
@@ -1225,9 +1255,19 @@ function rootsOf(block: SemanticBlock): SemanticValue[] {
  * reads, so each is computed once and is the same value everywhere it is used.
  */
 function commonWithin(body: Body): boolean {
+  // The same rule the hoister is held to: a name the whole body is asked about,
+  // so two bindings written in two rounds — or in two different blocks — cannot
+  // answer to one spelling. Counting out of the block and the order gave a body
+  // two bindings both called `commonentry_1`, one for `x * 2` and one for `x / 2`,
+  // and every read after the second was the first's value with the second's
+  // name on it.
+  const taken = new Set<string>(body.params.map((param) => param.name));
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    for (const statement of block.statements) if (statement.k === "let") taken.add(statement.slot.name);
+  }
   let changed = false;
   const walk = (block: SemanticBlock): void => {
-    if (commonOne(block)) changed = true;
+    if (commonOne(block, taken)) changed = true;
     for (const statement of block.statements) {
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
@@ -1236,17 +1276,17 @@ function commonWithin(body: Body): boolean {
   return changed;
 }
 
-function commonOne(block: SemanticBlock): boolean {
+function commonOne(block: SemanticBlock, taken: Set<string>): boolean {
   const repeated = repeatedAmong(rootsOf(block), namesWrittenHere(block));
   if (repeated.length === 0) return false;
   const line = block.statements[0]?.line ?? 0;
   const reads = new Map<string, SemanticValue>();
   const bindings: SemanticStatement[] = [];
-  repeated.forEach((value, order) => {
-    const name = `common${block.id}_${order}`;
+  for (const value of repeated) {
+    const name = freshName(taken, "common");
     reads.set(valueKey(value), { k: "local", type: value.type, name });
     bindings.push({ k: "let", slot: slotFor(value, name), value, line });
-  });
+  }
   block.statements = block.statements.map((statement) => replaceValues(statement, reads) as SemanticStatement);
   if (block.terminator.k === "return" && block.terminator.value !== null) {
     block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, reads) };

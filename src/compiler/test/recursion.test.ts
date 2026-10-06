@@ -384,6 +384,28 @@ test("a recursion with effects of its own keeps them", () => {
   assert.deepEqual(namesIn(loop.body.statements).slice(-4), ["blaze_arg1", "blaze_arg2", "n", "acc"]);
 });
 
+test("a turn that only binds a name above the test still becomes the loop", () => {
+  // The refusal is about what the loop leaves *out* on the call that reaches the
+  // base case, and a name nothing reads there is not something. `seen` binds a
+  // counter above the test, steps it below, and answers with the accumulator —
+  // so the loop that drops the last turn's step changes nothing the program can
+  // see, and the body is still a loop.
+  const source = library(
+    [
+      "function seen(n: number, acc: number): number {",
+      "  let count = 0;",
+      "  if (n <= 0) {",
+      "    return acc;",
+      "  }",
+      "  count = count + 1;",
+      "  return seen(n - 1, acc + n);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(callsItself(answered(source, "seen")), false, "the body becomes the loop");
+});
+
 test("a base case answering with a name a turn writes keeps its frames", () => {
   // The loop leaves the function holding what the base case answered, and it is
   // read where the base case was — after every turn has run. A name the turns

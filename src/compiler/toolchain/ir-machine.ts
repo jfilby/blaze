@@ -2863,10 +2863,26 @@ class Machine {
       case "printText":
         this.printText(statement.value);
         return;
-      case "printNumber":
+      case "printNumber": {
+        // A whole number is printed from the integer it is. The formatter the
+        // floating numbers use takes a double, and a double holds every whole
+        // number only up to 2^53 — so the bigint literal 9007199254740993 came
+        // out as 9007199254740992. The C backend already wrote the digits of an
+        // integer rather than handing it over; this is the same answer here.
+        const type = statement.value.type;
+        if (isNumber(type) && isInteger(type)) {
+          // A whole number narrower than a word is widened to one first, which
+          // is exact and leaves the digits it always had.
+          this.at(statement.value, widthOf(type) === 8 ? type : I64);
+          this.code.movRegReg(RDI, RAX);
+          this.code.movRegImm(RSI, statement.bigint ? 1n : 0n);
+          this.runtime("_print_whole");
+          return;
+        }
         this.at(statement.value, NUMBER);
         this.runtime("_print_number");
         return;
+      }
       case "printNewline":
         this.runtime("_print_newline");
         return;
@@ -4133,7 +4149,7 @@ class Machine {
     // A left side the comparison reads where it lies costs no slot and no copy:
     // the right side goes into the accumulator, which is the destination the
     // general form compares out of, and the element is the source.
-    const carried = isFloat(type) ? this.carriedOperand(comparison.left, type) : null;
+    const carried = isFloat(type) ? this.carriedOperand(comparison.left, type, !hasCall(comparison.right)) : null;
     if (carried !== null) {
       this.at(comparison.right, type);
       this.floatBranch(op, widthOf(type) === 4, sense, label, XMM0, carried);
@@ -4683,7 +4699,7 @@ class Machine {
    * form would have, which is what leaves every condition read after it exactly
    * as it was.
    */
-  private carriedOperand(value: SemanticValue, type: SemanticType): Memory | null {
+  private carriedOperand(value: SemanticValue, type: SemanticType, survives: boolean): Memory | null {
     if (value.k !== "element") return null;
     const element = elementTypeOf(value.of.type) ?? value.type;
     // A use that widens what the array holds is a conversion the instruction has
@@ -4691,6 +4707,19 @@ class Machine {
     // width.
     if (!typeEquals(element, value.type)) return null;
     if (!typeEquals(element, type)) return null;
+    // An address the instruction is to name as its own operand is built here and
+    // used by the caller *after* it has written the other side, and an index the
+    // build gave no register of its own is read into the scratch — which a call
+    // writes its arguments into and over. The element is then read at whatever
+    // address the scratch was left holding. So a carried element whose index is
+    // in the frame is carried only where the other side calls nothing, which is
+    // the same question `registerOperand` asks of a carried register. Left to the
+    // general form otherwise: the value is written to a slot of its own there,
+    // and the slot is not the scratch.
+    if (!survives) {
+      const index = this.plainIndex(value.index);
+      if (typeof index !== "bigint" && index !== null && index.register === null) return null;
+    }
     return this.elementAddress(value.of, value.index, element);
   }
 
@@ -4920,7 +4949,7 @@ class Machine {
       // The side the accumulator does not take, which is the only one a
       // difference and a quotient can carry.
       const carriedSide = commutative ? value.left : value.right;
-      const carried = this.carriedOperand(carriedSide, type);
+      const carried = this.carriedOperand(carriedSide, type, !hasCall(commutative ? value.right : value.left));
       if (carried !== null) {
         this.at(commutative ? value.right : value.left, type);
         this.code.sseMem(operation, XMM0, carried, single);
@@ -4930,7 +4959,7 @@ class Machine {
       // A sum and a product may hand the other side over instead, which is the
       // same instruction with the element on the other side of it.
       if (commutative) {
-        const other = this.carriedOperand(value.right, type);
+        const other = this.carriedOperand(value.right, type, !hasCall(value.left));
         if (other !== null) {
           this.at(value.left, type);
           this.code.sseMem(operation, XMM0, other, single);
@@ -5461,7 +5490,7 @@ class Machine {
     // below it: here the left side is the destination and the other one is the
     // source, which is the other way round from the branch, where the side held
     // is the destination.
-    const carried = isFloat(type) ? this.carriedOperand(value.right, type) : null;
+    const carried = isFloat(type) ? this.carriedOperand(value.right, type, !hasCall(value.left)) : null;
     if (carried !== null) {
       this.at(value.left, type);
       this.code.sseCompare(XMM0, carried, widthOf(type) === 4, true);
@@ -5700,9 +5729,17 @@ class Machine {
       this.code.leaLabel(RAX, this.lastLiteral);
       return;
     }
-    // Every part is measured before the string is laid out, so the buffer that
-    // holds it is exactly as long as the parts are.
+    // Every part is read before anything is measured, and every measure reads
+    // its part out of the frame rather than out of the register the read left
+    // it in. Measuring a part calls `strlen`, and a name the build gave a
+    // register of its own — a string pinned to one of the registers a call is
+    // written through, which is what a text local with no call reaching it
+    // gets — is gone after the first measure: `c = c + c` read the second `c`
+    // out of `rdi` after `strlen` had it, and answered a `strlen` of whatever the
+    // call left there. The liveness the allocator works from never saw a call
+    // in that statement, because the call is this lowering's own.
     const parts = value.parts.map(() => ({ pointer: this.hold(POINTER, "blaze_part"), length: this.hold(USIZE, "blaze_length") }));
+    const unmeasured: number[] = [];
     value.parts.forEach((part, at) => {
       if (part.k === "text") {
         this.literal(part.value);
@@ -5714,14 +5751,15 @@ class Machine {
       }
       // A part that came back measured is as long as it says, and one that did
       // not is text to begin with, which is the only shape left to measure.
-      const measured = this.asTextPart(part.value, parts[at].length);
+      if (!this.asTextPart(part.value, parts[at].length)) unmeasured.push(at);
       this.store(parts[at].pointer);
-      if (!measured) {
-        this.code.movRegReg(RDI, RAX);
-        this.library("strlen");
-        this.store(parts[at].length);
-      }
     });
+    for (const at of unmeasured) {
+      this.code.movRegMem(RAX, frame(parts[at].pointer.offset));
+      this.code.movRegReg(RDI, RAX);
+      this.library("strlen");
+      this.store(parts[at].length);
+    }
     const total = this.hold(USIZE, "blaze_total");
     this.code.movRegImm(RAX, 0n);
     for (const part of parts) {
@@ -6182,28 +6220,29 @@ class Machine {
     this.code.movRegImm(RDI, BigInt(layout.size));
     this.code.movRegImm(RSI, BigInt(layout.align));
     this.runtime("_object_new");
-    if (this.objectRegister !== null) {
-      this.code.movRegReg(this.objectRegister, RAX);
-      for (const written of value.fields) {
-        const field = this.field(value.layout, written.name);
-        const type = parseType(field.type);
-        this.at(written.value, type);
-        this.storeInto(type, this.objectRegister, field.offset);
-      }
-      this.code.movRegReg(RAX, this.objectRegister);
-      return;
-    }
+    // The object being built is kept in a slot of the frame as well as in the
+    // register the fields are written through, because anything a field's value
+    // reads that builds an object of its own takes that register for itself and
+    // does not hand it back. A field whose value reads a field of a nested
+    // literal — `{ x: { x: 100, y: 200 }.x, y: q.y }` — therefore wrote both of
+    // its fields into the *nested* block and left the object this literal
+    // allocated holding whatever the allocation before it had put there: `r.x`
+    // answered 30 where the source says 100.
+    const register = this.objectRegister;
     const object = this.hold(POINTER, "blaze_object");
     this.store(object);
-    this.code.movRegMem(RCX, frame(object.offset));
+    if (register !== null) this.code.movRegReg(register, RAX);
+    else this.code.movRegMem(RCX, frame(object.offset));
     for (const written of value.fields) {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
       this.at(written.value, type);
-      if (hasCall(written.value)) this.code.movRegMem(RCX, frame(object.offset));
-      this.storeInto(type, RCX, field.offset);
+      if (register !== null) this.code.movRegMem(register, frame(object.offset));
+      else this.code.movRegMem(RCX, frame(object.offset));
+      this.storeInto(type, register ?? RCX, field.offset);
     }
-    this.code.movRegReg(RAX, RCX);
+    if (register !== null) this.code.movRegReg(RAX, register);
+    else this.code.movRegReg(RAX, RCX);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -6528,13 +6567,21 @@ class Machine {
     const moves: Move[] = [];
     for (const { register, held, at } of registers) {
       if (at === placed) continue;
+      // An argument the caller left where it is was never written down, so it is
+      // in the accumulator and nowhere else. The slot it is named by may still
+      // carry a register of its own — a function whose arithmetic is inside a loop
+      // has spare vector registers to lend, and the slot was given one — and that
+      // register holds whatever the last thing to use it left there, because
+      // nothing ever wrote the argument into it. So the accumulator is asked
+      // about before the register is: a call whose argument is an element of an
+      // array answered the register instead of the element it read.
       const source =
-        held.register !== null
-          ? held.register
-          : at === fresh && onStack.length === 0
-            ? isFloat(held.type)
-              ? XMM0
-              : RAX
+        at === fresh && onStack.length === 0
+          ? isFloat(held.type)
+            ? XMM0
+            : RAX
+          : held.register !== null
+            ? held.register
             : null;
       if (source === register) continue;
       moves.push({ register, held, source });
