@@ -1018,10 +1018,17 @@ class Body {
    * carrier, which is what the two operators above compute. A `not-a-number`
    * is not zero, so it holds here as `f64.ne 0` says it does — the backend
    * does not give a whole other reading to a number it cannot compare.
+   *
+   * A wide number is not folded at all: it is held as an address rather than as
+   * a carrier, so `| 0` reads the low thirty-two bits of a number whose whole
+   * value may be above every one of them, and the arm the source does not take
+   * is the one a module would be left holding. The test is asked of it at run
+   * time like any other value's.
    */
   private known(value: SemanticValue): boolean | null {
     if (value.k === "bool") return value.value;
     if (value.k !== "const") return null;
+    if (value.type.kind === "primitive" && isWide(value.type.name)) return null;
     const held = facts(value.type).held;
     if (held === I32) return (Number(BigInt(value.text)) | 0) !== 0;
     if (held === I64) return BigInt(value.text) !== 0n;

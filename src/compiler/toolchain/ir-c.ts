@@ -709,6 +709,11 @@ class FunctionEmitter {
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
     const written = this.raw(value, depth);
     if (as === null || isTextType(value.type) || isTextType(as)) return written;
+    // A wide number is a struct, so the cast the conversions below write is a
+    // conversion to a non-scalar type, which is not a C source at all. The one
+    // conversion there is to a wide number is the widening, and it is the
+    // kernel's.
+    if (isWideType(as)) return this.widen(written, value);
     if (isNumber(value.type) && isNumber(as)) {
       return value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name
         ? written
@@ -716,6 +721,31 @@ class FunctionEmitter {
     }
     if (isReference(value.type) && isReference(as)) return `(${declaredType(as)})(${written})`;
     return written;
+  }
+
+  /**
+   * A value a use reads as a wide number, where the value itself is not one.
+   *
+   * A whole number is widened by the kernel that already builds a wide number
+   * out of one word, and the answer is the same number: the low limb holds the
+   * word it was written as and the three above it are nothing. Anything else has
+   * no form here — a double is not a set of limbs, and the kernel takes a word —
+   * so it is refused at the point where the cast used to be written.
+   */
+  private widen(written: string, value: SemanticValue): string {
+    if (isWideType(value.type)) return written;
+    if (!isInteger(value.type)) {
+      throw new CompilerError({
+        category: "SemanticIrError",
+        stage: "semantic-ir",
+        message: `a ${typeText(value.type)} is handed to a use that reads a wide number`,
+        detail:
+          "a wide number is four limbs, and a whole number is the only narrower value that has a limb in it: " +
+          "the kernel every backend widens with takes one machine word. Convert the value first, and say which of the two you meant",
+      });
+    }
+    const out = this.temporary("blaze_wide");
+    return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64(&${out}, (uint64_t)(${written})); ${out}; })`;
   }
 
   private raw(value: SemanticValue, depth: number): string {

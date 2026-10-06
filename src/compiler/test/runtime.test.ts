@@ -694,6 +694,48 @@ test("a string appended to itself is that string twice, and the block it left is
   assert.equal(result.stdout.trim(), "ok");
 });
 
+test("a block the slab pools is refused when it is released, as one given to the host is", async () => {
+  // The magic is what stands between a released pointer and a second use of it,
+  // and the pooled path returned before poisoning it: every block small enough
+  // for a slab — every small object, every short string, every small array —
+  // kept reading as live, so the check never fired for any of them. A second
+  // release then linked the block to itself and the class handed the same
+  // address out for ever, which is two live values in one piece of memory and a
+  // program that writes through one and reads through the other.
+  const probe = [
+    "#include <stdio.h>",
+    "#include <stdint.h>",
+    "#include <stddef.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "",
+    "int main(void) {",
+    "  void* block = blaze_rt_allocate(64);",
+    "  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)block - BLAZE_RT_HEADER_SIZE);",
+    '  if (header->magic != BLAZE_RT_MAGIC) { printf("a fresh block does not read as live\\n"); return 1; }',
+    `  ${RUNTIME_NAME}_release(block);`,
+    '  if (header->magic == BLAZE_RT_MAGIC) { printf("a pooled block still reads as live after its release\\n"); return 2; }',
+    `  ${RUNTIME_NAME}_release(block);`,
+    '  printf("a second release was refused\\n");',
+    "  return 3;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-pooled-release-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("debug"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  // The refusal is the runtime's own: it prints its reason and stops, so the
+  // probe's own last line is never reached.
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.notEqual(result.code, 3, `a second release of a pooled block must be refused: ${result.stdout}`);
+  assert.match(result.stderr, /not a live runtime pointer/);
+});
+
 test("a region hands out a block whose read past the end is a zero, as the language answers it", async () => {
   // The alignment is added to a block on top of the payload rather than taken
   // out of the slack the allocator leaves, and those bytes are what a read past

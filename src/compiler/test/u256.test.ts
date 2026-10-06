@@ -811,6 +811,125 @@ function wideArgumentContract(): FunctionContract {
   };
 }
 
+/**
+ * `function widen(n: u64): u256`, whose answer is the word it was handed.
+ *
+ * This is the one conversion into a wide number there is, and both backends got
+ * it wrong in the way a mistake about what a wide number *is* goes wrong: the C
+ * one wrote `(blaze_u256)(n)`, which is a conversion to a non-scalar type and so
+ * a source the C compiler refuses, and the machine one read four limbs out of a
+ * frame slot that only ever held one of them — so the three above were whatever
+ * the body had left beside the word.
+ */
+function widenFunction(): SemanticFunction {
+  return {
+    name: "widen",
+    symbol: "widen",
+    params: [{ kind: "value", name: "n", mutable: false, type: U64 }],
+    returns: U256,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: { id: "entry", statements: [], releases: [], terminator: { k: "return", value: { k: "local", type: U64, name: "n" } } },
+  };
+}
+
+function widenContract(): FunctionContract {
+  return {
+    ...wideArgumentContract(),
+    function: { name: "widen", symbol: "widen", params: [{ name: "n", type: "u64" }], returns: "u256" },
+  };
+}
+
+test("the C backend widens a machine word into a wide number and answers it", async () => {
+  const directory = await scratch("blaze-u256-widen-c-");
+  const runtime = await buildStandaloneRuntime(directory);
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      "struct blaze_u256 { uint64_t limbs[4]; };",
+      "extern struct blaze_u256 widen(uint64_t n);",
+      "int main(void) {",
+      `  const uint64_t word = ${0xfedcba9876543210n}n;`,
+      "  struct blaze_u256 r = widen(word);",
+      "  int ok = r.limbs[0] == word && r.limbs[1] == 0 && r.limbs[2] == 0 && r.limbs[3] == 0;",
+      '  printf("%s\\n", ok ? "right" : "wrong");',
+      "  return ok ? 0 : 1;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "widen.c"),
+    [
+      "#include <stdint.h>",
+      "struct blaze_u256 { uint64_t limbs[4]; };",
+      "void blaze_rt_u256_from_u64(struct blaze_u256* out, uint64_t value);",
+      generateFunctionC(widenFunction()),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "widen");
+  const built = run(
+    "gcc",
+    ["-std=c11", "-O2", join(directory, "driver.c"), join(directory, "widen.c"), runtime.objectPath, "-o", binary],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(built.code, 0, `the widened C must build:\n${built.stderr}`);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.stdout.trim(), "right", `a whole number widened is the number it was:\n${ran.stderr}`);
+});
+
+test("the machine backend widens a machine word into a wide number and answers it", async () => {
+  const directory = await scratch("blaze-u256-widen-machine-");
+  const runtime = await buildStandaloneRuntime(directory);
+  const object = join(directory, "widen.o");
+  const built = await buildMachineObject({
+    fn: widenFunction(),
+    contract: widenContract(),
+    target: TARGET,
+    callable: new Set<string>(),
+    objectPath: object,
+  });
+  assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      "struct blaze_u256 { uint64_t limbs[4]; };",
+      "extern struct blaze_u256 widen(uint64_t n);",
+      "int main(void) {",
+      `  const uint64_t word = ${0xfedcba9876543210n}n;`,
+      "  struct blaze_u256 r = widen(word);",
+      "  int ok = r.limbs[0] == word && r.limbs[1] == 0 && r.limbs[2] == 0 && r.limbs[3] == 0;",
+      '  printf("%s\\n", ok ? "right" : "wrong");',
+      "  return ok ? 0 : 1;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "widen");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.stdout.trim(), "right", `a whole number widened is the number it was:\n${ran.stderr}`);
+});
+
 test("the machine backend answers a wide complement, negation, comparison and choice", async () => {
   // Four more shapes, and each is a different answer to the same question of
   // where a wide value lives while it is being worked on.

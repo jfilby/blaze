@@ -77,6 +77,7 @@ import {
   NUMERIC,
   TEXT,
   VOID,
+  commonNumber,
   isBoolean,
   isFloat,
   isReference,
@@ -442,7 +443,20 @@ function isBigint(value: DraftValue): boolean {
       // this `console.log(f())` for a `f(): bigint` printed the number without
       // the `n` that is what says it is a bigint, and `f() + 1n` was refused as
       // a bigint mixed with a number.
-      return value.call.bigint;
+      if (value.call.bigint) return true;
+      // A `u256` is the compiler's own spelling of a bigint too wide for a
+      // machine word, and nothing in the signature says whether the program
+      // wrote it with an `n` beside it: what the arguments were is what says.
+      // A wide number the source wrote as a number prints its digits and one it
+      // wrote as a bigint prints them with the marker, and the source this
+      // program is checked against is what settles which.
+      const returns = primitive(value.call.returns);
+      return (
+        returns !== null &&
+        isWide(returns) &&
+        value.call.args.length > 0 &&
+        value.call.args.every((argument) => isBigint(argument))
+      );
     default:
       return false;
   }
@@ -559,13 +573,43 @@ function contractsOf(program: ProgramContract): Map<string, { signature: Functio
 
 /**
  * The whole number a whole operator yields. `%`, a shift and a bitwise operator
- * are operations on whole numbers whatever the literals were written as, and
- * `1 << 4` is 16 rather than a shift of two doubles, so the result is a whole
+ * are operations on whole numbers whatever the literals they were written as,
+ * and `1 << 4` is 16 rather than a shift of two doubles, so the result is a whole
  * number: the one the operands share when both are already whole, and an i64
  * otherwise.
+ *
+ * A wide number is the exception, and it is the one that matters for the same
+ * reason `numericResult` makes it: an operation over one keeps the width it was
+ * written at, because a machine word is not wide enough to hold the three limbs
+ * above the first and they are gone before a backend is handed the value. A
+ * literal beside one is the widening rather than a narrower number, so it is
+ * not what stops this.
  */
 function wholeResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName | null): PrimitiveTypeName {
+  if (left !== null && isWide(left)) return left;
+  if (right !== null && isWide(right)) return right;
   return left !== null && right !== null && isWhole(left) && isWhole(right) ? programWholeOf(left, right) : "i64";
+}
+
+/**
+ * The type one side of an operation is read at, which is the width the whole is
+ * computed at — unless the value is not a number that width holds.
+ *
+ * A whole number and a fraction are the one pair where reading the fraction at
+ * the whole one is not a conversion but a different number: `1.5` read as a
+ * `u256` is 1, and `a + 1.5` is then `a + 1`. The operation states one width, so
+ * the side keeps its own and the validator names the pair it cannot compute.
+ */
+function sideType(value: DraftValue, result: TypeExpr | null): TypeExpr | null {
+  if (result === null) return null;
+  const held = primitive(result);
+  if (held === null || !isWhole(held)) return result;
+  const written = primitive(draftType(value));
+  // A literal with no type of its own is a number as the source wrote it, and
+  // what it was written as is in its text: `1.5` is a fraction whatever it is
+  // initializing, and a whole result does not hold one.
+  if (written === null) return value.k === "literal" && !isWholeLiteral(value.held.text) ? null : result;
+  return isWhole(written) ? result : null;
 }
 
 /** The array forms a declaration is the allocation of, rather than an alias of. */
@@ -2204,9 +2248,14 @@ class ProgramResolver {
     // is whole here because it is written without a point.
     if (value.op === "~") {
       // Inverting a number gives a signed one, as it does in the language: the
-      // bits of 3 inverted are -4, and not a very large unsigned number.
+      // bits of 3 inverted are -4, and not a very large unsigned number. A wide
+      // number is the one exception, because a signed machine word is not wide
+      // enough to hold the three limbs above the first and they would be gone
+      // before a backend was handed the value: a complement of four limbs is
+      // what `~` is over a `u256`.
       const name = primitive(draftType(operand));
       if (name !== null && !isWhole(name)) throw programError("~ needs a whole number", this.body, line);
+      if (name !== null && isWide(name)) return { k: "unary", op: value.op, operand, type: numeric(name) };
       // `-` and `~` answer a bigint as a bigint: `~5n` is `-6n` in the language
       // and not `-6`, and the difference is the `n` the printer writes after the
       // digits. The mark is on the operand rather than on the operator, so a
@@ -2333,7 +2382,16 @@ class ProgramResolver {
     // answered it as a whole number would be answering a different program.
     const leftBig = isBigint(left);
     const rightBig = isBigint(right);
-    if (leftBig !== rightBig) {
+    // A wide number is not a number the language raises on: the language has no
+    // such type, so a `u256` beside a bigint is the compiler's own widening of
+    // one rather than a mix of two kinds, and what the widening holds is the
+    // validator's rule (`semantics/ir-validate.ts:wideningReason`) rather than
+    // this one.
+    const wideBeside = [left, right].some((value) => {
+      const name = primitive(draftType(value));
+      return name !== null && isWide(name);
+    });
+    if (leftBig !== rightBig && !wideBeside) {
       // What each side is, rather than which of the two is a bigint: a `u256`
       // is held at sixty-four bits and so reads as one here, and naming the two
       // as "a bigint and a bigint" says of a program that nothing is wrong.
@@ -3305,22 +3363,29 @@ class ProgramLowering {
         };
       case "call":
         return this.builtin(value.call, line);
-      case "compare":
+      case "compare": {
+        // Two strings are compared as the strings they are, at no number at
+        // all, which is the only comparison with no operand behind it.
+        if (value.how === "string") {
+          return {
+            k: "compare",
+            type: BOOLEAN,
+            op: value.negate ? "ne" : "eq",
+            operand: TEXT,
+            left: this.value(value.left, null, line),
+            right: this.value(value.right, null, line),
+          };
+        }
+        const operand = this.compared(value.left, value.right);
         return {
           k: "compare",
           type: BOOLEAN,
           op: value.negate ? "ne" : "eq",
-          // Two bigints are compared as the whole numbers they are, and anything
-          // else as the double every number in a program is.
-          operand:
-            value.how === "string"
-              ? TEXT
-              : isBigint(value.left) && isBigint(value.right)
-                ? numeric(BIGINT_TYPE)
-                : this.operand,
-          left: this.value(value.left, null, line),
-          right: this.value(value.right, null, line),
+          operand,
+          left: this.value(value.left, operand, line),
+          right: this.value(value.right, operand, line),
         };
+      }
       case "isNull":
         return { k: "isNull", type: BOOLEAN, operand: this.value(value.operand, null, line), negate: value.negate };
       case "unary":
@@ -3359,6 +3424,25 @@ class ProgramLowering {
    * `i64` beside a fraction is not that comparison.
    */
   private readonly operand: TypeExpr = numeric("f64");
+
+  /**
+   * The type two values of a program are compared at, which is the double they
+   * are — with the one exception a wide number is.
+   *
+   * A wide number is not a machine word, so there is no double it is read as:
+   * the kernel compares two of them limb by limb, and a pair that includes one
+   * is compared at the wide number itself or not at all. This is the rule
+   * `semantics/ir-function.ts` reads through `commonNumber` for a body inside a
+   * function, and it is read here through the same one, so the same comparison
+   * is the same IR whether it is written in a function or in a program body.
+   */
+  private compared(left: DraftValue, right: DraftValue): TypeExpr {
+    const here = primitive(draftType(left));
+    const there = primitive(draftType(right));
+    const pair = commonNumber(here === null ? null : numeric(here), there === null ? null : numeric(there));
+    if (pair !== null && pair.kind === "primitive" && isWide(pair.name)) return numeric(pair.name);
+    return isBigint(left) && isBigint(right) ? numeric(BIGINT_TYPE) : this.operand;
+  }
 
   /** A value as text, which is how a string carries a number. */
   private written(value: DraftValue, line: number): SemanticValue {
@@ -3486,11 +3570,12 @@ class ProgramLowering {
       };
     }
     // The two sides of a comparison are compared as the double they are, which
-    // is what a number in a program is whichever array it was read out of — and
-    // as the whole number they are when both of them are bigints.
+    // is what a number in a program is whichever array it was read out of — as
+    // the whole number they are when both of them are bigints, and as the wide
+    // number they are when one of them is one.
     const comparison = COMPARISONS[op];
     if (comparison !== null) {
-      const operand = isBigint(value.left) && isBigint(value.right) ? numeric(BIGINT_TYPE) : this.operand;
+      const operand = this.compared(value.left, value.right);
       return {
         k: "compare",
         type: BOOLEAN,
@@ -3500,8 +3585,18 @@ class ProgramLowering {
         right: this.value(value.right, operand, line),
       };
     }
-    const left = this.value(value.left, value.type, line);
-    const right = this.value(value.right, value.type, line);
+    // Both sides are read at the one width the operation states, so a number
+    // written as a fraction beside a whole number is read as the fraction it
+    // is: `a + 1.5` over a `u256` is a mix the kernel has no answer for, and
+    // reading 1.5 as four limbs answers `a + 1` instead. A side that cannot be
+    // read at the width keeps its own type, and the validator names the pair.
+    const left = this.value(value.left, sideType(value.left, value.type), line);
+    // The count of a shift is the machine word the source wrote the shift by, and
+    // not the number being shifted: the kernel every backend shifts a wide number
+    // with takes one word of count, and a four-limb count is a count of 256 bits
+    // that each target truncates to a different answer.
+    const counted = op === "<<" || op === ">>" || op === ">>>";
+    const right = this.value(value.right, counted ? numeric("usize") : sideType(value.right, value.type), line);
     // A string added to a string is the one operation with no number behind
     // it: the two arms were text, and it is text the IR states.
     if (value.type === null) return { k: "arith", type: TEXT, op: "concat", left, right };

@@ -437,11 +437,18 @@ export function isSafeToCompute(value: SemanticValue): boolean {
   }
 }
 
-/** The slot a computed value is bound to, which is what its own type asks for. */
-export function slotFor(value: SemanticValue, name: string): SemanticSlot {
-  if (isTextType(value.type)) return { kind: "text", name, mutable: false };
-  if (isReference(value.type)) return { kind: "object", name, mutable: false, type: value.type };
-  return { kind: "value", name, mutable: false, type: value.type };
+/**
+ * The slot a computed value is bound to, which is what its own type asks for.
+ *
+ * A binding the body writes again is a place rather than a binding, and says so
+ * with `mutable`: the validator holds every write to a name the source declared
+ * immutable, so an inlined parameter the callee's own body writes — bound here
+ * to the copy it was given — has to be a name that can be written.
+ */
+export function slotFor(value: SemanticValue, name: string, mutable = false): SemanticSlot {
+  if (isTextType(value.type)) return { kind: "text", name, mutable };
+  if (isReference(value.type)) return { kind: "object", name, mutable, type: value.type };
+  return { kind: "value", name, mutable, type: value.type };
 }
 
 /** A type, as a diagnostic names it. */
@@ -980,7 +987,7 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
     bindings.set(param.name, structuredClone(argument));
     if (!writesName(callee, param.name)) return;
     const name = freshName(taken, "inlined");
-    const slot = slotFor(argument, name);
+    const slot = slotFor(argument, name, true);
     before.push({ k: "let", slot, value: structuredClone(argument), line });
     bindings.set(param.name, { k: "local", type: slotType(slot), name });
     writes.set(param.name, name);

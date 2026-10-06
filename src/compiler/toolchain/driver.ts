@@ -637,11 +637,6 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     if (kind === "text") return [`program_print_string(${value});`];
     if (kind === "null") return [`program_print_string("null");`];
     if (kind === "boolean") return [`fputs((${value}) ? "true" : "false", stdout);`];
-    // A bigint is written with the `n` after it that says which of the two it is,
-    // and it is the same sixty-four bit whole number either way — so the format
-    // is the whole number's and the suffix is part of it.
-    if (bigint) return [`printf("%lldn", (long long)(${value}));`];
-    if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
     // A wide number is four limbs and no machine register, so it is never cast
     // to a scalar: `printf("%llu", (unsigned long long)(a_u256))` is C the
     // compiler rejects as "aggregate value used where an integer was
@@ -649,7 +644,21 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // The value is written into a temporary first, because the formatter wants
     // its address and a call is not an lvalue: `&(f(x))` is C the compiler
     // rejects as "lvalue required as unary '&' operand".
-    if (type !== null && isWideType(type)) return [`({ blaze_u256 blaze_wide_value = ${value}; program_print_wide(&blaze_wide_value); });`];
+    //
+    // The `n` is what says the source wrote this value as a bigint, so it
+    // follows the value rather than the type: a wide number the source wrote as
+    // a number prints its digits and one it wrote as a bigint prints them with
+    // the marker, which is what the source this program is checked against
+    // prints. The language has no `u256`, so the type alone cannot say.
+    if (type !== null && isWideType(type)) {
+      const printed = `({ blaze_u256 blaze_wide_value = ${value}; program_print_wide(&blaze_wide_value);`;
+      return [bigint ? `${printed} fputc('n', stdout); });` : `${printed} });`];
+    }
+    // A bigint is written with the `n` after it that says which of the two it is,
+    // and it is the same sixty-four bit whole number either way — so the format
+    // is the whole number's and the suffix is part of it.
+    if (bigint) return [`printf("%lldn", (long long)(${value}));`];
+    if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
     const format = type !== null && isUnsigned(type) ? "%llu" : "%lld";
     const cast = type !== null && isUnsigned(type) ? "unsigned long long" : "long long";
     return [`printf("${format}", (${cast})(${value}));`];
@@ -785,8 +794,62 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     if (kernel === undefined) {
       throw driverError(`a wide number has no ${op}, and the kernel has no answer for it`);
     }
+    // The kernel reads the number through a pointer, so it is bound to a name of
+    // its own first. An operand that is an operation is a compound literal in C,
+    // and there is no address to take of one.
     const out = `blaze_wide_${(this.builds += 1)}`;
-    return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_${kernel}(&${out}, &${left}, &${right}); ${out}; })`;
+    const first = `blaze_wide_left_${this.builds}`;
+    // A shift is the one operation whose second side is a count of bits rather
+    // than a number of the type: the kernel declares it `unsigned`, and the
+    // count is the machine word the source wrote the shift by, so it is bound as
+    // one rather than as four limbs a kernel would take a pointer to.
+    const counted = op === "shl" || op === "shr";
+    const second = `blaze_wide_${counted ? "count" : "right"}_${(this.builds += 1)}`;
+    const declared = counted ? `const unsigned ${second} = (unsigned)(${right});` : `const blaze_u256 ${second} = ${right};`;
+    const given = counted ? second : `&${second}`;
+    return (
+      `({ blaze_u256 ${out}; ` +
+      `const blaze_u256 ${first} = ${left}; ` +
+      `${declared} ` +
+      `${RUNTIME_NAME}_u256_${kernel}(&${out}, &${first}, ${given}); ${out}; })`
+    );
+  }
+
+  widen(value: string): string {
+    // A whole number widened into a wide number is the word it is in the low
+    // limb and nothing above it, which is the one copy of that every backend
+    // shares. A cast from a scalar to a struct is not C at all.
+    const out = `blaze_wide_${(this.builds += 1)}`;
+    return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64(&${out}, (uint64_t)(${value})); ${out}; })`;
+  }
+
+  wideCompare(op: string, left: string, right: string): string {
+    // The kernel walks the four limbs from the top down, so a pair of wide
+    // numbers is ordered by a call rather than by an operator C does not have.
+    const kernel = op === "eq" || op === "ne" ? "equal" : "less";
+    const first = `blaze_wide_left_${(this.builds += 1)}`;
+    const second = `blaze_wide_right_${(this.builds += 1)}`;
+    const test = `${RUNTIME_NAME}_u256_${kernel}(&${first}, &${second})`;
+    const flip = op === "ne" || op === "ge" || op === "gt" ? "!" : "";
+    return (
+      `({ const blaze_u256 ${first} = ${left}; ` +
+      `const blaze_u256 ${second} = ${right}; ${flip}${test}; })`
+    );
+  }
+
+  wideUnary(op: string, operand: string): string {
+    // A complement is the only one of its operations a wide number has: the
+    // answer of a negation is below zero, and the validator refuses that before
+    // it ever reaches a driver.
+    if (op !== "bitNot") {
+      throw driverError(`a wide number has no ${op}, and the kernel has no answer for it`);
+    }
+    const out = `blaze_wide_${(this.builds += 1)}`;
+    const moved = `blaze_wide_moved_${this.builds}`;
+    return (
+      `({ blaze_u256 ${out}; const blaze_u256 ${moved} = ${operand}; ` +
+      `${RUNTIME_NAME}_u256_not(&${out}, &${moved}); ${out}; })`
+    );
   }
 
   operator(op: string): string {

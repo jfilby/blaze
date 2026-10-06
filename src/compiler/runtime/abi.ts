@@ -1280,11 +1280,19 @@ void blaze_rt_release(void* pointer) {
        class is the size the block occupies, and its capacity and its alignment
        are the two that size is made of, so a block is put back on the class it
        was taken off: capacity and alignment do not change under a live block,
-       because the block that grows into a new capacity is a new block. */
+       because the block that grows into a new capacity is a new block. The magic
+       is poisoned here as it is on the path below, because this block is dead
+       too: a block that keeps it reads as live to every check, which is the one
+       the release of a pooled block is most often missed by — a second release
+       links it to itself and the class hands the same address out forever. The
+       slab takes it back without looking at the magic (blaze_rt_block writes
+       every header field afresh), so a poisoned entry is revalidated on the way
+       out. */
     const size_t cls = blaze_rt_class_of(header->capacity + header->alignment + BLAZE_RT_HEADER_SIZE, header->alignment);
     if (cls != 0) {
       header->base = (void*)blaze_rt_released[cls - 1];
       blaze_rt_released[cls - 1] = header;
+${guarded ? "      header->magic = 0;" : ""}
       return;
     }
   }

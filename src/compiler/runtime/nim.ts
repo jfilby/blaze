@@ -551,10 +551,17 @@ proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
     ## alignment are the two that size is made of, so a block goes back on the
     ## class it was taken off: capacity and alignment do not change under a live
     ## block, because the block that grows into a new capacity is a new block.
+    ## The magic is poisoned here as it is on the path below, because this block
+    ## is dead too: a block that keeps it reads as live to every check, which is
+    ## what the release of a pooled block is most often missed by — a second
+    ## release links it to itself and the class hands the same address out
+    ## forever. The slab takes it back without looking at the magic, so a
+    ## poisoned entry is revalidated on the way out.
     let cls = blazeClassOf(header[].capacity + header[].alignment + BlazeHeaderSize, header[].alignment)
     if cls != 0:
       header[].base = cast[pointer](blazeReleased[cls - 1])
       blazeReleased[cls - 1] = header
+${guarded ? "      header[].magic = BlazeFreed" : ""}
       return
   let base = header[].base
 ${guarded ? "  header[].magic = BlazeFreed" : ""}

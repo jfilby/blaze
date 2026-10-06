@@ -268,23 +268,24 @@ export function reusableFiles(
   // and a stored candidate was rebuilt on every build for the life of the
   // project. The module is what it delivers.
   if (lowering === "wasm") return [paths.module, paths.implementation];
-  // A kind that links a candidate on its own delivers the executable that
-  // links, so the executable is a file the build consumes and one that is not
-  // there is a candidate that has to be rebuilt. The `machine` branch below
-  // always needs it, because nothing else links it; `ir` needs it only when
-  // the candidate is standalone, which is what the call the program holds
-  // decides.
+  // A candidate that links on its own delivers the executable that links, and
+  // one that does not has none: `materialize` below returns before the harness
+  // link for a candidate that calls another function of the program, because the
+  // program is what has to run it. So the executable is a file the build
+  // consumes exactly when the candidate is standalone, whatever the output kind
+  // is — naming it for a `machine` build regardless made a stored candidate
+  // that can never be complete, so it was rebuilt on every build for the life of
+  // the project.
   //
   // The object is a separate question and the answer does not depend on the
   // output kind: every kind that assembles writes one, and a program build
   // links it for every function it holds. Asking the executable question
   // first and returning its answer is what used to drop the object, so both
   // files are collected and the list is built once.
-  const executable = output === "machine" || (output === "ir" && standalone);
   return [
     paths.implementation,
     delivered,
-    ...(executable ? [paths.executable] : []),
+    ...(standalone ? [paths.executable] : []),
     ...(linksObjects ? [paths.object] : []),
   ];
 }

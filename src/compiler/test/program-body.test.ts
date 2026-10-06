@@ -1681,17 +1681,27 @@ test("a wide number is written by the kernel every backend shares", async () => 
 });
 
 test("a refusal names what each side of the operation is", async () => {
-  // A `u256` is held at sixty-four bits, so it reads as a bigint here, and the
-  // refusal said a program could not "mix a bigint and a bigint". What each
-  // side is, in the language's own words, is what a person reading the message
-  // needs.
-  const phase = phaseOf("typescript", { "main.ts": "const k = 1;\nlet a: u256 = 3;\nconsole.log(a << 70n);\n" }, "main.ts");
-  assert.throws(
-    () => resolveProgram(phase.body!, phase.program),
-    /cannot mix a u256 and a bigint/,
-  );
-  const plain = phaseOf("typescript", { "main.ts": "const k = 1;\nconsole.log(1n + 1.5);\n" }, "main.ts");
+  // What each side is, in the language's own words, is what a person reading
+  // the message needs: a program that cannot mix a bigint with a fraction is
+  // told a bigint and a number, not two things it cannot name.
+  const plain = phaseOf("typescript", { "main.ts": "console.log(1n + 1.5);\n" }, "main.ts");
   assert.throws(() => resolveProgram(plain.body!, plain.program), /cannot mix a bigint and a number/);
+  // A wide number beside a double is refused where the type of the operation is
+  // settled rather than where the source is read, because the widening that is
+  // allowed beside one is a whole number and not a fraction.
+  const wide = phaseOf("typescript", { "main.ts": "let a: u256 = 3;\nconsole.log(a + 1.5);\n" }, "main.ts");
+  const program = resolveProgram(wide.body!, wide.program);
+  assert.match(semanticIrProblems(program, wide.program).join("\n"), /a double is not a set of limbs/);
+});
+
+test("a wide number beside a bigint is the compiler's own widening", async () => {
+  // The language has no `u256`, so a bigint beside one is not a mix of two
+  // kinds: it is the compiler's spelling of a bigint too wide for a machine
+  // word, and the count of a shift is a machine word whatever it was written
+  // as. The shift below is the program, not a refusal about a mix.
+  const phase = phaseOf("typescript", { "main.ts": "let a: u256 = 3;\nconsole.log(a << 2n);\n" }, "main.ts");
+  const program = resolveProgram(phase.body!, phase.program);
+  assert.deepEqual(semanticIrProblems(program, phase.program), []);
 });
 
 test("a fill written for what it does is a statement a program runs", async () => {

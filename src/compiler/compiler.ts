@@ -37,7 +37,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
@@ -1769,6 +1769,15 @@ export async function runBuild(
       } else {
         const functionName = units[0].contract.function.name;
         const winner = selected[functionName];
+        // A candidate that calls another function of the program is linked only
+        // into that program, so the backend never writes a binary of its own for
+        // it and there is nothing to deliver beside the IR. This is the same
+        // question `codegen.ts:materialize` asks before it links a harness, read
+        // off the IR that is delivered below, and a candidate whose IR cannot be
+        // read is answered as one that calls out: the copy fails inside the
+        // build rather than a binary that was never written being delivered.
+        const implementation = await readFile(join(base, `${functionName}/${winner}.ir`), "utf8");
+        const standalone = !callsOutOfProgram(implementation, program, callableSymbols(units[0].contract, contracts));
         // What the build delivers is the target the lowering produced, beside
         // the IR it was lowered from, which is the text a model wrote and the
         // one a later repair round is shown. Every kind answers in the IR, so
@@ -1778,8 +1787,10 @@ export async function runBuild(
           await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
           outputPath = store.resolve(paths.outputModule);
         } else if (outputKind === "ir") {
-          await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
-          outputPath = store.resolve(paths.outputBinary);
+          if (standalone) {
+            await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
+            outputPath = store.resolve(paths.outputBinary);
+          }
         } else if (backendKind === "machine") {
           // The object is the artifact the compiler wrote, so it is what the
           // build delivers beside the IR it was written from. A `machine`
@@ -1787,7 +1798,7 @@ export async function runBuild(
           await deliver(`${functionName}/${winner}.o`, paths.outputObject);
           outputAssemblyPath = store.resolve(paths.outputObject);
           outputPath = store.resolve(paths.outputObject);
-          if (outputKind === "machine") {
+          if (outputKind === "machine" && standalone) {
             await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = store.resolve(paths.outputBinary);
           }
@@ -1798,7 +1809,7 @@ export async function runBuild(
           await deliver(`${functionName}/${winner}.${outputKind === "c" ? "c" : "s"}`, target);
           outputAssemblyPath = store.resolve(target);
           outputPath = store.resolve(target);
-          if (outputKind === "machine") {
+          if (outputKind === "machine" && standalone) {
             await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = store.resolve(paths.outputBinary);
           }

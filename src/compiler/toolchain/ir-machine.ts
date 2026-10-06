@@ -3690,7 +3690,13 @@ class Machine {
           this.code.packedMove(into, turn.counter);
           return;
         }
-        this.code.movsLoad(into, frame(this.slot(value.name).offset), false);
+        // A name the build gave a register of its own is in it, and its frame
+        // offset is the first slot's own address rather than a slot of its own,
+        // so it is read out of that register. Read from the frame instead it is
+        // the first slot's value, which is whatever the body last left there.
+        const held = this.slot(value.name);
+        if (held.register !== null) this.code.movsMove(into, held.register, false);
+        else this.code.movsLoad(into, frame(held.offset), false);
         this.code.unpackLow(into, into);
         return;
       }
@@ -4717,17 +4723,25 @@ class Machine {
     if (!typeEquals(element, value.type)) return null;
     if (!typeEquals(element, type)) return null;
     // An address the instruction is to name as its own operand is built here and
-    // used by the caller *after* it has written the other side, and an index the
-    // build gave no register of its own is read into the scratch — which a call
-    // writes its arguments into and over. The element is then read at whatever
-    // address the scratch was left holding. So a carried element whose index is
-    // in the frame is carried only where the other side calls nothing, which is
-    // the same question `registerOperand` asks of a carried register. Left to the
-    // general form otherwise: the value is written to a slot of its own there,
-    // and the slot is not the scratch.
+    // used by the caller *after* it has written the other side. What has to
+    // survive that is the index, and it survives in one of two ways or in
+    // neither: a constant is folded into the displacement and is written down
+    // with the address, and a register the convention preserves outlives
+    // anything. Everything else does not survive — an index in the frame is read
+    // into the scratch, which is a register a call writes its arguments into and
+    // over, and an index in a register the convention does not preserve is a
+    // register the call is free to have written its own answer into. Either way
+    // the element is read at whatever address was left behind, which is not the
+    // element the program named. So a carried element is carried only where the
+    // other side calls nothing, which is the same question `registerOperand`
+    // asks of a carried register. Left to the general form otherwise: the value
+    // is written to a slot of its own there, and the slot is not the scratch.
     if (!survives) {
       const index = this.plainIndex(value.index);
-      if (typeof index !== "bigint" && index !== null && index.register === null) return null;
+      if (typeof index !== "bigint") {
+        if (index === null) return null;
+        if (index.register === null || !CALLEE_SAVED.includes(index.register)) return null;
+      }
     }
     return this.elementAddress(value.of, value.index, element);
   }
@@ -5083,6 +5097,12 @@ class Machine {
    * instruction at any width, and the only question is how many.
    */
   private wideValue(value: SemanticValue): void {
+    // A value a use reads as a wide number is not always one the source wrote
+    // as one, and the cases below each answer a value that already is.
+    if (!isWideType(value.type)) {
+      this.wideFrom(value);
+      return;
+    }
     switch (value.k) {
       case "const": {
         const limbs = this.limbsOf(value.type);
@@ -5092,9 +5112,18 @@ class Machine {
         }
         return;
       }
-      case "local":
-        this.wideLoad(this.slot(value.name));
+      case "local": {
+        const held = this.slot(value.name);
+        // The name is read at the width of a wide number while the slot holds
+        // one machine word, so the three limbs above that word are the rest of
+        // the frame rather than the number the source wrote.
+        if (!isWideType(held.type)) {
+          this.wideFrom(value);
+          return;
+        }
+        this.wideLoad(held);
         return;
+      }
       case "arith":
         this.wideArithmetic(value);
         return;
@@ -5110,6 +5139,28 @@ class Machine {
           "a wide number is a literal, a name, or the answer to an operation on two of those, and nothing else yet",
         );
     }
+  }
+
+  /**
+   * A whole number widened into the limbs of a wide number.
+   *
+   * A value a wide number is asked for is not always one: a parameter of a
+   * wide number is handed a whole number as often as not, and the whole number
+   * is the machine word the low limb holds with three limbs of nothing above
+   * it. This is the widening every backend answers with, and it is what stands
+   * between a program and four limbs read out of a frame slot that only ever
+   * held one of them.
+   */
+  private wideFrom(value: SemanticValue): void {
+    if (isFloat(value.type)) {
+      throw machineError(
+        `a ${value.type.kind === "primitive" ? value.type.name : "f64"} is handed to a use that reads a wide number`,
+        "a wide number is four limbs and a double is not a set of them: the kernel every backend widens with takes one machine word, so only a whole number has a limb in it",
+      );
+    }
+    this.at(value, value.type);
+    this.code.movRegReg(WIDE_WORK[0], RAX);
+    for (let limb = 1; limb < WIDE_WORK.length; limb += 1) this.code.alu("xor", WIDE_WORK[limb], WIDE_WORK[limb], false);
   }
 
   /**

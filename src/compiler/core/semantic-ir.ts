@@ -291,10 +291,19 @@ export function wholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTy
  * a double is read, an array written where a slice of the same element is
  * read. A number is not a truth and a reference is not an array, so a use that
  * would have to mean one as the other is refused rather than converted.
+ *
+ * A wide number is the one kind with a rule of its own in both directions. Read
+ * as a machine word it is its low limb and the three above it are not there:
+ * `printf("%lld", (long long)(a_u256))` answers the low limb of a number the
+ * program wrote whole, and the C emitter has no cast to write and the machine
+ * backend no register to read it in. Written where a wide number is read it is
+ * the widening the kernel is for — one machine word in the low limb and nothing
+ * above it — which is a conversion every backend has and the one place a
+ * narrower value is admitted beside a wide number.
  */
 export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (typeEquals(from, to)) return true;
-  if (isNumber(from) && isNumber(to)) return true;
+  if (isNumber(from) && isNumber(to)) return !isWideType(from) || isWideType(to);
   if (isTextType(from) && isTextType(to)) return true;
   if (isReference(from) && isReference(to)) return true;
   if (isSequence(from) && isSequence(to)) {

@@ -144,6 +144,12 @@ export interface ProgramTarget {
   assign(name: string, operator: string, value: string, type: SemanticType | null): string;
   /** An operation over a wide number, which is a call into the shared kernel. */
   wideBinary(op: string, left: string, right: string): string;
+  /** A whole number widened into a wide number, which is not a cast. */
+  widen(value: string): string;
+  /** A comparison over two wide numbers, which is a call into the shared kernel. */
+  wideCompare(op: string, left: string, right: string): string;
+  /** A complement or a negation of a wide number, which is the kernel's too. */
+  wideUnary(op: string, operand: string): string;
   /** The line that changes one element of a buffer. */
   elementAssign(buffer: string, index: string, operator: string, value: string): string;
   /** The line that moves a number up or down. */
@@ -724,6 +730,11 @@ class ProgramEmitter {
     // every use reads it as.
     if (!isNumber(value.type) || !isNumber(as)) return text;
     if (value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name) return text;
+    // A wide number is a struct, and a cast from a scalar to a struct is a
+    // conversion to a non-scalar type, which is not a C source at all. The one
+    // conversion there is to a wide number is the widening, and it is the
+    // kernel's.
+    if (isWideType(as)) return this.target.widen(text);
     // A number read as a length or an index is read the way the language reads
     // one: a NaN is no length at all, and it is zero. A cast would leave
     // whatever the machine made of the value there instead, which for a NaN is
@@ -833,6 +844,12 @@ class ProgramEmitter {
       }
       return `${this.target.stringCompare(left, right)} ${COMPARE_OPERATORS[value.op]} 0`;
     }
+    // A wide number is four limbs and C compares a struct with `==` by identity
+    // and has no ordering at all, so a pair of them is the kernel's comparison
+    // rather than an operator over two machine words.
+    if (isWideType(value.operand)) {
+      return this.target.wideCompare(value.op, this.expression(value.left, value.operand), this.expression(value.right, value.operand));
+    }
     // The two sides are compared as one type, which the IR states: a whole
     // number and a literal are compared as whole numbers, not as two.
     const left = this.expression(value.left, value.operand);
@@ -842,6 +859,13 @@ class ProgramEmitter {
 
   private unary(value: SemanticValue & { k: "unary" }): string {
     if (value.op === "not") return this.target.logicalNot(this.condition(value.operand));
+    // A wide complement covers every limb, which C's `~` cannot be asked for
+    // over a struct, so it is the kernel's operation rather than an operator. A
+    // wide negation never arrives: the validator refuses it, because the answer
+    // the language gives is below zero and a wide number holds none.
+    if (value.op === "bitNot" && isWideType(value.type)) {
+      return this.target.wideUnary(value.op, this.expression(value.operand, value.type));
+    }
     if (value.op === "bitNot") return this.target.bitwiseNot(this.expression(value.operand, value.type));
     return `(${value.op === "neg" ? "-" : "+"}${this.expression(value.operand, value.type)})`;
   }
@@ -896,7 +920,11 @@ class ProgramEmitter {
       case "or":
       case "xor": {
         const left = this.expression(value.left, value.type);
-        const right = this.expression(value.right, value.type);
+        // The count of a shift is the machine word the source wrote the shift by,
+        // and the kernel takes one word of it: read at the number's own width a
+        // count over four limbs is `(unsigned)(a struct)`, which is not C.
+        const counted = value.op === "shl" || value.op === "shr" || value.op === "ushr";
+        const right = this.expression(value.right, counted ? USIZE : value.type);
         // A wide number is four limbs and no C operator, so an operation over
         // one is a call into the kernel every backend shares. Written as a C
         // operator it is `invalid operands to binary + (have 'blaze_u256' and

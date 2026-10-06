@@ -484,8 +484,10 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   // named by every list: a build that took the object-level short-circuit and
   // then found no IR to deliver failed after having linked and verified
   // everything else.
-  // A `machine` candidate is always linked on its own, so its executable is
-  // always a file the build consumes.
+  // A candidate that links on its own delivers the executable it links, and a
+  // `machine` candidate that does not has none: naming it anyway asked the
+  // build for a file that is never written, so the stored candidate could never
+  // be complete and every build rebuilt it for the life of the project.
   assert.deepEqual(names("machine", false, true), [".ir", ".s", ""]);
   // A standalone `ir` candidate delivers the executable it links.
   assert.deepEqual(names("ir", false, true), [".ir", ".ir", ""]);
@@ -493,9 +495,12 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   // executable and demanding one would make it a cache miss for ever.
   assert.deepEqual(names("ir", false, false), [".ir", ".ir"]);
   // Every kind that assembles produces an object, and a program build links it.
-  assert.deepEqual(names("asm", true, true), [".ir", ".s", ".o"]);
-  assert.deepEqual(names("c", true, true), [".ir", ".c", ".o"]);
-  assert.deepEqual(names("c", false, true), [".ir", ".c"]);
+  // A candidate that links on its own has the harness executable whatever kind
+  // it is: the harness is what its vectors run against, so a reused candidate
+  // whose executable is missing cannot be verified.
+  assert.deepEqual(names("asm", true, true), [".ir", ".s", "", ".o"]);
+  assert.deepEqual(names("c", true, true), [".ir", ".c", "", ".o"]);
+  assert.deepEqual(names("c", false, true), [".ir", ".c", ""]);
   // A wasm build writes the module and no assembly at all, so naming the
   // assembly here asked for a file that was never written and the object half
   // of the cache was unreachable for that backend for the life of the project.
@@ -516,7 +521,7 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("ir", true, true), [".ir", ".ir", "", ".o"]);
   assert.deepEqual(names("ir", true, false), [".ir", ".ir", ".o"]);
   assert.deepEqual(names("machine", true, true), [".ir", ".s", "", ".o"]);
-  assert.deepEqual(names("machine", true, false), [".ir", ".s", "", ".o"]);
+  assert.deepEqual(names("machine", true, false), [".ir", ".s", ".o"]);
   assert.deepEqual(names("asm", true, false), [".ir", ".s", ".o"]);
   // A wasm build links no object at all, whatever the program around it does.
   assert.deepEqual(names("wasm", true, true, "wasm"), [".wasm", ".ir"]);

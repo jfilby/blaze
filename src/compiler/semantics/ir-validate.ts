@@ -65,7 +65,7 @@ import type {
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { parseType, typeToString } from "./contract.ts";
-import { NO_CALLEES, refusalFor, type Callees } from "./parallel.ts";
+import { NO_CALLEES, reductionsFor, refusalFor, type Callees } from "./parallel.ts";
 import { refusalFor as regionRefusalFor } from "./region.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -167,20 +167,42 @@ const COUNTED_OPERATIONS: ReadonlySet<string> = new Set(["shl", "shr"]);
  * lowering, so a pair like that is refused here rather than carried to a target
  * that cannot answer it — the same place, and for the same reason, as the
  * operation a wide number does not have at all.
+ *
+ * A whole number the compiler can read is the one narrower value a pair is
+ * admitted with: it is the widening, which every backend answers with the same
+ * one machine word in the low limb, and the value is in the wide number's range
+ * because the compiler is the one holding it. A whole number it cannot read —
+ * a name, a parameter, a call — is not, for the reason the validator's own
+ * widening rule gives.
  */
-function widePairProblem(left: SemanticType, right: SemanticType, result: SemanticType, counted: boolean): string | null {
-  if (!isWideType(left) && !isWideType(right) && !isWideType(result)) return null;
+function widePairProblem(left: SemanticValue, right: SemanticValue, result: SemanticType, counted: boolean): string | null {
+  if (!isWideType(left.type) && !isWideType(right.type) && !isWideType(result)) return null;
   if (!isWideType(result)) {
-    return `a ${typeText(left)} and a ${typeText(right)} are read as a ${typeText(result)}, and a wide number is not a machine word`;
+    return `a ${typeText(left.type)} and a ${typeText(right.type)} are read as a ${typeText(result)}, and a wide number is not a machine word`;
   }
   // The left side is the value being operated on and the right one is the
   // value it is operated with, except in a shift, where the right one is a
   // count of bits: that is the machine word the source wrote the shift by, and
   // it is the one narrower number a wide number may be beside.
-  if (isWideType(left) && (counted || isWideType(right))) return null;
-  const narrow = isWideType(left) ? right : left;
-  const wide = isWideType(left) ? left : right;
+  if (counted) {
+    // A shift count is the machine word the source wrote the shift by, and the
+    // kernel takes one word of it: a count that is itself a wide number is a
+    // count of 256 bits, which every target truncates to a different answer.
+    if (isWideType(right.type)) {
+      return `a ${typeText(left.type)} is shifted by a ${typeText(right.type)}, and a shift count is the machine word the source wrote the shift by`;
+    }
+    if (isWideType(left.type)) return null;
+  }
+  if (isWideType(left.type) && (isWideType(right.type) || wholeLiteral(right))) return null;
+  if (isWideType(right.type) && wholeLiteral(left)) return null;
+  const narrow = isWideType(left.type) ? right.type : left.type;
+  const wide = isWideType(left.type) ? left.type : right.type;
   return `a ${typeText(narrow)} is computed with a ${typeText(wide)}, and the kernel every backend answers a wide number with is over two of them`;
+}
+
+/** A whole number written as its digits, which is the one widening there is. */
+function wholeLiteral(value: SemanticValue): boolean {
+  return value.k === "const" && isInteger(value.type) && WHOLE_TEXT.test(value.text);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -688,6 +710,16 @@ function valueProblems(tree: Tree): string[] {
         problems.push(`${prefix}"${name}" is not declared where it is written`);
         continue;
       }
+      // A name the source declared as a constant is a binding rather than a
+      // place, and writing one mutates a binding the program did not declare
+      // mutable: a parameter is written the same way, and an element of a walk
+      // is written by the walk itself. The resolver holds to this, so a body
+      // that breaks it is IR written by hand or by a model, and nothing
+      // downstream checks it again.
+      if (!slot.mutable) {
+        problems.push(`${prefix}"${name}" is not a name that can be written`);
+        continue;
+      }
       if (statement.k === "set" && statement.op !== "=") {
         problems.push(...compoundProblems(slotType(slot), statement.value, statement.op, prefix, name));
       }
@@ -747,6 +779,13 @@ function readTypeProblems(prefix: string, value: SemanticValue, scope: Scope): s
  * wider slot than it is read at has lost its high bits, and a double read as a
  * whole number has lost its fraction. A reference or a text read as something
  * else is a value nothing in the program can carry, whichever is wider.
+ *
+ * A wide number is the one that has no width to be read at, because it is not
+ * one register: it is read at its own width or not at all. Every exemption
+ * below is a machine word standing for a machine word, and a four-limb number
+ * meeting a double or a sixty-four bit whole number would pass straight through
+ * all of them and reach a backend that reads one word of the four — the number
+ * the program wrote whole, with its high limbs in whatever was beside it.
  */
 function narrowsTo(held: SemanticType, read: SemanticType): boolean {
   if (typeEquals(held, read)) return true;
@@ -756,6 +795,7 @@ function narrowsTo(held: SemanticType, read: SemanticType): boolean {
     return left !== null && right !== null && narrowsTo(left, right);
   }
   if (!isNumber(held) || !isNumber(read)) return false;
+  if (isWideType(held) || isWideType(read)) return false;
   // A whole number held as a double is every value the slot can hold, said as
   // the wider of the two — which is the arm `whole-numbers.ts` writes past the
   // reach its narrowing holds for. A double read as a whole number is the
@@ -784,6 +824,35 @@ const WHOLE_RANK: Record<string, number> = {
   usize: 4,
   u256: 5,
 };
+
+/**
+ * Why a value handed to a use that reads it as a wide number is refused, or
+ * null when the widening is the same number.
+ *
+ * A wide number is four limbs and the kernel every backend widens with takes one
+ * machine word, so a whole number is widened by putting that word in the low limb
+ * and nothing above it. That is the same number only where the word is a value
+ * the wide number holds. An unsigned whole number is one for every value it can
+ * hold and a literal is one the compiler reads, but a signed whole number has
+ * values below zero and a wide number has none: widening -26 answers 2^64 - 26,
+ * which is a number the program never wrote and which no backend can recover.
+ * A double is not a set of limbs at all, and the kernel takes a word rather than
+ * a fraction. So both are refused here, where the type of the use is decided,
+ * rather than carried to a backend that has no answer for them.
+ */
+function wideningReason(value: SemanticValue, as: SemanticType): string | null {
+  if (!isWideType(as) || isWideType(value.type)) return null;
+  // An unsigned whole number holds no value a wide number does not, and a
+  // literal is a value the compiler reads rather than one it has to be told.
+  const unsigned = isInteger(value.type) && value.type.kind === "primitive" && value.type.name.startsWith("u");
+  if (unsigned || (value.k === "const" && isInteger(value.type) && WHOLE_TEXT.test(value.text))) return null;
+  if (isFloat(value.type)) return "a double is not a set of limbs";
+  if (isNumber(value.type)) return "a signed whole number holds values below zero that a wide number does not";
+  return "a wide number is four limbs, and this is not one of them";
+}
+
+/** A whole number written as its digits, which is a value the compiler reads. */
+const WHOLE_TEXT = /^(?:0[xX][0-9a-fA-F]+|[0-9]+)$/;
 
 /* -------------------------------------------------------------------------- */
 /* Rule 4: types                                                              */
@@ -920,7 +989,7 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
             `${prefix}${value.op} is not defined over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}; a wide number has an add, a subtraction, a product, the logical operations and the shifts`,
           );
         }
-        const pair = widePairProblem(value.left.type, value.right.type, value.type, COUNTED_OPERATIONS.has(value.op));
+        const pair = widePairProblem(value.left, value.right, value.type, COUNTED_OPERATIONS.has(value.op));
         if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
         return problems;
       }
@@ -938,11 +1007,18 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       }
       // A shift, a remainder and a bitwise operator are operations on whole
       // numbers whatever the literals were written as, so they yield one: there
-      // is no shift of two doubles for a target to perform.
+      // is no shift of two doubles for a target to perform — and no remainder or
+      // bitwise combination of two strings either, which is what asking for the
+      // whole answer first used to let through: the check for numbers is below
+      // this, so a pair of texts over `%` or `&` was accepted and the backend
+      // wrote a C operator over two pointers.
       if (WHOLE_OPERATIONS[value.op] === true) {
         if (!isInteger(value.type)) {
           problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is not a whole number`);
           return problems;
+        }
+        if (!isNumber(value.left.type) || !isNumber(value.right.type)) {
+          problems.push(`${prefix}${value.op} over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
         }
         return problems;
       }
@@ -1008,7 +1084,7 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // C comparison, and the machine backend asks for the width a wide number
       // does not have. The count of a shift is the one narrower number a wide
       // number may be beside, and it is not a comparison.
-      const pair = widePairProblem(value.left.type, value.right.type, value.operand, false);
+      const pair = widePairProblem(value.left, value.right, value.operand, false);
       if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
       return problems;
     case "logical": {
@@ -1071,6 +1147,17 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // that cannot read it.
       if (value.op === "bitNot" && !isInteger(value.type)) {
         problems.push(`${prefix}bitNot of a ${typeText(value.operand.type)} is a ${typeText(value.type)}, which is not a whole number`);
+      }
+      // A complement and a negation are the two operations whose answer the
+      // language that wrote the program does not hold in a wide number: `~a` is
+      // `-(a) - 1` and `-a` is below zero however wide `a` is, and a `u256` is
+      // an unsigned number whose zero is at the bottom of its range. The four
+      // limb kernel answers 2^256 - 1 - a and 2^256 - a, which are the same bits
+      // and not the number the source wrote — a program checked against the
+      // source it was written as prints one and not the other, and there is no
+      // spelling of the source's answer this type holds.
+      if ((value.op === "bitNot" || value.op === "neg") && (isWideType(value.operand.type) || isWideType(value.type))) {
+        problems.push(`${prefix}${value.op} of a ${typeText(value.operand.type)} is a number below zero, and a wide number holds none`);
       }
       return problems;
     }
@@ -1196,12 +1283,18 @@ function typeProblems(context: Context, tree: Tree): string[] {
       if (!convertibleTo(statement.value.type, declared)) {
         problems.push(`${prefix}"${statement.slot.name}" holds a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
       }
+      const reason = wideningReason(statement.value, declared);
+      if (reason !== null) problems.push(`${prefix}"${statement.slot.name}" is written where a ${typeText(declared)} is read, and ${reason}`);
     }
     if (statement.k === "set" && statement.op === "=") {
       const slot = placed.scope.slots.get(statement.name);
       const declared = slot === undefined ? null : slotType(slot);
       if (declared !== null && !convertibleTo(statement.value.type, declared)) {
         problems.push(`${prefix}"${statement.name}" holds a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
+      }
+      if (declared !== null) {
+        const reason = wideningReason(statement.value, declared);
+        if (reason !== null) problems.push(`${prefix}"${statement.name}" is written where a ${typeText(declared)} is read, and ${reason}`);
       }
     }
     if (statement.k === "step") {
@@ -1219,6 +1312,8 @@ function typeProblems(context: Context, tree: Tree): string[] {
           if (!convertibleTo(statement.value.type, element)) {
             problems.push(`${prefix}"${statement.buffer}" holds a ${typeText(element)}, not a ${typeText(statement.value.type)}`);
           }
+          const reason = wideningReason(statement.value, element);
+          if (reason !== null) problems.push(`${prefix}"${statement.buffer}[...]" is written where a ${typeText(element)} is read, and ${reason}`);
         } else {
           problems.push(...compoundProblems(element, statement.value, statement.op, prefix, `${statement.buffer}[...]`));
         }
@@ -1351,6 +1446,19 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     if (argument === undefined) continue;
     if (!typeEquals(parameter, argument)) {
       problems.push(`${prefix}argument ${index + 1} of ${call.callee} is passed as a ${typeText(argument)} and is taken as a ${typeText(parameter)}`);
+    }
+    // The type an argument is passed as is not the type the value is: the value
+    // is what the program computed and this is the width the callee reads it at,
+    // and where the two are not one is a conversion a backend has to make. A
+    // wide number beside a machine word is the one there is no answer for.
+    const value = call.args[index];
+    if (value === undefined) continue;
+    if (!convertibleTo(value.type, argument)) {
+      problems.push(`${prefix}argument ${index + 1} of ${call.callee} is a ${typeText(value.type)} and is read as a ${typeText(argument)}`);
+    }
+    const reason = wideningReason(value, argument);
+    if (reason !== null) {
+      problems.push(`${prefix}argument ${index + 1} of ${call.callee} is a ${typeText(value.type)} where a ${typeText(argument)} is read, and ${reason}`);
     }
   }
 
@@ -1756,6 +1864,8 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
     if (!convertibleTo(value.type, fn.returns)) {
       problems.push(`${where}the body returns a ${typeText(value.type)} and is declared to return a ${typeText(fn.returns)}`);
     }
+    const reason = wideningReason(value, fn.returns);
+    if (reason !== null) problems.push(`${where}the body returns a ${typeText(value.type)} where a ${typeText(fn.returns)} is read, and ${reason}`);
     for (const read of localNames(value)) {
       if (!placed.final.visible.has(read)) {
         problems.push(`${where}returns ${read}, which the block it is written in does not hold`);
@@ -1866,9 +1976,30 @@ function parallelProblems(context: Context, tree: Tree): string[] {
     const loop = statement.loop;
     if (loop.kind !== "counted" && loop.kind !== "each") continue;
     if (loop.parallel !== true) continue;
+    const where = label(placed.block.block.id, statement.line);
     const refusal = refusalFor(loop, context.callees);
     if (refusal !== null) {
-      problems.push(`${label(placed.block.block.id, statement.line)}loop is marked parallel but ${refusal}`);
+      problems.push(`${where}loop is marked parallel but ${refusal}`);
+    }
+    // The reduction clauses are the other mark a body carries about itself, and
+    // they are proved rather than believed for the same reason the parallel mark
+    // is. The C backend writes each one as `#pragma omp parallel for
+    // reduction(op:name)`, which holds that accumulator private to the thread for
+    // the length of the body and combines the per-thread copies at the end, so a
+    // clause the body does not perform — a product where the turns add, a name
+    // the body never accumulates into — is a program whose answer is a number no
+    // turn computed. `refusalFor` above derives the clauses the body really has
+    // and never reads the ones written beside the mark, so IR text carries any
+    // it likes.
+    const derived = reductionsFor(loop.body, loop.kind === "counted" ? loop.variable : loop.index);
+    for (const reduction of loop.reductions ?? []) {
+      const performed = derived.get(reduction.name);
+      if (performed === undefined) {
+        problems.push(`${where}loop is marked parallel with a reduction on "${reduction.name}", and its body accumulates into no name`);
+      } else if (performed.op !== reduction.op) {
+        const verb = performed.op === "+" ? "adds into" : "multiplies into";
+        problems.push(`${where}loop is marked parallel with a ${reduction.op} reduction on "${reduction.name}", and its body ${verb} it`);
+      }
     }
   }
 

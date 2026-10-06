@@ -230,7 +230,7 @@ function returnsOutOfIt(loop: Extract<SemanticLoop, { kind: "counted" | "each" }
  * that accumulator is refused rather than marked as one whose order does not
  * matter.
  */
-function reductionsFor(body: SemanticBlock, counter: string): Map<string, SemanticReduction> {
+export function reductionsFor(body: SemanticBlock, counter: string): Map<string, SemanticReduction> {
   const declared = new Set<string>();
   for (const block of blocksWithin(body)) {
     for (const statement of block.statements) {

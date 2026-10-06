@@ -825,6 +825,45 @@ ${anchor}
     });
   }
 
+  widen(_value: string): string {
+    // The same reason as the binary above: a `u256` is four limbs and this
+    // runtime declares no such type, so a whole number widened into one is
+    // refused by name rather than written as a type this target does not have.
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: "the Nim driver cannot widen a whole number into a wide number",
+      detail:
+        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel",
+    });
+  }
+
+  wideCompare(_op: string, _left: string, _right: string): string {
+    // The same reason as the binary above: ordering two wide numbers is the
+    // kernel's walk of four limbs and this runtime declares no such type.
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: "the Nim driver cannot compare two wide numbers",
+      detail:
+        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel",
+    });
+  }
+
+  wideUnary(_op: string, _operand: string): string {
+    // The same reason again: a complement and a negation cover all four limbs.
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: "the Nim driver cannot write a wide number's own complement or negation",
+      detail:
+        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel",
+    });
+  }
+
   operator(op: string): string {
     const written = NIM_OPERATORS[op];
     if (written === undefined) throw hostError(`the driver cannot write ${op} down`);

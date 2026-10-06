@@ -675,7 +675,10 @@ test("a callee that writes its parameter does not write the caller's name", () =
   );
   assert.ok("ir" in result);
   assert.doesNotMatch(result.ir, /call bump/);
-  assert.match(result.ir, /let value\[f64\] inlined\d+ immutable = local\[f64\] x/, "the argument is copied to a temporary of its own");
+  // The temporary is a place the spliced body writes — `x = x + 1` inside
+  // `bump` lands on it — so it is bound as a name that can be written, and the
+  // caller's own `x` is still a binding.
+  assert.match(result.ir, /let value\[f64\] inlined\d+ mutable = local\[f64\] x/, "the argument is copied to a temporary of its own");
   assert.match(result.ir, /return \[add\[f64\] local\[f64\] x local\[f64\] y\]/, "and the caller still reads its own x");
 });
 
