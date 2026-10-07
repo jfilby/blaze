@@ -363,8 +363,11 @@ export function projectIdFor(inputPath: string): string {
  * says which project it is and is still unique.
  */
 function projectStoreId(absoluteInput: string): string {
-  return `${projectIdFor(absoluteInput)}-${hashText(absoluteInput).slice(0, 12)}`;
+  return `${projectIdFor(absoluteInput)}-${hashText(absoluteInput).slice(0, STORE_HASH_LENGTH)}`;
 }
+
+/** How much of a path's hash a store directory carries, which is what tells one name's entry from another's. */
+const STORE_HASH_LENGTH = 12;
 
 /**
  * The store directory a project name refers to.
@@ -372,19 +375,34 @@ function projectStoreId(absoluteInput: string): string {
  * A store directory carries the readable name and a hash of the path beside
  * it, because a name is not unique and two projects sharing one directory
  * overwrite each other's cache. A command that is handed a bare name rather
- * than a path therefore looks the directory up by its prefix rather than
+ * than a path therefore looks the directory up by that name rather than
  * computing one: the exact set of directories named for a project is what it
  * is asked about, and a name with nothing stored under it is the answer the
  * caller already reports.
+ *
+ * The name has to be the whole of it, not a prefix of it. A store directory for
+ * `app-2` also begins `app-`, so matching on the prefix answered `app` with
+ * another project's contract and candidates — and reported its results under
+ * the name asked for.
  */
 async function storedPaths(store: JsonStore, project: string): Promise<ProjectPaths> {
   const prefix = `${project}-`;
-  const found = (await store.list("projects")).filter((entry) => entry.startsWith(prefix));
+  const found = (await store.list("projects")).filter(
+    (entry) => entry.startsWith(prefix) && entry.length === prefix.length + STORE_HASH_LENGTH,
+  );
   if (found.length === 0) return projectPaths(project, project);
-  // More than one is two projects with the same name, and neither can be told
-  // from the other by the name alone; the first is as good an answer as any and
-  // the build that owns it is the one that wrote it last.
-  return projectPaths(project, found.sort()[0] as string);
+  // More than one is two projects with the same name and different paths, which
+  // a name alone cannot tell apart. The one that wrote its record last is the one
+  // whose answers are the most recent ones, and that is what this reads.
+  const written: [string, number][] = await Promise.all(
+    found.map(async (entry) => {
+      const paths = projectPaths(project, entry);
+      const build = (await store.exists(paths.build)) ? await store.read<BuildStatus>(paths.build) : undefined;
+      return [entry, Date.parse(build?.updatedAt ?? "") || 0] as [string, number];
+    }),
+  );
+  written.sort((left, right) => right[1] - left[1]);
+  return projectPaths(project, written[0]?.[0] as string);
 }
 
 function projectPaths(id: string, storeId: string): ProjectPaths {

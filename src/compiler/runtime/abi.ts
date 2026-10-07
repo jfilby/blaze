@@ -136,7 +136,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
       ["bytes", "size_t"],
     ],
     "Resizes a managed block, keeping its contents and its reference.",
-    "Returns the managed pointer; a null pointer allocates. A block grown within the capacity it already has is returned as it stands, with no copy.",
+    "Returns the managed pointer; a null pointer allocates. A block grown within the capacity it already has is returned as it stands, with no copy. A block that has to move is one the caller holds alone: every other holder of it is left pointing at the block the move released, so a shared block is refused by name in a guarded build.",
     { tags: ["memory"] },
   ),
   entry(
@@ -1234,6 +1234,14 @@ void* blaze_rt_reallocate(void* pointer, size_t bytes) {
     header->length = bytes;
     return pointer;
   }
+  /* A block that grows *moves*: the bytes are copied into a new block and this
+     one is released. Every other holder of it is therefore left holding the
+     block that was just released, which is a use after free whatever the count
+     says — carrying the count across the move would keep the new block alive for
+     holders that are reading the old one, so the same dangling pointer with the
+     count agreeing about it. A resize is the same program only where the caller
+     holds the only reference, so that is what is asked here. */
+${guarded ? '  if (header->references > 1) blaze_rt_refuse("a block that is resized must be the only reference to it");' : ""}
   /* Doubling is what keeps a loop of appends from being quadratic. The request
      is a floor rather than a target: a caller that asks for the exact size it
      needs still gets at least twice the block it had, so the next append of a
@@ -1266,7 +1274,14 @@ void blaze_rt_release(void* pointer) {
      live in one piece of it. The rewind takes the whole region instead, which
      is what the region exists for and what every block in it is there for. */
   if (blaze_rt_region_depth > 0) {
-    blaze_rt_header_of(pointer)->references = 0;
+    /* The block is not recycled while the region is open — the rewind takes the
+       whole region — but its count is still a count. Another holder of this block
+       is not going away because this one released it, and a count that reads as
+       nothing while two holders still hold it is what sends the *next* release
+       down the recycling path for a block that is live: the class hands the same
+       address out and two values are then one piece of memory. */
+    blaze_rt_header* open = blaze_rt_header_of(pointer);
+    if (open->references > 0) open->references -= 1;
     return;
   }
   blaze_rt_header* header = blaze_rt_header_of(pointer);

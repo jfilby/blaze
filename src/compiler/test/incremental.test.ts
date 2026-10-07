@@ -9,6 +9,8 @@ import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprint
 import { join } from "node:path";
 import { returns as returnsValue } from "./definition.ts";
 import { scratch } from "./scratch.ts";
+import { inspectProject, STATE_DIRECTORY } from "../compiler.ts";
+import type { BuildStatus } from "../core/types.ts";
 import { programWithSemantics } from "./phase.ts";
 
 function contractOf(name: string, returns: string, objects: Record<string, ObjectLayout> = {}): FunctionContract {
@@ -525,5 +527,40 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("asm", true, false), [".ir", ".s", ".o"]);
   // A wasm build links no object at all, whatever the program around it does.
   assert.deepEqual(names("wasm", true, true, "wasm"), [".wasm", ".ir"]);
+});
+
+test("two projects whose names share a prefix each read their own record", async () => {
+  // A store directory is `<name>-<12 hex of the path>`, so the directory for
+  // `app-2` also begins `app-`. A lookup on the prefix alone answered `app` with
+  // `app-2`'s record — and with its contract and candidates — under the name
+  // that was asked for.
+  const directory = await scratch("blaze-collide-");
+  const store = createJsonStore(join(directory, STATE_DIRECTORY));
+  const at = (id: string, updatedAt: string): BuildStatus =>
+    ({
+      id,
+      input: `${id}.toml`,
+      contract: `projects/${id}/contract.json`,
+      target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+      status: "success",
+      outputKind: "ir",
+      backend: "c",
+      mode: "debug",
+      runtime: "nim",
+      createdAt: updatedAt,
+      updatedAt,
+      sourceHash: "",
+      contractHash: "",
+      model: "replay",
+      modelConfig: "",
+      compilerVersion: "",
+      engine: "",
+    }) as BuildStatus;
+  // `app-2` is written last, so a lookup that takes the first directory
+  // alphabetically — which is what it used to do — reads `app-2` for `app`.
+  await store.write("projects/app-0123456789ab/build.json", at("app", "2026-01-01T00:00:00.000Z"));
+  await store.write("projects/app-2-0123456789ab/build.json", at("app-2", "2026-02-01T00:00:00.000Z"));
+  assert.equal((await inspectProject("app", directory)).id, "app");
+  assert.equal((await inspectProject("app-2", directory)).id, "app-2");
 });
 

@@ -539,7 +539,13 @@ proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
   ## live in one piece of it. The rewind takes the whole region instead, which
   ## is what the region exists for and what every block in it is there for.
   if blazeRegionDepth > 0:
-    header[].refs = 0
+    ## The block is not recycled while the region is open — the rewind takes the
+    ## whole region — but its count is still a count. Another holder of this
+    ## block is not going away because this one released it, and a count that
+    ## reads as nothing while two holders still hold it is what sends the next
+    ## release down the recycling path for a block that is live.
+    if header[].refs > 0:
+      dec header[].refs
     return
   if header[].refs > 1:
     dec header[].refs
@@ -584,6 +590,12 @@ proc blaze_rt_reallocate*(pointer: pointer, bytes: csize_t): pointer {.exportc, 
       zeroMem(cast[pointer](cast[uint](pointer) + previous.length), int(bytes.uint64 - previous.length))
     header[].length = bytes.uint64
     return pointer
+  ## A block that grows *moves*: the bytes are copied into a new block and this
+  ## one is released, so every other holder of it is left holding the block that
+  ## was just released. A resize is the same program only where the caller holds
+  ## the only reference, which is what the C runtime this is the twin of asks
+  ## there.
+${guarded ? '  if previous.refs > 1:\n    blazeStop("a block that is resized must be the only reference to it")' : ""}
   ## Doubling is what keeps a loop of appends from being quadratic. The request
   ## is a floor rather than a target.
   let wanted = previous.capacity + previous.capacity div 2 + 16

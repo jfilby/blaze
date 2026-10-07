@@ -1914,7 +1914,18 @@ class Body {
     this.code.varuint(limb * 8);
   }
 
-  /** The refusal of an operation on a wide number this file has not written. */
+  /**
+   * The refusal of an operation on a wide number this file has not written.
+   *
+   * A wide multiply is the one the other two backends answer and this one does
+   * not, and the reason is an instruction the format does not have rather than
+   * one this file has not reached: there is no `mulhi`, so a sixty-four by
+   * sixty-four product has to be four thirty-two by thirty-two ones put back
+   * together, and each of the ten limb products added into the answer with the
+   * carry chain. A build that needs one is refused here rather than handed a
+   * product that is the low half of every limb and nothing of the halves above,
+   * which would be a wrong answer wearing a module's clothes.
+   */
   private wideRefuse(op: string): never {
     throw new CompilerError({
       category: "AssemblyError",

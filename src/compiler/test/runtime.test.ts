@@ -736,6 +736,81 @@ test("a block the slab pools is refused when it is released, as one given to the
   assert.match(result.stderr, /not a live runtime pointer/);
 });
 
+test("a release inside a region drops one reference and leaves the other holders", async () => {
+  // A block in an open region is not recycled — the rewind takes the whole
+  // region — but its count is still a count. It used to be cleared instead of
+  // dropped, so a block three holders were holding read as free after one of
+  // them released it: the next release took the recycling path for a block that
+  // two holders were still reading, and the class handed the same address out
+  // again.
+  const probe = [
+    "#include <stdio.h>",
+    "#include <stdint.h>",
+    "#include <stddef.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "",
+    "int main(void) {",
+    "  void* held = blaze_rt_allocate(64);",
+    "  blaze_rt_retain(held);",
+    "  blaze_rt_retain(held);",
+    "  blaze_rt_region_enter();",
+    "  blaze_rt_release(held);",
+    "  blaze_rt_region_leave();",
+    "  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)held - BLAZE_RT_HEADER_SIZE);",
+    '  printf("%llu\\n", (unsigned long long)header->references);',
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-region-refs-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("debug"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.stdout.trim(), "2", `two holders are still holding it: ${result.stderr}`);
+});
+
+test("a block that is resized has to be one its caller holds alone", async () => {
+  // Resizing moves the bytes: a new block is made, the old one is released, and
+  // every other holder of the old one is left pointing at what was just released.
+  // Carrying the count across the move would keep the *new* block alive for
+  // holders that are reading the old one, which is the same dangling pointer
+  // with the count agreeing about it — so the shared case is refused by name
+  // rather than answered with a block half the program's pointers are wrong
+  // about.
+  const probe = [
+    "#include <stdio.h>",
+    "#include <stdint.h>",
+    "#include <stddef.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "",
+    "int main(void) {",
+    "  void* shared = blaze_rt_allocate(64);",
+    "  blaze_rt_retain(shared);",
+    "  void* moved = blaze_rt_array_resize(shared, 4096, 1);",
+    '  printf("a shared block was resized into %p\\n", moved);',
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-shared-resize-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("debug"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.match(result.stderr, /must be the only reference/);
+});
+
 test("a region hands out a block whose read past the end is a zero, as the language answers it", async () => {
   // The alignment is added to a block on top of the payload rather than taken
   // out of the slack the allocator leaves, and those bytes are what a read past

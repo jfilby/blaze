@@ -447,6 +447,19 @@ marked would write over what the outer turn took before the inner loop began.
 The loop the blocks are built in is the one whose turns pay to rewind, which on
 binarytrees is the inner loop and not the one wrapping it.
 
+The WebAssembly backend is the one place a wide number is not an operation the
+compiler has written for every target: it walks the four limbs in the module's
+own memory, and there is no instruction above sixty-four bits to walk with. A
+sum, a difference, the bitwise pair, the shifts and the comparisons are limb
+walks and are written; a product is not, because the format has `i64.mul` and
+no `mulhi`, so a limb product is four thirty-two by thirty-two ones put back
+together and each of the ten of them added into the answer with the carry chain.
+It is refused by name (`wideRefuse`) rather than answered with the low half of
+every limb and nothing of the halves above — the same refusal every backend
+gives an operation it has no answer for. `test/u256.test.ts`'s differential test
+names the set the backend answers, so a capability leaving it is a failing test
+rather than a line that quietly vanished.
+
 The runtime keeps one region cursor per thread, for the same reason the slab
 pool is per thread: the turns of a parallel loop are handed to threads of the
 host's, and a cursor shared between them would hand two turns the same block.
