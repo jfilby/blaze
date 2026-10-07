@@ -71,6 +71,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { CallEdge, Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
+import type { Expression, Statement } from "../core/ir.ts";
 import { ARGV, ARGV_LENGTH, SHARED, builtinFor } from "./builtins.ts";
 import {
   BOOLEAN,
@@ -180,6 +181,13 @@ interface DraftCall {
    * `n` after it and the second without.
    */
   bigint: boolean;
+  /**
+   * The same question of a wide number, which a signature cannot answer: a
+   * `u256` is this compiler's own spelling of a bigint too wide for a machine
+   * word, so whether the source wrote it with an `n` beside it is read from the
+   * body the callee returns. Null where the callee is not one this build holds.
+   */
+  wide: boolean | null;
 }
 
 /** One piece of a string: text as written, or a value interpolated into it. */
@@ -428,7 +436,11 @@ function numericResult(left: PrimitiveTypeName | null, right: PrimitiveTypeName 
  */
 const BIGINT_TYPE: PrimitiveTypeName = "i64";
 
-/** True when the value is a bigint, which is a whole number the program wrote an `n` beside. */
+/**
+ * True when the value is a bigint, which is a whole number the program wrote an
+ * `n` beside. A call carries the answer its callee's body gives rather than
+ * working it out here, which is what `wide` on a call is for.
+ */
 function isBigint(value: DraftValue): boolean {
   switch (value.k) {
     case "literal":
@@ -446,17 +458,23 @@ function isBigint(value: DraftValue): boolean {
       if (value.call.bigint) return true;
       // A `u256` is the compiler's own spelling of a bigint too wide for a
       // machine word, and nothing in the signature says whether the program
-      // wrote it with an `n` beside it: what the arguments were is what says.
-      // A wide number the source wrote as a number prints its digits and one it
-      // wrote as a bigint prints them with the marker, and the source this
-      // program is checked against is what settles which.
-      const returns = primitive(value.call.returns);
-      return (
-        returns !== null &&
-        isWide(returns) &&
-        value.call.args.length > 0 &&
-        value.call.args.every((argument) => isBigint(argument))
-      );
+      // wrote it with an `n` beside it. A wide number the source wrote as a
+      // number prints its digits and one it wrote as a bigint prints them with
+      // the marker, and the source this program is checked against is what
+      // settles which.
+      //
+      // What the callee returned is what says it, and it is read from the
+      // callee's own body with this call's arguments: a signature states the
+      // width and the width is not the marker, so reading it off the arguments
+      // as this once did answered for a call that has none. `console.log(five())`
+      // for `function five(): u256 { return 5n; }` printed `5` where the source
+      // prints `5n`, and the build was refused for a number it had computed.
+      // The mark is the callee's answer, read from the body it returns with
+      // this call's arguments in place of its parameters. A wide number with no
+      // such answer — a callee this build holds no body for, or one whose paths
+      // disagree — is not marked, which is what the source prints for a number
+      // written without an `n`.
+      return value.call.wide === true;
     default:
       return false;
   }
@@ -470,6 +488,109 @@ function isBigint(value: DraftValue): boolean {
  */
 function returnsBigint(returns: string): boolean {
   return parseType(returns).kind === "primitive" && returns.trim() === "i64";
+}
+
+/**
+ * Whether what a wide-returning function hands back is a bigint, which is read
+ * from the body it returns with this call's arguments in place of its
+ * parameters.
+ *
+ * A `u256` is the compiler's own spelling of a bigint too wide for a machine
+ * word, so a signature states the width and the width is not the marker: the
+ * source writes `5n` where a bigint is meant and `5` where a number is, and the
+ * language prints the first with an `n` and the second without. Reading the
+ * marker off the arguments — which is what this once did — answers for every
+ * call that has arguments and for none that has none, so `console.log(five())`
+ * printed `5` where the source prints `5n`.
+ *
+ * Reading it from the callee's body is what settles it, because the body is
+ * what says what the function returns: `return 5n` is a bigint whatever the
+ * arguments were and `return n` hands back the parameter as it arrived, which
+ * is the one place the call itself is the answer.
+ */
+function returnsWideBigint(body: readonly Statement[], written: readonly DraftValue[], params: readonly string[]): boolean {
+  const results: Expression[] = [];
+  const walk = (statements: readonly Statement[]): void => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "result":
+          results.push(statement.value);
+          break;
+        case "if":
+          walk(statement.then);
+          walk(statement.otherwise);
+          break;
+        case "while":
+        case "doWhile":
+        case "loop":
+        case "forOf":
+          walk(statement.body);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  walk(body);
+  if (results.length === 0) return false;
+  // A return on one path and not another is a value that is sometimes a bigint
+  // and sometimes a number, and which of the two prints an `n` is decided by
+  // the path that ran. Every path answering the same way is the only case this
+  // settles, and a mixed one is left unmarked rather than marked wrongly.
+  const marks = results.map((result) => wideMark(result, written, params));
+  const marked = marks[0] as boolean;
+  return marks.every((mark) => mark === marked) ? marked : false;
+}
+
+/** The mark of one return expression, with the call's arguments in place. */
+function wideMark(expression: Expression, written: readonly DraftValue[], params: readonly string[]): boolean {
+  switch (expression.k) {
+    case "bigint":
+      return true;
+    case "ident": {
+      const position = params.indexOf(expression.name);
+      return position >= 0 && position < written.length && isBigint(written[position] as DraftValue);
+    }
+    case "binary":
+      return wideMark(expression.left, written, params) && wideMark(expression.right, written, params);
+    case "unary":
+      return wideMark(expression.operand, written, params);
+    case "conditional":
+      return wideMark(expression.then, written, params) && wideMark(expression.otherwise, written, params);
+    default:
+      // A literal was written without an `n` and is a number, and a call is
+      // settled by the body of the function it names rather than by anything
+      // here: `returnsWideBigint` reads that body where the callee is reached.
+      return false;
+  }
+}
+
+/**
+ * The same mark read from a function the program declared, whose body is
+ * resolved rather than still the contract's.
+ *
+ * It is the same question asked of the same thing: what the callee returns, with
+ * this call's arguments in place of the parameters it returns them from. A
+ * `return 5n` is a bigint whatever it was called with, and `return n` is the
+ * parameter as it arrived.
+ */
+function declaredWideBigint(compiled: DraftProgram | null, written: readonly DraftValue[], params: readonly string[]): boolean {
+  if (compiled === null) return false;
+  const results = returnsIn(compiled.statements);
+  if (results.length === 0) return false;
+  const marks = results.map((result) => {
+    const value = result.value;
+    // A return of a parameter is the one place the call is the answer: `return n`
+    // hands back the argument as it arrived, and the argument at this position is
+    // what says whether it was written as a bigint.
+    if (value.k === "reference") {
+      const position = params.indexOf(value.name);
+      if (position >= 0 && position < written.length) return isBigint(written[position] as DraftValue);
+    }
+    return isBigint(value);
+  });
+  const marked = marks[0] as boolean;
+  return marks.every((mark) => mark === marked) ? marked : false;
 }
 
 /** True when the value is a string, which is the one type a number is not. */
@@ -560,12 +681,22 @@ function arrayType(held: ArrayHeld): TypeExpr {
   return { kind: "array", of: { kind: "primitive", name: held.element ?? "f64" }, length: held.length };
 }
 
-/** Every exported function of the program, and what each of them does. */
-function contractsOf(program: ProgramContract): Map<string, { signature: FunctionSignature; effects: Effect[] }> {
-  const contracts = new Map<string, { signature: FunctionSignature; effects: Effect[] }>();
+/**
+ * Every exported function of the program, and what each of them does.
+ *
+ * The body travels with the signature because what a function hands back as a
+ * wide number is read from it: a `u256` signature says how wide the answer is
+ * and not whether the source wrote it with an `n` beside it.
+ */
+function contractsOf(program: ProgramContract): Map<string, CompiledFunction> {
+  const contracts = new Map<string, CompiledFunction>();
   for (const file of program.files) {
     for (const [name, contract] of Object.entries(file.functions)) {
-      contracts.set(name, { signature: contract.function, effects: contract.effects });
+      contracts.set(name, {
+        signature: contract.function,
+        effects: contract.effects,
+        body: contract.definition.statements,
+      });
     }
   }
   return contracts;
@@ -1098,10 +1229,22 @@ function leaves(block: SemanticBlock): boolean {
 /* Resolver                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * One compiled function of the program, as the resolver reads it: what it is
+ * called with and hands back, what it does beyond computing, and the body it
+ * runs. The body is here because whether a wide number it hands back was
+ * written as a bigint is read from what it returns.
+ */
+interface CompiledFunction {
+  signature: FunctionSignature;
+  effects: Effect[];
+  body: readonly Statement[];
+}
+
 class ProgramResolver {
   private readonly scopes: Map<string, Held>[] = [new Map()];
   private readonly body: ProgramBody;
-  private readonly contracts: Map<string, { signature: FunctionSignature; effects: Effect[] }>;
+  private readonly contracts: Map<string, CompiledFunction>;
   private readonly objects: Record<string, ObjectLayout>;
   /** An array another name was given, and the array it is the same array as. */
   private readonly aliases: [ArrayHeld, ArrayHeld][] = [];
@@ -1112,7 +1255,7 @@ class ProgramResolver {
 
   constructor(
     body: ProgramBody,
-    contracts: Map<string, { signature: FunctionSignature; effects: Effect[] }>,
+    contracts: Map<string, CompiledFunction>,
     objects: Record<string, ObjectLayout>,
     functions: ProgramFunctions,
   ) {
@@ -2180,6 +2323,9 @@ class ProgramResolver {
       effects: [],
       builtin: true,
       bigint: false,
+      // A block of bytes is laid out by the compiler itself and hands back a
+      // reference, so no wide number is involved.
+      wide: null,
     };
   }
 
@@ -2548,6 +2694,9 @@ class ProgramResolver {
         effects: [],
         builtin: true,
         bigint: false,
+        // A builtin is written by the compiler and returns a double, so the
+        // question a wide number asks it does not arise.
+        wide: null,
       };
     }
     // A function the program declared is called like any other: it is compiled
@@ -2589,6 +2738,7 @@ class ProgramResolver {
         if (capture.held.kind === "array") this.expectArray(expected, capture.held, line);
         return { k: "reference", name: capture.held.name, held: capture.held } satisfies DraftValue;
       });
+      const held = primitive(parseType(signature.returns));
       return {
         name: signature.symbol,
         signature,
@@ -2597,6 +2747,14 @@ class ProgramResolver {
         effects: [],
         builtin: false,
         bigint: returnsBigint(signature.returns),
+        wide:
+          held !== null && isWide(held)
+            ? declaredWideBigint(
+                declared.compiled,
+                written,
+                signature.params.slice(0, arity).map((param) => param.name),
+              )
+            : null,
       };
     }
     const contract = this.contracts.get(value.function);
@@ -2619,14 +2777,24 @@ class ProgramResolver {
         `${this.body.file}: ${expected}`,
       );
     }
+    const given = value.args.map((arg, position) => this.value(arg, parseType(signature.params[position].type), line));
+    const held = primitive(parseType(signature.returns));
     return {
       name: signature.symbol,
       signature,
-      args: value.args.map((arg, position) => this.value(arg, parseType(signature.params[position].type), line)),
+      args: given,
       returns: parseType(signature.returns),
       effects: contract.effects,
       builtin: false,
       bigint: returnsBigint(signature.returns),
+      wide:
+        held !== null && isWide(held)
+          ? returnsWideBigint(
+              contract.body,
+              given,
+              signature.params.map((param) => param.name),
+            )
+          : null,
     };
   }
 

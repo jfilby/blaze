@@ -1783,3 +1783,44 @@ test("a wide number the source wrote as a bigint is printed with the n that says
   await agreesWithNode(source);
 });
 
+test("a wide number a call with no arguments hands back is marked from its body", async () => {
+  // The marker was read off the call's arguments, which answers for every call
+  // that has some and for none that has none: `console.log(five())` printed `5`
+  // where the source prints `5n`, and the build was refused for a number it had
+  // computed correctly. What says it is the callee's own return, so the body is
+  // what is read — `return 5n` is a bigint whatever it was called with.
+  const source = [
+    "export function five(): u256 {",
+    "  return 5n;",
+    "}",
+    "export function plainFive(): u256 {",
+    "  return 5;",
+    "}",
+    "console.log(five());",
+    "console.log(plainFive());",
+    // Bound first, because the mark that was lost died at the binding.
+    "const a = five();",
+    "console.log(a);",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a wide number a declared function hands back is marked from its body", async () => {
+  // The same read through the other path: a function declared in the program
+  // body rather than imported. Both settle from a body, and one working while
+  // the other did not would be a mark that follows the spelling of the callee.
+  const source = [
+    "function five(): u256 {",
+    "  return 5n;",
+    "}",
+    "function plainFive(): u256 {",
+    "  return 5;",
+    "}",
+    "console.log(five());",
+    "console.log(plainFive());",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+

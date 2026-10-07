@@ -233,6 +233,22 @@ The one thing it does not reach is a `bigint` *parameter of a compiled function*
 the contract states it as the `i64` it is, so a function that prints one writes
 it without the `n`.
 
+**A wide number is marked from the body that returns it, not from the call.** A
+`u256` is the compiler's own spelling of a bigint too wide for a machine word, so
+its signature states the width and the width is not the marker: the source writes
+`5n` where a bigint is meant and `5` where a number is, and the language prints the
+first with an `n` and the second without. Reading the mark off the call's
+arguments answers for every call that has some and for none that has none, so
+`console.log(five())` for `function five(): u256 { return 5n; }` printed `5` where
+the source prints `5n`, and the build was refused for a number it had computed
+correctly. What says it is the callee's own return: `return 5n` is a bigint
+whatever it was called with, and `return n` is the parameter as it arrived, which
+is the one place the call is the answer. Every path of a body answering the same
+way is the only case settled — a return that is a bigint on one path and a number
+on another is decided by the path that ran, and is left unmarked rather than
+marked wrongly. Both ways of reaching a callee read it the same way: a function
+declared in the program body and one imported from a module.
+
 **A block that ends where nothing arrives says so.** `if (c) return 1; else
 return 2;` returns from both arms and has no return at the top of the body, so
 what the function hands back is read from *every* return in the body, and the
