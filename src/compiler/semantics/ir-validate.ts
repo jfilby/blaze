@@ -1254,8 +1254,11 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // A bigint is the `i64` the language's `1n` is, and the `n` after it says
     // so. A value of any other width has no such spelling: a double is written
     // as the number it is and a whole number wider than a machine word is
-    // written as its digits.
-    if (statement.k === "printNumber" && statement.bigint) {
+    // written as its digits. A wide number is the one value written as a bigint
+    // that is not an `i64`: the language has no `u256`, so every value that is
+    // one here was written as a bigint, and the driver writes the marker after
+    // the digits the formatter gives it.
+    if (statement.k === "printNumber" && statement.bigint && !isWideType(statement.value.type)) {
       const printed = statement.value.type;
       if (printed.kind !== "primitive" || printed.name !== "i64") {
         problems.push(`${prefix}a bigint is printed as a ${typeText(printed)}, which is not the sixty-four bit whole number a bigint is`);

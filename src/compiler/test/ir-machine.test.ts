@@ -425,6 +425,54 @@ test("an argument left where it is read out of the accumulator, not out of the s
   assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 4));`), "27");
 });
 
+test("an element the instruction carries is read before the other side's call writes its registers", async () => {
+  // An address built to be the instruction's own memory operand is built *before*
+  // the other side is written, because the other side is what the instruction is
+  // combined with — so the index in that address has to outlive whatever the
+  // other side does. An index in a register the convention preserves does; one
+  // in a register it does not (the six the argument registers are) is written by
+  // the call the other side makes, and the element is then read at an address
+  // built from whatever the callee left there. An index in the frame was already
+  // refused for exactly this, because it is read into the same scratch; this is
+  // the whole name beside a call, and either way the answer is the same: the
+  // element is read into a slot of its own and combined after the call.
+  const body: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    statements: [],
+    terminator: {
+      k: "return",
+      value: {
+        k: "arith",
+        type: F64,
+        op: "add",
+        left: { k: "element", type: F64, of: local("a", ARRAY_OF_F64), index: local("i", USIZE) },
+        right: {
+          k: "call",
+          type: F64,
+          call: {
+            callee: "f",
+            builtin: false,
+            signature: { name: "f", symbol: "f", params: [{ name: "v", type: "f64" }], returns: "f64" },
+            args: [number("1")],
+            argTypes: [F64],
+            returns: F64,
+            effects: [],
+            ownership: "none",
+            retain: false,
+          },
+        },
+      },
+    },
+  };
+  const fn = subject(F64, body, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "i", mutable: false, type: USIZE },
+  ]);
+  // `a[2]` is 7 and `f(1)` is 2.
+  assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 2UL));`), "9");
+});
+
 test("an argument the build gave a register of its own is read before that register is written", async () => {
   // A value the census weighs as worth a register is kept in one, and the
   // register it is kept in is very often one the call it is an argument of is

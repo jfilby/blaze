@@ -181,9 +181,43 @@ backend wrote a cast from a scalar to a struct — a source that does not compil
 not have. So `wholeOf` answers the wide number whenever one side is wide, *before*
 the length rule (`usize` is over every value a machine word holds, and a wide
 number holds values none of them do), and `ir-validate.ts` refuses a pair the
-kernel cannot answer, naming which of the two is not a wide number. The count of a
-shift is the one exception, because a shift count is the machine word the source
-wrote the shift by.
+kernel cannot answer, naming which of the two is not a wide number.
+
+**The one narrowing there is, and where it stops.** A whole number handed to a use
+that reads a wide number is the widening: the machine word in the low limb and
+nothing above it, which every backend answers the same way
+(`blaze_rt_u256_from_u64`, `wideValue`'s `wideFrom`, the driver's `widen`). That is
+the same number only where the word is a value the wide number holds, so an
+unsigned whole number and a literal the compiler reads are admitted and two
+things are not: a signed whole number, which has values below zero that widening
+turns into 2^64 - 26, and a double, which is not a set of limbs at all.
+`ir-validate.ts` refuses both where the type of the use is settled
+(`wideningReason`), and the read rule below refuses the other direction.
+
+**A wide number is read at its own width or not at all.** Every exemption in the
+read-width rule is a machine word standing for a machine word — a whole number
+read as a double is every value the slot holds, said as the wider of the two — and
+a wide number passed through all of them, because a four-limb slot read at `f64` or
+at any machine width is its low limb with whatever the body left beside it in the
+three above. `1.5` beside one is refused rather than re-read as four limbs, which
+would answer `a + 1`.
+
+**The count of a shift is a machine word, and a complement of a wide number is
+nothing at all.** The kernel every backend shifts with takes one word of count, so
+`a << 3n` is a shift by a machine word whatever the number being shifted is, and a
+count that is itself a wide number is refused rather than truncated differently on
+each target. `~a` and `-a` are the two operations whose answer the language does
+not hold in a wide number: `~a` is `-(a) - 1` and `-a` is below zero however wide
+`a` is, and the four-limb kernel answers 2^256 - 1 - a and 2^256 - a — the same
+bits and not the number the source wrote.
+
+**A machine function that returns a wide number takes its first argument in
+`rsi`.** The answer is thirty-two bytes, so the convention hands it over in
+memory with the pointer to where it goes arriving in `rdi` ahead of every other
+argument — `ir-machine.ts:parameters` takes `rdi` out of the file for it, and
+`arrivals` counts the whole-number arguments from the second register. Counting
+from the first read the pointer where the argument is, and the body works on the
+address of its own answer as though it were the number it was handed.
 
 **A bigint is a whole number and an `n` after it.** In a program every number is
 a double, which holds a whole number exactly only up to 2^53 — so
@@ -342,6 +376,14 @@ little slower. `ir-validate.ts` asks the same analysis about every loop the IR
 *text* claims is parallel, so a mark written by hand or by a model is proved
 rather than believed.
 
+The reduction clauses beside the mark are proved the same way. `refusalFor`
+derives the accumulators the body really has and never read the clauses written
+next to the mark, so IR text could carry `reduction(*:total)` over a body that
+adds — and OpenMP holds that accumulator private to the thread for the length of
+the body, so the answer is a number no turn computed. The validator now asks
+`reductionsFor` about each clause the IR states, and refuses one the body does
+not perform or performs another way.
+
 It also asks whether a turn is worth a thread. Handing `out[i] = in[i] * 2 + 1`
 over four million elements to four threads measured 1.6 times *slower* than
 running it in order, because the C compiler already vectorises it and the loop
@@ -386,6 +428,16 @@ given and the loop above it is refused. A function that reaches itself is read
 the way the parallel analysis reads one — assuming and checking afterwards —
 and `ir-validate.ts` asks this analysis about every loop the IR *text* claims is
 a region, so a mark written by hand or by a model is proved rather than believed.
+
+
+The check a released pointer is caught by is the magic in front of the block, and
+it has to be poisoned on *every* path a release takes. The pooled path returned
+before poisoning it, so every block small enough for a slab — every small
+object, every short string, every small array — kept reading as live: the guard
+never fired for any of them, and a second release linked the block to itself so
+the class handed the same address out for ever, which is two live values in one
+piece of memory. The slab takes a block back without looking at the magic
+(`blaze_rt_block` writes every header field afresh), so poisoning there is safe.
 
 The mark is the word `region` beside `parallel` on the loop, and the two are
 about different things: a loop may carry either or both. One loop on a path is

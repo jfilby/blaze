@@ -2463,7 +2463,13 @@ class Machine {
    * destroys that argument.
    */
   private arrivals(): { register: number | null; stack: number; limbs: number }[] {
-    let general = 0;
+    // A wide answer is returned through memory, and the pointer to where it goes
+    // arrives in `rdi` ahead of every other argument — which is why `parameters`
+    // takes `rdi` out of the file before it binds anything. The count below has
+    // to start past it as well: a first parameter read from `rdi` is the
+    // pointer, so the body works on the address of its own answer as though it
+    // were the number it was handed.
+    let general = isWideType(this.fn.returns) ? 1 : 0;
     let floating = 0;
     let stack = 0;
     // Whether the registers have run out, which is not the same question as

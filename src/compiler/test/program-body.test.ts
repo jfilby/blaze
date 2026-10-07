@@ -1687,11 +1687,12 @@ test("a refusal names what each side of the operation is", async () => {
   const plain = phaseOf("typescript", { "main.ts": "console.log(1n + 1.5);\n" }, "main.ts");
   assert.throws(() => resolveProgram(plain.body!, plain.program), /cannot mix a bigint and a number/);
   // A wide number beside a double is refused where the type of the operation is
-  // settled rather than where the source is read, because the widening that is
-  // allowed beside one is a whole number and not a fraction.
+  // settled rather than where the source is read: the widening that is allowed
+  // beside one is a whole number, and a fraction is not a whole number however
+  // it was written.
   const wide = phaseOf("typescript", { "main.ts": "let a: u256 = 3;\nconsole.log(a + 1.5);\n" }, "main.ts");
   const program = resolveProgram(wide.body!, wide.program);
-  assert.match(semanticIrProblems(program, wide.program).join("\n"), /a double is not a set of limbs/);
+  assert.match(semanticIrProblems(program, wide.program).join("\n"), /a f64 is computed with a u256/);
 });
 
 test("a wide number beside a bigint is the compiler's own widening", async () => {
@@ -1749,6 +1750,34 @@ test("an element is written by the operator the source wrote", async () => {
     "  return total;",
     "}",
     "console.log(accumulate(4));",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a wide number the source wrote as a bigint is printed with the n that says so", async () => {
+  // The language has no `u256`, so every value that is one here was written as a
+  // bigint — and the language prints a bigint with an `n` after it. Digits alone
+  // are a program whose output does not match the source it is checked against,
+  // and the marker follows the value rather than the type: a wide number the
+  // source wrote as a number (`let a: u256 = 12`) prints its digits, because that
+  // is what the source prints for it.
+  const source = [
+    "export function add(a: u256, b: u256): u256 {",
+    "  return a + b;",
+    "}",
+    "export function wide(n: u256): u256 {",
+    "  return n;",
+    "}",
+    "const a = wide(5n);",
+    "const b = add(5n, 7n);",
+    "console.log(a);",
+    "console.log(a + b);",
+    "console.log(a === 5n);",
+    "console.log(a < b);",
+    "console.log(b >> 1n);",
+    "let written: u256 = 12;",
+    "console.log(written);",
     "",
   ].join("\n");
   await agreesWithNode(source);

@@ -5,10 +5,10 @@ backend = "machine"
 mode = "danger"
 
 [model]
-# provider = "openrouter"
-model = "stealth/space-bunny-alpha"
+provider = "opencode-go"
+model = "glm-5.3-flash"
 
-provider = "commandcode"
+# provider = "commandcode"
 # model = "stealth/pixel-canary"
 
 [target]

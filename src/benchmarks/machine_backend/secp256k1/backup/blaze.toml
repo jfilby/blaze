@@ -1,0 +1,26 @@
+language = "typescript"
+sourceFile = "1.ts"
+output = "machine"
+backend = "machine"
+mode = "danger"
+
+[model]
+provider = "opencode-go"
+model = "glm-5.3-flash"
+
+# provider = "commandcode"
+# model = "stealth/pixel-canary"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+features = ["sse4.1"]
+
+[optimize]
+primary = "throughput"
+secondary = "size"
+
+[generation]
+maxCandidates = 2
+maxAttempts = 3

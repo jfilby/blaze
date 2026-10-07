@@ -1685,7 +1685,15 @@ class ProgramResolver {
         return declare({ kind: "number", mutable, type: "bool", text: "" });
       case "call": {
         const returns = primitive(value.call.returns);
-        if (returns !== null) return declare({ kind: "number", mutable, type: returns, text: "" });
+        if (returns !== null) {
+          // A `u256` is the compiler's own spelling of a bigint, and a call that
+          // hands one back is a bigint when everything it was made of was: the
+          // name it is bound to keeps the mark, or printing it writes digits
+          // where the source wrote them with the `n` that says which of the two
+          // they are.
+          const bigint = isBigint(value);
+          return declare({ kind: "number", mutable, type: returns, text: "", ...(bigint ? { bigint: true } : {}) });
+        }
         // A block of bytes is what the views over it are taken of, and a
         // program holds one as the reference it is.
         if (value.call.returns.kind === "ref" || value.call.returns.kind === "ptr") {
@@ -2419,11 +2427,17 @@ class ProgramResolver {
     const whole = WHOLE_OPERATORS.includes(op);
     const type = COMPARISONS[op] !== null
       ? numeric("bool")
-      : leftBig
-        ? numeric(BIGINT_TYPE)
-        : whole
-          ? numeric(wholeResult(leftName, rightName))
-          : numeric(numericResult(leftName, rightName, op === "/"));
+      : // A wide number beside a bigint keeps its own width: the `i64` a bigint
+        // is computed in would drop the three limbs above the first before a
+        // backend is handed the value, which is the same reason `wholeResult`
+        // and `numericResult` ask about a wide number before anything else.
+        wideBeside
+        ? numeric(wholeResult(leftName, rightName))
+        : leftBig
+          ? numeric(BIGINT_TYPE)
+          : whole
+            ? numeric(wholeResult(leftName, rightName))
+            : numeric(numericResult(leftName, rightName, op === "/"));
     return leftBig ? { k: "binary", op, left, right, type, bigint: true } : { k: "binary", op, left, right, type };
   }
 

@@ -345,6 +345,70 @@ test("a wide number is only computed with another wide number", () => {
   assert.deepEqual(semanticFunctionProblems(pair), []);
 });
 
+test("a wide number is read at its own width or not at all", () => {
+  // The read-width rule is what stops `print_number local[i32] n` over an `f64`
+  // slot from answering the low half of a double. Every exemption in it is a
+  // machine word standing for a machine word — a whole number read as a double
+  // is every value the slot holds, said as the wider of the two — and a wide
+  // number passed straight through all of them: read at `f64` or at a machine
+  // word it is its low limb, and the three above it are whatever was beside it.
+  for (const [read, said] of [
+    ["f64", /holds a u256 and is read as a f64/],
+    ["i64", /holds a u256 and is read as a i64/],
+  ] as const) {
+    const program = programNamed(
+      "typescript",
+      { "main.ts": ["export function f(a: u256): u256 {", "  return a;", "}", "console.log(f(5n));", ""].join("\n") },
+      "main.ts",
+      "f",
+    );
+    // The only way to state this is to say the read is at a machine width rather
+    // than at the width the name was declared at, which is what a body written by
+    // hand or by a model can do and a resolved one cannot.
+    const mutated = structuredClone(program);
+    const terminator = mutated.entry.terminator;
+    assert.ok(terminator.k === "return" && terminator.value !== null);
+    terminator.value = { k: "local", type: { kind: "primitive", name: read }, name: "a" };
+    assert.match(semanticFunctionProblems(mutated).join("\n"), said, `a wide number read at ${read}`);
+  }
+});
+
+test("a shift count is a machine word whatever the number being shifted is", () => {
+  // The kernel every backend shifts a wide number with takes one word of count,
+  // so a count that is itself four limbs is a count of 256 bits that each target
+  // truncates to a different answer. The resolver reads the count at the machine
+  // word the source wrote it by, and a body that says otherwise is refused here
+  // rather than handed to a driver that would pass a pointer where the kernel
+  // declares an `unsigned`.
+  const program = programNamed(
+    "typescript",
+    {
+      "main.ts": [
+        "export function wide(a: u256): u256 {",
+        "  return a;",
+        "}",
+        "const a = wide(1n);",
+        "console.log(a << 3n);",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "wide",
+  );
+  assert.deepEqual(semanticFunctionProblems(program), []);
+  const counted = structuredClone(program);
+  const terminator = counted.entry.terminator;
+  assert.ok(terminator.k === "return" && terminator.value !== null);
+  terminator.value = {
+    k: "arith",
+    type: U256,
+    op: "shl",
+    left: { k: "local", type: U256, name: "a" },
+    right: { k: "local", type: U256, name: "a" },
+  };
+  assert.match(semanticFunctionProblems(counted).join("\n"), /a shift count is the machine word/);
+});
+
 test("a whole operator over a wide number answers a wide number", () => {
   // A shift and a remainder are operations on whole numbers, and the answer was
   // the pair's common type with a side that is not one naming an `i64` — three
@@ -849,16 +913,17 @@ function widenContract(): FunctionContract {
 test("the C backend widens a machine word into a wide number and answers it", async () => {
   const directory = await scratch("blaze-u256-widen-c-");
   const runtime = await buildStandaloneRuntime(directory);
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
   await writeFile(
     join(directory, "driver.c"),
     [
       "#include <stdio.h>",
       "#include <stdint.h>",
-      "struct blaze_u256 { uint64_t limbs[4]; };",
-      "extern struct blaze_u256 widen(uint64_t n);",
+      `#include "${RUNTIME_NAME}.h"`,
+      "blaze_u256 widen(uint64_t n);",
       "int main(void) {",
-      `  const uint64_t word = ${0xfedcba9876543210n}n;`,
-      "  struct blaze_u256 r = widen(word);",
+      `  const uint64_t word = ${0xfedcba9876543210n}ULL;`,
+      "  blaze_u256 r = widen(word);",
       "  int ok = r.limbs[0] == word && r.limbs[1] == 0 && r.limbs[2] == 0 && r.limbs[3] == 0;",
       '  printf("%s\\n", ok ? "right" : "wrong");',
       "  return ok ? 0 : 1;",
@@ -867,17 +932,7 @@ test("the C backend widens a machine word into a wide number and answers it", as
     ].join("\n"),
     "utf8",
   );
-  await writeFile(
-    join(directory, "widen.c"),
-    [
-      "#include <stdint.h>",
-      "struct blaze_u256 { uint64_t limbs[4]; };",
-      "void blaze_rt_u256_from_u64(struct blaze_u256* out, uint64_t value);",
-      generateFunctionC(widenFunction()),
-      "",
-    ].join("\n"),
-    "utf8",
-  );
+  await writeFile(join(directory, "widen.c"), generateFunctionC(widenFunction()), "utf8");
   const binary = join(directory, "widen");
   const built = run(
     "gcc",
@@ -906,10 +961,14 @@ test("the machine backend widens a machine word into a wide number and answers i
     [
       "#include <stdio.h>",
       "#include <stdint.h>",
+      // Declared by value, and not as a pointer to one: thirty-two bytes is past
+      // what the register file hands over for a single argument, so the
+      // convention passes such a value in memory and the compiler has to be told
+      // so to place it.
       "struct blaze_u256 { uint64_t limbs[4]; };",
       "extern struct blaze_u256 widen(uint64_t n);",
       "int main(void) {",
-      `  const uint64_t word = ${0xfedcba9876543210n}n;`,
+      `  const uint64_t word = ${0xfedcba9876543210n}ULL;`,
       "  struct blaze_u256 r = widen(word);",
       "  int ok = r.limbs[0] == word && r.limbs[1] == 0 && r.limbs[2] == 0 && r.limbs[3] == 0;",
       '  printf("%s\\n", ok ? "right" : "wrong");',
