@@ -312,6 +312,19 @@ of a field is the same read one level down. A field read whose layout the
 program does not lay out is refused by that layout's name, and a field the
 layout does not hold is refused by it too.
 
+**A field read through an `any` is the field the layouts give it.** `any` is a
+reference the source left unshaped, so a use of it is a use of whatever is
+behind it: `p.x` in a body whose `p` is an `any` is a field of every layout the
+program lays out, and the read is written at the type and offset that layout
+gives the field. It used to answer the reference itself instead — a number is
+not a field of a reference, so no layout matched, and `p.x + p.y` was a sum of
+two `ref<any>` the validator refused, though both layouts held doubles at 0
+and 8. Two layouts that hold the field at the same offset and of the same type
+are one read and one is picked; two that disagree are the refusal that was
+already there, naming both. Where no layout holds the field at all, nothing
+says what is behind the reference, and the read is still of the reference: a
+body that asks `n.missing === null` is asking whether it was handed an object.
+
 ## The rules a review may propose
 
 `semantics/repair.ts` is the whole vocabulary: `hoist-invariant`,

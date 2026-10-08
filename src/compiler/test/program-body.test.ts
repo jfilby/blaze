@@ -1547,27 +1547,23 @@ test("an object literal is allocated, read, and handed to a compiled function", 
   // layout the function contracted is the same layout the body wrote the
   // literal as, because a shape is keyed by its fields whichever side wrote it.
   //
-  // The function reads the link of the node it is given — a reference, which a
-  // `ref<any>` parameter can be read as the way a tree is read — and the body
-  // reads the numbers of its own. A field read of a number through an `any` is
-  // a different question and is not answered here: nothing says which object
-  // the reference points at, so the number behind it is not a number the
-  // compiler may name.
+  // The function reads the numbers out of what the body built, which is the
+  // whole of the point: the layout it contracted is the layout the literal was
+  // written at, because a shape is keyed by its fields whichever side wrote it.
   const directory = await scratch("blaze-program-object-");
   await writeFile(
     join(directory, "main.ts"),
     [
-      "import { isLeaf } from \"./lib.ts\";",
-      "const leaf = { left: null, right: null };",
+      "import { sum } from \"./lib.ts\";",
       "const point = { x: 3, y: 4 };",
-      "console.log(isLeaf(leaf));",
+      "console.log(sum(point));",
       "console.log(point.x, point.y);",
       "",
     ].join("\n"),
   );
   await writeFile(
     join(directory, "lib.ts"),
-    ["export function isLeaf(n: any): boolean {", "  return n.left === null;", "}", ""].join("\n"),
+    ["export function sum(p: any): number {", "  return p.x + p.y;", "}", ""].join("\n"),
   );
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",

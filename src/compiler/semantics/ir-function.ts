@@ -961,30 +961,54 @@ class FunctionBody {
     // object at all. Naming a layout here would be naming one the program does
     // not have.
     if (layouts.length === 0) return { value: object, inferred: ANY };
-    const layout = layouts[0];
+    const layout = layouts[0] as string;
+    const type = this.fieldType(layout, expression.field, line);
+    // The read is at the type the layout gives the field, which is the number
+    // behind it rather than the reference: `p.x + p.y` over an `any` is a sum
+    // of two doubles because the layouts the program lays out say the fields
+    // are doubles, and it was refused as a sum of two references because
+    // nothing said what was behind them.
     return {
-      value: { k: "loadField", type: this.fieldType(layout, expression.field, line), object, layout, field: expression.field },
-      inferred: ANY,
+      value: { k: "loadField", type, object, layout, field: expression.field },
+      inferred: inferredOfField(type),
     };
   }
 
   /**
    * The layouts a field of something the body was given is a field of: every
-   * one that holds a field of that name the use is a use of. More than one is a
-   * refusal naming the layouts that could be meant, because a backend cannot
-   * pick between them and a check that guesses is worse than a refusal.
+   * one that holds a field of that name the use is a use of.
+   *
+   * A use that says nothing — an `any` the source left unshaped — is a use of
+   * whatever the reference points at, so a field of any type is a field of it.
+   * That is the difference between reading the link of a node and reading a
+   * number out of one: the link was typed as a reference because every layout
+   * that has a `left` holds a reference there, and a number was not a field of
+   * any of them, so the read degraded to the reference itself and the number
+   * behind it was never read.
+   *
+   * Two layouts that hold the field at the same offset and of the same type
+   * are one read whichever of them the object is: `left: f64` at `0` reads the
+   * same eight bytes in both. Only the layouts that disagree are a choice a
+   * backend cannot make, and those are a refusal naming them.
    */
   private layoutsWith(inferred: Inferred, what: string, field: string, use: Inferred, line: number): string[] {
     if (inferred.kind === "object") return [this.layoutFor(inferred.key, line)];
-    const candidates: string[] = [];
+    // A reference to nothing in particular behind it: `p.x` in a body whose
+    // `p` is an `any` asks what is behind `p`, not for a reference.
+    const unshaped = use.kind === "type" && use.type.kind === "ref" && use.type.of === null;
+    const candidates: { name: string; read: string }[] = [];
     for (const layout of Object.values(this.objects)) {
       const declared = layout.fields.find((one) => one.name === field);
-      if (declared === undefined || !holds(declared.type, use)) continue;
-      candidates.push(layout.name);
+      if (declared === undefined) continue;
+      if (!unshaped && !holds(declared.type, use)) continue;
+      candidates.push({ name: layout.name, read: `${declared.type} at ${declared.offset}` });
     }
-    if (candidates.length < 2) return candidates;
+    const [first] = candidates;
+    if (first === undefined) return [];
+    const disagreeing = candidates.filter((one) => one.read !== first.read).map((one) => one.name);
+    if (disagreeing.length === 0) return candidates.map((one) => one.name);
     throw this.error(
-      `reads or writes "${what}.${field}", which ${candidates.join(" and ")} could each be a field of`,
+      `reads or writes "${what}.${field}", which ${[first.name, ...disagreeing].join(" and ")} could each be a field of`,
       line,
       "a backend cannot pick between two layouts, so the field is written in the literal that writes the object",
     );
@@ -1565,6 +1589,17 @@ function holdsShape(shape: Shape, layout: ObjectLayout): boolean {
     const declared = layout.fields.find((entry) => entry.name === field.name);
     return declared !== undefined && holds(declared.type, field.value);
   });
+}
+
+/**
+ * What a read of a field is: the type the layout gives it, or `ANY` where that
+ * type is one the contract language does not spell — a text is a string in the
+ * IR, which is not a type an inferred value is, and a reference the source left
+ * unshaped is `ref<any>`, which says nothing.
+ */
+function inferredOfField(type: SemanticType): Inferred {
+  if (type.kind === "text") return ANY;
+  return { kind: "type", type };
 }
 
 /** Whether a use of a value is a use of the kind a field of that type takes. */

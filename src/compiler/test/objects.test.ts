@@ -9,8 +9,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
-import { programOf, phaseOf } from "./phase.ts";
+import { programOf, phaseOf, semanticsOf } from "./phase.ts";
 import { diagnostic } from "./phase.ts";
+import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
@@ -752,6 +753,108 @@ test("a literal a program body and a function both write is one object, not two"
   const written = generateProgramDriver(program);
   assert.match(written, /struct Object1 \{\n\s*double a;/, "one struct, declared once");
   assert.doesNotMatch(written, /struct Object2/, "and not a second one beside it");
+});
+
+test("a field read of an `any` is the field the layouts give it, not the reference", () => {
+  // The use says nothing — `p` is a reference the source left unshaped — so
+  // every field of every layout the program lays out is a field of it. Reading
+  // `p.x` used to keep the reference itself, because a number is not a field of
+  // a reference and no layout matched: `p.x + p.y` was a sum of two `ref<any>`
+  // and the validator refused it, though both layouts say the fields are
+  // doubles at offsets 0 and 8.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": [
+        "function make(a: number, b: number): any {",
+        "  return { x: a, y: b };",
+        "}",
+        "function sum(p: any): number {",
+        "  return p.x + p.y;",
+        "}",
+        "main();",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  const printed = printSemanticFunction(semanticsOf(phase)["sum"] as never);
+  assert.match(printed, /add\[f64\] \[load_field\[f64\] local\[ref<any>\] p Object1 x\] \[load_field\[f64\] local\[ref<any>\] p Object1 y\]/);
+});
+
+test("two layouts that hold a field the same way are one read of it", () => {
+  // `left` at the same offset and of the same type is the same eight bytes
+  // whichever object the reference points at, so this is one read rather than
+  // a choice between two layouts.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": [
+        "function a(): any {",
+        "  return { left: 1, right: 2 };",
+        "}",
+        "function b(): any {",
+        "  return { left: 3, up: 4 };",
+        "}",
+        "function read(n: any): number {",
+        "  return n.left;",
+        "}",
+        "main();",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  assert.deepEqual(Object.keys(phase.objectNames).length, 2, "two shapes are two layouts");
+  const printed = printSemanticFunction(semanticsOf(phase)["read"] as never);
+  assert.match(printed, /load_field\[f64\] local\[ref<any>\] n Object1 left/);
+});
+
+test("two layouts that hold a field differently are refused by name", () => {
+  // `left` is the first field of one object and the second of the other, so
+  // there are two numbers this could read and a backend cannot pick between
+  // them. The refusal names both rather than answering the first.
+  const message = diagnostic(() => {
+    const phase = phaseOf(
+      "typescript",
+      {
+        "1.ts": [
+          "function a(): any {",
+          "  return { left: 1, right: 2 };",
+          "}",
+          "function b(): any {",
+          "  return { up: 0, left: 2 };",
+          "}",
+          "function read(n: any): number {",
+          "  return n.left;",
+          "}",
+          "main();",
+          "",
+        ].join("\n"),
+      },
+      "1.ts",
+    );
+    resolveFunction(phase.program.files[0].functions["read"] as never, {
+      objectNames: phase.objectNames,
+      functions: {},
+    });
+  });
+  assert.match(message, /reads or writes "ref<any>\.left", which Object1 and Object2 could each be a field of/);
+});
+
+test("a field no layout holds still answers the reference itself", () => {
+  // Nothing the program lays out says what is behind the reference, so the
+  // only value the IR can name is the reference — which is what a body that
+  // asks whether it was handed an object at all is asking.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": ["function a(): any {", "  return { left: 1 };", "}", "function read(n: any): boolean {", "  return n.missing === null;", "}", "main();", ""].join("\n"),
+    },
+    "1.ts",
+  );
+  const printed = printSemanticFunction(semanticsOf(phase)["read"] as never);
+  assert.match(printed, /return \[is_null\[bool\] local\[ref<any>\] n\]/, "the read is of the reference, not of a field");
 });
 
 test("a field read is refused where the name is not a reference to an object", () => {
