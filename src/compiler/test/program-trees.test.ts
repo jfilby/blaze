@@ -40,7 +40,7 @@ async function trees() {
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const resolved = resolveProgram(phase.body!, phase.program);
+  const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   return { source, resolved, contracts: phase.program.files[0].functions };
 }
 
@@ -98,7 +98,7 @@ test("an object field named after a C keyword or a macro is declared under anoth
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
   assert.match(driver, /double long_; \/\* \+0 \*\//);
   assert.match(driver, /double register_; \/\* \+8 \*\//);
   assert.match(driver, /double bool_; \/\* \+16 \*\//);
@@ -214,7 +214,7 @@ test("the C driver closes a branch before it opens the else, so a choice compile
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
 
   // The arm is closed before the else opens: a header that closed the arm as
   // well left a stray brace and the driver could not be compiled at all.
@@ -243,7 +243,7 @@ test("a fallback keeps its arm when the left is a reference that may be null", a
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
 
   // A reference is as nullable as a string: reading it as a number compiled the
   // fallback away and answered the comparison with the left side alone.
@@ -268,7 +268,7 @@ test("a break frees the blocks it leaves and no block it stays inside", async ()
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
 
   // The break leaves the inner loop, not the block the buffer belongs to, so
   // `inner` is still live where it is read. Releasing it there freed the
@@ -341,7 +341,7 @@ test("the diagnostic for an array used at two element types names the file it is
       entry: { path: "1.ts", source },
       read: () => null,
     });
-    resolveProgram(phase.body!, phase.program);
+    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   }, (error: unknown) => error instanceof CompilerError && /line 8 of 1\.ts: allocate the array/.test(error.detail ?? ""));
 });
 
@@ -397,7 +397,7 @@ test("a function named after a C keyword is declared under another name and boun
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program));
+  const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
   assert.match(driver, /extern double short_\(double n\) __asm__\("short"\);/);
   // Nothing anywhere in the driver calls it under the name C cannot spell: the
   // declaration is the only place the symbol is written, and it writes the name
@@ -429,7 +429,7 @@ test("a function nested inside a function is read by the same resolver the captu
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program));
+  const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
   assert.match(printed, /function outer\(x: f64, base: f64\) -> f64/);
   assert.match(printed, /function inner\(n: f64, base: f64\) -> f64/);
 });
@@ -456,7 +456,7 @@ test("a function nested inside a function declared first is still the program's"
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const program = resolveProgram(phase.body!, phase.program);
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   assert.deepEqual(
     program.bodies.map((fn) => fn.name).sort(),
     ["inner", "outer"],
@@ -518,7 +518,7 @@ test("a function of a program is given every name of the scope it touches", () =
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program));
+  const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
 
   // Each is handed the name it touches, and `outer` the name `inner` reads:
   // reaching the program at all is what these are for, and a name missing from
@@ -562,7 +562,7 @@ test("a truth that is a call is asked of it once, by either driver", async (t) =
     entry: { path: "1.ts", source },
     read: () => null,
   });
-  const resolved = resolveProgram(phase.body!, phase.program);
+  const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 
   // The callee both drivers call, which counts nothing itself: the program's own
   // print is the count.

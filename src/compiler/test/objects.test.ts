@@ -631,7 +631,7 @@ test("a loop in a body and the same loop in a module count in the same width", (
   // read from the program rather than from a function of it.
   const phase = phaseOf("typescript", { "1.ts": ["let total = 0;", "for (let i = 0; i < 10; i += 1) {", "  total += i;", "}", "console.log(total);", ""].join("\n") }, "1.ts");
   assert.ok(phase.body !== undefined, "the entry module has statements to resolve");
-  const program = resolveProgram(phase.body, phase.program);
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   const first = program.entry.statements[1];
   assert.ok(first !== undefined && first.k === "loop" && first.loop.kind === "counted");
   assert.equal(first.loop.type.kind === "primitive" ? first.loop.type.name : "?", inBody);
@@ -715,7 +715,7 @@ test("an object a program body writes is laid out beside the objects the functio
     "1.ts",
   );
   assert.ok(phase.body !== undefined, "the entry module has statements to resolve");
-  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   // The node the functions lay out first, and the point the body writes after
   // it: the counter moves on from where the contract pass left it rather than
   // handing the body an `Object1` that is already the node.
@@ -748,7 +748,7 @@ test("a literal a program body and a function both write is one object, not two"
     "1.ts",
   );
   assert.ok(phase.body !== undefined, "the entry module has statements to resolve");
-  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   assert.deepEqual(Object.keys(program.objects), ["Object1"], "the pair is the object the function writes");
   const written = generateProgramDriver(program);
   assert.match(written, /struct Object1 \{\n\s*double a;/, "one struct, declared once");
@@ -863,12 +863,12 @@ test("a field read is refused where the name is not a reference to an object", (
   // with a field is not a program this compiler can answer.
   const message = diagnostic(() => {
     const phase = phaseOf("typescript", { "1.ts": "let n = 7;\nconsole.log(n.left);\n" }, "1.ts");
-    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts);
+    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   });
   assert.match(message, /"n" is not an object/);
   const missing = diagnostic(() => {
     const phase = phaseOf("typescript", { "1.ts": "const p = { a: 1 };\nconsole.log(p.b);\n" }, "1.ts");
-    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts);
+    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   });
   assert.match(missing, /has no field "b"/);
 });

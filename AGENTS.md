@@ -211,6 +211,27 @@ not hold in a wide number: `~a` is `-(a) - 1` and `-a` is below zero however wid
 `a` is, and the four-limb kernel answers 2^256 - 1 - a and 2^256 - a — the same
 bits and not the number the source wrote.
 
+The count is typed at a machine word wherever it is written, because
+`wholeResult` would otherwise spell both sides at the width of the wide one: the
+value's width and not the count's. So a shift's right side is read as the machine
+word the kernel takes in the contract path, and in the program path the
+whole-number rule does not hold of a count beside a wide number — `a << n` over
+a program number `n` is written as the count of the shift, which is a number of
+bits rather than a number of the width being shifted. A count that is itself a
+wide number is refused by name in both paths.
+
+**A compound assignment over a wide number is the binary form the kernel
+answers.** A wide number has no operator a backend can write: `a <<= 2` over a
+`u256` is `invalid operands to binary << (have 'blaze_u256' and 'blaze_u256')` to
+gcc, and the machine backend has no instruction over four limbs. The binary form
+of the same operation is the one every backend already calls the kernel for, so
+`compoundOverWide` (`core/semantic-ir.ts`) writes the compound as that, on the one
+path every backend lowers. It is the same program, because `a <<= v` is
+`a = a << v` in the language. An operation the kernel does not have is not
+excused by this: `>>>=` and `**=` are written as the arithmetic they state and
+the validator refuses it by name there, which is the one place a wide number is
+asked for something it does not have.
+
 **A machine function that returns a wide number takes its first argument in
 `rsi`.** The answer is thirty-two bytes, so the convention hands it over in
 memory with the pointer to where it goes arriving in `rdi` ahead of every other
@@ -324,6 +345,41 @@ are one read and one is picked; two that disagree are the refusal that was
 already there, naming both. Where no layout holds the field at all, nothing
 says what is behind the reference, and the read is still of the reference: a
 body that asks `n.missing === null` is asking whether it was handed an object.
+
+**A field of a program object is written where the source writes it.** A program
+body hands an object to a compiled function, and a compiled function writes into
+the fields of what it is handed — which is the whole of the point of the two
+halves reading the same bytes. `p.x = 5` is now that store, written under the
+statement a program parses and resolved against the layout the body's own
+literal was laid out at, and a compound over it is a read of the field, the
+operation the source named and the store of the answer. The write is refused by
+the validator where the field holds another type, and a wide number written
+where a double is read is refused rather than written: it would be the low half
+of a number the program never computed, and there is no gcc spelling that reads
+one.
+
+**A field written from a name holds the shape the name's own literal was written
+at.** `{ up: inner }` is a field of the shape `inner` was written as, and the
+only place that shape is known is the name's own declaration — so the shape pass
+(`semantics/program-objects.ts`) walks the declarations block by block exactly
+where the resolver opens and closes a scope, and hands every literal back the
+key it was laid out at. The resolver reads a literal's shape off that answer
+rather than deriving one from the parse tree, because which of two shapes folded
+into which is decided once the whole program has been walked and only that pass
+can say. A read of what the field holds is a read of that layout: a field whose
+declared type names a layout is a field of that one, and one no layout names is a
+field of the object it was read out of, which is what a tree of one shape is.
+
+**The contract language states `+ - * /` and the comparisons and nothing else.**
+A postcondition is an expression of that language, so a result the language
+cannot say is a body it does not state: the statements are the contract instead,
+which is where a body that prints or branches already goes. A compound
+assignment is written as the binary operator it names — `<<=` is a shift and
+`**=` is a power — and every one whose operator the contract language has not was
+spelled by its first character before that set grew, which read `<<=` as a
+comparison and `**=` as a product. A body that applies one of those to a number
+the result holds now states no postcondition rather than stating the wrong one,
+and the compiler asks the model about what the body does instead.
 
 ## The rules a review may propose
 

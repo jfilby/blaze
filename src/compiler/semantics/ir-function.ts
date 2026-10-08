@@ -67,6 +67,7 @@ import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, O
 import {
   BOOLEAN,
   TEXT,
+  compoundOverWide,
   commonNumber,
   hasCall,
   isReference,
@@ -535,15 +536,26 @@ class FunctionBody {
         // The name is written as the type it is read at, so `x += 1` adds a
         // number of that type to a number of that type.
         const held = this.read(statement.target, statement.line);
-        const value = this.typed(statement.value, held.inferred, statement.line).value;
+        // The count of a shift is a machine word, whatever the number being
+        // shifted is — the same rule the binary form follows, over the name
+        // rather than over a literal.
+        const counted = statement.op === "<<=" || statement.op === ">>=" || statement.op === ">>>=";
+        const value = this.typed(statement.value, counted ? asType(USIZE) : held.inferred, statement.line).value;
         // A number written into a string is written as its text, as `s += 1`
         // is in the language the body was written in, rather than as a refusal
         // the source does not raise.
+        const written =
+          held.slot.kind === "text" && !isText(value.type)
+            ? { k: "text" as const, type: TEXT, parts: [{ k: "value" as const, value }] }
+            : value;
+        // A wide number has no compound operator a backend can write, so the
+        // compound is written as the binary form the kernel answers.
+        const wide = compoundOverWide(statement.op, slotType(held.slot), { k: "local", type: slotType(held.slot), name: held.name }, written);
         this.write({
           k: "set",
           name: held.name,
-          op: statement.op,
-          value: held.slot.kind === "text" && !isText(value.type) ? { k: "text", type: TEXT, parts: [{ k: "value", value }] } : value,
+          op: wide === null ? statement.op : wide.op,
+          value: wide === null ? written : wide.value,
           line: statement.line,
         });
         return;
@@ -552,16 +564,19 @@ class FunctionBody {
         return this.fieldAssignment(statement);
       case "indexAssign": {
         const buffer = this.read(statement.buffer, statement.line);
-        const element = asType(elementOf(buffer.inferred));
+        const elementType = elementOf(buffer.inferred);
+        const element = asType(elementType);
+        const index = this.typed(statement.index, WHOLE, statement.line).value;
+        const value = this.typed(statement.value, element, statement.line).value;
+        // The same rule as the whole name above, over one element rather than
+        // a slot: a wide element has no compound operator a backend writes.
+        const wide = compoundOverWide(statement.op, elementType, { k: "element", type: elementType, of: { k: "local", type: slotType(buffer.slot), name: buffer.name }, index }, value);
         this.write({
           k: "setElement",
           buffer: buffer.name,
-          index: this.typed(statement.index, WHOLE, statement.line).value,
-          // `a[i] += x` reads the element and writes the sum back, and the
-          // operator it applies is the one the source wrote: the same rule a
-          // whole-name assignment follows, over one element rather than a slot.
-          op: statement.op,
-          value: this.typed(statement.value, element, statement.line).value,
+          index,
+          op: wide === null ? statement.op : wide.op,
+          value: wide === null ? value : wide.value,
           line: statement.line,
         });
         return;
@@ -1143,7 +1158,14 @@ class FunctionBody {
       };
     }
     const left = this.typed(expression.left, null, line);
-    const right = this.typed(expression.right, null, line);
+    // The count of a shift is a machine word, whatever the number being shifted
+    // is: the kernel every backend shifts with takes one word of count, and a
+    // count typed at the width of a wide number is the low half of the number
+    // being shifted rather than the number of bits to move. `wholeResult` types
+    // both sides at the width of the wide one, which is the value's width and
+    // not the count's.
+    const counted = op === "<<" || op === ">>" || op === ">>>";
+    const right = this.typed(expression.right, counted ? asType(USIZE) : null, line);
     // Asking whether a value is there is a different question from comparing
     // two of them, and one the IR states on its own.
     if (EQUALITY.includes(op) && (expression.left.k === "null" || expression.right.k === "null")) {

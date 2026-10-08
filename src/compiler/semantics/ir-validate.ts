@@ -977,9 +977,7 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       for (const field of value.fields) {
         problems.push(...layoutProblems(prefix, value.layout, field.name, context));
         const declared = fieldType(value.layout, field.name, context);
-        if (declared !== null && !fieldReadsAs(declared, field.value.type)) {
-          problems.push(`${prefix}${value.layout}.${field.name} is a ${typeText(declared)}, not a ${typeText(field.value.type)}`);
-        }
+        if (declared !== null) problems.push(...writeProblems(prefix, `${value.layout}.${field.name}`, declared, field.value));
       }
       return problems;
     }
@@ -1216,6 +1214,25 @@ function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
   return convertibleTo(declared, read);
 }
 
+/**
+ * What one field of a layout takes when it is written, which is what one
+ * element of a buffer takes and the same three answers: the field holds the
+ * type the layout gives it, what is written reads as that type, and a wide
+ * number is widened from a whole number and from nothing else. A wide number
+ * written where a double is read is the low half of a number the program never
+ * computed, so it is refused rather than written where no backend can read it.
+ */
+function writeProblems(prefix: string, what: string, declared: SemanticType, value: SemanticValue): string[] {
+  const problems: string[] = [];
+  if (isTextType(value.type) && isNumber(declared)) return problems;
+  if (!convertibleTo(value.type, declared)) {
+    problems.push(`${prefix}${what} is a ${typeText(declared)}, not a ${typeText(value.type)}`);
+  }
+  const reason = wideningReason(value, declared);
+  if (reason !== null) problems.push(`${prefix}${what} is written where a ${typeText(declared)} is read, and ${reason}`);
+  return problems;
+}
+
 /** A field of a layout the body lays out, and the type the layout gives it. */
 function layoutProblems(prefix: string, layout: string, field: string, context: Context): string[] {
   if (!isLayout(context, layout) && !isContractLayout(context.contract, layout)) {
@@ -1362,8 +1379,8 @@ function typeProblems(context: Context, tree: Tree): string[] {
         problems.push(`${prefix}${statement.layout}.${statement.field} is written through a ${typeText(statement.object.type)}, which is not a reference`);
       }
       const declared = fieldType(statement.layout, statement.field, context);
-      if (declared !== null && !fieldReadsAs(declared, statement.value.type)) {
-        problems.push(`${prefix}${statement.layout}.${statement.field} is a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
+      if (declared !== null) {
+        problems.push(...writeProblems(prefix, `${statement.layout}.${statement.field}`, declared, statement.value));
       }
     }
 

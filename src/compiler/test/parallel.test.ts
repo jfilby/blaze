@@ -585,7 +585,7 @@ test("a loop whose body returns out of the function is not marked", () => {
     },
     "main.ts",
   );
-  const program = resolveProgram(phase.body!, phase.program);
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   markParallelLoops(program.entry);
   const marked: string[] = [];
   const walk = (block: SemanticBlock): void => {
@@ -607,7 +607,7 @@ test("a loop whose body returns out of the function is not marked", () => {
 
 test("the word survives being printed and read back", () => {
   const phase = phaseOf("typescript", { "main.ts": PARALLEL_SOURCE }, "main.ts");
-  const program = resolveProgram(phase.body!, phase.program);
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   markParallelLoops(program.entry);
   const printed = printSemanticProgram(program);
   assert.match(printed, /parallel/);

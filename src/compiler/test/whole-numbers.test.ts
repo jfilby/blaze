@@ -71,7 +71,7 @@ const BOTH_ARMS = programOf(
 function resolved(source: string): SemanticProgram {
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   assert.ok(phase.body !== undefined);
-  return resolveProgram(phase.body, phase.program);
+  return resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 }
 
 /** The C a program of this source is written out as, after the rewrites. */

@@ -868,6 +868,47 @@ export interface SemanticReduction {
 /** The operators `op=` accepts. */
 export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 
+/** What each compound assignment states as the one operation it applies. */
+export const COMPOUND_ARITH: Record<Exclude<SemanticAssignOp, "=">, ArithOp> = {
+  "+=": "add",
+  "-=": "sub",
+  "*=": "mul",
+  "/=": "div",
+  "%=": "mod",
+  "&=": "and",
+  "|=": "or",
+  "^=": "xor",
+  "<<=": "shl",
+  ">>=": "shr",
+  ">>>=": "ushr",
+  "**=": "pow",
+};
+
+/**
+ * A compound assignment over a wide number, written as the binary form it is.
+ *
+ * A wide number has no operator a target can write: `a <<= 2` over a `u256` is
+ * `invalid operands to binary << (have 'blaze_u256' and 'blaze_u256')` to
+ * gcc, and the machine backend has no instruction over four limbs. The binary
+ * form of the same operation is answered by the kernel every backend already
+ * calls for it, so the compound form is written as that — which is the same
+ * program, because `a <<= v` is `a = a << v` in the language.
+ *
+ * An operation the kernel does not have is not excused by this: `>>>=` and
+ * `**=` are written as the arithmetic they state, and the validator refuses it
+ * by name there, which is the one place a wide number is asked for something
+ * it does not have.
+ */
+export function compoundOverWide(
+  op: SemanticAssignOp,
+  type: SemanticType,
+  left: SemanticValue,
+  right: SemanticValue,
+): { op: SemanticAssignOp; value: SemanticValue } | null {
+  if (op === "=" || !isWideType(type)) return null;
+  return { op: "=", value: { k: "arith", type, op: COMPOUND_ARITH[op], left, right } };
+}
+
 /**
  * The line of the source a statement was written on, for one that states
  * none. A statement carries that line so a diagnostic can name the place in

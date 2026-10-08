@@ -691,6 +691,25 @@ class ProgramParser {
       this.next();
       return { kind: "invoke", function: name.text, args: this.arguments(), line: name.line };
     }
+    if (token.text === ".") {
+      // A field of an object is written the way a name is: the object is read
+      // for what it holds, and the field is written into it. The read of the
+      // same spelling is a value, and a statement has nowhere to put it.
+      this.next();
+      this.next();
+      const field = this.identifier("the property of a value");
+      const op = this.assignOperator();
+      if (op === null) {
+        if (this.refused) {
+          this.synchronize();
+          return null;
+        }
+        this.fail(`"${name.text}.${field}" is not a statement of a program; a program cannot run it`, this.peek());
+        this.synchronize();
+        return null;
+      }
+      return { kind: "fieldAssign", object: name.text, field, op, value: this.value(), line: name.line };
+    }
     if (ASSIGN_OPS.includes(token.text as ProgramAssignOp)) {
       this.next();
       const op = this.next().text as ProgramAssignOp;

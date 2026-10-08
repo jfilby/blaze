@@ -553,7 +553,7 @@ async function delivered(source: string, transformed: boolean): Promise<string> 
     });
     objectPaths.push(built.objectPath);
   }
-  const program = resolveProgram(phase.body, phase.program);
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   if (transformed) optimizeSemanticProgram(program);
   const binary = await buildProgramDriver({
     mode: "debug",

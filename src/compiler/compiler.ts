@@ -51,6 +51,7 @@ import { verifyProgram, type ProgramVerification } from "./toolchain/verify-prog
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
+import type { LiteralKeys } from "./semantics/program-objects.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
@@ -804,9 +805,10 @@ function resolvedDriver(
   program: ProgramContract,
   objectNames: Record<string, string>,
   objectLayouts: Record<string, ObjectLayout>,
+  objectKeys: LiteralKeys,
   semantics: Record<string, SemanticFunction>,
 ): SemanticProgram {
-  const driver = resolveProgram(body, program, objectNames, objectLayouts);
+  const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
   wholeElementArithmetic(Object.values(semantics), driver.entry);
   return driver;
 }
@@ -816,6 +818,7 @@ function semanticFunctions(
   objectNames: Record<string, string>,
   body: ProgramBody | undefined,
   objectLayouts: Record<string, ObjectLayout>,
+  objectKeys: LiteralKeys,
 ): Record<string, SemanticFunction> {
   const context: FunctionContext = {
     objectNames,
@@ -834,7 +837,7 @@ function semanticFunctions(
   if (body !== undefined) {
     wholeElementArithmetic(
       Object.values(resolved),
-      resolveProgram(body, program, objectNames, objectLayouts).entry,
+      resolveProgram(body, program, objectNames, objectLayouts, objectKeys).entry,
     );
   }
   // Every body is resolved before any of them is checked, because a function is
@@ -1192,7 +1195,7 @@ export async function runBuild(
     });
     const program = phase.program;
     const units = compilationUnits(program, phase.body !== undefined);
-    const semantics = semanticFunctions(program, phase.objectNames, phase.body, phase.objectLayouts);
+    const semantics = semanticFunctions(program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
     reporter.stage(
@@ -1643,7 +1646,7 @@ export async function runBuild(
       phase.body === undefined
         ? undefined
         : optimizeSemanticProgram(
-            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, semantics),
+            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys, semantics),
             new Map(Object.entries(semantics)),
           );
     // The IR is checked here, before a toolchain is asked for anything: a
@@ -2040,7 +2043,7 @@ export async function runStored(
   // it may inline are resolved here exactly as the build resolved them. The
   // object layouts are a property of the contracted files and nothing else, so
   // the same program answers the same names without the phase being run again.
-  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files).names), undefined, {});
+  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files).names), undefined, {}, new Map());
 
   // Both records are collected as entries and written whole, the way a build
   // writes its own, so a name that is a key of neither is never half written.
@@ -2143,7 +2146,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     entry,
     read: moduleReader(directory),
   });
-  const semantics = semanticFunctions(phase.program, phase.objectNames, phase.body, phase.objectLayouts);
+  const semantics = semanticFunctions(phase.program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
   if (options.function !== undefined || options.all === true) {
@@ -2176,7 +2179,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   const callees = new Map(Object.entries(semantics));
   const program =
     options.from === undefined
-      ? resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts)
+      ? resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys)
       : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
   validateSemanticProgram(program, phase.program, callees);
   // As for a function: the program the backends lower is folded, so the one

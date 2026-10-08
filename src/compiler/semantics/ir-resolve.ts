@@ -58,7 +58,7 @@
 
 import { parseType, typeToString } from "./contract.ts";
 import { isWholeNumberText } from "./objects.ts";
-import { shapeKey } from "./program-objects.ts";
+import type { LiteralKeys } from "./program-objects.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import { mapTypeScriptType, PROGRAM_ENTRY_SYMBOL } from "./typescript.ts";
@@ -99,6 +99,7 @@ import {
   type SemanticType,
   type SemanticValue,
   type UnaryOp,
+  compoundOverWide,
 } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -255,6 +256,8 @@ type DraftStatement =
       type: TypeExpr;
       line: number;
     }
+  /** A field of an object written, as `node.left = null` is. */
+  | { kind: "fieldAssign"; object: string; type: TypeExpr; layout: string; field: string; value: DraftValue; line: number }
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; type: TypeExpr; line: number }
   /** `a.fill(x)`: the array is written from its first element, as one value. */
   | { kind: "fill"; buffer: DraftValue; value: DraftValue; held: ArrayHeld; line: number }
@@ -767,6 +770,28 @@ const WHOLE_OPERATORS: readonly ProgramBinaryOp[] = ["%", "<<", ">>", "&", "|", 
 const CONVERTING_OPERATORS: readonly ProgramBinaryOp[] = [">>>"];
 /** The compound assignments only whole numbers have. */
 const WHOLE_ASSIGNMENTS: readonly ProgramAssignOp[] = ["%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="];
+
+/**
+ * What each compound assignment states as the binary operator it applies. A
+ * store is the only write the IR states and it states no operators, so a
+ * compound write to a field is a read of that field, the binary form applied
+ * to it, and the store — which is the same program, because `p.x += 1` is
+ * `p.x = p.x + 1` in the language.
+ */
+const COMPOUND_BINARY: Record<Exclude<ProgramAssignOp, "=">, ProgramBinaryOp> = {
+  "+=": "+",
+  "-=": "-",
+  "*=": "*",
+  "/=": "/",
+  "%=": "%",
+  "&=": "&",
+  "|=": "|",
+  "^=": "^",
+  "<<=": "<<",
+  ">>=": ">>",
+  ">>>=": ">>>",
+  "**=": "**",
+};
 const EQUALITY: readonly ProgramBinaryOp[] = ["===", "!==", "==", "!="];
 
 const LOGICAL: readonly ProgramBinaryOp[] = ["&&", "||", "??"];
@@ -919,6 +944,9 @@ function calledNames(body: readonly ProgramStatement[]): string[] {
           callsInValue(statement.index, called);
           callsInValue(statement.value, called);
           continue;
+        case "fieldAssign":
+          callsInValue(statement.value, called);
+          continue;
         case "print":
           statement.values.forEach((value) => callsInValue(value, called));
           continue;
@@ -1000,6 +1028,10 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         case "elementAssign":
           note(statement.buffer);
           value(statement.index);
+          value(statement.value);
+          continue;
+        case "fieldAssign":
+          note(statement.object);
           value(statement.value);
           continue;
         case "update":
@@ -1245,6 +1277,16 @@ function isWideType(type: TypeExpr): boolean {
 }
 
 /**
+ * The layout a reference names, or null when it names none. A field of a
+ * reference the layouts do not name is a field of whatever holds it, which is
+ * what a tree of one shape is, and a read of its field is a read of the layout
+ * of that object rather than of a shape of its own.
+ */
+function referenceLayout(type: TypeExpr): string | undefined {
+  return type.kind === "ref" ? type.name : undefined;
+}
+
+/**
  * Whether control leaves a block rather than continuing past it, which is what
  * an `if` with two arms that each leave means for the block it is written in.
  */
@@ -1275,6 +1317,13 @@ class ProgramResolver {
   private readonly objects: Record<string, ObjectLayout>;
   /** The layout name each literal's shape is laid out as, keyed by its shape key. */
   private readonly objectLayoutNames: Map<string, string>;
+  /**
+   * The shape every object literal of the body was laid out at, by the literal
+   * itself. The layout pass walked the whole program before it named anything,
+   * so this is the only place that can say which of two shapes a literal ended
+   * up in.
+   */
+  private readonly literalKeys: LiteralKeys;
   /** An array another name was given, and the array it is the same array as. */
   private readonly aliases: [ArrayHeld, ArrayHeld][] = [];
   /** How many loops the statement being resolved is written in. */
@@ -1288,12 +1337,14 @@ class ProgramResolver {
     objects: Record<string, ObjectLayout>,
     functions: ProgramFunctions,
     objectLayoutNames: Map<string, string> = new Map(),
+    literalKeys: LiteralKeys = new Map(),
   ) {
     this.body = body;
     this.contracts = contracts;
     this.objects = objects;
     this.functions = functions;
     this.objectLayoutNames = objectLayoutNames;
+    this.literalKeys = literalKeys;
   }
 
   resolve(): DraftProgram {
@@ -1535,7 +1586,14 @@ class ProgramResolver {
     // A body is a program of its own: the same contracts and the same
     // functions, with the parameters and the captured names declared before
     // the first statement of the body runs.
-    const inner = new ProgramResolver(this.body, this.contracts, this.objects, this.functions, this.objectLayoutNames);
+    const inner = new ProgramResolver(
+      this.body,
+      this.contracts,
+      this.objects,
+      this.functions,
+      this.objectLayoutNames,
+      this.literalKeys,
+    );
     inner.open();
     for (const param of draft.signature.params) {
       inner.declareName(param.name, draft.line, heldOf(param.type));
@@ -1579,6 +1637,19 @@ class ProgramResolver {
       );
     }
     return held;
+  }
+
+  /**
+   * Whether a name counts with a wide number, which is not a machine word a
+   * shift may be read at. Asked before the count is read, because reading one
+   * at the width of a machine word is a conversion of the low limb rather than
+   * the number the source wrote, and the shape of the refusal is what the
+   * validator states.
+   */
+  private countsWide(name: string, line: number): boolean {
+    const held = this.held(name, line);
+    if (held.kind !== "number" || held.type === null) return false;
+    return isWide(held.type);
   }
 
   private declareName(name: string, line: number, held: WithoutName<Held>): Held {
@@ -1679,6 +1750,8 @@ class ProgramResolver {
         return this.declaration(statement);
       case "assign":
         return this.assignment(statement);
+      case "fieldAssign":
+        return this.fieldAssignment(statement);
       case "elementAssign":
         return this.elementAssignment(statement);
       case "fill":
@@ -1917,6 +1990,78 @@ class ProgramResolver {
     }
   }
 
+  /**
+   * A field of an object written, as `node.left = null` is. A plain `=` is one
+   * store, and a compound one is a read of the field, the operation applied to
+   * what was there, and the store of the answer.
+   */
+  private fieldAssignment(statement: ProgramStatement & { kind: "fieldAssign" }): DraftStatement {
+    const held = this.held(statement.object, statement.line);
+    if (held.kind !== "object") {
+      throw programError(
+        `"${statement.object}" is not an object`,
+        this.body,
+        statement.line,
+        `line ${statement.line} of ${this.body.file}: a program writes the fields of an object it holds, as in node.left = null`,
+      );
+    }
+    // The layout a name of an object holds carries with it: the field is a
+    // field of the layout the reference points at, or nothing answers.
+    if (held.type.kind !== "ref" || held.type.name === undefined) {
+      throw programError(
+        `"${statement.object}" is not an object the layout names`,
+        this.body,
+        statement.line,
+        `line ${statement.line} of ${this.body.file}: a field write is a field of a layout, and a program writes the fields of the objects it laid out`,
+      );
+    }
+    const laid = held.type.name;
+    const layout = this.objects[laid] as ObjectLayout | undefined;
+    if (layout === undefined) {
+      throw programError(
+        `"${laid}" is not a layout the program lays out`,
+        this.body,
+        statement.line,
+        `line ${statement.line} of ${this.body.file}: a program writes the fields of the objects it laid out, and nothing else lays out ${laid}`,
+      );
+    }
+    const found = layout.fields.find((field) => field.name === statement.field);
+    if (found === undefined) {
+      throw programError(
+        `${laid} has no field "${statement.field}"`,
+        this.body,
+        statement.line,
+        `line ${statement.line} of ${this.body.file}: write the field an object holds, or read one the layout states`,
+      );
+    }
+    // What is written is read back at the type the layout gives the field, so a
+    // field of a whole number is written a whole number and one of a reference
+    // is written a reference.
+    const type = parseType(found.type);
+    const value = this.value(statement.value, type, statement.line);
+    const object: DraftValue = { k: "reference", name: held.name, held };
+    const read: DraftValue = { k: "field", object, layout: laid, field: statement.field, type };
+    return {
+      kind: "fieldAssign",
+      object: held.name,
+      type: held.type,
+      layout: laid,
+      field: statement.field,
+      value:
+        statement.op === "="
+          ? value
+          : {
+              k: "binary",
+              op: COMPOUND_BINARY[statement.op],
+              left: read,
+              right: value,
+              type,
+              ...(isBigint(value) ? { bigint: true as const } : {}),
+            },
+      line: statement.line,
+    };
+  }
+
   private assignment(statement: ProgramStatement & { kind: "assign" }): DraftStatement {
     const held = this.held(statement.name, statement.line);
     this.mutable(held, statement.name, statement.line);
@@ -1957,11 +2102,15 @@ class ProgramResolver {
       );
     }
     const type = numeric(name);
+    // The count of a shift is a machine word, whatever the number being shifted
+    // is: the kernel takes one word of count, and a count typed at the width of
+    // a wide number is the low half of the number being shifted.
+    const counted = statement.op === "<<=" || statement.op === ">>=" || statement.op === ">>>=";
     return {
       kind: "assign",
       name: held.name,
       op: statement.op,
-      value: this.value(statement.value, type, statement.line),
+      value: this.value(statement.value, counted ? USIZE : type, statement.line),
       type,
       line: statement.line,
     };
@@ -2322,7 +2471,15 @@ class ProgramResolver {
         // the field it read is a field of, so either way the name is there.
         let laid: string | undefined;
         if (base.k === "field") {
-          laid = base.layout;
+          // The layout of what the field holds, when the layout gives the field a
+          // shape of its own: a literal written into a literal is an object of
+          // its own, laid out beside the one it was written into, and a read of
+          // what that field holds is a read of *that* layout rather than one
+          // further down the same one. A field of a reference no layout names is
+          // a field of the object it was read of, which is what a tree of one
+          // shape is: every `left` of it names the layout the tree itself is.
+          laid = referenceLayout(base.type);
+          if (laid === undefined) laid = base.layout;
         } else if (base.k === "reference" && base.held.kind === "object" && base.held.type.kind === "ref" && base.held.type.name !== undefined) {
           laid = base.held.type.name;
         } else {
@@ -2362,9 +2519,13 @@ class ProgramResolver {
         };
       }
       case "object": {
-        const key = shapeKey(value);
-        const layout = this.objectLayoutNames.get(key);
-        if (key === "" || layout === undefined) {
+        // The shape of the literal is the one the layout pass laid it out at,
+        // read off this literal rather than derived from the parse tree: which
+        // of two shapes folded into which is decided once the whole program has
+        // been walked, and only that pass can say.
+        const key = this.literalKeys.get(value);
+        const layout = key === undefined ? undefined : this.objectLayoutNames.get(key);
+        if (key === undefined || layout === undefined) {
           throw programError(
             "an object the program built is not laid out by it",
             this.body,
@@ -2595,7 +2756,22 @@ class ProgramResolver {
       };
     }
     const left = this.value(value.left, null, line);
-    const right = this.value(value.right, left.k === "literal" ? draftType(left) : null, line);
+    const leftName = primitive(draftType(left));
+    // The count of a shift is the machine word every backend writes it at, which
+    // the whole-number rule below cannot see: a count beside a wide number is
+    // written as the count of the shift rather than as a number of the width
+    // being shifted, and counting on the rule here would refuse `a << n` for a
+    // program number `n` that the emitter writes correctly. A count that is
+    // itself a wide number is refused rather than truncated differently on each
+    // target, and the validator is where that refusal is stated.
+    const counted = op === "<<" || op === ">>" || op === ">>>";
+    const wideValue = leftName !== null && isWide(leftName);
+    const wideCount = value.right.k === "name" && this.countsWide(value.right.name, line);
+    const right = this.value(
+      value.right,
+      counted && wideValue && !wideCount ? USIZE : left.k === "literal" ? draftType(left) : null,
+      line,
+    );
     if (op === "+" && (holdsText(left) || holdsText(right))) {
       if (!holdsText(left) || !holdsText(right)) {
         throw programError(
@@ -2639,6 +2815,11 @@ class ProgramResolver {
       // `%`, a shift and a bitwise operator need whole numbers, and the
       // language raises on anything else rather than rounding it.
       for (const [what, side] of [["the left", left], ["the right", right]] as const) {
+        // The count of a shift over a wide number is the one side the rule does
+        // not hold: it is written as the machine word the kernel reads it at,
+        // whatever the number written as the count is, because a count of the
+        // width being shifted is the low half of the number being shifted.
+        if (what === "the right" && counted && wideValue) continue;
         const name = primitive(draftType(side));
         const written = side.k === "literal" ? side.held.text : null;
         if (name === null && (written === null || isWholeLiteral(written))) continue;
@@ -2689,8 +2870,10 @@ class ProgramResolver {
         `line ${line} of ${this.body.file}: the language adds, subtracts, multiplies, divides and compares a bigint with another bigint and raises on a number beside one; convert it with Number() and say which of the two you meant`,
       );
     }
-    const leftName = primitive(draftType(left));
-    const rightName = primitive(draftType(right));
+    // The right side's own name, read once here: the left one was read where the
+    // count of a shift was decided, because a count beside a wide number is the
+    // machine word the kernel takes.
+    const wholeRightName = primitive(draftType(right));
     // A comparison holds or it does not. A whole operator needs whole numbers
     // and yields one, whatever the literals it was written with: `7 % 3` is 1.
     const whole = WHOLE_OPERATORS.includes(op);
@@ -2701,12 +2884,12 @@ class ProgramResolver {
         // backend is handed the value, which is the same reason `wholeResult`
         // and `numericResult` ask about a wide number before anything else.
         wideBeside
-        ? numeric(wholeResult(leftName, rightName))
+        ? numeric(wholeResult(leftName, wholeRightName))
         : leftBig
           ? numeric(BIGINT_TYPE)
           : whole
-            ? numeric(wholeResult(leftName, rightName))
-            : numeric(numericResult(leftName, rightName, op === "/"));
+            ? numeric(wholeResult(leftName, wholeRightName))
+            : numeric(numericResult(leftName, wholeRightName, op === "/"));
     return leftBig ? { k: "binary", op, left, right, type, bigint: true } : { k: "binary", op, left, right, type };
   }
 
@@ -3387,25 +3570,51 @@ class ProgramLowering {
         this.statement({ k: "let", slot, value: held, line: statement.line });
         return;
       }
-      case "assign":
+      case "fieldAssign": {
+        // The object is the name the program bound, read as the reference it
+        // is: a store is written through a reference, and the validator holds a
+        // store of anything else to be a name the program did not bind.
+        const object: SemanticValue = { k: "local", type: statement.type, name: statement.object };
+        this.statement({
+          k: "storeField",
+          object,
+          layout: statement.layout,
+          field: statement.field,
+          value: this.value(statement.value, null, statement.line),
+          line: statement.line,
+        });
+        return;
+      }
+      case "assign": {
+        const value = this.value(statement.value, statement.type, statement.line);
+        // A wide number has no compound operator a backend can write, so the
+        // compound is written as the binary form the kernel answers.
+        const wide = compoundOverWide(statement.op, statement.type ?? numeric("f64"), { k: "local", type: statement.type ?? numeric("f64"), name: statement.name }, value);
         this.statement({
           k: "set",
           name: statement.name,
-          op: statement.op,
-          value: this.value(statement.value, statement.type, statement.line),
+          op: wide === null ? statement.op : wide.op,
+          value: wide === null ? value : wide.value,
           line: statement.line,
         });
         return;
-      case "elementAssign":
+      }
+      case "elementAssign": {
+        const index = this.value(statement.index, USIZE, statement.line);
+        const value = this.value(statement.value, statement.type, statement.line);
+        // The same rule over one element rather than a slot.
+        const element = statement.type ?? numeric("f64");
+        const wide = compoundOverWide(statement.op, element, { k: "element", type: element, of: { k: "local", type: element, name: statement.buffer }, index }, value);
         this.statement({
           k: "setElement",
           buffer: statement.buffer,
-          index: this.value(statement.index, USIZE, statement.line),
-          op: statement.op,
-          value: this.value(statement.value, statement.type, statement.line),
+          index,
+          op: wide === null ? statement.op : wide.op,
+          value: wide === null ? value : wide.value,
           line: statement.line,
         });
         return;
+      }
       case "update":
         this.statement({ k: "step", name: statement.name, op: statement.op, prefix: statement.prefix, line: statement.line });
         return;
@@ -4080,6 +4289,7 @@ export function resolveProgram(
   program: ProgramContract,
   objectNames: Record<string, string> = {},
   objectLayouts: Record<string, ObjectLayout> = {},
+  objectKeys: LiteralKeys = new Map(),
 ): SemanticProgram {
   // The layouts are the ones the phase named for the whole program: the
   // objects the functions write and the objects the body writes are one
@@ -4102,6 +4312,7 @@ export function resolveProgram(
       used: new Set(),
     },
     new Map(Object.entries(objectNames)),
+    objectKeys,
   );
   return new ProgramLowering(resolver.taken()).lower(resolver.resolve());
 }

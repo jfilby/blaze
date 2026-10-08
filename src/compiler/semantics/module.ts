@@ -127,6 +127,8 @@ export type ProgramStatement =
   | { kind: "declare"; name: string; mutable: boolean; type: string | null; value: ProgramValue; line: number }
   | { kind: "assign"; name: string; op: ProgramAssignOp; value: ProgramValue; line: number }
   | { kind: "elementAssign"; buffer: string; index: ProgramValue; op: ProgramAssignOp; value: ProgramValue; line: number }
+  /** A field of an object written, as `node.left = null` is. */
+  | { kind: "fieldAssign"; object: string; field: string; op: ProgramAssignOp; value: ProgramValue; line: number }
   /**
    * `a.fill(x)` written for what it does: every element of the array written as
    * one value. The same spelling bound to a name is an expression, because it

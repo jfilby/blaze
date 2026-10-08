@@ -112,7 +112,7 @@ function phased(source: string): Phased {
   const contracts = phase.program.files.flatMap((file) => Object.entries(file.functions));
   const context: FunctionContext = { objectNames: phase.objectNames, functions: Object.fromEntries(contracts) };
   const functions = new Map(contracts.map(([name, contract]) => [name, resolveFunction(contract, context)]));
-  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   wholeElementArithmetic([...functions.values()], program.entry);
   return { program, functions, phase };
 }

@@ -20,6 +20,8 @@ import type { FileContract, FunctionContract, ObjectLayout, PrimitiveTypeName, T
 import { isWhole, LIMB_BYTES, limbsOf } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
+import type { LiteralKeys } from "./program-objects.ts";
+import type { ProgramValue } from "./module.ts";
 
 /** The number a reference takes: one pointer. */
 const POINTER_SIZE = 8;
@@ -907,15 +909,17 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
  * definition of every function that has one. A signature the source left as
  * `any` is narrowed to the object its body actually returns.
  *
- * Returns the name each shape is laid out as. A function body writes objects,
- * and the IR that describes that body names the layout each of them is: a
- * shape is keyed by the fields it holds, so the same literal in two functions
- * is one object with one name, and only this pass can say which.
+ * Returns the name each shape is laid out as, and the key each literal of a
+ * program body was laid out at. A function body writes objects, and the IR that
+ * describes that body names the layout each of them is: a shape is keyed by the
+ * fields it holds, so the same literal in two functions is one object with one
+ * name, and only this pass can say which.
  */
 export function resolveObjects(
   files: readonly FileContract[],
-  programShapes: ReadonlyMap<string, Shape> = new Map(),
-): { names: Map<string, string>; layouts: Record<string, ObjectLayout> } {
+  programBody: { shapes: ReadonlyMap<string, Shape>; keys: LiteralKeys } = { shapes: new Map(), keys: new Map() },
+): { names: Map<string, string>; layouts: Record<string, ObjectLayout>; keys: Map<ProgramValue & { k: "object" }, string> } {
+  const programShapes = programBody.shapes;
   const shapes = new Map<string, Shape>();
   const owners = new Map<string, string>();
   // Every function the program compiles is callable, and every one of them has
@@ -943,7 +947,7 @@ export function resolveObjects(
       const name = names.get(shape.key) as string;
       layouts[name] = layOut(name, shape, names, new Map());
     }
-    return { names, layouts };
+    return { names, layouts, keys: new Map(programBody.keys) };
   }
 
   // The declared return of every function is known before any body is walked,
@@ -999,6 +1003,14 @@ export function resolveObjects(
     for (const body of bodies.values()) body.renameObjects(remapped);
   }
 
+  // Every literal a program body wrote, filed under the key it survived as: the
+  // fold moved a shape that unified with another onto the kept key, and a literal
+  // is laid out under the key of the shape it ended up in.
+  const literalKeys = new Map<ProgramValue & { k: "object" }, string>();
+  for (const [literal, key] of programBody.keys) {
+    literalKeys.set(literal, remapped.get(key) ?? key);
+  }
+
   const names = new Map<string, string>();
   const ordered = [...shapes.values()];
   ordered.forEach((shape, index) => names.set(shape.key, `Object${index + 1}`));
@@ -1029,7 +1041,7 @@ export function resolveObjects(
     }
   }
 
-  return { names, layouts: written };
+  return { names, layouts: written, keys: literalKeys };
 }
 
 

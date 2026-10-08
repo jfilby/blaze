@@ -35,7 +35,7 @@ const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.sl
 function resolved(source: string): SemanticProgram {
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   assert.ok(phase.body !== undefined);
-  return resolveProgram(phase.body, phase.program);
+  return resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 }
 
 /** The C a program of this source is driven by. */
@@ -355,7 +355,7 @@ test("a parameter named after a C type or keyword is declared under another name
   };
   const phase = phaseOf("typescript", files, "main.ts");
   assert.ok(phase.body !== undefined);
-  const written = generateProgramDriver(resolveProgram(phase.body, phase.program));
+  const written = generateProgramDriver(resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
   assert.match(written, /extern double twice\(/);
   assert.doesNotMatch(written, /\bdouble double\b/);
 });
@@ -388,7 +388,7 @@ test("an alias of an array is the array, at the element type the call reads it a
   };
   const phase = phaseOf("typescript", files, "main.ts");
   assert.ok(phase.body !== undefined);
-  const written = generateProgramDriver(resolveProgram(phase.body, phase.program));
+  const written = generateProgramDriver(resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
   // One array is written down once, at the type the call reads it at, so the
   // pointer is never read back silently as another type.
   assert.match(written, /int32_t\* a = /);
@@ -413,7 +413,7 @@ test("an array read at two element types is refused, alias or not", () => {
   };
   const phase = phaseOf("typescript", files, "main.ts");
   assert.ok(phase.body !== null);
-  const refused = diagnostic(() => resolveProgram(phase.body!, phase.program));
+  const refused = diagnostic(() => resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
   assert.match(refused, /an array of (f64|i32) is used where/);
 });
 
@@ -559,7 +559,7 @@ test("a string is ordered by what it says, not by whether it matches", async () 
   // comes first. The function emitter has always used `strcmp` for this.
   const source = 'let a = "apple";\nlet b = "banana";\nconsole.log(a === b);\n';
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
-  assert.match(generateProgramDriver(resolveProgram(phase.body!, phase.program)), /program_string_equal/, "an equality is still an equality");
+  assert.match(generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys)), /program_string_equal/, "an equality is still an equality");
   const turned = parseSemanticProgram(
     [
       'ir 1',

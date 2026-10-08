@@ -1027,14 +1027,15 @@ class TypeScriptParser {
     }
     this.next();
     const field = this.next();
-    if (field.kind !== "ident" || !this.at("=")) {
+    const operator = this.peek();
+    if (field.kind !== "ident" || (operator.text !== "=" && !(operator.text in COMPOUND_OPERATORS))) {
       this.position = start;
       return null;
     }
     this.next();
     const value = this.readExpression();
     this.accept(";");
-    return { kind: "memberAssign", base: base.text, field: field.text, op: "=", value, line: base.line };
+    return { kind: "memberAssign", base: base.text, field: field.text, op: operator.text as AssignOperator, value, line: base.line };
   }
 
   /** A call or an `i++` written for what it does. */
@@ -1830,6 +1831,14 @@ interface LoopContext {
 const LOOP_REMEDY =
   "a postcondition is one expression the result must equal, so this body states none: the contract carries the statements themselves";
 
+/**
+ * The binary operators the contract language states. A compound assignment
+ * whose operator is not one of these is a result the contract cannot say, so
+ * the body is contracted by what it does rather than by an expression it
+ * cannot meet.
+ */
+const CONTRACT_BINARY = new Set(["+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!="]);
+
 class BodyAnalysis {
   private readonly declaration: TypeScriptFunction;
   private readonly bindings = new Map<string, string>();
@@ -1895,9 +1904,29 @@ class BodyAnalysis {
         if (current === undefined) {
           throw frontendError(`assignment to undeclared "${statement.target}"`, `line ${statement.line}`);
         }
+        // A compound assignment is the binary operator it states over the name
+        // and the value, and the operator is the one the source wrote: `<<=` is
+        // a shift, not a comparison, and `**=` is a power, not a product. The
+        // first character of the operator was the whole of this before the
+        // compound set grew, and it spelled every one of the new ones wrong.
+        if (statement.op !== "=") {
+          const binary = COMPOUND_OPERATORS[statement.op];
+          // The contract language states `+ - * /` and the comparisons and
+          // nothing else, so a result that is a shift, a bitwise operation or a
+          // power is a body the contract cannot state: it is contracted by what
+          // it does instead, which is where a body that prints or branches
+          // already goes.
+          if (!CONTRACT_BINARY.has(binary)) {
+            this.uncontractable(
+              `applies "${binary}" to "${statement.target}"`,
+              statement.line,
+              "a contract is one expression the result must equal, and the contract language states + - * / and the comparisons; write the operation as a binary expression the result returns",
+            );
+          }
+        }
         this.bindings.set(
           statement.target,
-          statement.op === "=" ? value : `(${current} ${statement.op[0]} ${value})`,
+          statement.op === "=" ? value : `(${current} ${COMPOUND_OPERATORS[statement.op]} ${value})`,
         );
         return;
       }

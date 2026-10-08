@@ -52,7 +52,7 @@ import { scratch } from "./scratch.ts";
 /** A program of one entry module and the library it calls, resolved to the IR. */
 function resolved(files: Record<string, string>): { program: SemanticProgram; contract: ProgramContract } {
   const phase = phaseOf("typescript", files, "main.ts");
-  return { program: resolveProgram(phase.body!, phase.program), contract: phase.program };
+  return { program: resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys), contract: phase.program };
 }
 
 const NUMBER = { kind: "primitive", name: "f64" } as const;

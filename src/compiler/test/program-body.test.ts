@@ -34,6 +34,36 @@ const DOT = [
   "",
 ].join("\n");
 
+/**
+ * A program that imports a function beside it, checked the same way: the source
+ * the two toolchains print is compared, and what the object of the body is laid
+ * out as is what the function reads it at.
+ */
+async function agreesWithNodeLib(source: string, library: string, output: "machine" | "asm" = "machine"): Promise<void> {
+  const directory = await scratch("blaze-program-lib-");
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeFile(join(directory, "lib.ts"), library, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output,
+  });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  const binary = outcome.outputPath;
+  assert.ok(binary !== null, "a program build delivers its binary");
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+}
+
 /** The statements of a TypeScript module, as the frontend parsed them. */
 function bodyOf(source: string) {
   return typeScriptFrontend.analyze(source, "main.ts").body;
@@ -42,7 +72,7 @@ function bodyOf(source: string) {
 /** A program of one entry module and the library it calls, resolved. */
 function resolved(files: Record<string, string>) {
   const phase = phaseOf("typescript", files, "main.ts");
-  return resolveProgram(phase.body!, phase.program);
+  return resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 }
 
 /** The call a resolved statement makes, which is the only interesting value. */
@@ -686,7 +716,7 @@ test("a function that falls off the end of a path is refused", () => {
     "",
   ].join("\n");
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
-  const program = resolveProgram(phase.body!, phase.program);
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   assert.deepEqual(semanticIrProblems(program, phase.program), [
     "maybe: entry: the body returns nothing and is declared to return a f64",
   ]);
@@ -1609,6 +1639,158 @@ test("the compound operators are the binary one over the name and the value", as
   await agreesWithNode(source);
 });
 
+test("a compound assignment over a wide number is the binary form the kernel answers", async () => {
+  // A wide number has no operator a backend can write: `a <<= 2` over a `u256`
+  // is `invalid operands to binary << (have 'blaze_u256' and 'blaze_u256')` to
+  // gcc, and the machine backend has no instruction over four limbs. The binary
+  // form of the same operation is the one the kernel answers, so every operator
+  // a wide number has is written that way and the program is the same one.
+  const source = [
+    "let a: u256 = 100;",
+    "a += 2;",
+    "a -= 1;",
+    "a *= 3;",
+    "a /= 2;",
+    "a %= 5;",
+    "a &= 0xff;",
+    "a |= 0x100;",
+    "a ^= 0x1;",
+    "a <<= 2;",
+    "a >>= 1;",
+    "console.log(a);",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a wide number is shifted by the machine word the count is written as", async () => {
+  // The count of a shift is the machine word every backend writes it at, so a
+  // count that is a program number is the number of bits to move rather than a
+  // number of the width being shifted — which is the low half of the number
+  // being shifted. A count that is itself a wide number is refused by name,
+  // because four limbs of count are not a number of bits any target reads the
+  // same way.
+  const source = [
+    "let a: u256 = 5;",
+    "let n = 3;",
+    "console.log(a << n);",
+    "let b: u256 = 40;",
+    "console.log(b >> n);",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+  // A count that is itself a wide number is refused by the validator rather than
+  // by the resolver, because which counts a kernel takes is a property of the
+  // IR and not of the expression it came from.
+  const wide = phaseOf("typescript", { "main.ts": "let a: u256 = 5;\nlet c: u256 = 3;\nconsole.log(a << c);\n" }, "main.ts");
+  const program = resolveProgram(wide.body!, wide.program, wide.objectNames, wide.objectLayouts, wide.objectKeys);
+  assert.match(
+    semanticIrProblems(program, wide.program).join("\n"),
+    /a shift count is the machine word the source wrote the shift by/,
+  );
+});
+
+test("a compound over a wide number is the same program through the C backend", async () => {
+  // The gcc spellings are where `a <<= 2` was `invalid operands to binary <<`, so
+  // a wide compound is answered through the C backend as well as through the
+  // machine one. A wide number written where a double is read is refused by
+  // name rather than written where gcc cannot read it, which is the same rule an
+  // element write states.
+  const source = [
+    "let a: u256 = 100;",
+    "a <<= 3;",
+    "a &= 0xff;",
+    "console.log(a);",
+    "const point = { x: 1, y: 2 };",
+    "point.x = 5;",
+    "point.y += 1;",
+    "console.log(point.x, point.y);",
+    "",
+  ].join("\n");
+  // A program is checked against the output of its own toolchain, and the two
+  // backends write the same program: `agreesWithNodeLib` builds it for both.
+  await agreesWithNodeLib(source, "", "asm");
+});
+
+test("a field of a program object is written where the source writes it", async () => {
+  // `p.x = 1` is a store into the block the body allocated, the same way a
+  // compiled function writes one, and a compound over it is a read of the field,
+  // the operation and the store. The layout is the one the body wrote the
+  // literal at, because a shape is keyed by its fields whichever side writes it.
+  const written = bodyOf("p.x = 10;\np.y += 5;\n").map((statement) => statement.kind);
+  assert.deepEqual(written, ["fieldAssign", "fieldAssign"], "a field write is a statement of a program");
+  await agreesWithNodeLib(
+    [
+      "import { sum } from \"./lib.ts\";",
+      "const point = { x: 3, y: 4 };",
+      "point.x = 10;",
+      "point.y += 5;",
+      "console.log(point.x, point.y);",
+      "console.log(sum(point));",
+      "",
+    ].join("\n"),
+    ["export function sum(p: any): number {", "  return p.x + p.y;", "}", ""].join("\n"),
+  );
+});
+
+test("a wide number is not written where a double is read", () => {
+  // A field of a layout holds the type the layout gives it, and a wide number
+  // read as a double is the low half of a number the program never computed —
+  // the same rule an element write states, and the one that keeps a build from
+  // reaching gcc with a blob assigned to a double.
+  const phase = phaseOf("typescript", { "main.ts": "let a: u256 = 5;\nconst p = { x: 1, y: 2 };\np.x = a;\nconsole.log(p.x);\n" }, "main.ts");
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+  assert.match(
+    semanticIrProblems(program, phase.program).join("\n"),
+    /Object1\.x is a f64, not a u256/,
+  );
+});
+
+test("a compound assignment to a field of a function body is the read, the operation and the store", async () => {
+  // A compiled function writes into the fields of what it is handed, and the
+  // operators it writes them with are the ones the source names: `p.n += 1` was
+  // a parse error in a body (`unexpected "+=" in an expression`), and only `=`
+  // was read. Both halves of the write now read the same bytes and answer what
+  // the language answers.
+  await agreesWithNodeLib(
+    [
+      "import { write } from \"./lib.ts\";",
+      "const inner = { v: 2, n: 1 };",
+      "const outer = { up: inner, n: 9 };",
+      "console.log(write(inner, 40), inner.v, inner.n);",
+      "console.log(outer.up.v + outer.n);",
+      "",
+    ].join("\n"),
+    [
+      "export function write(p: any, value: number): number {",
+      "  p.v += value;",
+      "  p.n -= 1;",
+      "  return p.v + p.n;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("a field of a literal holds the shape of the name it is written from", async () => {
+  // A name is a reference, so a field written from one is a field of the shape
+  // the name's own literal was written at — read off that literal rather than
+  // guessed at, because a literal written into a literal is an object of its own
+  // laid out beside the one it was written into. A read of what the field holds
+  // is a read of that layout, one level down.
+  await agreesWithNodeLib(
+    [
+      "import { total } from \"./lib.ts\";",
+      "const inner = { v: 2 };",
+      "const outer = { up: inner, n: 1 };",
+      "console.log(outer.up.v + outer.n);",
+      "console.log(total(outer));",
+      "",
+    ].join("\n"),
+    ["export function total(p: any): number {", "  return p.up.v + p.n;", "}", ""].join("\n"),
+  );
+});
+
 test("a null-coalescing assign still refuses, named rather than tokenised wrong", () => {
   // `??=` has no BinaryOp in the IR. It keeps its refusal, and the operator
   // must tokenize whole — one token, so the message lands on it — rather than
@@ -1762,13 +1944,16 @@ test("a refusal names what each side of the operation is", async () => {
   // the message needs: a program that cannot mix a bigint with a fraction is
   // told a bigint and a number, not two things it cannot name.
   const plain = phaseOf("typescript", { "main.ts": "console.log(1n + 1.5);\n" }, "main.ts");
-  assert.throws(() => resolveProgram(plain.body!, plain.program), /cannot mix a bigint and a number/);
+  assert.throws(
+    () => resolveProgram(plain.body!, plain.program, plain.objectNames, plain.objectLayouts, plain.objectKeys),
+    /cannot mix a bigint and a number/,
+  );
   // A wide number beside a double is refused where the type of the operation is
   // settled rather than where the source is read: the widening that is allowed
   // beside one is a whole number, and a fraction is not a whole number however
   // it was written.
   const wide = phaseOf("typescript", { "main.ts": "let a: u256 = 3;\nconsole.log(a + 1.5);\n" }, "main.ts");
-  const program = resolveProgram(wide.body!, wide.program);
+  const program = resolveProgram(wide.body!, wide.program, wide.objectNames, wide.objectLayouts, wide.objectKeys);
   assert.match(semanticIrProblems(program, wide.program).join("\n"), /a f64 is computed with a u256/);
 });
 
@@ -1778,7 +1963,7 @@ test("a wide number beside a bigint is the compiler's own widening", async () =>
   // word, and the count of a shift is a machine word whatever it was written
   // as. The shift below is the program, not a refusal about a mix.
   const phase = phaseOf("typescript", { "main.ts": "let a: u256 = 3;\nconsole.log(a << 2n);\n" }, "main.ts");
-  const program = resolveProgram(phase.body!, phase.program);
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   assert.deepEqual(semanticIrProblems(program, phase.program), []);
 });
 

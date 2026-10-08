@@ -29,6 +29,7 @@ import { parseContract } from "./contract.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import { resolveObjects } from "./objects.ts";
 import { programShapes } from "./program-objects.ts";
+import type { LiteralKeys } from "./program-objects.ts";
 import { resolveCalls } from "./calls.ts";
 import type {
   ContractEdge,
@@ -72,6 +73,14 @@ export interface ContractPhase {
    * rather than functions reads the layouts its own literals are built at.
    */
   objectLayouts: Record<string, ObjectLayout>;
+  /**
+   * The shape key every object literal of the program body was laid out at, by
+   * the literal itself. Which of two shapes folded into which one is decided
+   * once the whole program has been walked, so the resolver reads the shape of
+   * a literal off this rather than deriving one from the parse tree and getting
+   * it wrong for a shape that folded.
+   */
+  objectKeys: LiteralKeys;
 }
 
 function contractPhaseError(message: string, detail?: string): CompilerError {
@@ -360,7 +369,8 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   // because a field is often what another function returns. A program body
   // writes objects of its own beside the ones the functions write, so its
   // literals are merged into the same shapes before any name is handed out.
-  const objects = resolveObjects(files, body === undefined ? new Map() : programShapes(body));
+  const objects =
+    resolveObjects(files, body === undefined ? undefined : programShapes(body));
   const objectNames = objects.names;
   // Which of the calls that pass recorded is written out rather than made is
   // a property of the whole graph, so it is decided here, once the graph is
@@ -379,6 +389,7 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
     modules: records.map((record) => ({ path: record.path, source: record.source })),
     objectNames: Object.fromEntries(objectNames),
     objectLayouts: objects.layouts,
+    objectKeys: objects.keys,
     ...(body === undefined ? {} : { body }),
   };
 }

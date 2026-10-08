@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf, diagnostic, phaseOf } from "./phase.ts";
-import type { FunctionContract } from "../core/types.ts";
+import { contractOf, diagnostic, phaseOf, programOf } from "./phase.ts";
+import type { FunctionContract, ProgramContract } from "../core/types.ts";
 
 /**
  * The contract of one named export of a module that also runs. A function
@@ -61,6 +61,61 @@ test("a body that reads a buffer at a position the contract cannot name is refus
       /cannot be contracted: it reads a at a position the contract cannot name/,
       `a bound written as \`${bound}\` tested by \`${test}\` is not a length the caller is held to`,
     );
+  }
+});
+
+/** A program that imports a function of its own, and the function it imports. */
+const PROGRAM: Record<string, string> = {
+  "module.ts": 'import { shifted } from "./lib.ts";\nconsole.log(shifted(5));\n',
+  "lib.ts": 'export function shifted(x: u256): u256 {\n  x <<= 2;\n  return x;\n}\n',
+};
+
+/** Every function of every file of a program, by name. */
+function functionsOf(program: ProgramContract): Record<string, FunctionContract> {
+  return Object.fromEntries(program.files.flatMap((file) => Object.entries(file.functions)));
+}
+
+/** A library of one function whose body applies `written` to what it is handed. */
+function library(written: string): string {
+  return `export function shifted(x: u256): u256 {\n  ${written};\n  return x;\n}\n`;
+}
+
+test("a compound assignment states the operator the source wrote", async () => {
+  // A compound assignment is the binary operator it names over the name and the
+  // value, and the postcondition is that expression: the first character of the
+  // operator spelled `<<=` as a comparison and `**=` as a product, which for a
+  // wide number was a postcondition the contract could not even parse.
+  const contract = contractOf("typescript", `export function scaled(x: number): number {\n  x += 2;\n  x *= 3;\n  x -= 1;\n  x /= 2;\n  return x;\n}\n`);
+  assert.deepEqual(contract.ensures, ["result == ((((x + 2) * 3) - 1) / 2)"]);
+  parseContract(contract);
+});
+
+test("a compound the contract language cannot state is contracted by what it does", async () => {
+  // The contract language states `+ - * /` and the comparisons, so a result that
+  // is a shift, a bitwise operation or a power is a body it cannot state: the
+  // body goes to the definition rather than to a postcondition it cannot meet,
+  // which is where a body that prints or branches already goes. Before, the
+  // operator was spelled by its first character, so `<<=` was read as the
+  // comparison `<` and a `u256` body was refused for `u256 == bool`.
+  const program = programOf("typescript", PROGRAM, "module.ts");
+  const contract = functionsOf(program).shifted;
+  assert.deepEqual(contract.ensures, [], "the body states no postcondition");
+  assert.ok(contract.definition.statements.length > 0, "the statements are what the body is contracted by");
+  parseContract(contract);
+  // Every one of the seven new operators is the same answer, and none of them is
+  // the operation its first character names.
+  for (const written of ["x >>= 1", "x >>>= 1", "x &= 0x0f", "x |= 0xf0", "x ^= 0x01", "x **= 2", "x <<= 2"]) {
+    const refused = programOf(
+      "typescript",
+      { "module.ts": PROGRAM["module.ts"], "lib.ts": library(written) },
+      "module.ts",
+    );
+    assert.deepEqual(
+      functionsOf(refused).shifted.ensures,
+      [],
+      `\`${written}\` is a result the contract language cannot state`,
+    );
+    parseContract(functionsOf(refused).shifted);
   }
 });
 
