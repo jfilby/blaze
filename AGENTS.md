@@ -101,7 +101,7 @@ of implementing those features.
 - Don't try to do anything that would require secrets you don't have.
 - Don't edit env files, ask the user to do this for you.
 - Don't look in archived files, they are assumed to be irrelevant.
-- Don't edit anything under the private-docs dir.
+- Don't create or edit anything under the private-docs dir.
 
 
 ## Specs
