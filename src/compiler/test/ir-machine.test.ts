@@ -1321,6 +1321,90 @@ test("a comparison of a value that is not a number is false in every ordered way
   }
 });
 
+test("a branch on a comparison of floats is the comparison itself", async () => {
+  // The branch form of a comparison answers itself out of the flags, which is
+  // where the value form above goes for the answer too. Which of the two
+  // conditions above the carry it reads is what says which side the instruction
+  // is made out of: `a < b` is `b` above `a` and `a > b` is `a` above `b`, so
+  // the right side is the destination of the first and the left side of the
+  // second. A side the instruction reads as its own source cannot be its
+  // destination, so a comparison of an element the build carries takes the
+  // conditions below the carry and the parity bit for two of the four — and the
+  // answer must be the same either way, which is what this checks over every
+  // relation the language has, including the pair that is in none.
+  const relations: { op: "lt" | "le" | "gt" | "ge" | "eq" | "ne"; below: number; above: number; equal: number; unordered: number }[] = [
+    { op: "lt", below: 1, above: 0, equal: 0, unordered: 0 },
+    { op: "le", below: 1, above: 0, equal: 1, unordered: 0 },
+    { op: "gt", below: 0, above: 1, equal: 0, unordered: 0 },
+    { op: "ge", below: 0, above: 1, equal: 1, unordered: 0 },
+    { op: "eq", below: 0, above: 0, equal: 1, unordered: 0 },
+    { op: "ne", below: 1, above: 1, equal: 0, unordered: 1 },
+  ];
+  // A body that answers 1 when the comparison holds and 0 when it does not, so
+  // the branch is the only thing the answer comes from.
+  const branching = (condition: SemanticValue): SemanticBlock => ({
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "answer", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "if",
+        condition,
+        then: { id: "yes", releases: [], statements: [{ k: "set", name: "answer", op: "=", value: number("1", I32), line: 2 }], terminator: { k: "next" } },
+        otherwise: null,
+        line: 1,
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("answer", I32) },
+  });
+  for (const relation of relations) {
+    const answer = await lowered(
+      subject(I32, branching({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: local("v"), right: local("w") }), NUMBERS),
+      (name) => `printf("%d", ${name}(1.0, 2.0));`,
+    );
+    assert.equal(answer, `${relation.below}`, `1 ${relation.op} 2`);
+    assert.equal(await lowered(subject(I32, branching({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: local("v"), right: local("w") }), NUMBERS), (name) => `printf("%d", ${name}(2.0, 1.0));`), `${relation.above}`, `2 ${relation.op} 1`);
+    assert.equal(await lowered(subject(I32, branching({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: local("v"), right: local("w") }), NUMBERS), (name) => `printf("%d", ${name}(2.0, 2.0));`), `${relation.equal}`, `2 ${relation.op} 2`);
+    // The unordered pair answers the same whichever side the instruction is
+    // made out of, so this is the case the two conditions above the carry exist
+    // for and the one the parity bit is there to keep false.
+    const unordered = await lowered(
+      subject(I32, branching({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: local("v"), right: local("w") }), NUMBERS),
+      (name) => `printf("%d", ${name}(0.0/0.0, 2.0));`,
+    );
+    assert.equal(unordered, `${relation.unordered}`, `NaN ${relation.op} 2`);
+    assert.equal(await lowered(subject(I32, branching({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: local("v"), right: local("w") }), NUMBERS), (name) => `printf("%d", ${name}(2.0, 0.0/0.0));`), `${relation.unordered}`, `2 ${relation.op} NaN`);
+    // The opposite of the comparison is the other sense of it, and over a pair
+    // that is in no ordered relation it holds both ways round — which is the one
+    // case where the sense the branch is written under and the one the language
+    // answers could come to disagree.
+    const opposite: SemanticBlock = branching({
+      k: "unary",
+      type: BOOL,
+      op: "not",
+      operand: { k: "compare", type: BOOL, op: relation.op, operand: F64, left: local("v"), right: local("w") },
+    });
+    assert.equal(await lowered(subject(I32, opposite, NUMBERS), (name) => `printf("%d", ${name}(1.0, 2.0));`), `${1 - relation.below}`, `!(1 ${relation.op} 2)`);
+    assert.equal(await lowered(subject(I32, opposite, NUMBERS), (name) => `printf("%d", ${name}(2.0, 1.0));`), `${1 - relation.above}`, `!(2 ${relation.op} 1)`);
+    assert.equal(await lowered(subject(I32, opposite, NUMBERS), (name) => `printf("%d", ${name}(2.0, 2.0));`), `${1 - relation.equal}`, `!(2 ${relation.op} 2)`);
+    assert.equal(await lowered(subject(I32, opposite, NUMBERS), (name) => `printf("%d", ${name}(0.0/0.0, 2.0));`), `${1 - relation.unordered}`, `!(NaN ${relation.op} 2)`);
+    assert.equal(await lowered(subject(I32, opposite, NUMBERS), (name) => `printf("%d", ${name}(2.0, 0.0/0.0));`), `${1 - relation.unordered}`, `!(2 ${relation.op} NaN)`);
+  }
+  // The form where one side is read where it lies: the element is the source the
+  // instruction reads against, so two of the four ordered comparisons cannot be
+  // made out of the side they would need and fall back on the conditions below
+  // the carry. The answer is the same either way.
+  const elements: SemanticSlot[] = [{ kind: "value", name: "p", mutable: false, type: PTR }];
+  for (const relation of relations.filter((one) => one.op !== "eq" && one.op !== "ne")) {
+    const op = relation.op as "lt" | "le" | "gt" | "ge";
+    const ask = (value: string): Promise<string> => lowered(subject(I32, branching({ k: "compare", type: BOOL, op, operand: F64, left: { k: "element", type: F64, of: local("p", PTR), index: number("0", USIZE) }, right: number("2") }), elements), (name) => `printf("%d", ${name}((double[]){${value}, 0.0}));`);
+    assert.equal(await ask("1.0"), `${relation.below}`, `p[0] ${op} 2`);
+    assert.equal(await ask("3.0"), `${relation.above}`, `p[0] ${op} 2 the other way`);
+    assert.equal(await ask("2.0"), `${relation.equal}`, `p[0] ${op} 2 when equal`);
+    assert.equal(await ask("0.0/0.0"), "0", `p[0] ${op} 2 when unordered`);
+  }
+});
+
 test("a negated comparison is the other sense of the comparison it negates", async () => {
   // The negation was read out of the flags the comparison leaves, through the
   // conditions whole numbers use. A float leaves no such condition: the

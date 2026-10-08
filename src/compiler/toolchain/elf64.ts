@@ -93,7 +93,14 @@ const SECTIONS = {
 
 const SECTION_LAYOUT = [
   { key: "empty", name: "", type: 0, flags: 0, align: 0, entrySize: 0 },
-  { key: "text", name: ".text", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, align: 16, entrySize: 0 },
+  // Thirty-two is the boundary the instruction fetch of the machines this
+  // compiler targets reads at, so it is where a function is put: one object is
+  // one function and the linker lays every section out on the boundary its
+  // header states, so a function at the head of the text starts on one. A
+  // function that starts anywhere else has its entry point and the loop the
+  // program spent its time in spread over more of those windows than they would
+  // be otherwise, which is worth a few percent on a benchmark that is one loop.
+  { key: "text", name: ".text", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, align: 32, entrySize: 0 },
   { key: "data", name: ".rodata", type: SHT_PROGBITS, flags: SHF_ALLOC, align: 8, entrySize: 0 },
   { key: "relocations", name: ".rela.text", type: SHT_RELA, flags: 0, align: 8, entrySize: RELOCATION_SIZE },
   { key: "symbols", name: ".symtab", type: SHT_SYMTAB, flags: 0, align: 8, entrySize: SYMBOL_SIZE },
@@ -208,7 +215,7 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
   }
 
   const relocationSize = request.relocations.length * RELOCATION_SIZE;
-  const textOffset = align(ELF_HEADER_SIZE, 16);
+  const textOffset = align(ELF_HEADER_SIZE, 32);
   const dataOffset = align(textOffset + request.text.length, 8);
   const relocationOffset = align(dataOffset + request.rodata.length, 8);
   const symbolOffset = align(relocationOffset + relocationSize, 8);

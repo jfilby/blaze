@@ -1336,6 +1336,111 @@ function callsOut(value: SemanticValue): boolean {
   return called;
 }
 
+/**
+ * Whether a name is ever read as a number rather than as an index, which is what
+ * says a counted loop's counter is a whole number rather than a double.
+ *
+ * A counter the body only ever reaches through an element read or an element
+ * write is never asked what its value is. It is counted in whole numbers
+ * because that is what it is being used for, and the whole number is the shape
+ * a counter can be stepped and tested in one instruction each: a double is
+ * stepped by a move out of the read-only data and a comparison of two floats,
+ * and the two of those are on every turn of the loop.
+ *
+ * The places that read a counter are the index of an `element` and the index of
+ * a `setElement`, and nothing else. Every other use of the name — the operand
+ * of an arithmetic, a side of a comparison, an argument, a condition — asks for
+ * its value, and a loop with one of those keeps the double it was given.
+ */
+function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
+  // The walk is written out rather than taken from `walkValues` because that one
+  // steps into the index of an element, and the index of an element is the one
+  // place a counter turns up without its value being asked for. A walk built on
+  // it cannot leave an index alone: `walkValues` recurses into the index itself
+  // and calls the visitor with whatever it finds there.
+  const wants = (value: SemanticValue): boolean => {
+    switch (value.k) {
+      case "local":
+        return value.name === name;
+      case "element":
+        return wants(value.of);
+      case "text":
+        return value.parts.some((part) => part.k === "value" && wants(part.value));
+      case "length":
+      case "toText":
+        return wants(value.of);
+      case "isNull":
+      case "unary":
+        return wants(value.operand);
+      case "argv":
+        return value.index !== null && wants(value.index);
+      case "call":
+        return value.call.args.some(wants);
+      case "arith":
+      case "compare":
+      case "logical":
+      case "coalesce":
+        return wants(value.left) || wants(value.right);
+      case "buffer":
+        return (
+          (value.count !== null && wants(value.count)) ||
+          (value.view !== null && (wants(value.view.of) || wants(value.view.offset))) ||
+          value.values.some(wants)
+        );
+      case "loadField":
+        return wants(value.object);
+      case "newObject":
+        return value.fields.some((field) => wants(field.value));
+      case "select":
+        return wants(value.condition) || wants(value.then) || wants(value.otherwise);
+      default:
+        return false;
+    }
+  };
+  const walk = (block: SemanticBlock): boolean => {
+    for (const statement of block.statements) {
+      // The index of an element write is left out, and everything else the
+      // statement carries is walked.
+      if (statement.k === "setElement") {
+        if (wants(statement.value)) return true;
+      } else {
+        for (const value of statementValues(statement)) {
+          if (wants(value)) return true;
+        }
+      }
+      for (const inner of statementBlocksOf(statement)) {
+        if (walk(inner)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(body);
+}
+
+/**
+ * Whether a counted loop can be counted in whole numbers, which is what
+ * `wholeCounted` is the answer for.
+ *
+ * Three numbers have to be numbers the program wrote out: the one the loop
+ * counts from, the one it counts to and its step. The first two are compared
+ * against each other and the step is added to the counter, and every one of those
+ * is an instruction with a number of its own inside — an immediate for a whole
+ * number. A bound that is not one is a value read out of the frame, and a test
+ * against it is a comparison of two doubles, which is what the general form
+ * writes and what this leaves alone.
+ *
+ * The three are also held to what an instruction's own immediate field encodes,
+ * a sign-extended thirty-two bit number, so a loop that counts past that is left
+ * to the general form rather than answered with a truncated bound.
+ */
+function wholeCountable(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
+  const fits = (value: number): boolean => value >= -0x8000_0000 && value <= 0x7fff_ffff;
+  const from = wholeLiteral(loop.from);
+  const to = wholeLiteral(loop.to);
+  const step = loop.step === null ? (loop.down ? -1 : 1) : wholeLiteral(loop.step);
+  return from !== null && to !== null && step !== null && fits(from) && fits(to) && fits(step);
+}
+
 /** Whether a loop's body writes the name the loop counts by, which the loop owns. */
 function writesCounter(body: SemanticBlock, name: string): boolean {
   for (const statement of body.statements) {
@@ -2179,12 +2284,12 @@ class Machine {
     // they are written one after the other too — the first counter is dead
     // before the second is bound — so one register serves both and each turn of
     // each loop steps it where it lies.
-    const counters = new Map<string, { depth: number; type: SemanticType }>();
+    const counters = new Map<string, { depth: number; type: SemanticType; asIndex: boolean }>();
     const declarations = new Map<string, number>();
     const shared = new Set<string>();
     const walkCounters = (block: SemanticBlock, depth: number, enclosing: ReadonlySet<string>): void => {
       for (const statement of block.statements) {
-        const declare = (name: string, type: SemanticType): void => {
+        const declare = (name: string, type: SemanticType, asIndex = false): void => {
           declarations.set(name, (declarations.get(name) ?? 0) + 1);
           // A counter inside a loop of the same name is stepped while the
           // outer one is still counting, so the two cannot have one register.
@@ -2193,9 +2298,12 @@ class Machine {
           // Nor can two that count in different types: the register one is
           // given is the register both are read out of.
           if (found !== undefined && !typeEquals(found.type, type)) shared.add(name);
+          // A name one loop counts as a whole number and another counts as a
+          // value is two different counters under one spelling.
+          if (found !== undefined && found.asIndex !== asIndex) shared.add(name);
           // The inner loop of a nested pair turns the most, so depth is what
           // says which counter is worth a register first.
-          counters.set(name, { depth: Math.max(found?.depth ?? 0, depth), type });
+          counters.set(name, { depth: Math.max(found?.depth ?? 0, depth), type, asIndex });
         };
         if (statement.k !== "loop") {
           // A loop in an arm of an `if` is a loop like any other, and the
@@ -2207,7 +2315,11 @@ class Machine {
         const loop = statement.loop;
         let inside: Set<string> | null = null;
         if (loop.kind === "counted") {
-          declare(loop.variable, loop.type);
+          // A counter the body reaches only as an index is counted in whole
+          // numbers, which is what `counted` writes it as, so giving it a vector
+          // register would be a register for a double nothing reads — and a
+          // preserved one costs the function a push and a pop for it.
+          declare(loop.variable, loop.type, isFloat(loop.type) && !readsCounterAsValue(loop.body, loop.variable));
           inside = new Set(enclosing).add(loop.variable);
         } else if (loop.kind === "each") {
           declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
@@ -2230,7 +2342,15 @@ class Machine {
     const ordered = [...counters.entries()]
       .filter(([name]) => !shared.has(name) && declarationCount.get(name) === declarations.get(name))
       .sort((left, right) => right[1].depth - left[1].depth);
-    for (const [name, counter] of ordered) assign(name, counter.type);
+    // A counter nothing reads as a value is not pinned. It is written into the
+    // whole-number register the loop's index is read out of, so the vector
+    // register the general form would give it would hold a double nothing ever
+    // reads — and a preserved one costs the function a push and a pop and two
+    // memory operands on the way in and out.
+    for (const [name, counter] of ordered) {
+      if (counter.asIndex) continue;
+      assign(name, counter.type);
+    }
     // The register an object is filled in is claimed after every name that could
     // be pinned to one, so that a function which builds an object keeps the
     // registers its names are read most often and takes the object register
@@ -3809,6 +3929,27 @@ class Machine {
         ? this.spareIndexes.pop() ?? null
         : null;
     const variable = this.bind(loop.variable, type, shadow);
+    // A counter nothing reads as a number is counted in whole numbers, which is
+    // what an index is and what the shadow register holds. The double beside it
+    // is then written and stepped and tested for nothing: the body reaches the
+    // counter through element reads and element writes, every one of which is an
+    // index, and nothing else ever asks the counter what it holds. A whole
+    // number is stepped by one instruction and tested by one instruction; a
+    // double is stepped by a move out of the read-only data and a floating
+    // comparison, and both of those are on every turn of the loop.
+    //
+    // The bound has to be a number the program wrote out, because a test against
+    // a bound that is not one is a comparison of two doubles and there is no
+    // whole number to make it against. Everything else — the loop's first value,
+    // its step — is already known to be one, which is what the shadow register
+    // was reserved for.
+    const wholeCounter =
+      shadow !== null && wholeCountable(loop) && !readsCounterAsValue(loop.body, loop.variable);
+    if (wholeCounter) {
+      this.wholeCounted(loop, labels, shadow as number);
+      this.spareIndexes.push(shadow as number);
+      return;
+    }
     let from: Held | null = null;
     if (variable.register === null) {
       this.at(loop.from, type);
@@ -3951,6 +4092,52 @@ class Machine {
   }
 
   /**
+   * A counted loop whose counter the body reaches only as an index, counted in
+   * whole numbers.
+   *
+   * This is the loop above with the double taken out of it: the counter is the
+   * whole number the shadow register already holds, so there is no conversion to
+   * do at the start, no double to step at the header and no floating comparison
+   * to make. The turn is an addition to the counter, the test is a comparison
+   * against the bound the program wrote out, and both are the same whole-number
+   * shape the index the body reads is.
+   *
+   * The loop this writes is the loop `counted` writes. The counter is the same
+   * number at the same turns, because it is started from the same first value,
+   * moved by the same step and tested against the same bound with the same
+   * sense; and the double the general form keeps beside it is a value nothing
+   * reads, which is what `readsCounterAsValue` is what says.
+   */
+  private wholeCounted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels, counter: number): void {
+    const from = wholeLiteral(loop.from) as number;
+    const to = wholeLiteral(loop.to) as number;
+    // The step is the signed amount the counter moves by, whatever the direction
+    // the loop counts in: `down` says which way the trip runs and the step says
+    // how far each turn goes, and a descending loop's step is already negative.
+    const step = loop.step === null ? (loop.down ? -1 : 1) : (wholeLiteral(loop.step) as number);
+    // The counter is compared as a signed number because the value it was
+    // holding is a double, and the order of two whole numbers as signed numbers
+    // is the order the same two doubles have. The unsigned conditions would
+    // answer a loop that counts from below zero the other way round.
+    //
+    // The sense is the opposite of the one the loop runs under: a `for` that
+    // counts up to a bound without reaching it leaves the loop once the counter
+    // has reached it, which is the comparison the general form negates because
+    // it branches on the truth of the comparison it was given.
+    const past = loop.inclusive ? (loop.down ? "lt" : "gt") : loop.down ? "le" : "ge";
+    this.code.movRegImm(counter, BigInt(from));
+    const test = this.code.label("Ltest");
+    this.code.jmp(test);
+    this.code.bind(labels.header);
+    this.code.aluImm("add", counter, step, true);
+    this.code.bind(test);
+    this.code.aluImm("cmp", counter, to, true);
+    this.code.jcc(COMPARISON.signed[past], labels.exit);
+    this.turn(loop, labels);
+    this.code.bind(labels.exit);
+  }
+
+  /**
    * A counted loop written `factor` turns for every trip of the loop that is
    * left, each turn with the counter at the number that turn has.
    *
@@ -3980,45 +4167,87 @@ class Machine {
     // holding the number it has as well as the value itself.
     const shadow = this.spareIndexes.length > 0 ? this.spareIndexes.pop() ?? null : null;
     const variable = this.bind(loop.variable, type, shadow);
-    this.constantCounter(variable, type, from);
-    // The turns left are counted in a whole number whatever the counter is, so
-    // the test is one instruction wide whatever precision the loop counts in.
-    const trips = this.holdAcross(I64, "blaze_trips");
-    this.code.movRegImm(RAX, BigInt(Math.floor(turns / factor)));
-    this.store(trips);
-    const test = this.code.label("Ltest");
-    this.code.jmp(test);
-    this.code.bind(test);
-    this.code.bind(labels.header);
-    // The turns left are tested before they are spent, so that a loop of any
-    // number of trips writes its bodies the same number of times.
-    this.load(trips);
-    this.code.test(RAX);
-    this.code.jcc("e", labels.exit);
-    this.code.aluImm("sub", RAX, 1, true);
-    this.store(trips);
-    // Each turn is written with the counter at the value that turn has. A loop
-    // that runs once is written out whole, so each of its turns has a counter
-    // this pass counted and the counter is a number in the instruction rather
-    // than a value kept somewhere and converted back into an index. A loop that
-    // runs several trips has the same counter at a different number on each of
-    // them, so its turns are written as so many steps of the loop's own.
-    const once = turns === factor;
+    // A counter the body reaches only as an index is a number of the turns, and
+    // the number of the turn is in the instruction as well: `from + turn * step`
+    // is a literal, so the double beside it holds nothing the body reads. Which
+    // of the two the body reads is what says which of them to write — and a
+    // register to write the index into has to be one there is, because an index
+    // read out of a counter with no register of its own is the counter's own
+    // value converted, which is the double this is not writing.
+    const asIndex = shadow !== null && isFloat(type) && !readsCounterAsValue(loop.body, loop.variable);
+    this.constantCounter(variable, type, from, asIndex);
+    // A loop whose turns are all written out runs once, so there is nothing left
+    // to count: the bodies below stand one after another and control leaves them
+    // into the exit. A counter of trips the loop never reads is a number in the
+    // frame, a load and a test and a subtraction and a store on every trip of a
+    // loop that has exactly one — which is every loop this pass writes out whole,
+    // because the trip count is what it needs to divide by to write a factor of
+    // turns at a time.
+    const trips = Math.floor(turns / factor);
+    if (trips > 1) {
+      const counted = this.holdAcross(I64, "blaze_trips");
+      this.code.movRegImm(RAX, BigInt(trips));
+      this.store(counted);
+      const once = this.code.label("Ltest");
+      this.code.jmp(once);
+      this.code.bind(once);
+      this.code.bind(labels.header);
+      // The turns left are tested before they are spent, so that a loop of any
+      // number of trips writes its bodies the same number of times.
+      this.load(counted);
+      this.code.test(RAX);
+      this.code.jcc("e", labels.exit);
+      this.code.aluImm("sub", RAX, 1, true);
+      this.store(counted);
+      this.turnsOfUnrolled(loop, variable, type, factor, step, from, false, asIndex);
+      this.code.jmp(labels.header);
+      this.code.bind(labels.exit);
+      this.freeSlot(counted);
+    } else {
+      this.code.bind(labels.header);
+      this.turnsOfUnrolled(loop, variable, type, factor, step, from, true, asIndex);
+      this.code.bind(labels.exit);
+    }
+    if (shadow !== null) this.spareIndexes.push(shadow);
+    return true;
+  }
+
+  /**
+   * The `factor` turns of one trip of a loop that is written out, each with the
+   * counter at the value that turn has.
+   *
+   * A loop that runs once is written out whole, so each of its turns has a
+   * counter this pass counted and the counter is a number in the instruction
+   * rather than a value kept somewhere and converted back into an index. A loop
+   * that runs several trips has the same counter at a different number on each
+   * of them, so its turns are written as so many steps of the loop's own.
+   *
+   * `whole` says the first of the two: whether the counter of every turn is a
+   * number this pass worked out rather than a step of the loop's own. The second
+   * case is the only one that can be entered with the counter somewhere other
+   * than where the first turn left it, which is why the loop jumps to the step
+   * when it is not whole.
+   */
+  private turnsOfUnrolled(
+    loop: Extract<SemanticLoop, { kind: "counted" }>,
+    variable: Held,
+    type: SemanticType,
+    factor: number,
+    step: number,
+    from: number,
+    whole: boolean,
+    asIndex: boolean,
+  ): void {
     for (let turn = 0; turn < factor; turn += 1) {
       if (turn > 0) {
-        if (once) this.constantCounter(variable, type, from + turn * step);
-        else this.stepCounter(variable, type, step);
+        if (whole) this.constantCounter(variable, type, from + turn * step, asIndex);
+        else this.stepCounter(variable, type, step, asIndex);
       }
       this.block(loop.body);
     }
     // One step after the last turn, so that the value the loop leaves the
     // counter at is the one the rolled loop would have left it at.
-    this.stepCounter(variable, type, step);
-    this.code.jmp(labels.header);
-    this.code.bind(labels.exit);
-    this.freeSlot(trips);
-    if (shadow !== null) this.spareIndexes.push(shadow);
-    return true;
+    this.stepCounter(variable, type, step, asIndex);
   }
 
   /**
@@ -4031,10 +4260,15 @@ class Machine {
   }
 
   /** A counter put at a number the loop counted out before it was run. */
-  private constantCounter(variable: Held, type: SemanticType, value: number): void {
-    if (isFloat(type)) this.floatConstant(value, type, XMM0);
-    else this.code.movRegImm(RAX, BigInt(value));
-    this.store(variable);
+  private constantCounter(variable: Held, type: SemanticType, value: number, asIndex = false): void {
+    // A counter the body reaches only as an index has no value to write: the
+    // number of the turn is in the instruction beside it, so writing the double
+    // would be a load and a store of a number nothing reads, on every turn.
+    if (!asIndex) {
+      if (isFloat(type)) this.floatConstant(value, type, XMM0);
+      else this.code.movRegImm(RAX, BigInt(value));
+      this.store(variable);
+    }
     if (variable.index !== null) this.code.movRegImm(variable.index, BigInt(value));
   }
 
@@ -4042,8 +4276,17 @@ class Machine {
    * A counter moved on by the amount the loop steps it by, in the register it is
    * in or in the frame slot it is in, which is what the rolled loop above does
    * with the same value.
+   *
+   * As with `constantCounter`, a counter nothing reads as a value is only moved
+   * in the register the index is read out of: the move of the double is the same
+   * arithmetic the index's move is, written twice, and the second of the two is
+   * the one the body reads.
    */
-  private stepCounter(variable: Held, type: SemanticType, step: number): void {
+  private stepCounter(variable: Held, type: SemanticType, step: number, asIndex = false): void {
+    if (asIndex) {
+      if (variable.index !== null) this.code.aluImm("add", variable.index, step, true);
+      return;
+    }
     const register = variable.register ?? RAX;
     if (variable.register === null) this.load(variable);
     if (isFloat(type)) {
@@ -4177,11 +4420,30 @@ class Machine {
       return;
     }
     const type = comparison.operand;
-    // The value is true exactly when the comparison is false, and the opposite
-    // is true exactly when the comparison is false, so the branch is taken on
-    // the same sense it was asked for.
-    const op = underNot === null ? comparison.op : OPPOSITE[comparison.op];
-    const sense = whenTrue;
+    // A `!` over a comparison is answered by the other sense of the comparison
+    // rather than by a number the comparison is written down as first, which is
+    // what keeps the condition byte out of the accumulator.
+    //
+    // Over whole numbers the other sense is the opposite comparison. Over floats
+    // it is not, for the four ordered ones: a pair that is in no ordered relation
+    // is below nothing and above nothing, so `a < b` is false and so is
+    // `a >= b`, while `!(a < b)` is true — a branch written on the opposite
+    // comparison took the other arm on a value that is not a number. The answer
+    // is the comparison itself under the other sense, and that is what the
+    // conditions below the carry are for: an unordered pair sets them, which is
+    // exactly "the comparison does not hold".
+    //
+    // The two comparisons that are not ordered are the other way round. `==` and
+    // `!=` are relations over every pair, a pair that is in no ordered relation
+    // included, so each is the opposite of the other.
+    const ordered = underNot !== null && isFloat(type) && comparison.op !== "eq" && comparison.op !== "ne";
+    const op = underNot === null || ordered ? comparison.op : OPPOSITE[comparison.op];
+    // The branch is taken under the other sense of the comparison wherever the
+    // comparison itself is what was kept, and under the sense it was asked for
+    // where the opposite comparison is what was kept — which answers the same
+    // place, because the opposite of a relation over every pair is that pair's
+    // other side.
+    const sense = underNot === null ? whenTrue : ordered ? !whenTrue : whenTrue;
     // Which form the comparison takes is settled before either side is written,
     // so that a side is evaluated once whichever form it is. An other side the
     // program wrote out is carried by the comparison itself rather than by a
@@ -4191,17 +4453,19 @@ class Machine {
     if (immediate !== null) {
       this.at(comparison.left, type);
       this.comparedBranch(type, op, immediate, sense, label);
+      this.noteCompared(comparison.left, type);
       return;
     }
     // The side held is read back after the other one has been written, so a
     // register serves it exactly as long as nothing calls in between.
     // A left side the comparison reads where it lies costs no slot and no copy:
-    // the right side goes into the accumulator, which is the destination the
-    // general form compares out of, and the element is the source.
+    // the right side goes into the accumulator, and the element is the source
+    // the instruction reads it against.
     const carried = isFloat(type) ? this.carriedOperand(comparison.left, type, !hasCall(comparison.right)) : null;
     if (carried !== null) {
       this.at(comparison.right, type);
-      this.floatBranch(op, widthOf(type) === 4, sense, label, XMM0, carried);
+      this.floatBranch(op, widthOf(type) === 4, sense, label, carried, XMM0);
+      this.noteCompared(comparison.right, type);
       return;
     }
     const right = hasCall(comparison.left) ? this.hold(type, "blaze_right") : this.hold(type, "blaze_right");
@@ -4209,6 +4473,33 @@ class Machine {
     this.store(right);
     this.at(comparison.left, type);
     this.comparedBranch(type, op, right, sense, label);
+    this.noteCompared(comparison.left, type);
+  }
+
+  /**
+   * The note about the accumulator that a float comparison leaves behind.
+   *
+   * A comparison of two floats puts one side in the accumulator and compares it
+   * against the other, which is a register or an address of its own. `UCOMISD`
+   * writes no register but the flags, so the side the accumulator holds is still
+   * there once the flags have been read — and the arm the branch reaches next,
+   * which is written straight after, reads that side for nothing rather than
+   * reading it out of the register the build gave it a second time.
+   *
+   * This is the one place a note is left by anything but a store, and it is why
+   * the note names the side rather than the comparison: which side the
+   * accumulator holds is what each of the three forms above decided for itself.
+   * The note is set against the code as it stands after the branch, so it is
+   * read on the same path and not across one — a label bound clears it, which is
+   * what the other arm of the `if` does.
+   */
+  private noteCompared(side: SemanticValue, type: SemanticType): void {
+    if (!isFloat(type) || side.k !== "local") return;
+    const held = this.slot(side.name);
+    // The accumulator is asked whether it holds this slot rather than told, so
+    // a form that moved it on the way to the comparison leaves nothing behind.
+    if (this.accumulator?.id !== held.id) return;
+    this.accumulator = { id: held.id, at: this.code.written };
   }
 
   /**
@@ -4658,14 +4949,14 @@ class Machine {
       // every turn of the loop, and the test is one of them.
       if (left !== XMM0 && typeof right === "number") {
         this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(right, single)), single);
-        this.floatBranch(op, single, whenTrue, label, XMM0, left);
+        this.floatBranch(op, single, whenTrue, label, left, XMM0);
         return;
       }
       if (left !== XMM0) this.code.movsMove(XMM0, left, single);
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
       else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
       else this.code.movsLoad(XMM1, frame(right.offset), single);
-      this.floatBranch(op, single, whenTrue, label);
+      this.floatBranch(op, single, whenTrue, label, XMM0, XMM1);
       return;
     }
     const width = operationWidth(type);
@@ -4700,33 +4991,77 @@ class Machine {
    * to test. A branch wants no number, so the comparison is left where it is
    * and the jump reads it there.
    *
-   * The sides are compared the other way round, and that is what makes the
-   * conditions above the carry the ones the language asks for. `UCOMISD`
-   * compares without a sign, so an unordered pair sets every flag below the
-   * carry and clears every one above it: with the right side as the one being
-   * compared, `a < b` is `b > a` is "above", which an unordered pair cannot
-   * set, and `a > b` is "below", which it can, so that one takes the parity bit
-   * as a jump of its own rather than as an instruction that combines it with a
-   * condition afterwards.
+   * `UCOMISD` compares without a sign, so a pair that is not numbers sets every
+   * flag below the carry and clears every one above it. The two conditions above
+   * the carry — `a`, "the destination is above the source", and `ae`, "at or
+   * above" — therefore cannot be set by a pair that is not numbers, and they
+   * answer all four of the ordered comparisons on their own. Which side has to
+   * be the destination for that is what says which pair they are: `a < b` is `b`
+   * above `a`, so the right side is the destination for that one, and `a > b` is
+   * `a` above `b`, so the left side is for that one.
+   *
+   * The destination is a register and the source may be an address, so a
+   * comparison whose left side is read where it lies can only be made out of the
+   * right side. Where that is the case and the comparison is `a > b` or `a >= b`,
+   * the conditions below the carry are read instead and gated on the parity bit —
+   * two jumps where the other form is one, which is the trade this makes
+   * knowingly rather than the one every ordered comparison used to pay.
+   *
+   * The two comparisons that are not ordered are always gated, and so is an
+   * ordered comparison whose left side is an address. A pair that is in no
+   * ordered relation is what the parity bit is about: the zero flag and the carry
+   * are set on one as they are on the ordered pairs, so nothing but the bit
+   * tells the two apart.
    */
-  private floatBranch(op: CompareOp, single: boolean, whenTrue: boolean, label: string, right = XMM1, left: number | Memory = XMM0): void {
-    this.code.sseCompare(right, left, single, true);
-    const condition =
-      op === "lt" ? "a"
-      : op === "le" ? "ae"
-      : op === "gt" ? "b"
-      : op === "ge" ? "be"
-      : op === "eq" ? "e"
-      : "ne";
-    if (op === "lt" || op === "le") {
-      this.code.jcc(whenTrue ? condition : NEGATED[condition], label);
+  private floatBranch(op: CompareOp, single: boolean, whenTrue: boolean, label: string, left: number | Memory, right: number): void {
+    const fromLeft = op === "gt" || op === "ge";
+    const carried = fromLeft && typeof left !== "number";
+    const above = fromLeft && typeof left === "number" ? left : right;
+    const below = above === right ? left : right;
+    const gated = op === "eq" || op === "ne" || carried;
+    const condition = gated
+      ? op === "eq"
+        ? "e"
+        : op === "ne"
+          ? "ne"
+          : op === "gt"
+            ? "b"
+            : "be"
+      : op === "lt" || op === "gt"
+        ? "a"
+        : "ae";
+    this.code.sseCompare(above, below, single, true);
+    const check = whenTrue ? condition : NEGATED[condition];
+    if (!gated) {
+      this.code.jcc(check, label);
       return;
     }
-    // A comparison that was not ordered is false whichever way the branch
-    // reads it, so both jumps take the same label: the first for a pair that
-    // is not numbers, the second for the condition the language does answer.
-    this.code.jcc("p", label);
-    this.code.jcc(whenTrue ? condition : NEGATED[condition], label);
+    // What a pair that is in no ordered relation answers is a fact about the
+    // comparison rather than about the flags, and it is not the same for all of
+    // them: every ordered comparison of one is false, `==` is false, and `!=` is
+    // true. The zero flag and the carry are set on such a pair alike as they are
+    // on the ordered pairs each condition reads, so the parity bit is the only
+    // thing that tells the two apart — and where the branch jumps on an unordered
+    // pair the bit is a jump of its own beside the one the condition reads.
+    //
+    // Where the branch does not jump on one, the condition has to be reached only
+    // for an ordered pair, which is two jumps and a label: the pair is stepped
+    // over on the way to the condition and again on the way out of it, so an
+    // unordered pair never reads the condition at all. That is the case `a != b`
+    // is on a branch that runs the arm when it holds, and reading the condition
+    // for an unordered pair is what answered it the other way.
+    if (whenTrue === (op === "ne")) {
+      this.code.jcc("p", label);
+      this.code.jcc(check, label);
+      return;
+    }
+    const ordered = this.code.label("Lordered");
+    const past = this.code.label("Lpast");
+    this.code.jcc("np", ordered);
+    this.code.jmp(past);
+    this.code.bind(ordered);
+    this.code.jcc(check, label);
+    this.code.bind(past);
   }
 
   /**
@@ -5054,11 +5389,19 @@ class Machine {
     if (isFloat(type)) {
       const commutative = value.op === "add" || value.op === "mul";
       this.at(commutative ? value.left : value.right, type);
-      // This side is held in the frame rather than in a register of its own,
-      // which is the one place a value of an expression is better off in the
-      // frame: the instruction below reads it out of memory as its own operand,
-      // so a slot is one instruction where a register is a move into the
-      // scratch and then the operation.
+      // This side is held in a register where the function has one free and in
+      // the frame where it has not. The instruction below then reads it as its
+      // own operand — a memory operand for the frame, a register for the
+      // register — so either way the copy out of the accumulator and the read
+      // back into the scratch are the two instructions this replaces.
+      //
+      // It used to be the frame every time. A function whose arithmetic is in a
+      // loop is given three vector registers of its own for the values of its
+      // expressions, and none of them was ever taken: the two sides of an
+      // arithmetic went through the frame whatever was free, and the registers
+      // were saved by the prologue and read back by the epilogue on every call
+      // without ever holding anything. What they were reserved for is what they
+      // are given here.
       const memory = this.holdSlot(type, commutative ? "blaze_left" : "blaze_right");
       this.store(memory);
       this.at(commutative ? value.right : value.left, type);
@@ -5067,8 +5410,7 @@ class Machine {
         this.normalizeArithmetic(type);
         return;
       }
-      this.scratchFrom(memory);
-      this.apply(value.op, type);
+      this.code.sse(value.op as "add" | "sub" | "mul" | "div", XMM0, memory.register, widthOf(type) === 4);
       this.normalizeArithmetic(type);
       return;
     }
@@ -6206,6 +6548,26 @@ class Machine {
   private builtAddress(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): void {
     const scale = widthOf(element) as 1 | 2 | 4 | 8;
     const base = typeof sequence === "string" ? this.slot(sequence) : sequence.k === "local" ? this.slot(sequence.name) : null;
+    // An index is a whole number, and where the loop that counts it keeps that
+    // whole number in a register of its own this reads it out of that register
+    // rather than out of the double the counter also is. The conversion was done
+    // once for the loop when the register was filled, and doing it again on
+    // every element threw the answer away and wrote the frame slot the general
+    // form below puts it in. Which is what a counter the body reads as nothing
+    // but an index would have left unreadable — so this is also what makes it
+    // sound to count such a counter in whole numbers alone.
+    const plain = this.plainIndex(index);
+    if (plain !== null && typeof plain !== "bigint" && plain.register !== null && plain.register !== RAX) {
+      // The sequence is read first, because it is a value of its own and may be
+      // one the program computes; the counter's register is the convention's and
+      // nothing below writes it.
+      const counter = plain.register;
+      this.value(typeof sequence === "string" ? { k: "local", type: base?.type ?? POINTER, name: sequence } : sequence);
+      this.code.movRegReg(RCX, RAX);
+      this.code.movRegReg(RAX, counter);
+      this.code.lea(RAX, indexed(RCX, RAX, scale));
+      return;
+    }
     const held = this.hold(USIZE, "blaze_index");
     this.at(index, USIZE);
     this.store(held);
