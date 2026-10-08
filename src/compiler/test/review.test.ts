@@ -29,6 +29,22 @@ const FILES: Record<string, string> = {
     "  return total;",
     "}",
     "",
+    "export function outer(x: number, y: number): number {",
+    "  return middle(x) + double(y);",
+    "}",
+    "",
+    "export function middle(x: number): number {",
+    "  return triple(x);",
+    "}",
+    "",
+    "export function triple(x: number): number {",
+    "  return x * 3;",
+    "}",
+    "",
+    "export function double(y: number): number {",
+    "  return y + y;",
+    "}",
+    "",
   ].join("\n"),
   "main.ts": ["import { dotProduct } from \"./lib.ts\";", "console.log(dotProduct(1));", ""].join("\n"),
 };
@@ -201,6 +217,37 @@ test("a rule that takes no argument says so, rather than looking like one whose 
     assert.match(prompt, new RegExp(`- ${rule.name}:[\\s\\S]*?takes no arguments`));
   }
   assert.match(prompt, /takes one argument: callee/);
+});
+
+test("the worked example names a callee the inline rule may actually write", () => {
+  // A model copies the shape of the example it is handed, so an example naming
+  // a callee the compiler refuses is a proposal the build spends the round on.
+  // `outer` reaches `middle` first, and `middle` calls `triple`, so it cannot
+  // be written anywhere: the example is `double`, whose body the rule holds.
+  const outer = program.files.find((file) => file.path === "lib.ts")?.functions.outer as FunctionContract;
+  const prompt = buildIrReviewPrompt(
+    request({
+      contract: outer,
+      unit: { file: "lib.ts", function: "outer" },
+      artifact: printSemanticFunction(semantics.outer as NonNullable<typeof semantics.outer>),
+    }),
+  );
+  assert.match(prompt, /proposal: inline-call \S+ callee=double/);
+  assert.doesNotMatch(prompt, /callee=middle/, "the callee that calls something is not the example");
+});
+
+test("a body that reaches nothing the inline rule may write is shown no example of it", () => {
+  // `triple` reaches nothing at all. An example with a placeholder in it is one
+  // a model copies back as a callee called name, so the line is left out.
+  const triple = program.files.find((file) => file.path === "lib.ts")?.functions.triple as FunctionContract;
+  const prompt = buildIrReviewPrompt(
+    request({
+      contract: triple,
+      unit: { file: "lib.ts", function: "triple" },
+      artifact: printSemanticFunction(semantics.triple as NonNullable<typeof semantics.triple>),
+    }),
+  );
+  assert.doesNotMatch(prompt, /proposal: inline-call/, "there is no callee there to be written");
 });
 
 test("a line that says it proposes nothing is a review with no proposals, not an unreadable answer", () => {

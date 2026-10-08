@@ -67,6 +67,26 @@ const LIBRARY: Record<string, string> = {
     "  return shadow(x, u) + shadow(x + 1, u);",
     "}",
     "",
+    "export function twiceOf(x: number): number {",
+    "  return x + x;",
+    "}",
+    "",
+    "export function twoCalls(a: number, b: number): number {",
+    "  return twiceOf(a) + twiceOf(b);",
+    "}",
+    "",
+    "export function partly(one: number, two: number): number {",
+    "  return twiceOf(one) + twiceOf(twiceOf(two));",
+    "}",
+    "",
+    "export function shell(v: number): number {",
+    "  return v + 1;",
+    "}",
+    "",
+    "export function wrapped(t: number): number {",
+    "  return shell(twiceOf(t));",
+    "}",
+    "",
   ].join("\n"),
 };
 
@@ -83,13 +103,13 @@ function resolved(name: string): SemanticFunction {
 }
 
 /** Applies one proposal and hands back the revision, or the refusal. */
-function apply(name: string, proposal: Proposal): { ir: string; note: string } | { refused: string } {
+function apply(name: string, proposal: Proposal): { ir: string; note: string; partial?: readonly string[] } | { refused: string } {
   const outcome = applyProposal(resolved(name), proposal, context);
   if ("refused" in outcome) return outcome;
   // Every rule has to leave a function the compiler may lower: that is what
   // makes an applied proposal an artifact rather than an edit.
   validateSemanticFunction(outcome.applied, contracts[name]);
-  return { ir: printSemanticFunction(outcome.applied), note: outcome.note };
+  return { ir: printSemanticFunction(outcome.applied), note: outcome.note, partial: outcome.partial };
 }
 
 test("the catalogue is the one the prompt offers, and every rule is applied and refused by it", () => {
@@ -207,6 +227,59 @@ test("inline-call refuses a block that does not call the callee", () => {
   const outcome = apply("twice", proposalsIn(repaired("inline-call entry callee=twice"))[0] as Proposal);
   assert.ok("refused" in outcome);
   assert.match(outcome.refused, /twice is not called in block entry/);
+});
+
+test("inline-call puts the body where every call in the block was", () => {
+  // A proposal names a rule, a block and a callee: it does not name one of the
+  // calls, and there is nothing to choose between two written the same way.
+  // Both are inlined, each with the arguments it was written with and names of
+  // its own, and the block ends by calling the callee none. It used to be
+  // refused as a call no single one of was named.
+  const outcome = apply("twoCalls", proposalsIn(repaired("inline-call entry callee=twiceOf"))[0] as Proposal);
+  assert.ok("ir" in outcome, "the rule holds on this block");
+  assert.doesNotMatch(outcome.ir, /call twiceOf/, "no call to the callee is left");
+  assert.match(
+    outcome.ir,
+    /let value\[f64\] inlined\d+ immutable = \[add\[f64\] local\[f64\] a local\[f64\] a\]/,
+    "the first call's body is under a name of its own",
+  );
+  assert.match(
+    outcome.ir,
+    /let value\[f64\] inlined\d+ immutable = \[add\[f64\] local\[f64\] b local\[f64\] b\]/,
+    "and so is the second's, over its own argument",
+  );
+  assert.match(outcome.note, /inlined twiceOf into entry 2 times and bound what each returns/);
+  assert.equal(outcome.partial, undefined, "nothing was left undone");
+});
+
+test("inline-call inlines the calls it can and says which it could not", () => {
+  // The second call is written with an argument that is itself a call, which
+  // would run after the body inlined in front of it, so it cannot be written.
+  // The first one still can, and what is left in the block is reported rather
+  // than hidden behind a refusal of the whole proposal.
+  const outcome = apply("partly", proposalsIn(repaired("inline-call entry callee=twiceOf"))[0] as Proposal);
+  assert.ok("ir" in outcome, "the rule holds on the first of the two calls");
+  assert.match(
+    outcome.ir,
+    /let value\[f64\] inlined\d+ immutable = \[add\[f64\] local\[f64\] one local\[f64\] one\]/,
+    "the call that could be written was",
+  );
+  assert.match(outcome.ir, /call twiceOf/, "the call it could not write is still there");
+  assert.match(outcome.note, /inlined twiceOf into entry and bound what it returns/);
+  assert.equal(outcome.partial?.length, 1, "and the one it left is said");
+  assert.match(outcome.partial?.[0], /is called with an argument that is itself a call/);
+});
+
+test("inline-call puts the body where a call written inside another call's arguments was", () => {
+  // A call an argument holds is a call the block makes: `shell(twiceOf(t))` is
+  // the terminator's own value, and the body goes in front of it while the
+  // statement around it — the call to `shell` — stays where it was.
+  const outcome = apply("wrapped", proposalsIn(repaired("inline-call entry callee=twiceOf"))[0] as Proposal);
+  assert.ok("ir" in outcome);
+  assert.doesNotMatch(outcome.ir, /call twiceOf/);
+  assert.match(outcome.ir, /let value\[f64\] inlined\d+ immutable = \[add\[f64\] local\[f64\] t local\[f64\] t\]/);
+  assert.match(outcome.ir, /return \[call\[f64\] shell \[arg\[f64\] local\[f64\] inlined\d+\] /, "the call around it is still called");
+  assert.match(outcome.note, /inlined twiceOf into entry and bound what it returns/);
 });
 
 test("a rule that does not exist is refused with the ones that do", () => {
@@ -680,6 +753,39 @@ test("a callee that writes its parameter does not write the caller's name", () =
   // caller's own `x` is still a binding.
   assert.match(result.ir, /let value\[f64\] inlined\d+ mutable = local\[f64\] x/, "the argument is copied to a temporary of its own");
   assert.match(result.ir, /return \[add\[f64\] local\[f64\] x local\[f64\] y\]/, "and the caller still reads its own x");
+});
+
+test("a callee whose loop counts in a name the caller has is written under a name of its own", () => {
+  // A loop binds its counter the way a declaration does, and it is not a `let`,
+  // so the name has to be collected from the loop itself. `i` here is the
+  // caller's buffer, and the callee's `i` is twelve whole numbers: one spelling
+  // for both of them is `o[i] = a[i]` reading a limb out of a counter.
+  const result = inlined(
+    [
+      "export function copy12(o: Float64Array, a: Float64Array): void {",
+      "  for (let i = 0; i < 12; i++) {",
+      "    o[i] = a[i];",
+      "  }",
+      "}",
+      "",
+      "export function work(o: Float64Array, a: Float64Array, i: Float64Array, n: number): void {",
+      "  for (let k = 0; k < n; k++) {",
+      "    copy12(o, a);",
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+    "work",
+  );
+  assert.ok("ir" in result);
+  assert.match(result.ir, /for\[i64\] inlined\d+ from/, "the counter of the loop the callee brought is renamed");
+  assert.doesNotMatch(result.ir, /for\[i64\] i from/, "so it is not the caller's buffer of the same name");
+  // The loop the callee brought names two blocks of its own: the header it
+  // enters by, which is the id the caller's own loop is already written with,
+  // and the one it leaves for, which before the splice was the callee's entry
+  // block and is now the block the call was written in.
+  assert.match(result.ir, /header inlined_block\d+ exit b2/, "it leaves for the block the call was written in");
+  assert.equal((result.ir.match(/header b1/g) ?? []).length, 1, "and only the caller's own loop is written with b1");
 });
 
 test("a callee that calls something is left alone, however deep the recursion", () => {

@@ -103,9 +103,11 @@ export const REPAIR_RULES: readonly RepairRule[] = [
     name: "inline-call",
     summary: "Put the body of a called function where the call was, under names of its own.",
     applies:
-      "A call written in the statements of the named block, not in one nested inside it. The callee must compute " +
-      "a result and do nothing else: no call of its own, no allocation, no printing, no reading of the command " +
-      "line, no ownership to hand back, and no block left for anything but the next one.",
+      "A call written in the statements of the named block, not in one nested inside it. Every call the " +
+      "block makes to the callee is put there, each with the arguments it was written with and under names of " +
+      "its own, so a block that calls it five times ends by calling it none. The callee must compute a result " +
+      "and do nothing else: no call of its own, no allocation, no printing, no reading of the command line, no " +
+      "ownership to hand back, and no block left for anything but the next one.",
     args: [{ name: "callee", description: "the function to put the body of, by the name it is contracted under" }],
   },
 ];
@@ -122,7 +124,17 @@ export interface RepairContext {
 
 /** What a rule did, or why it did not do it. */
 export type RepairOutcome =
-  | { readonly applied: SemanticFunction; readonly note: string }
+  | {
+      readonly applied: SemanticFunction;
+      readonly note: string;
+      /**
+       * What the rule could not do where it was applied, oldest first. A rule
+       * aimed at a whole block that holds several calls to one callee inlines
+       * the ones it can and leaves the rest, and the ones it left are said
+       * here rather than dropped.
+       */
+      readonly partial?: readonly string[];
+    }
   | { readonly refused: string };
 
 /**
@@ -895,9 +907,15 @@ function reciprocalMultiply(fn: SemanticFunction, site: string): RepairOutcome {
 /* inline-call                                                                */
 /* -------------------------------------------------------------------------- */
 
-/** A call a statement makes in its own right, with the statement that makes it. */
+/**
+ * A call a statement makes to a callee, with the statement it makes it in.
+ *
+ * The statement is null for the call the block's own terminator makes, because
+ * that one has no statement to be written in: a block hands its value back
+ * from its terminator as often as it computes it in a statement.
+ */
 interface FoundCall {
-  readonly statement: SemanticStatement;
+  readonly statement: SemanticStatement | null;
   readonly call: SemanticCall;
 }
 
@@ -911,16 +929,14 @@ function callValueIn(value: SemanticValue | null, callee: string): SemanticCall 
   return found;
 }
 
-/** The call a statement makes to a callee in its own right, with its statement. */
-interface FoundCall {
-  readonly statement: SemanticStatement;
-  readonly call: SemanticCall;
-}
-
+/**
+ * The call a statement makes to a callee in its own right, with its statement.
+ *
+ * A statement that is itself a call is read the same way as any other: the
+ * whole call is one value the statement computes, so a callee written inside
+ * its arguments is a call the statement makes too.
+ */
 function callIn(statement: SemanticStatement, callee: string): FoundCall | null {
-  if (statement.k === "call") {
-    return statement.call.callee === callee ? { statement, call: statement.call } : null;
-  }
   for (const value of statementValues(statement)) {
     const call = callValueIn(value, callee);
     if (call !== null) return { statement, call };
@@ -928,6 +944,34 @@ function callIn(statement: SemanticStatement, callee: string): FoundCall | null 
   return null;
 }
 
+/**
+ * Every call the block makes to a callee, in the order they are written.
+ *
+ * The terminator's own call is read after the statements', because that is the
+ * order the block computes them in.
+ */
+function callsInBlock(block: SemanticBlock, callee: string): FoundCall[] {
+  const found: FoundCall[] = [];
+  for (const statement of block.statements) {
+    const entry = callIn(statement, callee);
+    if (entry !== null) found.push(entry);
+  }
+  const returned = block.terminator.k === "return" ? callValueIn(block.terminator.value, callee) : null;
+  if (returned !== null) found.push({ statement: null, call: returned });
+  return found;
+}
+
+/**
+ * Puts the body of a callee where every call the block makes to it was.
+ *
+ * A proposal is a rule, a block and a callee: it does not name one of the
+ * calls, and when a block makes several of them there is nothing to choose
+ * between. Every one is written the same way, so every one is inlined, each
+ * under names of its own beside the arguments it was written with — which is
+ * the same rewrite one call was, run once per call. A call that cannot be
+ * inlined is refused on its own and the rest still are, so what is left in the
+ * block is said in `partial` rather than hidden behind a refusal of the whole.
+ */
 function inlineCall(fn: SemanticFunction, site: string, calleeName: string, context: RepairContext): RepairOutcome {
   const block = blockAt(fn, site);
   if (block === null) return { refused: `cannot be written into block ${site}: there is no such block, and the blocks are ${blockNames(fn)}` };
@@ -938,26 +982,75 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   }
 
   // A block hands its value back from its terminator as often as from a
-  // statement, so the call this rule inlines may be written in either. The
+  // statement, so the calls this rule inlines may be written in either. The
   // site is read before the callee is judged: a block that does not make the
   // call at all is the more useful thing to say, and it names the block, so a
   // proposal aimed at the wrong one is corrected rather than told its callee
   // is the problem.
-  const written = block.statements
-    .map((statement) => callIn(statement, calleeName))
-    .filter((entry): entry is FoundCall => entry !== null);
-  const returned = block.terminator.k === "return" ? callValueIn(block.terminator.value, calleeName) : null;
-  if (written.length === 0 && returned === null) return { refused: `${calleeName} is not called in block ${site}` };
-  if (written.length + (returned === null ? 0 : 1) > 1) {
-    return { refused: `${calleeName} is called more than once in block ${site}, so no single one of them is named` };
+  if (callsInBlock(block, calleeName).length === 0) {
+    return { refused: `${calleeName} is not called in block ${site}` };
   }
-
   const refusal = inlineRefusal(callee);
   if (refusal !== null) return { refused: `${calleeName} ${refusal}` };
 
+  let current = fn;
+  let inlined = 0;
+  // How many calls this block has already refused. The calls are found again
+  // in the tree the previous round produced, because writing one body in front
+  // of a call moves the calls written after it, and the one that was refused is
+  // still where it was.
+  let skipped = 0;
+  const partial: string[] = [];
+  for (;;) {
+    const attempt = structuredClone(current);
+    const inBlock = blockAt(attempt, site) as SemanticBlock;
+    const target = callsInBlock(inBlock, calleeName)[skipped];
+    if (target === undefined) break;
+    const outcome = inlineOne(attempt, inBlock, callee, calleeName, target);
+    if ("refused" in outcome) {
+      partial.push(outcome.refused);
+      skipped += 1;
+      continue;
+    }
+    current = outcome.applied;
+    inlined += 1;
+  }
+  if (inlined === 0) return { refused: partial[0] ?? `${calleeName} is not called in block ${site}` };
+  const times = inlined === 1 ? "" : ` ${inlined} times`;
+  const bound =
+    callee.returns.kind === "void"
+      ? ""
+      : inlined === 1
+        ? " and bound what it returns"
+        : " and bound what each returns";
+  return {
+    applied: current,
+    note: `inlined ${calleeName} into ${site}${times}${bound}`,
+    ...(partial.length === 0 ? {} : { partial }),
+  };
+}
 
-  const call = written[0]?.call ?? (returned as SemanticCall);
-  const statement = written[0]?.statement ?? null;
+/**
+ * Puts the body of a callee where one call the block makes to it was.
+ *
+ * The block is the one the named block became in the tree being rewritten,
+ * which is not the tree `inlineCall` was handed: the names of an inlined copy
+ * are taken from the blocks that are already there, so a body written in front
+ * of one call must not leave its names for the next one to trip over.
+ *
+ * The tree is written in place and handed back, and what it answers is whether
+ * this one call could be written at all: the count of the ones that were, and
+ * what to say about them, is the caller's to decide.
+ */
+function inlineOne(
+  fn: SemanticFunction,
+  block: SemanticBlock,
+  callee: SemanticFunction,
+  calleeName: string,
+  target: FoundCall,
+): { applied: SemanticFunction } | { refused: string } {
+  const call = target.call;
+  const statement = target.statement;
   const line = statement?.line ?? 0;
   if (statement !== null && statement.k === "call" && callee.returns.kind !== "void") {
     return { refused: `${calleeName} returns ${typeLabel(callee.returns)} and is called here only for what it does, so inlining it would bind a result to a name nothing reads` };
@@ -999,7 +1092,7 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
     writes.set(param.name, name);
   });
   for (const inner of nestedBlocks(callee.entry)) {
-    for (const name of declaredNames(inner)) {
+    for (const name of boundNames(inner)) {
       // A name a nested block declares that something already answers to is a
       // *different* binding under the same name, and the substitution below is
       // by name: there is one spelling for both of them and either answer is
@@ -1022,12 +1115,29 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
   // own loop body has. Two blocks under one id is a function the compiler
   // cannot read back, so the callee's blocks are renamed beside everything
   // else it brought with it.
+  //
+  // Two of the ids a loop names are not blocks of the tree at all: the header
+  // it enters by is a name the loop is written with, and it is one the caller's
+  // own loop is very often written with too. Left unrenamed, two loops of one
+  // function are written with one header, which is one label twice in the code
+  // either backend writes. The exit a loop written in the callee's own entry
+  // block leaves for is that block, which after the splice is the block the
+  // call was written in — so it is the caller's id it is written as here.
   const blocks = new Map<string, string>();
   for (const inner of nestedBlocks(callee.entry)) {
     // The prefix is part of what `freshName` counts, not something added to
     // what it chose: a name it picked as free is free under its own spelling,
     // and `inlined_block1` is the spelling the earlier round left behind.
     if (inner.id !== callee.entry.id) blocks.set(inner.id, freshName(taken, "inlined_block"));
+  }
+  for (const inner of nestedBlocks(callee.entry)) {
+    for (const statement of inner.statements) {
+      if (statement.k !== "loop") continue;
+      for (const id of [statement.loop.header, statement.loop.exit]) {
+        if (id === callee.entry.id) blocks.set(id, block.id);
+        else if (!blocks.has(id)) blocks.set(id, freshName(taken, "inlined_block"));
+      }
+    }
   }
   // The block ids are renamed by a walk of the whole statement rather than by
   // picking the ones a loop names: a jump target, a loop's own header and exit
@@ -1051,9 +1161,20 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
     temp === null ? new Map() : new Map([[valueKey(read), temp]]);
   if (statement !== null) {
     const at = block.statements.indexOf(statement);
-    const rewritten = temp === null ? null : replaceValues(statement, atCall({ k: "call", type: call.returns, call }));
-    block.statements.splice(at, 1, ...added, ...(rewritten === null ? [] : [rewritten]));
+    // A statement the call was the whole of is replaced by the body, which is
+    // the one shape a callee that hands back nothing can be written in: an
+    // argument is a value, and no value holds a void. Where the call was
+    // written inside the statement — `shell(twice(t))` inlining `twice` — the
+    // statement stays and only the call inside it becomes the name, so losing
+    // a statement would lose the call around it.
+    const whole = statement.k === "call" && statement.call === call;
+    const callNode = { k: "call" as const, type: call.returns, call };
+    const kept = whole ? [] : [temp === null ? statement : replaceValues(statement, atCall(callNode))];
+    block.statements.splice(at, 1, ...added, ...kept);
   } else {
+    // A block whose terminator makes the call has no statement to write in
+    // front of: the body goes at the end of the block's statements, and the
+    // call the terminator reads is the name the body bound.
     block.statements.push(...added);
     if (temp !== null && block.terminator.k === "return") {
       const callNode = { k: "call" as const, type: call.returns, call };
@@ -1061,10 +1182,7 @@ function inlineCall(fn: SemanticFunction, site: string, calleeName: string, cont
     }
   }
   dropUnusedEdge(fn, calleeName);
-  return {
-    applied: fn,
-    note: `inlined ${calleeName} into ${site}${result === null ? "" : " and bound what it returns"}`,
-  };
+  return { applied: fn };
 }
 
 /**
@@ -1088,16 +1206,42 @@ export function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>)
   return node;
 }
 
-/** Every slot a function has, by name, as the type it is read as. */
+/**
+ * Every name a function binds, by name, as the type it is read at.
+ *
+ * A `let` binds the name it says it does, and a loop binds its own beside them:
+ * a counter, or the element and the index a walk is written with. The
+ * substitution by name answers for every one of them, and a loop's counter is
+ * a different binding from a parameter of the same name — a callee whose loop
+ * counts in `i`, put into a function that has `i`, is two names in one frame.
+ */
 function slotTypesOf(fn: SemanticFunction): Map<string, SemanticType> {
   const types = new Map<string, SemanticType>();
   for (const param of fn.params) types.set(param.name, slotType(param));
   for (const block of nestedBlocks(fn.entry)) {
     for (const statement of block.statements) {
       if (statement.k === "let") types.set(statement.slot.name, slotType(statement.slot));
+      else if (statement.k === "loop") {
+        if (statement.loop.kind === "counted") types.set(statement.loop.variable, statement.loop.type);
+        else if (statement.loop.kind === "each") {
+          types.set(statement.loop.element, statement.loop.elementType);
+          types.set(statement.loop.index, { kind: "primitive", name: "usize" });
+        }
+      }
     }
   }
   return types;
+}
+
+/** Every name a block binds of its own, which a rewrite renames beside it. */
+function boundNames(block: SemanticBlock): string[] {
+  const names = [...declaredNames(block)];
+  for (const statement of block.statements) {
+    if (statement.k !== "loop") continue;
+    if (statement.loop.kind === "counted") names.push(statement.loop.variable);
+    else if (statement.loop.kind === "each") names.push(statement.loop.index, statement.loop.element);
+  }
+  return names;
 }
 
 /**
@@ -1184,10 +1328,10 @@ function writesName(fn: SemanticFunction, name: string): boolean {
 /**
  * The callees a block calls, in the order they are first written in.
  *
- * A block is what decides whether a call may be put there — `inlineCall`
- * refuses a block that calls the same callee twice, because then no single
- * one of them is the call to name — so the calls are collected per block
- * rather than per function.
+ * A block is what decides whether a call may be put there, and every call a
+ * block makes to one callee is one proposal — `inlineCall` writes all of them
+ * under names of their own — so the calls are collected per block rather than
+ * per function.
  */
 function calleesInBlock(block: SemanticBlock): string[] {
   const names: string[] = [];

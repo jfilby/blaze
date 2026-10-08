@@ -1125,6 +1125,16 @@ function revise(
     }
     current = outcome.applied;
     applied.push(`\`${proposal.text}\`: ${outcome.note}`);
+    // A rule aimed at a whole block may hold where part of it does not — a
+    // callee called five times is inlined four of them, and the fifth is left
+    // where it was because an argument it was called with is itself a call.
+    // What it left is said here, which is where a round's refusals go, so the
+    // next round reads it beside what it did.
+    for (const reason of outcome.partial ?? []) {
+      const note = `\`${proposal.text}\` was refused: ${reason}`;
+      refused.push(note);
+      request.onNote?.(note);
+    }
   }
   // And once more after the last proposal, so a round that proposed nothing at
   // all still arrives folded, and so the text a review reads is what the

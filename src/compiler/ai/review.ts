@@ -27,7 +27,7 @@
  */
 
 import { parseType, typeToString, isBufferType } from "../semantics/contract.ts";
-import { describeSites, REPAIR_RULES } from "../semantics/repair.ts";
+import { describeSites, inlineRefusal, REPAIR_RULES } from "../semantics/repair.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import type {
   FunctionContract,
@@ -397,14 +397,36 @@ function renderReading(request: ReviewRequest): readonly string[] {
   ];
 }
 
+/**
+ * Whether a review may ask for a callee's body to be put where its call was.
+ *
+ * The example a prompt shows is one the rule has an answer for, so the callee
+ * is read with the rule that decides it rather than with the body's own list of
+ * callees: a callee that calls something cannot be written anywhere, and an
+ * example naming one is an example of a refusal.
+ */
+function inlineRefusable(callee: SemanticFunction | undefined): boolean {
+  return callee !== undefined && inlineRefusal(callee) === null;
+}
+
 function renderReview(request: ReviewRequest, lead: readonly string[]): string {
   const semantic = request.semantics[request.contract.function.name];
   // The worked examples in the answer format name a block and a callee this
   // artifact really has, so a model copying the shape copies an id the IR
   // prints rather than the name of a placeholder. The callee is one the body
-  // reaches other than itself: an example that inlines a function into itself
-  // is an example of a rule being refused.
-  const callee = semantic === undefined ? null : (semantic.calls.find((edge) => edge.callee !== semantic.name)?.callee ?? null);
+  // reaches other than itself — an example that inlines a function into itself
+  // is an example of a rule being refused — and it is one whose body the rule
+  // can actually put where the call was. An example of a callee that calls
+  // something is an example of a refusal, and a model that copies the shape
+  // spends the round on it: `pDouble` reaches `fMulMod`, whose body holds four
+  // calls, and the proposal the prompt showed there was refused every time a
+  // build asked. Where the body reaches nothing the rule may write, there is no
+  // example to give and the line is left out.
+  const callee =
+    semantic === undefined
+      ? null
+      : (semantic.calls.find((edge) => edge.callee !== semantic.name && inlineRefusable(request.semantics[edge.callee]))
+          ?.callee ?? null);
   // The sites are the whole list the review is handed, walked once: the worked
   // example names a block out of it and the section further down prints it. The
   // block named is the last one, so the example is a block inside the body
