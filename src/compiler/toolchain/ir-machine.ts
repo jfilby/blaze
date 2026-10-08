@@ -77,6 +77,7 @@ import {
   RCX,
   RDI,
   RDX,
+  RBP,
   RSI,
   RSP,
   SSE_ARGUMENTS,
@@ -4636,9 +4637,20 @@ class Machine {
       case "nothing":
         this.zero(value.type);
         return;
-      case "local":
-        this.load(this.slot(value.name));
+      case "local": {
+        const slot = this.slot(value.name);
+        this.load(slot);
+        // A name is loaded at the width its own declaration gives it, which is
+        // not always the width this read asks for: a whole number read as a
+        // double is every value the slot holds said as the wider of the two, and
+        // the conversion that says so is the accumulator's to make. Without it a
+        // name the build gave a register of its own lands in a general register
+        // while the operation that reads it expects a floating point one — which
+        // is what `x > 0` over a name `whole-numbers.ts` narrowed answered from
+        // whatever the register beside it happened to hold.
+        if (!typeEquals(slot.type, value.type)) this.convert(slot.type, value.type);
         return;
+      }
       case "text":
         this.text(value);
         return;
@@ -5414,6 +5426,27 @@ class Machine {
       this.normalizeArithmetic(type);
       return;
     }
+    // A side the build gave a register of its own is carried by that register,
+    // which is the same instruction with the copy into the frame and the read
+    // back out of it left out. The accumulator takes the other side, which is
+    // the order this already wrote them in, and the register is not the
+    // accumulator's own or the scratch register's — the instruction names it
+    // rather than moving into either, so neither is clobbered on the way.
+    //
+    // A sum and a product take their sides either way round, so either may be
+    // the one carried; a difference and a quotient may not, so only their right
+    // side can be. A carried side is never evaluated at all, which is sound for
+    // a register because the register is one the convention preserves, or is
+    // named only where the other side calls nothing and so writes nothing over
+    // it.
+    const named = this.integerOperand(value, type);
+    if (named !== null) {
+      const commutative = named.operation === "add" || named.operation === "mul";
+      this.at(commutative ? value.right : value.left, type);
+      this.applyRegister(named.operation, type, named.register);
+      this.normalizeArithmetic(type);
+      return;
+    }
     this.at(value.right, type);
     const right = this.hold(type, "blaze_right");
     this.store(right);
@@ -5421,6 +5454,59 @@ class Machine {
     this.scratchFrom(right);
     this.apply(value.op, type);
     this.normalizeArithmetic(type);
+  }
+
+  /**
+   * The operation and the register one side of an arithmetic of whole numbers
+   * could be written at rather than read out of the frame, or null where no side
+   * of it could be.
+   *
+   * It is the answer `registerOperand` gives for a floating point operation, over
+   * the whole numbers the general path below is written for: the frame round trip
+   * this skips is two instructions and a store-to-load forwarding on every
+   * whole-number operation whose other side the build gave a register, and a
+   * carry chain is one long run of exactly those.
+   */
+  private integerOperand(
+    value: SemanticValue & { k: "arith" },
+    type: SemanticType,
+  ): { operation: Extract<Arithmetic, "add" | "sub" | "mul" | "and" | "or" | "xor">; register: number } | null {
+    if (isFloat(type) || isWideType(type)) return null;
+    // Only the operations `applyRegister` writes are asked for here: a shift
+    // takes its count in the scratch register the general path masks it in, and a
+    // division needs both halves of the double width in the two registers the
+    // general path sets up, and neither names a register of its own.
+    const { op } = value;
+    if (op !== "add" && op !== "sub" && op !== "mul" && op !== "and" && op !== "or" && op !== "xor") return null;
+    const commutative = op === "add" || op === "mul";
+    const carried = commutative ? value.left : value.right;
+    const other = commutative ? value.right : value.left;
+    if (carried.k !== "local" || !isInteger(carried.type) || !isInteger(type)) return null;
+    if (widthOf(carried.type) !== widthOf(type)) return null;
+    const register = this.slot(carried.name).register;
+    // The accumulator and the scratch register are where the operation is
+    // written, and the stack and base pointers are not values a program has.
+    if (register === null || register === RAX || register === RCX || register === RDX) return null;
+    if (register === RSP || register === RBP) return null;
+    if (hasCall(other) && !CALLEE_SAVED.includes(register)) return null;
+    return { operation: op, register };
+  }
+
+  /**
+   * An arithmetic of whole numbers with one of its sides named at a register.
+   *
+   * The operations it is written for are the ones `integerOperand` admits, which
+   * is the whole list: a sum, a difference and the three bitwise operations take
+   * the second side as a register operand, and a product is the one instruction
+   * of them that names its other side rather than reading it.
+   */
+  private applyRegister(operation: Extract<Arithmetic, "add" | "sub" | "mul" | "and" | "or" | "xor">, type: SemanticType, source: number): void {
+    const wide = operationWidth(type) === 8;
+    if (operation === "mul") {
+      this.code.imul(RAX, source, wide);
+      return;
+    }
+    this.code.alu(operation, RAX, source, wide);
   }
 
   /* ---------------------------------------------------------------------- */

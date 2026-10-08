@@ -31,6 +31,7 @@ import { runContractPhase } from "./semantics/program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, type FunctionContext } from "./semantics/ir-function.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
+import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
 import { printSemanticProgram } from "./semantics/ir-text.ts";
 import { semanticFunctionProblems, validateSemanticProgram } from "./semantics/ir-validate.ts";
@@ -95,6 +96,17 @@ async function main(): Promise<void> {
   // Every function is resolved before any is inlined, because the inliner
   // reads the bodies it may write out and a body is what resolution writes.
   const resolvedByName = new Map(contracts.map(([name, contract]) => [name, resolveFunction(contract, context)]));
+  // Whole-number arithmetic over a buffer of whole numbers is a question about
+  // the whole program, and it is asked of the same bodies the backends are
+  // handed: the pass rewrites the loops of the functions themselves rather than
+  // a copy of them, so it runs here rather than inside `optimizeSemanticProgram`,
+  // which is handed the program's own statements and its own bodies.
+  wholeElementArithmetic(
+    [...resolvedByName.values()],
+    phase.body === undefined
+      ? null
+      : resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts).entry,
+  );
   const inlinable: RepairContext = { functions: resolvedByName };
 
   // The program, resolved and folded exactly as a build folds the driver.

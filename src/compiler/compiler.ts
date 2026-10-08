@@ -45,7 +45,7 @@ import { normalizeOptimize, parseContract, type ParsedContract } from "./semanti
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
-import type { SemanticFunction } from "./core/semantic-ir.ts";
+import type { SemanticFunction, SemanticProgram } from "./core/semantic-ir.ts";
 import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
@@ -54,6 +54,7 @@ import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
+import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
 import type { Threading } from "./core/target.ts";
 
@@ -107,6 +108,7 @@ import {
   type BuildStatus,
   OUTPUT_KINDS,
   type FunctionContract,
+  type ObjectLayout,
   type ProgramContract,
   type GenerationConfig,
   type ModelSelection,
@@ -787,7 +789,34 @@ function functionContext(phase: { program: ProgramContract; objectNames: Record<
   };
 }
 
-function semanticFunctions(program: ProgramContract, objectNames: Record<string, string>): Record<string, SemanticFunction> {
+/**
+ * The program's own statements, resolved and with the arithmetic of a loop over
+ * whole numbers computed in whole numbers.
+ *
+ * The pass is asked of the program's statements and of the functions it is
+ * handed, because what a buffer holds is what every write into it and every
+ * call site of every function leaves in it — a question the program's
+ * statements alone cannot answer, and one the resolved functions answer
+ * together.
+ */
+function resolvedDriver(
+  body: ProgramBody,
+  program: ProgramContract,
+  objectNames: Record<string, string>,
+  objectLayouts: Record<string, ObjectLayout>,
+  semantics: Record<string, SemanticFunction>,
+): SemanticProgram {
+  const driver = resolveProgram(body, program, objectNames, objectLayouts);
+  wholeElementArithmetic(Object.values(semantics), driver.entry);
+  return driver;
+}
+
+function semanticFunctions(
+  program: ProgramContract,
+  objectNames: Record<string, string>,
+  body: ProgramBody | undefined,
+  objectLayouts: Record<string, ObjectLayout>,
+): Record<string, SemanticFunction> {
   const context: FunctionContext = {
     objectNames,
     functions: Object.fromEntries(program.files.flatMap((file) => Object.entries(file.functions))),
@@ -797,6 +826,16 @@ function semanticFunctions(program: ProgramContract, objectNames: Record<string,
     for (const contract of Object.values(file.functions)) {
       resolved[contract.function.name] = resolveFunction(contract, context);
     }
+  }
+  // What a buffer of a program holds is a question about every write into it and
+  // every call site of every function that is handed one, so the arithmetic of a
+  // loop over whole numbers is settled here rather than by a per-function pass:
+  // it is asked of these bodies, which are the ones every backend is handed.
+  if (body !== undefined) {
+    wholeElementArithmetic(
+      Object.values(resolved),
+      resolveProgram(body, program, objectNames, objectLayouts).entry,
+    );
   }
   // Every body is resolved before any of them is checked, because a function is
   // checked against the others: a loop marked parallel is proved against what
@@ -1153,7 +1192,7 @@ export async function runBuild(
     });
     const program = phase.program;
     const units = compilationUnits(program, phase.body !== undefined);
-    const semantics = semanticFunctions(program, phase.objectNames);
+    const semantics = semanticFunctions(program, phase.objectNames, phase.body, phase.objectLayouts);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
     reporter.stage(
@@ -1604,7 +1643,7 @@ export async function runBuild(
       phase.body === undefined
         ? undefined
         : optimizeSemanticProgram(
-            resolveProgram(phase.body, program, phase.objectNames, phase.objectLayouts),
+            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, semantics),
             new Map(Object.entries(semantics)),
           );
     // The IR is checked here, before a toolchain is asked for anything: a
@@ -2001,7 +2040,7 @@ export async function runStored(
   // it may inline are resolved here exactly as the build resolved them. The
   // object layouts are a property of the contracted files and nothing else, so
   // the same program answers the same names without the phase being run again.
-  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files).names));
+  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files).names), undefined, {});
 
   // Both records are collected as entries and written whole, the way a build
   // writes its own, so a name that is a key of neither is never half written.
@@ -2104,7 +2143,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     entry,
     read: moduleReader(directory),
   });
-  const semantics = semanticFunctions(phase.program, phase.objectNames);
+  const semantics = semanticFunctions(phase.program, phase.objectNames, phase.body, phase.objectLayouts);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
   if (options.function !== undefined || options.all === true) {

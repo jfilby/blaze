@@ -1405,6 +1405,59 @@ test("a branch on a comparison of floats is the comparison itself", async () => 
   }
 });
 
+test("a whole number read as a double is converted before the comparison reads it", async () => {
+  // A name the build narrowed to a whole number is read back at the width the
+  // use asks for, and a use that asks for a double is a conversion the
+  // accumulator still owes: the name lies in a general register holding an
+  // integer, and `UCOMISD` reads a floating point one. Without the conversion
+  // the instruction compared whatever the register beside it held, which is how
+  // `if (carry > 0)` over a carry a whole-number loop left answered from
+  // something the loop never computed.
+  const params: SemanticSlot[] = [{ kind: "value", name: "v", mutable: false, type: I64 }];
+  const branching = (condition: SemanticValue): SemanticBlock => ({
+    id: "entry",
+    statements: [
+      { k: "let", slot: { kind: "value", name: "answer", mutable: true, type: I32 }, value: number("0", I32), line: 1 },
+      {
+        k: "if",
+        condition,
+        then: { id: "yes", releases: [], statements: [{ k: "set", name: "answer", op: "=", value: number("1", I32), line: 2 }], terminator: { k: "next" } },
+        otherwise: null,
+        line: 1,
+      },
+    ],
+    releases: [],
+    terminator: { k: "return", value: local("answer", I32) },
+  });
+  const widened = (name: string, type: SemanticType): SemanticValue => local(name, type);
+  const relations: { op: "lt" | "le" | "gt" | "ge" | "eq" | "ne"; below: number; above: number; equal: number }[] = [
+    { op: "lt", below: 1, above: 0, equal: 0 },
+    { op: "le", below: 1, above: 0, equal: 1 },
+    { op: "gt", below: 0, above: 1, equal: 0 },
+    { op: "ge", below: 0, above: 1, equal: 1 },
+    { op: "eq", below: 0, above: 0, equal: 1 },
+    { op: "ne", below: 1, above: 1, equal: 0 },
+  ];
+  for (const relation of relations) {
+    // The read is the one the IR keeps: the slot holds a whole number and the
+    // comparison reads it as a double.
+    const ask = (left: string, right: string): Promise<string> =>
+      lowered(
+        subject(I32, branching({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: widened("v", F64), right: number(right) }), params),
+        (fn) => `printf("%d", ${fn}(${left}LL));`,
+      );
+    assert.equal(await ask("1", "2"), `${relation.below}`, `1 ${relation.op} 2`);
+    assert.equal(await ask("2", "1"), `${relation.above}`, `2 ${relation.op} 1`);
+    assert.equal(await ask("2", "2"), `${relation.equal}`, `2 ${relation.op} 2`);
+    // The value form reads the same name the same way, so it answers the same.
+    const asValue = await lowered(
+      subject(BOOL, handsBack({ k: "compare", type: BOOL, op: relation.op, operand: F64, left: widened("v", F64), right: number("2") }), params),
+      (fn) => `printf("%d", ${fn}(1LL));`,
+    );
+    assert.equal(asValue, `${relation.below}`, `the value form of 1 ${relation.op} 2`);
+  }
+});
+
 test("a negated comparison is the other sense of the comparison it negates", async () => {
   // The negation was read out of the flags the comparison leaves, through the
   // conditions whole numbers use. A float leaves no such condition: the
