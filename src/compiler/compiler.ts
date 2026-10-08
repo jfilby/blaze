@@ -1603,7 +1603,10 @@ export async function runBuild(
     const driver =
       phase.body === undefined
         ? undefined
-        : optimizeSemanticProgram(resolveProgram(phase.body, program), new Map(Object.entries(semantics)));
+        : optimizeSemanticProgram(
+            resolveProgram(phase.body, program, phase.objectNames, phase.objectLayouts),
+            new Map(Object.entries(semantics)),
+          );
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
@@ -1998,7 +2001,7 @@ export async function runStored(
   // it may inline are resolved here exactly as the build resolved them. The
   // object layouts are a property of the contracted files and nothing else, so
   // the same program answers the same names without the phase being run again.
-  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files)));
+  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files).names));
 
   // Both records are collected as entries and written whole, the way a build
   // writes its own, so a name that is a key of neither is never half written.
@@ -2134,7 +2137,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   const callees = new Map(Object.entries(semantics));
   const program =
     options.from === undefined
-      ? resolveProgram(phase.body, phase.program)
+      ? resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts)
       : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
   validateSemanticProgram(program, phase.program, callees);
   // As for a function: the program the backends lower is folded, so the one

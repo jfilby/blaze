@@ -58,6 +58,7 @@
 
 import { parseType, typeToString } from "./contract.ts";
 import { isWholeNumberText } from "./objects.ts";
+import { shapeKey } from "./program-objects.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import { mapTypeScriptType, PROGRAM_ENTRY_SYMBOL } from "./typescript.ts";
@@ -235,7 +236,11 @@ type DraftValue =
       otherwise: DraftValue;
       type: TypeExpr | null;
       bigint?: true;
-    };
+    }
+  /** A field of one object a name holds, read out of it. */
+  | { k: "field"; object: DraftValue; layout: string; field: string; type: TypeExpr }
+  /** An object literal, resolved so it is allocated wherever it is written. */
+  | { k: "object"; fields: { name: string; value: DraftValue }[]; layout: string; type: TypeExpr };
 
 /** A statement the program runs, before it is written down as blocks. */
 type DraftStatement =
@@ -619,6 +624,8 @@ function holdsText(value: DraftValue): boolean {
     case "isNull":
     case "unary":
     case "null":
+    case "field":
+    case "object":
       return false;
   }
 }
@@ -639,6 +646,10 @@ function draftType(value: DraftValue): TypeExpr | null {
     case "text":
     case "fixed":
       return null;
+    case "field":
+      return value.type;
+    case "object":
+      return value.type;
     case "call":
       return value.call.returns;
     case "length":
@@ -843,6 +854,9 @@ function callsInValue(value: ProgramValue, called: string[]): void {
       return;
     case "text":
       for (const part of value.parts) if (part.k === "value") callsInValue(part.value, called);
+      return;
+    case "object":
+      for (const field of value.fields) callsInValue(field.value, called);
       return;
     case "fixed":
       callsInValue(value.of, called);
@@ -1072,6 +1086,12 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         note(one.buffer);
         value(one.index);
         return;
+      case "object":
+        for (const field of one.fields) value(field.value);
+        return;
+      case "field":
+        value(one.object);
+        return;
       case "call":
         one.args.forEach(value);
         return;
@@ -1253,6 +1273,8 @@ class ProgramResolver {
   private readonly body: ProgramBody;
   private readonly contracts: Map<string, CompiledFunction>;
   private readonly objects: Record<string, ObjectLayout>;
+  /** The layout name each literal's shape is laid out as, keyed by its shape key. */
+  private readonly objectLayoutNames: Map<string, string>;
   /** An array another name was given, and the array it is the same array as. */
   private readonly aliases: [ArrayHeld, ArrayHeld][] = [];
   /** How many loops the statement being resolved is written in. */
@@ -1265,11 +1287,13 @@ class ProgramResolver {
     contracts: Map<string, CompiledFunction>,
     objects: Record<string, ObjectLayout>,
     functions: ProgramFunctions,
+    objectLayoutNames: Map<string, string> = new Map(),
   ) {
     this.body = body;
     this.contracts = contracts;
     this.objects = objects;
     this.functions = functions;
+    this.objectLayoutNames = objectLayoutNames;
   }
 
   resolve(): DraftProgram {
@@ -1511,7 +1535,7 @@ class ProgramResolver {
     // A body is a program of its own: the same contracts and the same
     // functions, with the parameters and the captured names declared before
     // the first statement of the body runs.
-    const inner = new ProgramResolver(this.body, this.contracts, this.objects, this.functions);
+    const inner = new ProgramResolver(this.body, this.contracts, this.objects, this.functions, this.objectLayoutNames);
     inner.open();
     for (const param of draft.signature.params) {
       inner.declareName(param.name, draft.line, heldOf(param.type));
@@ -1822,6 +1846,24 @@ class ProgramResolver {
         return declare({ kind: "number", mutable, type: "usize", text: "" });
       case "element":
         return declare({ kind: "number", mutable, type: value.type, text: "" });
+      case "field": {
+        const parsed = value.type;
+        if (parsed.kind === "ref" || parsed.kind === "ptr") {
+          return declare({ kind: "object", mutable, type: parsed });
+        }
+        const name = primitive(parsed);
+        if (name === null || !NUMERIC.includes(name)) {
+          throw programError(
+            `a program cannot hold ${typeToString(parsed)}`,
+            this.body,
+            statement.line,
+            `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
+          );
+        }
+        return declare({ kind: "number", mutable, type: name, text: "" });
+      }
+      case "object":
+        return declare({ kind: "object", mutable, type: value.type });
       case "literal":
         return declare({
           kind: "number",
@@ -2103,6 +2145,8 @@ class ProgramResolver {
         return this.bigintWritten(value.operand, line);
       case "conditional":
         return this.bigintWritten(value.then, line) || this.bigintWritten(value.otherwise, line);
+      case "object":
+        return value.fields.some((field) => this.bigintWritten(field.value, line));
       default:
         return false;
     }
@@ -2268,6 +2312,78 @@ class ProgramResolver {
           this.coerce("a length", USIZE, expect, line);
         }
         return { k: "length", buffer: held.name, bufferType: arrayType(held), type: "usize" };
+      }
+      case "field": {
+        // The base of the read is resolved first: it is a name or another
+        // field, and whatever it resolves to is the object read here is of.
+        const base = this.value(value.object, null, line);
+        // The layout a base points at: a name of an object slot carries the
+        // layout it holds, and a field read of one is a reference to the layout
+        // the field it read is a field of, so either way the name is there.
+        let laid: string | undefined;
+        if (base.k === "field") {
+          laid = base.layout;
+        } else if (base.k === "reference" && base.held.kind === "object" && base.held.type.kind === "ref" && base.held.type.name !== undefined) {
+          laid = base.held.type.name;
+        } else {
+          throw programError(
+            base.k === "reference" ? `"${base.name}" is not an object the layout names` : "a field is read of something a program does not hold by name",
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: a field read is a field of a layout, and a program reads the fields of the objects it laid out`,
+          );
+        }
+        // The layout the base points at is the one the program lays out, and the
+        // field is a field of it or nothing the program answers.
+        const layout = this.objects[laid] as ObjectLayout | undefined;
+        if (layout === undefined) {
+          throw programError(
+            `"${laid}" is not a layout the program lays out`,
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: a program reads the fields of the objects it laid out, and nothing else lays out ${laid}`,
+          );
+        }
+        const found = layout.fields.find((field) => field.name === value.field);
+        if (found === undefined) {
+          throw programError(
+            `${laid} has no field "${value.field}"`,
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: write the field an object holds, or read one the layout states`,
+          );
+        }
+        return {
+          k: "field",
+          object: base,
+          layout: laid,
+          field: value.field,
+          type: parseType(found.type),
+        };
+      }
+      case "object": {
+        const key = shapeKey(value);
+        const layout = this.objectLayoutNames.get(key);
+        if (key === "" || layout === undefined) {
+          throw programError(
+            "an object the program built is not laid out by it",
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: the program lays out the objects its bodies write at the shapes they write; a literal of a shape the layout pass cannot read is refused where it is read`,
+          );
+        }
+        const laid = this.objects[layout];
+        // Every field is written as the type the layout gives it: a null is a
+        // reference to nothing and holds no type of its own until the field it
+        // is written into says which reference it is.
+        const fields = value.fields.map((field) => {
+          const declared = laid?.fields.find((entry) => entry.name === field.name)?.type;
+          return {
+            name: field.name,
+            value: this.value(field.value, declared === undefined ? null : parseType(declared), line),
+          };
+        });
+        return { k: "object", fields, layout, type: { kind: "ref", of: null, name: layout } };
       }
       case "element": {
         const held = this.held(value.buffer, line);
@@ -2940,6 +3056,11 @@ class ProgramResolver {
     // computed: a value of a primitive type is one of them, and a literal is a
     // number no use has fixed the type of yet.
     if (value.k === "literal" || draftType(value)?.kind === "primitive") return;
+    // A field read is printed as whatever the field holds, and a reference is
+    // one the driver prints as `null` or as the object behind it. The field's
+    // own type is the layout's, so this is the same question the printed
+    // value answers: a field of a reference type is not a buffer.
+    if (value.k === "field") return;
     const held = value.k === "buffer" || (value.k === "reference" && value.held.kind === "array");
     if (held) {
       throw programError(
@@ -3017,6 +3138,10 @@ function draftHasCall(value: DraftValue): boolean {
       return draftHasCall(value.left) || draftHasCall(value.right);
     case "conditional":
       return draftHasCall(value.condition) || draftHasCall(value.then) || draftHasCall(value.otherwise);
+    case "object":
+      return value.fields.some((field) => draftHasCall(field.value));
+    case "field":
+      return draftHasCall(value.object);
   }
 }
 
@@ -3258,6 +3383,7 @@ class ProgramLowering {
         // order the program took it. Freeing a view would free bytes in the
         // middle of a block, which is not a block at all.
         if (allocated && written !== null && written.k !== "view") this.own(slot.name);
+        if (value.k === "newObject") this.own(slot.name);
         this.statement({ k: "let", slot, value: held, line: statement.line });
         return;
       }
@@ -3539,6 +3665,46 @@ class ProgramLowering {
         return { k: "bool", type: BOOLEAN, value: value.value };
       case "null":
         return { k: "nothing", type: value.type ?? VOID };
+      case "field": {
+        // The base is written down first: it is a name of an object slot, or
+        // the field of one the resolver has already read, and both answer as
+        // the value a field is read of.
+        const object = value.object;
+        if (object.k !== "reference" && object.k !== "field") {
+          throw new CompilerError({
+            category: "ContractError",
+            stage: "program",
+            message: "a field is read of something the resolver did not read an object of",
+            detail: "the field read's object is neither a name nor another field read; the resolver refuses one that is",
+          });
+        }
+        if (object.k === "reference" && object.held.kind !== "object") {
+          throw new CompilerError({
+            category: "ContractError",
+            stage: "program",
+            message: "a field is read of a name that holds no object",
+            detail: "the field read's object is a name of a slot that is not an object; the resolver refuses one that is",
+          });
+        }
+        const base =
+          object.k === "reference"
+            ? { k: "local" as const, type: (object.held as ObjectHeld).type, name: (object.held as ObjectHeld).name }
+            : this.value(object, null, line);
+        return {
+          k: "loadField",
+          type: value.type,
+          object: base,
+          layout: value.layout,
+          field: value.field,
+        };
+      }
+      case "object": {
+        // The fields are written as the values the literal holds, not as the
+        // text they print: an object field is whatever type the layout gives
+        // it, and a number printed as text is not a number.
+        const fields = value.fields.map((field) => ({ name: field.name, value: this.value(field.value, null, line) }));
+        return { k: "newObject", type: value.type, layout: value.layout, fields };
+      }
       case "length":
         return { k: "length", type: numeric(value.type), of: { k: "local", type: value.bufferType, name: value.buffer } };
       case "stringLength":
@@ -3909,19 +4075,34 @@ function callsOf(block: SemanticBlock): CallEdge[] {
  * block and allocation is fixed here, so a backend is handed a program it can
  * read rather than a tree it has to decide anything about.
  */
-export function resolveProgram(body: ProgramBody, program: ProgramContract): SemanticProgram {
-  const objects: Record<string, ObjectLayout> = {};
+export function resolveProgram(
+  body: ProgramBody,
+  program: ProgramContract,
+  objectNames: Record<string, string> = {},
+  objectLayouts: Record<string, ObjectLayout> = {},
+): SemanticProgram {
+  // The layouts are the ones the phase named for the whole program: the
+  // objects the functions write and the objects the body writes are one
+  // counter, and a literal the body writes is built at the layout its own
+  // shape was named as.
+  const layouts: Record<string, ObjectLayout> = { ...objectLayouts };
   for (const file of program.files) {
     for (const contract of Object.values(file.functions)) {
-      Object.assign(objects, contract.definition.objects);
+      Object.assign(layouts, contract.definition?.objects ?? {});
     }
   }
-  const resolver = new ProgramResolver(body, contractsOf(program), objects, {
-    table: new Map(),
-    waiting: [],
-    settling: new Set(),
-    used: new Set(),
-  });
+  const resolver = new ProgramResolver(
+    body,
+    contractsOf(program),
+    layouts,
+    {
+      table: new Map(),
+      waiting: [],
+      settling: new Set(),
+      used: new Set(),
+    },
+    new Map(Object.entries(objectNames)),
+  );
   return new ProgramLowering(resolver.taken()).lower(resolver.resolve());
 }
 

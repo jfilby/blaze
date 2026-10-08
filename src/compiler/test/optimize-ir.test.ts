@@ -479,6 +479,58 @@ test("a value a block computes twice that one of them writes between is not comm
   assert.doesNotMatch(after, /common/);
 });
 
+test("an object a body allocates is not commoned with the one beside it", () => {
+  // Two literals of the same shape are two allocations and two sets of fields,
+  // so commoning them would give the second write into the first object, and
+  // dropping the binding of one would leave the block releasing the same name
+  // twice. Neither is the same program.
+  const node = (value: string): SemanticValue => ({
+    k: "newObject",
+    type: { kind: "ref", of: null, name: "Object1" },
+    layout: "Object1",
+    fields: [{ name: "value", value: constOf(value, I32) }],
+  });
+  const folded = optimizeSemanticFunction(
+    {
+      name: "objects",
+      symbol: "objects",
+      params: [],
+      returns: F64,
+      requires: [],
+      ensures: [],
+      effects: [],
+      allocates: true,
+      prints: true,
+      readsArgv: false,
+      objects: {
+        Object1: {
+          name: "Object1",
+          size: 8,
+          align: 8,
+          fields: [{ name: "value", type: "i32", offset: 0 }],
+        },
+      },
+      calls: [],
+      entry: {
+        id: "entry",
+        releases: ["left", "right"],
+        statements: [
+          { k: "let", slot: { kind: "object", name: "left", mutable: false, type: { kind: "ref", of: null, name: "Object1" } }, value: node("1"), line: 1 },
+          { k: "printNumber", value: { k: "loadField", type: I32, object: { k: "local", type: { kind: "ref", of: null, name: "Object1" }, name: "left" }, layout: "Object1", field: "value" }, line: 2, bigint: false },
+          { k: "let", slot: { kind: "object", name: "right", mutable: false, type: { kind: "ref", of: null, name: "Object1" } }, value: node("1"), line: 3 },
+          { k: "printNumber", value: { k: "loadField", type: I32, object: { k: "local", type: { kind: "ref", of: null, name: "Object1" }, name: "right" }, layout: "Object1", field: "value" }, line: 4, bigint: false },
+        ],
+        terminator: { k: "return", value: null },
+      },
+    },
+    new Map(),
+  );
+  const printed = printSemanticFunction(folded);
+  assert.match(printed, /new_object\[ref<Object1>\] Object1 value const\[i32\] 1/, "both objects are built");
+  assert.equal(printed.split("new_object").length - 1, 2, "two literals are two objects, not one");
+  assert.match(printed, /releases\[left right\]/, "and each is released under its own name");
+});
+
 test("a value a block computes twice that a nested block writes between is not commoned", () => {
   // The write is inside a nested block, which the block's own statements do not
   // hold: the binding goes at the top of the outer block and the reads it

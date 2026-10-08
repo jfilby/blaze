@@ -79,6 +79,10 @@ export type ProgramValue =
   /** `name.length`, of a buffer or of a string. */
   | { k: "length"; of: string }
   | { k: "element"; buffer: string; index: ProgramValue }
+  /** One field of one object a value holds, read out of it. */
+  | { k: "field"; object: ProgramValue; field: string }
+  /** An object literal, laid out by the program's own layout pass. */
+  | { k: "object"; fields: { name: string; value: ProgramValue }[] }
   | { k: "call"; function: string; args: ProgramValue[] }
   | { k: "binary"; op: ProgramBinaryOp; left: ProgramValue; right: ProgramValue }
   | { k: "unary"; op: ProgramUnaryOp; operand: ProgramValue }

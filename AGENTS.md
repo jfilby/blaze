@@ -284,13 +284,33 @@ what it points at is the layout the C declaration still checks.
 
 The lifetime is the runtime's on both sides, which is why nothing in the Nim type
 is traced: a value the program keeps is kept by the count in the runtime's own
-header, not by a collector walking these objects. A program cannot read a field
-(`node.left` is refused) or build an object literal, so the only thing a program
-does with one is hand it to a compiled function — which is why the object type
+header, not by a collector walking these objects. A Nim-hosted program cannot
+build an object literal or read a field, so the only thing such a program does
+with an object is hand it to a compiled function — which is why the object type
 and the prototype are the whole of the Nim side, and why the `create(...)` that
 allocated one in the driver's own object path was never reached: it took an
 initialisation procedure where a block belongs. It is a cast of the same
 `object_new` the C driver writes.
+
+**A program body writes objects of the same program.** A literal in the body of
+a TypeScript entry module is one block the runtime allocated, written where the
+source wrote it, with every field filled inside the allocation, and a program
+declares a name for it and frees it when the block that made it ends. The
+layouts are one counter across the whole program: `resolveObjects` walks the
+function bodies and `programShapes` (`semantics/program-objects.ts`) walks the
+body's statements, both filing a shape under the same key — the fields as
+`[name, type]` pairs, serialized — so a literal a body writes and a literal a
+function writes over the same fields are ONE object with one layout, and a shape
+only the body writes is laid out as the next `ObjectN` after the ones the
+functions laid out. That is what lets a compiled function read the fields of an
+object the body built: the layout it contracts is the layout the body wrote.
+
+A member read is deferred to where the name is resolved, because only there is
+a name known to be a reference or not: `node.left` becomes a field read, and the
+resolver says `"n" is not an object` when the name holds a number. A field read
+of a field is the same read one level down. A field read whose layout the
+program does not lay out is refused by that layout's name, and a field the
+layout does not hold is refused by it too.
 
 ## The rules a review may propose
 

@@ -14,6 +14,7 @@ import { diagnostic } from "./phase.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { generateProgramDriver } from "../toolchain/driver.ts";
 import { statementBlocksOf, type SemanticBlock, type SemanticLoop } from "../core/semantic-ir.ts";
 
 const TREE = [
@@ -688,6 +689,85 @@ test("a counter a body reads is left a double when the body is not wholly whole"
     ),
     "f64",
   );
+});
+
+test("an object a program body writes is laid out beside the objects the functions write", () => {
+  // A literal in a program body is an object the body allocates, and the
+  // layouts are one record for the whole program: the body writes a node of
+  // its own beside the tree the functions build, and the two are two objects
+  // because their fields are not the same ones.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": [
+        "function createTree(depth: number): any {",
+        "  return depth-- > 0",
+        "    ? { left: createTree(depth), right: createTree(depth) }",
+        "    : { left: null, right: null };",
+        "}",
+        "const point = { x: 1, y: 2 };",
+        "const tree = createTree(3);",
+        "console.log(tree.left === null, point.x);",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  assert.ok(phase.body !== undefined, "the entry module has statements to resolve");
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
+  // The node the functions lay out first, and the point the body writes after
+  // it: the counter moves on from where the contract pass left it rather than
+  // handing the body an `Object1` that is already the node.
+  assert.deepEqual(Object.keys(program.objects), ["Object1", "Object2"]);
+  assert.deepEqual(
+    program.objects.Object2?.fields.map((field) => [field.name, field.type, field.offset]),
+    [["x", "f64", 0], ["y", "f64", 8]],
+  );
+  assert.deepEqual(program.entry.releases, ["point"], "the object the body built is released when the block ends");
+});
+
+test("a literal a program body and a function both write is one object, not two", () => {
+  // The shapes are keyed by their fields, so the same fields spelled on both
+  // sides of a function boundary are one object with one layout and one name.
+  // Two layouts for it would declare two structs of the same bytes and hand
+  // the function one of them and the body the other.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": [
+        "function make(a: number, b: number): any {",
+        "  return { a: a, b: b };",
+        "}",
+        "const pair = { a: 1, b: 2 };",
+        "const made = make(3, 4);",
+        "console.log(made.a, pair.b);",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  assert.ok(phase.body !== undefined, "the entry module has statements to resolve");
+  const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
+  assert.deepEqual(Object.keys(program.objects), ["Object1"], "the pair is the object the function writes");
+  const written = generateProgramDriver(program);
+  assert.match(written, /struct Object1 \{\n\s*double a;/, "one struct, declared once");
+  assert.doesNotMatch(written, /struct Object2/, "and not a second one beside it");
+});
+
+test("a field read is refused where the name is not a reference to an object", () => {
+  // The member read is deferred to where the name is resolved, which is the
+  // only place a program's name is known to be a reference or not: a number
+  // with a field is not a program this compiler can answer.
+  const message = diagnostic(() => {
+    const phase = phaseOf("typescript", { "1.ts": "let n = 7;\nconsole.log(n.left);\n" }, "1.ts");
+    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts);
+  });
+  assert.match(message, /"n" is not an object/);
+  const missing = diagnostic(() => {
+    const phase = phaseOf("typescript", { "1.ts": "const p = { a: 1 };\nconsole.log(p.b);\n" }, "1.ts");
+    resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts);
+  });
+  assert.match(missing, /has no field "b"/);
 });
 
 test("a counter a nested loop of its own shadows is not a read of the outer one", () => {

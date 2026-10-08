@@ -425,6 +425,12 @@ export function isSafeToCompute(value: SemanticValue): boolean {
       return (
         isSafeToCompute(value.condition) && isSafeToCompute(value.then) && isSafeToCompute(value.otherwise)
       );
+    // An object is allocated and its fields are written, so it is not a value
+    // to move: a `let node = { left: ..., right: ... }` bound to another place
+    // would run its allocation on a turn it was not written on, and a block
+    // that released the name would release it twice.
+    case "newObject":
+      return false;
     case "toText":
       return isSafeToCompute(value.of);
     case "text":

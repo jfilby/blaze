@@ -406,6 +406,16 @@ export function generateHarness(contract: FunctionContract, demoRequest: string)
     throw linkError("the contract function name is not a valid C identifier", undefined, name);
   }
   if (contract.ensures.length === 0) return generateDefinitionHarness(contract);
+  // A parameter of a reference type is something the protocol does not carry,
+  // so there is no vector to hand this function and nothing for it to be
+  // called with. `planVectors` says the same thing and plans none, so the
+  // harness is the one that only links: the program the function belongs to is
+  // what calls it, and what says whether the two agree. Reading the header of
+  // such a vector raised `ref<any> is not a buffer` out of the harness the
+  // compiler wrote for a call it was never going to make.
+  if (contract.function.params.some((param) => parseType(param.type).kind === "ref")) {
+    return generateDefinitionHarness(contract);
+  }
   const returns = parseType(contract.function.returns);
   if (isBuffer(returns)) throw linkError("a pointer return type cannot be called from the harness", undefined, name);
   // The harness is C and the C compiler places the arguments, so an arity past

@@ -28,8 +28,17 @@ import { byName } from "../core/named-record.ts";
 import { parseContract } from "./contract.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import { resolveObjects } from "./objects.ts";
+import { programShapes } from "./program-objects.ts";
 import { resolveCalls } from "./calls.ts";
-import type { ContractEdge, FileContract, FunctionContract, ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
+import type {
+  ContractEdge,
+  FileContract,
+  FunctionContract,
+  ObjectLayout,
+  ProgramContract,
+  SourceInput,
+  SourceModule,
+} from "../core/types.ts";
 
 /** The path a source given inline to a project file is known by. */
 export const INLINE_MODULE = "<inline>";
@@ -56,6 +65,13 @@ export interface ContractPhase {
    * the layout of every object the body writes.
    */
   objectNames: Record<string, string>;
+  /**
+   * The layout of every object the program lays out, by the name it is laid
+   * out as. A function definition carries the same record for the IR that
+   * describes its body; this is where a program whose entry is statements
+   * rather than functions reads the layouts its own literals are built at.
+   */
+  objectLayouts: Record<string, ObjectLayout>;
 }
 
 function contractPhaseError(message: string, detail?: string): CompilerError {
@@ -341,10 +357,11 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const files = records.map((record) => contracts.get(record.path) as FileContract);
   validateFunctionNames(files);
   // The objects a program allocates are named once for the whole program,
-  // because a field is often what another function returns. The names are
-  // carried out of the phase, because the IR that describes a function body
-  // names the layout of every object the body writes.
-  const objectNames = resolveObjects(files);
+  // because a field is often what another function returns. A program body
+  // writes objects of its own beside the ones the functions write, so its
+  // literals are merged into the same shapes before any name is handed out.
+  const objects = resolveObjects(files, body === undefined ? new Map() : programShapes(body));
+  const objectNames = objects.names;
   // Which of the calls that pass recorded is written out rather than made is
   // a property of the whole graph, so it is decided here, once the graph is
   // complete and before anything is generated from it.
@@ -361,6 +378,7 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
     program,
     modules: records.map((record) => ({ path: record.path, source: record.source })),
     objectNames: Object.fromEntries(objectNames),
+    objectLayouts: objects.layouts,
     ...(body === undefined ? {} : { body }),
   };
 }

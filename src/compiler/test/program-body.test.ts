@@ -1540,6 +1540,55 @@ test("the width a bigint is computed at survives a call", async () => {
   await agreesWithNode(source);
 });
 
+test("an object literal is allocated, read, and handed to a compiled function", async () => {
+  // The last of these is the one a program body has no other way to do: a
+  // literal with nothing to read is nearly useless, and the object the body
+  // builds is only worth having once a compiled function reads its fields. The
+  // layout the function contracted is the same layout the body wrote the
+  // literal as, because a shape is keyed by its fields whichever side wrote it.
+  //
+  // The function reads the link of the node it is given — a reference, which a
+  // `ref<any>` parameter can be read as the way a tree is read — and the body
+  // reads the numbers of its own. A field read of a number through an `any` is
+  // a different question and is not answered here: nothing says which object
+  // the reference points at, so the number behind it is not a number the
+  // compiler may name.
+  const directory = await scratch("blaze-program-object-");
+  await writeFile(
+    join(directory, "main.ts"),
+    [
+      "import { isLeaf } from \"./lib.ts\";",
+      "const leaf = { left: null, right: null };",
+      "const point = { x: 3, y: 4 };",
+      "console.log(isLeaf(leaf));",
+      "console.log(point.x, point.y);",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(
+    join(directory, "lib.ts"),
+    ["export function isLeaf(n: any): boolean {", "  return n.left === null;", "}", ""].join("\n"),
+  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+  });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+});
+
 test("the compound operators are the binary one over the name and the value", async () => {
   // `&=` and the rest name the operator they apply, and all of them are
   // defined as that binary operator over the name and the value: every one of

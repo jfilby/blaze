@@ -55,7 +55,7 @@ import type { SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
-import type { ParsedContract } from "./semantics/contract.ts";
+import { parseType, type ParsedContract } from "./semantics/contract.ts";
 import { encodeRunRequest, planTestVectors, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
   BackendKind,
@@ -524,9 +524,23 @@ interface PlannedVectors {
  * a reference to an object, is not something to plan a vector for, and there
  * is no returned value to compare either. The program such a function belongs
  * to is what says whether the two agree.
+ *
+ * A parameter of a reference type is the same answer whichever way the
+ * contract is written: the vector cannot carry the object, so there is
+ * nothing to hand the function and nothing to compare — and a function that
+ * took one and was planned a vector for it failed the build with `ref<any> is
+ * not a buffer`, which names the protocol rather than the program. It is
+ * checked where it can be: against the program that calls it.
  */
 function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null {
   if (request.parsed.resultDefinition === null) return null;
+  // A parameter that is a reference to an object is what the protocol cannot
+  // carry: a vector holds numbers and the elements of a buffer, so a reference
+  // has nothing to be read as. Planning one raised `ref<any> is not a buffer`
+  // out of the vector builder, naming the protocol rather than the program,
+  // and there is no returned value to compare either — the program such a
+  // function belongs to is what says whether the two agree.
+  if (request.parsed.contract.function.params.some((param) => parseType(param.type).kind === "ref")) return null;
   const vectors = planTestVectors(request.parsed, request.test);
   return {
     cases: vectors,

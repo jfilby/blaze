@@ -43,7 +43,7 @@ const LOGICAL: Record<string, true> = { "&&": true, "||": true };
 export type Inferred = { kind: "type"; type: TypeExpr } | { kind: "object"; key: string };
 
 /** One object the source writes, before it is named and laid out. */
-interface Shape {
+export interface Shape {
   key: string;
   fields: { name: string; value: Inferred }[];
 }
@@ -836,6 +836,40 @@ function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
 }
 
 /**
+ * What a program body's own object literals have to say about the shapes the
+ * function bodies already laid out. A shape both wrote is one shape and one
+ * layout — which is the whole of why a function can be handed an object the
+ * body built and read its fields at the offsets it contracted — and a field
+ * the two give different types is a layout this cannot state.
+ */
+function mergeProgramShapes(
+  shapes: Map<string, Shape>,
+  owners: Map<string, string>,
+  programShapes: ReadonlyMap<string, Shape>,
+): void {
+  for (const [key, shape] of programShapes) {
+    const existing = shapes.get(key);
+    if (existing === undefined) {
+      shapes.set(key, { key, fields: shape.fields.map((field) => ({ ...field })) });
+      owners.set(key, "the program body");
+      continue;
+    }
+    for (const field of shape.fields) {
+      const known = existing.fields.find((entry) => entry.name === field.name);
+      if (known === undefined) {
+        existing.fields.push({ name: field.name, value: field.value });
+        continue;
+      }
+      if (describe(known.value) === describe(field.value)) continue;
+      throw objectsError(
+        `the program body writes "${field.name}" as ${describe(field.value)}, which ${owners.get(key)} has it as ${describe(known.value)}`,
+        "an object is one object to the program, so one field holds one type; write the field in the literal so the two objects have different shapes",
+      );
+    }
+  }
+}
+
+/**
  * What every function that writes an object of one key has to say about it.
  *
  * The key is the shape of the literal, so an object two functions build the
@@ -878,7 +912,10 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
  * shape is keyed by the fields it holds, so the same literal in two functions
  * is one object with one name, and only this pass can say which.
  */
-export function resolveObjects(files: readonly FileContract[]): Map<string, string> {
+export function resolveObjects(
+  files: readonly FileContract[],
+  programShapes: ReadonlyMap<string, Shape> = new Map(),
+): { names: Map<string, string>; layouts: Record<string, ObjectLayout> } {
   const shapes = new Map<string, Shape>();
   const owners = new Map<string, string>();
   // Every function the program compiles is callable, and every one of them has
@@ -893,7 +930,21 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
       callers.set(name, { file, name, contract });
     }
   }
-  if (callers.size === 0) return new Map<string, string>();
+  // A program of nothing but statements has no function body for the layouts
+  // to be written into, and the layouts are still the ones the body reads its
+  // fields at: the names and the layouts are what it needs, and the write into
+  // the definitions is for the functions beside it.
+  if (callers.size === 0) {
+    mergeProgramShapes(shapes, owners, programShapes);
+    const names = new Map<string, string>();
+    [...shapes.values()].forEach((shape, index) => names.set(shape.key, `Object${index + 1}`));
+    const layouts: Record<string, ObjectLayout> = {};
+    for (const shape of shapes.values()) {
+      const name = names.get(shape.key) as string;
+      layouts[name] = layOut(name, shape, names, new Map());
+    }
+    return { names, layouts };
+  }
 
   // The declared return of every function is known before any body is walked,
   // because one function's body may call another's.
@@ -910,6 +961,11 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
     bodies.set(caller.name, body);
     mergeShape(shapes, owners, body);
   }
+  // The objects a program body writes are merged after the function bodies, so
+  // a shape a function writes keeps the name it had before a body could write
+  // one beside it: the counter moves on from where the walk of the functions
+  // left it, and a shape both wrote is one shape either way.
+  mergeProgramShapes(shapes, owners, programShapes);
 
   // Two shapes that differ only where one of them says nothing about what a
   // reference points at are one object, and the keys that changed are written
@@ -953,11 +1009,12 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
   }
 
 
+  const written: Record<string, ObjectLayout> = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
   for (const caller of callers.values()) {
     const definition = caller.contract.definition;
     const body = bodies.get(caller.name);
     if (body === undefined) continue;
-    definition.objects = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
+    definition.objects = written;
     // The call graph of the whole program, recorded by the one pass that walks
     // every body. Which of these calls is written out rather than made is not
     // decided here: it is a property of the whole graph, and `resolveCalls`
@@ -972,7 +1029,7 @@ export function resolveObjects(files: readonly FileContract[]): Map<string, stri
     }
   }
 
-  return names;
+  return { names, layouts: written };
 }
 
 
@@ -1014,7 +1071,7 @@ function programReads(bodies: ReadonlyMap<string, BodyTypes>): Map<string, Map<s
  * offsets ascending and the C and Nim struct declarations, whose members gcc
  * lays out in the order they are written, agreeing with what is stated here.
  */
-function layOut(
+export function layOut(
   name: string,
   shape: Shape,
   names: Map<string, string>,

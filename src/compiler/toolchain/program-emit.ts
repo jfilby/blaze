@@ -769,10 +769,16 @@ class ProgramEmitter {
         throw emitError("the emitter cannot write down an array that is not a declaration");
       case "newObject":
         // The fields are written where the object is built, so a literal in the
-        // arm of a conditional is only built when that arm is taken.
+        // arm of a conditional is only built when that arm is taken. Each field
+        // is written as the type it was resolved to: a value written without a
+        // type is written as the text it prints, which the layout's field is
+        // whatever type the literal resolved to.
         return this.target.buildObject(
           value.layout,
-          value.fields.map((field) => ({ field: this.target.escape(field.name), value: this.expression(field.value) })),
+          value.fields.map((field) => ({
+            field: this.target.escape(field.name),
+            value: this.expression(field.value, field.value.type),
+          })),
         );
       case "call":
         return this.call(value.call);

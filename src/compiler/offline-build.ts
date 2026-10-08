@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   const inlinable: RepairContext = { functions: resolvedByName };
 
   // The program, resolved and folded exactly as a build folds the driver.
-  const program = optimizeSemanticProgram(resolveProgram(phase.body, phase.program), inlinable.functions);
+  const program = optimizeSemanticProgram(resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts), inlinable.functions);
   // The validator refuses rather than answers, so a program that is not one a
   // backend may lower stops here with the reason it gave.
   validateSemanticProgram(program, phase.program, inlinable.functions);

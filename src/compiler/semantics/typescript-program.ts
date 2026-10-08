@@ -820,21 +820,21 @@ class ProgramParser {
       // whatever the value is, and both answer the value they were written of.
       if (member === "toFixed" && this.at("(")) return this.fixed(value);
       if (member === "fill" && this.at("(")) return this.filled(value);
-      if (value.k !== "name") {
-        this.fail(
-          "a program cannot read a member of a value; it reads the length of a name, and writes a number as x.toFixed(digits)",
-          dot,
-        );
-        if (this.at("(")) this.skipArguments();
-        return value;
+      if (value.k === "name") {
+        if (member === "length") return { k: "length", of: value.name };
+        // The name is a reference or not — the member read is decided where
+        // the name is resolved to what it holds, not where it is read.
+        return this.chainedField({ k: "field", object: value, field: member });
       }
-      if (member !== "length") {
-        this.fail(
-          `${value.name}.${member} is not a value a program can read; a program reads name.length, and writes a number as name.toFixed(digits)`,
-        );
-        return value;
-      }
-      return { k: "length", of: value.name };
+      // A field read of a field is the same read one level down: what is read
+      // of it is decided where that name is resolved.
+      if (value.k === "field") return this.chainedField({ k: "field", object: value, field: member });
+      this.fail(
+        "a program cannot read a member of a value; it reads a field of a name, and writes a number as x.toFixed(digits)",
+        dot,
+      );
+      if (this.at("(")) this.skipArguments();
+      return value;
     }
     if (this.at("(")) {
       if (value.k !== "name") {
@@ -846,6 +846,19 @@ class ProgramParser {
       return { k: "call", function: value.name, args: this.arguments() };
     }
     return value;
+  }
+
+  /**
+   * A field read chains: `node.next.value` is one read of `node.next` and one
+   * of the field of what that names, and each is read the same way.
+   */
+  private chainedField(value: ProgramValue): ProgramValue {
+    let read = value;
+    while (read.k === "field" && this.at(".")) {
+      this.next();
+      read = { k: "field", object: read, field: this.identifier("the property of a value") };
+    }
+    return read;
   }
 
   /**
@@ -943,6 +956,9 @@ class ProgramParser {
     // `new Float64Array([1, 2, 3])` spells out in full. An empty list is a
     // block of no elements, which the runtime still has to hand back.
     if (this.accept("[")) return this.arrayLiteral();
+    // `{ a: 1, b: 2 }`: an object, allocated where it is written, with every
+    // field inside the same literal.
+    if (this.accept("{")) return this.objectLiteral();
     if (this.accept("(")) {
       // Brackets end the operand of a unary operator: `-(2 ** 2)` is the
       // negation of a power, and JavaScript reads it as one.
@@ -955,6 +971,21 @@ class ProgramParser {
     }
     this.fail(`"${token.text}" is not a value a program can read`, token);
     return this.nothing();
+  }
+
+  /** `{ a: 1, b: x.y }`: an object, allocated where it is written. */
+  private objectLiteral(): ProgramValue {
+    const fields: { name: string; value: ProgramValue }[] = [];
+    if (!this.at("}")) {
+      for (;;) {
+        const name = this.identifier("the name of a field");
+        this.expect(":");
+        fields.push({ name, value: this.value() });
+        if (!this.accept(",")) break;
+      }
+    }
+    this.expect("}");
+    return { k: "object", fields };
   }
 
   /**
