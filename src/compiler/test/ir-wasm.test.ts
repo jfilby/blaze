@@ -651,9 +651,9 @@ test("a construct the module boundary cannot reach is refused by name", async ()
 /**
  * Emits the module for a function written as the IR text a model writes,
  * against the contract of the same function written in a source, and answers
- * whether the engine takes the bytes. The TypeScript path never lowers a
- * compound element write, so that shape reaches this backend only through the
- * text form.
+ * whether the engine takes the bytes. The TypeScript path only writes an
+ * element with a compound operator where the source itself is compound, so
+ * shapes the text form can write still reach this backend through the text.
  */
 function throughIr(library: string, text: string): number {
   const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
@@ -671,8 +671,8 @@ test("a compound write to an element reads the element it writes over", () => {
   // value and emitting the operator left the operator combining those two and
   // one value on the stack where the store reads two, so `WebAssembly.validate`
   // said no: every compound element write was a module the engine refused.
-  // The TypeScript path only ever writes an element with `=`, so the shape
-  // reaches this backend through the IR text a model writes.
+  // The shape also reaches this backend through the IR text a model writes,
+  // which names the compound write directly.
   const library = "export function r(a: Float64Array): number {\n  a[1] = 2.5;\n  a[0] = 1.5;\n  return a[0] + a[1];\n}\n";
   const text = [
     "function r(a: []f64) -> f64",
@@ -692,6 +692,51 @@ test("a compound write to an element reads the element it writes over", () => {
     "",
   ].join("\n");
   assert.ok(throughIr(library, text) > 0, "a compound element write is a module the engine takes");
+});
+
+test("a power is refused by name, rather than silently lowered to nothing", () => {
+  // There is no power instruction and no runtime to call one of, so the build
+  // must stop here. It used to emit no opcode at all, or whatever byte happened
+  // to be in the slot.
+  const library = "export function r(a: number): number {\n  return a ** 2;\n}\n";
+  const text = [
+    "function r(a: f64) -> f64",
+    "  requires none",
+    "  ensures none",
+    "  allocates no",
+    "  prints no",
+    "  reads_argv no",
+    "  effects none",
+    "  param value[f64] a mutable",
+    "  block entry: releases[]",
+    "  return [pow[f64] local[f64] a const[f64] 2]",
+    "",
+  ].join("\n");
+  assert.throws(
+    () => throughIr(library, text),
+    /has not written a pow/,
+    "a pow in IR text is refused by name",
+  );
+  const setText = [
+    "function r(a: f64) -> f64",
+    "  requires none",
+    "  ensures none",
+    "  allocates no",
+    "  prints no",
+    "  reads_argv no",
+    "  effects none",
+    "  param value[f64] a mutable",
+    "  block entry: releases[]",
+    "    let value[f64] b mutable = local[f64] a @2",
+    "    set b **= const[f64] 2 @3",
+    "  return local[f64] b",
+    "",
+  ].join("\n");
+  assert.throws(
+    () => throughIr(library, setText),
+    /has not written a pow/,
+    "a `**=` in IR text is refused by name",
+  );
 });
 
 test("two blocks that both declare a name are two values, not one", async () => {

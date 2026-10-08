@@ -755,7 +755,7 @@ const WHOLE_OPERATORS: readonly ProgramBinaryOp[] = ["%", "<<", ">>", "&", "|", 
  */
 const CONVERTING_OPERATORS: readonly ProgramBinaryOp[] = [">>>"];
 /** The compound assignments only whole numbers have. */
-const WHOLE_ASSIGNMENTS: readonly ProgramAssignOp[] = ["%="];
+const WHOLE_ASSIGNMENTS: readonly ProgramAssignOp[] = ["%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="];
 const EQUALITY: readonly ProgramBinaryOp[] = ["===", "!==", "==", "!="];
 
 const LOGICAL: readonly ProgramBinaryOp[] = ["&&", "||", "??"];
@@ -1045,11 +1045,18 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         case "result":
           value(statement.value);
           continue;
-        case "function":
+        case "function": {
           // A function reads the scope it is declared in when it is *called*,
           // and the call is what passes the names: what the declaration itself
           // is written with is its own parameters, which are its own scope.
+          // The names the nested function reads off the scope around this one
+          // are the reads the enclosing function has it in the scope: the
+          // call passes them through, so it names them as reads of its own.
+          for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
+            note(name);
+          }
           continue;
+        }
       }
     }
   };

@@ -305,6 +305,7 @@ const NIM_OPERATORS: Record<string, string> = {
   "-": "-",
   "*": "*",
   "/": "/",
+  "**": "^",
   "<<": "shl",
   ">>": "shr",
   ">>>": "ushr",
@@ -316,6 +317,18 @@ const NIM_OPERATORS: Record<string, string> = {
   ">": ">",
   ">=": ">=",
 };
+
+/** Nim's own spelling of a remainder, as a binary expression over two sides. */
+function nimModulo(left: string, right: string): string {
+  return `((${left}) - ((${left}) div (${right})) * (${right}))`;
+}
+
+/** The Nim spelling of a compound assignment's binary part, or a refusal. */
+function spelledOr(binary: string, operator: string): string {
+  const spelled = NIM_OPERATORS[binary];
+  if (spelled === undefined) throw hostError(`the driver cannot write ${operator} down`);
+  return spelled;
+}
 
 /** A contract type, which is what an array holds and a loop counts in. */
 function contractType(type: SemanticType): TypeExpr {
@@ -517,10 +530,23 @@ ${anchor}
   assign(name: string, operator: string, value: string, type: SemanticType | null): string {
     // A string grows rather than adds, and Nim has no `+=` for one.
     if ((type === null || isTextType(type)) && operator === "+=") return `${name} = ${name} & (${value})`;
+    // Nim's compound spellings differ from C's: there is no `&=`, `^=`,
+    // `<<=` or `**=`. Every compound assignment is written as the binary
+    // operator over the name and the value, spelled as Nim spells it.
+    if (operator.length > 1 && operator !== "==") {
+      const binary = operator.slice(0, -1);
+      return binary === "%" ? `${name} = ${nimModulo(name, value)}` : `${name} = ${name} ${spelledOr(binary, operator)} (${value})`;
+    }
     return `${name} ${operator} ${value}`;
   }
 
   elementAssign(buffer: string, index: string, operator: string, value: string): string {
+    if (operator.length > 1) {
+      const binary = operator.slice(0, -1);
+      return binary === "%"
+        ? `${buffer}[${index}] = ${nimModulo(`${buffer}[${index}]`, value)}`
+        : `${buffer}[${index}] = ${buffer}[${index}] ${spelledOr(binary, operator)} (${value})`;
+    }
     return `${buffer}[${index}] ${operator} ${value}`;
   }
 

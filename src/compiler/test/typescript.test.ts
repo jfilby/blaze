@@ -389,6 +389,50 @@ test("an interpolation ends at the brace that closes it, not the first one", () 
   );
 });
 
+test("the compound operators parse where their binary ones do", () => {
+  // `&=` and the rest were not tokenised, so the source split them into the
+  // identifier and a stray `&` and the message landed on the wrong token. Now
+  // they are one token, and the binary they name is what they write.
+  const source = [
+    "export function r(n: number): number {",
+    "  let s = 0;",
+    "  for (let i = 1; i < n; i += 1) {",
+    "    i &= 7;",
+    "    i |= 1;",
+    "    i ^= 2;",
+    "    i <<= 1;",
+    "    i >>= 0;",
+    "    i >>>= 0;",
+    "    i %= 4;",
+    "    s += i;",
+    "  }",
+    "  let b = n;",
+    "  b **= 2;",
+    "  return s + b;",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["r"],
+  );
+});
+
+test("a template inside an interpolation is part of the template that holds it", () => {
+  // The lexer stopped the outer token at the first unescaped backtick, which
+  // belonged to the nested template: the outer text was truncated to `"${"`
+  // and the parser refused the interpolation.
+  const analysis = typescript.analyze(
+    "export function f(n: number): number {\n  console.log(`${`inner ${n}`}`);\n  return n;\n}\n",
+    "main.ts",
+  );
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["f"],
+  );
+});
+
 test("an escaped `\\${` is the text it writes, not an interpolation", () => {
   // It is how a template prints a literal `${`. Reading it as the start of an
   // interpolation left the backslash alone and aborted the whole build with a

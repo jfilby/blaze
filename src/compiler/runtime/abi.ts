@@ -376,6 +376,8 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_add(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_sub(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_or(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_xor(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
@@ -579,6 +581,7 @@ void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256
   *out = accumulator;
 }
 
+
 void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
   for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] & right->limbs[i];
 }
@@ -697,6 +700,87 @@ int blaze_rt_u256_less(const blaze_u256* left, const blaze_u256* right) {
 int blaze_rt_u256_equal(const blaze_u256* left, const blaze_u256* right) {
   return (left->limbs[0] == right->limbs[0]) && (left->limbs[1] == right->limbs[1]) &&
          (left->limbs[2] == right->limbs[2]) && (left->limbs[3] == right->limbs[3]);
+}
+
+/* True when any limb of the value is not zero. */
+static int blaze_u256_is_zero(const blaze_u256* value) {
+  return (value->limbs[0] | value->limbs[1] | value->limbs[2] | value->limbs[3]) == 0u;
+}
+
+/* How many bits a value holds above its lowest one, which is the position of its
+   most significant set bit. A zero holds none and answers 0, and the divide
+   below reads that as the count of turns it has left to run.
+
+   The limbs are walked from the top down, because the top limb holds the most
+   significant bits: the first limb that is not zero is the one that decides the
+   width, and no limb below it can raise it. Walking up from the bottom instead
+   stops at the first non-zero limb and answers the width of the lowest one,
+   which for a value whose bottom limb is all ones and whose top limb is not
+   said 64 bits rather than 256 — and every quotient of that value came back
+   empty. */
+static int blaze_u256_bits(const blaze_u256* value) {
+  for (unsigned i = 4; i-- > 0;) {
+    const uint64_t limb = value->limbs[i];
+    if (limb == 0u) continue;
+    int top = 0;
+    for (unsigned bit = 0; bit < 64u; bit += 1) {
+      if ((limb >> bit) & 1u) top = (int)bit + 1;
+    }
+    return (int)(i * 64u) + top;
+  }
+  return 0;
+}
+
+/* Restoring division, written here rather than beside the multiplication it is
+   the counterpart of because it is the only operation in this file that calls
+   \`blaze_rt_u256_less\`, and that is written below the arithmetic. A call to a
+   function that is not declared yet is a call on an implicit declaration, which
+   C99 removed and which answers from whatever the compiler assumed: the divide
+   was written beside the multiply and returned a quotient of zero for nearly
+   every input, because the comparison it asked was not the one it ran.
+
+   The invariant the loop rests on is that what is left is always below the
+   divisor: each turn moves it up by one bit and subtracts the divisor only where
+   the divisor still fits under it. That is why this is not the shorter form
+   subtracting \`divisor << step\` from the whole dividend — that one leaves the
+   whole dividend in the remainder, which reaches the divisor's own width as
+   soon as the divisor is a whole number of limbs wide and a 256 bit value
+   cannot hold it. Holding what is left below the divisor keeps the move up to
+   one limb plus the one bit the subtraction cannot consume. */
+static void blaze_u256_divmod(blaze_u256* quotient, blaze_u256* remainder, const blaze_u256* left, const blaze_u256* right) {
+  *quotient = blaze_u256_zero();
+  *remainder = blaze_u256_zero();
+  if (blaze_u256_is_zero(right)) return;
+  blaze_u256 rest = blaze_u256_zero();
+  for (int step = blaze_u256_bits(left) - 1; step >= 0; step -= 1) {
+    /* What is left moves up one bit and takes the dividend's bit at the bottom.
+       A shift by the full width of a limb is undefined in C, so each limb takes
+       the top bit of the one below it rather than being shifted as a number. */
+    rest.limbs[3] = (rest.limbs[3] << 1) | (rest.limbs[2] >> 63);
+    rest.limbs[2] = (rest.limbs[2] << 1) | (rest.limbs[1] >> 63);
+    rest.limbs[1] = (rest.limbs[1] << 1) | (rest.limbs[0] >> 63);
+    rest.limbs[0] = (rest.limbs[0] << 1) | ((left->limbs[step / 64] >> (step % 64)) & 1u);
+    if (!blaze_rt_u256_less(&rest, right)) {
+      blaze_rt_u256_sub(&rest, &rest, right);
+      quotient->limbs[step / 64] |= (uint64_t)1u << (unsigned)(step % 64);
+    }
+  }
+  *remainder = rest;
+}
+
+/* A division by zero answers zero. The language has no way to raise, so there
+   is nothing here for the kernel to report it as, and a target that trapped
+   would take the whole program down over one expression; the program driver is
+   where a division by a zero the source can settle is refused by name. */
+void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  blaze_u256 remainder;
+  blaze_u256_divmod(out, &remainder, left, right);
+}
+
+void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  blaze_u256 quotient;
+  blaze_u256_divmod(&quotient, out, left, right);
+  (void)quotient;
 }
 
 /* Widening zero-extends, because the number is unsigned; narrowing keeps the

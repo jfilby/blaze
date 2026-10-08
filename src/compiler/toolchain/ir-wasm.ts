@@ -551,6 +551,12 @@ const COMPOUND: Record<string, string> = {
   "*=": "mul",
   "/=": "div",
   "%=": "mod",
+  "&=": "and",
+  "|=": "or",
+  "^=": "xor",
+  "<<=": "shl",
+  ">>=": "shr",
+  ">>>=": "ushr",
 };
 
 /**
@@ -562,6 +568,16 @@ const COMPOUND: Record<string, string> = {
  * numerator above the signed range.
  */
 function compoundCode(held: number, type: SemanticType, op: string): number {
+  if (op === "**=") {
+    // There is no power instruction, and a compound power is not the low half
+    // of a computation every backend runs: it is refused here, by name.
+    throw new CompilerError({
+      category: "AssemblyError",
+      stage: "wasm",
+      message: "this backend has not written a pow",
+      detail: "WebAssembly has no instruction for a power, and no runtime to call one of: a program that raises is written C or run as machine code",
+    });
+  }
   const name = COMPOUND[op] as string;
   const code = facts(type).unsigned ? UNSIGNED_BINARY[held][name] : undefined;
   return (code ?? BINARY[held][name]) as number;
@@ -1300,6 +1316,17 @@ class Body {
           }
           this.wideBinary(value.op, value.left, value.right);
           return;
+        }
+        // A compound assignment and an arith of `pow` both have no
+        // instruction and no runtime here. Refuse it by name rather than emit
+        // a byte that does not decode, or nothing at all.
+        if (value.k === "arith" && value.op === "pow") {
+          throw new CompilerError({
+            category: "AssemblyError",
+            stage: "wasm",
+            message: "this backend has not written a pow",
+            detail: "WebAssembly has no instruction for a power, and no runtime to call one of: a program that raises is written C or run as machine code",
+          });
         }
         const held = facts(compared).held;
         this.value(value.left, compared);

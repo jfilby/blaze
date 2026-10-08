@@ -80,7 +80,7 @@ export type Expression =
   /** `i++` as a value: the old value of `name`, after the change. */
   | { k: "update"; name: string; op: "++" | "--"; prefix: boolean };
 
-export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "%=";
+export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 
 export type Statement =
   | { kind: "declare"; name: string; type: TypeExpr | null; init: Expression; line: number }
@@ -120,4 +120,11 @@ export const COMPOUND_OPERATORS: Record<string, BinaryOp> = {
   "*=": "*",
   "/=": "/",
   "%=": "%",
+  "&=": "&",
+  "|=": "|",
+  "^=": "^",
+  "<<=": "<<",
+  ">>=": ">>",
+  ">>>=": ">>>",
+  "**=": "**",
 };

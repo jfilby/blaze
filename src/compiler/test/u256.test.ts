@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import { isInteger, isWhole, limbsOf, wholeOf } from "../core/semantic-ir.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { foldSemanticValue } from "../semantics/optimize-ir.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
@@ -1367,11 +1368,15 @@ const DIFFERENTIAL_VECTORS: readonly (readonly [string, string])[] = [
  * The operations both backends are asked, each with the answer the language's
  * own `BigInt` gives for the same two numbers.
  *
- * Division and the rest are left out: they are the one path where both backends
- * call the same kernel, so a vector set including them compares the kernel
- * against itself and says nothing about either backend's own lowering.
+ * Division and the remainder are here for the reason they used to be left out.
+ * Both backends answer them by calling the same kernel, so this compares that
+ * kernel against `BigInt` rather than one backend against another — which is
+ * what it says: that the restoring division agrees with the language about
+ * every borrow it makes. What it does not check is either backend's own
+ * lowering, and that is covered by each backend answering a divide of its own
+ * elsewhere in this file.
  */
-const DIFFERENTIAL_OPS = ["add", "sub", "mul", "and", "or", "xor", "shl", "shr"] as const;
+const DIFFERENTIAL_OPS = ["add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr"] as const;
 
 /** The amount both shifts are asked for, as a machine number. */
 const SHIFT_COUNT = 65n;
@@ -1381,6 +1386,14 @@ const DIFFERENTIAL_ANSWER: Record<DifferentialOp, (left: bigint, right: bigint) 
   add: (left, right) => left + right,
   sub: (left, right) => left - right,
   mul: (left, right) => left * right,
+  // A quotient and a remainder are restoring division over the four limbs, and
+  // the answer is the language's own. `right` is never zero across this vector
+  // set, which is deliberate: the language raises on a division by zero, so a
+  // program carrying one is not a program the compiler can be checked against,
+  // and the kernel answering zero for it is a total function rather than a
+  // claim about what a source means.
+  div: (left, right) => left / right,
+  mod: (left, right) => left % right,
   and: (left, right) => left & right,
   or: (left, right) => left | right,
   xor: (left, right) => left ^ right,
@@ -1585,6 +1598,78 @@ test("the C, machine and WebAssembly backends answer one vector set the same way
     ["add", "and", "or", "shl", "shr", "sub", "xor"],
     "the operations the WebAssembly backend answers of this vector set",
   );
+  // Division and the remainder are refused by name there, not answered and not
+  // silently lowered to nothing.
+  assert.ok(wasmRefused.has("div"), "the WebAssembly backend refuses a wide div");
+  assert.ok(wasmRefused.has("mod"), "the WebAssembly backend refuses a wide mod");
+  assert.ok(!wasmAnswered.has("div") && !wasmAnswered.has("mod"), "the WebAssembly backend never answered a div or a mod");
+});
+
+test("a wide division by a literal zero is refused by name, and not constant-folded", () => {
+  // The kernel's zero is a total function the IR validator keeps for the ones
+  // it cannot settle, but a divisor the source wrote as zero is a number the
+  // language raises on: refused where the validator reads it. And because the
+  // fold has no answer for a wide number, the operation is left exactly as it
+  // was written rather than turned into a limb pattern.
+  const div: SemanticFunction = {
+    name: "halve",
+    symbol: "halve",
+    params: [],
+    returns: U256,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: {
+          k: "arith",
+          type: U256,
+          op: "div",
+          left: { k: "const", type: U256, text: "100" },
+          right: { k: "const", type: U256, text: "0" },
+        },
+      },
+    },
+  };
+  assert.ok(
+    semanticFunctionProblems(div).some((problem) => /a wide number cannot be divided by zero/.test(problem)),
+    `a wide division by a literal zero: ${semanticFunctionProblems(div).join("; ")}`,
+  );
+  for (const op of ["div", "mod"] as const) {
+    const zero: SemanticFunction = {
+      ...div,
+      name: `h${op}`,
+      symbol: `h${op}`,
+      entry: {
+        ...div.entry,
+        terminator: {
+          k: "return",
+          value: { k: "arith", type: U256, op, left: { k: "const", type: U256, text: "100" }, right: { k: "const", type: U256, text: "0x0" } },
+        },
+      },
+    };
+    assert.ok(
+      semanticFunctionProblems(zero).some((problem) => /a wide number cannot be divided by zero/.test(problem)),
+      `a wide ${op} by a literal zero: ${semanticFunctionProblems(zero).join("; ")}`,
+    );
+    const value: SemanticValue = {
+      k: "arith",
+      type: U256,
+      op,
+      left: { k: "const", type: U256, text: "100" },
+      right: { k: "const", type: U256, text: "7" },
+    };
+    assert.equal(foldSemanticValue(value), value, `a wide ${op} is not folded, because the fold has no wide arithmetic`);
+  }
 });
 
 /** One operation on two wide literals, lowered to C, compiled, and run. */

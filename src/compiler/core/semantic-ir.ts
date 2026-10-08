@@ -866,7 +866,7 @@ export interface SemanticReduction {
 }
 
 /** The operators `op=` accepts. */
-export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "%=";
+export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 
 /**
  * The line of the source a statement was written on, for one that states

@@ -467,12 +467,18 @@ The WebAssembly backend is the one place a wide number is not an operation the
 compiler has written for every target: it walks the four limbs in the module's
 own memory, and there is no instruction above sixty-four bits to walk with. A
 sum, a difference, the bitwise pair, the shifts and the comparisons are limb
-walks and are written; a product is not, because the format has `i64.mul` and
-no `mulhi`, so a limb product is four thirty-two by thirty-two ones put back
-together and each of the ten of them added into the answer with the carry chain.
-It is refused by name (`wideRefuse`) rather than answered with the low half of
+walks and are written; a product, a quotient and a remainder are not, because
+the format has `i64.mul` and no `mulhi`, so a limb product is four thirty-two
+by thirty-two ones put back together and each of the ten of them added into the
+answer with the carry chain. Quotient and remainder over the four limbs are
+answered by the kernel on the C and machine backends, and the kernel's sweep
+against `BigInt` is `test/u256-kernel.test.ts`. Each unwritten operation is
+refused by name (`wideRefuse`) rather than answered with the low half of
 every limb and nothing of the halves above — the same refusal every backend
-gives an operation it has no answer for. `test/u256.test.ts`'s differential test
+gives an operation it has no answer for. A divide by a literal zero is refused
+earlier than any backend: the language raises where the kernel is total, so
+`ir-validate.ts` names it and the kernel's zero stays the dynamic total
+function. `test/u256.test.ts`'s differential test
 names the set the backend answers, so a capability leaving it is a failing test
 rather than a line that quietly vanished.
 

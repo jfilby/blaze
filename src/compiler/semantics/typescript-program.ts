@@ -120,10 +120,10 @@ const VIEWS_LIST = Object.keys(VIEWS).join(", ");
 const MATH = MATH_NAMES.join(", ");
 
 /** What an assignment may be written with. */
-const ASSIGN_OPS: readonly ProgramAssignOp[] = ["=", "+=", "-=", "*=", "/=", "%="];
+const ASSIGN_OPS: readonly ProgramAssignOp[] = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=", "**="];
 
 /** Assignments a program has, written to say what they do. */
-const OTHER_ASSIGN_OPS: readonly string[] = ["**=", "??="];
+const OTHER_ASSIGN_OPS: readonly string[] = ["??="];
 
 /** The comparisons a counted loop may count on, as the source writes them. */
 const COUNT_OPS: readonly string[] = ["<", "<=", ">", ">="];

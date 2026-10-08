@@ -1540,6 +1540,38 @@ test("the width a bigint is computed at survives a call", async () => {
   await agreesWithNode(source);
 });
 
+test("the compound operators are the binary one over the name and the value", async () => {
+  // `&=` and the rest name the operator they apply, and all of them are
+  // defined as that binary operator over the name and the value: every one of
+  // the seven, and a power raised in place on a number.
+  const source = [
+    "const a = new Int32Array([7, 0, 8, 3, 2, 9]);",
+    "a[0] &= 3;",
+    "a[1] |= 8;",
+    "a[2] ^= 15;",
+    "a[3] <<= 1;",
+    "a[4] >>= 1;",
+    "a[5] >>>= 1;",
+    "console.log(a[0], a[1], a[2], a[3], a[4], a[5]);",
+    "let x = 2;",
+    "x **= 10;",
+    "console.log(x);",
+    "let t = 0;",
+    "for (let i = 1; i < 4; i += 1) { i &= 7; t += i; }",
+    "console.log(t);",
+    "",
+  ].join("\n");
+  await agreesWithNode(source);
+});
+
+test("a null-coalescing assign still refuses, named rather than tokenised wrong", () => {
+  // `??=` has no BinaryOp in the IR. It keeps its refusal, and the operator
+  // must tokenize whole — one token, so the message lands on it — rather than
+  // falling apart into `?` `?` `=` and reporting the wrong place.
+  const message = diagnostic(() => bodyOf("let x = 1;\nx ??= 3;\nconsole.log(x);\n"));
+  assert.match(message, /"x \?\?=" is not an assignment a program can make/);
+});
+
 test("a compiled function allocates the array it was written to build", async () => {
   // `export function` is how a module offers a function, and the contract
   // frontend read no `new` at all: `new Float64Array(n)` parsed as a call to a

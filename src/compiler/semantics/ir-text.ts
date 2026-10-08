@@ -194,7 +194,7 @@ import { unescape } from "./typescript.ts";
 const VERSION = "1";
 
 /** The operators `op=` accepts, which the IR names as they are written. */
-const ASSIGN_OPS: readonly SemanticAssignOp[] = ["=", "+=", "*=", "-=", "/=", "%="];
+const ASSIGN_OPS: readonly SemanticAssignOp[] = ["=", "+=", "*=", "-=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=", "**="];
 
 /** The arithmetic a value states, each of which prints as the IR names it. */
 const ARITH_OPS: readonly ArithOp[] = [

@@ -120,22 +120,30 @@ const WHOLE_OPERATIONS: Record<string, true> = {
 /**
  * The arithmetic a wide number has, which is the arithmetic its kernel has.
  *
- * The kernel defines an add, a subtraction, a product, the logical operations,
- * the shifts and the comparisons, and nothing else. A division, a remainder
- * and a power are not there, and an IR that carried one would reach a backend
- * with no instruction and no declaration for it: the C backend would write the C
+ * The kernel defines an add, a subtraction, a product, a quotient, a remainder,
+ * the logical operations, the shifts and the comparisons, and nothing else. A
+ * power is not there, and an IR that carried one would reach a backend with no
+ * instruction and no declaration for it: the C backend would write the C
  * operator over a struct and produce a source that does not compile, and the
- * machine backend would have no divide at the width to emit.
+ * machine backend would have nothing to emit.
  *
- * Refusing here is what makes that unreachable. The validator is the last thing
- * that runs before a backend is handed the tree, so a program that needs one of
- * the missing operations is told which is missing rather than carried to a
- * target that cannot answer it.
+ * The quotient and the remainder are `blaze_rt_u256_div` and `blaze_rt_u256_mod`,
+ * restoring division over the four limbs. They were refused here until the
+ * kernel grew them, and the refusal is what this list is: a divide was a
+ * `u256` operation the compiler had no answer for rather than one it declined
+ * to compute.
+ *
+ * Refusing here is what makes the rest unreachable. The validator is the last
+ * thing that runs before a backend is handed the tree, so a program that needs
+ * one of the missing operations is told which is missing rather than carried to
+ * a target that cannot answer it.
  */
 const WIDE_ARITHMETIC: ReadonlySet<string> = new Set([
   "add",
   "sub",
   "mul",
+  "div",
+  "mod",
   "and",
   "or",
   "xor",
@@ -649,6 +657,13 @@ function compoundProblems(target: SemanticType, value: SemanticValue, operator: 
       ? []
       : [`${prefix}${operator} writes text into "${name}" and a ${typeText(value.type)}`];
   }
+  const wholeCompounds = operator === "%=" || operator === "&=" || operator === "|=" || operator === "^=" || operator === "<<=" || operator === ">>=" || operator === ">>>=";
+  if (wholeCompounds) {
+    if (!isInteger(target) || !isInteger(value.type)) {
+      return [`${prefix}"${name}" is a ${typeText(target)}, which ${operator} cannot write`];
+    }
+    return [];
+  }
   const common = commonNumber(target, value.type);
   if (common === null) {
     return [`${prefix}"${name}" is a ${typeText(target)}, which ${operator} cannot write`];
@@ -981,16 +996,30 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // listed above and nothing else. Anything else over one would reach a
       // backend with no instruction for it — the C backend would write a C
       // operator over a struct and produce a source that does not compile, and
-      // the machine backend has no divide at the width — so it is refused here,
+      // the machine backend would have nothing to emit — so it is refused here,
       // which is the last point before a backend is handed the tree.
       if (isWideType(value.left.type) || isWideType(value.right.type) || isWideType(value.type)) {
         if (!WIDE_ARITHMETIC.has(value.op)) {
           problems.push(
-            `${prefix}${value.op} is not defined over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}; a wide number has an add, a subtraction, a product, the logical operations and the shifts`,
+            `${prefix}${value.op} is not defined over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}; a wide number has an add, a subtraction, a product, a quotient, a remainder, the logical operations and the shifts`,
           );
         }
         const pair = widePairProblem(value.left, value.right, value.type, COUNTED_OPERATIONS.has(value.op));
         if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
+        // A zero divisor is a number the language raises on, so it is refused by
+        // name here rather than answered with the kernel's total zero: the
+        // kernel's answer is a total function, and the language is not.
+        if ((value.op === "div" || value.op === "mod") && value.right.k === "const") {
+          try {
+            const text = value.right.text.replace(/n$/, "").trim();
+            if (text !== "" && BigInt(text) === 0n) {
+              problems.push(`${prefix}a wide number cannot be divided by zero`);
+            }
+          } catch {
+            // Not a whole literal (a float text, say): the width rule above is
+            // the one that answers it.
+          }
+        }
         return problems;
       }
       if (value.op === "concat") {

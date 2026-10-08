@@ -297,14 +297,16 @@ function driverError(message: string, detail?: string): CompilerError {
 
 
 /* The kernel each operation over a wide number is one call of, by the name the
-   runtime gives it. A wide number has no quotient or remainder: the kernel
-   carries four limbs and answers addition, subtraction, a product, the shifts
-   and the bitwise operators, and the driver says so rather than writing a C
-   operator the compiler would reject. */
+   runtime gives it. The kernel carries four limbs and answers addition,
+   subtraction, a product, a quotient and a remainder, the shifts and the bitwise
+   operators, and the driver says so rather than writing a C operator the
+   compiler would reject. */
 const WIDE_KERNELS: Record<string, string> = {
   add: "add",
   sub: "sub",
   mul: "mul",
+  div: "div",
+  mod: "mod",
   shl: "shl",
   shr: "shr",
   and: "and",
@@ -478,10 +480,17 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   assign(name: string, operator: string, value: string, type: SemanticType | null): string {
     // A string grows: `+=` is a new value rather than an addition in place.
     if ((type === null || isTextType(type)) && operator === "+=") return `${name} = program_concat(${name}, ${value});`;
+    // C has no `**=`: a power is libm's `pow`. And no `>>>=`: the unsigned
+    // right shift is `>>=` over an unsigned type, which is what the binary
+    // form already lowers to.
+    if (operator === "**=") return `${name} = pow(${name}, ${value});`;
+    if (operator === ">>>=") return `${name} >>= ${value};`;
     return `${name} ${operator} ${value};`;
   }
 
   elementAssign(buffer: string, index: string, operator: string, value: string): string {
+    if (operator === "**=") return `{ double blaze_pow = ${buffer}[${index}]; ${buffer}[${index}] = pow(blaze_pow, ${value}); }`;
+    if (operator === ">>>=") return `${buffer}[${index}] >>= ${value};`;
     return `${buffer}[${index}] ${operator} ${value};`;
   }
 

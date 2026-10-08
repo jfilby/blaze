@@ -113,7 +113,7 @@ export type ProgramBinaryOp =
 export type ProgramUnaryOp = "-" | "+" | "!" | "~";
 
 /** What an assignment does to what it is written on. */
-export type ProgramAssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=";
+export type ProgramAssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 
 /** One piece of a string: text as written, or a value interpolated into it. */
 export type ProgramText = { k: "text"; value: string } | { k: "value"; value: ProgramValue };

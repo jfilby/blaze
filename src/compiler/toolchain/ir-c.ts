@@ -61,6 +61,17 @@ function declaredType(type: SemanticType | null): string {
 }
 
 /**
+ * The compound assignment as C spells it. C has no `>>>=` — an unsigned right
+ * shift is `>>=` over an unsigned type, which is what the binary form already
+ * lowers to, so it is the same here. `**=` is handled by the caller, which
+ * spells a power out as `pow`.
+ */
+function cAssignOp(op: string): string {
+  if (op === ">>>=") return ">>=";
+  return op;
+}
+
+/**
  * The text a value is written out as, when the emitter is the one writing it:
  * a constant of the text type, and a text whose parts are all written out,
  * which `text` below folds into one literal. Null when the program builds the
@@ -345,14 +356,29 @@ class FunctionEmitter {
           this.write([`${pad(depth)}${target} = ${this.concat(held, statement.value, depth)};`]);
           return;
         }
-        this.write([`${pad(depth)}${target} ${statement.op} ${this.expression(statement.value, type, depth)};`]);
+        // C has a compound form of every operator the IR names except `**=`;
+        // a power is a libm call, so it is spelled out like one.
+        if (statement.op === "**=") {
+          this.write([`${pad(depth)}${target} = pow(${target}, ${this.expression(statement.value, type, depth)});`]);
+          return;
+        }
+        this.write([`${pad(depth)}${target} ${cAssignOp(statement.op)} ${this.expression(statement.value, type, depth)};`]);
         return;
       }
       case "setElement": {
         const buffer = this.names.declared(statement.buffer);
         const element = buffer === null || buffer.type === null ? null : elementTypeOf(buffer.type);
+        // C has no `**=`: a power is libm's `pow`, spelled out, over the slot
+        // whose address the element already needed. `>>>=` is written `>>=`,
+        // the same spelling the binary form takes.
+        if (statement.op === "**=") {
+          this.write([
+            `${pad(depth)}{ ${declaredType(element ?? statement.value.type)}* blaze_pow_slot = &(${this.element(statement.buffer, statement.index, depth)}); *blaze_pow_slot = pow(*blaze_pow_slot, ${this.expression(statement.value, element ?? statement.value.type, depth)}); }`,
+          ]);
+          return;
+        }
         this.write([
-          `${pad(depth)}${this.element(statement.buffer, statement.index, depth)} ${statement.op} ${this.expression(statement.value, element ?? statement.value.type, depth)};`,
+          `${pad(depth)}${this.element(statement.buffer, statement.index, depth)} ${cAssignOp(statement.op)} ${this.expression(statement.value, element ?? statement.value.type, depth)};`,
         ]);
         return;
       }

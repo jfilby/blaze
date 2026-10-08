@@ -902,6 +902,13 @@ class ProgramEmitter {
       case "max":
         return this.target.max(this.expression(value.left, value.type), this.expression(value.right, value.type));
       case "mod":
+        // A wide remainder is four limbs and no C operator, so it is a call into
+        // the kernel like every other wide operation. Read as `x % y` it is
+        // `invalid operands to binary % (have 'blaze_u256' and 'blaze_u256')`
+        // and the build failed at the link rather than here.
+        if (isWideType(value.type)) {
+          return this.target.wideBinary(value.op, this.expression(value.left, value.type), this.expression(value.right, value.type));
+        }
         return this.target.modulo(this.expression(value.left, value.type), this.expression(value.right, value.type));
       case "pow":
         // A power is floating point even over whole numbers, and Nim spells one

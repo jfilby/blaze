@@ -280,6 +280,16 @@ export function mapTypeScriptType(text: string, position: string): TypeExpr {
   );
 }
 
+/** What a program has none of: everything from the first import is a library; a program has none. */
+function tokensAfterImports(tokens: Token[]): Token[] {
+  let position = 0;
+  while (tokens[position]?.text === "import") {
+    while (tokens[position] !== undefined && tokens[position].text !== ";") position += 1;
+    position += 1;
+  }
+  return tokens.slice(position);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Lexer                                                                      */
 /* -------------------------------------------------------------------------- */
@@ -295,7 +305,7 @@ export interface Token {
   /** The character the string was written with. */
   quote?: string;
 }
-const PUNCTUATION = ["===", "!==", "**=", "**", "==", "!=", "<=", ">=", "<<", ">>>", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
+const PUNCTUATION = ["===", "!==", "**=", "**", "==", "!=", "<=", ">=", ">>>=", ">>=", "<<=", "<<", ">>>", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
@@ -339,8 +349,41 @@ export function tokenize(source: string): Token[] {
         // source, where it read the same string again and for ever.
         if (end < 0) throw frontendError("unterminated string", `line ${startLine}`);
         const backslashes = /\\*$/.exec(source.slice(index + 1, end))?.[0].length ?? 0;
-        if (backslashes % 2 === 0) break;
-        end += 1;
+        if (backslashes % 2 !== 0) {
+          end += 1;
+          continue;
+        }
+        // A backtick inside an interpolation belongs to the template nested
+        // there, not to this one: the first unescaped backtick past an
+        // unclosed `${` ends the inner template. Between this template's
+        // opening and the candidate closing quote, walk the interpolations —
+        // if one has no close before the candidate, the candidate quote is
+        // inside it, so the search continues past that interpolation.
+        if (character === "`") {
+          const between = source.slice(index + 1, end);
+          let cursor = 0;
+          let inside = false;
+          for (;;) {
+            const open = between.indexOf("${", cursor);
+            if (open < 0) break;
+            const escaped = /\\*$/.exec(between.slice(0, open))?.[0].length ?? 0;
+            if (escaped % 2 === 1) {
+              cursor = open + 2;
+              continue;
+            }
+            const close = closingBrace(between, open);
+            if (close < 0) {
+              inside = true;
+              const closeSource = closingBrace(source, index + 1 + open);
+              if (closeSource < 0) throw frontendError("unterminated string", `line ${startLine}`);
+              end = closeSource + 1;
+              break;
+            }
+            cursor = close + 1;
+          }
+          if (inside) continue;
+        }
+        break;
       }
       line += (source.slice(index, end).match(/\n/g) ?? []).length;
       tokens.push({ kind: "string", text: source.slice(index + 1, end), line: startLine, quote: character, template: character === "`" });
@@ -401,7 +444,7 @@ export interface TypeScriptFunction {
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
 class TypeScriptParser {
-  private readonly tokens: Token[];
+  readonly tokens: Token[];
   private readonly path: string;
   private readonly diagnostics: Diagnostics;
   private position = 0;
@@ -412,7 +455,11 @@ class TypeScriptParser {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
+    this.position = 0;
   }
+
+  /** A nested function declaration is handled by the program parsing, not the module one. */
+  nestedFunction = false;
   private peek(offset = 0): Token {
     return this.tokens[Math.min(this.position + offset, this.tokens.length - 1)];
   }
@@ -889,6 +936,11 @@ class TypeScriptParser {
       return { kind: "expression", value: this.hole(), line: token.line };
     }
     if (this.at("function")) {
+      // A nested function is something a program body is allowed and the
+      // module-level declaration parser is not: a program parses its whole
+      // source again as statements if one is seen anywhere. The diagnostic
+      // lands if that reading fails too, which is the case this is for.
+      this.nestedFunction = true;
       this.report("a function may not be declared inside a function", "declare it in the module", token);
       this.synchronize();
       return { kind: "expression", value: this.hole(), line: token.line };
@@ -2180,7 +2232,25 @@ export const typeScriptFrontend: Frontend = {
       throw frontendError(`module ${path} is empty`);
     }
     const diagnostics = new Diagnostics();
-    const analysis = new TypeScriptParser(tokenize(source), path, diagnostics).parseModule(path);
+    const parser = new TypeScriptParser(tokenize(source), path, diagnostics);
+    const analysis = parser.parseModule(path);
+    // A file read as a program has its whole text readable as statements, so a
+    // nested function inside a function that the module parser stopped for is
+    // read by the one parser whose grammar carries that shape. The module
+    // parse's nested-function entries are still the answer if that fails too.
+    if (parser.nestedFunction) {
+      const fromStatements = tokensAfterImports(parser["tokens"]);
+      const programDiagnostics = new Diagnostics();
+      try {
+        const statements = parseProgramBody(fromStatements, path, programDiagnostics);
+        if (programDiagnostics.entries.length === 0) {
+          return { path, imports: analysis.imports, functions: [], default: null, body: statements };
+        }
+      } catch {
+        // A program parse that cannot be a program keeps the module parse's
+        // own diagnostics, which name the refusal where it is.
+      }
+    }
     // A file is read to the end whatever it holds, so a build names every
     // construct outside the subset instead of the first one.
     diagnostics.throwIfAny(path);

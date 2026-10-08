@@ -245,6 +245,13 @@ const COMPOUND: Record<Exclude<AssignOperator, "=">, ArithOp> = {
   "*=": "mul",
   "/=": "div",
   "%=": "mod",
+  "&=": "and",
+  "|=": "or",
+  "^=": "xor",
+  "<<=": "shl",
+  ">>=": "shr",
+  ">>>=": "ushr",
+  "**=": "pow",
 };
 
 /** The two `Math.` builtins that are one operation rather than a call. */

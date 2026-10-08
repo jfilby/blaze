@@ -140,12 +140,18 @@ const LIBRARY: Record<string, true> = {
 };
 
 /** The operator each compound assignment is, by the name the IR gives it. */
-const COMPOUND: Record<string, "add" | "sub" | "mul" | "div" | "mod"> = {
+const COMPOUND: Record<string, "add" | "sub" | "mul" | "div" | "mod" | "and" | "or" | "xor" | "shl" | "shr" | "ushr"> = {
   "+": "add",
   "-": "sub",
   "*": "mul",
   "/": "div",
   "%": "mod",
+  "&": "and",
+  "|": "or",
+  "^": "xor",
+  "<<": "shl",
+  ">>": "shr",
+  ">>>": "ushr",
 };
 
 /**
@@ -2850,6 +2856,21 @@ class Machine {
         this.readSlotAt(element, place.offset);
         const read = this.hold(element, "blaze_read");
         this.store(read);
+        if (statement.op === "**=") {
+          // The old value is in `read` and the new one is in `written`: a
+          // power is the libm call the two sides of an arith of it take,
+          // spelled out exactly as the binary form is.
+          this.load(written);
+          const right = this.hold(element, "blaze_right");
+          this.store(right);
+          this.load(read);
+          this.scratchFrom(right);
+          this.library("pow");
+          this.normalizeArithmetic(element);
+          this.code.movRegMem(RCX, frame(place.offset));
+          this.storeInto(element, RCX);
+          return;
+        }
         this.load(written);
         this.toScratch(element);
         this.load(read);
@@ -2969,6 +2990,16 @@ class Machine {
     // into the accumulator and the name's old value is read into the scratch
     // register, which is one instruction fewer than the general form below and
     // the same answer.
+    if (op === "**=") {
+      // A power is a libm call, and the answer it hands back is the value the
+      // name is to hold: one arith of the old value and the one it was given.
+      this.at(
+        { k: "arith", type: target.type, op: "pow", left: { k: "local", type: target.type, name }, right: value },
+        target.type,
+      );
+      this.store(target);
+      return;
+    }
     const operation = COMPOUND[op.slice(0, -1)];
     this.at(value, target.type);
     if (operation === "add" || operation === "mul") {
@@ -5186,7 +5217,7 @@ class Machine {
   private wideArithmetic(value: SemanticValue & { k: "arith" }): void {
     const type = value.type;
     const limbs = this.limbsOf(type);
-    if (value.op === "mul" || value.op === "div") {
+    if (value.op === "mul" || value.op === "div" || value.op === "mod") {
       this.wideKernel(value.op, value.left, value.right, type);
       return;
     }
@@ -5201,7 +5232,7 @@ class Machine {
     if (plain === null) {
       throw machineError(
         `a wide ${value.op} is not written in this backend`,
-        "a wide number adds, subtracts and combines bitwise here, and multiplies and divides through the wide kernel",
+        "a wide number adds, subtracts and combines bitwise here, and multiplies, divides and takes a remainder through the wide kernel",
       );
     }
     // The right side is answered first and written to a slot, and the left is
@@ -5453,7 +5484,7 @@ class Machine {
    * operation written in registers cannot arrange. Both are therefore in slots,
    * and the working registers are not involved at all.
    */
-  private wideKernel(op: "mul" | "div", left: SemanticValue, right: SemanticValue, type: SemanticType): void {
+  private wideKernel(op: "mul" | "div" | "mod", left: SemanticValue, right: SemanticValue, type: SemanticType): void {
     const result = this.hold(type, "blaze_wide_out");
     const a = this.hold(type, "blaze_wide_a");
     const b = this.hold(type, "blaze_wide_b");

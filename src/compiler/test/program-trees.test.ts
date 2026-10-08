@@ -405,6 +405,64 @@ test("a function named after a C keyword is declared under another name and boun
   assert.doesNotMatch(driver, /[^_\w]short\(/);
 });
 
+test("a function nested inside a function is read by the same resolver the captures are for", () => {
+  // A function the body of another declares gets what it reads of the scope
+  // around it at every call, like a function the program declares: it is
+  // compiled on its own, and the call is where the scope it touches crosses.
+  // Both of them must end up in one program's own table, and the contract
+  // frontend parsing is what decides which table each is in — a nested one
+  // used to stop the whole file from being a program.
+  const source = [
+    "let base = 10;",
+    "function outer(x: number): number {",
+    "  function inner(n: number): number {",
+    "    return n + base;",
+    "  }",
+    "  return inner(x);",
+    "}",
+    "console.log(outer(32));",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program));
+  assert.match(printed, /function outer\(x: f64, base: f64\) -> f64/);
+  assert.match(printed, /function inner\(n: f64, base: f64\) -> f64/);
+});
+
+test("a function nested inside a function declared first is still the program's", () => {
+  // Nothing in a program's grammar says where its functions are written: a
+  // program may run first and declare its functions when it comes to them.
+  // The module front end read it as declarations, and refused the nested one
+  // before the program was ever tried; the program parser is the one that
+  // carries that shape, so a file it is denied is re-read by it whole.
+  const source = [
+    "function outer(x: number): number {",
+    "  function inner(n: number): number {",
+    "    return n * 2;",
+    "  }",
+    "  return inner(x);",
+    "}",
+    "console.log(outer(21));",
+    "",
+  ].join("\n");
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "1.ts", source },
+    read: () => null,
+  });
+  const program = resolveProgram(phase.body!, phase.program);
+  assert.deepEqual(
+    program.bodies.map((fn) => fn.name).sort(),
+    ["inner", "outer"],
+  );
+});
+
 test("a function of a program is given every name of the scope it touches", () => {
   // A function declared in a program is compiled on its own, so every name it
   // reads of the scope around it is a parameter of its own. Two walks decide
