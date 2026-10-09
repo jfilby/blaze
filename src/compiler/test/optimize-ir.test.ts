@@ -723,7 +723,7 @@ test("what the new rewrites produce is a function the compiler may lower", () =>
     id: "entry", releases: [], terminator: { k: "return", value: { k: "local", type: F64, name: "sum" } },
     statements: [loop],
   }, F64, [n, i, sum]);
-  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before), undefined as never), []);
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before)), []);
 });
 
 test("what the pass produces is a function the compiler may lower", () => {
@@ -740,7 +740,7 @@ test("what the pass produces is a function the compiler may lower", () => {
       countedLoop(bin("mul", readN, constOf("2"), I32)),
     ],
   }, { kind: "void" }, [n, i]);
-  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before), undefined as never), []);
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before)), []);
 });
 
 test("the folded C computes what the unfolded C computes", async () => {
@@ -1353,3 +1353,136 @@ test("dropping what a raise makes unreachable still leaves a function the compil
   assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(fnOf(entry, { kind: "void" }, []))), []);
 });
 
+
+/* -------------------------------------------------------------------------- */
+/* A loop whose body has nothing left to do                                     */
+/* -------------------------------------------------------------------------- */
+
+const ARRAY: SemanticType = { kind: "array", of: F64, length: 11 };
+/** A field value as eleven limbs in one block, which is how this benchmark holds one. */
+const slice = (name: string): SemanticSlot => ({ kind: "value", name, mutable: true, type: ARRAY });
+const limb = (of: string, index: SemanticValue): SemanticValue => ({
+  k: "element", type: F64, of: { k: "local", type: ARRAY, name: of }, index,
+});
+const counter = (name: string, type: SemanticType = I32): SemanticValue => ({ k: "local", type, name });
+
+/** A comparison as the IR states one: over the type of what it compares, answering a truth. */
+const compareOf = (op: string, left: SemanticValue, right: SemanticValue): SemanticValue => ({
+  k: "compare", type: BOOL, op: op as never, operand: left.type, left, right,
+});
+
+/**
+ * The loop a compare of two field values writes, which is the shape this rewrite
+ * is for: the limbs are read from the top down, the first one that differs
+ * decides the answer, and the body does nothing on the turns after it.
+ *
+ * Written the way `ir-text` reads it back, so the body ends by going round
+ * again rather than by falling out of its own end.
+ */
+function compareLoop(): SemanticBlock["statements"][number] {
+  const i = counter("i");
+  const work = (value: SemanticValue): SemanticStatement => ({
+    k: "set", name: "answer", op: "=", value, line: 3,
+  });
+  return {
+    k: "loop", line: 1,
+    loop: {
+      kind: "counted", variable: "i", type: I32,
+      from: constOf("10", I32), to: constOf("0", I32), inclusive: true, down: true, step: null,
+      header: "b1", exit: "entry",
+      body: {
+        id: "b2", releases: [], terminator: { k: "jump", target: "b1", releases: [] },
+        statements: [
+          {
+            k: "if", line: 2, condition: compareOf("eq", counter("answer", F64), constOf("0")), otherwise: null,
+            then: {
+              id: "b3", releases: [], terminator: { k: "next" },
+              statements: [
+                {
+                  k: "if", line: 3, condition: compareOf("gt", limb("a", i), limb("b", i)), otherwise: null,
+                  then: { id: "b4", releases: [], statements: [work(constOf("1"))], terminator: { k: "next" } },
+                },
+                {
+                  k: "if", line: 4, condition: compareOf("lt", limb("a", i), limb("b", i)), otherwise: null,
+                  then: { id: "b5", releases: [], statements: [work(constOf("-1"))], terminator: { k: "next" } },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+test("a loop whose body works until a name settles is left at the turn that settles it", () => {
+  // Eleven turns of a compare of two field values, one of which decides the
+  // answer: the ten after it are the counter's step, the loop's test and the
+  // guard again, and nothing the program can observe. The guard becomes the
+  // loop's way out and the work stays under it.
+  const answer: SemanticSlot = { kind: "value", name: "answer", mutable: true, type: F64 };
+  const before = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: { k: "local", type: F64, name: "answer" } },
+    statements: [{ k: "set", name: "answer", op: "=", value: constOf("0"), line: 0 }, compareLoop()],
+  }, F64, [slice("a"), slice("b"), answer]);
+  const after = printed(before);
+  assert.match(after, /if \[ne\[bool\] f64 local\[f64\] answer const\[f64\] 0\]/, "the guard is asked the other way round");
+  // The way through the guard is the work, and the way out is a jump for the
+  // block the loop was written in, which is what a `break` is.
+  assert.match(after, /jump entry/, "the turn the guard is not met leaves the loop");
+  assert.match(after, /if \[gt\[bool\] f64 \[element/, "the work is still under the guard");
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before)), []);
+});
+
+test("a loop whose counter is read after it is left alone", () => {
+  // The counter's last value is the one a loop written out leaves behind, and
+  // leaving early leaves a different one: a loop counting down from ten that
+  // stops on its first turn leaves the counter at nine rather than at minus
+  // one, and the return below would answer the wrong number.
+  const answer: SemanticSlot = { kind: "value", name: "answer", mutable: true, type: F64 };
+  const i: SemanticSlot = { kind: "value", name: "i", mutable: false, type: I32 };
+  const before = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("add", counter("i"), counter("answer", F64)) },
+    statements: [{ k: "set", name: "answer", op: "=", value: constOf("0"), line: 0 }, compareLoop()],
+  }, F64, [slice("a"), slice("b"), answer, i]);
+  const after = printed(before);
+  assert.match(after, /if \[eq\[bool\] f64 local\[f64\] answer const\[f64\] 0\]/, "the guard stays as it was written");
+  assert.doesNotMatch(after, /jump entry/);
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(before)), []);
+});
+
+test("a loop whose body writes the name the guard tests outside it is left alone", () => {
+  // The guard is what decides whether the body works only while nothing else
+  // writes the name. Here the reset is the last statement of the turn, so a
+  // turn whose guard is not met still writes it and the loop cannot leave.
+  const answer: SemanticSlot = { kind: "value", name: "answer", mutable: true, type: F64 };
+  const loop = compareLoop();
+  if (loop.k !== "loop") throw new Error("the fixture is a loop");
+  loop.loop.body.statements.push({ k: "set", name: "answer", op: "=", value: constOf("2"), line: 9 });
+  const before = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: { k: "local", type: F64, name: "answer" } },
+    statements: [{ k: "set", name: "answer", op: "=", value: constOf("0"), line: 0 }, loop],
+  }, F64, [slice("a"), slice("b"), answer]);
+  const after = printed(before);
+  assert.match(after, /if \[eq\[bool\] f64 local\[f64\] answer const\[f64\] 0\]/, "the guard stays as it was written");
+  assert.doesNotMatch(after, /jump entry/);
+});
+
+test("a loop whose guard is not the last thing its body does is left alone", () => {
+  // The statement after the guard runs on every turn, so leaving early would
+  // drop it: the rewrite is only for a body whose last statement is the guard.
+  const answer: SemanticSlot = { kind: "value", name: "answer", mutable: true, type: F64 };
+  const loop = compareLoop();
+  if (loop.k !== "loop") throw new Error("the fixture is a loop");
+  loop.loop.body.statements.push({ k: "set", name: "seen", op: "=", value: constOf("1"), line: 9 });
+  const seen: SemanticSlot = { kind: "value", name: "seen", mutable: true, type: F64 };
+  const before = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: { k: "local", type: F64, name: "seen" } },
+    statements: [{ k: "set", name: "answer", op: "=", value: constOf("0"), line: 0 }, loop],
+  }, F64, [slice("a"), slice("b"), answer, seen]);
+  assert.doesNotMatch(printed(before), /jump entry/);
+});

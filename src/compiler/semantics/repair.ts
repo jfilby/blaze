@@ -1277,14 +1277,32 @@ export function inlineRefusal(callee: SemanticFunction): string | null {
   // callee that returns would return from the *caller* once its body is
   // spliced in, handing back the callee's value where the caller returns
   // nothing or returns something else — so `if (n > 2) { return 3; }` is a
-  // body with nowhere to go, and a jump is control flow the caller does not
-  // own for the same reason.
+  // body with nowhere to go.
+  //
+  // A jump is not the same problem, and the reason is that a jump names a loop
+  // of its own: the two ways out of a block are the two ends of the loop the
+  // block is written in, and every id a loop names is renamed when the body is
+  // spliced in — header and exit together, so the jump still lands on the loop
+  // it was written for. A `break` in a callee's own loop is therefore a `break`
+  // in the caller's copy of that loop, which is the same control flow rather
+  // than control flow the caller does not own. A jump whose target is not one
+  // of them is not one the IR writes at all.
+  const loops = new Set<string>();
+  for (const block of nestedBlocks(callee.entry)) {
+    for (const statement of block.statements) {
+      if (statement.k !== "loop") continue;
+      loops.add(statement.loop.header);
+      loops.add(statement.loop.exit);
+    }
+  }
   for (const block of nestedBlocks(callee.entry)) {
     if (block === callee.entry) continue;
     if (block.terminator.k === "return") {
       return "returns from a block of its own, which would return from the function it is put into";
     }
-    if (block.terminator.k === "jump") return "leaves a block for another one, which is control flow the function it is put into does not own";
+    if (block.terminator.k === "jump" && !loops.has(block.terminator.target)) {
+      return "leaves a block for another one, which is control flow the function it is put into does not own";
+    }
   }
   return null;
 }

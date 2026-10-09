@@ -39,7 +39,7 @@ import type {
   SemanticType,
   SemanticValue,
 } from "../core/semantic-ir.ts";
-import { hasCall, isInteger, isUnsigned, slotType, statementBlocksOf, statementValues } from "../core/semantic-ir.ts";
+import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
@@ -1961,6 +1961,227 @@ function claimsAName(statement: SemanticStatement): boolean {
   return false;
 }
 
+/* -------------------------------------------------------------------------- */
+/* A loop whose body has nothing left to do                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A loop whose body does nothing once the name its guard tests has settled,
+ * left at the turn that settles it.
+ *
+ * A guard at the end of a loop body that tests a name the body itself writes —
+ * `if (answer === 0) { answer = a[i] > b[i] ? 1 : -1 }` — is a loop that does
+ * its work on the turns before the name settles and nothing on the turns after.
+ * The IR already says that: the body is one statement, and it is the guarded
+ * one. Writing the loop as one that leaves when the guard is not met is the
+ * same program with the turns that do nothing taken out of it.
+ *
+ * What is skipped is what makes it exact rather than a guess. Every turn the
+ * rewrite removes contained exactly three things: the counter's step, the
+ * loop's own test, and the guard's evaluation. The body's statements are the
+ * guard, so they still run on exactly the turns they ran on; a turn that no
+ * longer runs takes no read with it that the original performed, because the
+ * guard was false on it and the body was not entered. Four things have to hold,
+ * and each is checked before anything is rewritten:
+ *
+ * - Nothing outside the guarded arm writes the name, so the guard is what
+ *   decides whether the body works and not an assignment somewhere else. A
+ *   `let` of the same spelling inside the loop is a different binding and is
+ *   refused as a write of it.
+ * - The loop's own counter — and the index and element of a walk — is not read
+ *   after the loop, because a loop that leaves early leaves the counter
+ *   somewhere the original left it not.
+ * - Every value the loop's own header evaluates on each turn holds no element,
+ *   field or length read, so a turn that no longer runs does not drop a read
+ *   that could fault. `isSafeToCompute` is the one answer to that, the same one
+ *   `hoist-invariant` and `common-subexpression` are held to.
+ * - The body falls out of its own end, so the guard really is the last thing a
+ *   turn does and leaving skips nothing the body did after it.
+ *
+ * A loop this rewrites is one `parallel.ts` refuses afterwards — a turn that
+ * decides whether the next one runs is not a turn that may run beside another —
+ * and it is refused there rather than here, because the mark is a claim about
+ * the body as it stands and this said nothing about turns.
+ */
+function leaveSettledLoopsEarly(body: Body): boolean {
+  const ids = new Set<string>(nestedSemanticBlocks(body.entry).map((block) => block.id));
+  let minted = 0;
+  let changed = false;
+  const walk = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      if (statement.k !== "loop") {
+        for (const nested of statementBlocksOf(statement)) walk(nested);
+        continue;
+      }
+      const loop = statement.loop;
+      minted += 1;
+      if (settled(loop, body, ids, `blaze_leave_${minted}`)) changed = true;
+      walk(loop.body);
+    }
+  };
+  walk(body.entry);
+  return changed;
+}
+
+/** The name a guard tests for the value the body settles it at, or null. */
+function settledName(condition: SemanticValue): string | null {
+  if (condition.k !== "compare" || condition.op !== "eq") return null;
+  // A text is compared by the runtime rather than by an instruction, and the
+  // answer is the same either way, but a name holding one is a reference and
+  // the guard is about a number the body works towards.
+  if (isTextType(condition.operand)) return null;
+  const { left, right } = condition;
+  if (left.k === "local") return left.name;
+  if (right.k === "local") return right.name;
+  return null;
+}
+
+/** Whether a loop's body has nothing left to do once a name settles. */
+function settled(loop: SemanticLoop, body: Body, ids: Set<string>, fresh: string): boolean {
+  // A loop a team may run, or one that owns a region, is read by the rule that
+  // marks it rather than by this one. Neither is marked when this runs, so the
+  // question is asked of the marks a body can already carry.
+  const marked = loop as { parallel?: unknown; region?: unknown };
+  if (marked.parallel !== undefined || marked.region === true) return false;
+  // Every value the loop's own turn evaluates: what a counted loop stops at and
+  // steps by are re-read at the header when the body writes them, and a walk
+  // reads its length and a `while` its condition on every turn.
+  const perTurn =
+    loop.kind === "counted"
+      ? [loop.to, ...(loop.step === null ? [] : [loop.step])]
+      : loop.kind === "each"
+        ? [loop.length]
+        : [loop.condition];
+  for (const value of perTurn) if (!isSafeToCompute(value)) return false;
+  // The names the loop itself moves, which a `break` leaves somewhere else and
+  // which the guard cannot be about.
+  const own = new Set<string>();
+  if (loop.kind === "counted") own.add(loop.variable);
+  if (loop.kind === "each") {
+    own.add(loop.index);
+    own.add(loop.element);
+  }
+  // The guard is the last statement of the body and the body falls out of its
+  // own end, so nothing follows it and leaving skips nothing. A body that ends
+  // by going round again falls out of its own end too, which is what a trailing
+  // `continue` is.
+  const statements = loop.body.statements;
+  const back = loop.body.terminator;
+  const fallsOut = back.k === "next" || (back.k === "jump" && back.target === loop.header);
+  if (!fallsOut || statements.length === 0) return false;
+  const guard = statements[statements.length - 1];
+  if (guard.k !== "if" || guard.otherwise !== null) return false;
+  const name = settledName(guard.condition);
+  if (name === null || own.has(name)) return false;
+  if (writes(loop.body, name, guard.then)) return false;
+  // The counter is what a `break` leaves somewhere else, so a loop that is read
+  // after itself is one this may not rewrite.
+  if (readsOutside(loop, body, own)) return false;
+  const leaving: SemanticBlock = {
+    id: fresh,
+    statements: [],
+    releases: [],
+    // A `break` frees what the blocks it leaves own, the block it is written in
+    // first and the loop's own body after it: the resolver's `jump` writes the
+    // same list for a `break` the source spelled out.
+    terminator: { k: "jump", target: loop.exit, releases: [...loop.body.releases] },
+  };
+  ids.add(fresh);
+  // The guard is asked the other way round: the arm under it is the work a turn
+  // does while the name is still at the value the body settles, and the way
+  // through is the loop's last turn.
+  const condition = guard.condition;
+  if (condition.k === "compare") condition.op = condition.op === "eq" ? "ne" : "eq";
+  statements[statements.length - 1] = {
+    k: "if",
+    condition,
+    then: leaving,
+    otherwise: guard.then,
+    line: guard.line,
+  };
+  return true;
+}
+
+/**
+ * Whether anything in a loop writes a name, the guarded arm left out.
+ *
+ * The arm is what the guard lets through, so a write in it is the write the
+ * guard is about. A `let` counts as a write: a second binding of one spelling
+ * is a different name to the resolver, and the guard would be asked about the
+ * new one on the turns after it.
+ */
+function writes(loop: SemanticBlock, name: string, guarded: SemanticBlock): boolean {
+  const walk = (block: SemanticBlock): boolean => {
+    for (const statement of block.statements) {
+      if (statement.k === "set" || statement.k === "step") {
+        if (statement.name === name) return true;
+      } else if (statement.k === "let") {
+        if (statement.slot.name === name) return true;
+      } else if (statement.k === "loop") {
+        const inner = statement.loop;
+        if (inner.kind === "counted" && inner.variable === name) return true;
+        if (inner.kind === "each" && (inner.index === name || inner.element === name)) return true;
+        if (walk(inner.body)) return true;
+        continue;
+      }
+      for (const nested of statementBlocksOf(statement)) {
+        // The guarded arm is the write the guard is about; it is left out here
+        // and read as part of the guard below.
+        if (nested === guarded) continue;
+        if (walk(nested)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(loop);
+}
+
+/**
+ * Whether a name is read anywhere the loop is not.
+ *
+ * The counter's last value is the one a loop written out leaves behind, and
+ * leaving early leaves a different one: a loop that counts down from ten and
+ * stops at its first turn leaves the counter at nine rather than at minus one.
+ * The loop's own ends are read in the block the loop is written in, so they are
+ * outside it for the purposes of this question.
+ */
+function readsOutside(loop: SemanticLoop, body: Body, names: ReadonlySet<string>): boolean {
+  let found = false;
+  const ask = (value: SemanticValue | null): void => {
+    if (found || value === null) return;
+    walkValues(value, (one) => {
+      if (one.k === "local" && names.has(one.name)) found = true;
+    });
+  };
+  const outside = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      if (statement.k !== "loop") {
+        for (const nested of statementBlocksOf(statement)) outside(nested);
+        continue;
+      }
+      const inner = statement.loop;
+      if (inner !== loop) {
+        outside(inner.body);
+        continue;
+      }
+      if (inner.kind === "counted") {
+        ask(inner.from);
+        ask(inner.to);
+        ask(inner.step);
+      } else if (inner.kind === "each") ask(inner.length);
+      else ask(inner.condition);
+    }
+    // What the block hands back is read after the loop just as a statement after
+    // it is.
+    ask(block.terminator.k === "return" ? block.terminator.value : null);
+    for (const statement of block.statements) {
+      if (statement.k === "raise") ask(statement.message);
+    }
+  };
+  outside(body.entry);
+  return found;
+}
+
 /**
  * What the rewrites read of a function: the body they walk and the names that
  * are already bound in it. A program has the same body and no parameters of its
@@ -2050,6 +2271,10 @@ function optimizeBody(body: Body, callees: Callees): void {
     if (foldAll(body)) changed = true;
     if (pruneAll(body)) changed = true;
     if (hoistLoopInvariants(body)) changed = true;
+    // A loop whose body has nothing left to do once a name settles is left at
+    // that turn before the loops are counted and written out: unrolling one
+    // first would write its guard out as many times as it turns.
+    if (leaveSettledLoopsEarly(body)) changed = true;
     // Unrolling reads the loop's ends, so it goes after the fold has made them
     // written out and before the round decides the IR has stopped changing.
     if (unrollCountedLoops(body)) changed = true;
