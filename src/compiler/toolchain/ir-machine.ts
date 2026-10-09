@@ -3097,6 +3097,15 @@ class Machine {
     }
     if (op === "=") {
       if (this.copyBetween(value, target)) return;
+      // A number written out goes into the register the name has of its own
+      // rather than through the accumulator, which is one instruction rather
+      // than the pair. A name the build gave a register of its own is a value
+      // read on every turn of a loop as often as anything else — `borrow` is
+      // one, and the eleven limbs of a modular subtraction assign it twice each.
+      if (value.k === "const" && isFloat(target.type) && target.register !== null && !isWideType(target.type)) {
+        this.floatConstant(Number(decimalText(value.text)), target.type, target.register);
+        return;
+      }
       this.at(value, target.type);
       this.store(target);
       return;
@@ -5470,9 +5479,9 @@ class Machine {
    * carry chain is one long run of exactly those.
    *
    * A sum and a product take their sides either way round, so either of them may
-   * be the carried one and the first that has a register of its own is the one
-   * that is asked for: a limb added to a carry that has a register is one
-   * instruction where it was three, whatever order the two were written in.
+   * be the carried one and the side the accumulator already holds is the one the
+   * other is written at: asking for the held side is the instruction that is
+   * saved, and a limb added to a carry is one instruction where it was three.
    * A difference and a quotient may not, so only their right side is a candidate
    * there.
    */
@@ -5492,9 +5501,13 @@ class Machine {
     const { op } = value;
     if (op !== "add" && op !== "sub" && op !== "mul" && op !== "and" && op !== "or" && op !== "xor") return null;
     const commutative = op === "add" || op === "mul";
-    // The sides a register may come from, in the order they are asked for.
-    const order: ("left" | "right")[] = commutative ? ["left", "right"] : ["right"];
-    for (const carried of order) {
+    const sides: ("left" | "right")[] = commutative ? ["left", "right"] : ["right"];
+    // The side the accumulator already holds is the one the operation is written
+    // from — asking for the other is the instruction that is saved. `load`
+    // answers the same question for a slot; this is the one for a value the
+    // statement has just computed and not written down yet.
+    if (commutative && this.heldByAccumulator(value.left) && !this.heldByAccumulator(value.right)) sides.reverse();
+    for (const carried of sides) {
       const side = carried === "left" ? value.left : value.right;
       const other = carried === "left" ? value.right : value.left;
       if (side.k !== "local" || !isInteger(side.type) || !isInteger(type)) continue;
@@ -5508,6 +5521,19 @@ class Machine {
       return { operation: op, register, carried };
     }
     return null;
+  }
+
+  /**
+   * Whether the accumulator already holds the value a name reads, which is what
+   * makes asking for it cost nothing. A slot's own identity is what says so:
+   * two values of the same shape are not one value, and a name read twice is one
+   * read the accumulator can answer.
+   */
+  private heldByAccumulator(value: SemanticValue): boolean {
+    if (value.k !== "local" || this.accumulator === null) return false;
+    if (this.accumulator.at !== this.code.written) return false;
+    const held = this.slots.get(this.names.read(value.name));
+    return held !== undefined && held.id === this.accumulator.id;
   }
 
   /**

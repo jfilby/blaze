@@ -2851,3 +2851,29 @@ test("a comparison reads the element it is compared against where it lies", asyn
     }
   }
 });
+
+test("a sum is written from the side the accumulator already holds", async () => {
+  // A sum takes its sides either way round, so the one the accumulator holds is
+  // the one the operation is written from and the register the other is in is the
+  // one the instruction names. A limb arithmetic is the shape that needs it: the
+  // limb is bound to a name and the carry is read out of a register the build
+  // gave it, and asking for the limb instead was a move out of the register the
+  // statement before it had written the limb into. Both orders are the same
+  // number, and a lowering that asked for the wrong side answers the limb alone.
+  const carry: SemanticSlot = { kind: "value", name: "carry", mutable: true, type: I64 };
+  const limb: SemanticSlot = { kind: "value", name: "limb", mutable: false, type: I64 };
+  // The limb is written out first, so the accumulator holds it when the carry is
+  // added, however the sum is written.
+  for (const [left, right] of [["limb", "carry"], ["carry", "limb"]]) {
+    const bound: SemanticBlock = {
+      id: "entry", releases: [],
+      statements: [{ k: "let", slot: { kind: "value", name: "kept", mutable: true, type: I64 }, value: local(left, I64), line: 1 }],
+      terminator: { k: "return", value: { k: "arith", type: I64, op: "add", left: local("kept", I64), right: local(right, I64) } },
+    };
+    assert.equal(
+      await lowered(subject(I64, bound, [carry, limb]), (name) => `printf("%lld", ${name}(4, 3));`),
+      "7",
+      `the limb and the carry, written ${left} then ${right}`,
+    );
+  }
+});
