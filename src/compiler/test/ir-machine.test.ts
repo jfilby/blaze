@@ -2877,3 +2877,44 @@ test("a sum is written from the side the accumulator already holds", async () =>
     );
   }
 });
+
+test("a shift over a value the build gave a register of its own is written in that register", async () => {
+  // The accumulator is where a whole number is read and written through, so a
+  // shift over a name that has a register of its own was a load, a shift and a
+  // store where a shift and a store are the same number. The carry a limb
+  // arithmetic hands the next limb is that shape: `carry = sum >> 24` over a
+  // `sum` in a register. The width the two are read at has to agree, or the
+  // shift is of a narrower number than the one the source wrote.
+  const wide: SemanticSlot = { kind: "value", name: "sum", mutable: true, type: I64 };
+  const shifted: SemanticBlock = {
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "kept", mutable: true, type: I64 }, value: local("sum", I64), line: 1 },
+      { k: "set", name: "sum", op: "=", value: { k: "arith", type: I64, op: "shr", left: local("kept", I64), right: number("24", I64) }, line: 2 },
+    ],
+    terminator: { k: "return", value: local("sum", I64) },
+  };
+  // A limb read as an i32 is a value the wider slot holds read at the narrower
+  // width, so the shift is taken at that width: 1 shifted down by 24 answers 0,
+  // and a shift written at the width of the slot would answer whatever the
+  // upper half of it held.
+  const narrow: SemanticSlot = { kind: "value", name: "n", mutable: true, type: I32 };
+  const narrowed: SemanticBlock = {
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "kept", mutable: true, type: I32 }, value: local("n", I32), line: 1 },
+      { k: "set", name: "n", op: "=", value: { k: "arith", type: I32, op: "shr", left: local("kept", I32), right: number("24", I32) }, line: 2 },
+    ],
+    terminator: { k: "return", value: local("n", I32) },
+  };
+  assert.equal(
+    await lowered(subject(I64, shifted, [wide]), (name) => `printf("%lld", ${name}((long long)1 << 40));`),
+    "65536",
+    "the shift is of the number the whole holds",
+  );
+  assert.equal(
+    await lowered(subject(I32, narrowed, [narrow]), (name) => `printf("%d", ${name}(1));`),
+    "0",
+    "the shift is of the number at the width it is read at",
+  );
+});

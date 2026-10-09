@@ -2767,6 +2767,38 @@ class Machine {
   }
 
   /**
+   * A shift by a number written out, over a value the build gave a register of
+   * its own, written in that register.
+   *
+   * The accumulator is where a whole number is read and written through, so a
+   * shift over a name that has a register of its own was two moves and a shift
+   * where a shift is the same number. The carry a limb arithmetic hands the next
+   * limb is that shape: `carry = sum >> 24` over a `sum` in a register was a
+   * load, a shift and a store, and the load and the store are the moves the
+   * register makes unnecessary.
+   *
+   * The value being shifted has to be at the width the whole is read at, or the
+   * shift would be of a narrower number: a slot holds what it was declared at,
+   * and a read written at another width converts on the way out of it.
+   */
+  private shiftInPlace(value: SemanticValue, target: Held): boolean {
+    if (value.k !== "arith") return false;
+    if (value.op !== "shl" && value.op !== "shr" && value.op !== "ushr") return false;
+    const type = target.type;
+    if (isFloat(type) || isWideType(type)) return false;
+    if (value.left.k !== "local") return false;
+    const places = this.immediateOf(value.right, type);
+    if (places === null) return false;
+    const held = this.slot(value.left.name);
+    if (held.register === null) return false;
+    if (widthOf(held.type) !== widthOf(type)) return false;
+    const wide = operationWidth(type) === 8;
+    this.code.shiftImm(shiftOf(value.op, type), held.register, places & (wide ? 63 : 31), wide);
+    this.storeFrom(target, held.register);
+    return true;
+  }
+
+  /**
    * A slot holding the value the accumulator has.
    *
    * Writing the accumulator down does not take it away, so what it holds is
@@ -2785,6 +2817,33 @@ class Machine {
       return;
     }
     this.code.movMemRegSized(frame(held.offset), RAX, widthOf(held.type));
+  }
+
+  /**
+   * A value the accumulator is not in, written into the slot a name is held in.
+   *
+   * A value normally arrives in the accumulator and a store moves it from
+   * there. A shift over a name the build gave a register of its own is written
+   * in that register instead, and this is what writes the answer of one into
+   * the slot the assignment names without the pair of moves through the
+   * accumulator.
+   *
+   * The accumulator's note is dropped rather than kept where the value lands in
+   * the frame: the register it is written from does not hold what the note says
+   * the accumulator holds, and a note that says otherwise is a read that never
+   * loads. Where the name has a register of its own the value is in that
+   * register, and `load` reads it out of there whatever the note says.
+   */
+  private storeFrom(held: Held, register: number): void {
+    if (held.register !== null) {
+      if (held.register === register) return;
+      if (isFloat(held.type)) this.code.movsMove(held.register, register, widthOf(held.type) === 4);
+      else this.code.movRegReg(held.register, register);
+      return;
+    }
+    if (isFloat(held.type)) this.code.movsStore(frame(held.offset), register, widthOf(held.type) === 4);
+    else this.code.movMemRegSized(frame(held.offset), register, widthOf(held.type));
+    this.accumulator = null;
   }
 
   /**
@@ -3106,6 +3165,11 @@ class Machine {
         this.floatConstant(Number(decimalText(value.text)), target.type, target.register);
         return;
       }
+      // A shift over a value the build gave a register of its own is written in
+      // that register rather than moved into the accumulator, shifted there and
+      // moved back: the carry a limb arithmetic hands the next limb is one long
+      // run of exactly that.
+      if (this.shiftInPlace(value, target)) return;
       this.at(value, target.type);
       this.store(target);
       return;
@@ -4878,10 +4942,18 @@ class Machine {
   private compare(type: SemanticType, op: CompareOp, right: Held | number): void {
     if (isFloat(type)) {
       const single = widthOf(type) === 4;
-      if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
-      else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
-      else this.code.movsLoad(XMM1, frame(right.offset), single);
-      this.code.sseCompare(XMM0, XMM1, single, true);
+      if (typeof right === "number") {
+        // A number the program wrote out is the instruction's own second
+        // operand, so the accumulator is compared against the literal where it
+        // lies rather than against a copy of it in the scratch: the copy is an
+        // instruction on every turn of a loop over limbs, and the test is one
+        // of them.
+        this.code.sseCompareLabel(XMM0, this.floatLiteral(floatBits(right, single)), single, true);
+      } else {
+        if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
+        else this.code.movsLoad(XMM1, frame(right.offset), single);
+        this.code.sseCompare(XMM0, XMM1, single, true);
+      }
       switch (op) {
         case "lt":
         case "le":
