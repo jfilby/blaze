@@ -2918,3 +2918,59 @@ test("a shift over a value the build gave a register of its own is written in th
     "the shift is of the number at the width it is read at",
   );
 });
+
+test("a counter of a loop over buffers keeps its register away from the buffers", async () => {
+  // A counter the body reaches only as an index is counted in a whole-number
+  // register of its own, and that register is taken before the names of the
+  // body are weighed for one: a function with several buffers had all four
+  // preserved registers given to the buffers and its counters left in the frame
+  // to be converted on every element they reached. Two values in one register is
+  // two values in one piece of memory, so the answer the loop computes is what
+  // this checks.
+  const arrays = Array.from({ length: 5 }, () => ({ kind: "array" as const, of: F64, length: 8 }));
+  const params: SemanticSlot[] = arrays.map((type, at) => ({ kind: "value", name: `v${String(at)}`, mutable: false, type }));
+  const element = (of: SemanticValue, index: SemanticValue): SemanticValue => ({ k: "element", type: F64, of, index });
+  const at = (name: string): SemanticValue => ({ k: "local", type: arrays[0] as SemanticType, name });
+  const counted = (name: string, value: SemanticValue): SemanticStatement => ({
+    k: "set", name, op: "+=", value, line: 4,
+  });
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [
+      counted("total", element(at("v0"), local("i", F64))),
+      counted("total", element(at("v1"), local("i", F64))),
+      counted("total", element(at("v2"), local("i", F64))),
+      counted("total", element(at("v3"), local("i", F64))),
+      counted("total", element(at("v4"), local("i", F64))),
+    ],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        {
+          k: "loop",
+          line: 3,
+          loop: {
+            kind: "counted", variable: "i", type: F64,
+            from: number("0"), to: number("8"), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    params,
+  );
+  // Every array holds n at index n, so the five sums over eight are each 28.
+  assert.equal(
+    await lowered(fn, (name) => `{ double a[8]={0,1,2,3,4,5,6,7}; printf("%g", ${name}(a,a,a,a,a)); }`),
+    "140",
+    "five arrays of eight elements each",
+  );
+});

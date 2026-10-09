@@ -1777,7 +1777,7 @@ class Machine {
    * is answered out of the frame, which is what every value was answered out of
    * before.
    */
-  private reserveTemporaryVectors(): number[] {
+  private reserveTemporaryVectors(taken: ReadonlySet<number>): number[] {
     // Only arithmetic a loop turns over pays for the registers: a prologue that
     // saves three and an epilogue that reads them back are worth a few
     // instructions per call, and a function that computes a sum once has one
@@ -1794,8 +1794,7 @@ class Machine {
     };
     turning(this.fn.entry, 0);
     if (arithmetic === 0) return [];
-    const spoken = new Set(this.pinned.values());
-    const free = VECTOR_CALLEE_SAVED.filter((register) => !spoken.has(register));
+    const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - Math.min(arithmetic, TEMPORARY_VECTORS), 0));
   }
 
@@ -1808,7 +1807,7 @@ class Machine {
    * an inner counter read through the outer's register would be an address built
    * from the wrong number.
    */
-  private reserveIndexRegisters(): number[] {
+  private reserveIndexRegisters(taken: ReadonlySet<number>): number[] {
     let deepest = 0;
     const counting = (body: SemanticBlock, depth: number): void => {
       for (const statement of body.statements) {
@@ -1830,8 +1829,7 @@ class Machine {
     };
     counting(this.fn.entry, 0);
     if (deepest === 0) return [];
-    const spoken = new Set(this.pinned.values());
-    const free = CALLEE_SAVED.filter((register) => !spoken.has(register));
+    const free = CALLEE_SAVED.filter((register) => !taken.has(register));
     return free.slice(0, Math.min(deepest, INDEX_REGISTERS));
   }
 
@@ -2156,6 +2154,18 @@ class Machine {
       if (found === undefined) taken.set(register, [...live]);
       else found.push(...live);
     };
+    // The registers this function's counters are read out of as whole numbers,
+    // taken before any name is weighed. A counter is stepped and read on every
+    // turn of its loop, and a buffer is read as the base of an element the
+    // counter names: a function with several of both had all four preserved
+    // registers given to the buffers and its counters left in the frame,
+    // converted on every element they reached.
+    const reserved = new Set<number>();
+    for (const register of this.reserveIndexRegisters(new Set(this.pinned.values()))) {
+      reserved.add(register);
+      this.pinnedRegisters.push(register);
+      this.spareIndexes.push(register);
+    }
     // The first register of a pool that is free over every place the name is
     // live, or null when every one of them is spoken for. Two names whose runs
     // never meet are never both live, so either register will do.
@@ -2176,6 +2186,10 @@ class Machine {
           const wanted = pass === 0 ? register === own : register !== own;
           if (!wanted) continue;
           if (later?.has(register) === true) continue;
+          // A register the counters of this function's loops are read out of is
+          // spoken for whatever the liveness says, because a pin and an index in
+          // one register is two values in one piece of memory.
+          if (reserved.has(register)) continue;
           const held = taken.get(register);
           if (held === undefined || !overlaps(held, live)) return register;
         }
@@ -2366,15 +2380,9 @@ class Machine {
     // an expression holds one side while the other side — which may be the call
     // — is written. A function that computes nothing in floats reserves none,
     // which is what keeps the prologue of a small one free of them.
-    for (const register of this.reserveTemporaryVectors()) {
+    for (const register of this.reserveTemporaryVectors(new Set(this.pinned.values()))) {
       this.pinnedVectors.push({ register, offset: 0, single: false });
       this.spareVectors.push(register);
-    }
-    // The same is true of a counter read as an index: the register holding it as
-    // a whole number has to survive every call the loop's body makes.
-    for (const register of this.reserveIndexRegisters()) {
-      this.pinnedRegisters.push(register);
-      this.spareIndexes.push(register);
     }
     // The prologue pushes the registers above the frame and the lowering binds
     // its slots from there downwards, so a slot's address does not depend on
