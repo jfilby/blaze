@@ -2182,6 +2182,125 @@ function readsOutside(loop: SemanticLoop, body: Body, names: ReadonlySet<string>
   return found;
 }
 
+/* -------------------------------------------------------------------------- */
+/* A residue, as a mask                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The widest mask that is still one number a double holds exactly, which is
+ * what a literal is printed as. A residue of a wider value than that has no
+ * mask this pass could write down, and the arithmetic it was written with is
+ * left as it was.
+ */
+const MASK_PLACES = 53;
+
+/**
+ * A limb's residue, taken as a mask rather than as a shift down, a shift back up
+ * and a difference.
+ *
+ * A field value is limbs, and an addition carries from one to the next. What a
+ * limb keeps and what the rest of it carries are one value read two ways, and
+ * the way the pass that reasons about limb arithmetic (`whole-elements.ts`)
+ * writes it is a shift down for the carry and a shift back up for the residue:
+ * `whole = sum >> 24; o[i] = sum - (whole << 24)`. On the machine that is a
+ * shift, a shift, a round trip through the frame for the shifted value and a
+ * difference, because the difference needs the value in a register the
+ * accumulator is not.
+ *
+ * `x - ((x >> k) << k)` is `x` with its low `k` bits, for every whole number and
+ * every `k`: the shift down drops them, the shift back up puts back the ones it
+ * kept and nothing of the ones it dropped, and the difference is the difference.
+ * The machine has a single instruction for that with the number inside it, and a
+ * carry chain is one long run of exactly this shape.
+ *
+ * The source writes the shift back up as a product by a power of two as often
+ * as not — `sum - whole * 16777216` — so a product is read as the move it is.
+ * Both are the same number, and the mask is the same shift.
+ */
+function maskLimbResidues(body: Body): boolean {
+  let changed = false;
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    // The names a statement of this block writes, which are not the ones its
+    // bindings hold: what such a name holds after the write is not what it was
+    // bound to, and a substitution against the binding would read the first
+    // value where the second is the one that is there.
+    const written = new Set<string>();
+    for (const statement of block.statements) {
+      if (statement.k === "set" || statement.k === "step") written.add(statement.name);
+    }
+    // Every residue found, keyed as the value it was found as. The search walks
+    // the block in order, because a residue is only a residue against a binding
+    // that is already in effect: the `let` that binds the carry comes before the
+    // statement that takes the residue off it.
+    const found = new Map<string, SemanticValue>();
+    const bound = new Map<string, SemanticValue>();
+    for (const statement of block.statements) {
+      for (const value of statementValues(statement)) {
+        walkSemanticValue(value, (inner) => {
+          const mask = maskedOf(inner, bound);
+          if (mask !== null) found.set(valueKey(inner), mask);
+        });
+      }
+      if (statement.k === "let" && !written.has(statement.slot.name)) bound.set(statement.slot.name, statement.value);
+    }
+    if (found.size === 0) continue;
+    block.statements = block.statements.map((statement) => replaceValues(statement, found) as SemanticStatement);
+    changed = true;
+  }
+  return changed;
+}
+
+/** The mask a residue written as a shift back up is, or null when it is not one. */
+function maskedOf(value: SemanticValue, bound: ReadonlyMap<string, SemanticValue>): SemanticValue | null {
+  if (value.k !== "arith" || value.op !== "sub") return null;
+  // A mask is over the bits of a whole number, and the residue has to be one.
+  if (value.type.kind !== "primitive" || !isInteger(value.type)) return null;
+  const back = maskPlaces(value.right, bound);
+  if (back === null) return null;
+  // The residue is taken of the very value the carry was shifted down from, so
+  // the two halves are one value read two ways.
+  if (valueKey(value.left) !== back.down) return null;
+  return {
+    k: "arith", type: value.type, op: "and",
+    left: value.left,
+    right: { k: "const", type: value.type, text: String(back.bits) },
+  };
+}
+
+/**
+ * The value a residue was shifted down from and the mask that is the same
+ * number, read off the shift back up that takes the difference.
+ *
+ * The shift back up is over the carry, and the carry is either a name the block
+ * bound to the shift down — which is the way `whole-elements` writes it, because
+ * the carry is read a second time by the statement that hands it on — or the
+ * shift down itself, which is the way an expression a program wrote out has it.
+ * Both are the same number, and the mask is the same shift.
+ */
+function maskPlaces(value: SemanticValue, bound: ReadonlyMap<string, SemanticValue>): { down: string; bits: number } | null {
+  if (value.k !== "arith") return null;
+  if (value.op !== "shl" && value.op !== "mul") return null;
+  if (value.left.k !== "local") return null;
+  const moved = literalOf(value.right);
+  if (moved === null) return null;
+  // A shift moves the name by a number of places; a product moves it by a power
+  // of two, which is the same move and the way the source writes it.
+  const places = value.op === "shl" ? moved : powerOfTwo(moved);
+  if (places === null || places < 1 || places > MASK_PLACES) return null;
+  const carried = bound.get(value.left.name);
+  const down = carried === undefined ? value.left : carried;
+  if (down.k !== "arith" || down.op !== "shr") return null;
+  if (literalOf(down.right) !== places) return null;
+  return { down: valueKey(down.left), bits: 2 ** places - 1 };
+}
+
+/** The power of two a number is, or null when it is not one. */
+function powerOfTwo(value: number): number | null {
+  if (value < 1 || !Number.isSafeInteger(value)) return null;
+  const places = Math.log2(value);
+  return Number.isInteger(places) && 2 ** places === value ? places : null;
+}
+
 /**
  * What the rewrites read of a function: the body they walk and the names that
  * are already bound in it. A program has the same body and no parameters of its
@@ -2191,10 +2310,6 @@ interface Body {
   readonly params: readonly SemanticSlot[];
   readonly entry: SemanticBlock;
 }
-
-/* -------------------------------------------------------------------------- */
-/* The pass                                                                    */
-/* -------------------------------------------------------------------------- */
 
 /**
  * Applies the deterministic rewrites to a function, to a fixed point.
@@ -2269,6 +2384,10 @@ function optimizeBody(body: Body, callees: Callees): void {
   for (let round = 0; round < 8; round += 1) {
     let changed = false;
     if (foldAll(body)) changed = true;
+    // A residue written as a shift down and a shift back up is a mask, which is
+    // one instruction rather than four — and the fold can only see it once the
+    // binding that carries the shift down is one it can read.
+    if (maskLimbResidues(body)) changed = true;
     if (pruneAll(body)) changed = true;
     if (hoistLoopInvariants(body)) changed = true;
     // A loop whose body has nothing left to do once a name settles is left at

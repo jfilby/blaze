@@ -32,6 +32,7 @@ const I32: SemanticType = { kind: "primitive", name: "i32" };
 const U32: SemanticType = { kind: "primitive", name: "u32" };
 const BOOL: SemanticType = { kind: "primitive", name: "bool" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
+const I64: SemanticType = { kind: "primitive", name: "i64" };
 
 const constOf = (text: string, type: SemanticType = F64): SemanticValue => ({ k: "const", type, text });
 
@@ -62,6 +63,7 @@ const paramF = (name: string): SemanticValue => ({ k: "local", type: F64, name }
  * that is not written out, which is why it is a name and not a literal.
  */
 const paramI = (name: string): SemanticValue => ({ k: "local", type: I32, name });
+const paramI64 = (name: string): SemanticValue => ({ k: "local", type: I64, name });
 
 /** `Math.abs`, which is the shortest call a hand-written fixture can make. */
 function absOf(argument: SemanticValue): SemanticValue {
@@ -811,6 +813,16 @@ test("the folded C computes what the unfolded C computes", async () => {
     { name: "a value against itself, less", expression: cmp("lt", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["0", "0", "0"] },
     { name: "a value against itself, at most", expression: cmp("le", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
     { name: "a value against itself, over", expression: cmp("ge", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1"], expected: ["1", "1", "1"] },
+    // The residue of a limb arithmetic writes: the shift down drops the bits the
+    // shift back up could not have kept, and the difference is the mask over
+    // exactly the same bits. Driven at a negative value, where a signed shift and
+    // a truncation towards zero disagree, and at one whose mask is every bit.
+    {
+      name: "a value less its own low bits",
+      expression: bin("sub", paramI64("x"), bin("shl", bin("shr", paramI64("x"), constOf("3", I64), I64), constOf("3", I64), I64), I64),
+      parameter: "x", inputs: ["-7", "0", "5", "9007199254740993"],
+      expected: ["1", "0", "5", "1"],
+    },
   ];
   const directory = await scratch("blaze-opt-");
   await writeFile(join(directory, "blaze_rt.h"), runtimeHeaderSource(), "utf8");
@@ -1485,4 +1497,77 @@ test("a loop whose guard is not the last thing its body does is left alone", () 
     statements: [{ k: "set", name: "answer", op: "=", value: constOf("0"), line: 0 }, loop],
   }, F64, [slice("a"), slice("b"), answer, seen]);
   assert.doesNotMatch(printed(before), /jump entry/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* A residue, as a mask                                                         */
+/* -------------------------------------------------------------------------- */
+
+test("a residue written as a shift down and a shift back up is a mask", () => {
+  // A field value is limbs, and an addition carries from one to the next: what
+  // a limb keeps and what the rest carries are one value read two ways. The
+  // pass that reasons about limb arithmetic writes it as a shift down and a
+  // shift back up, which is four instructions on the machine; the same number
+  // read as a mask is one of them, and a carry chain is one long run of it.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: true, type: I64 };
+  const ones: SemanticValue = { k: "local", type: I64, name: "n" };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [
+      { k: "set", name: "n", op: "=", value: bin("add", ones, constOf("1", I64), I64), line: 1 },
+      { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: I64 }, value: bin("shr", ones, constOf("3", I64), I64), line: 2 },
+      { k: "set", name: "n", op: "=", value: bin("sub", ones, bin("shl", { k: "local", type: I64, name: "whole" }, constOf("3", I64), I64), I64), line: 3 },
+    ],
+  }, { kind: "void" }, [n]));
+  assert.match(after, /\[and\[i64\] local\[i64\] n const\[i64\] 7\]/, "the residue is a mask");
+  assert.doesNotMatch(after, /shl\[i64\] local\[i64\] whole/);
+});
+
+test("a residue written as a product by a power of two is a mask too", () => {
+  // The source writes the shift back up as `whole * 8` as often as not, and the
+  // product by a power of two is the same move the shift is.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: true, type: I64 };
+  const ones: SemanticValue = { k: "local", type: I64, name: "n" };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [
+      { k: "set", name: "n", op: "=", value: bin("add", ones, constOf("1", I64), I64), line: 1 },
+      { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: I64 }, value: bin("shr", ones, constOf("3", I64), I64), line: 2 },
+      { k: "set", name: "n", op: "=", value: bin("sub", ones, bin("mul", { k: "local", type: I64, name: "whole" }, constOf("8", I64), I64), I64), line: 3 },
+    ],
+  }, { kind: "void" }, [n]));
+  assert.match(after, /\[and\[i64\] local\[i64\] n const\[i64\] 7\]/, "the residue is a mask");
+});
+
+test("a residue of something other than the value the carry came from is left alone", () => {
+  // The two halves have to be one value read two ways. Here the residue is taken
+  // of a number that is not the one the carry was shifted down from, so the mask
+  // would be a different number.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: true, type: I64 };
+  const m: SemanticSlot = { kind: "value", name: "m", mutable: true, type: I64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [
+      { k: "set", name: "n", op: "=", value: bin("add", { k: "local", type: I64, name: "n" }, constOf("1", I64), I64), line: 1 },
+      { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: I64 }, value: bin("shr", { k: "local", type: I64, name: "n" }, constOf("3", I64), I64), line: 2 },
+      { k: "set", name: "m", op: "=", value: bin("sub", { k: "local", type: I64, name: "m" }, bin("shl", { k: "local", type: I64, name: "whole" }, constOf("3", I64), I64), I64), line: 3 },
+    ],
+  }, { kind: "void" }, [n, m]));
+  assert.doesNotMatch(after, /\[and\[i64\]/);
+});
+
+test("a residue whose carry is written again before it is left alone", () => {
+  // The binding is what says which value the carry came from, and a write after
+  // it leaves the name holding something else: the mask would be the first
+  // value's and the number would be the second's.
+  const n: SemanticSlot = { kind: "value", name: "n", mutable: true, type: I64 };
+  const after = printed(fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: null },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "whole", mutable: true, type: I64 }, value: bin("shr", { k: "local", type: I64, name: "n" }, constOf("3", I64), I64), line: 1 },
+      { k: "set", name: "whole", op: "=", value: constOf("9", I64), line: 2 },
+      { k: "set", name: "n", op: "=", value: bin("sub", { k: "local", type: I64, name: "n" }, bin("shl", { k: "local", type: I64, name: "whole" }, constOf("3", I64), I64), I64), line: 3 },
+    ],
+  }, { kind: "void" }, [n]));
+  assert.doesNotMatch(after, /\[and\[i64\]/);
 });

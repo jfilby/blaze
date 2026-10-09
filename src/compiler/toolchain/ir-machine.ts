@@ -5441,8 +5441,10 @@ class Machine {
     // it.
     const named = this.integerOperand(value, type);
     if (named !== null) {
-      const commutative = named.operation === "add" || named.operation === "mul";
-      this.at(commutative ? value.right : value.left, type);
+      // The side the register is the answer for, and the one the accumulator has
+      // to be written from: the carried side is never evaluated at all.
+      const carriedLeft = named.carried === "left";
+      this.at(carriedLeft ? value.right : value.left, type);
       this.applyRegister(named.operation, type, named.register);
       this.normalizeArithmetic(type);
       return;
@@ -5457,20 +5459,31 @@ class Machine {
   }
 
   /**
-   * The operation and the register one side of an arithmetic of whole numbers
-   * could be written at rather than read out of the frame, or null where no side
-   * of it could be.
+   * The operation, the register and the side one side of an arithmetic of whole
+   * numbers could be written at rather than read out of the frame, or null where
+   * no side of it could be.
    *
    * It is the answer `registerOperand` gives for a floating point operation, over
    * the whole numbers the general path below is written for: the frame round trip
    * this skips is two instructions and a store-to-load forwarding on every
    * whole-number operation whose other side the build gave a register, and a
    * carry chain is one long run of exactly those.
+   *
+   * A sum and a product take their sides either way round, so either of them may
+   * be the carried one and the first that has a register of its own is the one
+   * that is asked for: a limb added to a carry that has a register is one
+   * instruction where it was three, whatever order the two were written in.
+   * A difference and a quotient may not, so only their right side is a candidate
+   * there.
    */
   private integerOperand(
     value: SemanticValue & { k: "arith" },
     type: SemanticType,
-  ): { operation: Extract<Arithmetic, "add" | "sub" | "mul" | "and" | "or" | "xor">; register: number } | null {
+  ): {
+    operation: Extract<Arithmetic, "add" | "sub" | "mul" | "and" | "or" | "xor">;
+    register: number;
+    carried: "left" | "right";
+  } | null {
     if (isFloat(type) || isWideType(type)) return null;
     // Only the operations `applyRegister` writes are asked for here: a shift
     // takes its count in the scratch register the general path masks it in, and a
@@ -5479,17 +5492,22 @@ class Machine {
     const { op } = value;
     if (op !== "add" && op !== "sub" && op !== "mul" && op !== "and" && op !== "or" && op !== "xor") return null;
     const commutative = op === "add" || op === "mul";
-    const carried = commutative ? value.left : value.right;
-    const other = commutative ? value.right : value.left;
-    if (carried.k !== "local" || !isInteger(carried.type) || !isInteger(type)) return null;
-    if (widthOf(carried.type) !== widthOf(type)) return null;
-    const register = this.slot(carried.name).register;
-    // The accumulator and the scratch register are where the operation is
-    // written, and the stack and base pointers are not values a program has.
-    if (register === null || register === RAX || register === RCX || register === RDX) return null;
-    if (register === RSP || register === RBP) return null;
-    if (hasCall(other) && !CALLEE_SAVED.includes(register)) return null;
-    return { operation: op, register };
+    // The sides a register may come from, in the order they are asked for.
+    const order: ("left" | "right")[] = commutative ? ["left", "right"] : ["right"];
+    for (const carried of order) {
+      const side = carried === "left" ? value.left : value.right;
+      const other = carried === "left" ? value.right : value.left;
+      if (side.k !== "local" || !isInteger(side.type) || !isInteger(type)) continue;
+      if (widthOf(side.type) !== widthOf(type)) continue;
+      const register = this.slot(side.name).register;
+      // The accumulator and the scratch register are where the operation is
+      // written, and the stack and base pointers are not values a program has.
+      if (register === null || register === RAX || register === RCX || register === RDX) continue;
+      if (register === RSP || register === RBP) continue;
+      if (hasCall(other) && !CALLEE_SAVED.includes(register)) continue;
+      return { operation: op, register, carried };
+    }
+    return null;
   }
 
   /**
