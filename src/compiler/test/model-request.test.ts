@@ -188,6 +188,42 @@ test("a model that never answers with a review fails with every reason it gave",
   assert.equal(chat.prompts.length, 2, "the re-request is the only request beyond the first");
 });
 
+test("a build that gave up on an answer says what the model wrote", async (t) => {
+  // A refusal names a line of the answer it is about, so a failure record that
+  // carries only the refusal is the one thing a build needs and does not have:
+  // two reasons, a paragraph and an empty reply are three different things to
+  // fix in the prompt, and the reason alone is the same for all three.
+  const TWO_REASONS = ["verdict: sound", "reason: the body is the zero the source wrote", "reason: nothing else applies"].join("\n");
+  const { directory } = await projectAnswering(t, [TWO_REASONS], { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 });
+
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) => {
+      const detail = error instanceof CompilerError ? (error.detail ?? "") : "";
+      assert.match(detail, /line 3 gives a second reason/, detail);
+      // The reply is quoted under the request it answered, by its lines.
+      assert.match(detail, /- request 1: line 3 gives a second reason[^\n]*\n {4}verdict: sound\n {4}reason: the body is the zero the source wrote\n {4}reason: nothing else applies/, detail);
+      return true;
+    },
+  );
+});
+
+test("a reply that was cut off is quoted, so where the limit fell can be read", async (t) => {
+  const { directory } = await projectAnswering(t, [CUT_OFF_REVIEW], { maxCandidates: 1, maxAttempts: 1, maxRetries: 1 }, {
+    finishReason: "length",
+  });
+
+  await assert.rejects(
+    () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
+    (error: unknown) => {
+      const detail = error instanceof CompilerError ? (error.detail ?? "") : "";
+      assert.match(detail, /the answer was cut off at the token limit/, detail);
+      assert.match(detail, /\n {4}proposal: hoist-inv/, detail);
+      return true;
+    },
+  );
+});
+
 test("an answer the provider stopped short of says why it stopped", async (t) => {
   const { directory, chat } = await projectAnswering(
     t,

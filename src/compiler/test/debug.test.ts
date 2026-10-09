@@ -139,6 +139,59 @@ test("--debug prints the system and user prompt of every review", async (t) => {
   assert.match(debug, /THE TARGET CODE THE COMPILER LOWERED THE IR INTO/);
 });
 
+test("--debug prints the answer the compiler could not read", async (t) => {
+  // A refusal names a line of the answer it is about, so an answer that was set
+  // aside without its text is a refusal nobody can act on and nothing at all to
+  // diagnose: two reasons, a paragraph and an empty reply are three different
+  // things to fix in the prompt, and the log line is the same for all three.
+  const TWO_REASONS = ["verdict: sound", "reason: the body is the zero the source wrote", "reason: nothing else applies"].join("\n");
+  const directory = await project(t, [TWO_REASONS, SOUND]);
+
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    written.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => {
+    process.stderr.write = original;
+  });
+
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
+  assert.equal(outcome.build.status, "success");
+
+  const debug = written.join("");
+  assert.match(debug, /-- answer ir 1\.1 request 1 --/);
+  assert.match(debug, /reason: the body is the zero the source wrote/, "the answer is printed as it came");
+  assert.match(debug, /reason: nothing else applies/);
+  // The request the answer belongs to is printed above it, and it is named by
+  // the same stage and round the retry line names.
+  assert.match(debug, /-- prompt ir 1\.1: user --/);
+  // The review that came after it is not printed: it was read.
+  assert.equal(debug.match(/-- answer /g)?.length, 1);
+});
+
+test("without --debug the answer that could not be read is not printed", async (t) => {
+  const TWO_REASONS = "verdict: sound\nreason: one\nreason: two";
+  const endpoint = await chatEndpoint(t, [TWO_REASONS, SOUND]);
+  const directory = await scratch("blaze-debug-");
+  await writeProject(join(directory, "blaze.toml"), SQUARE);
+
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    written.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => {
+    process.stderr.write = original;
+  });
+
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  assert.equal(outcome.build.status, "success", endpoint.url);
+  assert.equal(written.join(""), "", "a quiet build writes no diagnostics");
+});
+
 test("the prompt reaches the model as the contract and the instructions", async (t) => {
   const endpoint = await chatEndpoint(t, [SOUND]);
   const directory = await scratch("blaze-debug-");

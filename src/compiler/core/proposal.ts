@@ -82,37 +82,59 @@ const FENCE = /^\s*```/;
  * everything else has to be a `verdict:`, `reason:` or `proposal:` line, because
  * a reply that carries prose beside the answer is one the compiler has to guess
  * at, and a guess at which rule to run is a guess at what the build delivers.
+ *
+ * A refusal is written to be acted on rather than merely recorded: the question
+ * is asked again with it quoted, so it names the line of the answer the model
+ * wrote — the lines that are skipped are still counted, or a refusal points at
+ * a line the model cannot find in its own text — and it says what was read
+ * there. A refusal that only says the answer was wrong leaves the model with
+ * nothing to change, and it answers the same way again.
  */
 export function parseReview(text: string): ParsedReview {
-  const lines = text.split("\n").filter((line) => line.trim() !== "" && !FENCE.test(line));
+  const lines = text
+    .split("\n")
+    .map((line, at) => ({ line, at: at + 1 }))
+    .filter((entry) => entry.line.trim() !== "" && !FENCE.test(entry.line));
   let verdict: Verdict | null = null;
+  let verdictAt = 0;
   let reason: string | null = null;
+  let reasonAt = 0;
   const proposals: Proposal[] = [];
 
-  for (const [index, line] of lines.entries()) {
+  for (const { line, at } of lines) {
     const field = /^([a-z]+):[ \t]*(.*)$/.exec(line);
     if (field === null) {
-      return { unusable: `line ${index + 1} is neither a verdict, a reason nor a proposal: ${JSON.stringify(line)}` };
+      return { unusable: `line ${at} is neither a verdict, a reason nor a proposal: ${JSON.stringify(line)}` };
     }
     const [, name, value] = field;
     switch (name) {
       case "verdict": {
-        if (verdict !== null) return { unusable: "the answer gives a verdict more than once" };
+        if (verdict !== null) {
+          return {
+            unusable: `line ${at} gives a second verdict, and an answer has one: line ${verdictAt} already gave ${JSON.stringify(verdict)}, so write what you concluded on that line instead`,
+          };
+        }
         const stated = VERDICTS.find((entry) => entry === value);
         if (stated === undefined) {
-          return { unusable: `${JSON.stringify(value)} is not a verdict: expected sound, repaired or unsound` };
+          return { unusable: `line ${at} gives ${JSON.stringify(value)}, which is not a verdict: expected sound, repaired or unsound` };
         }
         verdict = stated;
+        verdictAt = at;
         break;
       }
       case "reason": {
-        if (reason !== null) return { unusable: "the answer gives a reason more than once" };
-        if (value.trim() === "") return { unusable: "the answer gives an empty reason" };
+        if (reason !== null) {
+          return {
+            unusable: `line ${at} gives a second reason, and an answer has one: line ${reasonAt} already gave ${JSON.stringify(reason)}, so put everything you found on that one line`,
+          };
+        }
+        if (value.trim() === "") return { unusable: `line ${at} gives an empty reason: say what you found on it` };
         reason = value.trim();
+        reasonAt = at;
         break;
       }
       case "proposal": {
-        const proposal = readProposal(value, index + 1);
+        const proposal = readProposal(value, at);
         if ("unusable" in proposal) return proposal;
         // A line that says it proposes nothing is a review with no proposals,
         // and the verdict decides whether that is a whole answer: `sound` and
@@ -122,7 +144,7 @@ export function parseReview(text: string): ParsedReview {
         break;
       }
       default:
-        return { unusable: `line ${index + 1} names an unknown field ${JSON.stringify(name)}` };
+        return { unusable: `line ${at} names an unknown field ${JSON.stringify(name)}` };
     }
   }
 

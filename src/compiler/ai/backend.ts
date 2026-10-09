@@ -58,13 +58,28 @@ class UnusableAnswer extends Error {
    * again. Absent for a request that never came back at all.
    */
   readonly stop: ProviderStop | undefined;
+  /**
+   * The reply as the provider returned it, when there was one. It is kept out of
+   * the reason, which the re-request prompt carries, because what a model wrote
+   * is not an instruction to a model. It is the other half of the record: a
+   * build says an answer could not be read, and this is the only place the
+   * answer itself can be read.
+   */
+  readonly answer: string | undefined;
 
-  constructor(reason: string, retryable: boolean, failure: CompilerError, stop?: ProviderStop) {
+  constructor(
+    reason: string,
+    retryable: boolean,
+    failure: CompilerError,
+    stop?: ProviderStop,
+    answer?: string,
+  ) {
     super(reason);
     this.reason = reason;
     this.retryable = retryable;
     this.failure = failure;
     this.stop = stop;
+    this.answer = answer;
   }
 }
 
@@ -152,6 +167,30 @@ function usageOf(usage: LanguageModelUsage): ResponseUsage | undefined {
   return Object.keys(reported).length === 0 ? undefined : reported;
 }
 
+/**
+ * How much of a reply a failure record carries. A refusal names a line of the
+ * answer, so the answer is what makes the refusal readable, and a model that
+ * wrote an essay instead of a review is worth reading to the end — but a reply
+ * that never ends is not, so the rest of it is counted rather than kept.
+ */
+const QUOTED_REPLY_LINES = 20;
+
+/**
+ * What a model wrote, indented under the request it answered. The number a
+ * refusal names is a line of this text, so it is printed as it came: a reply
+ * quoted back is quoted by its lines and not by its tokens, and a build that
+ * cannot read an answer has nowhere else to read it.
+ */
+export function quoteReply(answer: string | undefined): string[] {
+  if (answer === undefined) return [];
+  const lines = answer.replace(/\s+$/, "").split("\n");
+  if (lines.length === 0 || lines.every((line) => line.trim() === "")) return [];
+  return [
+    ...lines.slice(0, QUOTED_REPLY_LINES).map((line) => `    ${line}`),
+    ...(lines.length <= QUOTED_REPLY_LINES ? [] : [`    … ${lines.length - QUOTED_REPLY_LINES} more lines`]),
+  ];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Vercel AI SDK backend                                                      */
 /* -------------------------------------------------------------------------- */
@@ -163,6 +202,21 @@ export interface PromptDump {
   attempt: number;
   system: string;
   user: string;
+}
+
+/**
+ * An answer that was not a review, for a build that is asked again over it. It
+ * is kept beside the prompt rather than in the retry reason, so a refusal that
+ * names a line of it can be read against the text it names.
+ */
+export interface AnswerDump {
+  stage: ReviewRequest["stage"];
+  candidate: number;
+  attempt: number;
+  /** The re-request about to be made, 1-based. */
+  retry: number;
+  /** What the model wrote, as the provider returned it. */
+  answer: string;
 }
 
 /**
@@ -182,6 +236,13 @@ export interface ResponseRetry {
   reason: string;
   /** How the request behind it ended, when there was a request to end. */
   stop?: ProviderStop;
+  /**
+   * What the model wrote, when there was a reply to write. A build reports the
+   * reason in one line; this is the reply that reason is about, and it is what
+   * says whether the model wrote two reasons, a paragraph or the format it was
+   * shown. It is not in the line, because a build log is read on a terminal.
+   */
+  answer?: string;
 }
 
 /**
@@ -296,7 +357,7 @@ export class VercelAiBackend implements AiBackend {
     const { system, user } = reviewPrompts(request);
     this.onPrompt?.({ stage: request.stage, candidate: request.candidate, attempt: request.attempt, system, user });
     const model = await this.languageModel();
-    const answers: { reason: string; stop: ProviderStop | undefined }[] = [];
+    const answers: { reason: string; stop: ProviderStop | undefined; answer: string | undefined }[] = [];
     let review: Review;
 
     for (let retry = 0; ; retry += 1) {
@@ -308,15 +369,17 @@ export class VercelAiBackend implements AiBackend {
         );
         const parsed = parseReview(answer.text);
         if ("unusable" in parsed) {
-          // The reason the answer could not be read is told to the model, and
-          // how the request ended is told to the build: a reply the provider
-          // cut short is a different failure from one the model finished, and
-          // only the provider knows which it was.
+          // The reason the answer could not be read is told to the model, how
+          // the request ended and what the model wrote are told to the build: a
+          // reply the provider cut short is a different failure from one the
+          // model finished, only the provider knows which it was, and the reply
+          // is the only place a refusal like "a second reason" can be read.
           throw new UnusableAnswer(
             parsed.unusable,
             true,
             reviewError("the model did not answer with a review the compiler could read"),
             answer.stop,
+            answer.text,
           );
         }
         review = parsed.review;
@@ -324,7 +387,7 @@ export class VercelAiBackend implements AiBackend {
       } catch (cause) {
         if (!(cause instanceof UnusableAnswer)) throw cause;
         if (!cause.retryable) throw cause.failure;
-        answers.push({ reason: cause.reason, stop: cause.stop });
+        answers.push({ reason: cause.reason, stop: cause.stop, answer: cause.answer });
         if (retry === this.retries) {
           throw new CompilerError({
             category: "AiReviewError",
@@ -333,7 +396,10 @@ export class VercelAiBackend implements AiBackend {
             function: request.contract.function.name,
             detail: [
               `asked ${this.retries + 1} times, and no answer carried a review:`,
-              ...answers.map((entry) => `- ${entry.reason}${entry.stop === undefined ? "" : ` (${describeProviderStop(entry.stop)})`}`),
+              ...answers.flatMap((entry, at) => [
+                `- request ${at + 1}: ${entry.reason}${entry.stop === undefined ? "" : ` (${describeProviderStop(entry.stop)})`}`,
+                ...quoteReply(entry.answer),
+              ]),
               ...(cause.failure.detail === undefined ? [] : [cause.failure.detail]),
             ].join("\n"),
           });
@@ -346,6 +412,7 @@ export class VercelAiBackend implements AiBackend {
           retries: this.retries,
           reason: cause.reason,
           ...(cause.stop === undefined ? {} : { stop: cause.stop }),
+          ...(cause.answer === undefined ? {} : { answer: cause.answer }),
         });
         await sleep(Math.min(RETRY_BACKOFF_MS * 2 ** retry, RETRY_BACKOFF_MAX_MS));
       }
@@ -424,6 +491,7 @@ export class VercelAiBackend implements AiBackend {
           "the reply was cut off before the review was finished, so none of it was read",
         ),
         stop,
+        text,
       );
     }
     return { text, stop };

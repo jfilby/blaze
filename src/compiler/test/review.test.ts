@@ -116,12 +116,46 @@ test("an answer that is not a review is refused as unreadable, and says which li
     ["verdict: repaired\nreason: fix it\nproposal: hoist-invariant b1 factor", /neither a rule nor a name=value/],
     ["verdict: repaired\nreason: fix it\nproposal: hoist-invariant b1 factor=", /gives factor no value/],
     ["verdict: repaired\nreason: fix it\nproposal: hoist-invariant b1 factor=2 factor=3", /gives factor twice/],
-    ["verdict: sound\nreason: fine\nverdict: unsound", /a verdict more than once/],
+    ["verdict: sound\nreason: fine\nverdict: unsound", /line 3 gives a second verdict, and an answer has one: line 1 already gave "sound"/],
   ] as const) {
     const parsed = parseReview(answer);
     assert.ok("unusable" in parsed, `"${answer.split("\n")[0]}" must not be read as a review`);
     assert.match(parsed.unusable, because, answer);
   }
+});
+
+test("a refusal names the line of the answer the model wrote", () => {
+  // The question is asked again with the refusal quoted, so a line number
+  // counted over the lines that were read is a line the model cannot find in its
+  // own text: the fences and the blank lines it wrote are still its lines.
+  const answer = ["```text", "verdict: sound", "reason: the body is right", "", "and nothing else is read"].join("\n");
+  const parsed = parseReview(answer);
+  assert.ok("unusable" in parsed);
+  assert.match(parsed.unusable, /^line 5 is neither a verdict/, parsed.unusable);
+  assert.match(parsed.unusable, /"and nothing else is read"/);
+
+  const repeated = parseReview("verdict: sound\n\nreason: the body is right\nreason: and it is cheap enough");
+  assert.ok("unusable" in repeated);
+  assert.match(repeated.unusable, /^line 4 gives a second reason, and an answer has one: line 3 already gave "the body is right"/, repeated.unusable);
+});
+
+test("a second reason says what it is a second of, so the model can answer it", () => {
+  // A refusal that only says the answer was wrong leaves nothing to change, and
+  // the answer comes back the same way: this one names the line the compiler
+  // reads, what it read there, and what to do with the rest.
+  const parsed = parseReview(
+    ["verdict: repaired", "reason: the bound is recomputed on every turn", "proposal: hoist-invariant b1", "reason: the loop writes nothing else"].join("\n"),
+  );
+  assert.ok("unusable" in parsed);
+  assert.match(parsed.unusable, /line 4 gives a second reason/);
+  assert.match(parsed.unusable, /line 2 already gave "the bound is recomputed on every turn"/);
+  assert.match(parsed.unusable, /put everything you found on that one line/);
+});
+
+test("an empty reason says which line is empty", () => {
+  const parsed = parseReview("verdict: sound\nreason:");
+  assert.ok("unusable" in parsed);
+  assert.match(parsed.unusable, /^line 2 gives an empty reason/);
 });
 
 test("a verdict of unsound is a report, and carries no proposal", () => {

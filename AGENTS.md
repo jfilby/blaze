@@ -63,6 +63,15 @@ tests all live there. Run commands from it.
   the prompts, `ai/backend.ts` the transports). A proposal the rules hold is
   applied by rewriting the IR and printing it again; one they do not is refused
   with a reason, which the build log and the next review both carry.
+- An answer the grammar cannot read is asked for again, and what it says about
+  the answer is written to be acted on rather than only recorded: the refusal
+  names the line of the model's own text it is about — the fences and the blank
+  lines it wrote are counted, or the refusal points at a line the model cannot
+  find — and quotes what was read there. A refusal that only said the answer was
+  wrong leaves nothing to change, and the answer comes back the same way. What
+  the model wrote is kept beside the refusal rather than in it: `--debug` prints
+  it, and a build that spends its re-requests quotes it in the failure, because
+  a refusal that names a line is unreadable without the answer it names.
 - `maxCandidates` reads are one reading, not several copies of it. Every chain
   starts from the same base IR, so without something to tell them apart the
   first round of every candidate rendered the same prompt and a build paid for

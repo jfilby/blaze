@@ -39,7 +39,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
-import { createBackend, describeProviderStop, type PromptDump } from "./ai/backend.ts";
+import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
@@ -670,6 +670,20 @@ function printPrompt(dump: PromptDump): void {
   process.stderr.write(
     `\n-- prompt ${at}: system --\n${dump.system}\n-- prompt ${at}: user --\n${dump.user}\n`,
   );
+}
+
+/**
+ * What a model answered with, for `--debug`. Only the answers that were not
+ * reviews are printed: a refusal names a line of one of them, and a reply the
+ * compiler could read is already in the build log as the verdicts and the
+ * proposals that came out of it.
+ */
+function printAnswer(dump: AnswerDump): void {
+  const at = `${dump.stage} ${dump.candidate}.${dump.attempt} request ${dump.retry}`;
+  // An answer that was nothing at all is printed as nothing: a retry line reads
+  // the same whether the model wrote an essay or a single space.
+  const quoted = quoteReply(dump.answer);
+  process.stderr.write(`\n-- answer ${at} --\n${quoted.length === 0 ? "(nothing)" : quoted.join("\n")}\n`);
 }
 
 function testConfigFor(input: SourceInput, options: BuildOptions): TestConfig {
@@ -1435,7 +1449,7 @@ export async function runBuild(
                 return createBackend(requireModel(), {
                   timeoutMs: requestTimeoutMs(input),
                   retries: generation.maxRetries,
-                  onRetry: ({ stage, candidate, attempt, retry, retries, reason, stop }) => {
+                  onRetry: ({ stage, candidate, attempt, retry, retries, reason, stop, answer }) => {
                     // An answer that could not be read is also told how its request
                     // ended and what the request cost: one cut short by the output
                     // limit, one a content filter took and one the model finished on
@@ -1447,6 +1461,13 @@ export async function runBuild(
                       "info",
                       `Asking again: ${functionName}, ${stage} of candidate ${candidate}, round ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
                     );
+                    // What the model wrote is not a line of the build log: a refusal
+                    // names a line of it, so it is the only way to see the answer the
+                    // refusal is about. It is printed beside the prompt, under the
+                    // same `--debug`.
+                    if (options.debug === true && answer !== undefined) {
+                      printAnswer({ stage, candidate, attempt, retry, answer });
+                    }
                   },
                   ...(options.debug === true ? { onPrompt: printPrompt } : {}),
                 });
