@@ -152,7 +152,8 @@ interface DebugBlocks {
   readonly answers: string[];
 }
 
-function extractDebug(stderr: string): DebugBlocks {
+/** The `-- prompt` and `-- answer` blocks in a build's debug output. */
+export function extractDebug(stderr: string): DebugBlocks {
   const prompts: string[] = [];
   const answers: string[] = [];
   let block: string[] | null = null;

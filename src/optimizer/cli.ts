@@ -2,7 +2,7 @@
 /**
  * blazeopt - iterative blaze compiler optimizer.
  *
- *   blazeopt [options]
+ *   blazeopt [project] [options]
  *
  * Runs an optimization loop that alternates between three pass methods:
  *   1. research       — Tavily search + compiler source review
@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
 import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
-import { benchmarkCompiler } from "./benchmark.ts";
+import { benchmarkCompiler, type BenchmarkResult } from "./benchmark.ts";
 import { gatherBuildFeedback } from "./build-feedback.ts";
 import { proposeImprovements, applyProposal, type PassMethod } from "./ai.ts";
 import { loadProject, type ProjectInfo } from "./project.ts";
@@ -65,6 +65,11 @@ own. With one, the run is targeted at it: the research queries are about
 what the project does, the build-feedback pass compiles it, and the proposals
 are asked to be relevant to it. Without one, the passes are general.
 
+A run establishes the compiler's test suite as a baseline before it starts,
+refuses a working tree that already holds uncommitted work, and commits only
+the files its own passes changed. A change the suite rejects, or that
+measures slower than the noise, is reverted.
+
 Options:
   --max-iterations <n>   Maximum passes (default 3)
   --benchmark-runs <n>   Hyperfine runs per benchmark (default 5)
@@ -94,15 +99,21 @@ async function runPass(
   iteration: number,
   options: Options,
 ): Promise<boolean> {
-  const methodLabel = method === "research" ? "research" : method === "build-feedback" ? "build-feedback" : "code-review";
   process.stdout.write(`\n${"=".repeat(72)}\n`);
-  process.stdout.write(`Iteration ${iteration}/${options.maxIterations}: ${methodLabel}\n`);
+  process.stdout.write(`Iteration ${iteration}/${options.maxIterations}: ${method}\n`);
   process.stdout.write(`${"=".repeat(72)}\n\n`);
 
   // 1. Gather context
-  let context = "";
+  let context: string | null = "";
   if (method === "research") {
     context = await gatherResearchContext(options.project);
+    // Nothing new to read is nothing to propose from: a research pass whose
+    // papers have all been processed would otherwise be asked for an
+    // improvement out of memory of them.
+    if (context === null) {
+      process.stdout.write("Nothing new in the research cache, skipping.\n\n");
+      return false;
+    }
   } else if (method === "build-feedback") {
     context = await gatherBuildFeedbackContext(options.project);
   }
@@ -121,16 +132,37 @@ async function runPass(
   // 3. Benchmark before
   process.stdout.write("Benchmarking before changes...\n");
   const before = await benchmarkCompiler(options.benchmarkRuns);
-  process.stdout.write(`  Before: ${before.mean.toFixed(3)}s ± ${before.stddev.toFixed(3)}s\n\n`);
+  process.stdout.write(`  Before: ${before.mean.toFixed(3)}s ± ${before.stddev.toFixed(3)}s (${before.runs} runs)\n\n`);
 
   // 4. Apply proposals
   const applied: string[] = [];
+  const touched: string[] = [];
   for (const proposal of response.proposals) {
-    if (applyProposal(proposal)) {
-      applied.push(`${proposal.file}: ${proposal.description}`);
-      process.stdout.write(`  Applied: ${proposal.file} — ${proposal.description}\n`);
-    } else {
-      process.stdout.write(`  Skipped (original not found): ${proposal.file}\n`);
+    const outcome = applyProposal(proposal);
+    switch (outcome.kind) {
+      case "applied":
+        applied.push(`${proposal.file}: ${proposal.description}`);
+        touched.push(outcome.path);
+        process.stdout.write(`  Applied: ${proposal.file} — ${proposal.description}\n`);
+        break;
+      case "not-found":
+        process.stdout.write(`  Skipped (original not found): ${proposal.file}\n`);
+        break;
+      case "ambiguous":
+        process.stdout.write(`  Skipped (original appears more than once): ${proposal.file}\n`);
+        break;
+      case "outside-compiler":
+        process.stderr.write(`  Refused (not a file inside the compiler): ${proposal.file}\n`);
+        break;
+      case "test-file":
+        process.stderr.write(`  Refused (the tests are the gate, not a target): ${proposal.file}\n`);
+        break;
+      case "unchanged":
+        process.stdout.write(`  Skipped (replaces the text with itself): ${proposal.file}\n`);
+        break;
+      case "write-failed":
+        process.stderr.write(`  Skipped (could not be written): ${proposal.file}\n`);
+        break;
     }
   }
 
@@ -139,36 +171,93 @@ async function runPass(
     return false;
   }
 
-  // 5. Test
-  process.stdout.write("\nRunning test suite...\n");
-  const testResult = runTests();
-  if (!testResult) {
-    process.stdout.write("Tests failed, reverting changes.\n");
-    revertChanges();
-    return false;
+  // From here the working tree holds this pass's changes, so every exit from
+  // this block either commits them or reverts exactly the files this pass
+  // wrote. The whole tree is never touched: it is the user's repository and
+  // it holds anything else they have in progress.
+  try {
+    // 5. Test
+    process.stdout.write("\nRunning test suite...\n");
+    const testResult = testsPassed();
+    if (!testResult) {
+      process.stdout.write("Tests failed, reverting changes.\n");
+      revertPass(touched);
+      return false;
+    }
+    process.stdout.write("Tests passed.\n");
+
+    // 6. Benchmark after
+    process.stdout.write("\nBenchmarking after changes...\n");
+    const after = await benchmarkCompiler(options.benchmarkRuns);
+    process.stdout.write(`  After:  ${after.mean.toFixed(3)}s ± ${after.stddev.toFixed(3)}s (${after.runs} runs)\n`);
+
+    const delta = after.mean - before.mean;
+    if (isSlower(before, after)) {
+      process.stdout.write(`  Slower by ${delta.toFixed(3)}s (${((delta / before.mean) * 100).toFixed(1)}%), reverting.\n`);
+      revertPass(touched);
+      return false;
+    }
+    if (delta < 0) {
+      process.stdout.write(`  Faster by ${(-delta).toFixed(3)}s (${((-delta / before.mean) * 100).toFixed(1)}%)\n`);
+    } else {
+      process.stdout.write(`  Within measurement noise (${delta.toFixed(3)}s)\n`);
+    }
+
+    // 7. Commit
+    commitChanges(method, applied, touched);
+    return true;
+  } catch (cause) {
+    // A pass that dies after applying its changes must not leave the
+    // compiler modified and uncommitted: the next pass would be proposing
+    // on top of a change nobody has judged.
+    revertPass(touched);
+    throw cause;
   }
-  process.stdout.write("Tests passed.\n");
-
-  // 6. Benchmark after
-  process.stdout.write("\nBenchmarking after changes...\n");
-  const after = await benchmarkCompiler(options.benchmarkRuns);
-  process.stdout.write(`  After:  ${after.mean.toFixed(3)}s ± ${after.stddev.toFixed(3)}s\n`);
-
-  const delta = after.mean - before.mean;
-  const percent = (delta / before.mean) * 100;
-  if (delta > 0) {
-    process.stdout.write(`  Slower by ${delta.toFixed(3)}s (${percent.toFixed(1)}%), reverting.\n`);
-    revertChanges();
-    return false;
-  }
-  process.stdout.write(`  Faster by ${(-delta).toFixed(3)}s (${(-percent).toFixed(1)}%)\n`);
-
-  // 7. Commit
-  commitChanges(methodLabel, applied);
-  return true;
 }
 
-async function gatherResearchContext(project?: ProjectInfo): Promise<string> {
+/**
+ * Is the change measurably slower?
+ *
+ * `npm test` is a noisy clock: two measurements of the same compiler differ
+ * by more than zero, so reverting on any positive difference would throw
+ * most improvements away for the noise. A change counts as slower only when
+ * the slowdown is larger than the two benchmarks' own spread could produce
+ * on its own.
+ */
+function isSlower(before: BenchmarkResult, after: BenchmarkResult): boolean {
+  const delta = after.mean - before.mean;
+  if (delta <= 0) return false;
+
+  // The uncertainty of a benchmark's mean: hyperfine's stddev is over its
+  // own runs, so the mean's own spread is that over the root of how many
+  // runs it took. One run measured no spread.
+  const error = (r: BenchmarkResult): number =>
+    r.runs > 1 && Number.isFinite(r.stddev) ? r.stddev / Math.sqrt(r.runs) : 0;
+
+  // The spread of the difference of two independent means, doubled so that
+  // a difference this large is not something noise alone would produce.
+  const noise = 2 * Math.sqrt(error(before) ** 2 + error(after) ** 2);
+
+  // And nothing smaller than a percent of the whole measurement is worth a
+  // revert either: a millisecond a minute is not a change.
+  const floor = 0.01 * before.mean;
+
+  return delta > Math.max(noise, floor);
+}
+
+/** How much of one paper's text is read. The search answers with whole
+ * articles, and a prompt holding all of them is a request that fails for
+ * its size rather than one the model reads. */
+const PAPER_CONTENT_SHOWN = 1500;
+
+/** The beginning of a text, and a marker for what was left out. */
+function cap(text: string, limit: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+  return `${trimmed.slice(0, limit)}\n... [${trimmed.length - limit} more characters not shown]`;
+}
+
+async function gatherResearchContext(project?: ProjectInfo): Promise<string | null> {
   const apiKey = tavilyApiKey();
   if (!apiKey) {
     throw new Error("TAVILY_API_KEY is not set");
@@ -185,7 +274,7 @@ async function gatherResearchContext(project?: ProjectInfo): Promise<string> {
 
   if (fresh.length === 0) {
     process.stdout.write("All papers already processed (cached), skipping.\n");
-    return "";
+    return null;
   }
 
   let newCache: CacheEntry[] = cache;
@@ -194,7 +283,7 @@ async function gatherResearchContext(project?: ProjectInfo): Promise<string> {
   }
   saveCache(newCache);
 
-  const parts = fresh.map((r, i) => `Paper ${i + 1}: ${r.title}\n${r.content}`);
+  const parts = fresh.map((r, i) => `Paper ${i + 1}: ${r.title}\n${cap(r.content, PAPER_CONTENT_SHOWN)}`);
   return parts.join("\n\n---\n\n");
 }
 
@@ -214,29 +303,146 @@ async function gatherBuildFeedbackContext(project?: ProjectInfo): Promise<string
   return parts.join("\n\n");
 }
 
-function runTests(): boolean {
-  const result = spawnSync("npm", ["test"], {
-    cwd: COMPILER_DIR,
-    stdio: "inherit",
-    timeout: 300000,
-  });
-  return result.status === 0;
+/**
+ * What the compiler's test suite said.
+ *
+ * A pass is judged by this suite, so what it says before anything is
+ * applied is what tells a failure the model caused from one that was
+ * already there.
+ */
+interface SuiteResult {
+  /** Whether the suite ran to the end: a suite killed by the bound, or one
+   *  that could not be started, has said nothing about the compiler. */
+  readonly completed: boolean;
+  /** Whether it passed, which is what the exit status settles. */
+  readonly passed: boolean;
+  /** How many tests it says failed, when its summary line says. */
+  readonly failures: number;
+  /** How many tests it says passed. */
+  readonly passedCount: number;
+  /** The end of what it printed, for a refusal that says what was read. */
+  readonly output: string;
 }
 
-function revertChanges(): void {
-  const result = spawnSync("git", ["checkout", "--", "."], {
+/** How long the test suite may run before it is abandoned. The suite takes
+ * a few minutes on its own, so the bound is a generous multiple of it. */
+const TEST_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Run the compiler's test suite.
+ *
+ * @param live Let the suite write to this process's own streams rather than
+ *   reading it, for the runs a person is watching as they happen
+ */
+function runTestSuite(live: boolean): SuiteResult {
+  const result = live
+    ? spawnSync("npm", ["test"], { cwd: COMPILER_DIR, stdio: "inherit", timeout: TEST_TIMEOUT_MS })
+    : spawnSync("npm", ["test"], {
+        cwd: COMPILER_DIR,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+        timeout: TEST_TIMEOUT_MS,
+      });
+
+  if (result.error !== undefined) {
+    return {
+      completed: false,
+      passed: false,
+      failures: 0,
+      passedCount: 0,
+      output:
+        /timed out/i.test(result.error.message) && result.error.name === "Error"
+          ? `the suite did not finish within ${TEST_TIMEOUT_MS / 60000} minutes`
+          : `the suite could not be run: ${result.error.message}`,
+    };
+  }
+
+  const text = live ? "" : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const fail = /^# fail (\d+)$/m.exec(text);
+  const pass = /^# pass (\d+)$/m.exec(text);
+
+  return {
+    completed: true,
+    // The exit status is what settles it: a suite that fails to load a file
+    // says nothing the summary line would hold, and is a failure all the same.
+    passed: result.status === 0,
+    failures: Number.parseInt(fail?.[1] ?? "0", 10),
+    passedCount: Number.parseInt(pass?.[1] ?? "0", 10),
+    // The end of the output holds the failures and the summary, which is
+    // the part a refusal is about.
+    output: tailText(text, 3000),
+  };
+}
+
+/** Whether the compiler's suite passed, as a pass's own gate. */
+function testsPassed(): boolean {
+  const result = runTestSuite(true);
+  return result.completed && result.passed;
+}
+
+/** The end of a text, for a diagnostic. */
+function tailText(text: string, limit = 2000): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+  return `... [earlier output cut] ...\n${trimmed.slice(-limit)}`;
+}
+
+/**
+ * What is uncommitted in the compiler's repository, by `git status` line.
+ *
+ * The compiler's directory is inside the whole blaze repository, so this is
+ * the repository's state and not one directory's: a commit made from here
+ * stages what it is given and nothing else, and a revert made from here
+ * restores what it is given and nothing else, but `git add -A` and
+ * `git checkout -- .` are given everything.
+ */
+function uncommittedChanges(): string[] {
+  const result = spawnSync("git", ["status", "--porcelain"], {
+    cwd: COMPILER_DIR,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(`git status failed: ${result.stderr.trim()}`);
+  }
+  return result.stdout
+    .split("\n")
+    // An untracked file is nobody's tracked work: nothing this run does
+    // stages or restores one, so it is not in the way.
+    .filter((line) => line.trim() !== "" && !line.startsWith("??") && !line.startsWith("!!"));
+}
+
+/**
+ * Revert exactly the files this pass wrote.
+ *
+ * The whole tree is deliberately not restored: it is the user's repository,
+ * and a checkout of it would take their work in progress with it.
+ */
+function revertPass(files: readonly string[]): void {
+  const unique = [...new Set(files)];
+  if (unique.length === 0) return;
+  const result = spawnSync("git", ["checkout", "--", ...unique], {
     cwd: COMPILER_DIR,
     stdio: "inherit",
   });
   if (result.status !== 0) {
-    process.stderr.write("Failed to revert changes\n");
+    process.stderr.write(`Failed to revert: ${unique.join(", ")}\n`);
   }
 }
 
-function commitChanges(method: string, applied: readonly string[]): void {
-  const result = spawnSync("git", ["add", "-A"], { cwd: COMPILER_DIR, stdio: "inherit" });
+function commitChanges(method: string, applied: readonly string[], files: readonly string[]): void {
+  // Only what this pass wrote is staged: `git add -A` would take the whole
+  // repository with it, and the repository is the user's.
+  const unique = [...new Set(files)];
+  const result = spawnSync("git", ["add", "--", ...unique], { cwd: COMPILER_DIR, stdio: "inherit" });
   if (result.status !== 0) {
     process.stderr.write("Failed to stage changes\n");
+    return;
+  }
+  // A proposal that rewrote a line into itself stages nothing, and a commit
+  // of nothing is an error rather than a record of a pass.
+  const staged = spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: COMPILER_DIR });
+  if (staged.status === 0) {
+    process.stdout.write("Nothing to commit: the changes were already there as written.\n");
     return;
   }
   const message = `blazeopt: ${method} — ${applied.length} improvement(s)\n\n${applied.join("\n")}`;
@@ -249,16 +455,25 @@ function commitChanges(method: string, applied: readonly string[]): void {
 }
 
 async function main(argv: string[]): Promise<number> {
-  const parsed = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    options: {
-      "max-iterations": { type: "string" },
-      "benchmark-runs": { type: "string" },
-      methods: { type: "string" },
-      help: { type: "boolean", short: "h" },
-    },
-  });
+  let parsed;
+  try {
+    // Strict: an unknown option is a typo, and a typo that quietly falls
+    // back to a default is a run that does not do what was asked.
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      strict: true,
+      options: {
+        "max-iterations": { type: "string" },
+        "benchmark-runs": { type: "string" },
+        methods: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+  } catch (cause) {
+    process.stderr.write(`${cause instanceof Error ? cause.message : String(cause)}\n\n${USAGE}`);
+    return 1;
+  }
 
   if (parsed.values.help) {
     process.stdout.write(USAGE);
@@ -278,8 +493,13 @@ async function main(argv: string[]): Promise<number> {
     ? parseInt(parsed.values["benchmark-runs"], 10)
     : 5;
 
-  if (isNaN(maxIterations) || maxIterations < 1) {
+  if (isNaN(maxIterations) || !Number.isInteger(maxIterations) || maxIterations < 1) {
     process.stderr.write(`invalid --max-iterations\n\n${USAGE}`);
+    return 1;
+  }
+
+  if (isNaN(benchmarkRuns) || !Number.isInteger(benchmarkRuns) || benchmarkRuns < 1) {
+    process.stderr.write(`invalid --benchmark-runs\n\n${USAGE}`);
     return 1;
   }
 
@@ -301,25 +521,73 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
+  // A pass reverts the files it wrote and commits only those, and neither
+  // operation can tell this run's work from the user's — so the run begins
+  // from a tree that holds nothing but its own work. Anything already
+  // uncommitted is somebody else's, and is refused rather than risked.
+  let dirty: string[];
+  try {
+    dirty = uncommittedChanges();
+  } catch (cause) {
+    process.stderr.write(`${cause instanceof Error ? cause.message : String(cause)}\n`);
+    return 1;
+  }
+  if (dirty.length > 0) {
+    process.stderr.write(
+      "blazeopt: the working tree is not clean, so a pass could not tell its own changes from yours:\n" +
+        `${dirty.slice(0, 10).join("\n")}` +
+        `${dirty.length > 10 ? `\n... and ${dirty.length - 10} more` : ""}\n` +
+        "Commit or stash them and run blazeopt again.\n",
+    );
+    return 1;
+  }
+
   const options: Options = { maxIterations, benchmarkRuns, project };
 
+  let committedPasses = 0;
   process.stdout.write(`blazeopt: starting optimization loop (max ${maxIterations} iterations)\n`);
   process.stdout.write(`blazeopt: pass methods: ${methods.join(" → ")}\n`);
   if (project !== undefined) {
     process.stdout.write(`blazeopt: targeting project ${project.tomlPath}\n`);
   }
 
+  // A pass is judged by the compiler's suite, so what the suite says before
+  // anything is applied decides whether a pass can be judged at all. A
+  // suite that already fails would have every proposal reverted and blamed,
+  // which is a failure the model did not cause.
+  process.stdout.write("Running the compiler's test suite once to establish a baseline...\n");
+  const baseline = runTestSuite(false);
+  if (!baseline.completed) {
+    process.stderr.write(`blazeopt: the compiler's test suite did not run:\n${baseline.output}\n`);
+    return 1;
+  }
+  if (!baseline.passed) {
+    // A failure that is already there is not a failure a proposal caused,
+    // so a pass on this compiler could not be judged by its own suite.
+    const count = baseline.failures > 0 ? ` (${baseline.failures} failing)` : "";
+    process.stderr.write(
+      `blazeopt: the compiler's test suite already fails${count}, so no pass could be judged by it:\n${baseline.output}\n`,
+    );
+    return 1;
+  }
+  process.stdout.write(`blazeopt: the compiler's test suite passes (${baseline.passedCount} tests)\n`);
+
   for (let i = 0; i < maxIterations; i++) {
     const method = methods[i % methods.length];
     try {
-      await runPass(method, i + 1, options);
+      const committed = await runPass(method, i + 1, options);
+      if (committed) committedPasses += 1;
     } catch (cause) {
       process.stderr.write(`Pass ${i + 1} (${method}) failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
     }
   }
 
   process.stdout.write("\nblazeopt: optimization loop complete\n");
-  return 0;
+  process.stdout.write(`blazeopt: ${committedPasses} of ${maxIterations} pass(es) committed\n`);
+
+  // A run that committed nothing did not optimise anything: an exit of zero
+  // would tell whatever is reading it that this run had an effect.
+  return committedPasses > 0 ? 0 : 1;
 }
 
 try {

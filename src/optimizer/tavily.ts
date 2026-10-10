@@ -1,10 +1,11 @@
 /**
  * Tavily search integration for compiler optimization research.
  *
- * The compiler uses LLMs to review and propose fixes for both IR and target
- * code. This module adds the ability to search for external research on
- * compiler optimizations — either in general or targeted at a specific
- * project — using the Tavily search API.
+ * The optimizer searches for external research on compiler optimizations —
+ * either in general or targeted at a specific project — and reads the
+ * results as the context of a research pass, so the improvements proposed
+ * are grounded in what the papers say rather than in what the model
+ * remembers of them.
  *
  *   blazeopt                     general compiler optimization research
  *   blazeopt [projectPath]       research targeted at a specific project
@@ -13,6 +14,10 @@
  */
 
 const TAVILY_API_URL = "https://api.tavily.com/search";
+
+/** How long a search may take before it is abandoned, so a search that never
+ * answers costs a pass its place in the loop rather than the whole run. */
+const SEARCH_TIMEOUT_MS = 60_000;
 
 export interface TavilySearchResult {
   readonly title: string;
@@ -50,17 +55,26 @@ export async function searchTavily(
   apiKey: string,
   maxResults = 10,
 ): Promise<TavilyResponse> {
-  const response = await fetch(TAVILY_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      api_key: apiKey,
-      query,
-      search_depth: "advanced",
-      include_answer: true,
-      max_results: maxResults,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(TAVILY_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query,
+        search_depth: "advanced",
+        include_answer: true,
+        max_results: maxResults,
+      }),
+      signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new TavilyError(
+      `Tavily search failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      cause,
+    );
+  }
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -78,58 +92,6 @@ export async function searchTavily(
  */
 export function tavilyApiKey(): string | undefined {
   return process.env["TAVILY_API_KEY"] || undefined;
-}
-
-/**
- * Format Tavily search results for terminal output.
- */
-export function formatResults(response: TavilyResponse): string {
-  const lines: string[] = [];
-  lines.push(`Query: ${response.query}`);
-  lines.push("");
-
-  if (response.answer) {
-    lines.push("─".repeat(72));
-    lines.push("Summary");
-    lines.push("─".repeat(72));
-    lines.push(response.answer);
-    lines.push("");
-  }
-
-  lines.push("─".repeat(72));
-  lines.push("Sources");
-  lines.push("─".repeat(72));
-
-  for (const [i, result] of response.results.entries()) {
-    lines.push("");
-    lines.push(`${i + 1}. ${result.title}`);
-    lines.push(`   ${result.url}`);
-    // Wrap content at ~72 chars, indented
-    const wrapped = wrapText(result.content, 72, "   ");
-    lines.push(wrapped);
-  }
-
-  lines.push("");
-  return lines.join("\n");
-}
-
-/** Wrap text to a maximum line length with a prefix for continuation lines. */
-function wrapText(text: string, maxLength: number, prefix: string): string {
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let current = prefix;
-
-  for (const word of words) {
-    if (current.length + word.length + 1 > maxLength + prefix.length) {
-      lines.push(current);
-      current = prefix + word;
-    } else {
-      current = current === prefix ? prefix + word : `${current} ${word}`;
-    }
-  }
-  if (current !== prefix) lines.push(current);
-
-  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------

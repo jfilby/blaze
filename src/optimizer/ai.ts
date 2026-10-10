@@ -12,7 +12,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ProjectInfo } from "./project.ts";
 
 const COMPILER_DIR = join(import.meta.dirname, "..", "compiler");
@@ -239,18 +239,24 @@ function buildUserPrompt(
   return parts.join("\n");
 }
 
-function parseResponse(text: string): AiResponse {
-  // Strip markdown fences if present
-  let clean = text.trim();
-  if (clean.startsWith("```")) {
-    const firstNewline = clean.indexOf("\n");
-    const lastFence = clean.lastIndexOf("```");
-    if (firstNewline !== -1 && lastFence > firstNewline) {
-      clean = clean.slice(firstNewline + 1, lastFence).trim();
-    }
+/**
+ * Read the JSON answer a model gave back.
+ *
+ * Thrown when the answer holds no readable JSON object, naming the end of
+ * what was read so there is something to change in the next ask.
+ */
+export function parseResponse(text: string): AiResponse {
+  // An answer is read where its JSON object is, wherever the answer wrote
+  // it: a fence, a sentence before it, a note after it. Only the outermost
+  // braces are taken, so a `{` inside the answer's own text is left alone.
+  const trimmed = text.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end <= start) {
+    throw new Error(`the answer held no JSON object: ${tail(trimmed)}`);
   }
 
-  const data = JSON.parse(clean) as {
+  let data: {
     summary?: string;
     proposals?: Array<{
       file?: string;
@@ -259,9 +265,22 @@ function parseResponse(text: string): AiResponse {
       replacement?: string;
     }>;
   };
+  try {
+    data = JSON.parse(trimmed.slice(start, end + 1)) as typeof data;
+  } catch (cause) {
+    throw new Error(
+      `the answer's JSON could not be read (${cause instanceof Error ? cause.message : String(cause)}): ${tail(trimmed)}`,
+    );
+  }
 
   const proposals: Proposal[] = (data.proposals ?? [])
-    .filter((p) => p.file && p.description && p.original && p.replacement)
+    .filter(
+      (p) =>
+        typeof p.file === "string" && p.file !== "" &&
+        typeof p.description === "string" && p.description !== "" &&
+        typeof p.original === "string" && p.original !== "" &&
+        typeof p.replacement === "string",
+    )
     .map((p) => ({
       file: p.file!,
       description: p.description!,
@@ -275,21 +294,76 @@ function parseResponse(text: string): AiResponse {
   };
 }
 
+/** The end of an answer, for a refusal that says what was read. */
+function tail(text: string, limit = 300): string {
+  const trimmed = text.trim();
+  return trimmed.length <= limit ? trimmed : `... ${trimmed.slice(-limit)}`;
+}
+
+/**
+ * What became of one proposal.
+ *
+ * A proposal is applied verbatim, so every way it can be wrong is a way
+ * the compiler's source can be corrupted, and each of them is named rather
+ * than counted as one failure.
+ */
+export type ApplyOutcome =
+  | { readonly kind: "applied"; readonly path: string }
+  | { readonly kind: "outside-compiler" }
+  | { readonly kind: "test-file" }
+  | { readonly kind: "not-found" }
+  | { readonly kind: "ambiguous" }
+  | { readonly kind: "unchanged" }
+  | { readonly kind: "write-failed"; readonly path: string };
+
 /**
  * Apply a proposal to the compiler source.
- * Returns true if the change was applied, false if the original text was not found.
+ *
+ * The file a proposal names is checked before it is read: an answer's text
+ * is untrusted input, and a path that leaves the compiler — `../..`, an
+ * absolute one — is refused rather than followed. The original text has to
+ * appear exactly once, because the first occurrence is not necessarily the
+ * one the answer was looking at: this compiler repeats its own scaffolding,
+ * and a match written into the wrong copy is a change no test may notice.
  */
-export function applyProposal(proposal: Proposal): boolean {
-  const path = join(COMPILER_DIR, proposal.file);
+export function applyProposal(proposal: Proposal): ApplyOutcome {
+  const path = resolveWithinCompiler(proposal.file);
+  if (path === null) return { kind: "outside-compiler" };
+
+  // The test suite is the gate a pass is judged by, so a proposal that
+  // rewrites it would be judging itself.
+  if (/(^|\/)test\//.test(path) || /\.test\.ts$/.test(path)) return { kind: "test-file" };
+
+  let content: string;
   try {
-    const content = readFileSync(path, "utf8");
-    if (!content.includes(proposal.original)) {
-      return false;
-    }
-    const updated = content.replace(proposal.original, proposal.replacement);
-    writeFileSync(path, updated);
-    return true;
+    content = readFileSync(join(COMPILER_DIR, path), "utf8");
   } catch {
-    return false;
+    return { kind: "not-found" };
   }
+
+  if (proposal.original === "") return { kind: "not-found" };
+  const occurrences = content.split(proposal.original).length - 1;
+  if (occurrences === 0) return { kind: "not-found" };
+  if (occurrences > 1) return { kind: "ambiguous" };
+  if (proposal.original === proposal.replacement) return { kind: "unchanged" };
+
+  const updated = content.replace(proposal.original, proposal.replacement);
+  try {
+    writeFileSync(join(COMPILER_DIR, path), updated);
+  } catch {
+    return { kind: "write-failed", path };
+  }
+  return { kind: "applied", path };
+}
+
+/**
+ * The compiler-relative path a proposal may name, or null when it names
+ * something that is not a file inside the compiler.
+ */
+function resolveWithinCompiler(file: string): string | null {
+  if (file === "" || file.includes("\0")) return null;
+  const inside = resolve(COMPILER_DIR, file);
+  const path = relative(COMPILER_DIR, inside);
+  if (path === "" || path.startsWith("..") || isAbsolute(path)) return null;
+  return path;
 }
