@@ -40,14 +40,14 @@ interface CacheData {
   readonly entries: CacheEntry[];
 }
 
-export function loadCache(): CacheEntry[] {
+export function loadCache(cacheFile = CACHE_FILE, legacyFile = LEGACY_CACHE_FILE): CacheEntry[] {
   // A cache written beside the compiler is read once, so that the papers a
   // previous run already processed are not asked about again after the
   // cache has moved. It is not written back there.
-  if (!existsSync(CACHE_FILE) && existsSync(LEGACY_CACHE_FILE)) {
-    return read(LEGACY_CACHE_FILE);
+  if (!existsSync(cacheFile) && existsSync(legacyFile)) {
+    return read(legacyFile);
   }
-  return read(CACHE_FILE);
+  return read(cacheFile);
 }
 
 function read(path: string): CacheEntry[] {
@@ -67,10 +67,10 @@ function read(path: string): CacheEntry[] {
   }
 }
 
-export function saveCache(entries: readonly CacheEntry[]): void {
+export function saveCache(entries: readonly CacheEntry[], cacheFile = CACHE_FILE): void {
   const data: CacheData = { entries: [...entries] };
-  mkdirSync(dirname(CACHE_FILE), { recursive: true });
-  writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2));
+  mkdirSync(dirname(cacheFile), { recursive: true });
+  writeFileSync(cacheFile, JSON.stringify(data, null, 2));
 }
 
 /** Check if a paper was already processed (and is still within the weekly window). */

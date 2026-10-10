@@ -104,12 +104,17 @@ const SOURCE_BUDGET = 96_000;
 /** How much of the targeted project's source is shown. */
 const PROJECT_SOURCE_SHOWN = 4_000;
 
-/** Read compiler source files and return them as a single context string. */
-export function readCompilerSource(): string {
+/**
+ * Read compiler source files and return them as a single context string.
+ *
+ * @param compilerDir The directory the files are read from, overridable by a
+ *   test building its own
+ */
+export function readCompilerSource(compilerDir = COMPILER_DIR): string {
   const parts: string[] = [];
   let total = 0;
   for (const file of CONTEXT_FILES) {
-    const path = join(COMPILER_DIR, file);
+    const path = join(compilerDir, file);
     let content: string;
     try {
       content = readFileSync(path, "utf8");
@@ -325,9 +330,12 @@ export type ApplyOutcome =
  * appear exactly once, because the first occurrence is not necessarily the
  * one the answer was looking at: this compiler repeats its own scaffolding,
  * and a match written into the wrong copy is a change no test may notice.
+ *
+ * @param compilerDir The directory the file is read from and written to,
+ *   overridable by a test building its own
  */
-export function applyProposal(proposal: Proposal): ApplyOutcome {
-  const path = resolveWithinCompiler(proposal.file);
+export function applyProposal(proposal: Proposal, compilerDir = COMPILER_DIR): ApplyOutcome {
+  const path = resolveWithinCompiler(proposal.file, compilerDir);
   if (path === null) return { kind: "outside-compiler" };
 
   // The test suite is the gate a pass is judged by, so a proposal that
@@ -336,7 +344,7 @@ export function applyProposal(proposal: Proposal): ApplyOutcome {
 
   let content: string;
   try {
-    content = readFileSync(join(COMPILER_DIR, path), "utf8");
+    content = readFileSync(join(compilerDir, path), "utf8");
   } catch {
     return { kind: "not-found" };
   }
@@ -349,7 +357,7 @@ export function applyProposal(proposal: Proposal): ApplyOutcome {
 
   const updated = content.replace(proposal.original, proposal.replacement);
   try {
-    writeFileSync(join(COMPILER_DIR, path), updated);
+    writeFileSync(join(compilerDir, path), updated);
   } catch {
     return { kind: "write-failed", path };
   }
@@ -360,10 +368,10 @@ export function applyProposal(proposal: Proposal): ApplyOutcome {
  * The compiler-relative path a proposal may name, or null when it names
  * something that is not a file inside the compiler.
  */
-function resolveWithinCompiler(file: string): string | null {
+function resolveWithinCompiler(file: string, compilerDir: string): string | null {
   if (file === "" || file.includes("\0")) return null;
-  const inside = resolve(COMPILER_DIR, file);
-  const path = relative(COMPILER_DIR, inside);
+  const inside = resolve(compilerDir, file);
+  const path = relative(compilerDir, inside);
   if (path === "" || path.startsWith("..") || isAbsolute(path)) return null;
   return path;
 }

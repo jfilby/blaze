@@ -31,7 +31,7 @@ export interface BenchmarkResult {
 }
 
 /** The part of hyperfine's JSON export this module reads. */
-interface HyperfineExport {
+export interface HyperfineExport {
   readonly results?: Array<{ mean: number; stddev: number; times: number[] }>;
 }
 
@@ -99,32 +99,45 @@ export async function benchmark(
     });
 
     const data = JSON.parse(await readFile(exportPath, "utf8")) as HyperfineExport;
-    const first = data.results?.[0];
-    if (first === undefined || typeof first.mean !== "number" || !Number.isFinite(first.mean)) {
-      throw new Error("hyperfine returned no usable result");
-    }
-
-    // A run that times nothing, or that hyperfine refused to time, would
-    // read as a mean of zero and as an unlimited speedup.
-    const times = Array.isArray(first.times)
-      ? first.times.filter((t): t is number => typeof t === "number" && t > 0)
-      : [];
-    if (first.mean <= 0 || times.length === 0) {
-      throw new Error("hyperfine measured the command as taking no time");
-    }
-
-    return {
-      mean: first.mean,
-      // One run has no spread, and hyperfine says so with a null rather
-      // than a zero: read it as no measured spread rather than no result.
-      stddev:
-        typeof first.stddev === "number" && Number.isFinite(first.stddev) ? first.stddev : 0,
-      runs: times.length,
-      unit: "s",
-    };
+    return readHyperfineResult(data);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * What one hyperfine export says, read from the export's own JSON.
+ *
+ * The shape is hyperfine's and not an array of results: a top level object
+ * with a `results` array, each entry of which carries the mean and the
+ * spread over its own runs. A single run has no spread, and hyperfine says so
+ * with a null rather than a zero.
+ *
+ * @param export The parsed `--export-json` document
+ * @returns The first benchmark's mean, spread and run count
+ */
+export function readHyperfineResult(data: HyperfineExport): BenchmarkResult {
+  const first = data.results?.[0];
+  if (first === undefined || typeof first.mean !== "number" || !Number.isFinite(first.mean)) {
+    throw new Error("hyperfine returned no usable result");
+  }
+
+  // A run that times nothing, or that hyperfine refused to time, would read
+  // as a mean of zero and as an unlimited speedup.
+  const times = Array.isArray(first.times)
+    ? first.times.filter((t): t is number => typeof t === "number" && t > 0)
+    : [];
+  if (first.mean <= 0 || times.length === 0) {
+    throw new Error("hyperfine measured the command as taking no time");
+  }
+
+  return {
+    mean: first.mean,
+    stddev:
+      typeof first.stddev === "number" && Number.isFinite(first.stddev) ? first.stddev : 0,
+    runs: times.length,
+    unit: "s",
+  };
 }
 
 /**

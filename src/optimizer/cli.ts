@@ -26,7 +26,9 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
 import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
@@ -39,7 +41,8 @@ const COMPILER_DIR = join(import.meta.dirname, "..", "compiler");
 
 const VALID_METHODS: readonly PassMethod[] = ["research", "build-feedback", "code-review"];
 
-function parseMethods(value: string): PassMethod[] | null {
+/** The methods a methods list names, or null when it names none of them. */
+export function parseMethods(value: string): PassMethod[] | null {
   const parts = value.split(",").map((m) => m.trim());
   const methods: PassMethod[] = [];
   for (const part of parts) {
@@ -224,7 +227,8 @@ async function runPass(
  * the slowdown is larger than the two benchmarks' own spread could produce
  * on its own.
  */
-function isSlower(before: BenchmarkResult, after: BenchmarkResult): boolean {
+/** The threshold the measurement has to clear before a change is slower. */
+export function isSlower(before: BenchmarkResult, after: BenchmarkResult): boolean {
   const delta = after.mean - before.mean;
   if (delta <= 0) return false;
 
@@ -310,7 +314,7 @@ async function gatherBuildFeedbackContext(project?: ProjectInfo): Promise<string
  * applied is what tells a failure the model caused from one that was
  * already there.
  */
-interface SuiteResult {
+export interface SuiteResult {
   /** Whether the suite ran to the end: a suite killed by the bound, or one
    *  that could not be started, has said nothing about the compiler. */
   readonly completed: boolean;
@@ -334,11 +338,11 @@ const TEST_TIMEOUT_MS = 30 * 60 * 1000;
  * @param live Let the suite write to this process's own streams rather than
  *   reading it, for the runs a person is watching as they happen
  */
-function runTestSuite(live: boolean): SuiteResult {
+export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteResult {
   const result = live
-    ? spawnSync("npm", ["test"], { cwd: COMPILER_DIR, stdio: "inherit", timeout: TEST_TIMEOUT_MS })
+    ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", timeout: TEST_TIMEOUT_MS })
     : spawnSync("npm", ["test"], {
-        cwd: COMPILER_DIR,
+        cwd: compilerDir,
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
         timeout: TEST_TIMEOUT_MS,
@@ -396,9 +400,9 @@ function tailText(text: string, limit = 2000): string {
  * restores what it is given and nothing else, but `git add -A` and
  * `git checkout -- .` are given everything.
  */
-function uncommittedChanges(): string[] {
+export function uncommittedChanges(compilerDir = COMPILER_DIR): string[] {
   const result = spawnSync("git", ["status", "--porcelain"], {
-    cwd: COMPILER_DIR,
+    cwd: compilerDir,
     encoding: "utf8",
   });
   if (result.status !== 0) {
@@ -417,11 +421,11 @@ function uncommittedChanges(): string[] {
  * The whole tree is deliberately not restored: it is the user's repository,
  * and a checkout of it would take their work in progress with it.
  */
-function revertPass(files: readonly string[]): void {
+export function revertPass(files: readonly string[], compilerDir = COMPILER_DIR): void {
   const unique = [...new Set(files)];
   if (unique.length === 0) return;
   const result = spawnSync("git", ["checkout", "--", ...unique], {
-    cwd: COMPILER_DIR,
+    cwd: compilerDir,
     stdio: "inherit",
   });
   if (result.status !== 0) {
@@ -429,24 +433,29 @@ function revertPass(files: readonly string[]): void {
   }
 }
 
-function commitChanges(method: string, applied: readonly string[], files: readonly string[]): void {
+export function commitChanges(
+  method: string,
+  applied: readonly string[],
+  files: readonly string[],
+  compilerDir = COMPILER_DIR,
+): void {
   // Only what this pass wrote is staged: `git add -A` would take the whole
   // repository with it, and the repository is the user's.
   const unique = [...new Set(files)];
-  const result = spawnSync("git", ["add", "--", ...unique], { cwd: COMPILER_DIR, stdio: "inherit" });
+  const result = spawnSync("git", ["add", "--", ...unique], { cwd: compilerDir, stdio: "inherit" });
   if (result.status !== 0) {
     process.stderr.write("Failed to stage changes\n");
     return;
   }
   // A proposal that rewrote a line into itself stages nothing, and a commit
   // of nothing is an error rather than a record of a pass.
-  const staged = spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: COMPILER_DIR });
+  const staged = spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: compilerDir });
   if (staged.status === 0) {
     process.stdout.write("Nothing to commit: the changes were already there as written.\n");
     return;
   }
   const message = `blazeopt: ${method} — ${applied.length} improvement(s)\n\n${applied.join("\n")}`;
-  const commit = spawnSync("git", ["commit", "-m", message], { cwd: COMPILER_DIR, stdio: "inherit" });
+  const commit = spawnSync("git", ["commit", "-m", message], { cwd: compilerDir, stdio: "inherit" });
   if (commit.status === 0) {
     process.stdout.write(`Committed ${applied.length} change(s)\n`);
   } else {
@@ -590,9 +599,29 @@ async function main(argv: string[]): Promise<number> {
   return committedPasses > 0 ? 0 : 1;
 }
 
-try {
-  process.exitCode = await main(process.argv.slice(2));
-} catch (cause) {
-  process.stderr.write(`blazeopt failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
-  process.exitCode = 1;
+/**
+ * Whether this module is the thing being run, rather than read.
+ *
+ * The command is the module, so a test that imports it to read the pass flow
+ * would otherwise start optimising the compiler while the tests run: the
+ * symlink `npm link` installs is resolved back to this file, and compared
+ * against it.
+ */
+function isInvoked(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isInvoked()) {
+  try {
+    process.exitCode = await main(process.argv.slice(2));
+  } catch (cause) {
+    process.stderr.write(`blazeopt failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+    process.exitCode = 1;
+  }
 }
