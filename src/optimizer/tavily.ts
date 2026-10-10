@@ -6,8 +6,8 @@
  * compiler optimizations — either in general or targeted at a specific
  * project — using the Tavily search API.
  *
- *   blaze tavily                     general compiler optimization research
- *   blaze tavily [projectPath]       research targeted at a specific project
+ *   blazeopt                     general compiler optimization research
+ *   blazeopt [projectPath]       research targeted at a specific project
  *
  * The API key comes from the TAVILY_API_KEY environment variable.
  */

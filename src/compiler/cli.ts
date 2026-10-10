@@ -9,18 +9,15 @@
  *   blaze benchmark <project>  re-benchmark the selected candidate of a build
  *   blaze inspect <project>    print the build record
  *   blaze projects             list the projects in .blaze/projects
- *   blaze tavily [project]     search for compiler optimization research
  *
  * All state is written to `.blaze/` in the current directory. Model
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
 import { existsSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { parse as parseToml } from "smol-toml";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
@@ -48,7 +45,6 @@ import {
   type RuntimeKind,
 } from "./core/types.ts";
 import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./core/terminal-title.ts";
-import { craftQuery, extractProjectContext, formatResults, searchTavily, tavilyApiKey } from "./ai/tavily.ts";
 
 /**
  * The tab title of a command that is working. A command that answers at once
@@ -78,7 +74,6 @@ Usage:
   blaze benchmark <project>                re-benchmark the selected candidate
   blaze inspect <project>                  print the build record
   blaze projects                           list ${STATE_DIRECTORY}/projects
-  blaze tavily [project]                   search for compiler optimization research
 
 build, generate and ir take ./${PROJECT_FILE} when no path is given, and a directory
 holding one names its project; any other .toml names its own. State is written
@@ -130,7 +125,6 @@ Environment:
   COMMANDCODE_API_KEY, COMMAND_CODE_API_KEY, COMMANDCODE_BASE_URL,
   OPENCODE_GO_BASE_URL
   OPENROUTER_SITE_URL, OPENROUTER_APP_NAME   optional OpenRouter attribution
-  TAVILY_API_KEY                            enables blaze tavily
 `;
 
 function consoleReporter(): Reporter {
@@ -335,73 +329,6 @@ function selectedLabel(build: BuildStatus): string {
   return names.map((name) => `${name}#${selected[name]}`).join(",");
 }
 
-/**
- * `blaze tavily [projectPath]` — search for compiler optimization research.
- *
- * With no project path, searches for general compiler optimization research.
- * With a project path, reads the project's source to understand what the
- * program does and crafts a targeted query.
- */
-async function runTavily(argument: string | undefined): Promise<number> {
-  const apiKey = tavilyApiKey();
-  if (!apiKey) {
-    process.stderr.write(
-      "TAVILY_API_KEY is not set. Get a key at https://tavily.com and set it:\n" +
-        "  export TAVILY_API_KEY=tvly-...\n",
-    );
-    return 1;
-  }
-
-  let projectContext: string | undefined;
-
-  if (argument !== undefined) {
-    // Resolve the project path: a directory containing blaze.toml, or a .toml file
-    const inputPath = resolve(process.cwd(), argument);
-    let tomlPath: string;
-    if (existsSync(inputPath) && !inputPath.endsWith(".toml")) {
-      tomlPath = join(inputPath, PROJECT_FILE);
-    } else {
-      tomlPath = inputPath;
-    }
-
-    if (!existsSync(tomlPath)) {
-      process.stderr.write(`no ${PROJECT_FILE} at ${tomlPath}\n`);
-      return 1;
-    }
-
-    try {
-      const toml = parseToml(await readFile(tomlPath, "utf8")) as { sourceFile?: string };
-      if (!toml.sourceFile) {
-        process.stderr.write(`${tomlPath} does not name a sourceFile\n`);
-        return 1;
-      }
-      const sourcePath = resolve(dirname(tomlPath), toml.sourceFile);
-      if (!existsSync(sourcePath)) {
-        process.stderr.write(`source file not found: ${sourcePath}\n`);
-        return 1;
-      }
-      const source = await readFile(sourcePath, "utf8");
-      projectContext = extractProjectContext(source);
-    } catch (cause) {
-      process.stderr.write(`failed to read project: ${cause instanceof Error ? cause.message : String(cause)}\n`);
-      return 1;
-    }
-  }
-
-  const query = craftQuery(projectContext);
-  const title = titleAnimation("tavily");
-  try {
-    const response = await searchTavily(query, apiKey);
-    title.stop("ok");
-    process.stdout.write(formatResults(response) + "\n");
-  } catch (cause) {
-    title.stop("fail");
-    process.stderr.write(`tavily search failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
-    return 1;
-  }
-  return 0;
-}
-
 async function main(argv: string[]): Promise<number> {
   const parsed = parseArgs({
     args: argv,
@@ -510,9 +437,6 @@ async function main(argv: string[]): Promise<number> {
         process.stdout.write(`${project}${state}\n`);
       }
       return 0;
-    }
-    case "tavily": {
-      return await runTavily(argument);
     }
     default:
       process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);

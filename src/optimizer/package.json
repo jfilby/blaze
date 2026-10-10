@@ -1,0 +1,23 @@
+{
+  "name": "blaze-optimizer",
+  "version": "0.1.0",
+  "description": "Compiler optimization research tool: search for techniques using Tavily",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "blazeopt": "cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "smol-toml": "^1.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
