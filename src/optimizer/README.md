@@ -66,7 +66,7 @@ whole working tree, which is the user's repository.
 
 | variable | what it is for |
 |---|---|
-| `AI_MODEL` | `provider/model`, e.g. `anthropic/claude-sonnet-4-5` |
+| `AI_MODEL` | `provider/model`, e.g. `anthropic/claude-sonnet-4-5`. With a project, its `blaze.toml` is read instead when this is not set |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` | provider keys |
 | `TAVILY_API_KEY` | the `research` method's searches |
 
@@ -84,3 +84,9 @@ The suite covers what a proposal is allowed to do to a file, what is read
 back out of what a model wrote, what the commands do to a repository, and
 what the records add up to in a report. It needs no API key and no network,
 and it takes a couple of seconds.
+
+A run asks one model, and it is the model a build of the project asks: the
+environment's, or the project's own when the environment names none. Which
+model is resolved, and how a provider is constructed, are the compiler's own
+code — `ai/model.ts` and `ai/backend.ts` — so a project that compiles with a
+model is a project the optimizer asks.

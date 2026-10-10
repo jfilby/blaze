@@ -4,13 +4,15 @@
  * Uses the Vercel AI SDK to send compiler source code and context
  * (research papers, build feedback, or neither) to a language model
  * and receive structured code change proposals.
+ *
+ * Which model is asked, and how a provider is constructed, are the
+ * compiler's own: a run asks the model the build it is aimed at would ask,
+ * named by the environment or by the project's own selection.
  */
 
 import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { languageModelFor } from "../compiler/ai/backend.ts";
+import { resolveModel } from "../compiler/ai/model.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ProjectInfo } from "./project.ts";
@@ -33,59 +35,6 @@ export interface AiResponse {
 
 /** The three ways a run works. */
 export type Method = "research" | "build-feedback" | "code-review";
-
-/**
- * Resolve the AI model from environment variables.
- * Uses AI_MODEL (e.g. "anthropic/claude-sonnet-4-5") and provider API keys.
- */
-/** The model a run would ask, named the way the environment names it. */
-export function modelSpec(): string | null {
-  const spec = process.env["AI_MODEL"];
-  return spec === undefined || spec.trim() === "" ? null : spec.trim();
-}
-
-function resolveModel() {
-  const spec = process.env["AI_MODEL"];
-  if (!spec) return undefined;
-
-  const slash = spec.indexOf("/");
-  if (slash === -1) return undefined;
-  const provider = spec.slice(0, slash);
-  const model = spec.slice(slash + 1);
-
-  switch (provider) {
-    case "anthropic": {
-      const apiKey = process.env["ANTHROPIC_API_KEY"] ?? process.env["AI_API_KEY"];
-      if (!apiKey) return undefined;
-      return createAnthropic({ apiKey })(model);
-    }
-    case "google": {
-      const apiKey = process.env["GOOGLE_GENERATIVE_AI_API_KEY"] ?? process.env["AI_API_KEY"];
-      if (!apiKey) return undefined;
-      return createGoogleGenerativeAI({ apiKey })(model);
-    }
-    case "openai": {
-      const apiKey = process.env["OPENAI_API_KEY"] ?? process.env["AI_API_KEY"];
-      if (!apiKey) return undefined;
-      return createOpenAI({ apiKey })(model);
-    }
-    case "openai-compatible":
-    case "opencode-go": {
-      const apiKey = process.env["OPENCODE_API_KEY"] ?? process.env["AI_API_KEY"];
-      if (!apiKey) return undefined;
-      const baseURL = process.env["AI_BASE_URL"] ?? "https://opencode.ai/zen/go/v1";
-      return createOpenAICompatible({ apiKey, baseURL, name: "openai-compatible" })(model);
-    }
-    case "openrouter": {
-      const apiKey = process.env["OPENROUTER_API_KEY"] ?? process.env["AI_API_KEY"];
-      if (!apiKey) return undefined;
-      const baseURL = "https://openrouter.ai/api/v1";
-      return createOpenAICompatible({ apiKey, baseURL, name: "openrouter" })(model);
-    }
-    default:
-      return undefined;
-  }
-}
 
 /** Key compiler source files to include as context. */
 const CONTEXT_FILES = [
@@ -140,11 +89,61 @@ export function readCompilerSource(compilerDir = COMPILER_DIR): string {
 }
 
 /**
+ * The model a run would ask, named the way the environment names it.
+ */
+export function modelSpec(): string | null {
+  const spec = process.env["AI_MODEL"];
+  return spec === undefined || spec.trim() === "" ? null : spec.trim();
+}
+
+/**
+ * The model a run asks: the environment's, or the project's own when the
+ * environment names none.
+ *
+ * A project already knows what it is compiled with, so a run aimed at one
+ * asks that when `AI_MODEL` is not set — the same model the build it is
+ * aimed at would ask.
+ */
+export function modelToAsk(project?: ProjectInfo): string | null {
+  return modelSpec() ?? project?.model ?? null;
+}
+
+/**
+ * Why no model could be asked, or null when one could be.
+ *
+ * Every method proposes through a model, so a session that cannot ask one
+ * cannot do anything at all. This is asked before the session does anything,
+ * because the answer is the same at the start of a run as it is at the end of
+ * one — and finding it out at the end means a baseline suite, a project build
+ * and three turns of the loop have been spent learning what a look at the
+ * environment says.
+ */
+export function modelProblem(project?: ProjectInfo): string | null {
+  const spec = modelToAsk(project);
+  if (spec === null) {
+    return project === undefined
+      ? "no AI_MODEL is set: it names the provider and the model, as anthropic/claude-sonnet-4-5"
+      : `no AI_MODEL is set and ${project.tomlPath} names no model`;
+  }
+  // The compiler's own resolver is what says whether a spec can be asked: it
+  // is the same one a build resolves with, and it names the key that is absent.
+  try {
+    resolveModel(spec, process.env);
+    return null;
+  } catch (cause) {
+    const error = cause as { message?: string; detail?: string };
+    const detail = error.detail === undefined ? "" : ` (${error.detail})`;
+    return `the model ${spec} cannot be asked: ${error.message ?? String(cause)}${detail}`;
+  }
+}
+
+/**
  * Propose compiler improvements using the AI SDK.
  *
- * @param method The pass method (research, build-feedback, or code-review)
+ * @param method The way this run works: research, build-feedback or code-review
  * @param context Additional context (research papers or build feedback)
- * @param project The project the run is targeting, if any
+ * @param project The project the run is targeting, if any, whose own model the
+ *   run asks when the environment names none
  * @returns The AI's proposals
  */
 export async function proposeImprovements(
@@ -152,12 +151,15 @@ export async function proposeImprovements(
   context: string,
   project?: ProjectInfo,
 ): Promise<AiResponse> {
-  const model = resolveModel();
-  if (!model) {
-    throw new Error(
-      "No AI model configured. Set AI_MODEL (e.g. anthropic/claude-sonnet-4-5) and the provider's API key.",
-    );
+  const problem = modelProblem(project);
+  if (problem !== null) {
+    throw new Error(`${problem}.\nSet it in the environment and run blazeopt again.`);
   }
+
+  // The model the compiler would resolve for this run, constructed by the
+  // compiler's own provider code rather than by a second copy of it.
+  const configuration = resolveModel(modelToAsk(project) ?? "", process.env);
+  const model = languageModelFor(configuration);
 
   const source = readCompilerSource();
   const systemPrompt = buildSystemPrompt(method);

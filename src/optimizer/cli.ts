@@ -34,7 +34,7 @@ import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
 import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
 import { benchmarkCompiler, type BenchmarkResult } from "./benchmark.ts";
 import { gatherBuildFeedback } from "./build-feedback.ts";
-import { proposeImprovements, applyProposal, modelSpec, type Method } from "./ai.ts";
+import { proposeImprovements, applyProposal, modelProblem, modelToAsk, type Method } from "./ai.ts";
 import { loadProject, type ProjectInfo } from "./project.ts";
 import {
   newId,
@@ -101,7 +101,9 @@ Options:
 
 Environment:
   TAVILY_API_KEY         enables research runs
-  AI_MODEL               provider/model for the AI SDK (e.g. anthropic/claude-sonnet-4-5)
+  AI_MODEL               provider/model for the AI SDK (e.g. anthropic/claude-sonnet-4-5).
+                         With a project, its blaze.toml is read instead when this
+                         is not set, because a build of it would ask that model.
   ANTHROPIC_API_KEY      Anthropic API key
   OPENAI_API_KEY         OpenAI API key
   GOOGLE_GENERATIVE_AI_API_KEY  Google API key
@@ -621,7 +623,10 @@ async function main(argv: string[]): Promise<number> {
   const session: Mutable<SessionContext> = {
     id: newId(new Date(startedAt)),
     startedAt: new Date(startedAt).toISOString(),
-    model: modelSpec(),
+    // The model this session asks. The project is not read yet — a path
+    // that names no project is refused, and that refusal is recorded — so
+    // this is the environment's model until the project's own is known.
+    model: modelToAsk(),
     project: null,
     methods,
     maxIterations,
@@ -667,6 +672,9 @@ async function main(argv: string[]): Promise<number> {
     try {
       project = await loadProject(positionals[0]);
       session.project = project.tomlPath;
+      // Which model the session asks, now that the project it is aimed at has
+      // been read: its own, when the environment names none.
+      session.model = modelToAsk(project);
     } catch (cause) {
       return refuse(1, cause instanceof Error ? cause.message : String(cause));
     }
@@ -692,10 +700,21 @@ async function main(argv: string[]): Promise<number> {
     );
   }
 
+  // A run proposes through a model, so a session that cannot ask one cannot
+  // do anything at all. This is asked before the baseline suite is run rather
+  // than at the end of the first turn of the loop: the answer does not change,
+  // and finding it out late costs a suite run and a build to learn what the
+  // environment already says.
+  const problem = modelProblem(project);
+  if (problem !== null) {
+    return refuse(1, `blazeopt: ${problem}.\n${modelAdvice(project)}`);
+  }
+
   const options: Options = { maxIterations, benchmarkRuns, project };
 
   process.stdout.write(`blazeopt: starting optimization loop (max ${maxIterations} runs)\n`);
   process.stdout.write(`blazeopt: methods: ${methods.join(" → ")}\n`);
+  process.stdout.write(`blazeopt: model: ${session.model === null ? "none" : session.model}\n`);
   if (project !== undefined) {
     process.stdout.write(`blazeopt: targeting project ${project.tomlPath}\n`);
   }
@@ -740,6 +759,17 @@ async function main(argv: string[]): Promise<number> {
   // A session that committed nothing did not optimise anything: an exit of
   // zero would tell whatever is reading it that this session had an effect.
   return finish(committed > 0 ? 0 : 1);
+}
+
+/** What to set, given whether a project named a model of its own. */
+function modelAdvice(project: ProjectInfo | undefined): string {
+  if (project !== undefined && project.model !== null) {
+    return (
+      `The project names ${project.model}, so that is what a build of it asks: set its provider's API key, ` +
+        `or name another model with AI_MODEL.`
+    );
+  }
+  return "Set AI_MODEL to provider/model (for example anthropic/claude-sonnet-4-5) in the environment and try again.";
 }
 
 /** A run that was asked for and died before it could be judged. */

@@ -287,6 +287,47 @@ function reviewPrompts(request: ReviewRequest): { system: string; user: string }
   return { system, user };
 }
 
+/**
+ * The AI SDK model a provider configuration constructs.
+ *
+ * Provider construction is the only provider-specific code in the compiler,
+ * and it is written once here rather than once per caller: `blazeopt` asks
+ * the models a build asks, off a project's own selection, and a second copy
+ * of these branches would be a place for the two to drift apart.
+ */
+export function languageModelFor(configuration: ModelConfiguration): LanguageModel {
+  const apiKey = configuration.apiKey ?? "";
+  const baseURL = configuration.baseUrl;
+
+  if (configuration.provider === "openai") {
+    return createOpenAI(apiKey === "" ? undefined : { apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
+  }
+  if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible" || configuration.provider === "opencode-go") {
+    if (baseURL === undefined) throw reviewError(`${configuration.provider} has no endpoint`);
+    return createOpenAICompatible({
+      name: configuration.provider,
+      baseURL,
+      apiKey,
+      ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
+    })(configuration.model);
+  }
+  if (configuration.provider === "commandcode") {
+    if (baseURL === undefined) throw reviewError("commandcode has no endpoint");
+    return createCommandCode({
+      apiKey,
+      baseUrl: baseURL,
+      ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
+    })(configuration.model);
+  }
+  if (configuration.provider === "anthropic") {
+    return createAnthropic({ apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
+  }
+  if (configuration.provider === "google") {
+    return createGoogleGenerativeAI({ apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
+  }
+  throw reviewError(`provider "${configuration.provider}" cannot be used for reviews`);
+}
+
 export class VercelAiBackend implements AiBackend {
   readonly id: string;
   private readonly configuration: ModelConfiguration;
@@ -310,35 +351,7 @@ export class VercelAiBackend implements AiBackend {
    * everything else is expressed through the AI SDK abstraction.
    */
   private async languageModel(): Promise<LanguageModel> {
-    if (this.model !== null) return this.model;
-    const configuration = this.configuration;
-    const apiKey = configuration.apiKey ?? "";
-    const baseURL = configuration.baseUrl;
-
-    if (configuration.provider === "openai") {
-      this.model = createOpenAI(apiKey === "" ? undefined : { apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
-    } else if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible" || configuration.provider === "opencode-go") {
-      if (baseURL === undefined) throw reviewError(`${configuration.provider} has no endpoint`);
-      this.model = createOpenAICompatible({
-        name: configuration.provider,
-        baseURL,
-        apiKey,
-        ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
-      })(configuration.model);
-    } else if (configuration.provider === "commandcode") {
-      if (baseURL === undefined) throw reviewError("commandcode has no endpoint");
-      this.model = createCommandCode({
-        apiKey,
-        baseUrl: baseURL,
-        ...(configuration.headers === undefined ? {} : { headers: configuration.headers }),
-      })(configuration.model);
-    } else if (configuration.provider === "anthropic") {
-      this.model = createAnthropic({ apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
-    } else if (configuration.provider === "google") {
-      this.model = createGoogleGenerativeAI({ apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
-    } else {
-      throw reviewError(`provider "${configuration.provider}" cannot be used for reviews`);
-    }
+    this.model ??= languageModelFor(this.configuration);
     return this.model;
   }
 

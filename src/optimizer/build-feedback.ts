@@ -105,10 +105,20 @@ function runBuild(args: readonly string[], cwd: string): Promise<BuildFeedback> 
       const { prompts, answers } = extractDebug(stderr);
 
       if (prompts.length === 0 && answers.length === 0) {
-        // A build with no model configured reviews nothing, and a build
-        // that fails before any review has sent no prompt either. Either
-        // way there is no feedback to propose from, and the tail of the
-        // output says which it was.
+        // The two reasons there is nothing to read are told apart here rather
+        // than left to whoever reads the error. A build with no model reviews
+        // nothing at all and says so in its own output; a build that failed
+        // before it reviewed anything says something else, and the tail of
+        // what it said is what identifies it.
+        if (/Model:\s*\(unset\)/.test(stdout)) {
+          reject(
+            new Error(
+              "the build reviewed nothing because no model is configured: its own output says \"Model: (unset)\"\n" +
+                "A build-feedback run is the reviewer's prompts and answers, so it needs a model to review with.",
+            ),
+          );
+          return;
+        }
         const detail = tail(stderr) || tail(stdout);
         reject(new Error(`the build produced no review output (exit ${String(code)})${detail ? `:\n${detail}` : ""}`));
         return;

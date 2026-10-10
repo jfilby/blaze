@@ -11,9 +11,30 @@
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { loadProject, ProjectError } from "../project.ts";
 import { craftQuery, extractProjectContext } from "../tavily.ts";
+import { modelProblem, modelSpec, modelToAsk } from "../ai.ts";
+
+/**
+ * The environment a model is resolved from, restored after these tests.
+ *
+ * `process.env.X = undefined` writes the string \"undefined\", so a variable
+ * is taken away with `delete` and put back as the string it was.
+ */
+const ENVIRONMENT = { ...process.env };
+
+after(() => {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in ENVIRONMENT)) delete process.env[key];
+  }
+  Object.assign(process.env, ENVIRONMENT);
+});
+
+/** Take a variable out of the environment. */
+function without(keys: readonly string[]): void {
+  for (const key of keys) delete process.env[key];
+}
 import { scratch } from "./scratch.ts";
 
 /** A project directory naming a source file. */
@@ -92,4 +113,105 @@ test("the query is steered by what the source does", () => {
 test("a source holding nothing distinctive is read as holding nothing", () => {
   assert.equal(extractProjectContext(""), "");
   assert.equal(craftQuery(extractProjectContext("")), craftQuery(""));
+});
+
+test("no model in the environment is a problem named before a session starts", () => {
+  without(["AI_MODEL", "ANTHROPIC_API_KEY", "AI_API_KEY", "OPENAI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]);
+
+  assert.equal(modelSpec(), null);
+  assert.match(modelProblem() ?? "", /no AI_MODEL is set/);
+});
+
+test("a model whose provider has no key is a problem too", () => {
+  process.env["AI_MODEL"] = "anthropic/claude-sonnet-4-5";
+  without(["ANTHROPIC_API_KEY", "AI_API_KEY"]);
+
+  assert.equal(modelSpec(), "anthropic/claude-sonnet-4-5");
+  // The compiler's own resolver says which keys would serve.
+  assert.match(modelProblem() ?? "", /cannot be asked: missing API key for provider "anthropic"/);
+  assert.match(modelProblem() ?? "", /set one of ANTHROPIC_API_KEY/);
+});
+
+test("a model with its key is not a problem", () => {
+  process.env["AI_MODEL"] = "anthropic/claude-sonnet-4-5";
+  process.env["ANTHROPIC_API_KEY"] = "a-key";
+
+  assert.equal(modelProblem(), null);
+});
+
+test("the model a project names is read the way the compiler reads it", async () => {
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), [
+    'sourceFile = "main.ts"',
+    'model = "anthropic/claude-sonnet-4-5"',
+    'output = "machine"',
+  ].join("\n") + "\n");
+
+  assert.equal((await loadProject(dir)).model, "anthropic/claude-sonnet-4-5");
+});
+
+test("a project may name its model as a table", async () => {
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), [
+    'sourceFile = "main.ts"',
+    '[model]',
+    'provider = "openai"',
+    'model = "gpt-5"',
+  ].join("\n") + "\n");
+
+  assert.equal((await loadProject(dir)).model, "openai/gpt-5");
+});
+
+test("a project that names no model reads as one that names none", async () => {
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\n');
+
+  assert.equal((await loadProject(dir)).model, null);
+});
+
+test("a project's model that cannot be used is refused, saying why", async () => {
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), [
+    'sourceFile = "main.ts"',
+    '[model]',
+    'provider = "anthropic"',
+  ].join("\n") + "\n");
+
+  await assert.rejects(() => loadProject(dir), /names a model that cannot be used/);
+});
+
+test("a run aimed at a project asks the project's own model when the environment names none", async () => {
+  without(["AI_MODEL", "ANTHROPIC_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"]);
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\nmodel = "openai/gpt-5"\n');
+  const project = await loadProject(dir);
+
+  assert.equal(modelToAsk(project), "openai/gpt-5");
+  assert.match(modelProblem(project) ?? "", /missing API key for provider "openai"/);
+});
+
+test("a project that names no model of its own leaves the environment's", async () => {
+  without(["AI_MODEL", "ANTHROPIC_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"]);
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\n');
+  const project = await loadProject(dir);
+
+  assert.equal(modelToAsk(project), null);
+  assert.match(modelProblem(project) ?? "", /names no model/);
+});
+
+test("the environment's model wins over the project's own", async () => {
+  process.env["AI_MODEL"] = "anthropic/claude-sonnet-4-5";
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
+  await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\nmodel = "openai/gpt-5"\n');
+  const project = await loadProject(dir);
+
+  assert.equal(modelToAsk(project), "anthropic/claude-sonnet-4-5");
 });
