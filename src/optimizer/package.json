@@ -1,7 +1,7 @@
 {
   "name": "blaze-optimizer",
   "version": "0.1.0",
-  "description": "Compiler optimization research tool: search for techniques using Tavily",
+  "description": "Compiler optimization research tool: iteratively improves the blaze compiler using AI",
   "type": "module",
   "private": true,
   "bin": {
@@ -14,6 +14,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.65",
+    "@ai-sdk/google": "^4.0.82",
+    "@ai-sdk/openai": "^4.0.78",
+    "@ai-sdk/openai-compatible": "^3.0.57",
+    "@ai-sdk/provider": "^4.0.18",
+    "ai": "^7.0.116",
     "smol-toml": "^1.9.0"
   },
   "devDependencies": {
