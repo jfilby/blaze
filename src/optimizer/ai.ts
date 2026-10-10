@@ -31,13 +31,19 @@ export interface AiResponse {
   readonly summary: string;
 }
 
-/** The three pass methods. */
-export type PassMethod = "research" | "build-feedback" | "code-review";
+/** The three ways a run works. */
+export type Method = "research" | "build-feedback" | "code-review";
 
 /**
  * Resolve the AI model from environment variables.
  * Uses AI_MODEL (e.g. "anthropic/claude-sonnet-4-5") and provider API keys.
  */
+/** The model a run would ask, named the way the environment names it. */
+export function modelSpec(): string | null {
+  const spec = process.env["AI_MODEL"];
+  return spec === undefined || spec.trim() === "" ? null : spec.trim();
+}
+
 function resolveModel() {
   const spec = process.env["AI_MODEL"];
   if (!spec) return undefined;
@@ -142,7 +148,7 @@ export function readCompilerSource(compilerDir = COMPILER_DIR): string {
  * @returns The AI's proposals
  */
 export async function proposeImprovements(
-  method: PassMethod,
+  method: Method,
   context: string,
   project?: ProjectInfo,
 ): Promise<AiResponse> {
@@ -166,8 +172,8 @@ export async function proposeImprovements(
   return parseResponse(result.text);
 }
 
-function buildSystemPrompt(method: PassMethod): string {
-  const methodDesc: Record<PassMethod, string> = {
+function buildSystemPrompt(method: Method): string {
+  const methodDesc: Record<Method, string> = {
     "research": "You are given research papers on compiler optimizations and the source code of the blaze compiler.",
     "build-feedback": "You are given AI review feedback from a blaze build and the source code of the blaze compiler.",
     "code-review": "You are given only the source code of the blaze compiler.",
@@ -201,7 +207,7 @@ Respond with ONLY a JSON object in this exact format (no markdown fences, no oth
 }
 
 function buildUserPrompt(
-  method: PassMethod,
+  method: Method,
   context: string,
   source: string,
   project?: ProjectInfo,

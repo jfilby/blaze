@@ -3,3 +3,4 @@ private-docs
 node_modules/
 *.o
 
+.blazeopt/
