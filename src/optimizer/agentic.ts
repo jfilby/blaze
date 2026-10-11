@@ -171,8 +171,15 @@ What to do:
 1. Read the compiler's source under \`${compiler}\` and understand the part of
    it you are going to change.
 2. Make the change.
-3. Check your work: \`npm run typecheck\` in \`${compiler}\`. You may run
-   \`npm test\` there as well if you want to be sure of it.
+3. Check your work in \`${compiler}\`: \`npm run typecheck\`, and then
+   \`npm test\`.
+
+Failing tests are a normal part of changing this compiler, not a signal to undo
+the change: read what each failure says, fix what it points at, and run the
+suite again. Keep iterating on that feedback until the suite passes. Stop only
+when a round of fixing has not reduced the number of failures — at that point
+the change has been taken as far as it can be, and you should say which
+failures are left and why you could not move them.
 
 What you may edit:
 
