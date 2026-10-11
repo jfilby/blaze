@@ -26,7 +26,11 @@ async function repository(): Promise<string> {
 }
 
 /** The command one request builds, given what a run has. */
-function invocation(cwd: string, model: string | null = "anthropic/claude-sonnet-4-5"): {
+function invocation(
+  cwd: string,
+  model: string | null = "anthropic/claude-sonnet-4-5",
+  showOutput = false,
+): {
   command: string;
   args: string[];
   cwd: string;
@@ -37,6 +41,7 @@ function invocation(cwd: string, model: string | null = "anthropic/claude-sonnet
     model,
     instructions: join(cwd, "AGENTS.md"),
     cwd,
+    showOutput,
   });
   return { command: built.command, args: [...built.args], cwd: built.cwd };
 }
@@ -115,6 +120,24 @@ test("the project a run is aimed at is part of what the agent is given", () => {
   assert.match(prompt, /a spectral norm/);
 });
 
+test("the event mode is asked only when the work is to be shown", async () => {
+  const dir = await repository();
+
+  // The mode it is asked in by default writes its answer at the end and
+  // nothing on the way, which is all a run that is not showing the work
+  // wants of it.
+  const plain = invocation(dir);
+  assert.equal(plain.args.includes("--mode"), false);
+
+  // The event mode carries every tool it calls as it calls it, which is the
+  // only stream that says what it is doing while it does it.
+  const shown = invocation(dir, "anthropic/claude-sonnet-4-5", true);
+  const mode = shown.args.indexOf("--mode");
+  assert.equal(shown.args[mode + 1], "json");
+  // It is still print mode: one prompt, and its answer is the end of the run.
+  assert.notEqual(shown.args.indexOf("--print"), -1);
+});
+
 test("a recorded answer is not a model that can write code", () => {
   assert.match(agentModelProblem("replay:./candidate.json") ?? "", /recorded answer/);
   // A model the compiler can be asked is one the agent can be asked too.
@@ -141,10 +164,11 @@ test("a repository holding everything the agent needs is one it can be asked in"
   assert.equal(agentProblem(null, "node", dir), null);
 });
 
-/** The prompt one request builds. */
-function promptOf(request: Parameters<typeof agentInvocation>[0]): string {
+/** The prompt one request builds. The question of showing the work is asked
+ *  of the stream rather than of the prompt, so it is not part of it. */
+function promptOf(request: Omit<Parameters<typeof agentInvocation>[0], "showOutput">): string {
   // The prompt is the `--print` argument, which is the last one given.
-  const args = [...agentInvocation(request).args];
+  const args = [...agentInvocation({ ...request, showOutput: false }).args];
   const index = args.indexOf("--print");
   assert.notEqual(index, -1);
   return args[index + 1] ?? "";

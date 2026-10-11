@@ -27,6 +27,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ProjectInfo } from "./project.ts";
 import { agentsFile, compilerDirectory, repositoryRoot } from "./repository.ts";
 import type { Method } from "./ai.ts";
+import { AgentOutput } from "./agent-output.ts";
 
 /** The command a run hands its work to. */
 export const AGENT_COMMAND = "pi";
@@ -54,6 +55,8 @@ export interface AgentRequest {
   readonly instructions: string;
   /** Where the agent works: the base of the repository. */
   readonly cwd: string;
+  /** Whether what it does is written to the console as it does it. */
+  readonly showOutput: boolean;
 }
 
 /** The command a run hands its work to, with everything it is given. */
@@ -119,6 +122,12 @@ export function agentInvocation(request: AgentRequest): AgentInvocation {
   // `provider/model`, which is the very form this option takes. Left out when
   // the run names none: the agent then uses the model it is configured with.
   if (request.model !== null) args.push("--model", request.model);
+
+  // The event mode is the only one that says what the agent does as it does
+  // it: the mode it is otherwise asked in writes its answer at the end and
+  // nothing at all on the way. So a run that was asked to show the work asks
+  // for it here, and reads it out of the stream as it arrives.
+  if (request.showOutput) args.push("--mode", "json");
 
   // Print mode: one prompt, the agent works, and its answer is the end of
   // what it writes.
@@ -211,16 +220,21 @@ const METHOD_HEADING: Record<Method, string> = {
  * Run the coding agent and read what it answered.
  *
  * The agent is spawned rather than asked for: it works with its own tools for
- * as long as it takes, and the two streams it writes are read whole rather
- * than line by line, because in print mode its answer arrives at the end of
- * its work and everything else it has to say arrives before that.
+ * as long as it takes, and what it writes is read while it writes it rather
+ * than kept whole until it is done, because in print mode its answer arrives
+ * at the end of its work and everything else it has to say arrives before
+ * that.
+ *
+ * The one stream is both what keeps the answer and what shows the work, and
+ * which of the two it is asked to do is the run's own answer to whether a
+ * person is watching.
  */
 export async function runAgent(request: AgentRequest): Promise<AgentRun> {
-  return runInvocation(agentInvocation(request));
+  return runInvocation(agentInvocation(request), request.showOutput);
 }
 
 /** One run of the command a request names. */
-async function runInvocation(invocation: AgentInvocation): Promise<AgentRun> {
+async function runInvocation(invocation: AgentInvocation, showOutput: boolean): Promise<AgentRun> {
   return new Promise((resolve) => {
     const child = spawn(invocation.command, [...invocation.args], {
       cwd: invocation.cwd,
@@ -233,13 +247,14 @@ async function runInvocation(invocation: AgentInvocation): Promise<AgentRun> {
       child.kill("SIGKILL");
     }, AGENT_TIMEOUT_MS);
 
-    let stdout = "";
+    const output = new AgentOutput(showOutput, invocation.command);
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+      output.receive(chunk.toString());
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
+      output.diagnostic(chunk.toString());
     });
 
     const finish = (run: AgentRun): void => {
@@ -248,6 +263,7 @@ async function runInvocation(invocation: AgentInvocation): Promise<AgentRun> {
     };
 
     child.on("close", (code) => {
+      output.finish();
       finish(
         abandoned
           ? {
@@ -256,7 +272,7 @@ async function runInvocation(invocation: AgentInvocation): Promise<AgentRun> {
               detail: tail(stderr),
               problem: `the coding agent did not finish within ${AGENT_TIMEOUT_MS / 60000} minutes`,
             }
-          : { summary: cap(stdout), exitCode: code, detail: tail(stderr), problem: null },
+          : { summary: cap(output.summary), exitCode: code, detail: tail(stderr), problem: null },
       );
     });
 

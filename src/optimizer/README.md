@@ -55,6 +55,30 @@ tests are the gate a change is judged by, so an agent that rewrote one would
 be judging itself. An edit anywhere else is taken back out before the run is
 judged, and recorded as a refusal naming the reason.
 
+## Watching the agent
+
+```
+blazeopt --show-ai-coding
+```
+
+The agent is asked in print mode, which writes its answer at the end of its
+work and nothing at all on the way — so a run nobody is watching has nothing
+to show. With this flag it is asked in the event mode instead, which carries
+every tool it calls as it calls it, and each one is printed as it happens:
+
+```
+Handing the run to pi, the coding agent at the base of the repository...
+pi: tool read path=src/compiler/codegen.ts
+pi: tool bash command=npm run typecheck
+pi: tool bash failed: exitCode=2 stdout=error TS2322
+pi: I hoisted the invariant out of the inner loop.
+```
+
+A tool is shown with what it was given, and with what it answered when it
+went wrong: what it answered when it went well is a file or a build log, and
+none of that is what it did. The change is still read out of the tree rather
+than out of this, and it is judged by the same three gates.
+
 ## blazeopt-report
 
 ```

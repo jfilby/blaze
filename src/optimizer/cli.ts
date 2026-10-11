@@ -22,6 +22,7 @@
  *   --benchmark-runs <n>   Hyperfine runs per benchmark (default 5)
  *   --methods <list>       Comma-separated methods to cycle through
  *                         (default "research,build-feedback,code-review")
+ *   --show-ai-coding       Print what the coding agent does as it works
  *   -h, --help             Show this help
  */
 
@@ -124,6 +125,7 @@ Options:
                            build-feedback blaze build AI review feedback + source
                            code-review    compiler source review alone
                          (default "research,build-feedback,code-review")
+  --show-ai-coding       print what the coding agent does as it works
   -h, --help             show this help
 
 Environment:
@@ -139,6 +141,8 @@ Environment:
 interface Options {
   maxIterations: number;
   benchmarkRuns: number;
+  /** Whether what the coding agent does is printed as it works. */
+  showOutput: boolean;
   project?: ProjectInfo;
 }
 
@@ -195,7 +199,7 @@ async function runOne(
   //    repository's own instructions, and everything it writes is read back
   //    out of the tree rather than remembered from what it said.
   process.stdout.write(`Handing the run to ${AGENT_DESCRIPTION} at the base of the repository...\n`);
-  const answer = await askCodingAgent(method, context, options.project);
+  const answer = await askCodingAgent(method, context, options.project, options.showOutput);
 
   record.summary = answer.summary === "" ? null : answer.summary;
   record.applied = answer.files.map((file) => ({ file, description: "the coding agent's change" }));
@@ -348,11 +352,15 @@ export function readAgentEdits(cwd: string): { files: FileEdit[]; refused: Refus
  * own instructions, and what it wrote is read out of the tree rather than
  * taken from what it says: an agent with its own tools may write a file
  * nobody asked it for, and the tree is the only thing that knows.
+ *
+ * @param showOutput Whether what it does is printed as it does it, which is
+ *   asked of the stream it writes rather than of what it wrote
  */
 async function askCodingAgent(
   method: Method,
   context: string,
   project: ProjectInfo | undefined,
+  showOutput: boolean,
 ): Promise<AgentAnswer> {
   const problem = agentProblem(modelToAsk(project));
   if (problem !== null) return { files: [], refused: [], summary: "", problem };
@@ -364,6 +372,7 @@ async function askCodingAgent(
     model: modelToAsk(project),
     instructions: agentsFile(REPO_DIR),
     cwd: REPO_DIR,
+    showOutput,
   });
 
   const edits = readAgentEdits(REPO_DIR);
@@ -684,6 +693,7 @@ async function main(argv: string[]): Promise<number> {
         "max-iterations": { type: "string" },
         "benchmark-runs": { type: "string" },
         methods: { type: "string" },
+        "show-ai-coding": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -725,6 +735,12 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`invalid --methods (must be a comma-separated subset of: ${VALID_METHODS.join(", ")})\n\n${USAGE}`);
     return 1;
   }
+
+  // Whether the agent's own work is watched as it happens. It is off unless
+  // it was asked for, because what it does is a great deal of output for a
+  // question nobody asked: the change is what matters, and the agent's own
+  // account of it is kept either way.
+  const showOutput = parsed.values["show-ai-coding"] === true;
 
   // From here the invocation is a session, and it is recorded however it
   // ends: a session that was refused before it started is as much a result
@@ -826,12 +842,15 @@ async function main(argv: string[]): Promise<number> {
     return refuse(1, `blazeopt: ${agentic}.\n${agentAdvice()}`);
   }
 
-  const options: Options = { maxIterations, benchmarkRuns, project };
+  const options: Options = { maxIterations, benchmarkRuns, showOutput, project };
 
   process.stdout.write(`blazeopt: starting optimization loop (max ${maxIterations} runs)\n`);
   process.stdout.write(`blazeopt: methods: ${methods.join(" → ")}\n`);
   process.stdout.write(`blazeopt: model: ${session.model === null ? "none" : session.model}\n`);
   process.stdout.write(`blazeopt: coding agent: ${AGENT_COMMAND}\n`);
+  if (showOutput) {
+    process.stdout.write(`blazeopt: printing what ${AGENT_COMMAND} does as it works\n`);
+  }
   if (project !== undefined) {
     process.stdout.write(`blazeopt: targeting project ${project.tomlPath}\n`);
   }
