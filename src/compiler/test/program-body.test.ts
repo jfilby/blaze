@@ -857,6 +857,15 @@ test("a delivered program that runs out of memory is a verdict, not a dead build
     t.skip("python3 is needed to grow more heap than a program is given");
     return;
   }
+  // The proof grows a real heap past the delivered program's own, which on a
+  // machine with little room to spare is the thing the system kills. A run of
+  // the optimizer sets the variable, because a session that is benchmarking
+  // the suite cannot afford the two gigabytes the proof touches; a person
+  // running the suite by hand gets the proof.
+  if (process.env.BLAZE_SKIP_HEAP_PROOF !== undefined) {
+    t.skip("BLAZE_SKIP_HEAP_PROOF is set, so the heap proof is left out");
+    return;
+  }
   const directory = await scratch("blaze-oom-");
   await writeFile(join(directory, "main.ts"), 'console.log("expected");\n', "utf8");
 

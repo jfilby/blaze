@@ -22,6 +22,17 @@ const COMPILER_DIR = join(import.meta.dirname, "..", "compiler");
 /** How long a benchmark may run before it is abandoned, per hyperfine run. */
 const BENCHMARK_RUN_TIMEOUT_MS = 15 * 60 * 1000;
 
+/**
+ * Set when a run of this optimizer times the suite, to leave the heap proof
+ * out of it: the proof in test/program-body.test.ts grows a real two gigabytes
+ * of memory, which is the thing the system kills on a machine a benchmarking
+ * session is already filling.
+ */
+export const SKIP_HEAP_PROOF_ENV = "BLAZE_SKIP_HEAP_PROOF";
+
+/** The command a benchmark of the compiler times. */
+const SUITE_COMMAND = `${SKIP_HEAP_PROOF_ENV}=1 npm test`;
+
 export interface BenchmarkResult {
   readonly mean: number;
   readonly stddev: number;
@@ -141,10 +152,11 @@ export function readHyperfineResult(data: HyperfineExport): BenchmarkResult {
 }
 
 /**
- * Benchmark the blaze compiler by timing `npm test`.
+ * Benchmark the blaze compiler by timing the test suite, with the suite's
+ * heap proof left out of it.
  * This exercises the full compiler pipeline and is the most reliable
  * measure of compiler performance.
  */
 export async function benchmarkCompiler(runs = 5): Promise<BenchmarkResult> {
-  return benchmark("npm test", runs);
+  return benchmark(SUITE_COMMAND, runs);
 }

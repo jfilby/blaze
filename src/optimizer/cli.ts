@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
 import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
-import { benchmarkCompiler, type BenchmarkResult } from "./benchmark.ts";
+import { benchmarkCompiler, SKIP_HEAP_PROOF_ENV, type BenchmarkResult } from "./benchmark.ts";
 import { gatherBuildFeedback } from "./build-feedback.ts";
 import { AGENTS_FILE, agentsFile, compilerDirectory, repositoryRoot } from "./repository.ts";
 import {
@@ -552,13 +552,15 @@ const TEST_TIMEOUT_MS = 30 * 60 * 1000;
  *   reading it, for the runs a person is watching as they happen
  */
 export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteResult {
+  const env = { ...process.env, [SKIP_HEAP_PROOF_ENV]: "1" };
   const result = live
-    ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", timeout: TEST_TIMEOUT_MS })
+    ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", timeout: TEST_TIMEOUT_MS, env })
     : spawnSync("npm", ["test"], {
         cwd: compilerDir,
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
         timeout: TEST_TIMEOUT_MS,
+        env,
       });
 
   if (result.error !== undefined) {
