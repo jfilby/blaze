@@ -184,10 +184,10 @@ function countSessions(sessions: readonly SessionRecord[]): OutcomeSummary[] {
 /**
  * What has been refusing the runs.
  *
- * A refusal is counted by what it was, not by which file it was about: the
- * same line written in two places refuses a proposal however many times it
- * is proposed, and that is one fact about the compiler and the model rather
- * than a count of files.
+ * A refusal is counted by what it was, not by which file it was about: a
+ * change written where a turn may not write is refused however many times
+ * the agent tries it, and that is one fact about the compiler and the agent
+ * rather than a count of files.
  */
 function refusalSummary(runs: readonly RunRecord[]): RefusalSummary[] {
   const counts = new Map<string, RefusalSummary>();

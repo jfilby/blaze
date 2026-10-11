@@ -5,8 +5,8 @@
  * the optimizer runs against that repository rather than owning it. So a
  * command given the whole tree — an `add` with no path, a `checkout` of the
  * working directory — takes the user's own work with it: their uncommitted
- * changes would be committed under a blazeopt message, or thrown away by a
- * revert. Every one of these is checked against a scratch repository that
+ * changes would be committed under a blazeopt message, or thrown away by
+ * a revert. Every one of these is checked against a scratch repository that
  * holds a change of its own beside the one a pass made.
  */
 
@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { commitChanges, revertPass, uncommittedChanges } from "../cli.ts";
+import { commitChanges, uncommittedChanges } from "../cli.ts";
 import { scratch } from "./scratch.ts";
 
 /** A scratch git repository with one commit and a file a pass may write. */
@@ -81,30 +81,11 @@ test("a commit stages only the files the pass wrote", async () => {
   );
 });
 
-test("a revert restores the files the pass wrote and touches nothing else", async () => {
-  const { dir, compilerFile, userFile } = await repository();
-  const userWork = "// the user's edit in progress\n";
-  await writeFile(compilerFile, "// the change the pass made\n");
-  await writeFile(userFile, userWork);
-
-  revertPass(["compiler.ts"], dir);
-
-  assert.match(await readFile(compilerFile, "utf8"), /the compiler/);
-  assert.equal(await readFile(userFile, "utf8"), userWork);
-});
-
-test("a revert of nothing is nothing to do", async () => {
-  const { dir } = await repository();
-  // No throw, and no change to the tree.
-  revertPass([], dir);
-  assert.deepEqual(uncommittedChanges(dir), []);
-});
-
 test("a change that rewrites a line into itself commits nothing", async () => {
   const { dir, compilerFile } = await repository();
   const before = await readFile(compilerFile, "utf8");
-  // Write the same text back, which is what a proposal replacing text with
-  // itself leaves behind.
+  // Write the same text back, which is what a change that changes nothing
+  // leaves behind.
   await writeFile(compilerFile, before);
 
   commitChanges("research", ["compiler.ts: nothing changed"], ["compiler.ts"], dir);

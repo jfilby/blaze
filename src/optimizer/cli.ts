@@ -4,18 +4,18 @@
  *
  *   blazeopt [project] [options]
  *
- * Runs an optimization loop of runs, each with one of three methods:
+ * Runs an optimization loop of turns, each with one of three methods:
  *   1. research       — Tavily search + compiler source review
  *   2. build-feedback — blaze build AI review feedback + compiler source review
  *   3. code-review    — compiler source review alone
  *
- * Each run proposes changes using the Vercel AI SDK, applies them, tests
- * with the full test suite, benchmarks with hyperfine, and commits on success.
- * Research results are cached with a weekly reset.
+ * Each turn hands what it gathered to the coding agent pi, which reads the
+ * compiler and edits it. The result is judged with the compiler's own test
+ * suite and a measurement of it, and a change that survives is committed.
  *
  * A project path targets the run at one blaze project: the research queries
- * and the build feedback are about that project, and the proposals are
- * asked to be relevant to what it does.
+ * and the build feedback are about that project, and the agent is told what
+ * the project does.
  *
  * Options:
  *   --max-iterations <n>   Maximum runs (default 3)
@@ -27,21 +27,32 @@
 
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
 import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
 import { benchmarkCompiler, type BenchmarkResult } from "./benchmark.ts";
 import { gatherBuildFeedback } from "./build-feedback.ts";
-import { proposeImprovements, applyProposal, modelProblem, modelToAsk, type Method } from "./ai.ts";
+import { AGENTS_FILE, agentsFile, compilerDirectory, repositoryRoot } from "./repository.ts";
+import {
+  AGENT_COMMAND,
+  agentProblem,
+  changedPaths,
+  editVerdict,
+  putBack,
+  revertEdits,
+  runAgent,
+  setAside,
+  verdictReason,
+  type FileEdit,
+} from "./agentic.ts";
+import { modelProblem, modelToAsk, type Method } from "./ai.ts";
 import { loadProject, type ProjectInfo } from "./project.ts";
 import {
   newId,
   RECORD_VERSION,
   writeRun,
   writeSession,
-  type AppliedChange,
   type RefusedProposal,
   type RunOutcome,
   type RunRecord,
@@ -50,9 +61,19 @@ import {
   type SessionRecord,
 } from "./runs.ts";
 
-const COMPILER_DIR = join(import.meta.dirname, "..", "compiler");
-
 const VALID_METHODS: readonly Method[] = ["research", "build-feedback", "code-review"];
+
+/** The compiler directory, where `npm test` is run. */
+const COMPILER_DIR = compilerDirectory();
+
+/** The repository the agent works at the base of. */
+const REPO_DIR = repositoryRoot();
+
+/** How the run names the thing it hands its work to. */
+const AGENT_DESCRIPTION = `${AGENT_COMMAND}, the coding agent`;
+
+/** How much of the agent's answer a run record carries. */
+const AGENT_SUMMARY_BUDGET = 600;
 
 /** The methods a methods list names, or null when it names none of them. */
 export function parseMethods(value: string): Method[] | null {
@@ -70,21 +91,27 @@ export function parseMethods(value: string): Method[] | null {
 const USAGE = `blazeopt - iterative blaze compiler optimizer
 
 Alternates between three methods (research, build-feedback, code-review),
-proposing compiler improvements using the Vercel AI SDK. Each run is tested
-with the full test suite, benchmarked with hyperfine, and committed on success.
+each of which gathers what the coding agent pi is given to read. The agent
+reads the compiler and edits it, and every change is tested with the full
+test suite, benchmarked with hyperfine, and committed on success.
 
 Usage:
   blazeopt [project] [options]
 
 A project is a directory containing blaze.toml, or a .toml file naming its
 own. With one, the run is targeted at it: the research queries are about
-what the project does, the build-feedback method compiles it, and the
-proposals are asked to be relevant to it. Without one, the runs are general.
+what the project does, the build-feedback method compiles it, and the agent
+is told what the project is for. Without one, the runs are general.
 
 A run establishes the compiler's test suite as a baseline before it starts,
 refuses a working tree that already holds uncommitted work, and commits only
-the files its own runs changed. A change the suite rejects, or that
-measures slower than the noise, is reverted.
+the files the agent changed. A change the suite rejects, or that measures
+slower than the noise, is reverted.
+
+The agent is started at the base of the repository rather than in the
+compiler directory, because that is where the repository's own AGENTS.md
+lives and what it says is how this repository is worked in. It is handed
+that file by name as well, so it does not depend on finding it.
 
 Every run and every session records itself in .blazeopt at the head of the
 repository, whatever happened. blazeopt-report reports on those records.
@@ -101,7 +128,7 @@ Options:
 
 Environment:
   TAVILY_API_KEY         enables research runs
-  AI_MODEL               provider/model for the AI SDK (e.g. anthropic/claude-sonnet-4-5).
+  AI_MODEL               provider/model for the coding agent (e.g. anthropic/claude-sonnet-4-5).
                          With a project, its blaze.toml is read instead when this
                          is not set, because a build of it would ask that model.
   ANTHROPIC_API_KEY      Anthropic API key
@@ -152,8 +179,8 @@ async function runOne(
   let context: string | null = "";
   if (method === "research") {
     context = await gatherResearchContext(options.project);
-    // Nothing new to read is nothing to propose from: a run of research
-    // whose papers have all been processed would otherwise be asked for an
+    // Nothing new to read is nothing to work from: a run of research whose
+    // papers have all been processed would otherwise be asked for an
     // improvement out of memory of them.
     if (context === null) {
       process.stdout.write("Nothing new in the research cache, skipping.\n\n");
@@ -163,118 +190,89 @@ async function runOne(
     context = await gatherBuildFeedbackContext(options.project);
   }
 
-  // 2. Propose improvements
-  process.stdout.write("Requesting AI proposals...\n");
-  const response = await proposeImprovements(method, context, options.project);
-  record.summary = response.summary;
-  process.stdout.write(`AI summary: ${response.summary}\n`);
-  process.stdout.write(`Proposed ${response.proposals.length} change(s)\n\n`);
+  // 2. Hand the run to the coding agent, which reads the compiler and writes
+  //    the change. It works at the base of the repository, under the
+  //    repository's own instructions, and everything it writes is read back
+  //    out of the tree rather than remembered from what it said.
+  process.stdout.write(`Handing the run to ${AGENT_DESCRIPTION} at the base of the repository...\n`);
+  const answer = await askCodingAgent(method, context, options.project);
 
-  if (response.proposals.length === 0) {
-    process.stdout.write("No proposals to apply, skipping.\n");
-    return finish(record, "no-proposals", started);
+  record.summary = answer.summary === "" ? null : answer.summary;
+  record.applied = answer.files.map((file) => ({ file, description: "the coding agent's change" }));
+  record.refused = answer.refused;
+
+  for (const refusal of answer.refused) {
+    process.stderr.write(`  Refused (${refusal.reason}): ${refusal.file}\n`);
   }
 
-  // 3. Benchmark before
-  process.stdout.write("Benchmarking before changes...\n");
-  const before = await benchmarkCompiler(options.benchmarkRuns);
-  process.stdout.write(`  Before: ${before.mean.toFixed(3)}s ± ${before.stddev.toFixed(3)}s (${before.runs} runs)\n\n`);
-
-  // 4. Apply proposals
-  const applied: string[] = [];
-  const changed: AppliedChange[] = [];
-  const refused: RefusedProposal[] = [];
-  const touched: string[] = [];
-  for (const proposal of response.proposals) {
-    const outcome = applyProposal(proposal);
-    switch (outcome.kind) {
-      case "applied":
-        applied.push(`${proposal.file}: ${proposal.description}`);
-        changed.push({ file: proposal.file, description: proposal.description });
-        touched.push(outcome.path);
-        process.stdout.write(`  Applied: ${proposal.file} — ${proposal.description}\n`);
-        break;
-      case "not-found":
-        refused.push({ file: proposal.file, reason: "the original text is not in the file" });
-        process.stdout.write(`  Skipped (original not found): ${proposal.file}\n`);
-        break;
-      case "ambiguous":
-        refused.push({ file: proposal.file, reason: "the original text appears more than once" });
-        process.stdout.write(`  Skipped (original appears more than once): ${proposal.file}\n`);
-        break;
-      case "outside-compiler":
-        refused.push({ file: proposal.file, reason: "the file is not inside the compiler" });
-        process.stderr.write(`  Refused (not a file inside the compiler): ${proposal.file}\n`);
-        break;
-      case "test-file":
-        refused.push({ file: proposal.file, reason: "the tests are the gate, not a target" });
-        process.stderr.write(`  Refused (the tests are the gate, not a target): ${proposal.file}\n`);
-        break;
-      case "unchanged":
-        refused.push({ file: proposal.file, reason: "the replacement is the original text" });
-        process.stdout.write(`  Skipped (replaces the text with itself): ${proposal.file}\n`);
-        break;
-      case "write-failed":
-        refused.push({ file: proposal.file, reason: "the file could not be written" });
-        process.stderr.write(`  Skipped (could not be written): ${proposal.file}\n`);
-        break;
-    }
+  // The agent could not be asked at all: it is not installed, the
+  // instructions are not there, or the model it was given cannot write code.
+  // Whatever it wrote before it died is work nobody has judged, and the tree
+  // has already been put back the way it was found.
+  if (answer.problem !== null) {
+    process.stdout.write(`${answer.problem}\n`);
+    return finish(record, "failed", started, answer.problem);
   }
-  record.applied = changed;
-  record.refused = refused;
 
-  if (applied.length === 0) {
-    process.stdout.write("No proposals could be applied, skipping.\n");
+  if (answer.files.length === 0) {
+    process.stdout.write("Nothing to keep: the agent changed nothing the run can keep.\n");
     return finish(record, "nothing-applied", started);
   }
 
-  // From here the working tree holds this run's changes, so every exit from
-  // this block either commits them or reverts exactly the files this run
+  for (const file of answer.files) process.stdout.write(`  Changed: ${file}\n`);
+  process.stdout.write(`\nThe coding agent says:\n${answer.summary}\n\n`);
+
+  // From here the working tree holds the agent's change, so every exit from
+  // this block either commits it or reverts exactly the files the agent
   // wrote. The whole tree is never touched: it is the user's repository and
   // it holds anything else they have in progress.
   try {
-    // 5. Test
+    // 3. Test
     process.stdout.write("\nRunning test suite...\n");
     const testResult = testsPassed();
     if (!testResult) {
       process.stdout.write("Tests failed, reverting changes.\n");
-      revertPass(touched);
+      revertEdits(answer.files, REPO_DIR);
       return finish(record, "tests-failed", started, "the compiler's test suite rejected the change");
     }
     process.stdout.write("Tests passed.\n");
 
-    // 6. Benchmark after
-    process.stdout.write("\nBenchmarking after changes...\n");
-    const after = await benchmarkCompiler(options.benchmarkRuns);
-    process.stdout.write(`  After:  ${after.mean.toFixed(3)}s ± ${after.stddev.toFixed(3)}s (${after.runs} runs)\n`);
-
-    const delta = after.mean - before.mean;
+    // 4. Measure the compiler with the change and without it
+    const measured = await measureChange(answer.files, options.benchmarkRuns);
     record.benchmark = {
-      before,
-      after,
-      delta,
-      percent: (delta / before.mean) * 100,
-      withinNoise: !isSlower(before, after),
+      before: measured.before,
+      after: measured.after,
+      delta: measured.delta,
+      percent: (measured.delta / measured.before.mean) * 100,
+      withinNoise: !isSlower(measured.before, measured.after),
     };
 
-    if (isSlower(before, after)) {
-      process.stdout.write(`  Slower by ${delta.toFixed(3)}s (${((delta / before.mean) * 100).toFixed(1)}%), reverting.\n`);
-      revertPass(touched);
+    if (isSlower(measured.before, measured.after)) {
+      process.stdout.write(
+        `  Slower by ${measured.delta.toFixed(3)}s (${((measured.delta / measured.before.mean) * 100).toFixed(1)}%), reverting.\n`,
+      );
+      revertEdits(answer.files, REPO_DIR);
       return finish(
         record,
         "slower",
         started,
-        `the change measured ${delta.toFixed(3)}s slower, beyond measurement noise`,
+        `the change measured ${measured.delta.toFixed(3)}s slower, beyond measurement noise`,
       );
     }
-    if (delta < 0) {
-      process.stdout.write(`  Faster by ${(-delta).toFixed(3)}s (${((-delta / before.mean) * 100).toFixed(1)}%)\n`);
+    if (measured.delta < 0) {
+      process.stdout.write(
+        `  Faster by ${(-measured.delta).toFixed(3)}s (${((-measured.delta / measured.before.mean) * 100).toFixed(1)}%)\n`,
+      );
     } else {
-      process.stdout.write(`  Within measurement noise (${delta.toFixed(3)}s)\n`);
+      process.stdout.write(`  Within measurement noise (${measured.delta.toFixed(3)}s)\n`);
     }
 
-    // 7. Commit
-    const commit = commitChanges(method, applied, touched);
+    // 5. Commit
+    const commit = commitChanges(
+      method,
+      record.applied.map((change) => `${change.file}: ${change.description}`),
+      answer.files,
+    );
     if (commit === null) {
       // Nothing to commit is not a run that kept its change either: the
       // change is in the tree, uncommitted, and the record says so.
@@ -283,10 +281,10 @@ async function runOne(
     record.commit = commit;
     return finish(record, "committed", started);
   } catch (cause) {
-    // A run that dies after applying its changes must not leave the
-    // compiler modified and uncommitted: the next pass would be proposing
-    // on top of a change nobody has judged.
-    revertPass(touched);
+    // A run that dies after writing its change must not leave the compiler
+    // modified and uncommitted: the next turn would be working on top of a
+    // change nobody has judged.
+    revertEdits(answer.files, REPO_DIR);
     return finish(record, "failed", started, cause instanceof Error ? cause.message : String(cause));
   }
 }
@@ -304,8 +302,138 @@ function finish(record: Mutable<RunRecord>, outcome: RunOutcome, started: number
 /** A record being filled in, so that it is written once it is whole. */
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
+/** What the coding agent did, as far as the run can tell. */
+interface AgentAnswer {
+  /** Every path it wrote that the run may keep. */
+  readonly files: readonly FileEdit[];
+  /** Every path it wrote that the run may not, and why. */
+  readonly refused: readonly RefusedProposal[];
+  /** What it says it did. */
+  readonly summary: string;
+  /** Why there is nothing to judge, or null when there is. */
+  readonly problem: string | null;
+}
+
 /**
- * Is the change measurably slower?
+ * Read what the agent wrote out of the tree, and take back out what it may
+ * not have written.
+ *
+ * The tree is read rather than remembered: an agent with tools of its own may
+ * write a file nobody asked it for, and the tree is the only thing that
+ * knows. What it may write is the compiler, and never the compiler's tests,
+ * which are the gate the change is judged by. Anything else is taken back out
+ * before the turn is judged, and named as the refusal it is.
+ *
+ * @param cwd The base of the repository, whose tree is read
+ */
+export function readAgentEdits(cwd: string): { files: FileEdit[]; refused: RefusedProposal[] } {
+  const files: FileEdit[] = [];
+  const refused: RefusedProposal[] = [];
+  for (const path of changedPaths(cwd)) {
+    const verdict = editVerdict(path, cwd);
+    if (verdict === "compiler") files.push(path);
+    else refused.push({ file: path, reason: verdictReason(verdict) });
+  }
+  revertEdits(
+    refused.map((entry) => entry.file),
+    cwd,
+  );
+  return { files, refused };
+}
+
+/**
+ * Hand one turn of the loop to the coding agent, and read back what it wrote.
+ *
+ * The agent is started at the base of the repository, under the repository's
+ * own instructions, and what it wrote is read out of the tree rather than
+ * taken from what it says: an agent with its own tools may write a file
+ * nobody asked it for, and the tree is the only thing that knows.
+ */
+async function askCodingAgent(
+  method: Method,
+  context: string,
+  project: ProjectInfo | undefined,
+): Promise<AgentAnswer> {
+  const problem = agentProblem(modelToAsk(project));
+  if (problem !== null) return { files: [], refused: [], summary: "", problem };
+
+  const answer = await runAgent({
+    method,
+    context,
+    project,
+    model: modelToAsk(project),
+    instructions: agentsFile(REPO_DIR),
+    cwd: REPO_DIR,
+  });
+
+  const edits = readAgentEdits(REPO_DIR);
+  const files = edits.files;
+  const refused = edits.refused;
+
+  // Everything it wrote, whether the turn may keep it or not: an agent that
+  // died leaves work nobody has judged, and a tree that goes back the way it
+  // was found is the state a turn that kept nothing is in.
+  const written = [...files, ...refused.map((entry) => entry.file)];
+  const answerText = cap(answer.summary, AGENT_SUMMARY_BUDGET);
+
+  if (answer.problem !== null) {
+    revertEdits(written, REPO_DIR);
+    return { files: [], refused, summary: answerText, problem: answer.problem };
+  }
+  if (answer.exitCode !== 0) {
+    revertEdits(written, REPO_DIR);
+    const detail = answer.detail === "" ? "" : `\n${answer.detail}`;
+    return {
+      files: [],
+      refused,
+      summary: answerText,
+      problem: `the coding agent exited ${String(answer.exitCode)}${detail}`,
+    };
+  }
+
+  return { files, refused, summary: answerText, problem: null };
+}
+
+/** What a measurement of one change came to. */
+interface Measured {
+  readonly before: BenchmarkResult;
+  readonly after: BenchmarkResult;
+  /** `after - before`, in seconds. */
+  readonly delta: number;
+}
+
+/**
+ * Measure the compiler with the change and without it.
+ *
+ * The change is already in the tree by the time there is anything to
+ * measure, so it is taken out — read into the run, the tree put back the way
+ * it was, and the change written back afterwards. The two measurements are
+ * then of the same compiler minutes apart rather than a run apart.
+ */
+async function measureChange(files: readonly FileEdit[], runs: number): Promise<Measured> {
+  const aside = setAside(files, REPO_DIR);
+  revertEdits(files, REPO_DIR);
+
+  let before: BenchmarkResult;
+  try {
+    process.stdout.write("\nMeasuring the compiler without the change...\n");
+    before = await benchmarkCompiler(runs);
+    process.stdout.write(
+      `  Before: ${before.mean.toFixed(3)}s ± ${before.stddev.toFixed(3)}s (${before.runs} runs)\n`,
+    );
+  } finally {
+    putBack(aside, REPO_DIR);
+  }
+
+  process.stdout.write("\nMeasuring the compiler with the change...\n");
+  const after = await benchmarkCompiler(runs);
+  process.stdout.write(`  After:  ${after.mean.toFixed(3)}s ± ${after.stddev.toFixed(3)}s (${after.runs} runs)\n`);
+
+  return { before, after, delta: after.mean - before.mean };
+}
+
+/**
+ * The threshold the measurement has to clear before a change is slower.
  *
  * `npm test` is a noisy clock: two measurements of the same compiler differ
  * by more than zero, so reverting on any positive difference would throw
@@ -313,7 +441,6 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] };
  * the slowdown is larger than the two benchmarks' own spread could produce
  * on its own.
  */
-/** The threshold the measurement has to clear before a change is slower. */
 export function isSlower(before: BenchmarkResult, after: BenchmarkResult): boolean {
   const delta = after.mean - before.mean;
   if (delta <= 0) return false;
@@ -486,9 +613,9 @@ function tailText(text: string, limit = 2000): string {
  * restores what it is given and nothing else, but `git add -A` and
  * `git checkout -- .` are given everything.
  */
-export function uncommittedChanges(compilerDir = COMPILER_DIR): string[] {
+export function uncommittedChanges(repoDir = REPO_DIR): string[] {
   const result = spawnSync("git", ["status", "--porcelain"], {
-    cwd: compilerDir,
+    cwd: repoDir,
     encoding: "utf8",
   });
   if (result.status !== 0) {
@@ -501,62 +628,44 @@ export function uncommittedChanges(compilerDir = COMPILER_DIR): string[] {
     .filter((line) => line.trim() !== "" && !line.startsWith("??") && !line.startsWith("!!"));
 }
 
-/**
- * Revert exactly the files this pass wrote.
- *
- * The whole tree is deliberately not restored: it is the user's repository,
- * and a checkout of it would take their work in progress with it.
- */
-export function revertPass(files: readonly string[], compilerDir = COMPILER_DIR): void {
-  const unique = [...new Set(files)];
-  if (unique.length === 0) return;
-  const result = spawnSync("git", ["checkout", "--", ...unique], {
-    cwd: compilerDir,
-    stdio: "inherit",
-  });
-  if (result.status !== 0) {
-    process.stderr.write(`Failed to revert: ${unique.join(", ")}\n`);
-  }
-}
-
 export function commitChanges(
   method: string,
   applied: readonly string[],
   files: readonly string[],
-  compilerDir = COMPILER_DIR,
+  repoDir = REPO_DIR,
 ): string | null {
   // Only what this pass wrote is staged: `git add -A` would take the whole
   // repository with it, and the repository is the user's.
   const unique = [...new Set(files)];
-  const result = spawnSync("git", ["add", "--", ...unique], { cwd: compilerDir, stdio: "inherit" });
+  const result = spawnSync("git", ["add", "--", ...unique], { cwd: repoDir, stdio: "inherit" });
   if (result.status !== 0) {
     process.stderr.write("Failed to stage changes\n");
     return null;
   }
-  // A proposal that rewrote a line into itself stages nothing, and a commit
+  // A change that rewrites a file into itself stages nothing, and a commit
   // of nothing is an error rather than a record of a pass.
-  const staged = spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: compilerDir });
+  const staged = spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: repoDir });
   if (staged.status === 0) {
     process.stdout.write("Nothing to commit: the changes were already there as written.\n");
     return null;
   }
   const message = `blazeopt: ${method} — ${applied.length} improvement(s)\n\n${applied.join("\n")}`;
-  const commit = spawnSync("git", ["commit", "-m", message], { cwd: compilerDir, stdio: "inherit" });
+  const commit = spawnSync("git", ["commit", "-m", message], { cwd: repoDir, stdio: "inherit" });
   if (commit.status !== 0) {
     process.stderr.write("Failed to commit\n");
     return null;
   }
   // The record of the pass names the commit, so that what a run left behind
   // in the repository can be read back against what it reports.
-  const head = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: compilerDir, encoding: "utf8" });
+  const head = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: repoDir, encoding: "utf8" });
   const sha = head.status === 0 ? head.stdout.trim() : null;
   process.stdout.write(`Committed ${applied.length} change(s)${sha === null ? "" : ` as ${sha}`}\n`);
   return sha;
 }
 
 /** The commit the repository is on now, when it is on one. */
-export function currentCommit(compilerDir = COMPILER_DIR): string | null {
-  const head = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: compilerDir, encoding: "utf8" });
+export function currentCommit(repoDir = REPO_DIR): string | null {
+  const head = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: repoDir, encoding: "utf8" });
   return head.status === 0 && head.stdout.trim() !== "" ? head.stdout.trim() : null;
 }
 
@@ -700,14 +809,19 @@ async function main(argv: string[]): Promise<number> {
     );
   }
 
-  // A run proposes through a model, so a session that cannot ask one cannot
-  // do anything at all. This is asked before the baseline suite is run rather
-  // than at the end of the first turn of the loop: the answer does not change,
-  // and finding it out late costs a suite run and a build to learn what the
-  // environment already says.
+  // A run writes its change through the coding agent, so a session that
+  // cannot hand one a model, or that has no instruction file to give it, or
+  // on a machine where pi is not installed, cannot do anything at all. All
+  // three are asked here rather than at the end of the first turn of the
+  // loop: the answers do not change, and finding them out late costs a suite
+  // run and a build to learn what the environment already says.
   const problem = modelProblem(project);
   if (problem !== null) {
     return refuse(1, `blazeopt: ${problem}.\n${modelAdvice(project)}`);
+  }
+  const agentic = agentProblem(session.model);
+  if (agentic !== null) {
+    return refuse(1, `blazeopt: ${agentic}.\n${agentAdvice()}`);
   }
 
   const options: Options = { maxIterations, benchmarkRuns, project };
@@ -715,21 +829,22 @@ async function main(argv: string[]): Promise<number> {
   process.stdout.write(`blazeopt: starting optimization loop (max ${maxIterations} runs)\n`);
   process.stdout.write(`blazeopt: methods: ${methods.join(" → ")}\n`);
   process.stdout.write(`blazeopt: model: ${session.model === null ? "none" : session.model}\n`);
+  process.stdout.write(`blazeopt: coding agent: ${AGENT_COMMAND}\n`);
   if (project !== undefined) {
     process.stdout.write(`blazeopt: targeting project ${project.tomlPath}\n`);
   }
 
   // A run is judged by the compiler's suite, so what the suite says before
-  // anything is applied decides whether a run can be judged at all. A suite
-  // that already fails would have every proposal reverted and blamed, which
-  // is a failure the model did not cause.
+  // anything is written decides whether a run can be judged at all. A suite
+  // that already fails would have every change reverted and blamed, which is
+  // a failure the agent did not cause.
   process.stdout.write("Running the compiler's test suite once to establish a baseline...\n");
   const baseline = runTestSuite(false);
   if (!baseline.completed) {
     return refuse(1, `blazeopt: the compiler's test suite did not run:\n${baseline.output}`);
   }
   if (!baseline.passed) {
-    // A failure that is already there is not a failure a proposal caused, so
+    // A failure that is already there is not a failure a change caused, so
     // no run on this compiler could be judged by its own suite.
     const count = baseline.failures > 0 ? ` (${baseline.failures} failing)` : "";
     return refuse(1, `blazeopt: the compiler's test suite already fails${count}, so no run could be judged by it:\n${baseline.output}`);
@@ -770,6 +885,17 @@ function modelAdvice(project: ProjectInfo | undefined): string {
     );
   }
   return "Set AI_MODEL to provider/model (for example anthropic/claude-sonnet-4-5) in the environment and try again.";
+}
+
+/**
+ * What to install, given that the coding agent is what writes the changes.
+ *
+ * There is nothing to set up to get an agent of one's own: it reads the same
+ * model the compiler would ask, so an environment that compiles a project is
+ * an environment that can optimise the compiler.
+ */
+function agentAdvice(): string {
+  return `Install ${AGENT_COMMAND} and put it on PATH, and keep ${AGENTS_FILE} at the base of the repository.`;
 }
 
 /** A run that was asked for and died before it could be judged. */

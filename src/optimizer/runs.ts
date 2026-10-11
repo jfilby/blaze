@@ -2,13 +2,13 @@
  * What each run did, and which session it belonged to, written at the head
  * of the repository.
  *
- * A **run** is one turn of the optimization loop — one method, one answer,
- * one measurement, one commit or revert. A **session** is one invocation of
- * `blazeopt`, which is the runs it got through and the answer it was working
- * under. Both are recorded, whether they got anywhere or not: a run whose
- * tests failed, one whose proposals were all refused and a session that
- * refused to start on a dirty tree are three different facts, and none of
- * them is visible afterwards except from here.
+ * A **run** is one turn of the optimization loop — one method, one answer
+ * from the coding agent, one measurement, one commit or revert. A **session**
+ * is one invocation of `blazeopt`, which is the runs it got through and the
+ * answer it was working under. Both are recorded, whether they got anywhere
+ * or not: a run whose tests failed, one whose changes were all refused and a
+ * session that refused to start on a dirty tree are three different facts,
+ * and none of them is visible afterwards except from here.
  *
  * `blazeopt-report` reads what this module writes.
  *
@@ -24,12 +24,19 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { repositoryRoot } from "./repository.ts";
 import type { Method } from "./ai.ts";
 
 /** The version of the record shapes, so a report can say what it cannot read. */
 export const RECORD_VERSION = 1;
 
-/** Where the records are: `.blazeopt` at the head of the repository. */
+/**
+ * Where the records are: `.blazeopt` at the head of the repository.
+ *
+ * The head is the repository the optimizer is a package inside, which is what
+ * `repository.ts` says it is rather than a second answer to the same
+ * question.
+ */
 export function recordsDirectory(repoRoot = repositoryRoot()): string {
   return join(repoRoot, ".blazeopt");
 }
@@ -45,24 +52,20 @@ export function sessionsDirectory(repoRoot = repositoryRoot()): string {
 }
 
 /**
- * The head of the repository the optimizer works on.
+ * What became of one run.
  *
- * The optimizer is a package inside it (`src/optimizer`), so the head is two
- * directories up — the same assumption the compiler directory rests on.
+ * Every way a run can end is named here, including the ones that end before
+ * anything is kept: a run that left the compiler as it found it is still a
+ * thing that happened, and it is the only one of those that a report can see.
  */
-function repositoryRoot(): string {
-  return join(import.meta.dirname, "..", "..");
-}
-
-/** What became of one run. */
 export type RunOutcome =
   /** The change was kept and committed. */
   | "committed"
-  /** The model proposed nothing. */
+  /** The coding agent answered with nothing to change, and changed nothing. */
   | "no-proposals"
-  /** Every proposal was refused, or none of them could be applied. */
+  /** Every change was refused, or none of them could be kept. */
   | "nothing-applied"
-  /** The change was applied and the compiler's suite rejected it. */
+  /** The change was written and the compiler's suite rejected it. */
   | "tests-failed"
   /** The change was kept, measured slower than the noise, and reverted. */
   | "slower"
@@ -71,13 +74,13 @@ export type RunOutcome =
   /** The run threw. */
   | "failed";
 
-/** A change a run applied. */
+/** A change a run wrote, and what it was about. */
 export interface AppliedChange {
   readonly file: string;
   readonly description: string;
 }
 
-/** A proposal a run refused, and why. */
+/** A change a run refused, and why. */
 export interface RefusedProposal {
   readonly file: string;
   readonly reason: string;
@@ -132,7 +135,7 @@ export interface RunRecord {
   readonly iteration: number;
   readonly method: Method;
   readonly outcome: RunOutcome;
-  /** What the model said it was doing, when a model was asked. */
+  /** What the coding agent said it did, when it answered. */
   readonly summary: string | null;
   readonly applied: readonly AppliedChange[];
   readonly refused: readonly RefusedProposal[];
