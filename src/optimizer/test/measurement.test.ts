@@ -10,9 +10,12 @@
  */
 
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { test } from "node:test";
-import { readHyperfineResult, type HyperfineExport } from "../benchmark.ts";
-import { isSlower } from "../cli.ts";
+import { benchmarkProject, readHyperfineResult, type HyperfineExport } from "../benchmark.ts";
+import { benchmarkProblem, isSlower } from "../cli.ts";
+import type { ProjectInfo } from "../project.ts";
+import { scratch } from "./scratch.ts";
 
 /** An export as hyperfine writes it for one measurement of five runs. */
 const exportOf = (over: Partial<{ mean: number; stddev: number | null; times: number[] }>): HyperfineExport => {
@@ -91,4 +94,56 @@ test("the smaller of the two thresholds still counts", () => {
 test("one run measured no spread, and a percent of the measurement still counts", () => {
   assert.equal(isSlower(measured(213, 1), measured(213.5, 1)), false);
   assert.equal(isSlower(measured(213, 1), measured(216, 1)), true);
+});
+
+/**
+ * A project a run may be aimed at, with whatever benchmark entry it names.
+ *
+ * The shape is `ProjectInfo`'s and the paths are scratch ones, which is what
+ * lets a test ask what a project's own benchmark is read as without running
+ * anything.
+ */
+function projectAt(directory: string, benchmark: ProjectInfo["benchmark"]): ProjectInfo {
+  return {
+    tomlPath: join(directory, "blaze.toml"),
+    directory,
+    sourcePath: join(directory, "main.ts"),
+    source: "function main(): void { console.log('hi'); }\n",
+    context: "a tree walk",
+    model: null,
+    benchmark,
+  };
+}
+
+test("a project that names no benchmark has nothing to be timed", async () => {
+  const dir = join(await scratch("blazeopt-project-"), "binarytrees");
+
+  // Nothing here builds a program: a project that names no command has no
+  // measurement, and saying so is the whole answer.
+  await assert.rejects(() => benchmarkProject(projectAt(dir, null)), /names no \[benchmark\] entry/);
+});
+
+test("a project with no benchmark entry is refused, and handed the entry to write", async () => {
+  const dir = join(await scratch("blazeopt-project-"), "binarytrees");
+
+  const problem = benchmarkProblem(projectAt(dir, null));
+
+  assert.match(problem ?? "", /names no \[benchmark\] entry, so a run aimed at it has nothing to measure it by/);
+  // The refusal is the entry to write, in the words the file takes, with the
+  // program the project's own build delivers already in it.
+  assert.match(problem ?? "", /command = "\.\/binarytrees 16"/);
+  assert.match(problem ?? "", /working_dir = "\."/);
+});
+
+test("a project that names an entry is measured on the program it builds", async () => {
+  const dir = join(await scratch("blazeopt-project-"), "binarytrees");
+
+  assert.equal(benchmarkProblem(projectAt(dir, { command: "./binarytrees 16", directory: dir, program: "binarytrees" })), null);
+});
+
+test("a project file that is not its directory's own is refused, because the rebuild reads that one", async () => {
+  const dir = await scratch("blazeopt-project-");
+  const named = { ...projectAt(dir, { command: "./run 16", directory: dir, program: "run" }), tomlPath: join(dir, "app.toml") };
+
+  assert.match(benchmarkProblem(named) ?? "", /is not the blaze\.toml of its directory/);
 });

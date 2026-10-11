@@ -28,11 +28,17 @@
 
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
 import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
-import { benchmarkCompiler, SKIP_HEAP_PROOF_ENV, type BenchmarkResult } from "./benchmark.ts";
+import {
+  benchmarkCompiler,
+  benchmarkProject,
+  SKIP_HEAP_PROOF_ENV,
+  type BenchmarkResult,
+} from "./benchmark.ts";
 import { gatherBuildFeedback } from "./build-feedback.ts";
 import { AGENTS_FILE, agentsFile, compilerDirectory, repositoryRoot } from "./repository.ts";
 import {
@@ -48,7 +54,7 @@ import {
   type FileEdit,
 } from "./agentic.ts";
 import { modelProblem, modelToAsk, type Method } from "./ai.ts";
-import { loadProject, type ProjectInfo } from "./project.ts";
+import { benchmarkExample, deliveredProgram, loadProject, PROJECT_FILE, type ProjectInfo } from "./project.ts";
 import {
   newId,
   RECORD_VERSION,
@@ -103,6 +109,14 @@ A project is a directory containing blaze.toml, or a .toml file naming its
 own. With one, the run is targeted at it: the research queries are about
 what the project does, the build-feedback method compiles it, and the agent
 is told what the project is for. Without one, the runs are general.
+
+A run is measured on what it improves: the compiler's own test suite when no
+project is named, and the program the project builds when one is. How much of
+that program to run is the project's own to say -- a command nobody chose can
+use all the machine's memory -- so a run aimed at a project needs a
+[benchmark] entry in its blaze.toml naming the command to time and the
+directory to run it in. A project that names none is refused, and the refusal
+prints the entry to write.
 
 A run establishes the compiler's test suite as a baseline before it starts,
 refuses a working tree that already holds uncommitted work, and commits only
@@ -241,8 +255,8 @@ async function runOne(
     }
     process.stdout.write("Tests passed.\n");
 
-    // 4. Measure the compiler with the change and without it
-    const measured = await measureChange(answer.files, options.benchmarkRuns);
+    // 4. Measure with the change and without it, on what the run improves
+    const measured = await measureChange(answer.files, options.benchmarkRuns, options.project);
     record.benchmark = {
       before: measured.before,
       after: measured.after,
@@ -419,14 +433,23 @@ interface Measured {
  * it was, and the change written back afterwards. The two measurements are
  * then of the same compiler minutes apart rather than a run apart.
  */
-async function measureChange(files: readonly FileEdit[], runs: number): Promise<Measured> {
+async function measureChange(
+  files: readonly FileEdit[],
+  runs: number,
+  project: ProjectInfo | undefined,
+): Promise<Measured> {
   const aside = setAside(files, REPO_DIR);
   revertEdits(files, REPO_DIR);
 
+  // What a run aimed at a project measures is the program it builds, which is
+  // the thing the compiler makes fast; what a general run measures is the
+  // compiler's own suite, which is the only command that means the same thing
+  // from any directory.
+  const what = measuredThing(project);
   let before: BenchmarkResult;
   try {
-    process.stdout.write("\nMeasuring the compiler without the change...\n");
-    before = await benchmarkCompiler(runs);
+    process.stdout.write(`\nMeasuring ${what} without the change...\n`);
+    before = await measure(runs, project);
     process.stdout.write(
       `  Before: ${before.mean.toFixed(3)}s ± ${before.stddev.toFixed(3)}s (${before.runs} runs)\n`,
     );
@@ -434,11 +457,40 @@ async function measureChange(files: readonly FileEdit[], runs: number): Promise<
     putBack(aside, REPO_DIR);
   }
 
-  process.stdout.write("\nMeasuring the compiler with the change...\n");
-  const after = await benchmarkCompiler(runs);
+  process.stdout.write(`\nMeasuring ${what} with the change...\n`);
+  const after = await measure(runs, project);
   process.stdout.write(`  After:  ${after.mean.toFixed(3)}s ± ${after.stddev.toFixed(3)}s (${after.runs} runs)\n`);
 
   return { before, after, delta: after.mean - before.mean };
+}
+
+/** What the measurement of one change is of, said the way a run says it. */
+function measuredThing(project: ProjectInfo | undefined): string {
+  if (project === undefined || project.benchmark === null) return "the compiler";
+  return `the program ${userPath(project.tomlPath)} builds`;
+}
+
+/**
+ * A path the way whoever ran this names it: from the base of the repository
+ * when it is inside it, and absolute when it is not, so a project anywhere else
+ * is named by where it is rather than by how far away it is.
+ */
+function userPath(path: string): string {
+  const fromRoot = relative(REPO_DIR, path);
+  return fromRoot.startsWith("..") ? path : fromRoot;
+}
+
+/**
+ * The measurement a run is judged by, with the change in whatever state the
+ * tree is in now.
+ *
+ * A project is measured on the program the compiler produces for it — the
+ * compiler's own suite measures how long the compiler takes, and a change that
+ * makes its output faster and itself slower is the change a project asked for.
+ */
+async function measure(runs: number, project: ProjectInfo | undefined): Promise<BenchmarkResult> {
+  if (project === undefined || project.benchmark === null) return benchmarkCompiler(runs);
+  return benchmarkProject(project, runs);
 }
 
 /**
@@ -481,6 +533,20 @@ function cap(text: string, limit: number): string {
   const trimmed = text.trim();
   if (trimmed.length <= limit) return trimmed;
   return `${trimmed.slice(0, limit)}\n... [${trimmed.length - limit} more characters not shown]`;
+}
+
+/**
+ * A text with every line set in from the left, for something quoted whole.
+ *
+ * An entry a refusal prints is one the user pastes into a file, so it is shown
+ * the way it reads there: indented under the sentence that introduces it, with
+ * a blank line left empty rather than filled with the indent.
+ */
+function indent(text: string, prefix: string): string {
+  return text
+    .split("\n")
+    .map((line) => (line === "" ? "" : `${prefix}${line}`))
+    .join("\n");
 }
 
 async function gatherResearchContext(project?: ProjectInfo): Promise<string | null> {
@@ -807,6 +873,16 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
+  // A run aimed at a project is measured on the program that project builds,
+  // and how much of it to run is the project's own to say: a command nobody
+  // chose can use all the machine's memory. A project that names none has no
+  // measurement to be judged by, and the session is refused with the entry to
+  // write rather than sent off to time something of its own.
+  if (project !== undefined) {
+    const benchmark = benchmarkProblem(project);
+    if (benchmark !== null) return refuse(1, benchmark);
+  }
+
   // A run reverts the files it wrote and commits only those, and neither
   // operation can tell this session's work from the user's — so the session
   // begins from a tree that holds nothing but its own work. Anything already
@@ -906,6 +982,49 @@ function modelAdvice(project: ProjectInfo | undefined): string {
     );
   }
   return "Set AI_MODEL to provider/model (for example anthropic/claude-sonnet-4-5) in the environment and try again.";
+}
+
+/**
+ * What stops a run aimed at a project before it can be judged, or null when
+ * nothing does.
+ *
+ * The measurement is the project's own program, which means the project's own
+ * file has to say how much of it to run. That is not a formality and it is not
+ * a default that can be invented: `./binarytrees 16` and `./binarytrees 18`
+ * are the same program a gigabyte apart, and a command nobody chose is a
+ * command nobody sized for the machine it runs on. So a project that names no
+ * `[benchmark]` entry is refused, and the refusal is the entry to write into
+ * its file, with the project's own program name already in it.
+ *
+ * The rebuild is the compiler's own deterministic one, which reads
+ * `blaze.toml` beside the project's sources — the file naming any other, a
+ * differently named `.toml` would have it build another project than the one
+ * the session was aimed at, and measure that instead.
+ */
+export function benchmarkProblem(project: ProjectInfo): string | null {
+  if (project.benchmark === null) {
+    const program = deliveredProgram(project.tomlPath);
+    return (
+      `blazeopt: ${userPath(project.tomlPath)} names no [benchmark] entry, so a run aimed at it has nothing to measure it by.\n\n` +
+      `A run of the compiler for a project is judged by the program that project builds, which is the thing the ` +
+      `compiler makes fast. How much of it to run is the project's own to say — a command nobody chose can use ` +
+      `all the machine's memory — so nothing here times the program until the project says what to run. Write ` +
+      `this into ${userPath(project.tomlPath)}:\n\n` +
+      `${indent(benchmarkExample(project.tomlPath), "  ")}\n\n` +
+      `command is run in working_dir once the project has been rebuilt, so it names the program a build delivers ` +
+      `beside the project's sources: this one is delivered as ./${program}. The argument is the size of the work ` +
+      `it does, which is the one this machine can afford.`
+    );
+  }
+  if (resolve(project.tomlPath) !== resolve(join(project.directory, PROJECT_FILE))) {
+    return (
+      `blazeopt: ${userPath(project.tomlPath)} is not the ${PROJECT_FILE} of its directory.\n\n` +
+      `A measurement rebuilds the project with the compiler's own deterministic build, which reads ` +
+      `${PROJECT_FILE} beside the project's sources. Name the project by its directory — ` +
+      `blazeopt ${userPath(project.directory)} — and its [benchmark] entry is read as written.`
+    );
+  }
+  return null;
 }
 
 /**

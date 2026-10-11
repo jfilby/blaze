@@ -10,17 +10,30 @@
  * anything the benchmarked command prints — slicing that apart by bracket
  * reads the wrong JSON. And the benchmark runs in the compiler directory,
  * because `npm test` is a command with a meaning only relative to a project.
+ *
+ * A run aimed at a project is measured on the program that project builds
+ * rather than on the compiler's own suite, because the compiler is what makes
+ * that program fast. The rebuild is the deterministic half of a build and the
+ * command that times the program is the project's own.
  */
 
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ProjectInfo } from "./project.ts";
 
 const COMPILER_DIR = join(import.meta.dirname, "..", "compiler");
 
+/** The compiler's own deterministic rebuild of a project, with no model in it. */
+const OFFLINE_BUILD = join(COMPILER_DIR, "offline-build.ts");
+
 /** How long a benchmark may run before it is abandoned, per hyperfine run. */
 const BENCHMARK_RUN_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** How long a project may take to rebuild before it is abandoned. */
+const REBUILD_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * Set when a run of this optimizer times the suite, to leave the heap proof
@@ -159,4 +172,129 @@ export function readHyperfineResult(data: HyperfineExport): BenchmarkResult {
  */
 export async function benchmarkCompiler(runs = 5): Promise<BenchmarkResult> {
   return benchmark(SUITE_COMMAND, runs);
+}
+
+/**
+ * Benchmark a blaze project: rebuild it with the compiler as it stands, and
+ * time the program the project's own file says to time.
+ *
+ * The program is what the compiler made fast, so a run aimed at a project is
+ * judged by it rather than by the compiler's own suite. The rebuild is the
+ * deterministic half of a build — the same frontend, resolver, optimizer and
+ * toolchain a build runs, with no model in it — so what is timed is what the
+ * rule-based half of the compiler produced, and two measurements of the same
+ * compiler are the same program twice.
+ *
+ * The command is the project's own and nothing here ever chooses one. How much
+ * of the program to run is a question about the machine, not about the
+ * compiler: a project file that names no `[benchmark]` entry has no
+ * measurement to be judged by, and the run refuses it rather than timing
+ * something of its own.
+ *
+ * @param project The project, whose blaze.toml names the command and the
+ *   directory it runs in
+ * @param runs Number of measurement runs
+ */
+export async function benchmarkProject(project: ProjectInfo, runs = 5): Promise<BenchmarkResult> {
+  const entry = project.benchmark;
+  if (entry === null) {
+    throw new Error(`${project.tomlPath} names no [benchmark] entry, so there is nothing to time`);
+  }
+
+  const work = await mkdtemp(join(tmpdir(), "blazeopt-project-"));
+  // The program the measurement times is written where the project's own build
+  // delivers it, which is the project's directory and therefore the user's.
+  const delivered = join(entry.directory, entry.program);
+  const previous = join(work, "previous");
+  let replaced = false;
+
+  try {
+    const built = await rebuildProject(project, work);
+    replaced = await holdAside(delivered, previous);
+    await copyFile(built, delivered);
+    await chmod(delivered, 0o755);
+    return await benchmark(entry.command, runs, entry.directory);
+  } finally {
+    // The project's directory goes back the way it was found: the program this
+    // measured by is a build artifact of this run, and a run that left its own
+    // build behind would leave the user's tree dirty with it.
+    if (replaced) await copyFile(previous, delivered).catch(() => {});
+    else await rm(delivered, { force: true }).catch(() => {});
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Rebuild a project, and say where the program it wrote is.
+ *
+ * The rebuild is the compiler's own offline harness, which runs the
+ * deterministic half of a build: it writes the objects, the runtime and the
+ * linked program into the work directory it is given. It is run from the
+ * project's own directory, the way a build of it is, so what it resolves is
+ * what the project resolves.
+ */
+async function rebuildProject(project: ProjectInfo, work: string): Promise<string> {
+  const program = join(work, "program");
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("node", [OFFLINE_BUILD, project.directory, work], {
+      cwd: project.directory,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`the project was not rebuilt within ${REBUILD_TIMEOUT_MS / 60000} minutes`));
+    }, REBUILD_TIMEOUT_MS);
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        const detail = tail(stderr) || tail(stdout);
+        reject(
+          new Error(
+            `the project could not be rebuilt (exit ${String(code)})${detail === "" ? "" : `:\n${detail}`}`,
+          ),
+        );
+        return;
+      }
+      // A build that answered with nothing wrote nothing, and there would be
+      // nothing for the command to time but a program an earlier one left.
+      if (!existsSync(program)) {
+        reject(new Error("the rebuild wrote no program to time"));
+        return;
+      }
+      resolve();
+    });
+
+    child.on("error", (cause) => {
+      clearTimeout(timer);
+      reject(cause);
+    });
+  });
+
+  return program;
+}
+
+/**
+ * Hold whatever the delivered program is now out of the way, so it can be put
+ * back once the measurement is over.
+ *
+ * @returns Whether there was something to hold, which is what decides whether
+ *   the delivered file is restored or taken back out at the end
+ */
+async function holdAside(delivered: string, previous: string): Promise<boolean> {
+  if (!existsSync(delivered)) return false;
+  await copyFile(delivered, previous);
+  return true;
+}
+
+/** The end of a text, for a diagnostic. */
+function tail(text: string, limit = 2000): string {
+  const trimmed = text.trim();
+  return trimmed.length <= limit ? trimmed : `... [earlier output cut] ...\n${trimmed.slice(-limit)}`;
 }

@@ -9,12 +9,14 @@
  */
 
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
-import { loadProject, ProjectError } from "../project.ts";
+import { benchmarkExample, loadProject, ProjectError } from "../project.ts";
 import { craftQuery, extractProjectContext } from "../tavily.ts";
 import { modelProblem, modelSpec, modelToAsk } from "../ai.ts";
+import { EXECUTABLE_SUFFIX } from "../../compiler/core/target.ts";
+import { compilerDirectory, repositoryRoot } from "../repository.ts";
 
 /**
  * The environment a model is resolved from, restored after these tests.
@@ -42,6 +44,17 @@ async function project(source = "export function f(x: number): number { return x
   const dir = await scratch("blazeopt-project-");
   await writeFile(join(dir, "blaze.toml"), "sourceFile = \"main.ts\"\noutput = \"machine\"\n");
   await writeFile(join(dir, "main.ts"), source);
+  return dir;
+}
+
+/** A project directory whose blaze.toml carries the given extra lines. */
+async function projectWith(lines: readonly string[]): Promise<string> {
+  const dir = await scratch("blazeopt-project-");
+  await writeFile(
+    join(dir, "blaze.toml"),
+    `sourceFile = "main.ts"\noutput = "machine"\n${lines.join("\n")}\n`,
+  );
+  await writeFile(join(dir, "main.ts"), "function main(): void { console.log('hi'); }\n");
   return dir;
 }
 
@@ -214,4 +227,80 @@ test("the environment's model wins over the project's own", async () => {
   const project = await loadProject(dir);
 
   assert.equal(modelToAsk(project), "anthropic/claude-sonnet-4-5");
+});
+
+test("the benchmark a project names is read, with the directory it runs in", async () => {
+  const dir = await projectWith(["[benchmark]", 'command = "./run 16"', 'working_dir = "artifacts"']);
+
+  const read = await loadProject(dir);
+
+  assert.equal(read.benchmark?.command, "./run 16");
+  // Beside the project's own sources, the way its `sourceFile` is: a path a
+  // project file names is relative to the file that names it.
+  assert.equal(read.benchmark?.directory, join(dir, "artifacts"));
+  // The program is the project's own name, which is the name its build writes
+  // it under beside the sources.
+  assert.equal(read.benchmark?.program, `${basename(dir)}${EXECUTABLE_SUFFIX}`);
+});
+
+test("a benchmark's working_dir is the project's own directory when it says nothing", async () => {
+  const dir = await projectWith(["[benchmark]", 'command = "./run 16"']);
+
+  assert.equal((await loadProject(dir)).benchmark?.directory, dir);
+});
+
+test("a benchmark's working_dir is read beside the project's sources, and from the head of the repository", async () => {
+  // A directory beside the sources, which is the project's own spelling.
+  const dir = await projectWith(["[benchmark]", 'command = "./run 16"', 'working_dir = "src"']);
+  await mkdir(join(dir, "src"), { recursive: true });
+  assert.equal((await loadProject(dir)).benchmark?.directory, join(dir, "src"));
+
+  // And a path from the head of the repository, which names a directory the
+  // project itself does not hold: `src/compiler` is one, and an entry written
+  // that way is read as it was written rather than refused.
+  const repositorySpelled = await projectWith([
+    "[benchmark]",
+    'command = "./run 16"',
+    'working_dir = "src/compiler"',
+  ]);
+  assert.equal((await loadProject(repositorySpelled)).benchmark?.directory, compilerDirectory(repositoryRoot()));
+});
+
+test("a benchmark's working_dir that names nothing is still read, so the command says so", async () => {
+  const dir = await projectWith(["[benchmark]", 'command = "./run 16"', 'working_dir = "nowhere"']);
+
+  // Nothing to resolve to, so the directory beside the project is what the
+  // entry names: a command that never runs fails as one, rather than silently
+  // timing a program somewhere else.
+  assert.equal((await loadProject(dir)).benchmark?.directory, join(dir, "nowhere"));
+});
+
+test("a project that names no benchmark names none", async () => {
+  assert.equal((await loadProject(await project())).benchmark, null);
+});
+
+test("a benchmark entry that names no command is refused, with an entry that does", async () => {
+  const dir = await projectWith(["[benchmark]", 'working_dir = "artifacts"']);
+
+  await assert.rejects(() => loadProject(dir), (cause) => {
+    assert.ok(cause instanceof ProjectError);
+    assert.match(cause.message, /\[benchmark\] names no command to time/);
+    // The refusal is not only a reason: it is the entry to write into the
+    // file, with the program this project's own build delivers in it.
+    assert.match(cause.message, /\[benchmark\]\ncommand = "\.\/[^"]+ 16"\nworking_dir = "\."/);
+    return true;
+  });
+});
+
+test("a benchmark that is not a table is refused the same way", async () => {
+  const dir = await projectWith(['benchmark = "./run 16"']);
+
+  await assert.rejects(() => loadProject(dir), /\[benchmark\] must be a table naming a command to time/);
+});
+
+test("the example entry names the program the project's own build delivers", () => {
+  assert.equal(
+    benchmarkExample("/repo/src/binarytrees/blaze.toml"),
+    ["[benchmark]", 'command = "./binarytrees 16"', 'working_dir = "."'].join("\n"),
+  );
 });

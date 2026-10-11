@@ -17,9 +17,11 @@ blazeopt-report [options]
 
 One turn of the loop is a **run**: it gathers context, hands that context to
 the coding agent, reads back what the agent wrote, runs the compiler's test
-suite, measures the compiler with the change and without it, and commits what
-survived. One invocation of `blazeopt` is a **session**, which is the runs it
-got through.
+suite, measures it with the change and without it, and commits what survived.
+What is measured is the program a named project builds when a project is named,
+and the compiler's own suite otherwise; both are described under
+[What a run is measured by](#what-a-run-is-measured-by). One invocation of
+`blazeopt` is a **session**, which is the runs it got through.
 
 A run is one of three **methods**, which is how it gathers its context:
 
@@ -94,6 +96,50 @@ commit, which method earns it, what has been refusing the runs, which files
 the kept changes were written in, and what the measurements have been doing
 to the compiler.
 
+## What a run is measured by
+
+The measurement is what says whether a change was one, and what it measures
+depends on whether a project was named:
+
+| | what is timed | what is built |
+|---|---|---|
+| no project | the compiler's own test suite (`npm test`) | nothing |
+| a project | the program that project builds | the project, rebuilt from its sources |
+
+A run aimed at a project therefore needs an entry in that project's
+`blaze.toml`:
+
+```toml
+[benchmark]
+command = "./binarytrees 16"
+working_dir = "src/benchmarks/machine_backend/binarytrees"
+```
+
+`command` is what hyperfine times, and it runs in `working_dir`, which is read
+beside the project file the way its `sourceFile` is — `"."` is the directory
+holding it — and, when that path names nothing there, against the base of the
+repository instead, so either spelling of the project's own directory works.
+The entry has to be written by whoever owns the project rather than worked out
+by the run: how much of the program to do is a question about the machine and
+not about the compiler, and a command nobody chose can use all the machine's
+memory. `./binarytrees 16` and `./binarytrees 18` are the same program a
+gigabyte apart, which is the difference between a run that finishes and one
+the kernel kills. A project that names no entry is refused, and the refusal
+prints the entry to write with the program its own build delivers already in
+it.
+
+`command` names the program a build delivers beside the project's sources,
+because that is where the freshly built one is written: the run rebuilds the
+project, writes the program into `working_dir` under the name `blaze build`
+delivers it under — the project's own — times the command there, and puts back
+whatever was at that path afterwards, so the project's directory is left the
+way it was found.
+
+The rebuild is the compiler's own offline one (`compiler/offline-build.ts`):
+the frontend, the resolver, the optimizer and the toolchain a build runs, with
+no model in it. What a run times is therefore what the rule-based half of the
+compiler produced, which is the same program every time for the same compiler.
+
 ## How a change is judged
 
 Three gates, all of them the compiler's own:
@@ -101,8 +147,10 @@ Three gates, all of them the compiler's own:
 1. The compiler's test suite must pass before any run starts, so that a
    failure a change causes is a failure the change caused.
 2. After a change is written the suite must pass, or the change is reverted.
-3. The compiler must not measure slower. A difference smaller than the two
-   measurements' own spread is noise, not a change, and is kept.
+3. The compiler must not measure slower — the compiler's own suite when no
+   project is named, and the program the project builds when one is. A
+   difference smaller than the two measurements' own spread is noise, not a
+   change, and is kept.
 
 Every file the agent writes is reverted and committed on its own — never the
 whole working tree, which is the user's repository.

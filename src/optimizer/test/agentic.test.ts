@@ -183,5 +183,10 @@ function projectOf(tomlPath: string): ProjectInfo {
     source: "export function f(): number { return 1; }",
     context: "a spectral norm over two arrays",
     model: null,
+    benchmark: {
+      command: "./project 16",
+      directory: "/repo/project",
+      program: "project",
+    },
   };
 }
