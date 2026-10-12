@@ -59,14 +59,20 @@ judged, and recorded as a refusal naming the reason.
 
 ## Watching the agent
 
+The agent's work is shown as it happens by default:
+
 ```
-blazeopt --show-ai-coding
+blazeopt
 ```
 
-The agent is asked in print mode, which writes its answer at the end of its
-work and nothing at all on the way — so a run nobody is watching has nothing
-to show. With this flag it is asked in the event mode instead, which carries
-every tool it calls as it calls it, and each one is printed as it happens:
+The agent is asked in the event mode, which carries every tool it calls as it
+calls it, and each one is printed as it happens. A run nobody is watching
+passes `--no-show-ai-coding` and is asked in print mode instead, which writes
+the answer at the end of its work and nothing at all on the way:
+
+```
+blazeopt --no-show-ai-coding
+```
 
 ```
 Handing the run to pi, the coding agent at the base of the repository...

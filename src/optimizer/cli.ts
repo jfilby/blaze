@@ -23,6 +23,7 @@
  *   --methods <list>       Comma-separated methods to cycle through
  *                         (default "research,build-feedback,code-review")
  *   --show-ai-coding       Print what the coding agent does as it works
+ *                          (default; --no-show-ai-coding turns it off)
  *   -h, --help             Show this help
  */
 
@@ -140,6 +141,7 @@ Options:
                            code-review    compiler source review alone
                          (default "research,build-feedback,code-review")
   --show-ai-coding       print what the coding agent does as it works
+                           (default; --no-show-ai-coding turns it off)
   -h, --help             show this help
 
 Environment:
@@ -759,7 +761,8 @@ async function main(argv: string[]): Promise<number> {
         "max-iterations": { type: "string" },
         "benchmark-runs": { type: "string" },
         methods: { type: "string" },
-        "show-ai-coding": { type: "boolean" },
+        "show-ai-coding": { type: "boolean", default: true },
+        "no-show-ai-coding": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -802,11 +805,11 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // Whether the agent's own work is watched as it happens. It is off unless
-  // it was asked for, because what it does is a great deal of output for a
-  // question nobody asked: the change is what matters, and the agent's own
-  // account of it is kept either way.
-  const showOutput = parsed.values["show-ai-coding"] === true;
+  // Whether the agent's own work is watched as it happens. It is on by
+  // default, so a run shows what it did as it did it; --no-show-ai-coding
+  // turns it off for a run nobody is watching. The change is what matters,
+  // and the agent's own account of it is kept either way.
+  const showOutput = parsed.values["no-show-ai-coding"] !== true;
 
   // From here the invocation is a session, and it is recorded however it
   // ends: a session that was refused before it started is as much a result
