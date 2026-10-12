@@ -13,10 +13,24 @@ export interface ChatEndpoint {
   url: string;
   /** The prompts the endpoint was asked, in arrival order. */
   prompts: string[];
+  /** Every request as it arrived: where it was addressed and how it authenticated. */
+  requests: RecordedRequest[];
   /** The most requests that were in flight at the same time. */
   peak: () => number;
   /** Resolves once a request has arrived, however it was answered. */
   received: Promise<void>;
+}
+
+/**
+ * One request as the stand-in was handed it. A provider is more than its base
+ * URL: it is the path its wire format is asked at, and the credential and the
+ * headers it carries there, so those are what a test of one asserts.
+ */
+export interface RecordedRequest {
+  /** The path and query the request was addressed at, relative to the server. */
+  readonly url: string;
+  readonly authorization: string | undefined;
+  readonly session: string | undefined;
 }
 
 export interface ChatEndpointOptions {
@@ -66,6 +80,7 @@ export async function chatEndpoint(
   options: ChatEndpointOptions = {},
 ): Promise<ChatEndpoint> {
   const prompts: string[] = [];
+  const requests: RecordedRequest[] = [];
   const arrived = Promise.withResolvers<void>();
   let served = 0;
   let inFlight = 0;
@@ -84,6 +99,14 @@ export async function chatEndpoint(
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
         messages: { role: string; content: string }[];
       };
+      // A header arrives as one value or as several; the credential and the
+      // session are each one value, so the first of them is the one asked for.
+      const session = request.headers["x-opencode-session"];
+      requests.push({
+        url: request.url ?? "",
+        authorization: request.headers.authorization,
+        session: typeof session === "string" ? session : session?.[0],
+      });
       prompts.push(body.messages.map((message) => message.content).join("\n\n"));
       const prompt = prompts[prompts.length - 1];
       const content = options.answer?.(prompt) ?? answers[Math.min(served, answers.length - 1)];
@@ -144,5 +167,5 @@ export async function chatEndpoint(
     }
   });
 
-  return { url: `http://127.0.0.1:${port}/v1`, prompts, peak: () => peak, received: arrived.promise };
+  return { url: `http://127.0.0.1:${port}/v1`, prompts, requests, peak: () => peak, received: arrived.promise };
 }
