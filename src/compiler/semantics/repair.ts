@@ -1067,10 +1067,8 @@ function inlineOne(
   const taken = new Set([...slotNames(fn), ...blocksOf(fn).map((block) => block.id)]);
   // Every name the callee declares is renamed into this function, and its
   // parameters become the arguments the call was made with, so nothing it was
-  // written as can be read here as something of this function's.
-  const types = slotTypesOf(callee);
-  const bindings = new Map<string, SemanticValue>();
-  // What each name the callee writes is written under here. A local is renamed
+  // written as can be read here as something of this function's. What each
+  // name the callee writes is written under here. A local is renamed
   // like any other name, so its writes follow it. A parameter is a different
   // matter: a parameter is a *copy* of the argument, so a write to one must
   // never land on the name the caller passed. `const y = bump(x)` with
@@ -1078,37 +1076,34 @@ function inlineOne(
   // reached through would answer 12 where the source answers 11. A written
   // parameter is therefore bound to a temporary of its own, which is the copy
   // the callee was given.
-  const writes = new Map<string, string>();
+  const scope: Scope = { reads: new Map(), targets: new Map() };
   const before: SemanticStatement[] = [];
   callee.params.forEach((param, index) => {
     const argument = call.args[index];
     if (argument === undefined) return;
-    bindings.set(param.name, structuredClone(argument));
+    scope.reads.set(param.name, structuredClone(argument));
     if (!writesName(callee, param.name)) return;
     const name = freshName(taken, "inlined");
     const slot = slotFor(argument, name, true);
     before.push({ k: "let", slot, value: structuredClone(argument), line });
-    bindings.set(param.name, { k: "local", type: slotType(slot), name });
-    writes.set(param.name, name);
+    scope.reads.set(param.name, { k: "local", type: slotType(slot), name });
+    scope.targets.set(param.name, name);
   });
-  for (const inner of nestedBlocks(callee.entry)) {
-    for (const name of boundNames(inner)) {
-      // A name a nested block declares that something already answers to is a
-      // *different* binding under the same name, and the substitution below is
-      // by name: there is one spelling for both of them and either answer is
-      // wrong. Renaming the shadow sends the parameter's own reads to it, and
-      // leaving it sends the shadow's reads to the argument — which is what
-      // `helper(t, u)` whose `if` arm declares `let t` did, inlined into a
-      // caller: `use(10, 5)` answered 31 where the program answers 210. A
-      // callee that shadows a name is left as a call.
-      if (bindings.has(name)) {
-        return { refused: `${callee.name} declares "${name}" in a block of its own, which shadows another name of the function, and a name answers for one binding` };
-      }
-      const renamed = freshName(taken, "inlined");
-      bindings.set(name, { k: "local", type: types.get(name) ?? { kind: "primitive", name: "f64" }, name: renamed });
-      writes.set(name, renamed);
-    }
-  }
+  // The renaming walks the scopes the callee declares its names in, rather
+  // than the spellings: two blocks of one body very often declare one spelling
+  // — two loops counted by the same `i`, the commonest counter there is — and
+  // those are two bindings. A map by spelling would make them one, and the
+  // second loop would count the first one's counter. What a name answers for
+  // inside the block it is declared in is that declaration; what it answers
+  // for outside it is whatever answered before; and a declaration that shadows
+  // a name already in scope — `helper(t, u)` whose `if` arm declares `let t`,
+  // which inlined into a caller answered 31 where the program answers 210 — is
+  // refused, because a name answers for one binding and the walk would be
+  // renaming the shadow over the very reads the parameter's own binding
+  // answers for.
+  const body = structuredClone(callee.entry);
+  const shadowed = renameBindings(body, scope, taken, callee.name);
+  if (shadowed !== null) return { refused: shadowed };
 
   // A block id is a name like any other, and the callee's are its own: its
   // loop body is very often also called `b2`, which is the name the caller's
@@ -1142,12 +1137,10 @@ function inlineOne(
   // The block ids are renamed by a walk of the whole statement rather than by
   // picking the ones a loop names: a jump target, a loop's own header and exit
   // and the block a nested statement carries are all just strings, and each is
-  // the callee's own spelling.
-  const spliced = callee.entry.statements.map((entry) =>
-    replaceBlockIds(substituteLocals(entry, bindings, writes), blocks) as SemanticStatement,
-  );
-  const handsBack = callee.entry.terminator.k === "return" ? callee.entry.terminator.value : null;
-  const result = handsBack === null ? null : substituteLocals(handsBack, bindings, writes);
+  // the callee's own spelling. The statements themselves were renamed by the
+  // walk above, one scope at a time, so what is left here is the ids.
+  const spliced = body.statements.map((entry) => replaceBlockIds(entry, blocks) as SemanticStatement);
+  const result = body.terminator.k === "return" ? body.terminator.value : null;
   const added: SemanticStatement[] = [...before, ...spliced];
   // The result is bound to a name of its own, so the value that was the call
   // reads that name and the call is gone.
@@ -1207,41 +1200,177 @@ export function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>)
 }
 
 /**
- * Every name a function binds, by name, as the type it is read at.
+ * The names a scope answers for, as the spliced body reads them.
  *
- * A `let` binds the name it says it does, and a loop binds its own beside them:
- * a counter, or the element and the index a walk is written with. The
- * substitution by name answers for every one of them, and a loop's counter is
- * a different binding from a parameter of the same name — a callee whose loop
- * counts in `i`, put into a function that has `i`, is two names in one frame.
+ * `reads` is what a read of a spelling is read as — the argument a parameter
+ * was made with, or the local a declaration was renamed to. `targets` is what
+ * a write of a spelling is written under, which is a bare string in the IR
+ * rather than a value: a `set`, a `step` and a `setElement` name what they
+ * write, and a `let` names the slot it declares, so both maps travel together.
  */
-function slotTypesOf(fn: SemanticFunction): Map<string, SemanticType> {
-  const types = new Map<string, SemanticType>();
-  for (const param of fn.params) types.set(param.name, slotType(param));
-  for (const block of nestedBlocks(fn.entry)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") types.set(statement.slot.name, slotType(statement.slot));
-      else if (statement.k === "loop") {
-        if (statement.loop.kind === "counted") types.set(statement.loop.variable, statement.loop.type);
-        else if (statement.loop.kind === "each") {
-          types.set(statement.loop.element, statement.loop.elementType);
-          types.set(statement.loop.index, { kind: "primitive", name: "usize" });
-        }
-      }
-    }
-  }
-  return types;
+interface Scope {
+  readonly reads: Map<string, SemanticValue>;
+  readonly targets: Map<string, string>;
 }
 
-/** Every name a block binds of its own, which a rewrite renames beside it. */
-function boundNames(block: SemanticBlock): string[] {
-  const names = [...declaredNames(block)];
-  for (const statement of block.statements) {
-    if (statement.k !== "loop") continue;
-    if (statement.loop.kind === "counted") names.push(statement.loop.variable);
-    else if (statement.loop.kind === "each") names.push(statement.loop.index, statement.loop.element);
+/** Whether a node of a walked tree is a block, which its own scope renames. */
+function isBlockNode(node: unknown): node is SemanticBlock {
+  return (
+    typeof node === "object" &&
+    node !== null &&
+    !Array.isArray(node) &&
+    "statements" in node &&
+    "terminator" in node &&
+    "releases" in node
+  );
+}
+
+/**
+ * Substitutes what a walked tree reads, without entering a block of it.
+ *
+ * A block is renamed by the walk that carries its own scope into it, so a
+ * substitution that entered one would read the names of the scope outside it
+ * and rewrite the block twice — the second time over reads the first had
+ * already answered, some of which the block's own declarations shadow.
+ */
+function substituteShallow<T>(node: T, scope: Scope): T {
+  if (isBlockNode(node)) return node;
+  if (typeof node === "string") return (scope.targets.get(node) ?? node) as T;
+  if (isValueNode(node) && node.k === "local") {
+    const bound = scope.reads.get(node.name);
+    if (bound !== undefined) return structuredClone(bound) as T;
   }
-  return names;
+  if (Array.isArray(node)) return node.map((entry) => substituteShallow(entry, scope)) as T;
+  if (node !== null && typeof node === "object") {
+    return Object.fromEntries(
+      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, substituteShallow(entry, scope)]),
+    ) as T;
+  }
+  return node;
+}
+
+/**
+ * Substitutes what one statement reads, with the scope it reads it in.
+ *
+ * What the statement itself declares is left alone: the declaration is renamed
+ * where it is made, after this has run, because a value it reads is read
+ * before any declaration of its own answers — `let i = i + 1` reads the outer
+ * one, and its own slot is written under a name of its own.
+ */
+function substituteStatement(statement: SemanticStatement, scope: Scope): void {
+  if (statement.k === "let") {
+    statement.value = substituteShallow(statement.value, scope);
+    return;
+  }
+  if (statement.k === "loop") {
+    const loop = statement.loop;
+    if (loop.kind === "counted") {
+      statement.loop = {
+        ...loop,
+        from: substituteShallow(loop.from, scope),
+        to: substituteShallow(loop.to, scope),
+        step: loop.step === null ? null : substituteShallow(loop.step, scope),
+      };
+    } else if (loop.kind === "each") {
+      statement.loop = { ...loop, length: substituteShallow(loop.length, scope) };
+    } else {
+      statement.loop = { ...loop, condition: substituteShallow(loop.condition, scope) };
+    }
+    return;
+  }
+  blockStatement(statement, scope);
+}
+
+/** Every statement kind that neither declares nor carries a body of its own. */
+function blockStatement(statement: SemanticStatement, scope: Scope): void {
+  const rewritten = substituteShallow(statement, scope);
+  if (rewritten !== statement) Object.assign(statement, rewritten);
+}
+
+/**
+ * Renames every name a body declares, one binding at a time, in place.
+ *
+ * The body is the callee's own, already copied, and the scope it is handed
+ * starts at its parameters: every read of one is read as the argument the call
+ * was made with, and every write of one lands on the temporary that is the
+ * copy. Each block is walked with the scope it is entered with, so a
+ * declaration answers for the statements after it in the block and for the
+ * blocks they carry, and is gone when the block ends; a loop's counter is
+ * declared into a copy of the scope the body alone is renamed with, so it
+ * never reaches the statement after the loop.
+ *
+ * A declaration whose spelling is already answered for in the scope it is made
+ * in shadows it, and the answer is the refusal the caller reads: two bindings
+ * under one spelling cannot both be renamed by one map, and a body that
+ * shadows is left as a call.
+ */
+function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<string>, callee: string): string | null {
+  for (const statement of block.statements) {
+    substituteStatement(statement, scope);
+    // A loop's counter is declared for its body alone, so the body is renamed
+    // with a copy of the scope and the block's own never holds it: the
+    // statement after the loop reads whatever answered before the loop, and a
+    // second loop counted by the same spelling is a binding of its own.
+    const counting = statement.k === "loop" && statement.loop.kind !== "while" && statement.loop.kind !== "doWhile";
+    const inner: Scope = counting ? { reads: new Map(scope.reads), targets: new Map(scope.targets) } : scope;
+    const refused = declareStatement(statement, inner, taken, callee);
+    if (refused !== null) return refused;
+    for (const nested of statementBlocks(statement)) {
+      const refused = renameBindings(nested, inner, taken, callee);
+      if (refused !== null) return refused;
+    }
+  }
+  if (block.terminator.k === "return" && block.terminator.value !== null) {
+    block.terminator = { ...block.terminator, value: substituteShallow(block.terminator.value, scope) };
+  } else {
+    block.terminator = substituteShallow(block.terminator, scope);
+  }
+  block.releases = block.releases.map((name) => scope.targets.get(name) ?? name);
+  return null;
+}
+
+/**
+ * Renames the binding a statement declares, and answers for it in the scope.
+ *
+ * A `let` declares one slot; a counted loop one counter; a walk an index and
+ * an element, each of its own. All of them are renamed where they are made and
+ * answered for in the scope they are made in, and a spelling that is already
+ * answered for there is the refusal the caller reads.
+ */
+function declareStatement(statement: SemanticStatement, scope: Scope, taken: Set<string>, callee: string): string | null {
+  const declare = (spelling: string, type: SemanticType): string => {
+    const renamed = freshName(taken, "inlined");
+    scope.reads.set(spelling, { k: "local", type, name: renamed });
+    scope.targets.set(spelling, renamed);
+    return renamed;
+  };
+  const refuse = (spelling: string): string =>
+    `${callee} declares "${spelling}" in a block of its own, which shadows another name of the function, and a name answers for one binding`;
+  if (statement.k === "let") {
+    const spelling = statement.slot.name;
+    if (scope.reads.has(spelling) || scope.targets.has(spelling)) return refuse(spelling);
+    statement.slot = { ...statement.slot, name: declare(spelling, slotType(statement.slot)) };
+    return null;
+  }
+  if (statement.k === "loop") {
+    const loop = statement.loop;
+    if (loop.kind === "counted") {
+      const spelling = loop.variable;
+      if (scope.reads.has(spelling) || scope.targets.has(spelling)) return refuse(spelling);
+      statement.loop = { ...loop, variable: declare(spelling, loop.type) };
+      return null;
+    }
+    if (loop.kind === "each") {
+      for (const spelling of [loop.index, loop.element]) {
+        if (scope.reads.has(spelling) || scope.targets.has(spelling)) return refuse(spelling);
+      }
+      const index = declare(loop.index, { kind: "primitive", name: "usize" });
+      const element = declare(loop.element, loop.elementType);
+      statement.loop = { ...loop, index, element };
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -1307,6 +1436,22 @@ export function inlineRefusal(callee: SemanticFunction): string | null {
   return null;
 }
 
+/** Whether a body writes the name it was given, which is what a parameter is. */
+function writesName(fn: SemanticFunction, name: string): boolean {
+  for (const block of blocksOf(fn)) {
+    for (const statement of block.statements) {
+      const target =
+        statement.k === "set" || statement.k === "step"
+          ? statement.name
+          : statement.k === "setElement"
+            ? statement.buffer
+            : null;
+      if (target === name) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * An edge the body no longer makes is not one, whichever block made it. A call
  * is a call wherever it is written, and a return terminator is where a
@@ -1325,22 +1470,6 @@ function dropUnusedEdge(fn: SemanticFunction, callee: string): void {
     }
   }
   if (!called) fn.calls = fn.calls.filter((edge) => edge.callee !== callee);
-}
-
-/** Whether a body writes the name it was given, which is what a parameter is. */
-function writesName(fn: SemanticFunction, name: string): boolean {
-  for (const block of blocksOf(fn)) {
-    for (const statement of block.statements) {
-      const target =
-        statement.k === "set" || statement.k === "step"
-          ? statement.name
-          : statement.k === "setElement"
-            ? statement.buffer
-            : null;
-      if (target === name) return true;
-    }
-  }
-  return false;
 }
 
 /**
