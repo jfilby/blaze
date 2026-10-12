@@ -32,9 +32,6 @@ import { AgentOutput } from "./agent-output.ts";
 /** The command a run hands its work to. */
 export const AGENT_COMMAND = "pi";
 
-/** How long the agent may work before the run is abandoned. */
-export const AGENT_TIMEOUT_MS = 45 * 60 * 1000;
-
 /** How much of the agent's own answer is kept as what it says it did. */
 const SUMMARY_BUDGET = 2000;
 
@@ -248,12 +245,6 @@ async function runInvocation(invocation: AgentInvocation, showOutput: boolean): 
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    let abandoned = false;
-    const timer = setTimeout(() => {
-      abandoned = true;
-      child.kill("SIGKILL");
-    }, AGENT_TIMEOUT_MS);
-
     const output = new AgentOutput(showOutput, invocation.command);
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -265,22 +256,12 @@ async function runInvocation(invocation: AgentInvocation, showOutput: boolean): 
     });
 
     const finish = (run: AgentRun): void => {
-      clearTimeout(timer);
       resolve(run);
     };
 
     child.on("close", (code) => {
       output.finish();
-      finish(
-        abandoned
-          ? {
-              summary: "",
-              exitCode: code,
-              detail: tail(stderr),
-              problem: `the coding agent did not finish within ${AGENT_TIMEOUT_MS / 60000} minutes`,
-            }
-          : { summary: cap(output.summary), exitCode: code, detail: tail(stderr), problem: null },
-      );
+      finish({ summary: cap(output.summary), exitCode: code, detail: tail(stderr), problem: null });
     });
 
     child.on("error", (cause) => {
