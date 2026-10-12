@@ -75,3 +75,16 @@ test("a suite with no test script says so, and did not pass", async () => {
   assert.equal(result.passed, false);
   assert.match(result.output, /Missing script|npm error/);
 });
+
+test("a session that forces colour does not carry it into the suite", async () => {
+  // A run driven from a coloured terminal or an agent's own session inherits
+  // FORCE_COLOR, which makes console.log write ANSI codes and a test that
+  // compares a program's output byte for byte fail on them. The suite is run
+  // colour-blind whatever the session that asked for it said.
+  const dir = await fakeCompiler('node -e "process.stdout.write(process.env.NO_COLOR === \'1\' && process.env.FORCE_COLOR === undefined ? \'# pass 3\\n\' : \'# fail 1\\n\'); process.exit(process.env.NO_COLOR === \'1\' && process.env.FORCE_COLOR === undefined ? 0 : 1)"');
+
+  const result = runTestSuite(false, dir);
+
+  assert.equal(result.completed, true);
+  assert.equal(result.passed, true);
+});

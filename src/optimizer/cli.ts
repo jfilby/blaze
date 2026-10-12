@@ -629,7 +629,19 @@ const TEST_TIMEOUT_MS = 30 * 60 * 1000;
  *   reading it, for the runs a person is watching as they happen
  */
 export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteResult {
-  const env = { ...process.env, [SKIP_HEAP_PROOF_ENV]: "1" };
+  // The suite judges programs by what they print, and some of its tests
+  // compare that output byte for byte. A session this tool is driven from —
+  // a coding agent's own, or a terminal with colours forced — may set
+  // FORCE_COLOR, which console.log answers with ANSI codes and a comparison
+  // of plain text against them fails on. The suite is run colour-blind:
+  // NO_COLOR alone is not enough, because FORCE_COLOR wins where both are
+  // set, so the forcing variable is taken out.
+  const env = {
+    ...process.env,
+    [SKIP_HEAP_PROOF_ENV]: "1",
+    NO_COLOR: "1",
+  };
+  delete env.FORCE_COLOR;
   const result = live
     ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", timeout: TEST_TIMEOUT_MS, env })
     : spawnSync("npm", ["test"], {
