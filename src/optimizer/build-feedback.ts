@@ -20,9 +20,6 @@ import type { ProjectInfo } from "./project.ts";
 const COMPILER_DIR = join(import.meta.dirname, "..", "compiler");
 const COMPILER_CLI = join(COMPILER_DIR, "cli.ts");
 
-/** How long a feedback build may run before it is abandoned. */
-const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
-
 /** A project used when no project is given: small enough to build fast. */
 const TEST_SOURCE = `export function square(x: number): number {
   return x * x;
@@ -90,18 +87,12 @@ function runBuild(args: readonly string[], cwd: string): Promise<BuildFeedback> 
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`the build did not finish within ${BUILD_TIMEOUT_MS / 1000}s`));
-    }, BUILD_TIMEOUT_MS);
-
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
     child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
 
     child.on("close", (code) => {
-      clearTimeout(timer);
       const { prompts, answers } = extractDebug(stderr);
 
       if (prompts.length === 0 && answers.length === 0) {
@@ -133,7 +124,6 @@ function runBuild(args: readonly string[], cwd: string): Promise<BuildFeedback> 
     });
 
     child.on("error", (cause) => {
-      clearTimeout(timer);
       reject(cause);
     });
   });
