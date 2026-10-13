@@ -33,7 +33,7 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
-import { addProcessed, isProcessed, loadCache, saveCache, type CacheEntry } from "./cache.ts";
+import { addProcessed, isProcessed, loadCache, markUseful, saveCache, type CacheEntry } from "./cache.ts";
 import {
   benchmarkCompiler,
   benchmarkProject,
@@ -57,19 +57,23 @@ import {
 import { modelProblem, modelToAsk, type Method } from "./ai.ts";
 import { benchmarkExample, deliveredProgram, loadProject, PROJECT_FILE, type ProjectInfo } from "./project.ts";
 import {
+  DEFAULT_BENCHMARK_RUNS,
+  DEFAULT_MAX_ITERATIONS,
+  DEFAULT_METHODS,
   newId,
+  readSession,
   RECORD_VERSION,
+  resumeCommand,
   writeRun,
   writeSession,
   type RefusedProposal,
+  type ResearchPaper,
   type RunOutcome,
   type RunRecord,
   type SessionContext,
   type SessionOutcome,
   type SessionRecord,
 } from "./runs.ts";
-
-const VALID_METHODS: readonly Method[] = ["research", "build-feedback", "code-review"];
 
 /** The compiler directory, where `npm test` is run. */
 const COMPILER_DIR = compilerDirectory();
@@ -89,7 +93,7 @@ export function parseMethods(value: string): Method[] | null {
   const methods: Method[] = [];
   for (const part of parts) {
     if (part === "") continue;
-    if (!VALID_METHODS.includes(part as Method)) return null;
+    if (!DEFAULT_METHODS.includes(part as Method)) return null;
     if (!methods.includes(part as Method)) methods.push(part as Method);
   }
   if (methods.length === 0) return null;
@@ -132,6 +136,11 @@ that file by name as well, so it does not depend on finding it.
 Every run and every session records itself in .blazeopt at the head of the
 repository, whatever happened. blazeopt-report reports on those records.
 
+A session that dies before it finishes — a rate-limited model, a missing key,
+a crash — leaves a record of where it stopped, and the command to continue it
+is printed as the session starts and again when it fails: blazeopt --resume <id>
+rebuilds the session from that record and runs the runs it had left.
+
 Options:
   --max-iterations <n>   Maximum runs (default 3)
   --benchmark-runs <n>   Hyperfine runs per benchmark (default 5)
@@ -140,6 +149,7 @@ Options:
                            build-feedback blaze build AI review feedback + source
                            code-review    compiler source review alone
                          (default "research,build-feedback,code-review")
+  --resume <id>          Continue a failed session where it stopped
   --show-ai-coding       print what the coding agent does as it works
                            (default; --no-show-ai-coding turns it off)
   -h, --help             show this help
@@ -186,6 +196,7 @@ async function runOne(
     benchmark: null,
     commit: null,
     error: null,
+    papers: [],
     startedAt,
     finishedAt: startedAt,
     durationMs: 0,
@@ -198,14 +209,16 @@ async function runOne(
   // 1. Gather context
   let context: string | null = "";
   if (method === "research") {
-    context = await gatherResearchContext(options.project);
+    const research = await gatherResearchContext(options.project);
     // Nothing new to read is nothing to work from: a run of research whose
     // papers have all been processed would otherwise be asked for an
     // improvement out of memory of them.
-    if (context === null) {
+    if (research === null) {
       process.stdout.write("Nothing new in the research cache, skipping.\n\n");
       return finish(record, "skipped", started);
     }
+    context = research.context;
+    record.papers = research.papers;
   } else if (method === "build-feedback") {
     context = await gatherBuildFeedbackContext(options.project);
   }
@@ -551,7 +564,21 @@ function indent(text: string, prefix: string): string {
     .join("\n");
 }
 
-async function gatherResearchContext(project?: ProjectInfo): Promise<string | null> {
+/**
+ * The context a research run hands the coding agent, and the papers it was
+ * gathered from.
+ *
+ * The papers are kept beside the text they were read into so that a report
+ * can say which of them were of use: a run that committed and a run that
+ * kept nothing are two different answers to whether the research was worth
+ * searching for, and the papers are the thing that differs between them.
+ */
+interface ResearchContext {
+  readonly context: string;
+  readonly papers: readonly ResearchPaper[];
+}
+
+async function gatherResearchContext(project?: ProjectInfo): Promise<ResearchContext | null> {
   const apiKey = tavilyApiKey();
   if (!apiKey) {
     throw new Error("TAVILY_API_KEY is not set");
@@ -577,8 +604,9 @@ async function gatherResearchContext(project?: ProjectInfo): Promise<string | nu
   }
   saveCache(newCache);
 
+  const papers: ResearchPaper[] = fresh.map((r) => ({ title: r.title, url: r.url }));
   const parts = fresh.map((r, i) => `Paper ${i + 1}: ${r.title}\n${cap(r.content, PAPER_CONTENT_SHOWN)}`);
-  return parts.join("\n\n---\n\n");
+  return { context: parts.join("\n\n---\n\n"), papers };
 }
 
 async function gatherBuildFeedbackContext(project?: ProjectInfo): Promise<string> {
@@ -641,7 +669,7 @@ export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteRe
     [SKIP_HEAP_PROOF_ENV]: "1",
     NO_COLOR: "1",
   };
-  delete env.FORCE_COLOR;
+  delete env["FORCE_COLOR"];
   const result = live
     ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", timeout: TEST_TIMEOUT_MS, env })
     : spawnSync("npm", ["test"], {
@@ -760,6 +788,119 @@ export function currentCommit(repoDir = REPO_DIR): string | null {
   return head.status === 0 && head.stdout.trim() !== "" ? head.stdout.trim() : null;
 }
 
+/** How long a session record stays proof of the tree it started from. */
+const RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** What a `--resume` invocation asked for, as one struct. */
+export interface Asked {
+  /** The session to continue, when `--resume` was given. */
+  readonly resume: string | undefined;
+  /** The positional arguments, of which at most one names a project. */
+  readonly positionals: readonly string[];
+  /** The values the flags named, when they were given. */
+  readonly requested: {
+    readonly maxIterations: number | undefined;
+    readonly benchmarkRuns: number | undefined;
+    readonly methods: readonly Method[] | undefined;
+  };
+  /** Which of the three flags were given at all. */
+  readonly given: {
+    readonly maxIterations: boolean;
+    readonly benchmarkRuns: boolean;
+    readonly methods: boolean;
+  };
+}
+
+/** What a session is continued from, when it can be. */
+export interface ResumePlan {
+  readonly record: SessionRecord;
+  /** How many of its runs are already recorded. */
+  readonly done: number;
+  readonly methods: readonly Method[];
+  readonly maxIterations: number;
+  readonly benchmarkRuns: number;
+}
+
+/**
+ * What continuing a session means, or why it cannot be continued.
+ *
+ * A session that died mid-loop left a record of where it stopped, and
+ * `--resume` rebuilds the session from that record: the same id, the same
+ * settings, the runs it had left. What is checked here is that the record is
+ * one that can be continued — that it failed rather than finishing, that it
+ * has runs left, that the invocation continuing it is the invocation it was
+ * (same project, same settings), and that the tree it started from is the tree
+ * it would be continued on.
+ *
+ * @returns The plan to continue with, or the reason it cannot be continued
+ */
+export function resumePlan(asked: Asked, repoRoot = REPO_DIR): ResumePlan | string {
+  const id = asked.resume ?? "";
+  const record = readSession(id, repoRoot);
+  if (record === null) {
+    return `no session record named ${id}; the id is in the restartable command blazeopt prints.`;
+  }
+  // A session that finished has nothing to continue: it either ran to the end
+  // or refused to start, and neither is a session waiting to be finished.
+  if (record.outcome !== "failed") {
+    return `nothing to continue (it ${record.outcome === "refused" ? "refused to start" : "ran to end"})`;
+  }
+  const context = record.context;
+  const done = record.runs.length;
+  if (context.maxIterations - done < 1) {
+    return `no runs left (${done} of ${context.maxIterations} runs are recorded)`;
+  }
+  // The invocation continuing a session is the session's own invocation: a
+  // project it was not aimed at, or settings it was not run with, is a
+  // different session however much it looks like the one that died.
+  if (asked.positionals.length === 1 && asked.positionals[0] !== (context.project ?? "")) {
+    return `it was aimed at ${context.project ?? "no project"}`;
+  }
+  if (asked.given.maxIterations && asked.requested.maxIterations !== context.maxIterations) {
+    return `it was given --max-iterations ${context.maxIterations}, not ${asked.requested.maxIterations}`;
+  }
+  if (asked.given.benchmarkRuns && asked.requested.benchmarkRuns !== context.benchmarkRuns) {
+    return `it was given --benchmark-runs ${context.benchmarkRuns}, not ${asked.requested.benchmarkRuns}`;
+  }
+  if (asked.given.methods && (asked.requested.methods ?? []).join(",") !== context.methods.join(",")) {
+    return `it was given --methods ${context.methods.join(",")}, not ${(asked.requested.methods ?? []).join(",")}`;
+  }
+  // The record names the commit the session started from, and a short sha is
+  // not a tree: the same seven characters after a history rewrite are a
+  // different tree, so an old record is refused rather than continued on a
+  // tree it does not describe.
+  const age = Date.now() - Date.parse(context.startedAt);
+  if (age > RESUME_MAX_AGE_MS) {
+    return `tree proof expired (the session is older than ${RESUME_MAX_AGE_MS / (60 * 60 * 1000)} hours)`;
+  }
+  let dirty: string[];
+  try {
+    dirty = uncommittedChanges(repoRoot);
+  } catch (cause) {
+    return `the working tree could not be read: ${cause instanceof Error ? cause.message : String(cause)}`;
+  }
+  if (dirty.length > 0) {
+    return (
+      "the working tree is not clean, so a run could not tell its own changes from yours:\n" +
+      `${dirty.slice(0, 10).join("\n")}` +
+      `${dirty.length > 10 ? `\n... and ${dirty.length - 10} more` : ""}\n` +
+      "Commit or stash them and run blazeopt again."
+    );
+  }
+  const head = currentCommit(repoRoot);
+  if (head !== context.baseCommit) {
+    return `the repository is on ${head ?? "no commit"}, not the ${context.baseCommit ?? "none"} it started from`;
+  }
+  return { record, done, methods: context.methods, maxIterations: context.maxIterations, benchmarkRuns: context.benchmarkRuns };
+}
+
+/** The iterations a loop runs, from how many are already done to the maximum. */
+export function iterationRange(done: number, maxIterations: number): number[] {
+  const range: number[] = [];
+  for (let i = done; i < maxIterations; i++) range.push(i);
+  return range;
+}
+
 async function main(argv: string[]): Promise<number> {
   let parsed;
   try {
@@ -773,6 +914,7 @@ async function main(argv: string[]): Promise<number> {
         "max-iterations": { type: "string" },
         "benchmark-runs": { type: "string" },
         methods: { type: "string" },
+        resume: { type: "string" },
         "show-ai-coding": { type: "boolean", default: true },
         "no-show-ai-coding": { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -794,28 +936,56 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const maxIterations = parsed.values["max-iterations"]
-    ? parseInt(parsed.values["max-iterations"], 10)
-    : 3;
-  const benchmarkRuns = parsed.values["benchmark-runs"]
-    ? parseInt(parsed.values["benchmark-runs"], 10)
-    : 5;
+  // What the flags asked for, kept apart from what the session runs with: a
+  // `--resume` invocation is checked against the session it continues, and
+  // the session's own settings are what it runs with.
+  const rawMax = parsed.values["max-iterations"];
+  const rawBenchmarkRuns = parsed.values["benchmark-runs"];
+  const rawMethods = parsed.values.methods;
 
-  if (isNaN(maxIterations) || !Number.isInteger(maxIterations) || maxIterations < 1) {
+  const givenMax = rawMax !== undefined;
+  const givenBenchmarkRuns = rawBenchmarkRuns !== undefined;
+  const givenMethods = rawMethods !== undefined;
+
+  const requestedMax = givenMax ? parseInt(rawMax, 10) : undefined;
+  const requestedBenchmarkRuns = givenBenchmarkRuns ? parseInt(rawBenchmarkRuns, 10) : undefined;
+  const requestedMethods = givenMethods ? parseMethods(rawMethods) : undefined;
+
+  if (givenMax && (requestedMax === undefined || !Number.isInteger(requestedMax) || requestedMax < 1)) {
     process.stderr.write(`invalid --max-iterations\n\n${USAGE}`);
     return 1;
   }
 
-  if (isNaN(benchmarkRuns) || !Number.isInteger(benchmarkRuns) || benchmarkRuns < 1) {
+  if (givenBenchmarkRuns && (requestedBenchmarkRuns === undefined || !Number.isInteger(requestedBenchmarkRuns) || requestedBenchmarkRuns < 1)) {
     process.stderr.write(`invalid --benchmark-runs\n\n${USAGE}`);
     return 1;
   }
 
-  const methods = parseMethods(parsed.values["methods"] ?? "research,build-feedback,code-review");
-  if (methods === null) {
-    process.stderr.write(`invalid --methods (must be a comma-separated subset of: ${VALID_METHODS.join(", ")})\n\n${USAGE}`);
+  if (givenMethods && requestedMethods === null) {
+    process.stderr.write(`invalid --methods (must be a comma-separated subset of: ${DEFAULT_METHODS.join(", ")})\n\n${USAGE}`);
     return 1;
   }
+
+  const asked: Asked = {
+    resume: parsed.values.resume,
+    positionals,
+    requested: { maxIterations: requestedMax, benchmarkRuns: requestedBenchmarkRuns, methods: requestedMethods ?? undefined },
+    given: { maxIterations: givenMax, benchmarkRuns: givenBenchmarkRuns, methods: givenMethods },
+  };
+
+  let resumed: ResumePlan | undefined;
+  if (asked.resume !== undefined) {
+    const plan = resumePlan(asked);
+    if (typeof plan === "string") {
+      process.stderr.write(`blazeopt: cannot resume session ${asked.resume}: ${plan}\n`);
+      return 1;
+    }
+    resumed = plan;
+  }
+
+  const maxIterations = resumed?.maxIterations ?? requestedMax ?? DEFAULT_MAX_ITERATIONS;
+  const benchmarkRuns = resumed?.benchmarkRuns ?? requestedBenchmarkRuns ?? DEFAULT_BENCHMARK_RUNS;
+  const methods = resumed?.methods ?? requestedMethods ?? DEFAULT_METHODS;
 
   // Whether the agent's own work is watched as it happens. It is on by
   // default, so a run shows what it did as it did it; --no-show-ai-coding
@@ -828,19 +998,31 @@ async function main(argv: string[]): Promise<number> {
   // as one that committed, and it is the only one of the two that would
   // otherwise leave nothing behind.
   const startedAt = Date.now();
-  const session: Mutable<SessionContext> = {
-    id: newId(new Date(startedAt)),
-    startedAt: new Date(startedAt).toISOString(),
-    // The model this session asks. The project is not read yet — a path
-    // that names no project is refused, and that refusal is recorded — so
-    // this is the environment's model until the project's own is known.
-    model: modelToAsk(),
-    project: null,
-    methods,
-    maxIterations,
-    benchmarkRuns,
-    baseCommit: currentCommit(),
-  };
+  // A resumed session is the session that died: the same id, the same
+  // settings, the same model — only when it started again is new, because a
+  // new invocation is what this is. The runs it already did are recorded
+  // against the same id, so the records of both invocations join.
+  const session: Mutable<SessionContext> = resumed === undefined
+    ? {
+        id: newId(new Date(startedAt)),
+        startedAt: new Date(startedAt).toISOString(),
+        // The model this session asks. The project is not read yet — a path
+        // that names no project is refused, and that refusal is recorded — so
+        // this is the environment's model until the project's own is known.
+        model: modelToAsk(),
+        project: null,
+        methods,
+        maxIterations,
+        benchmarkRuns,
+        baseCommit: currentCommit(),
+      }
+    : {
+        ...resumed.record.context,
+        startedAt: new Date(startedAt).toISOString(),
+        baseCommit: currentCommit(),
+      };
+  const resumeDone = resumed?.done ?? 0;
+  const resumeLine = resumeCommand(session, resumeDone);
   const runIds: string[] = [];
   let committed = 0;
   let outcome: SessionOutcome = "no-commits";
@@ -876,13 +1058,17 @@ async function main(argv: string[]): Promise<number> {
   // run, so a path that names no project is refused before anything else is
   // spent — and the refusal is what the record says happened.
   let project: ProjectInfo | undefined;
-  if (positionals.length === 1) {
+  const projectPath = positionals.length === 1 ? positionals[0] : resumed?.record.context.project ?? undefined;
+  if (projectPath !== undefined) {
     try {
-      project = await loadProject(positionals[0]);
-      session.project = project.tomlPath;
-      // Which model the session asks, now that the project it is aimed at has
-      // been read: its own, when the environment names none.
-      session.model = modelToAsk(project);
+      project = await loadProject(projectPath);
+      // A resumed session already names its project and its model in the
+      // record it is continued from; a fresh session takes both from the
+      // project it was aimed at.
+      if (resumed === undefined) {
+        session.project = project.tomlPath;
+        session.model = modelToAsk(project);
+      }
     } catch (cause) {
       return refuse(1, cause instanceof Error ? cause.message : String(cause));
     }
@@ -946,6 +1132,9 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(`blazeopt: targeting project ${project.tomlPath}\n`);
   }
 
+  process.stdout.write("If a run dies fatally, the session can be continued where it stopped with:\n\n");
+  process.stdout.write(`  ${resumeLine}\n`);
+
   // A run is judged by the compiler's suite, so what the suite says before
   // anything is written decides whether a run can be judged at all. A suite
   // that already fails would have every change reverted and blamed, which is
@@ -963,12 +1152,23 @@ async function main(argv: string[]): Promise<number> {
   }
   process.stdout.write(`blazeopt: the compiler's test suite passes (${baseline.passedCount} tests)\n`);
 
-  for (let i = 0; i < maxIterations; i++) {
+  for (const i of iterationRange(resumeDone, maxIterations)) {
     const method = methods[i % methods.length];
     try {
       const run = await runOne(method, i + 1, session, options);
       if (writeRun(run) !== null) runIds.push(run.id);
-      if (run.outcome === "committed") committed += 1;
+      if (run.outcome === "committed") {
+        committed += 1;
+        // Mark the papers this run read as useful, so the cache knows they
+        // led to a change that survived. A useful paper is skipped for a month.
+        if (run.papers.length > 0) {
+          let cache = loadCache();
+          for (const paper of run.papers) {
+            cache = markUseful(cache, paper.url);
+          }
+          saveCache(cache);
+        }
+      }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       process.stderr.write(`Run ${i + 1} (${method}) failed: ${message}\n`);
@@ -976,16 +1176,25 @@ async function main(argv: string[]): Promise<number> {
       // record says so: the session is not the only thing that happened.
       const failed = failedRun(method, i + 1, session, message);
       if (writeRun(failed) !== null) runIds.push(failed.id);
+      // A fatal error stops the loop rather than spending the remaining runs
+      // on the same answer: the session is recorded as failed, and the
+      // command to continue it is printed.
+      outcome = "failed";
+      error = message;
+      process.stderr.write("\nIf a run dies fatally, the session can be continued where it stopped with:\n\n");
+      process.stderr.write(`  ${resumeCommand(session, runIds.length)}\n`);
+      break;
     }
   }
 
   process.stdout.write("\nblazeopt: optimization loop complete\n");
   process.stdout.write(`blazeopt: ${committed} of ${maxIterations} run(s) committed\n`);
-  if (committed > 0) outcome = "committed";
+  if (committed > 0 && outcome !== "failed") outcome = "committed";
 
-  // A session that committed nothing did not optimise anything: an exit of
-  // zero would tell whatever is reading it that this session had an effect.
-  return finish(committed > 0 ? 0 : 1);
+  // A session that died before it finished did not optimise anything: an
+  // exit of zero would tell whatever is reading it that this session had an
+  // effect.
+  return finish(outcome === "failed" ? 1 : committed > 0 ? 0 : 1);
 }
 
 /** What to set, given whether a project named a model of its own. */
@@ -1074,6 +1283,7 @@ function failedRun(
     benchmark: null,
     commit: null,
     error: message,
+    papers: [],
     startedAt: new Date(at).toISOString(),
     finishedAt: new Date(at).toISOString(),
     durationMs: 0,

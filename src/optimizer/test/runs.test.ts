@@ -14,11 +14,15 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  DEFAULT_BENCHMARK_RUNS,
+  DEFAULT_MAX_ITERATIONS,
+  DEFAULT_METHODS,
   readRun,
   readRuns,
   readSession,
   readSessions,
   recordsDirectory,
+  resumeCommand,
   runsDirectory,
   sessionsDirectory,
   writeRun,
@@ -54,6 +58,7 @@ function run(over: Partial<RunRecord> = {}): RunRecord {
     benchmark: null,
     commit: "def5678",
     error: null,
+    papers: [],
     startedAt: "2026-10-10T09:01:00.000Z",
     finishedAt: "2026-10-10T09:02:00.000Z",
     durationMs: 60000,
@@ -176,4 +181,57 @@ test("a repository that cannot be written is said rather than swallowing the run
   const path = writeRun(run(), repo);
 
   assert.equal(path, null);
+});
+
+/** The session a resume command is built for, as a session record carries it. */
+type ResumeSession = Pick<SessionContext, "id" | "project" | "methods" | "maxIterations" | "benchmarkRuns">;
+
+function resumeSession(over: Partial<ResumeSession> = {}): ResumeSession {
+  return {
+    id: "2026-10-10_09-00-00_aaaaaa",
+    project: null,
+    methods: DEFAULT_METHODS,
+    maxIterations: DEFAULT_MAX_ITERATIONS,
+    benchmarkRuns: DEFAULT_BENCHMARK_RUNS,
+    ...over,
+  };
+}
+
+test("the resume command omits the flags a session took the defaults with", () => {
+  const line = resumeCommand(resumeSession(), 0);
+
+  assert.equal(
+    line,
+    "blazeopt --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 3 of 3 run(s) left.",
+  );
+});
+
+test("the resume command carries a session's non-default settings", () => {
+  const line = resumeCommand(
+    resumeSession({
+      project: "/repo/proj/blaze.toml",
+      methods: ["code-review"],
+      maxIterations: 7,
+      benchmarkRuns: 2,
+    }),
+    0,
+  );
+
+  assert.equal(
+    line,
+    "blazeopt /repo/proj/blaze.toml --max-iterations 7 --benchmark-runs 2 --methods code-review --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 7 of 7 run(s) left.",
+  );
+});
+
+test("the resume command counts the runs a session has left", () => {
+  const session = resumeSession();
+
+  assert.match(resumeCommand(session, 1), /2 of 3 run\(s\) left\.$/);
+  assert.match(resumeCommand(session, 2), /1 of 3 run\(s\) left\.$/);
+});
+
+test("the resume command clamps the runs left at zero", () => {
+  const session = resumeSession();
+
+  assert.match(resumeCommand(session, 5), /0 of 3 run\(s\) left\.$/);
 });

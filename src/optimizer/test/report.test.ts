@@ -43,6 +43,7 @@ function run(
     benchmark: null,
     commit: null,
     error: null,
+    papers: [],
     startedAt: AT,
     finishedAt: AT,
     durationMs: 1000,
@@ -284,4 +285,79 @@ test("the report reads as a report", () => {
   assert.match(text, /no-commits 1/);
   // The reading says which way round a negative number is.
   assert.match(text, /a negative number is a compiler that got faster/);
+});
+
+test("a research paper that led to a commit is of use", () => {
+  const paper = { title: "Loop Vectorization", url: "https://example.com/loop" };
+  const runs = [
+    run({ method: "research", outcome: "committed", papers: [paper] }),
+    run({ method: "research", outcome: "no-proposals", papers: [paper] }),
+  ];
+
+  const research = summarize(runs, []).research;
+
+  assert.equal(research.length, 1);
+  assert.equal(research[0]?.title, "Loop Vectorization");
+  assert.equal(research[0]?.runs, 2);
+  assert.equal(research[0]?.committed, 1);
+  assert.equal(research[0]?.useful, true);
+});
+
+test("a research paper that only led to failed runs is not of use", () => {
+  const paper = { title: "Dead End", url: "https://example.com/dead" };
+  const runs = [
+    run({ method: "research", outcome: "tests-failed", papers: [paper] }),
+    run({ method: "research", outcome: "slower", papers: [paper] }),
+  ];
+
+  const research = summarize(runs, []).research;
+
+  assert.equal(research.length, 1);
+  assert.equal(research[0]?.useful, false);
+  assert.equal(research[0]?.committed, 0);
+});
+
+test("research papers are listed useful first, then by how many runs read them", () => {
+  const useful = { title: "Useful", url: "https://example.com/useful" };
+  const notUseful = { title: "Not Useful", url: "https://example.com/not" };
+  const runs = [
+    run({ method: "research", outcome: "tests-failed", papers: [notUseful] }),
+    run({ method: "research", outcome: "committed", papers: [useful] }),
+  ];
+
+  const research = summarize(runs, []).research;
+
+  assert.equal(research.length, 2);
+  assert.equal(research[0]?.title, "Useful");
+  assert.equal(research[0]?.useful, true);
+  assert.equal(research[1]?.title, "Not Useful");
+  assert.equal(research[1]?.useful, false);
+});
+
+test("the report shows which research papers were of use", () => {
+  const useful = { title: "Loop Vectorization", url: "https://example.com/loop" };
+  const notUseful = { title: "Dead End", url: "https://example.com/dead" };
+  const runs = [
+    run({ method: "research", outcome: "committed", papers: [useful] }),
+    run({ method: "research", outcome: "tests-failed", papers: [notUseful] }),
+  ];
+
+  const text = render(summarize(runs, []));
+
+  assert.match(text, /Research papers the runs read/);
+  assert.match(text, /Of use \(1\):/);
+  assert.match(text, /Loop Vectorization \(1 committed\)/);
+  assert.match(text, /Not of use \(1\):/);
+  assert.match(text, /Dead End/);
+});
+
+test("runs without papers are not counted as research", () => {
+  const runs = [
+    run({ method: "code-review", outcome: "committed" }),
+    run({ method: "build-feedback", outcome: "no-proposals" }),
+  ];
+
+  const research = summarize(runs, []).research;
+
+  assert.equal(research.length, 0);
 });

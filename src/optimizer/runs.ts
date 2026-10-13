@@ -125,6 +125,12 @@ export interface SessionContext {
   readonly baseCommit: string | null;
 }
 
+/** A research paper a run read, and what it was called. */
+export interface ResearchPaper {
+  readonly title: string;
+  readonly url: string;
+}
+
 /** What one run did. */
 export interface RunRecord {
   readonly version: number;
@@ -144,6 +150,8 @@ export interface RunRecord {
   readonly commit: string | null;
   /** Why a run that kept nothing kept nothing. */
   readonly error: string | null;
+  /** The research papers this run read, when it was a research run. */
+  readonly papers: readonly ResearchPaper[];
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly durationMs: number;
@@ -326,4 +334,40 @@ function isSessionRecord(value: unknown): value is SessionRecord {
     typeof record.context === "object" &&
     record.context !== null
   );
+}
+
+/** The methods a session cycles through when it is given no `--methods`. */
+export const DEFAULT_METHODS: readonly Method[] = ["research", "build-feedback", "code-review"];
+
+/** The runs a session gets when it is given no `--max-iterations`. */
+export const DEFAULT_MAX_ITERATIONS = 3;
+
+/** The hyperfine runs a measurement gets when it is given no `--benchmark-runs`. */
+export const DEFAULT_BENCHMARK_RUNS = 5;
+
+/**
+ * The command that continues a session, printed where a fatal error leaves
+ * one behind.
+ *
+ * The session's own settings are what the command carries, so the run that
+ * continues it is the run that was interrupted rather than a near copy of it:
+ * the project it was aimed at, the methods it cycled and how many runs it
+ * was to get. A flag the session was started with the default for is left
+ * out, because the default is what a command without the flag means.
+ *
+ * @param session The session to continue
+ * @param done How many of its runs are already recorded
+ */
+export function resumeCommand(
+  session: Pick<SessionContext, "id" | "project" | "methods" | "maxIterations" | "benchmarkRuns">,
+  done: number,
+): string {
+  const parts = ["blazeopt"];
+  if (session.project !== null) parts.push(session.project);
+  if (session.maxIterations !== DEFAULT_MAX_ITERATIONS) parts.push(`--max-iterations ${session.maxIterations}`);
+  if (session.benchmarkRuns !== DEFAULT_BENCHMARK_RUNS) parts.push(`--benchmark-runs ${session.benchmarkRuns}`);
+  if (session.methods.join(",") !== DEFAULT_METHODS.join(",")) parts.push(`--methods ${session.methods.join(",")}`);
+  parts.push(`--resume ${session.id}`);
+  const left = Math.max(session.maxIterations - done, 0);
+  return `${parts.join(" ")}    # continues session ${session.id}: ${left} of ${session.maxIterations} run(s) left.`;
 }

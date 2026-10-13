@@ -37,6 +37,8 @@ export interface Summary {
   readonly sessionOutcomes: readonly OutcomeSummary[];
   /** The runs that did not keep anything, newest first, and why. */
   readonly failures: readonly Failure[];
+  /** The research papers the runs read, and whether they were of use. */
+  readonly research: readonly ResearchSummary[];
 }
 
 export interface MethodSummary {
@@ -102,6 +104,18 @@ export interface Failure {
   readonly refused: readonly RefusalSummary[];
 }
 
+/** A research paper, and what became of the runs that read it. */
+export interface ResearchSummary {
+  readonly title: string;
+  readonly url: string;
+  /** How many runs read this paper. */
+  readonly runs: number;
+  /** How many of those runs committed. */
+  readonly committed: number;
+  /** Whether this paper was of use: at least one run that read it committed. */
+  readonly useful: boolean;
+}
+
 /** The order the outcomes are read in, which is the order that matters. */
 const OUTCOME_ORDER: readonly RunOutcome[] = [
   "committed",
@@ -137,6 +151,7 @@ export function summarize(runs: readonly RunRecord[], sessions: readonly Session
     files: fileSummary(runs),
     sessionOutcomes: countSessions(sessions),
     failures: failures(runs),
+    research: researchSummary(runs),
   };
 }
 
@@ -272,6 +287,52 @@ function failures(runs: readonly RunRecord[]): Failure[] {
     }));
 }
 
+/**
+ * Which research papers were of use, and which were not.
+ *
+ * A paper is of use when at least one run that read it committed: the research
+ * it carried was turned into a change that survived the suite and the
+ * measurement. A paper that was only read by runs that kept nothing was not
+ * of use — the ideas it carried were not ones this compiler could use, or not
+ * ones the agent could turn into a change.
+ *
+ * A paper read by both a committed run and a failed run is counted as useful:
+ * the same paper can carry an idea that works and one that does not, and the
+ * run that found the working one is the answer to whether the paper was worth
+ * reading.
+ */
+function researchSummary(runs: readonly RunRecord[]): ResearchSummary[] {
+  const byUrl = new Map<string, ResearchSummary>();
+  for (const run of runs) {
+    for (const paper of run.papers) {
+      const found = byUrl.get(paper.url);
+      if (found === undefined) {
+        byUrl.set(paper.url, {
+          title: paper.title,
+          url: paper.url,
+          runs: 1,
+          committed: run.outcome === "committed" ? 1 : 0,
+          useful: run.outcome === "committed",
+        });
+      } else {
+        const committed = found.committed + (run.outcome === "committed" ? 1 : 0);
+        byUrl.set(paper.url, {
+          ...found,
+          runs: found.runs + 1,
+          committed,
+          useful: found.useful || run.outcome === "committed",
+        });
+      }
+    }
+  }
+  return [...byUrl.values()].sort((a, b) => {
+    // Useful papers first, then by how many runs read them, then by title.
+    if (a.useful !== b.useful) return a.useful ? -1 : 1;
+    if (a.runs !== b.runs) return b.runs - a.runs;
+    return a.title.localeCompare(b.title);
+  });
+}
+
 function mean(values: readonly number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((a, b) => a + b, 0) / values.length;
@@ -360,6 +421,30 @@ export function render(summary: Summary): string {
     out.push(rule);
     for (const file of summary.files) {
       out.push(`  ${String(file.changes).padStart(4)} × ${file.file}`);
+    }
+    out.push("");
+  }
+
+  if (summary.research.length > 0) {
+    out.push("Research papers the runs read");
+    out.push(rule);
+    const useful = summary.research.filter((p) => p.useful);
+    const notUseful = summary.research.filter((p) => !p.useful);
+    if (useful.length > 0) {
+      out.push(`  Of use (${useful.length}):`);
+      for (const paper of useful) {
+        const runs = paper.runs > 1 ? `, ${paper.runs} runs` : "";
+        out.push(`    ${paper.title} (${paper.committed} committed${runs})`);
+        out.push(`      ${paper.url}`);
+      }
+    }
+    if (notUseful.length > 0) {
+      out.push(`  Not of use (${notUseful.length}):`);
+      for (const paper of notUseful) {
+        const runs = paper.runs > 1 ? `, ${paper.runs} runs` : "";
+        out.push(`    ${paper.title}${runs}`);
+        out.push(`      ${paper.url}`);
+      }
     }
     out.push("");
   }
