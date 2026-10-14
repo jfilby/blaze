@@ -990,7 +990,7 @@ function callsInBlock(block: SemanticBlock, callee: string): FoundCall[] {
  * inlined is refused on its own and the rest still are, so what is left in the
  * block is said in `partial` rather than hidden behind a refusal of the whole.
  */
-function inlineCall(fn: SemanticFunction, site: string, calleeName: string, context: RepairContext): RepairOutcome {
+export function inlineCall(fn: SemanticFunction, site: string, calleeName: string, context: RepairContext): RepairOutcome {
   // A loop is named in the IR by the block it leaves for, and that id is
   // also the name a proposal is written against: a call written in a loop's
   // body belongs to the block the loop enters by rather than to the header it

@@ -42,6 +42,7 @@ import type {
 import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
+import { restructureHotFunction } from "./restructure.ts";
 import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
 import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
@@ -2337,7 +2338,14 @@ export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees 
   // things none of them can do while the frames are still there.
   eliminateRecursion(fn);
   optimizeBody(fn, callees);
-  return fn;
+  // A call boundary the local rewrites cannot cross is the one thing left that
+  // can cost more than it saves, so it is asked after the rounds have settled.
+  // The rounds run again over what the fusion exposed, because a body written
+  // into another is a body the folds and the commoner have not read yet.
+  const restructured = restructureHotFunction(fn, callees);
+  if ("refused" in restructured) return fn;
+  optimizeBody(restructured.applied, callees);
+  return restructured.applied;
 }
 
 /**
@@ -2381,7 +2389,24 @@ export function optimizeSemanticProgram(
   // decide what the others are answered with.
   eliminateMutualRecursionInProgram(program.bodies);
   for (const fn of program.bodies) eliminateRecursion(fn);
-  for (const fn of program.bodies) optimizeSemanticEntry(fn.entry, callees);
+  // The bodies are held in one map that is read and written as the pass goes,
+  // because which bodies a program may write out is a question about the
+  // program rather than about one body, and a body fused into another is the
+  // body the next one reads. A map built once over `program.bodies` would
+  // answer about the tree as it was before this pass touched it.
+  const bodies = new Map(program.bodies.map((fn) => [fn.name, fn]));
+  for (let index = 0; index < program.bodies.length; index += 1) {
+    const fn = program.bodies[index] as SemanticFunction;
+    optimizeSemanticEntry(fn.entry, bodies);
+    // The same call-boundary rewrite a single function gets, run here over a
+    // body the program declares. Whole-number arithmetic runs after this, so
+    // a body it has fused is one the whole-number pass reads.
+    const restructured = restructureHotFunction(fn, bodies);
+    if ("refused" in restructured) continue;
+    program.bodies[index] = restructured.applied;
+    bodies.set(fn.name, restructured.applied);
+    optimizeSemanticEntry(restructured.applied.entry, bodies);
+  }
   // Whole-number arithmetic is the one rewrite here that is a question about a
   // whole program rather than about one body: what it needs to know is what
   // the callers of a function hand it, which is settled once every body has
