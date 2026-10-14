@@ -27,6 +27,9 @@ import { join } from "node:path";
 import { repositoryRoot } from "./repository.ts";
 import type { Method } from "./ai.ts";
 
+/** The goal a session was run for. */
+export type Goal = "optimize" | "capability";
+
 /** The version of the record shapes, so a report can say what it cannot read. */
 export const RECORD_VERSION = 1;
 
@@ -116,6 +119,8 @@ export interface SessionContext {
   readonly startedAt: string;
   /** The model the session asked, named the way the environment names it. */
   readonly model: string | null;
+  /** The goal the session was run for. */
+  readonly goal?: Goal;
   /** The project the session was aimed at, when one was named. */
   readonly project: string | null;
   readonly methods: readonly Method[];
@@ -359,10 +364,10 @@ export const DEFAULT_BENCHMARK_RUNS = 5;
  * @param done How many of its runs are already recorded
  */
 export function resumeCommand(
-  session: Pick<SessionContext, "id" | "project" | "methods" | "maxIterations" | "benchmarkRuns">,
+  session: Pick<SessionContext, "id" | "goal" | "project" | "methods" | "maxIterations" | "benchmarkRuns">,
   done: number,
 ): string {
-  const parts = ["blazeup"];
+  const parts = ["blazeup", session.goal ?? "optimize"];
   if (session.project !== null) parts.push(session.project);
   if (session.maxIterations !== DEFAULT_MAX_ITERATIONS) parts.push(`--max-iterations ${session.maxIterations}`);
   if (session.benchmarkRuns !== DEFAULT_BENCHMARK_RUNS) parts.push(`--benchmark-runs ${session.benchmarkRuns}`);

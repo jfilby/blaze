@@ -74,7 +74,12 @@ import {
   type SessionContext,
   type SessionOutcome,
   type SessionRecord,
+  type Goal,
 } from "./runs.ts";
+
+/** The goals a session can be run for. */
+export const GOALS: readonly Goal[] = ["optimize", "capability"];
+export type { Goal };
 
 /** The compiler directory, where `npm test` is run. */
 const COMPILER_DIR = compilerDirectory();
@@ -87,6 +92,11 @@ const AGENT_DESCRIPTION = `${AGENT_COMMAND}, the coding agent`;
 
 /** How much of the agent's answer a run record carries. */
 const AGENT_SUMMARY_BUDGET = 600;
+
+/** Whether a string names a goal a run can be run for. */
+export function isGoal(value: string): value is Goal {
+  return GOALS.includes(value as Goal);
+}
 
 /** The methods a methods list names, or null when it names none of them. */
 export function parseMethods(value: string): Method[] | null {
@@ -109,7 +119,11 @@ reads the compiler and edits it, and every change is tested with the full
 test suite, benchmarked with hyperfine, and committed on success.
 
 Usage:
-  blazeup [project] [options]
+  blazeup <goal> [project] [options]
+
+goal must be one of: ${GOALS.join(", ")}.
+  optimize     improve the compiler's generated code (the default kind of run)
+  capability  add what the compiler is missing, especially for a named project
 
 A project is a directory containing blaze.toml, or a .toml file naming its
 own. With one, the run is targeted at it: the research queries are about
@@ -171,6 +185,7 @@ interface Options {
   /** Whether what the coding agent does is printed as it works. */
   showOutput: boolean;
   project?: ProjectInfo;
+  goal?: Goal;
 }
 
 async function runOne(
@@ -229,7 +244,7 @@ async function runOne(
   //    repository's own instructions, and everything it writes is read back
   //    out of the tree rather than remembered from what it said.
   process.stdout.write(`Handing the run to ${AGENT_DESCRIPTION} at the base of the repository...\n`);
-  const answer = await askCodingAgent(method, context, options.project, options.showOutput);
+  const answer = await askCodingAgent(method, context, options.project, options.showOutput, options.goal);
 
   record.summary = answer.summary === "" ? null : answer.summary;
   record.applied = answer.files.map((file) => ({ file, description: "the coding agent's change" }));
@@ -391,6 +406,7 @@ async function askCodingAgent(
   context: string,
   project: ProjectInfo | undefined,
   showOutput: boolean,
+  goal?: Goal,
 ): Promise<AgentAnswer> {
   const problem = agentProblem(modelToAsk(project));
   if (problem !== null) return { files: [], refused: [], summary: "", problem };
@@ -399,6 +415,7 @@ async function askCodingAgent(
     method,
     context,
     project,
+    goal,
     model: modelToAsk(project),
     instructions: agentsFile(REPO_DIR),
     cwd: REPO_DIR,
@@ -796,7 +813,9 @@ const RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export interface Asked {
   /** The session to continue, when `--resume` was given. */
   readonly resume: string | undefined;
-  /** The positional arguments, of which at most one names a project. */
+  /** The goal a run was asked for, when one was named. */
+  readonly goal?: Goal;
+  /** The positional arguments, of which the first may name a goal and one may name a project. */
   readonly positionals: readonly string[];
   /** The values the flags named, when they were given. */
   readonly requested: {
@@ -817,6 +836,8 @@ export interface ResumePlan {
   readonly record: SessionRecord;
   /** How many of its runs are already recorded. */
   readonly done: number;
+  /** The goal the session was run for. */
+  readonly goal?: Goal;
   readonly methods: readonly Method[];
   readonly maxIterations: number;
   readonly benchmarkRuns: number;
@@ -851,10 +872,17 @@ export function resumePlan(asked: Asked, repoRoot = REPO_DIR): ResumePlan | stri
   if (context.maxIterations - done < 1) {
     return `no runs left (${done} of ${context.maxIterations} runs are recorded)`;
   }
-  // The invocation continuing a session is the session's own invocation: a
-  // project it was not aimed at, or settings it was not run with, is a
-  // different session however much it looks like the one that died.
-  if (asked.positionals.length === 1 && asked.positionals[0] !== (context.project ?? "")) {
+  // A goal a session was not run under, or a project it was not aimed at, is
+  // a different session however much it looks like the one that died.
+  const askedGoal = asked.goal ?? (asked.positionals.length > 0 && isGoal(asked.positionals[0]) ? asked.positionals[0] : undefined);
+  const contextGoal = context.goal ?? "optimize";
+  if (askedGoal !== undefined && askedGoal !== contextGoal) {
+    return `it was run for ${contextGoal}, not ${askedGoal}`;
+  }
+  const askedProject = askedGoal !== undefined
+    ? asked.positionals[1]
+    : (asked.positionals.length > 0 ? asked.positionals[0] : undefined);
+  if (askedProject !== undefined && askedProject !== (context.project ?? "")) {
     return `it was aimed at ${context.project ?? "no project"}`;
   }
   if (asked.given.maxIterations && asked.requested.maxIterations !== context.maxIterations) {
@@ -892,7 +920,7 @@ export function resumePlan(asked: Asked, repoRoot = REPO_DIR): ResumePlan | stri
   if (head !== context.baseCommit) {
     return `the repository is on ${head ?? "no commit"}, not the ${context.baseCommit ?? "none"} it started from`;
   }
-  return { record, done, methods: context.methods, maxIterations: context.maxIterations, benchmarkRuns: context.benchmarkRuns };
+  return { record, done, goal: context.goal ?? "optimize", methods: context.methods, maxIterations: context.maxIterations, benchmarkRuns: context.benchmarkRuns };
 }
 
 /** The iterations a loop runs, from how many are already done to the maximum. */
@@ -932,8 +960,37 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const positionals = parsed.positionals;
-  if (positionals.length > 1) {
-    process.stderr.write(`too many arguments (one project path at most)\n\n${USAGE}`);
+
+  // A session is always run *for* something: optimizing generated code, or
+  // adding a capability the compiler is missing. That goal is the first thing
+  // on the command line, before any project path.
+  const resume = parsed.values.resume;
+  let goal: Goal | undefined;
+  let projectPositionals: string[] = positionals;
+  if (resume === undefined) {
+    if (positionals.length === 0) {
+      process.stderr.write(`a goal is required (one of: ${GOALS.join(", ")})\n\n${USAGE}`);
+      return 1;
+    }
+    if (!isGoal(positionals[0])) {
+      process.stderr.write(`invalid goal (one of: ${GOALS.join(", ")})\n\n${USAGE}`);
+      return 1;
+    }
+    goal = positionals[0];
+    projectPositionals = positionals.slice(1);
+    if (projectPositionals.length > 1) {
+      process.stderr.write(`too many arguments (a goal and one project path at most)\n\n${USAGE}`);
+      return 1;
+    }
+  } else if (positionals.length > 0 && isGoal(positionals[0])) {
+    goal = positionals[0];
+    projectPositionals = positionals.slice(1);
+    if (projectPositionals.length > 1) {
+      process.stderr.write(`too many arguments (a goal and one project path at most)\n\n${USAGE}`);
+      return 1;
+    }
+  } else if (positionals.length > 1) {
+    process.stderr.write(`too many arguments (a goal and one project path at most)\n\n${USAGE}`);
     return 1;
   }
 
@@ -969,6 +1026,7 @@ async function main(argv: string[]): Promise<number> {
 
   const asked: Asked = {
     resume: parsed.values.resume,
+    goal,
     positionals,
     requested: { maxIterations: requestedMax, benchmarkRuns: requestedBenchmarkRuns, methods: requestedMethods ?? undefined },
     given: { maxIterations: givenMax, benchmarkRuns: givenBenchmarkRuns, methods: givenMethods },
@@ -1003,6 +1061,7 @@ async function main(argv: string[]): Promise<number> {
   // settings, the same model — only when it started again is new, because a
   // new invocation is what this is. The runs it already did are recorded
   // against the same id, so the records of both invocations join.
+  const sessionGoal = resumed === undefined ? goal : (resumed.record.context.goal ?? goal ?? "optimize");
   const session: Mutable<SessionContext> = resumed === undefined
     ? {
         id: newId(new Date(startedAt)),
@@ -1011,6 +1070,7 @@ async function main(argv: string[]): Promise<number> {
         // that names no project is refused, and that refusal is recorded — so
         // this is the environment's model until the project's own is known.
         model: modelToAsk(),
+        goal: sessionGoal,
         project: null,
         methods,
         maxIterations,
@@ -1022,6 +1082,7 @@ async function main(argv: string[]): Promise<number> {
         startedAt: new Date(startedAt).toISOString(),
         baseCommit: currentCommit(),
       };
+  if (resumed !== undefined) session.goal = sessionGoal;
   const resumeDone = resumed?.done ?? 0;
   const resumeLine = resumeCommand(session, resumeDone);
   const runIds: string[] = [];
@@ -1058,8 +1119,11 @@ async function main(argv: string[]): Promise<number> {
   // A project path targets the session at one project. It is read before any
   // run, so a path that names no project is refused before anything else is
   // spent — and the refusal is what the record says happened.
+  // A resumed session already knows its goal and project from its record; a
+  // fresh session takes them from the command line.
+  const commandProject = projectPositionals.length > 0 ? projectPositionals[0] : undefined;
   let project: ProjectInfo | undefined;
-  const projectPath = positionals.length === 1 ? positionals[0] : resumed?.record.context.project ?? undefined;
+  const projectPath = commandProject ?? resumed?.record.context.project ?? undefined;
   if (projectPath !== undefined) {
     try {
       project = await loadProject(projectPath);
@@ -1129,7 +1193,7 @@ async function main(argv: string[]): Promise<number> {
     return refuse(1, `blazeup: ${smoke}.\n${agentAdvice()}`);
   }
 
-  const options: Options = { maxIterations, benchmarkRuns, showOutput, project };
+  const options: Options = { maxIterations, benchmarkRuns, showOutput, project, goal: sessionGoal };
 
   process.stdout.write(`blazeup: starting optimization loop (max ${maxIterations} runs)\n`);
   process.stdout.write(`blazeup: methods: ${methods.join(" → ")}\n`);

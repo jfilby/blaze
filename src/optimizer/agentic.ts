@@ -25,6 +25,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ProjectInfo } from "./project.ts";
+import type { Goal } from "./runs.ts";
 import { agentsFile, compilerDirectory, repositoryRoot } from "./repository.ts";
 import type { Method } from "./ai.ts";
 import { AgentOutput } from "./agent-output.ts";
@@ -42,6 +43,8 @@ const DETAIL_BUDGET = 1500;
 export interface AgentRequest {
   /** The way this run works, which is what it is given to read. */
   readonly method: Method;
+  /** What the run is for. */
+  readonly goal?: Goal;
   /** What the method gathered: research, build feedback, or nothing. */
   readonly context: string;
   /** The project the run is aimed at, when one was named. */
@@ -146,6 +149,9 @@ the repository's own instructions for working in it — has been given to you in
 your system prompt: read it and follow it.
 `);
 
+  const goal = request.goal ?? "optimize";
+  parts.push(GOAL_ASK[goal]);
+
   parts.push(METHOD_ASK[request.method]);
 
   if (request.context.trim() !== "") {
@@ -202,6 +208,14 @@ Finish by saying in a few sentences what you changed, and why.
 
   return parts.join("\n");
 }
+
+/** What the run's goal asks of the agent. */
+const GOAL_ASK: Record<Goal, string> = {
+  optimize:
+    "This is an optimization run: improve the compiler's generated code and its own speed, and keep a change only when it measures faster than what is there now.",
+  capability:
+    "This is a capability run: close gaps in what the compiler supports, especially frontend language features that a named project needs lowered to the semantic IR, so that project builds. A change that keeps its feature working and keeps the suite passing is the whole of what this run is for, and it is not to be thrown away for making the compiler a little slower.",
+};
 
 /** What each method hands the agent to read. */
 const METHOD_ASK: Record<Method, string> = {

@@ -9,7 +9,7 @@ Both are commands of this package, installed with `npm link`:
 
 ```
 npm link
-blazeup [project] [options]
+blazeup <goal> [project] [options]
 blazeup-report [options]
 ```
 

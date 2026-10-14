@@ -202,7 +202,7 @@ test("the resume command omits the flags a session took the defaults with", () =
 
   assert.equal(
     line,
-    "blazeup --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 3 of 3 run(s) left.",
+    "blazeup optimize --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 3 of 3 run(s) left.",
   );
 });
 
@@ -219,7 +219,7 @@ test("the resume command carries a session's non-default settings", () => {
 
   assert.equal(
     line,
-    "blazeup /repo/proj/blaze.toml --max-iterations 7 --benchmark-runs 2 --methods code-review --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 7 of 7 run(s) left.",
+    "blazeup optimize /repo/proj/blaze.toml --max-iterations 7 --benchmark-runs 2 --methods code-review --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 7 of 7 run(s) left.",
   );
 });
 
