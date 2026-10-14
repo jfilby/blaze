@@ -32,8 +32,8 @@ import { realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { craftQuery, searchTavily, tavilyApiKey } from "./tavily.ts";
-import { addProcessed, isProcessed, loadCache, markUseful, saveCache, type CacheEntry } from "./cache.ts";
+import { codegenQueries, searchTavily, tavilyApiKey } from "./tavily.ts";
+import { addProcessed, isProcessed, loadCache, markUseful, saveCache } from "./cache.ts";
 import {
   benchmarkCompiler,
   benchmarkProject,
@@ -621,28 +621,47 @@ async function gatherResearchContext(project?: ProjectInfo): Promise<ResearchCon
     throw new Error("TAVILY_API_KEY is not set");
   }
 
-  // A project's context steers the query at what it does, so the research
-  // is about the domains the project works in rather than in general.
-  const query = craftQuery(project?.context);
-  process.stdout.write(`Searching Tavily: ${query}\n`);
-  const response = await searchTavily(query, apiKey);
+  const queries = codegenQueries(project?.context);
+  process.stdout.write(`Searching Tavily (${queries.length} quer${queries.length === 1 ? "y" : "ies"})...\n`);
+  for (const query of queries) process.stdout.write(`  ${query}\n`);
+
+  const seenUrls = new Set<string>();
+  const allResults = [];
+  const answers = [];
+  for (const query of queries) {
+    const response = await searchTavily(query, apiKey);
+    if (response.answer && response.answer.trim() !== "") {
+      answers.push(`Query: ${query}\n${response.answer.trim()}`);
+    }
+    for (const result of response.results) {
+      if (seenUrls.has(result.url)) continue;
+      seenUrls.add(result.url);
+      allResults.push(result);
+    }
+  }
 
   const cache = loadCache();
-  const fresh = response.results.filter((r) => !isProcessed(cache, r.url));
+  const fresh = allResults.filter((r) => !isProcessed(cache, r.url));
 
   if (fresh.length === 0) {
     process.stdout.write("All papers already processed (cached), skipping.\n");
     return null;
   }
 
-  let newCache: CacheEntry[] = cache;
+  let newCache = cache;
   for (const r of fresh) {
     newCache = addProcessed(newCache, r.url, r.title);
   }
   saveCache(newCache);
 
-  const papers: ResearchPaper[] = fresh.map((r) => ({ title: r.title, url: r.url }));
-  const parts = fresh.map((r, i) => `Paper ${i + 1}: ${r.title}\n${cap(r.content, PAPER_CONTENT_SHOWN)}`);
+  const papers = fresh.map((r) => ({ title: r.title, url: r.url }));
+  const parts = [];
+  if (answers.length > 0) {
+    parts.push(`## Tavily research summaries\n${answers.join("\n\n---\n\n")}`);
+  }
+  parts.push(
+    ...fresh.map((r, i) => `Paper ${i + 1}: ${r.title}\n${cap(r.content, PAPER_CONTENT_SHOWN)}${r.raw_content ? `\n${cap(r.raw_content, PAPER_CONTENT_SHOWN)}` : ""}`),
+  );
   return { context: parts.join("\n\n---\n\n"), papers };
 }
 

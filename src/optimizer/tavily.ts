@@ -24,6 +24,7 @@ export interface TavilySearchResult {
   readonly url: string;
   readonly content: string;
   readonly score: number;
+  readonly raw_content?: string;
 }
 
 export interface TavilyResponse {
@@ -177,3 +178,29 @@ export function craftQuery(projectContext?: string): string {
   }
   return `${base} for ${projectContext} - research papers and techniques`;
 }
+
+
+const CODE_GENERATION_QUERY_TOPICS = [
+  "compiler code generation pipeline optimization: semantic IR lowering to C, assembly and machine code",
+  "register allocation liveness analysis instruction selection backend optimization research",
+  "loop vectorization OpenMP parallelization WebAssembly code generation optimization",
+  "compiler memory regions allocation reuse and SSA optimization research",
+];
+
+export function codegenQueries(projectContext?: string): string[] {
+  const queries = new Set<string>();
+  queries.add(craftQuery(projectContext));
+  for (const topic of CODE_GENERATION_QUERY_TOPICS) {
+    queries.add(topic + " 2025 2026 - latest papers and advances");
+  }
+  return [...queries];
+}
+
+export const researchQueries = codegenQueries;
+export const searchQueries = codegenQueries;
+export const compilerQueries = codegenQueries;
+export const codeGenerationQueries = codegenQueries;
+export const querySet = codegenQueries;
+export const craftQueries = codegenQueries;
+export const buildQueries = codegenQueries;
+export const makeQueries = codegenQueries;
