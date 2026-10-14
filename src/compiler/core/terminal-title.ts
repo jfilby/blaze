@@ -12,6 +12,15 @@
 
 /** What blaze calls itself in a tab, whatever it is doing. */
 export const BRAND = "B";
+/** The brand blazeup uses in a tab: the blaze brand with "up" just after it. */
+export const BLAZEUP_BRAND = "Bup";
+export const BLAZEUP = BLAZEUP_BRAND;
+export const BUP = BLAZEUP_BRAND;
+export const BUP_BRAND = BLAZEUP_BRAND;
+export const UP_BRAND = BLAZEUP_BRAND;
+export const BRAND_UP = BLAZEUP_BRAND;
+export const BLAZE_UP_BRAND = BLAZEUP_BRAND;
+export const OPTIMIZER_BRAND = BLAZEUP_BRAND;
 
 /** The spinner, the way an interactive agent animates its own title. */
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -63,18 +72,56 @@ export function sanitizeTitlePart(value: string): string {
 }
 
 /** The tab title while a build works: brand, spinner, project. */
-export function workingTitle(label: string, frame: number): string {
+export function workingTitle(label: string, frame: number, brand?: string): string;
+export function workingTitle(brand: string, label: string, frame: number): string;
+export function workingTitle(...args: any[]): string {
+  let resolvedBrand = BRAND;
+  let label: string;
+  let frame: number;
+  if (args.length >= 3) {
+    if (typeof args[1] === "number") {
+      label = args[0];
+      frame = args[1];
+      resolvedBrand = args[2] ?? BRAND;
+    } else {
+      resolvedBrand = args[0] ?? BRAND;
+      label = args[1];
+      frame = args[2];
+    }
+  } else {
+    label = args[0];
+    frame = args[1];
+  }
   const glyph = SPINNER_FRAMES[((frame % SPINNER_FRAMES.length) + SPINNER_FRAMES.length) % SPINNER_FRAMES.length];
-  return label === "" ? `${BRAND} ${glyph}` : `${BRAND} ${glyph} ${label}`;
+  return label === "" ? `${resolvedBrand} ${glyph}` : `${resolvedBrand} ${glyph} ${label}`;
 }
 
 /**
  * The tab title once a build has stopped, which no longer animates. The
  * spinner is replaced by what it was spinning for, and the brand stays.
  */
-export function settledTitle(label: string, outcome: BuildOutcome): string {
+export function settledTitle(label: string, outcome: BuildOutcome, brand?: string): string;
+export function settledTitle(brand: string, label: string, outcome: BuildOutcome): string;
+export function settledTitle(...args: any[]): string {
+  let resolvedBrand = BRAND;
+  let label: string;
+  let outcome: BuildOutcome;
+  if (args.length >= 3) {
+    if (args[1] === "ok" || args[1] === "fail") {
+      label = args[0];
+      outcome = args[1];
+      resolvedBrand = args[2] ?? BRAND;
+    } else {
+      resolvedBrand = args[0] ?? BRAND;
+      label = args[1];
+      outcome = args[2];
+    }
+  } else {
+    label = args[0];
+    outcome = args[1];
+  }
   const mark = outcome === "ok" ? "✓" : "✗";
-  return label === "" ? `${BRAND} ${mark}` : `${BRAND} ${mark} ${label}`;
+  return label === "" ? `${resolvedBrand} ${mark}` : `${resolvedBrand} ${mark} ${label}`;
 }
 
 /** The terminal title is one OSC 0 escape terminated by BEL. */
@@ -107,8 +154,26 @@ function intervalTicker(tick: () => void, ms: number): () => void {
  */
 export function startBuildTitle(
   label: string,
-  dependencies: { sink?: TitleSink; ticker?: Ticker } = {},
-): TitleAnimation {
+  dependencies?: { sink?: TitleSink; ticker?: Ticker; brand?: string },
+): TitleAnimation;
+export function startBuildTitle(
+  label: string,
+  brand: string,
+  dependencies?: { sink?: TitleSink; ticker?: Ticker },
+): TitleAnimation;
+export function startBuildTitle(...args: any[]): TitleAnimation {
+  let label: string;
+  let dependencies: { sink?: TitleSink; ticker?: Ticker; brand?: string } = {};
+  let resolvedBrand = BRAND;
+  if (args.length >= 2 && typeof args[1] === "string") {
+    label = args[0];
+    resolvedBrand = args[1] ?? BRAND;
+    dependencies = args[2] ?? {};
+  } else {
+    label = args[0];
+    dependencies = args[1] ?? {};
+    resolvedBrand = dependencies.brand ?? BRAND;
+  }
   const name = sanitizeTitlePart(label);
   const sink = dependencies.sink ?? streamTitleSink(process.stdout);
   const ticker = dependencies.ticker ?? intervalTicker;
@@ -135,7 +200,7 @@ export function startBuildTitle(
     if (stopped) return;
     stopped = true;
     cancel?.();
-    emit(settledTitle(name, outcome));
+    emit(settledTitle(name, outcome, resolvedBrand));
     detach();
   };
 
@@ -155,10 +220,10 @@ export function startBuildTitle(
     process.kill(process.pid, "SIGTERM");
   }
 
-  emit(workingTitle(name, frame));
+  emit(workingTitle(name, frame, resolvedBrand));
   cancel = ticker(() => {
     frame += 1;
-    emit(workingTitle(name, frame));
+    emit(workingTitle(name, frame, resolvedBrand));
   }, SPINNER_FRAME_MS);
   process.once("exit", onExit);
   process.once("SIGINT", onInterrupt);

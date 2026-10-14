@@ -57,6 +57,7 @@ import {
   type FileEdit,
 } from "./agentic.ts";
 import { modelProblem, modelToAsk, type Method } from "./ai.ts";
+import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./terminal-title.ts";
 import { benchmarkExample, deliveredProgram, loadProject, PROJECT_FILE, type ProjectInfo } from "./project.ts";
 import {
   DEFAULT_BENCHMARK_RUNS,
@@ -187,6 +188,15 @@ interface Options {
   showOutput: boolean;
   project?: ProjectInfo;
   goal?: Goal;
+}
+
+/**
+ * The tab title of a session that is working. A session that answers at once
+ * never owns the tab.
+ */
+function titleAnimation(label: string): TitleAnimation {
+  if (!process.stdout.isTTY) return NO_TITLE_ANIMATION;
+  return startBuildTitle(label);
 }
 
 async function runOne(
@@ -1246,6 +1256,7 @@ async function main(argv: string[]): Promise<number> {
 
   const options: Options = { maxIterations, benchmarkRuns, showOutput, project, goal: sessionGoal };
 
+  const title = titleAnimation(session.id);
   process.stdout.write(`blazeup: starting optimization loop (max ${maxIterations} runs)\n`);
   process.stdout.write(`blazeup: methods: ${methods.join(" → ")}\n`);
   process.stdout.write(`blazeup: model: ${session.model === null ? "none" : session.model}\n`);
@@ -1331,6 +1342,7 @@ async function main(argv: string[]): Promise<number> {
   // A session that died before it finished did not optimise anything: an
   // exit of zero would tell whatever is reading it that this session had an
   // effect.
+  title.stop(outcome === "failed" ? "fail" : committed > 0 ? "ok" : "ok");
   return finish(outcome === "failed" ? 1 : committed > 0 ? 0 : 1);
 }
 
