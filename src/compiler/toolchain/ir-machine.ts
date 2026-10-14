@@ -3173,6 +3173,17 @@ class Machine {
         this.floatConstant(Number(decimalText(value.text)), target.type, target.register);
         return;
       }
+      // The same is true of an integer written out: a constant already fits in
+      // an immediate the instruction carries, so a held register takes it
+      // directly rather than through the accumulator and a move. A name the
+      // build gave a register of its own is the one both sides read equally,
+      // and the eleven limbs of a field arithmetic assign one several times.
+      if (value.k === "const" && isInteger(target.type) && target.register !== null && !isWideType(target.type)) {
+        const whole = integerText(value.text);
+        this.code.movRegImm(target.register, whole);
+        if (!this.writtenWhole(whole, target.type)) this.normalizeArithmetic(target.type, target.register);
+        return;
+      }
       // A shift over a value the build gave a register of its own is written in
       // that register rather than moved into the accumulator, shifted there and
       // moved back: the carry a limb arithmetic hands the next limb is one long
