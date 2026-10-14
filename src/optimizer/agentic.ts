@@ -206,7 +206,7 @@ makes the compiler slower is thrown away however good it is.
 Finish by saying in a few sentences what you changed, and why.
 `);
 
-  return parts.join("\n");
+  return parts.join("\n").replace(/\u0000/g, "");
 }
 
 /** What the run's goal asks of the agent. */
