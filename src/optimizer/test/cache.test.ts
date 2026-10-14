@@ -102,7 +102,7 @@ test("markUseful leaves other papers alone", () => {
 });
 
 test("what was saved is read back", async () => {
-  const file = join(await scratch("blazeopt-cache-"), "cache.json");
+  const file = join(await scratch("blazeup-cache-"), "cache.json");
   saveCache([entry("https://example.com/a", 0)], file);
 
   assert.deepEqual(
@@ -112,14 +112,14 @@ test("what was saved is read back", async () => {
 });
 
 test("a cache that cannot be read holds nothing rather than failing the run", async () => {
-  const file = join(await scratch("blazeopt-cache-"), "cache.json");
+  const file = join(await scratch("blazeup-cache-"), "cache.json");
   await writeFile(file, "{ not json at all");
 
   assert.deepEqual(loadCache(file), []);
 });
 
 test("an entry whose timestamp is not one is dropped: it could never be aged", async () => {
-  const file = join(await scratch("blazeopt-cache-"), "cache.json");
+  const file = join(await scratch("blazeup-cache-"), "cache.json");
   await writeFile(
     file,
     JSON.stringify({
@@ -139,7 +139,7 @@ test("an entry whose timestamp is not one is dropped: it could never be aged", a
 test("the cache is not written beside the compiler any more", async () => {
   // The cache a run writes is in the user's cache directory, not inside the
   // repository a pass commits to.
-  const file = join(await scratch("blazeopt-cache-"), "nested", "cache.json");
+  const file = join(await scratch("blazeup-cache-"), "nested", "cache.json");
   saveCache([entry("https://example.com/a", 0)], file);
 
   assert.deepEqual(
@@ -152,7 +152,7 @@ test("an unreadable legacy cache is read once, where the papers were", async () 
   // The first version wrote the cache beside the compiler. A run that finds
   // nothing in the new place still reads that, so the papers it processed are
   // not asked about again.
-  const dir = await scratch("blazeopt-cache-");
+  const dir = await scratch("blazeup-cache-");
   const legacy = join(dir, "legacy.json");
   const fresh = join(dir, "fresh", "cache.json");
   await writeFile(
@@ -167,7 +167,7 @@ test("a cache file from before useful and readCount were tracked is read as not 
   // An old cache file has no useful or readCount fields. They default to
   // "not useful, read once", which is what an entry that was only tracked
   // by its timestamp was.
-  const file = join(await scratch("blazeopt-cache-"), "cache.json");
+  const file = join(await scratch("blazeup-cache-"), "cache.json");
   await writeFile(
     file,
     JSON.stringify({

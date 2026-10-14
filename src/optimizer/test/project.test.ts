@@ -41,7 +41,7 @@ import { scratch } from "./scratch.ts";
 
 /** A project directory naming a source file. */
 async function project(source = "export function f(x: number): number { return x; }\n"): Promise<string> {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "blaze.toml"), "sourceFile = \"main.ts\"\noutput = \"machine\"\n");
   await writeFile(join(dir, "main.ts"), source);
   return dir;
@@ -49,7 +49,7 @@ async function project(source = "export function f(x: number): number { return x
 
 /** A project directory whose blaze.toml carries the given extra lines. */
 async function projectWith(lines: readonly string[]): Promise<string> {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(
     join(dir, "blaze.toml"),
     `sourceFile = "main.ts"\noutput = "machine"\n${lines.join("\n")}\n`,
@@ -94,21 +94,21 @@ test("a path that names no project is refused", async () => {
 });
 
 test("a project file that names no source is refused", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "blaze.toml"), "output = \"machine\"\n");
 
   await assert.rejects(() => loadProject(dir), /does not name a sourceFile/);
 });
 
 test("a project whose source file is not there is refused", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "blaze.toml"), "sourceFile = \"gone.ts\"\n");
 
   await assert.rejects(() => loadProject(dir), /source file not found/);
 });
 
 test("a project file that cannot be parsed is refused, saying why", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "blaze.toml"), "this is not = = toml\n");
 
   await assert.rejects(() => loadProject(dir), /failed to parse/);
@@ -153,7 +153,7 @@ test("a model with its key is not a problem", () => {
 });
 
 test("the model a project names is read the way the compiler reads it", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), [
     'sourceFile = "main.ts"',
@@ -165,7 +165,7 @@ test("the model a project names is read the way the compiler reads it", async ()
 });
 
 test("a project may name its model as a table", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), [
     'sourceFile = "main.ts"',
@@ -178,7 +178,7 @@ test("a project may name its model as a table", async () => {
 });
 
 test("a project that names no model reads as one that names none", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\n');
 
@@ -186,7 +186,7 @@ test("a project that names no model reads as one that names none", async () => {
 });
 
 test("a project's model that cannot be used is refused, saying why", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), [
     'sourceFile = "main.ts"',
@@ -199,7 +199,7 @@ test("a project's model that cannot be used is refused, saying why", async () =>
 
 test("a run aimed at a project asks the project's own model when the environment names none", async () => {
   without(["AI_MODEL", "ANTHROPIC_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"]);
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\nmodel = "openai/gpt-5"\n');
   const project = await loadProject(dir);
@@ -210,7 +210,7 @@ test("a run aimed at a project asks the project's own model when the environment
 
 test("a project that names no model of its own leaves the environment's", async () => {
   without(["AI_MODEL", "ANTHROPIC_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"]);
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\n');
   const project = await loadProject(dir);
@@ -221,7 +221,7 @@ test("a project that names no model of its own leaves the environment's", async 
 
 test("the environment's model wins over the project's own", async () => {
   process.env["AI_MODEL"] = "anthropic/claude-sonnet-4-5";
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   await writeFile(join(dir, "main.ts"), "export function f(x: number): number { return x; }\n");
   await writeFile(join(dir, "blaze.toml"), 'sourceFile = "main.ts"\nmodel = "openai/gpt-5"\n');
   const project = await loadProject(dir);

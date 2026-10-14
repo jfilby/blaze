@@ -35,12 +35,12 @@ const EXHAUSTED_READS = 3;
 /** Where the cache lives: the user's cache directory, never the repository. */
 const CACHE_FILE = join(
   process.env["XDG_CACHE_HOME"] ?? join(homedir(), ".cache"),
-  "blazeopt",
+  "blazeup",
   "cache.json",
 );
 
 /** Where the first version of this module wrote it. */
-const LEGACY_CACHE_FILE = join(import.meta.dirname, ".blazeopt-cache.json");
+const LEGACY_CACHE_FILE = join(import.meta.dirname, ".blazeup-cache.json");
 
 export interface CacheEntry {
   readonly url: string;

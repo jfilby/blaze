@@ -1,16 +1,16 @@
-# blazeopt
+# blazeup
 
-`blazeopt` improves the blaze compiler by giving a coding agent what it needs
+`blazeup` improves the blaze compiler by giving a coding agent what it needs
 to read it and asking it to make the compiler better, then keeping the changes
 that survive the compiler's own test suite and a measurement of it.
-`blazeopt-report` reads what a run of it did.
+`blazeup-report` reads what a run of it did.
 
 Both are commands of this package, installed with `npm link`:
 
 ```
 npm link
-blazeopt [project] [options]
-blazeopt-report [options]
+blazeup [project] [options]
+blazeup-report [options]
 ```
 
 ## What a run does
@@ -21,7 +21,7 @@ suite, measures it with the change and without it, and commits what survived.
 What is measured is the program a named project builds when a project is named,
 and the compiler's own suite otherwise; both are described under
 [What a run is measured by](#what-a-run-is-measured-by). One invocation of
-`blazeopt` is a **session**, which is the runs it got through.
+`blazeup` is a **session**, which is the runs it got through.
 
 A run is one of three **methods**, which is how it gathers its context:
 
@@ -35,8 +35,8 @@ The changes themselves are written by the agent, not proposed as text and
 applied: it reads the compiler source, decides what to change and edits it.
 
 A run records itself whether it got anywhere or not, and so does a session
-that was refused before it ran anything: `.blazeopt/runs` holds one record
-per run and `.blazeopt/sessions` holds one per session, at the head of the
+that was refused before it ran anything: `.blazeup/runs` holds one record
+per run and `.blazeup/sessions` holds one per session, at the head of the
 repository. A run record stands on its own — it carries the context of the
 session it belonged to — so a report never has to join two files to say what
 one run did.
@@ -62,7 +62,7 @@ judged, and recorded as a refusal naming the reason.
 The agent's work is shown as it happens by default:
 
 ```
-blazeopt
+blazeup
 ```
 
 The agent is asked in the event mode, which carries every tool it calls as it
@@ -71,7 +71,7 @@ passes `--no-show-ai-coding` and is asked in print mode instead, which writes
 the answer at the end of its work and nothing at all on the way:
 
 ```
-blazeopt --no-show-ai-coding
+blazeup --no-show-ai-coding
 ```
 
 ```
@@ -87,14 +87,14 @@ went wrong: what it answered when it went well is a file or a build log, and
 none of that is what it did. The change is still read out of the tree rather
 than out of this, and it is judged by the same three gates.
 
-## blazeopt-report
+## blazeup-report
 
 ```
-blazeopt-report
-blazeopt-report --method research          # one method only
-blazeopt-report --since 7                  # the last week
-blazeopt-report --limit 20 --list          # the last 20 runs, one line each
-blazeopt-report --json                     # machine-readable
+blazeup-report
+blazeup-report --method research          # one method only
+blazeup-report --since 7                  # the last week
+blazeup-report --limit 20 --list          # the last 20 runs, one line each
+blazeup-report --json                     # machine-readable
 ```
 
 It reads those records and reports on them: how often a run gets to a

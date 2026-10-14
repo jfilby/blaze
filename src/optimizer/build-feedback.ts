@@ -56,7 +56,7 @@ export async function gatherBuildFeedback(project?: ProjectInfo): Promise<BuildF
     // beside it the way a build of it anywhere else would be.
     cwd = project.directory;
   } else {
-    const dir = await mkdtemp(join(tmpdir(), "blazeopt-build-"));
+    const dir = await mkdtemp(join(tmpdir(), "blazeup-build-"));
     await writeFile(join(dir, "main.ts"), TEST_SOURCE);
     await writeFile(join(dir, "blaze.toml"), TEST_TOML);
     cwd = dir;

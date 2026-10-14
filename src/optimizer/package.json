@@ -5,8 +5,8 @@
   "type": "module",
   "private": true,
   "bin": {
-    "blazeopt": "cli.ts",
-    "blazeopt-report": "report.ts"
+    "blazeup": "cli.ts",
+    "blazeup-report": "report.ts"
   },
   "engines": {
     "node": ">=22.18"

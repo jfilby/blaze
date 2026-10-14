@@ -23,7 +23,7 @@ import { scratch } from "./scratch.ts";
 /** A scratch git repository shaped like the blaze one: a compiler package
  *  with its own test directory, beside a file of the user's own. */
 async function repository(): Promise<string> {
-  const dir = await scratch("blazeopt-tree-");
+  const dir = await scratch("blazeup-tree-");
   await mkdir(join(dir, "src", "compiler", "test"), { recursive: true });
   await writeFile(join(dir, "AGENTS.md"), "# Instructions\n");
   await writeFile(join(dir, "src", "compiler", "codegen.ts"), "// the compiler\n");

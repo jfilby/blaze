@@ -82,7 +82,7 @@ function session(over: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 test("a run written is a run that can be read back", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
 
   const path = writeRun(run(), repo);
 
@@ -92,7 +92,7 @@ test("a run written is a run that can be read back", async () => {
 });
 
 test("a session written is a session that can be read back", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
 
   writeSession(session(), repo);
 
@@ -101,19 +101,19 @@ test("a session written is a session that can be read back", async () => {
 });
 
 test("the two kinds of record are in two directories, under one", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
   writeRun(run(), repo);
   writeSession(session(), repo);
 
-  assert.equal(recordsDirectory(repo), join(repo, ".blazeopt"));
-  assert.equal(runsDirectory(repo), join(repo, ".blazeopt", "runs"));
-  assert.equal(sessionsDirectory(repo), join(repo, ".blazeopt", "sessions"));
+  assert.equal(recordsDirectory(repo), join(repo, ".blazeup"));
+  assert.equal(runsDirectory(repo), join(repo, ".blazeup", "runs"));
+  assert.equal(sessionsDirectory(repo), join(repo, ".blazeup", "sessions"));
   // A run is not a session, and neither is read for the other.
   assert.deepEqual(readRuns(repo).map((r) => r.id), [run().id]);
 });
 
 test("a repository that has never run holds no records", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
 
   assert.deepEqual(readRuns(repo), []);
   assert.deepEqual(readSessions(repo), []);
@@ -121,7 +121,7 @@ test("a repository that has never run holds no records", async () => {
 });
 
 test("records come back in the order they happened, not the order of their names", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
   // The third was written first, and its name sorts before the others.
   writeRun(run({ id: "2026-10-10_09-03-00_c", iteration: 3 }), repo);
   writeRun(run({ id: "2026-10-10_09-01-00_a", iteration: 1 }), repo);
@@ -134,7 +134,7 @@ test("records come back in the order they happened, not the order of their names
 });
 
 test("two runs of the same second are read in the order their names break the tie", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
   const both = "2026-10-10T09:00:00.000Z";
   // Two runs of one session share a second: the name decides which is first.
   writeRun(run({ id: "2026-10-10_09-00-00_b", iteration: 2, startedAt: both }), repo);
@@ -147,7 +147,7 @@ test("two runs of the same second are read in the order their names break the ti
 });
 
 test("a record that is not one is left out rather than failing the report", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
   writeRun(run(), repo);
   // What an interrupted run leaves behind: a file that is not a record.
   await writeFile(join(runsDirectory(repo), "interrupted.json"), "{ \"version\": 1,");
@@ -162,7 +162,7 @@ test("a record that is not one is left out rather than failing the report", asyn
 });
 
 test("a run keeps the context of the session it belonged to", async () => {
-  const repo = await scratch("blazeopt-runs-");
+  const repo = await scratch("blazeup-runs-");
 
   writeRun(run(), repo);
 
@@ -175,8 +175,8 @@ test("a run keeps the context of the session it belonged to", async () => {
 test("a repository that cannot be written is said rather than swallowing the run", async () => {
   // A path that cannot be created as a directory: the write fails, the run
   // reports it, and the run is not a failure of the record.
-  const repo = await scratch("blazeopt-runs-");
-  writeFileSync(join(repo, ".blazeopt"), "not a directory\n");
+  const repo = await scratch("blazeup-runs-");
+  writeFileSync(join(repo, ".blazeup"), "not a directory\n");
 
   const path = writeRun(run(), repo);
 
@@ -202,7 +202,7 @@ test("the resume command omits the flags a session took the defaults with", () =
 
   assert.equal(
     line,
-    "blazeopt --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 3 of 3 run(s) left.",
+    "blazeup --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 3 of 3 run(s) left.",
   );
 });
 
@@ -219,7 +219,7 @@ test("the resume command carries a session's non-default settings", () => {
 
   assert.equal(
     line,
-    "blazeopt /repo/proj/blaze.toml --max-iterations 7 --benchmark-runs 2 --methods code-review --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 7 of 7 run(s) left.",
+    "blazeup /repo/proj/blaze.toml --max-iterations 7 --benchmark-runs 2 --methods code-review --resume 2026-10-10_09-00-00_aaaaaa    # continues session 2026-10-10_09-00-00_aaaaaa: 7 of 7 run(s) left.",
   );
 });
 

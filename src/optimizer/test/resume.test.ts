@@ -73,7 +73,7 @@ function head(dir: string): string {
 
 /** A scratch git repository with one commit, the tree a session record names. */
 async function repository(): Promise<string> {
-  const dir = await scratch("blazeopt-resume-");
+  const dir = await scratch("blazeup-resume-");
   await mkdir(join(dir, "src"), { recursive: true });
   await writeFile(join(dir, "src", "compiler.ts"), "// the compiler\n");
   git(dir, "init", "--quiet");

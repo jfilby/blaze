@@ -4,15 +4,15 @@
  *
  * A **run** is one turn of the optimization loop — one method, one answer
  * from the coding agent, one measurement, one commit or revert. A **session**
- * is one invocation of `blazeopt`, which is the runs it got through and the
+ * is one invocation of `blazeup`, which is the runs it got through and the
  * answer it was working under. Both are recorded, whether they got anywhere
  * or not: a run whose tests failed, one whose changes were all refused and a
  * session that refused to start on a dirty tree are three different facts,
  * and none of them is visible afterwards except from here.
  *
- * `blazeopt-report` reads what this module writes.
+ * `blazeup-report` reads what this module writes.
  *
- * The records live in `.blazeopt` at the head of the repository, one file
+ * The records live in `.blazeup` at the head of the repository, one file
  * per run and one file per session rather than one appended log: a run that
  * is interrupted part way through would leave a half-written line in a log,
  * and a whole record in a directory is what a report can read.
@@ -31,14 +31,14 @@ import type { Method } from "./ai.ts";
 export const RECORD_VERSION = 1;
 
 /**
- * Where the records are: `.blazeopt` at the head of the repository.
+ * Where the records are: `.blazeup` at the head of the repository.
  *
  * The head is the repository the optimizer is a package inside, which is what
  * `repository.ts` says it is rather than a second answer to the same
  * question.
  */
 export function recordsDirectory(repoRoot = repositoryRoot()): string {
-  return join(repoRoot, ".blazeopt");
+  return join(repoRoot, ".blazeup");
 }
 
 /** Where the run records are. */
@@ -214,7 +214,7 @@ export function writeRun(record: RunRecord, repoRoot = repositoryRoot()): string
     return path;
   } catch (cause) {
     process.stderr.write(
-      `blazeopt: the run's record could not be written: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+      `blazeup: the run's record could not be written: ${cause instanceof Error ? cause.message : String(cause)}\n`,
     );
     return null;
   }
@@ -230,7 +230,7 @@ export function writeSession(record: SessionRecord, repoRoot = repositoryRoot())
     return path;
   } catch (cause) {
     process.stderr.write(
-      `blazeopt: the session's record could not be written: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+      `blazeup: the session's record could not be written: ${cause instanceof Error ? cause.message : String(cause)}\n`,
     );
     return null;
   }
@@ -362,7 +362,7 @@ export function resumeCommand(
   session: Pick<SessionContext, "id" | "project" | "methods" | "maxIterations" | "benchmarkRuns">,
   done: number,
 ): string {
-  const parts = ["blazeopt"];
+  const parts = ["blazeup"];
   if (session.project !== null) parts.push(session.project);
   if (session.maxIterations !== DEFAULT_MAX_ITERATIONS) parts.push(`--max-iterations ${session.maxIterations}`);
   if (session.benchmarkRuns !== DEFAULT_BENCHMARK_RUNS) parts.push(`--benchmark-runs ${session.benchmarkRuns}`);

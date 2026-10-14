@@ -116,7 +116,7 @@ function projectAt(directory: string, benchmark: ProjectInfo["benchmark"]): Proj
 }
 
 test("a project that names no benchmark has nothing to be timed", async () => {
-  const dir = join(await scratch("blazeopt-project-"), "binarytrees");
+  const dir = join(await scratch("blazeup-project-"), "binarytrees");
 
   // Nothing here builds a program: a project that names no command has no
   // measurement, and saying so is the whole answer.
@@ -124,7 +124,7 @@ test("a project that names no benchmark has nothing to be timed", async () => {
 });
 
 test("a project with no benchmark entry is refused, and handed the entry to write", async () => {
-  const dir = join(await scratch("blazeopt-project-"), "binarytrees");
+  const dir = join(await scratch("blazeup-project-"), "binarytrees");
 
   const problem = benchmarkProblem(projectAt(dir, null));
 
@@ -136,13 +136,13 @@ test("a project with no benchmark entry is refused, and handed the entry to writ
 });
 
 test("a project that names an entry is measured on the program it builds", async () => {
-  const dir = join(await scratch("blazeopt-project-"), "binarytrees");
+  const dir = join(await scratch("blazeup-project-"), "binarytrees");
 
   assert.equal(benchmarkProblem(projectAt(dir, { command: "./binarytrees 16", directory: dir, program: "binarytrees" })), null);
 });
 
 test("a project file that is not its directory's own is refused, because the rebuild reads that one", async () => {
-  const dir = await scratch("blazeopt-project-");
+  const dir = await scratch("blazeup-project-");
   const named = { ...projectAt(dir, { command: "./run 16", directory: dir, program: "run" }), tomlPath: join(dir, "app.toml") };
 
   assert.match(benchmarkProblem(named) ?? "", /is not the blaze\.toml of its directory/);

@@ -291,7 +291,7 @@ function reviewPrompts(request: ReviewRequest): { system: string; user: string }
  * The AI SDK model a provider configuration constructs.
  *
  * Provider construction is the only provider-specific code in the compiler,
- * and it is written once here rather than once per caller: `blazeopt` asks
+ * and it is written once here rather than once per caller: `blazeup` asks
  * the models a build asks, off a project's own selection, and a second copy
  * of these branches would be a place for the two to drift apart.
  */

@@ -19,7 +19,7 @@ import { scratch } from "./scratch.ts";
 
 /** A scratch repository with a compiler directory and an instruction file. */
 async function repository(): Promise<string> {
-  const dir = await scratch("blazeopt-agent-");
+  const dir = await scratch("blazeup-agent-");
   await mkdir(join(dir, "src", "compiler"), { recursive: true });
   await writeFile(join(dir, "AGENTS.md"), "# Instructions\n\n- Run the tests.\n");
   return dir;
@@ -146,14 +146,14 @@ test("a recorded answer is not a model that can write code", () => {
 });
 
 test("an instruction file that is not there is said about, by name", async () => {
-  const empty = await scratch("blazeopt-agent-");
+  const empty = await scratch("blazeup-agent-");
 
   assert.match(agentProblem(null, "node", empty) ?? "", /AGENTS\.md is not there/);
 });
 
 test("a command that is not on PATH is said about by name", () => {
-  assert.match(agentInstallProblem("blazeopt-no-such-command") ?? "", /could not be run/);
-  assert.match(agentInstallProblem("blazeopt-no-such-command") ?? "", /blazeopt-no-such-command/);
+  assert.match(agentInstallProblem("blazeup-no-such-command") ?? "", /could not be run/);
+  assert.match(agentInstallProblem("blazeup-no-such-command") ?? "", /blazeup-no-such-command/);
 });
 
 test("a repository holding everything the agent needs is one it can be asked in", async () => {

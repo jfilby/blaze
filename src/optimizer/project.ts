@@ -57,7 +57,7 @@ export interface ProjectInfo {
    * The model the project is compiled with, as the compiler reads its own
    * selection: `provider/model`, or null when it names none.
    *
-   * This is what `blazeopt` asks when the environment names no `AI_MODEL`,
+   * This is what `blazeup` asks when the environment names no `AI_MODEL`,
    * because the project is what the build is aimed at and it already knows
    * what it is compiled with.
    */

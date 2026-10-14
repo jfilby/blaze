@@ -21,7 +21,7 @@ import { scratch } from "./scratch.ts";
 /** A scratch git repository holding the compiler package beside the
  *  repository's own instruction file and some work of the user's. */
 async function repository(): Promise<{ dir: string; compilerFile: string; testFile: string; note: string }> {
-  const dir = await scratch("blazeopt-turn-");
+  const dir = await scratch("blazeup-turn-");
   await mkdir(join(dir, "src", "compiler", "test"), { recursive: true });
   await writeFile(join(dir, "AGENTS.md"), "# Instructions\n");
   await writeFile(join(dir, "src", "compiler", "codegen.ts"), "// the compiler\n");

@@ -72,7 +72,7 @@ export async function benchmark(
   runs = 5,
   cwd = COMPILER_DIR,
 ): Promise<BenchmarkResult> {
-  const dir = await mkdtemp(join(tmpdir(), "blazeopt-bench-"));
+  const dir = await mkdtemp(join(tmpdir(), "blazeup-bench-"));
   const exportPath = join(dir, "hyperfine.json");
 
   // A measurement of the compiler's own test suite is a few minutes a run,
@@ -201,7 +201,7 @@ export async function benchmarkProject(project: ProjectInfo, runs = 5): Promise<
     throw new Error(`${project.tomlPath} names no [benchmark] entry, so there is nothing to time`);
   }
 
-  const work = await mkdtemp(join(tmpdir(), "blazeopt-project-"));
+  const work = await mkdtemp(join(tmpdir(), "blazeup-project-"));
   // The program the measurement times is written where the project's own build
   // delivers it, which is the project's directory and therefore the user's.
   const delivered = join(entry.directory, entry.program);

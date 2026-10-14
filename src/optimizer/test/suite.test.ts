@@ -24,7 +24,7 @@ import { scratch } from "./scratch.ts";
  * passed.
  */
 async function fakeCompiler(script: string): Promise<string> {
-  const dir = await scratch("blazeopt-suite-");
+  const dir = await scratch("blazeup-suite-");
   await writeFile(join(dir, "package.json"), JSON.stringify({ name: "fake", private: true, scripts: { test: script } }));
   return dir;
 }
@@ -65,7 +65,7 @@ test("a suite that cannot say anything still failed", async () => {
 });
 
 test("a suite with no test script says so, and did not pass", async () => {
-  const dir = await scratch("blazeopt-suite-");
+  const dir = await scratch("blazeup-suite-");
   await writeFile(join(dir, "package.json"), JSON.stringify({ name: "fake", private: true }));
 
   const result = runTestSuite(false, dir);

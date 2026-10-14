@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * blazeopt - iterative blaze compiler optimizer.
+ * blazeup - iterative blaze compiler optimizer.
  *
- *   blazeopt [project] [options]
+ *   blazeup [project] [options]
  *
  * Runs an optimization loop of turns, each with one of three methods:
  *   1. research       — Tavily search + compiler source review
@@ -101,7 +101,7 @@ export function parseMethods(value: string): Method[] | null {
   return methods;
 }
 
-const USAGE = `blazeopt - iterative blaze compiler optimizer
+const USAGE = `blazeup - iterative blaze compiler optimizer
 
 Alternates between three methods (research, build-feedback, code-review),
 each of which gathers what the coding agent pi is given to read. The agent
@@ -109,7 +109,7 @@ reads the compiler and edits it, and every change is tested with the full
 test suite, benchmarked with hyperfine, and committed on success.
 
 Usage:
-  blazeopt [project] [options]
+  blazeup [project] [options]
 
 A project is a directory containing blaze.toml, or a .toml file naming its
 own. With one, the run is targeted at it: the research queries are about
@@ -134,12 +134,12 @@ compiler directory, because that is where the repository's own AGENTS.md
 lives and what it says is how this repository is worked in. It is handed
 that file by name as well, so it does not depend on finding it.
 
-Every run and every session records itself in .blazeopt at the head of the
-repository, whatever happened. blazeopt-report reports on those records.
+Every run and every session records itself in .blazeup at the head of the
+repository, whatever happened. blazeup-report reports on those records.
 
 A session that dies before it finishes — a rate-limited model, a missing key,
 a crash — leaves a record of where it stopped, and the command to continue it
-is printed as the session starts and again when it fails: blazeopt --resume <id>
+is printed as the session starts and again when it fails: blazeup --resume <id>
 rebuilds the session from that record and runs the runs it had left.
 
 Options:
@@ -769,7 +769,7 @@ export function commitChanges(
     process.stdout.write("Nothing to commit: the changes were already there as written.\n");
     return null;
   }
-  const message = `blazeopt: ${method} — ${applied.length} improvement(s)\n\n${applied.join("\n")}`;
+  const message = `blazeup: ${method} — ${applied.length} improvement(s)\n\n${applied.join("\n")}`;
   const commit = spawnSync("git", ["commit", "-m", message], { cwd: repoDir, stdio: "inherit" });
   if (commit.status !== 0) {
     process.stderr.write("Failed to commit\n");
@@ -839,7 +839,7 @@ export function resumePlan(asked: Asked, repoRoot = REPO_DIR): ResumePlan | stri
   const id = asked.resume ?? "";
   const record = readSession(id, repoRoot);
   if (record === null) {
-    return `no session record named ${id}; the id is in the restartable command blazeopt prints.`;
+    return `no session record named ${id}; the id is in the restartable command blazeup prints.`;
   }
   // A session that finished has nothing to continue: it either ran to the end
   // or refused to start, and neither is a session waiting to be finished.
@@ -885,7 +885,7 @@ export function resumePlan(asked: Asked, repoRoot = REPO_DIR): ResumePlan | stri
       "the working tree is not clean, so a run could not tell its own changes from yours:\n" +
       `${dirty.slice(0, 10).join("\n")}` +
       `${dirty.length > 10 ? `\n... and ${dirty.length - 10} more` : ""}\n` +
-      "Commit or stash them and run blazeopt again."
+      "Commit or stash them and run blazeup again."
     );
   }
   const head = currentCommit(repoRoot);
@@ -978,7 +978,7 @@ async function main(argv: string[]): Promise<number> {
   if (asked.resume !== undefined) {
     const plan = resumePlan(asked);
     if (typeof plan === "string") {
-      process.stderr.write(`blazeopt: cannot resume session ${asked.resume}: ${plan}\n`);
+      process.stderr.write(`blazeup: cannot resume session ${asked.resume}: ${plan}\n`);
       return 1;
     }
     resumed = plan;
@@ -1098,10 +1098,10 @@ async function main(argv: string[]): Promise<number> {
   if (dirty.length > 0) {
     return refuse(
       1,
-      "blazeopt: the working tree is not clean, so a run could not tell its own changes from yours:\n" +
+      "blazeup: the working tree is not clean, so a run could not tell its own changes from yours:\n" +
         `${dirty.slice(0, 10).join("\n")}` +
         `${dirty.length > 10 ? `\n... and ${dirty.length - 10} more` : ""}\n` +
-        "Commit or stash them and run blazeopt again.",
+        "Commit or stash them and run blazeup again.",
     );
   }
 
@@ -1113,11 +1113,11 @@ async function main(argv: string[]): Promise<number> {
   // run and a build to learn what the environment already says.
   const problem = modelProblem(project);
   if (problem !== null) {
-    return refuse(1, `blazeopt: ${problem}.\n${modelAdvice(project)}`);
+    return refuse(1, `blazeup: ${problem}.\n${modelAdvice(project)}`);
   }
   const agentic = agentProblem(session.model);
   if (agentic !== null) {
-    return refuse(1, `blazeopt: ${agentic}.\n${agentAdvice()}`);
+    return refuse(1, `blazeup: ${agentic}.\n${agentAdvice()}`);
   }
 
   // A version probe and a model name are only claims about the agent: the
@@ -1126,20 +1126,20 @@ async function main(argv: string[]): Promise<number> {
   // refused here rather than surfacing as a failure of a later turn.
   const smoke = agentSmokeProblem(session.model, AGENT_COMMAND, REPO_DIR);
   if (smoke !== null) {
-    return refuse(1, `blazeopt: ${smoke}.\n${agentAdvice()}`);
+    return refuse(1, `blazeup: ${smoke}.\n${agentAdvice()}`);
   }
 
   const options: Options = { maxIterations, benchmarkRuns, showOutput, project };
 
-  process.stdout.write(`blazeopt: starting optimization loop (max ${maxIterations} runs)\n`);
-  process.stdout.write(`blazeopt: methods: ${methods.join(" → ")}\n`);
-  process.stdout.write(`blazeopt: model: ${session.model === null ? "none" : session.model}\n`);
-  process.stdout.write(`blazeopt: coding agent: ${AGENT_COMMAND}\n`);
+  process.stdout.write(`blazeup: starting optimization loop (max ${maxIterations} runs)\n`);
+  process.stdout.write(`blazeup: methods: ${methods.join(" → ")}\n`);
+  process.stdout.write(`blazeup: model: ${session.model === null ? "none" : session.model}\n`);
+  process.stdout.write(`blazeup: coding agent: ${AGENT_COMMAND}\n`);
   if (showOutput) {
-    process.stdout.write(`blazeopt: printing what ${AGENT_COMMAND} does as it works\n`);
+    process.stdout.write(`blazeup: printing what ${AGENT_COMMAND} does as it works\n`);
   }
   if (project !== undefined) {
-    process.stdout.write(`blazeopt: targeting project ${project.tomlPath}\n`);
+    process.stdout.write(`blazeup: targeting project ${project.tomlPath}\n`);
   }
 
   process.stdout.write("If a run dies fatally, the session can be continued where it stopped with:\n\n");
@@ -1152,15 +1152,15 @@ async function main(argv: string[]): Promise<number> {
   process.stdout.write("Running the compiler's test suite once to establish a baseline...\n");
   const baseline = runTestSuite(false);
   if (!baseline.completed) {
-    return refuse(1, `blazeopt: the compiler's test suite did not run:\n${baseline.output}`);
+    return refuse(1, `blazeup: the compiler's test suite did not run:\n${baseline.output}`);
   }
   if (!baseline.passed) {
     // A failure that is already there is not a failure a change caused, so
     // no run on this compiler could be judged by its own suite.
     const count = baseline.failures > 0 ? ` (${baseline.failures} failing)` : "";
-    return refuse(1, `blazeopt: the compiler's test suite already fails${count}, so no run could be judged by it:\n${baseline.output}`);
+    return refuse(1, `blazeup: the compiler's test suite already fails${count}, so no run could be judged by it:\n${baseline.output}`);
   }
-  process.stdout.write(`blazeopt: the compiler's test suite passes (${baseline.passedCount} tests)\n`);
+  process.stdout.write(`blazeup: the compiler's test suite passes (${baseline.passedCount} tests)\n`);
 
   for (const i of iterationRange(resumeDone, maxIterations)) {
     const method = methods[i % methods.length];
@@ -1197,8 +1197,8 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
-  process.stdout.write("\nblazeopt: optimization loop complete\n");
-  process.stdout.write(`blazeopt: ${committed} of ${maxIterations} run(s) committed\n`);
+  process.stdout.write("\nblazeup: optimization loop complete\n");
+  process.stdout.write(`blazeup: ${committed} of ${maxIterations} run(s) committed\n`);
   if (committed > 0 && outcome !== "failed") outcome = "committed";
 
   // A session that died before it finished did not optimise anything: an
@@ -1239,7 +1239,7 @@ export function benchmarkProblem(project: ProjectInfo): string | null {
   if (project.benchmark === null) {
     const program = deliveredProgram(project.tomlPath);
     return (
-      `blazeopt: ${userPath(project.tomlPath)} names no [benchmark] entry, so a run aimed at it has nothing to measure it by.\n\n` +
+      `blazeup: ${userPath(project.tomlPath)} names no [benchmark] entry, so a run aimed at it has nothing to measure it by.\n\n` +
       `A run of the compiler for a project is judged by the program that project builds, which is the thing the ` +
       `compiler makes fast. How much of it to run is the project's own to say — a command nobody chose can use ` +
       `all the machine's memory — so nothing here times the program until the project says what to run. Write ` +
@@ -1252,10 +1252,10 @@ export function benchmarkProblem(project: ProjectInfo): string | null {
   }
   if (resolve(project.tomlPath) !== resolve(join(project.directory, PROJECT_FILE))) {
     return (
-      `blazeopt: ${userPath(project.tomlPath)} is not the ${PROJECT_FILE} of its directory.\n\n` +
+      `blazeup: ${userPath(project.tomlPath)} is not the ${PROJECT_FILE} of its directory.\n\n` +
       `A measurement rebuilds the project with the compiler's own deterministic build, which reads ` +
       `${PROJECT_FILE} beside the project's sources. Name the project by its directory — ` +
-      `blazeopt ${userPath(project.directory)} — and its [benchmark] entry is read as written.`
+      `blazeup ${userPath(project.directory)} — and its [benchmark] entry is read as written.`
     );
   }
   return null;
@@ -1322,7 +1322,7 @@ if (isInvoked()) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (cause) {
-    process.stderr.write(`blazeopt failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+    process.stderr.write(`blazeup failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
     process.exitCode = 1;
   }
 }

@@ -7,8 +7,8 @@
  * are grounded in what the papers say rather than in what the model
  * remembers of them.
  *
- *   blazeopt                     general compiler optimization research
- *   blazeopt [projectPath]       research targeted at a specific project
+ *   blazeup                     general compiler optimization research
+ *   blazeup [projectPath]       research targeted at a specific project
  *
  * The API key comes from the TAVILY_API_KEY environment variable.
  */

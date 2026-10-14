@@ -36,7 +36,7 @@ function onExit(): void {
   }
   if (failed.length > 0) {
     const plural = failed.length === 1 ? "y" : "ies";
-    process.stderr.write(`blazeopt: ${failed.length} scratch director${plural} could not be removed\n`);
+    process.stderr.write(`blazeup: ${failed.length} scratch director${plural} could not be removed\n`);
   }
 }
 

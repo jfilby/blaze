@@ -5,7 +5,7 @@
  * the optimizer runs against that repository rather than owning it. So a
  * command given the whole tree — an `add` with no path, a `checkout` of the
  * working directory — takes the user's own work with it: their uncommitted
- * changes would be committed under a blazeopt message, or thrown away by
+ * changes would be committed under a blazeup message, or thrown away by
  * a revert. Every one of these is checked against a scratch repository that
  * holds a change of its own beside the one a pass made.
  */
@@ -20,7 +20,7 @@ import { scratch } from "./scratch.ts";
 
 /** A scratch git repository with one commit and a file a pass may write. */
 async function repository(): Promise<{ dir: string; compilerFile: string; userFile: string }> {
-  const dir = await scratch("blazeopt-git-");
+  const dir = await scratch("blazeup-git-");
   const compilerFile = join(dir, "compiler.ts");
   const userFile = join(dir, "notes.md");
   await writeFile(compilerFile, "// the compiler\n");
@@ -77,7 +77,7 @@ test("a commit stages only the files the pass wrote", async () => {
   assert.deepEqual(uncommittedChanges(dir), [" M notes.md"]);
   assert.equal(
     spawnSync("git", ["log", "-1", "--pretty=%s"], { cwd: dir, encoding: "utf8" }).stdout.trim(),
-    "blazeopt: code-review — 1 improvement(s)",
+    "blazeup: code-review — 1 improvement(s)",
   );
 });
 

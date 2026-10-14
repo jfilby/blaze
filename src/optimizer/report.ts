@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 /**
- * blazeopt-report — what the optimizer's runs have been doing.
+ * blazeup-report — what the optimizer's runs have been doing.
  *
- *   blazeopt-report [options]
+ *   blazeup-report [options]
  *
- * Reads the run and session records `blazeopt` writes at the head of the
+ * Reads the run and session records `blazeup` writes at the head of the
  * repository and reports on them: how often a run gets to a commit, which of
  * the three methods earns it, what has been refusing the runs (a text that is
  * not there, a test that fails, a measurement that is slower), and what the
  * measurements have been doing to the compiler over time.
  *
  * A run is one turn of the optimization loop and a session is one invocation
- * of blazeopt, which is the words the records themselves are written in.
+ * of blazeup, which is the words the records themselves are written in.
  */
 
 import { realpathSync } from "node:fs";
@@ -24,14 +24,14 @@ import type { Method } from "./ai.ts";
 /** The methods a run can be, for `--method`. */
 const METHODS: readonly Method[] = ["research", "build-feedback", "code-review"];
 
-const USAGE = `blazeopt-report — what the optimizer's runs have been doing
+const USAGE = `blazeup-report — what the optimizer's runs have been doing
 
 Usage:
-  blazeopt-report [options]
+  blazeup-report [options]
 
-Reads what blazeopt wrote into .blazeopt at the head of the repository:
+Reads what blazeup wrote into .blazeup at the head of the repository:
 one record per run and one per session. A run is one turn of the
-optimization loop; a session is one invocation of blazeopt.
+optimization loop; a session is one invocation of blazeup.
 
 Options:
   --limit <n>        Only the most recent n runs (default: all)
@@ -131,8 +131,8 @@ function main(argv: string[]): number {
   // is the most likely explanation for being here.
   if (runs.length === 0 && sessions.length === 0) {
     process.stderr.write(
-      `blazeopt-report: no records at ${recordsDirectory(options.repoRoot)}\n` +
-        "Run blazeopt first: every run and every session writes a record, whatever happened.\n",
+      `blazeup-report: no records at ${recordsDirectory(options.repoRoot)}\n` +
+        "Run blazeup first: every run and every session writes a record, whatever happened.\n",
     );
     return 1;
   }

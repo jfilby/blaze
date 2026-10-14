@@ -369,7 +369,7 @@ export function render(summary: Summary): string {
   const width = 72;
   const rule = "-".repeat(width);
 
-  out.push("blazeopt-report".padEnd(width));
+  out.push("blazeup-report".padEnd(width));
   out.push(rule);
   out.push(
     `${summary.runs} run${plural(summary.runs)}, ${summary.committed} committed, ` +

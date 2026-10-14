@@ -512,7 +512,7 @@ function isTracked(path: FileEdit, cwd: string): boolean {
 function runGit(args: readonly string[], cwd: string): void {
   const result = spawnSync("git", args, { cwd, stdio: "inherit" });
   if (result.status !== 0) {
-    process.stderr.write(`blazeopt: git ${args.join(" ")} failed\n`);
+    process.stderr.write(`blazeup: git ${args.join(" ")} failed\n`);
   }
 }
 
