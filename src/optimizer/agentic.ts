@@ -25,7 +25,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ProjectInfo } from "./project.ts";
-import type { Goal } from "./runs.ts";
+import type { Goal, RefusedProposal } from "./runs.ts";
 import { agentsFile, compilerDirectory, repositoryRoot } from "./repository.ts";
 import type { Method } from "./ai.ts";
 import { AgentOutput } from "./agent-output.ts";
@@ -401,6 +401,32 @@ export const smokeTestProblem = agentSmokeProblem;
 export const agentSmokeProblemTest = agentSmokeProblem;
 export const smoke = agentSmokeProblem;
 export const agentSmokeRun = agentSmokeProblem;
+
+/**
+ * Why an agent that left nothing behind gave the run nothing to judge, or
+ * null when it gave it something.
+ *
+ * An agent is asked to change the compiler and to finish by saying what it
+ * changed. One that wrote nothing the run may keep, had nothing it wrote
+ * taken back out, and said nothing contributed nothing at all — it did not
+ * answer, however its process exited. That is the same as an agent that
+ * could not be asked: there is no turn to judge, and a session that carried
+ * on would spend its remaining runs on the same wall. A process that exits
+ * cleanly is not an answer on its own, which is why what it left in the tree
+ * and what it said are read rather than its exit status.
+ *
+ * @param files What it wrote that the run may keep
+ * @param refused What it wrote that the run may not
+ * @param summary What it says it did
+ */
+export function nothingToJudge(
+  files: readonly FileEdit[],
+  refused: readonly RefusedProposal[],
+  summary: string,
+): string | null {
+  if (files.length > 0 || refused.length > 0 || summary.trim() !== "") return null;
+  return "the coding agent changed nothing and said nothing";
+}
 
 /**
  * Every path the tree holds differently from the commit it started at.

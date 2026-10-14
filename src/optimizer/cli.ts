@@ -48,6 +48,7 @@ import {
   agentSmokeProblem,
   changedPaths,
   editVerdict,
+  nothingToJudge,
   putBack,
   revertEdits,
   runAgent,
@@ -264,8 +265,15 @@ async function runOne(
   }
 
   if (answer.files.length === 0) {
+    // The agent answered — it said what it did, or wrote where it may not —
+    // but nothing it wrote is a change the run can keep. That is a turn that
+    // happened and kept nothing rather than one that could not happen, so
+    // the two are named apart: an agent that had its every write refused
+    // applied nothing, and one that looked and found nothing proposed
+    // nothing.
+    const outcome: RunOutcome = answer.refused.length > 0 ? "nothing-applied" : "no-proposals";
     process.stdout.write("Nothing to keep: the agent changed nothing the run can keep.\n");
-    return finish(record, "nothing-applied", started);
+    return finish(record, outcome, started);
   }
 
   for (const file of answer.files) process.stdout.write(`  Changed: ${file}\n`);
@@ -445,6 +453,17 @@ async function askCodingAgent(
       summary: answerText,
       problem: `the coding agent exited ${String(answer.exitCode)}${detail}`,
     };
+  }
+
+  // An agent that contributed nothing at all did not answer, however its
+  // process exited: it wrote nothing the run may keep, had nothing it wrote
+  // taken back out, and said nothing. There is no turn to judge, so this is
+  // the same as an agent that could not be asked, and the run is recorded as
+  // one that could not happen rather than one that looked and kept nothing.
+  // An agent that kept failing upstream and gave up lands here.
+  const unanswered = nothingToJudge(files, refused, answerText);
+  if (unanswered !== null) {
+    return { files: [], refused, summary: answerText, problem: unanswered };
   }
 
   return { files, refused, summary: answerText, problem: null };
@@ -1116,6 +1135,19 @@ async function main(argv: string[]): Promise<number> {
     return finish(code);
   };
 
+  /**
+   * Say where a session that stopped short can be continued from.
+   *
+   * The runs it has left are the runs it did not get to, so this is said with
+   * the runs it has recorded counted: a session that stopped two runs in is
+   * continued from its third, and one given the command on its last run is
+   * told it has none left.
+   */
+  const printResume = (): void => {
+    process.stderr.write("\nIf a run dies fatally, the session can be continued where it stopped with:\n\n");
+    process.stderr.write(`  ${resumeCommand(session, runIds.length)}\n`);
+  };
+
   // A project path targets the session at one project. It is read before any
   // run, so a path that names no project is refused before anything else is
   // spent — and the refusal is what the record says happened.
@@ -1243,6 +1275,19 @@ async function main(argv: string[]): Promise<number> {
           saveCache(cache);
         }
       }
+      // A run that could not happen — the coding agent could not be asked, or
+      // answered nothing at all — is not something the remaining runs should
+      // be spent on: every one of them would meet the same wall, and a
+      // session that carried on would end having looked like it ran to the
+      // end. The session is recorded as failed with what the run said, and
+      // the command to continue it is printed, which is the same answer a
+      // thrown error gives.
+      if (run.outcome === "failed") {
+        outcome = "failed";
+        error = run.error;
+        printResume();
+        break;
+      }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       process.stderr.write(`Run ${i + 1} (${method}) failed: ${message}\n`);
@@ -1255,8 +1300,7 @@ async function main(argv: string[]): Promise<number> {
       // command to continue it is printed.
       outcome = "failed";
       error = message;
-      process.stderr.write("\nIf a run dies fatally, the session can be continued where it stopped with:\n\n");
-      process.stderr.write(`  ${resumeCommand(session, runIds.length)}\n`);
+      printResume();
       break;
     }
   }

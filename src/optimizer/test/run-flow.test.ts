@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { changedPaths } from "../agentic.ts";
+import { changedPaths, nothingToJudge } from "../agentic.ts";
 import { readAgentEdits } from "../cli.ts";
 import { scratch } from "./scratch.ts";
 
@@ -122,4 +122,34 @@ test("a file the agent may have written is kept, and one it may not is removed",
   // The file outside the compiler is gone, and the one inside it is still there.
   assert.equal(await readFile(join(dir, "src", "compiler", "semantics", "new-pass.ts"), "utf8"), "// a new pass\n");
   assert.deepEqual(changedPaths(dir), ["src/compiler/semantics/new-pass.ts"]);
+});
+
+/**
+ * What an agent that left nothing behind gave the run to judge.
+ *
+ * An agent that kept failing upstream and gave up can exit cleanly having
+ * written nothing and said nothing, which is not an answer: the run it was
+ * the whole of has nothing to judge, and a session that carried on would
+ * spend its remaining runs on the same wall. An agent that wrote where it
+ * may not answered, and had its work taken back out; an agent that looked
+ * and kept nothing answered too. The three are told apart by what is in the
+ * tree and what was said, not by how the process exited.
+ */
+
+test("an agent that wrote nothing and said nothing did not answer", () => {
+  assert.equal(nothingToJudge([], [], ""), "the coding agent changed nothing and said nothing");
+  // Whitespace is not a summary.
+  assert.equal(nothingToJudge([], [], "  \n"), "the coding agent changed nothing and said nothing");
+});
+
+test("an agent that wrote where it may not answered, and kept nothing", () => {
+  assert.equal(nothingToJudge([], [{ file: "AGENTS.md", reason: "the file is not inside the compiler" }], ""), null);
+});
+
+test("an agent that said it found nothing answered", () => {
+  assert.equal(nothingToJudge([], [], "I read the passes and found nothing safe to change."), null);
+});
+
+test("an agent that wrote a change answered, however little it said", () => {
+  assert.equal(nothingToJudge(["src/compiler/codegen.ts"], [], ""), null);
 });
