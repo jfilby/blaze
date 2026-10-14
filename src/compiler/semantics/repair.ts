@@ -875,7 +875,16 @@ function isFloatType(type: SemanticType): boolean {
 }
 
 function reciprocalMultiply(fn: SemanticFunction, site: string): RepairOutcome {
-  const block = blockAt(fn, site);
+  // A loop is named in the IR by the block it leaves for, and that id is
+  // also the name a proposal is written against: a body the division lives in
+  // is the block the loop enters by rather than the block it was named from.
+  // Resolving a header to that body keeps a rewrite that is valid on the body
+  // from being refused on the spelling the reader of the IR actually saw.
+  let block = blockAt(fn, site);
+  if (block === null) {
+    const loop = loopsOf(fn).find((entry) => entry.loop.header === site);
+    if (loop !== undefined) block = loop.loop.body;
+  }
   if (block === null) return { refused: `no block is named ${site}; the blocks are ${blockNames(fn)}` };
 
   const replacements = new Map<string, SemanticValue>();
