@@ -186,7 +186,8 @@ function parseSince(text: string): Date | null {
 function line(run: RunRecord): string {
   const when = run.startedAt.replace("T", " ").slice(0, 16);
   const kept = run.outcome === "committed" ? ` ${run.commit ?? ""}` : "";
-  const refused = run.refused.length > 0 ? ` (+${run.refused.length} refused)` : "";
+  const refusedCount = run.refused?.length ?? 0;
+  const refused = refusedCount > 0 ? ` (+${refusedCount} refused)` : "";
   const error = run.error === null ? "" : ` — ${firstLine(run.error)}`;
   return `${when}  ${run.iteration} ${pad(run.method)}  ${pad(run.outcome)}${kept}${refused}${error}`;
 }

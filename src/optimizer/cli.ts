@@ -664,7 +664,7 @@ export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteRe
   // of plain text against them fails on. The suite is run colour-blind:
   // NO_COLOR alone is not enough, because FORCE_COLOR wins where both are
   // set, so the forcing variable is taken out.
-  const env = {
+  const env: Record<string, string | undefined> = {
     ...process.env,
     [SKIP_HEAP_PROOF_ENV]: "1",
     NO_COLOR: "1",
@@ -846,7 +846,7 @@ export function resumePlan(asked: Asked, repoRoot = REPO_DIR): ResumePlan | stri
     return `nothing to continue (it ${record.outcome === "refused" ? "refused to start" : "ran to end"})`;
   }
   const context = record.context;
-  const done = record.runs.length;
+  const done = (record.runs ?? []).length;
   if (context.maxIterations - done < 1) {
     return `no runs left (${done} of ${context.maxIterations} runs are recorded)`;
   }
@@ -1161,9 +1161,9 @@ async function main(argv: string[]): Promise<number> {
         committed += 1;
         // Mark the papers this run read as useful, so the cache knows they
         // led to a change that survived. A useful paper is skipped for a month.
-        if (run.papers.length > 0) {
+        if ((run.papers?.length ?? 0) > 0) {
           let cache = loadCache();
-          for (const paper of run.papers) {
+          for (const paper of run.papers ?? []) {
             cache = markUseful(cache, paper.url);
           }
           saveCache(cache);

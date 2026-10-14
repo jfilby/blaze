@@ -138,20 +138,39 @@ const SESSION_ORDER: readonly SessionOutcome[] = ["committed", "no-commits", "re
  *   the runs alone would not show it
  */
 export function summarize(runs: readonly RunRecord[], sessions: readonly SessionRecord[]): Summary {
+  // Older records may predate a field or have been hand-written without one:
+  // a summary reads them rather than refusing them, so anything not there
+  // reads as empty (or absent) instead of stopping the report.
+  const normalized = runs.map(normalizeRun);
   return {
-    runs: runs.length,
+    runs: normalized.length,
     sessions: sessions.length,
-    committed: runs.filter((run) => run.outcome === "committed").length,
-    firstAt: runs[0]?.startedAt ?? null,
-    lastAt: runs.at(-1)?.startedAt ?? null,
-    byMethod: byMethod(runs),
-    outcomes: countBy(runs, (run) => run.outcome, OUTCOME_ORDER),
-    refusals: refusalSummary(runs),
-    measurements: measurements(runs),
-    files: fileSummary(runs),
+    committed: normalized.filter((run) => run.outcome === "committed").length,
+    firstAt: normalized[0]?.startedAt ?? null,
+    lastAt: normalized.at(-1)?.startedAt ?? null,
+    byMethod: byMethod(normalized),
+    outcomes: countBy(normalized, (run) => run.outcome, OUTCOME_ORDER),
+    refusals: refusalSummary(normalized),
+    measurements: measurements(normalized),
+    files: fileSummary(normalized),
     sessionOutcomes: countSessions(sessions),
-    failures: failures(runs),
-    research: researchSummary(runs),
+    failures: failures(normalized),
+    research: researchSummary(normalized),
+  };
+}
+
+/**
+ * A run record with every optional-looking array (and a possibly absent
+ * benchmark) present. Run records never arrive this way from this module, but
+ * ones read off disk or passed to a test may.
+ */
+function normalizeRun(run: RunRecord): RunRecord {
+  return {
+    ...run,
+    applied: run.applied ?? [],
+    refused: run.refused ?? [],
+    papers: run.papers ?? [],
+    benchmark: run.benchmark ?? null,
   };
 }
 
