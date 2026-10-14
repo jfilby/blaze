@@ -45,6 +45,7 @@ import { AGENTS_FILE, agentsFile, compilerDirectory, repositoryRoot } from "./re
 import {
   AGENT_COMMAND,
   agentProblem,
+  agentSmokeProblem,
   changedPaths,
   editVerdict,
   putBack,
@@ -1117,6 +1118,15 @@ async function main(argv: string[]): Promise<number> {
   const agentic = agentProblem(session.model);
   if (agentic !== null) {
     return refuse(1, `blazeopt: ${agentic}.\n${agentAdvice()}`);
+  }
+
+  // A version probe and a model name are only claims about the agent: the
+  // only proof it works is that it answers. So the agent is asked once,
+  // trivially, before anything is spent, and a model it does not recognise is
+  // refused here rather than surfacing as a failure of a later turn.
+  const smoke = agentSmokeProblem(session.model, AGENT_COMMAND, REPO_DIR);
+  if (smoke !== null) {
+    return refuse(1, `blazeopt: ${smoke}.\n${agentAdvice()}`);
   }
 
   const options: Options = { maxIterations, benchmarkRuns, showOutput, project };

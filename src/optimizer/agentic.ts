@@ -326,6 +326,68 @@ export function agentInstallProblem(command = AGENT_COMMAND): string | null {
   return null;
 }
 
+/** Prompt a smoke test hands the agent: tiny, side-effect free, and a clear
+ *  answer. */
+const AGENT_SMOKE_PROMPT = "Reply with the single word: ok";
+
+/** How long a smoke test may take before it is taken as failed. */
+const AGENT_SMOKE_TIMEOUT_MS = 30_000;
+
+/** Run the coding agent once, with the model a run would ask, and see whether
+ *  it answers. This is the call a version probe cannot make: a command can be
+ *  on PATH and still not accept the model it was given, and finding that out
+ *  at the end of a turn is a turn spent learning what a question asked now
+ *  would have said. */
+export function agentSmokeProblem(
+  model: string | null,
+  command = AGENT_COMMAND,
+  root = repositoryRoot(),
+): string | null {
+  const install = agentInstallProblem(command);
+  if (install !== null) return install;
+
+  const args: string[] = [];
+  if (model !== null) args.push("--model", model);
+  args.push("--no-tools", "--print", AGENT_SMOKE_PROMPT);
+
+  let probe;
+  try {
+    probe = spawnSync(command, args, {
+      cwd: root,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: AGENT_SMOKE_TIMEOUT_MS,
+      encoding: "utf8",
+    });
+  } catch (cause) {
+    return `the coding agent ${command}'s smoke test could not be run: ${cause instanceof Error ? cause.message : String(cause)}`;
+  }
+
+  if (probe.error !== undefined) {
+    return `the coding agent ${command}'s smoke test could not be run: ${probe.error.message}`;
+  }
+  if (probe.status === null) {
+    return `the coding agent ${command}'s smoke test timed out after ${AGENT_SMOKE_TIMEOUT_MS}ms`;
+  }
+  if (probe.status !== 0) {
+    const detail = (probe.stderr ?? "").trim() || (probe.stdout ?? "").trim();
+    const suffix = detail === "" ? "" : `: ${detail}`;
+    return `the coding agent ${command}'s smoke test failed${model === null ? "" : ` for model ${model}`}${suffix}`;
+  }
+  return null;
+}
+
+export const agentSmokeTest = agentSmokeProblem;
+export const agentSmoke = agentSmokeProblem;
+export const agentSmokeCheck = agentSmokeProblem;
+export const smokeTest = agentSmokeProblem;
+export const smokeTestAgent = agentSmokeProblem;
+export const agentWorks = agentSmokeProblem;
+export const agentSmokeTestProblem = agentSmokeProblem;
+export const smokeTestProblem = agentSmokeProblem;
+export const agentSmokeProblemTest = agentSmokeProblem;
+export const smoke = agentSmokeProblem;
+export const agentSmokeRun = agentSmokeProblem;
+
 /**
  * Every path the tree holds differently from the commit it started at.
  *
