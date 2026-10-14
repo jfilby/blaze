@@ -21,7 +21,7 @@ import { buildObject } from "../toolchain/ir-machine.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { resolveFunction, type FunctionContext } from "../semantics/ir-function.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "../semantics/optimize-ir.ts";
-import { eliminateRecursion, recursionRefusal } from "../semantics/recursion.ts";
+import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion, mutualRecursionRefusal, recursionRefusal } from "../semantics/recursion.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
@@ -65,6 +65,18 @@ function bodiesOf(source: string): Map<string, SemanticFunction> {
 function answered(source: string, name: string): SemanticFunction {
   const fn = structuredClone(bodiesOf(source).get(name) as SemanticFunction);
   eliminateRecursion(fn);
+  return fn;
+}
+
+/**
+ * The body a source declares for one function, as the passes that answer a cycle
+ * of bodies left it: the body it is handed is answered from the others as the
+ * source wrote them, which is what a build compiles one function at a time on.
+ */
+function answeredCycle(source: string, name: string): SemanticFunction {
+  const bodies = bodiesOf(source);
+  const fn = structuredClone(bodies.get(name) as SemanticFunction);
+  eliminateMutualRecursion(fn, bodies);
   return fn;
 }
 
@@ -158,6 +170,247 @@ test("the pass runs before the rewrites that read loops", () => {
   assert.equal(callsItself(fn), false);
   assert.equal(onlyLoop(fn).kind, "while");
 });
+
+/* -------------------------------------------------------------------------- */
+/* What a cycle of bodies becomes                                              */
+/* -------------------------------------------------------------------------- */
+
+const PARITY = library(
+  [
+    "function even(n: number): boolean {",
+    "  if (n <= 0) {",
+    "    return true;",
+    "  }",
+    "  return odd(n - 1);",
+    "}",
+    "",
+    "function odd(n: number): boolean {",
+    "  if (n <= 0) {",
+    "    return false;",
+    "  }",
+    "  return even(n - 1);",
+    "}",
+    "",
+  ].join("\n"),
+);
+
+test("a body that hands back to another body becomes one loop of both", () => {
+  const bodies = bodiesOf(PARITY);
+  const even = structuredClone(bodies.get("even") as SemanticFunction);
+  assert.equal(eliminateMutualRecursion(even, bodies), true, "the cycle is one loop");
+
+  // The calls between the bodies are what the loop carries, so neither of them
+  // is left in it: what is left is the arguments of each call written into the
+  // parameters of the body that call reaches.
+  assert.equal(callsItself(even), false, "the body no longer calls itself");
+  assert.equal(JSON.stringify(even).includes('"callee":"odd"'), false, "and no longer calls the body it hands back to");
+
+  const loop = onlyLoop(even);
+  assert.equal(loop.kind, "while", "the loop is the one the base case's test is written as");
+  // One arm per body of the cycle, so the loop runs the turn of whichever body
+  // it is on and the counter says which one that is.
+  const dispatch = loop.body.statements[0];
+  assert.equal(dispatch?.k, "if", "the turn of the loop is chosen by which body it is on");
+  if (dispatch?.k === "if") assert.notEqual(dispatch.otherwise, null, "both bodies of the cycle are an arm of the loop");
+  assert.deepEqual(semanticFunctionProblems(even), [], "the validator holds a rewritten cycle to the rules it holds any other to");
+});
+
+test("every body of a cycle is answered, whichever of them is answered first", () => {
+  const bodies = [...bodiesOf(PARITY).values()].map((body) => structuredClone(body));
+  assert.equal(eliminateMutualRecursionInProgram(bodies), true, "every body of the cycle is one loop");
+  for (const body of bodies) {
+    assert.equal(callsItself(body), false, `${body.name} no longer calls itself`);
+    assert.deepEqual(semanticFunctionProblems(body), [], `${body.name} is a function the compiler may lower`);
+  }
+});
+
+test("a merged cycle survives the IR text a model is handed and a person reads", () => {
+  const printed = printSemanticFunction(answeredCycle(PARITY, "odd"));
+  const parsed = parseSemanticFunction(printed, phaseOf("typescript", { "main.ts": PARITY }, "main.ts").program);
+  assert.deepEqual(semanticFunctionProblems(parsed), []);
+  assert.equal(callsItself(parsed), false);
+});
+
+test("a body that calls itself inside a cycle is still one loop", async () => {
+  // `even` hands back to itself on one turn and to `odd` on the next, and the
+  // cycle is the two of them rather than `even` alone: the merged loop carries
+  // the call of itself the same way it carries the call of the other body.
+  const source = library(
+    [
+      "function even(n: number): number {",
+      "  if (n <= 0) {",
+      "    return 0;",
+      "  }",
+      "  if (n === 3) {",
+      "    return even(n - 1);",
+      "  }",
+      "  return odd(n - 1);",
+      "}",
+      "",
+      "function odd(n: number): number {",
+      "  if (n <= 0) {",
+      "    return 1;",
+      "  }",
+      "  return even(n - 1);",
+      "}",
+      "",
+      "console.log(even(9));",
+      "console.log(even(3));",
+      "console.log(odd(9));",
+      "",
+    ].join("\n"),
+  );
+  const even = answeredCycle(source, "even");
+  assert.equal(callsItself(even), false, "the body no longer calls itself");
+  assert.equal(JSON.stringify(even).includes('"callee":"odd"'), false, "nor the body it hands back to");
+  assert.deepEqual(semanticFunctionProblems(even), []);
+  assert.equal(await delivered(source, true), await delivered(source, false), "the loop answers what the frames answered");
+});
+
+test("a body that hands back to a body that hands back to nothing is left alone", () => {
+  // `plain` does not hand back to `elsewhere`, so there is one recursion here
+  // and not a cycle: the two bodies are two loops that call one another, and
+  // only the frames between them are what the loop cannot carry.
+  const source = library(
+    [
+      "function plain(n: number): number {",
+      "  return n;",
+      "}",
+      "",
+      "function elsewhere(n: number): number {",
+      "  if (n <= 0) {",
+      "    return 0;",
+      "  }",
+      "  return plain(n);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const bodies = bodiesOf(source);
+  const fn = structuredClone(bodies.get("elsewhere") as SemanticFunction);
+  const written = printSemanticFunction(fn);
+  assert.equal(mutualRecursionRefusal(fn, bodies), "the body hands back to no body that hands back to it");
+  assert.equal(eliminateMutualRecursion(fn, bodies), false);
+  assert.equal(printSemanticFunction(fn), written, "a body in no cycle is left exactly as the source wrote it");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Cycles that are refused, and why                                            */
+/* -------------------------------------------------------------------------- */
+
+interface CycleRefused {
+  readonly about: string;
+  readonly source: string;
+  readonly fn: string;
+  readonly why: RegExp;
+}
+
+const CYCLE_REFUSED: readonly CycleRefused[] = [
+  {
+    // One loop leaves one function handing back one answer, so two bodies that
+    // hand back two types are two loops with a call between them rather than one
+    // loop, and the frames between them are what they are.
+    about: "two bodies that hand back two types",
+    fn: "count",
+    source: library(
+      [
+        "function count(n: number): number {",
+        "  if (n <= 0) {",
+        "    return 0;",
+        "  }",
+        "  return label(n - 1);",
+        "}",
+        "",
+        "function label(n: number): bigint {",
+        "  if (n <= 0) {",
+        "    return 0n;",
+        "  }",
+        "  return count(n - 1);",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /one loop leaves one function handing back one type/,
+  },
+  {
+    // A call that is not the last thing a body does is a frame the loop cannot
+    // carry: this turn is waiting for the answer of that call, and the turn the
+    // call would have been is not the next turn of this loop. The other call of
+    // `pong` is in tail position and is what the cycle is found through, which
+    // is why the body is refused here rather than as a body in no cycle.
+    about: "a call of the cycle that is not the last thing it does",
+    fn: "ping",
+    source: library(
+      [
+        "function ping(n: number): number {",
+        "  if (n <= 0) {",
+        "    return 0;",
+        "  }",
+        "  if (n === 3) {",
+        "    return pong(n - 1);",
+        "  }",
+        "  const answer = pong(n - 1);",
+        "  return answer;",
+        "}",
+        "",
+        "function pong(n: number): number {",
+        "  if (n <= 0) {",
+        "    return 1;",
+        "  }",
+        "  return ping(n - 1);",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /not the last thing it does/,
+  },
+  {
+    // The loop reads the parameters of every body of the cycle above itself,
+    // before any turn wrote them, and the values it reads them on are the
+    // arguments of a call that reaches the body. An argument that calls
+    // something is not one of them: it would be evaluated on every call into the
+    // function rather than on every turn, and a call that prints would print
+    // for a body the loop never reached.
+    about: "a call into the cycle made with an argument that calls",
+    fn: "even",
+    source: library(
+      [
+        "function tick(n: number): number {",
+        "  return n - 1;",
+        "}",
+        "",
+        "function even(n: number): boolean {",
+        "  if (n <= 0) {",
+        "    return true;",
+        "  }",
+        "  return odd(tick(n));",
+        "}",
+        "",
+        "function odd(n: number): boolean {",
+        "  if (n <= 0) {",
+        "    return false;",
+        "  }",
+        "  return even(tick(n));",
+        "}",
+        "",
+      ].join("\n"),
+    ),
+    why: /no call whose arguments the loop can read above itself/,
+  },
+];
+
+for (const subject of CYCLE_REFUSED) {
+  test(`a cycle is left alone when ${subject.about}`, () => {
+    const bodies = bodiesOf(subject.source);
+    const fn = structuredClone(bodies.get(subject.fn) as SemanticFunction);
+    const written = printSemanticFunction(fn);
+    const refusal = mutualRecursionRefusal(fn, bodies);
+    assert.ok(refusal !== null, "the cycle is refused a loop");
+    assert.match(refusal, subject.why);
+    assert.equal(eliminateMutualRecursion(fn, bodies), false);
+    assert.equal(printSemanticFunction(fn), written, "a refused cycle is left exactly as the source wrote it");
+  });
+}
 
 /* -------------------------------------------------------------------------- */
 /* What is refused, and why                                                     */
@@ -517,10 +770,51 @@ const PROGRAM = [
   "  return shallow(x - 1) + doubled;",
   "}",
   "",
+  "function even(n: number): boolean {",
+  "  if (n <= 0) {",
+  "    return true;",
+  "  }",
+  "  return odd(n - 1);",
+  "}",
+  "",
+  "function odd(n: number): boolean {",
+  "  if (n <= 0) {",
+  "    return false;",
+  "  }",
+  "  return even(n - 1);",
+  "}",
+  "",
+  "function phase(n: number): number {",
+  "  if (n <= 0) {",
+  "    return 10;",
+  "  }",
+  "  console.log(`phase ${n}`);",
+  "  return turn(n - 1);",
+  "}",
+  "",
+  "function turn(n: number): number {",
+  "  if (n <= 0) {",
+  "    return 20;",
+  "  }",
+  "  console.log(`turn ${n}`);",
+  "  return third(n - 1);",
+  "}",
+  "",
+  "function third(n: number): number {",
+  "  if (n <= 0) {",
+  "    return 30;",
+  "  }",
+  "  console.log(`third ${n}`);",
+  "  return phase(n - 1);",
+  "}",
+  "",
   "console.log(count(6, 1));",
   "console.log(countdown(3, 0));",
   "console.log(twoWays(5, 0));",
   "console.log(shallow(4));",
+  "console.log(even(6));",
+  "console.log(odd(6));",
+  "console.log(phase(5));",
   "",
 ].join("\n");
 
@@ -539,9 +833,13 @@ async function delivered(source: string, transformed: boolean): Promise<string> 
   runtime ??= buildStandaloneRuntime(await scratch("blaze-runtime-")).then((built) => built.objectPath);
 
   const objectPaths: string[] = [];
+  // A build compiles one function at a time and hands the pass every body of the
+  // program, which is what a cycle of bodies is answered from: the other bodies
+  // are read as the source wrote them and left as they are.
+  const bodies = new Map(Object.entries(contracts).map(([name, contract]) => [name, resolveFunction(contract, context)]));
   for (const [name, contract] of Object.entries(contracts)) {
     const fn = resolveFunction(contract, context);
-    if (transformed) optimizeSemanticFunction(fn);
+    if (transformed) optimizeSemanticFunction(fn, bodies);
     const built = await compileFunctionC({
       fn,
       contract,
@@ -573,7 +871,10 @@ test("a loop answers what the frames it replaced answered", async () => {
   const before = await delivered(PROGRAM, false);
   const after = await delivered(PROGRAM, true);
   assert.equal(after, before, "the rewritten program prints what the recursive one printed");
-  assert.equal(before, "720\nturn 3\nturn 2\nturn 1\n6\n903\n20\n");
+  assert.equal(
+    before,
+    "720\nturn 3\nturn 2\nturn 1\n6\n903\n20\ntrue\nfalse\nphase 5\nturn 4\nthird 3\nphase 2\nturn 1\n30\n",
+  );
 });
 
 test("the machine backend lowers the same loop", async () => {
@@ -588,4 +889,18 @@ test("the machine backend lowers the same loop", async () => {
     objectPath: join(await scratch("blaze-recursion-machine-"), "count.o"),
   });
   assert.ok(built.textSizeBytes > 0, "the object carries the loop");
+});
+
+test("the machine backend lowers the loop of a cycle of bodies", async () => {
+  const fn = answeredCycle(PARITY, "even");
+  assert.deepEqual(semanticFunctionProblems(fn), []);
+  const contract = contractsOf(PARITY)["even"] as FunctionContract;
+  const built = await buildObject({
+    fn,
+    contract,
+    target: TARGET,
+    callable: new Set(),
+    objectPath: join(await scratch("blaze-recursion-cycle-machine-"), "even.o"),
+  });
+  assert.ok(built.textSizeBytes > 0, "the object carries the loop of both bodies");
 });

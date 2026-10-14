@@ -43,7 +43,7 @@ import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
-import { eliminateRecursion } from "./recursion.ts";
+import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -2325,6 +2325,12 @@ interface Body {
  * writing both out as text is the same answer for far more work.
  */
 export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees = NO_CALLEES): SemanticFunction {
+  // A cycle of bodies is answered before a body's own recursion is, because a
+  // body in a cycle may also call itself: the merged loop carries a call of
+  // itself as a turn of the loop the same way it carries a call of any other
+  // body of the cycle, while the pass below answers a body that calls only
+  // itself and would take that call out of reach of this one.
+  eliminateMutualRecursion(fn, callees);
   // Recursion is answered with a loop before the rounds run, because the loop
   // it writes is the loop the rounds read: hoisting an invariant out of a
   // recursion, commoning two values in it and counting its turns are three
@@ -2369,6 +2375,11 @@ export function optimizeSemanticProgram(
   // is worth as much there as it is in the block the program starts in. What a
   // body of its own recursion becomes is a loop, and it becomes one first, so
   // that the rounds below are rounds over a loop rather than over frames.
+  // A cycle of bodies is one loop of several bodies and is answered before any
+  // one of them is answered on its own, and every body of it is answered from
+  // the same copy of every body, so which of them was answered first does not
+  // decide what the others are answered with.
+  eliminateMutualRecursionInProgram(program.bodies);
   for (const fn of program.bodies) eliminateRecursion(fn);
   for (const fn of program.bodies) optimizeSemanticEntry(fn.entry, callees);
   // Whole-number arithmetic is the one rewrite here that is a question about a

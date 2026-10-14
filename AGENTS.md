@@ -614,7 +614,7 @@ and counting its turns are three things none of them can do while the frames are
 still there. It is one pass over the IR rather than one per backend, so every
 output kind lowers the loop and none of them re-derives it.
 
-There are two shapes, and both are the narrowest that can be proved. A **tail
+There are three shapes, and each is the narrowest that can be proved. A **tail
 call** is the first: the entry block ends in `return f(args)` where `f` is the
 function itself, and the statement before it is the test that ends the
 recursion. Every statement around that test becomes the body of a loop, the
@@ -645,6 +645,33 @@ are grouped, the same fact the reductions in `parallel.ts` rest on. A double is
 not exact that way and a subtraction is not the same operation either way
 round, so both are refused rather than approximated.
 
+The third is a **cycle of bodies**: `even` ending in a call of `odd` which ends
+in a call of `even` is the tail-call shape written across two functions rather
+than one, and it is one recursion and not two — the frames between the turns are
+the frames of the calls between the bodies. The loop holds the turns of every
+body of the cycle, one arm each, and a counter says which of them a turn is;
+the call a turn ends with binds the arguments into the parameters of the body
+that call reaches and moves the counter to it, and the test of that body is what
+the loop runs next. Every body is renamed as it is put in the loop, so the turns
+of two bodies can sit beside each other, and every body of the cycle is entered
+on values written above the loop, which is what its parameters hold before the
+first turn wrote them.
+
+```ts
+function even(n: number): boolean { if (n <= 0) return true; return odd(n - 1); }
+function odd(n: number): boolean { if (n <= 0) return false; return even(n - 1); }
+```
+
+It is the one shape that is not a question about one body: it needs the bodies
+the cycle runs through, so `eliminateMutualRecursion` reads them where the
+caller holds them and rewrites only the body it is handed — which is what a build
+compiling functions one at a time needs, and each body of a cycle is answered
+the same way when it is the one being compiled. `eliminateMutualRecursionInProgram`
+answers all of them at once from the same copy of every body, so which of them
+was answered first does not decide what the others are answered with. It runs
+before the per-body pass, because a body in a cycle may also call itself and the
+merged loop carries that call the same way it carries a call of any other body.
+
 What is left alone is most of the language's recursion, and that is the point. A
 recursion with two calls of itself in one return — `fib`, or a tree walked with
 a left and a right — is not a state machine this IR can hold: it needs storage
@@ -653,8 +680,8 @@ whose length is not known until the walk has finished, and an array in
 the program states. There is no push and no growth, so an explicit stack of
 unbounded depth is not a program this IR can be written as, and a traversal is
 not answered with one that would overflow where the recursion did not. Every
-refusal carries its reason and `recursionRefusal` hands it to whoever asks why a
-body kept its calls.
+refusal carries its reason and `recursionRefusal` and `mutualRecursionRefusal`
+hand it to whoever asks why a body kept its calls.
 
 One difference is worth stating because it is the only one: a tail call that
 never reaches its base case was a stack overflow and is now an unbounded loop.

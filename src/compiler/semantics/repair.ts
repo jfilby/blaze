@@ -1235,7 +1235,7 @@ export function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>)
  * rather than a value: a `set`, a `step` and a `setElement` name what they
  * write, and a `let` names the slot it declares, so both maps travel together.
  */
-interface Scope {
+export interface Scope {
   readonly reads: Map<string, SemanticValue>;
   readonly targets: Map<string, string>;
 }
@@ -1330,8 +1330,13 @@ function blockStatement(statement: SemanticStatement, scope: Scope): void {
  * in shadows it, and the answer is the refusal the caller reads: two bindings
  * under one spelling cannot both be renamed by one map, and a body that
  * shadows is left as a call.
+ *
+ * Exported because the recursion pass splices bodies the same way this does: a
+ * body of a cycle of bodies is put inside a loop with the other bodies' turns
+ * beside it, and two of them very often declare one spelling — the same
+ * counter, the same temporary — and each of those is a binding of its own.
  */
-function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<string>, callee: string): string | null {
+export function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<string>, callee: string): string | null {
   for (const statement of block.statements) {
     substituteStatement(statement, scope);
     // A loop's counter is declared for its body alone, so the body is renamed
