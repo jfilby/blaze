@@ -798,7 +798,16 @@ function hoistInvariant(fn: SemanticFunction, site: string): RepairOutcome {
 /* -------------------------------------------------------------------------- */
 
 function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome {
-  const block = blockAt(fn, site);
+  // A loop is named in the IR by the block it leaves for, and that id is
+  // also the name a proposal is written against: a body the expression lives in
+  // is the block the loop enters by rather than the block it was named from.
+  // Resolving a header to that body keeps a rewrite that is valid on the body
+  // from being refused on the spelling the reader of the IR actually saw.
+  let block = blockAt(fn, site);
+  if (block === null) {
+    const loop = loopsOf(fn).find((entry) => entry.loop.header === site);
+    if (loop !== undefined) block = loop.loop.body;
+  }
   if (block === null) return { refused: `no block is named ${site}; the blocks are ${blockNames(fn)}` };
 
   // A block that ends in a return hands its value back from the statement that
@@ -982,7 +991,16 @@ function callsInBlock(block: SemanticBlock, callee: string): FoundCall[] {
  * block is said in `partial` rather than hidden behind a refusal of the whole.
  */
 function inlineCall(fn: SemanticFunction, site: string, calleeName: string, context: RepairContext): RepairOutcome {
-  const block = blockAt(fn, site);
+  // A loop is named in the IR by the block it leaves for, and that id is
+  // also the name a proposal is written against: a call written in a loop's
+  // body belongs to the block the loop enters by rather than to the header it
+  // was named from. Resolving a header to that body keeps a rewrite that is
+  // valid on the body from being refused on the spelling the reader saw.
+  let block = blockAt(fn, site);
+  if (block === null) {
+    const loop = loopsOf(fn).find((entry) => entry.loop.header === site);
+    if (loop !== undefined) block = loop.loop.body;
+  }
   if (block === null) return { refused: `cannot be written into block ${site}: there is no such block, and the blocks are ${blockNames(fn)}` };
   const callee = context.functions.get(calleeName);
   if (callee === undefined) {
