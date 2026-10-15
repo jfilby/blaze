@@ -15,8 +15,8 @@ import { spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { iterationRange, resumePlan, type Asked } from "../cli.ts";
-import { writeSession, type SessionContext, type SessionRecord } from "../runs.ts";
+import { continuationStart, iterationRange, resumePlan, shouldWriteRefusedSession, type Asked } from "../cli.ts";
+import { readSession, writeSession, type SessionContext, type SessionRecord } from "../runs.ts";
 import { scratch } from "./scratch.ts";
 
 const CONTEXT: SessionContext = {
@@ -194,4 +194,55 @@ test("the continuation loop skips the runs a session already did", () => {
   assert.deepEqual(iterationRange(0, 3), [0, 1, 2]);
   assert.deepEqual(iterationRange(1, 3), [1, 2]);
   assert.deepEqual(iterationRange(3, 3), []);
+});
+
+test("a continuation starts with the dead session's runs and commits", async () => {
+  const dir = await repository();
+  writeSession(session({ runs: ["a", "b"], committed: 1, context: { ...CONTEXT, baseCommit: head(dir) } }), dir);
+
+  const plan = resumePlan(asked(), dir);
+  assert.notEqual(typeof plan, "string");
+  if (typeof plan === "string") return;
+
+  const start = continuationStart(plan);
+  assert.deepEqual(start.runIds, ["a", "b"]);
+  assert.equal(start.committed, 1);
+});
+
+test("a fresh session starts with no runs and no commits", () => {
+  const start = continuationStart(undefined);
+  assert.deepEqual(start.runIds, []);
+  assert.equal(start.committed, 0);
+});
+
+test("a refused fresh session is written, a refused continuation is not", async () => {
+  // A fresh refusal is the only record of an invocation that never started, so
+  // it is kept. A refused continuation reuses the dead session's id, so
+  // writing one would overwrite the failed record it was meant to continue —
+  // and a second `--resume` would find nothing to continue (it refused to
+  // start).
+  assert.equal(shouldWriteRefusedSession(undefined), true);
+
+  const dir = await repository();
+  writeSession(session({ context: { ...CONTEXT, baseCommit: head(dir) } }), dir);
+  const plan = resumePlan(asked(), dir);
+  assert.notEqual(typeof plan, "string");
+  if (typeof plan === "string") return;
+  assert.equal(shouldWriteRefusedSession(plan), false);
+});
+
+test("a refused continuation leaves the failed session resumable", async () => {
+  const dir = await repository();
+  const failed = session({ outcome: "failed", runs: ["2026-10-10_09-01-00_bbbbbb"], context: { ...CONTEXT, baseCommit: head(dir) } });
+  writeSession(failed, dir);
+
+  // What the fix does on a refused `--resume`: nothing is written, so the
+  // failed record stays as it was.
+  assert.deepEqual(readSession(CONTEXT.id, dir)?.outcome, "failed");
+
+  // And what the old code did — overwrite with a refused record of the same
+  // id — is what made the second `--resume` fail.
+  writeSession({ ...failed, runs: [], committed: 0, outcome: "refused", error: "smoke test" }, dir);
+  const plan = resumePlan(asked(), dir);
+  assert.match(plan as string, /nothing to continue \(it refused to start\)/);
 });

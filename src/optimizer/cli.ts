@@ -978,6 +978,32 @@ export function iterationRange(done: number, maxIterations: number): number[] {
   return range;
 }
 
+/**
+ * What a continuation starts with: the runs the dead session already got
+ * through, and the commits it already kept.
+ *
+ * Starting from empty would drop what the dead session did: its runs would no
+ * longer be recorded against the id both invocations share, and the final
+ * count would report only the new ones.
+ */
+export function continuationStart(plan: ResumePlan | undefined): { runIds: string[]; committed: number } {
+  if (plan === undefined) return { runIds: [], committed: 0 };
+  return { runIds: [...plan.record.runs], committed: plan.record.committed };
+}
+
+/**
+ * Whether a refused session should be written.
+ *
+ * A fresh session that refuses to start leaves its refused record behind, and
+ * that is the only thing saying it happened. A continuation that never started
+ * reuses the dead session's id, so writing one would overwrite the failed
+ * record it was meant to continue — and a second `--resume` would find nothing
+ * to continue (it refused to start). One is written, the other is not.
+ */
+export function shouldWriteRefusedSession(resumed: ResumePlan | undefined): boolean {
+  return resumed === undefined;
+}
+
 async function main(argv: string[]): Promise<number> {
   let parsed;
   try {
@@ -1133,8 +1159,9 @@ async function main(argv: string[]): Promise<number> {
   if (resumed !== undefined) session.goal = sessionGoal;
   const resumeDone = resumed?.done ?? 0;
   const resumeLine = resumeCommand(session, resumeDone);
-  const runIds: string[] = [];
-  let committed = 0;
+  const start = continuationStart(resumed);
+  const runIds: string[] = start.runIds;
+  let committed = start.committed;
   let outcome: SessionOutcome = "no-commits";
   let error: string | null = null;
 
@@ -1158,6 +1185,18 @@ async function main(argv: string[]): Promise<number> {
 
   /** End a session that was refused before it ran anything. */
   const refuse = (code: number, message: string): number => {
+    // A continuation that never started must not erase where it stopped: it
+    // reuses the dead session's id, so writing a refused record here would
+    // overwrite the failed record it was meant to continue, and a second
+    // `--resume` would find nothing to continue (it refused to start). Leave
+    // the original as it was, so it stays resumable.
+    if (!shouldWriteRefusedSession(resumed)) {
+      process.stderr.write(`${message}\n`);
+      process.stderr.write(
+        `The session ${session.id} was left as it was and can still be continued with:\n\n  ${resumeCommand(session, resumeDone)}\n`,
+      );
+      return code;
+    }
     outcome = "refused";
     error = message;
     process.stderr.write(`${message}\n`);
