@@ -191,7 +191,11 @@ function fAddMod(o: Float64Array, a: Float64Array, b: Float64Array, m: Float64Ar
         carry = whole;
     }
     o[11] = carry;
-    if (carry > 0 || fCmp(o, m) >= 0) {
+    let reduceMod = carry > 0;
+    if (!reduceMod && fCmp(o, m) >= 0) {
+        reduceMod = true;
+    }
+    if (reduceMod) {
         let borrow = 0;
         for (let i = 0; i < 11; i++) {
             const difference = o[i] - m[i] - borrow;
