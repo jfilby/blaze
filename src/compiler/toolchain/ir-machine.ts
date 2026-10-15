@@ -1554,6 +1554,20 @@ interface Held {
    */
   readonly index: number | null;
   /**
+   * The whole number this value holds, where the loop it belongs to counted it
+   * out and the number of each turn is therefore in the code rather than in a
+   * register: an element it reaches is then addressed by that number times the
+   * width of an element, added to the buffer, and the register the index would
+   * otherwise be materialized into is never written at all. Null wherever the
+   * value is somewhere a read would have to go to, which is every name whose
+   * number the lowering does not know.
+   *
+   * This is written by the turns of an unrolled loop as they are written, so it
+   * is the value's own note of what its index register would hold, and it is
+   * what `plainIndex` answers an element's index out of.
+   */
+  constant: bigint | null;
+  /**
    * The register a value that never changes lives in, or null where it lives in
    * the frame. A name that is written once and read after is in a register that
    * a call cannot take, so a read of it is a move and a frame is not reserved
@@ -1857,7 +1871,7 @@ class Machine {
     // three read the register.
     const offset = register === null ? this.reserve(frameBytes(type)) : 0;
     this.heldCount += 1;
-    const held: Held = { id: this.heldCount, offset, type, register, index };
+    const held: Held = { id: this.heldCount, offset, type, register, index, constant: null };
     this.slots.set(emitted, held);
     return held;
   }
@@ -1923,7 +1937,7 @@ class Machine {
     const register = borrowable && isFloat(type) && !isWideType(type) ? this.takeSpareVector() : null;
     const offset = this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8));
     this.heldCount += 1;
-    const held: Held = { id: this.heldCount, offset, type, register, index: null };
+    const held: Held = { id: this.heldCount, offset, type, register, index: null, constant: null };
     this.slots.set(name, held);
     return held;
   }
@@ -2104,7 +2118,7 @@ class Machine {
     const score = (name: string): number => (reads.get(name) ?? 0) + (writes.get(name) ?? 0);
     const candidates = declared
       .map((entry) => ({ entry, score: score(entry.name) }))
-      .filter((candidate) => candidate.score > 0 && declarationCount.get(candidate.entry.name) === 1)
+      .filter((candidate) => candidate.score > 0 && declarationCount.get(candidate.entry.name) === 1 && !candidate.entry.name.startsWith("blaze_limb_"))
       .sort((left, right) => right.score - left.score);
 
     this.pinnedRegisters = [];
@@ -2992,7 +3006,12 @@ class Machine {
           return;
         }
         this.at(statement.value, type);
-        this.store(this.bind(statement.slot.name, type));
+        const held = this.bind(statement.slot.name, type);
+        if (statement.slot.name.startsWith("blaze_limb_")) {
+          this.accumulator = { id: held.id, at: this.code.written };
+          return;
+        }
+        this.store(held);
         return;
       }
       case "set":
@@ -4256,19 +4275,19 @@ class Machine {
     if (!Number.isSafeInteger(turns) || turns < factor) return false;
     // The loop's own scope was entered by the caller, as it is for the rolled
     // loop, and is left when the caller leaves it. A counter of this program is
-    // a double and an index is a whole number, so each turn is given a register
-    // holding the number it has as well as the value itself.
+    // a double and an index is a whole number, so the number each turn has is
+    // counted out beside the value and stands in the code where the turn
+    // reaches an element with it.
     const shadow = this.spareIndexes.length > 0 ? this.spareIndexes.pop() ?? null : null;
     const variable = this.bind(loop.variable, type, shadow);
     // A counter the body reaches only as an index is a number of the turns, and
     // the number of the turn is in the instruction as well: `from + turn * step`
     // is a literal, so the double beside it holds nothing the body reads. Which
     // of the two the body reads is what says which of them to write — and a
-    // register to write the index into has to be one there is, because an index
-    // read out of a counter with no register of its own is the counter's own
-    // value converted, which is the double this is not writing.
+    // counter with no index register of its own is one whose number nothing
+    // records, so an index read out of it is the counter's own value converted,
+    // which is the double this is not writing.
     const asIndex = shadow !== null && isFloat(type) && !readsCounterAsValue(loop.body, loop.variable);
-    this.constantCounter(variable, type, from, asIndex);
     // A loop whose turns are all written out runs once, so there is nothing left
     // to count: the bodies below stand one after another and control leaves them
     // into the exit. A counter of trips the loop never reads is a number in the
@@ -4277,6 +4296,11 @@ class Machine {
     // because the trip count is what it needs to divide by to write a factor of
     // turns at a time.
     const trips = Math.floor(turns / factor);
+    // A loop run once carries the number of every turn in the code, so its
+    // counter is never moved to a register at all; a loop of several trips
+    // writes its turns once and runs them again and again, and the number a turn
+    // has on the second trip is the number the first left the counter at.
+    this.constantCounter(variable, type, from, asIndex, trips === 1);
     if (trips > 1) {
       const counted = this.holdAcross(I64, "blaze_trips");
       this.code.movRegImm(RAX, BigInt(trips));
@@ -4311,9 +4335,12 @@ class Machine {
    *
    * A loop that runs once is written out whole, so each of its turns has a
    * counter this pass counted and the counter is a number in the instruction
-   * rather than a value kept somewhere and converted back into an index. A loop
-   * that runs several trips has the same counter at a different number on each
-   * of them, so its turns are written as so many steps of the loop's own.
+   * rather than a value kept somewhere and converted back into an index — the
+   * number is carried by the element addresses themselves and no register is
+   * written. A loop that runs several trips has the same counter at a different
+   * number on each of them, so its turns are written as so many steps of the
+   * loop's own: the body is written out once and run once per trip, and only
+   * the first of the trips was counted here.
    *
    * `whole` says the first of the two: whether the counter of every turn is a
    * number this pass worked out rather than a step of the loop's own. The second
@@ -4333,7 +4360,7 @@ class Machine {
   ): void {
     for (let turn = 0; turn < factor; turn += 1) {
       if (turn > 0) {
-        if (whole) this.constantCounter(variable, type, from + turn * step, asIndex);
+        if (whole) this.constantCounter(variable, type, from + turn * step, asIndex, true);
         else this.stepCounter(variable, type, step, asIndex);
       }
       this.block(loop.body);
@@ -4352,8 +4379,17 @@ class Machine {
     this.code.cvtFloatToInt(shadow, XMM0, widthOf(type) === 4, true);
   }
 
-  /** A counter put at a number the loop counted out before it was run. */
-  private constantCounter(variable: Held, type: SemanticType, value: number, asIndex = false): void {
+  /**
+   * A counter put at a number the loop counted out before it was run.
+   *
+   * `inCode` says the number is one the code carries for this turn rather than
+   * one a register has to be moved to: the turns of a loop written out once are
+   * executed once each, so the number of each of them is the number written
+   * beside it, while the turns of a loop of several trips are written once and
+   * run a trip at a time, and the number a turn has then is wherever the trip
+   * before it left the counter.
+   */
+  private constantCounter(variable: Held, type: SemanticType, value: number, asIndex = false, inCode = false): void {
     // A counter the body reaches only as an index has no value to write: the
     // number of the turn is in the instruction beside it, so writing the double
     // would be a load and a store of a number nothing reads, on every turn.
@@ -4362,7 +4398,13 @@ class Machine {
       else this.code.movRegImm(RAX, BigInt(value));
       this.store(variable);
     }
-    if (variable.index !== null) this.code.movRegImm(variable.index, BigInt(value));
+    if (variable.index === null) return;
+    // The number is recorded rather than moved in, and every element the counter
+    // reaches is addressed by that number without a register in it — which is
+    // one instruction per turn the loop does not write, and the register it
+    // would have been written into is spent on nothing else.
+    if (inCode) variable.constant = BigInt(value);
+    else this.code.movRegImm(variable.index, BigInt(value));
   }
 
   /**
@@ -4373,11 +4415,17 @@ class Machine {
    * As with `constantCounter`, a counter nothing reads as a value is only moved
    * in the register the index is read out of: the move of the double is the same
    * arithmetic the index's move is, written twice, and the second of the two is
-   * the one the body reads.
+   * the one the body reads. Where the index register's number is one this pass
+   * counted out, the move is the number addition itself and no register at all.
    */
   private stepCounter(variable: Held, type: SemanticType, step: number, asIndex = false): void {
+    const advance = (): void => {
+      if (variable.index === null) return;
+      if (variable.constant !== null) variable.constant += BigInt(step);
+      else this.code.aluImm("add", variable.index, step, true);
+    };
     if (asIndex) {
-      if (variable.index !== null) this.code.aluImm("add", variable.index, step, true);
+      advance();
       return;
     }
     const register = variable.register ?? RAX;
@@ -4388,7 +4436,7 @@ class Machine {
     } else {
       this.code.aluImm("add", register, step, operationWidth(type) === 8);
     }
-    if (variable.index !== null) this.code.aluImm("add", variable.index, step, true);
+    advance();
     if (variable.register === null) this.store(variable);
   }
 
@@ -6719,6 +6767,11 @@ class Machine {
     if (index.k === "const") return integerText(index.text);
     if (index.k !== "local") return null;
     const held = this.slot(index.name);
+    // A counter this pass counted out holds the number of its turn in the
+    // instruction rather than anywhere a read could go, and that number is what
+    // the address of an element is built from: the buffer and a displacement,
+    // with no register spent on the index at all.
+    if (held.constant !== null) return held.constant;
     // A float is not a plain index however it is held. The register a float is
     // pinned to is numbered out of the vector file, so handing it to a whole
     // number register the way a frame slot is handed over reads a different
@@ -6732,7 +6785,7 @@ class Machine {
       // for the index register and not for the counter, and a note about what
       // the accumulator holds must not answer a read of the counter with it.
       this.heldCount += 1;
-      return { id: this.heldCount, offset: 0, type: USIZE, register: held.index, index: null };
+      return { id: this.heldCount, offset: 0, type: USIZE, register: held.index, index: null, constant: null };
     }
     if (held.register !== null) return held;
     return widthOf(held.type) !== 8 ? null : held;
@@ -6778,7 +6831,25 @@ class Machine {
     // but an index would have left unreadable — so this is also what makes it
     // sound to count such a counter in whole numbers alone.
     const plain = this.plainIndex(index);
-    if (plain !== null && typeof plain !== "bigint" && plain.register !== null && plain.register !== RAX) {
+    if (typeof plain === "bigint") {
+      // The index is a number the code carries, so the address is the buffer
+      // plus that many elements and there is no register in it: one `lea`,
+      // whose displacement is the number written into the instruction where it
+      // fits there. A counter the loop counted out is the number of its turn
+      // and nothing else, so this is the whole address of the element it
+      // reaches — and the counter is never materialized anywhere.
+      this.value(typeof sequence === "string" ? { k: "local", type: base?.type ?? POINTER, name: sequence } : sequence);
+      this.code.movRegReg(RCX, RAX);
+      const offset = plain * BigInt(scale);
+      if (offset >= -0x8000_0000n && offset <= 0x7fff_ffffn) {
+        this.code.lea(RAX, mem(RCX, Number(offset)));
+      } else {
+        this.code.movRegImm(RAX, plain);
+        this.code.lea(RAX, indexed(RCX, RAX, scale));
+      }
+      return;
+    }
+    if (plain !== null && plain.register !== null && plain.register !== RAX) {
       // The sequence is read first, because it is a value of its own and may be
       // one the program computes; the counter's register is the convention's and
       // nothing below writes it.
@@ -6823,12 +6894,10 @@ class Machine {
     // The sequence is a pointer wherever it came from: an array reaches a
     // function as a pointer to its elements, so it is one whole-register read.
     if (base === null || base.register === null || widthOf(base.type) !== 8 || isFloat(base.type)) {
-      if (process.env.BLAZE_DBG) console.error(`elementAddress ${this.fn.symbol} base=${typeof sequence === "string" ? sequence : sequence.k} index=${index.k === "local" ? index.name : index.k} -> null(base)`);
       return null;
     }
     const register = base.register;
     const at = this.plainIndex(index);
-    if (process.env.BLAZE_DBG) console.error(`elementAddress ${this.fn.symbol} base=${typeof sequence === "string" ? sequence : sequence.k} index=${index.k === "local" ? index.name : index.k} baseReg=${register} at=${at === null ? "null" : typeof at === "bigint" ? String(at) : `reg${at.register}/off${at.offset}`}`);
     if (at === null) return null;
     if (typeof at === "bigint") {
       const offset = at * BigInt(scale);
