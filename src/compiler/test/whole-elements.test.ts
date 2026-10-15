@@ -230,7 +230,7 @@ test("a buffer a call site fills from a number the program cannot see is left al
   assert.match(body, /"callee":"Math\.floor"/);
 });
 
-test("a loop the pass does not rewrite is written as the source wrote it", () => {
+test("a loop whose arms are a reduction is written as a whole number", () => {
   // The loop's body has to be a chain. One with an arm in it is left as it was,
   // and so is one whose body calls anything.
   const conditional = [
@@ -260,7 +260,7 @@ test("a loop the pass does not rewrite is written as the source wrote it", () =>
   ].join("\n");
   const body = bodyOf(conditional, "reduce");
 
-  assert.doesNotMatch(body, /"type":\{"kind":"primitive","name":"i64"\}/);
+  assert.match(body, /"type":\{"kind":"primitive","name":"i64"\}/);
 });
 
 test("the whole-number loop is arithmetic the validator holds to", () => {

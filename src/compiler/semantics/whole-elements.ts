@@ -909,6 +909,38 @@ function wholeNumbersOf(
   slots: ReadonlyMap<string, SemanticSlot>,
 ): boolean {
   for (const statement of body.statements) {
+    if (statement.k === "if") {
+      // A reduction's conditional arms are each one chain and write the same
+      // whole number along either path. Tallying them here puts the borrow loop
+      // into the pass, because the body is not one chain only in syntax; the
+      // `if` is a selector between two equally whole expressions, and both
+      // write the same names. An arm that cannot be read gives up through
+      // `knownOf`, which returns false for anything the `where` cannot hold
+      // whole.
+      if (reductionOf(statement) === null) return false;
+      const condKnown = knownOf(statement.condition, inside);
+      if (!condKnown.whole || !(condKnown.reach <= REACH)) return false;
+      for (const arm of blocksOf(statement)) {
+        for (const nested of arm.statements) {
+          if (nested.k !== "let" && nested.k !== "set" && nested.k !== "setElement") return false;
+          const nestedKnown = knownOf(nested.value, inside);
+          if (!nestedKnown.whole || !(nestedKnown.reach <= REACH)) return false;
+          const nestedName = nameWrittenBy(nested);
+          if (nestedName === null) continue;
+          whole.add(nestedName);
+          const before = inside.locals.get(nestedName);
+          const slot = slots.get(nestedName);
+          const across = slot !== undefined && slot.kind === "value" && !isFloat(slot.type);
+          inside.locals.set(
+            nestedName,
+            before !== undefined && before.whole && across
+              ? { whole: true, reach: Math.max(before.reach, nestedKnown.reach), reduced: null }
+              : nestedKnown,
+          );
+        }
+      }
+      continue;
+    }
     if (statement.k !== "let" && statement.k !== "set" && statement.k !== "setElement") return false;
     const name = nameWrittenBy(statement);
     if (name === null && statement.k !== "setElement") return false;
@@ -1027,6 +1059,13 @@ function rewriteChain(
         const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
         if (form === null) return false;
         statement.value = form;
+        break;
+      }
+      case "if": {
+        if (reductionOf(statement) === null) return false;
+        for (const arm of blocksOf(statement)) {
+          if (!rewriteChain(arm, inside, whole, slots, fresh, bindings, introduced)) return false;
+        }
         break;
       }
       default:
