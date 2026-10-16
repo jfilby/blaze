@@ -1186,7 +1186,41 @@ function hoistableIn(block: SemanticBlock, written: ReadonlySet<string>): Semant
     seen.add(key);
     hoistable.push(value);
   }
+  // A read of an element of a buffer the loop never writes, at an index the
+  // loop never changes, is the same value on every turn: hoisting it reads the
+  // buffer once above the loop instead of once per turn. `candidates` refuses
+  // every element read because `isSafeToCompute` holds all memory reads too
+  // conservative to bind in general, but a loop-invariant element read is sound
+  // to hoist here — neither the buffer nor the index is written by the loop, so
+  // every turn would read the very same element.
+  for (const root of roots) {
+    walkSemanticValue(root, (value) => {
+      if (value.k !== "element") return;
+      if (!isElementReadLoopInvariant(value, written)) return;
+      const key = valueKey(value);
+      if (seen.has(key)) return;
+      seen.add(key);
+      hoistable.push(value);
+    });
+  }
   return hoistable;
+}
+
+/**
+ * Whether one element read names the same value on every turn of a loop: the
+ * buffer it reads is one the loop never writes, and the index it reads at is
+ * one the loop never changes.
+ */
+function isElementReadLoopInvariant(
+  value: SemanticValue & { k: "element" },
+  written: ReadonlySet<string>,
+): boolean {
+  if (value.of.k !== "local" || written.has(value.of.name)) return false;
+  let dependent = false;
+  walkSemanticValue(value.index, (one) => {
+    if (one.k === "local" && written.has(one.name)) dependent = true;
+  });
+  return !dependent;
 }
 
 function repeatedAmong(roots: readonly SemanticValue[], written: ReadonlySet<string>): SemanticValue[] {
