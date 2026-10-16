@@ -394,6 +394,33 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_print_u256_hex(const blaze_u256* value)",
 ];
 
+/* The prototypes of the signed wide integer kernel. A blaze_i256 holds the
+   same four limbs as a blaze_u256, but the top limb's high bit is the sign, so
+   shift-right, comparison, division and remainder are answered as signed while
+   addition, subtraction, multiplication and the bitwise operations share the
+   two's complement bit patterns of the unsigned form. */
+const I256_DECLARATIONS: readonly string[] = [
+  "void blaze_rt_i256_add(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_sub(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_mul(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_div(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_mod(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_and(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_or(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_xor(blaze_i256* out, const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_not(blaze_i256* out, const blaze_i256* value)",
+  "void blaze_rt_i256_shl(blaze_i256* out, const blaze_i256* value, unsigned count)",
+  "void blaze_rt_i256_shr(blaze_i256* out, const blaze_i256* value, unsigned count)",
+  "int blaze_rt_i256_less(const blaze_i256* left, const blaze_i256* right)",
+  "int blaze_rt_i256_equal(const blaze_i256* left, const blaze_i256* right)",
+  "void blaze_rt_i256_from_i64(blaze_i256* out, int64_t value)",
+  "int64_t blaze_rt_i256_to_i64(const blaze_i256* value)",
+  "size_t blaze_rt_i256_format(const blaze_i256* value, unsigned base, unsigned char* buffer, size_t size)",
+  "int blaze_rt_i256_parse(blaze_i256* out, const char* text, size_t length)",
+  "void blaze_rt_print_i256(const blaze_i256* value)",
+  "void blaze_rt_print_i256_hex(const blaze_i256* value)",
+];
+
 /**
  * The wide integer symbols, which generated code may reference alongside the
  * runtime ABI. Kept apart from `RUNTIME_SYMBOLS` because they are the compiler's
@@ -401,7 +428,7 @@ const U256_DECLARATIONS: readonly string[] = [
  * `U256_DECLARATIONS` for why the two are not one list.
  */
 export const WIDE_SYMBOLS: Record<string, true> = Object.fromEntries(
-  U256_DECLARATIONS.map((declaration) => [
+  [...U256_DECLARATIONS, ...I256_DECLARATIONS].map((declaration) => [
     declaration.slice(declaration.indexOf("blaze_rt_"), declaration.indexOf("(")),
     true as const,
   ]),
@@ -476,6 +503,16 @@ typedef struct blaze_u256 {
 /* The number of bytes a u256 occupies, for a backend laying a frame out. */
 #define BLAZE_U256_BYTES 32u
 
+typedef struct blaze_i256 {
+  /* The same four limbs as a blaze_u256; the high bit of the top limb is the
+     sign, so a negative value is held in two's complement and the sign is read
+     from limb 3 rather than stored beside it. */
+  uint64_t limbs[4];
+} blaze_i256;
+
+/* The number of bytes an i256 occupies, for a backend laying a frame out. */
+#define BLAZE_I256_BYTES 32u
+
 `;
 
 const HEADER_EPILOGUE = `
@@ -490,7 +527,7 @@ export function runtimeHeaderSource(): string {
       item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
     })${suffix};`;
   }).join("\n");
-  return `${HEADER_PREAMBLE}\n${declarations}\n\n${U256_DECLARATIONS.map((declaration) => `${declaration};`).join("\n")}\n${HEADER_EPILOGUE}`;
+  return `${HEADER_PREAMBLE}\n${declarations}\n\n${[...U256_DECLARATIONS, ...I256_DECLARATIONS].map((declaration) => `${declaration};`).join("\n")}\n${HEADER_EPILOGUE}`;
 }
 
 /**
@@ -900,6 +937,369 @@ void blaze_rt_print_u256(const blaze_u256* value) {
 void blaze_rt_print_u256_hex(const blaze_u256* value) {
   unsigned char text[80];
   const size_t written = blaze_rt_u256_format(value, 16u, text, sizeof text);
+  fwrite(text, 1, written, stdout);
+}
+`;
+
+/* The arithmetic of a signed fixed-width wide integer, in one place. A blaze_i256 holds the same four limbs as a blaze_u256, so addition, subtraction, multiplication and the bitwise operations share the two's complement bit patterns of the unsigned form. Only where the sign matters does it differ: shift right extends the sign, comparison reads the sign first, division and remainder truncate toward zero, and decimal text carries a leading minus. */
+export const I256_KERNEL = `
+/* The zero every operation starts from and the value an underflow produces. */
+static blaze_i256 blaze_i256_zero(void) {
+  blaze_i256 out;
+  out.limbs[0] = 0; out.limbs[1] = 0; out.limbs[2] = 0; out.limbs[3] = 0;
+  return out;
+}
+
+/* Sign-extends a 64 bit value across the four limbs, so a negative number is held in two's complement with every upper limb all ones. */
+static blaze_i256 blaze_i256_of_i64(int64_t value) {
+  blaze_i256 out = blaze_i256_zero();
+  out.limbs[0] = (uint64_t)value;
+  if (value < 0) {
+    out.limbs[1] = UINT64_MAX; out.limbs[2] = UINT64_MAX; out.limbs[3] = UINT64_MAX;
+  }
+  return out;
+}
+
+/* True when any limb of the value is not zero. */
+static int blaze_i256_is_zero(const blaze_i256* value) {
+  return (value->limbs[0] | value->limbs[1] | value->limbs[2] | value->limbs[3]) == 0u;
+}
+
+/* The sign of the value: 1 when negative (the top limb's high bit is set), 0 otherwise. */
+static int blaze_i256_sign(const blaze_i256* value) {
+  return (int)((value->limbs[3] >> 63) & 1u);
+}
+
+/* Two's complement negation: complement every limb and add one, carrying as it goes. */
+static void blaze_i256_negate(blaze_i256* value) {
+  unsigned __int128 borrow = 1;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 current = (unsigned __int128)(~value->limbs[i]) + borrow;
+    value->limbs[i] = (uint64_t)current;
+    borrow = current >> 64;
+  }
+}
+
+/* How many bits a magnitude holds above its lowest one, the position of its most significant set bit. The divide below reads that as the count of turns it has left to run. */
+static int blaze_i256_bits(const blaze_i256* value) {
+  for (unsigned i = 4; i-- > 0;) {
+    const uint64_t limb = value->limbs[i];
+    if (limb == 0u) continue;
+    int top = 0;
+    for (unsigned bit = 0; bit < 64u; bit += 1) {
+      if ((limb >> bit) & 1u) top = (int)bit + 1;
+    }
+    return (int)(i * 64u) + top;
+  }
+  return 0;
+}
+
+/* Walks from the top limb down; the first limb that differs decides the answer, treating the limbs as an unsigned magnitude. */
+static int blaze_i256_unsigned_less(const blaze_i256* left, const blaze_i256* right) {
+  for (unsigned i = 4; i-- > 0;) {
+    if (left->limbs[i] < right->limbs[i]) return 1;
+    if (left->limbs[i] > right->limbs[i]) return 0;
+  }
+  return 0;
+}
+
+/* Addition and subtraction share the two's complement bit patterns of the unsigned form: the carry and borrow propagate limb by limb and the carry out of the top limb is dropped, which is exactly wrapping modulo 2^256. */
+void blaze_rt_i256_add(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  unsigned __int128 carry = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 sum = (unsigned __int128)left->limbs[i] + right->limbs[i] + carry;
+    out->limbs[i] = (uint64_t)sum;
+    carry = sum >> 64;
+  }
+}
+
+void blaze_rt_i256_sub(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  unsigned __int128 borrow = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 difference = (unsigned __int128)left->limbs[i] - right->limbs[i] - borrow;
+    out->limbs[i] = (uint64_t)difference;
+    borrow = (difference >> 64) & 1u;
+  }
+}
+
+/* Schoolbook multiplication: the low 256 bits of the product are the same whether the operands are read as signed or unsigned, so the unsigned kernel's columns give the two's complement product. */
+void blaze_rt_i256_mul(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  blaze_i256 accumulator = blaze_i256_zero();
+  for (unsigned i = 0; i < 4; i += 1) {
+    unsigned __int128 carry = 0;
+    for (unsigned j = 0; i + j < 4; j += 1) {
+      const unsigned __int128 product = (unsigned __int128)left->limbs[i] * right->limbs[j] + accumulator.limbs[i + j] + carry;
+      accumulator.limbs[i + j] = (uint64_t)product;
+      carry = product >> 64;
+    }
+  }
+  *out = accumulator;
+}
+
+void blaze_rt_i256_and(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] & right->limbs[i];
+}
+
+void blaze_rt_i256_or(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] | right->limbs[i];
+}
+
+void blaze_rt_i256_xor(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] ^ right->limbs[i];
+}
+
+/* The complement covers every limb, so it is a complement over all 256 bits rather than a 64 bit one repeated four times. */
+void blaze_rt_i256_not(blaze_i256* out, const blaze_i256* value) {
+  for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = ~value->limbs[i];
+}
+
+/* A shift left is the same bit move whether the number is signed or unsigned: the bits move up and the bits that leave the top limb are dropped. */
+static void blaze_i256_shl_limbs(blaze_i256* out, const blaze_i256* value, unsigned limbs) {
+  blaze_i256 result = blaze_i256_zero();
+  for (unsigned i = limbs; i < 4; i += 1) result.limbs[i] = value->limbs[i - limbs];
+  *out = result;
+}
+
+static void blaze_i256_shl_bits(blaze_i256* out, const blaze_i256* value, unsigned bits) {
+  blaze_i256 result = blaze_i256_zero();
+  for (unsigned i = 0; i < 4; i += 1) {
+    uint64_t limb = value->limbs[i] << bits;
+    if (i > 0u) limb |= value->limbs[i - 1u] >> (64u - bits);
+    result.limbs[i] = limb;
+  }
+  *out = result;
+}
+
+void blaze_rt_i256_shl(blaze_i256* out, const blaze_i256* value, unsigned count) {
+  if (count >= 256u) { *out = blaze_i256_zero(); return; }
+  const unsigned limbs = count / 64u;
+  const unsigned bits = count % 64u;
+  if (bits == 0u) {
+    blaze_i256_shl_limbs(out, value, limbs);
+    return;
+  }
+  blaze_i256 moved;
+  blaze_i256_shl_limbs(&moved, value, limbs);
+  blaze_i256_shl_bits(out, &moved, bits);
+}
+
+/* A shift right extends the sign rather than filling with zeros: when the top limb's high bit is set, the bits shifted in at the top are ones, which is what keeps a negative number negative as it moves down. A shift of 256 or more leaves every bit as the sign, which is -1 for a negative number and 0 for a positive one. */
+static void blaze_i256_shr_limbs(blaze_i256* out, const blaze_i256* value, unsigned limbs) {
+  blaze_i256 result = blaze_i256_zero();
+  const uint64_t fill = blaze_i256_sign(value) ? UINT64_MAX : 0u;
+  for (unsigned i = 0; i + limbs < 4; i += 1) result.limbs[i] = value->limbs[i + limbs];
+  for (unsigned i = 4 - limbs; i < 4; i += 1) result.limbs[i] = fill;
+  *out = result;
+}
+
+static void blaze_i256_shr_bits(blaze_i256* out, const blaze_i256* value, unsigned bits) {
+  blaze_i256 result = blaze_i256_zero();
+  const uint64_t fill = blaze_i256_sign(value) ? UINT64_MAX : 0u;
+  for (unsigned i = 0; i < 4; i += 1) {
+    uint64_t limb = value->limbs[i] >> bits;
+    if (i + 1u < 4u) limb |= value->limbs[i + 1u] << (64u - bits);
+    else limb |= fill << (64u - bits);
+    result.limbs[i] = limb;
+  }
+  *out = result;
+}
+
+void blaze_rt_i256_shr(blaze_i256* out, const blaze_i256* value, unsigned count) {
+  if (count >= 256u) {
+    blaze_i256 result = blaze_i256_zero();
+    if (blaze_i256_sign(value)) {
+      result.limbs[0] = UINT64_MAX; result.limbs[1] = UINT64_MAX; result.limbs[2] = UINT64_MAX; result.limbs[3] = UINT64_MAX;
+    }
+    *out = result;
+    return;
+  }
+  const unsigned limbs = count / 64u;
+  const unsigned bits = count % 64u;
+  if (bits == 0u) {
+    blaze_i256_shr_limbs(out, value, limbs);
+    return;
+  }
+  blaze_i256 moved;
+  blaze_i256_shr_limbs(&moved, value, limbs);
+  blaze_i256_shr_bits(out, &moved, bits);
+}
+
+/* A signed comparison reads the sign first: a negative is below a positive whatever their magnitudes, and two numbers of the same sign are compared as magnitudes, with the larger magnitude of two negatives being the smaller number. */
+int blaze_rt_i256_less(const blaze_i256* left, const blaze_i256* right) {
+  const int leftSign = blaze_i256_sign(left);
+  const int rightSign = blaze_i256_sign(right);
+  if (leftSign != rightSign) return leftSign;
+  /* Two's complement preserves ordering between two numbers of the same sign,
+     so the unsigned limb comparison decides both the positive and the negative
+     case: for two negatives the one with the larger unsigned value is the
+     smaller (closer to zero) number, and the unsigned walk reads exactly that. */
+  return blaze_i256_unsigned_less(left, right);
+}
+
+int blaze_rt_i256_equal(const blaze_i256* left, const blaze_i256* right) {
+  return (left->limbs[0] == right->limbs[0]) && (left->limbs[1] == right->limbs[1]) &&
+         (left->limbs[2] == right->limbs[2]) && (left->limbs[3] == right->limbs[3]);
+}
+
+/* Restoring division on magnitudes, then the sign is applied: the quotient takes the sign of the dividend XOR the divisor (truncating toward zero), and the remainder takes the sign of the dividend. The most negative value has no matching positive, so its magnitude is taken as itself and the single overflow case (the most negative divided by -1) wraps back to the most negative, as wrapping arithmetic does. */
+static void blaze_i256_divmod(blaze_i256* quotient, blaze_i256* remainder, const blaze_i256* left, const blaze_i256* right) {
+  *quotient = blaze_i256_zero();
+  *remainder = blaze_i256_zero();
+  if (blaze_i256_is_zero(right)) return;
+  const int leftSign = blaze_i256_sign(left);
+  const int rightSign = blaze_i256_sign(right);
+  /* The magnitudes: negate a negative value into its two's complement positive. */
+  blaze_i256 leftMag = *left;
+  blaze_i256 rightMag = *right;
+  if (leftSign) blaze_i256_negate(&leftMag);
+  if (rightSign) blaze_i256_negate(&rightMag);
+  blaze_i256 q = blaze_i256_zero();
+  blaze_i256 rest = blaze_i256_zero();
+  for (int step = blaze_i256_bits(&leftMag) - 1; step >= 0; step -= 1) {
+    /* What is left moves up one bit and takes the dividend's bit at the bottom. A shift by the full width of a limb is undefined in C, so each limb takes the top bit of the one below it rather than being shifted as a number. */
+    rest.limbs[3] = (rest.limbs[3] << 1) | (rest.limbs[2] >> 63);
+    rest.limbs[2] = (rest.limbs[2] << 1) | (rest.limbs[1] >> 63);
+    rest.limbs[1] = (rest.limbs[1] << 1) | (rest.limbs[0] >> 63);
+    rest.limbs[0] = (rest.limbs[0] << 1) | ((leftMag.limbs[step / 64] >> (step % 64)) & 1u);
+    if (!blaze_i256_unsigned_less(&rest, &rightMag)) {
+      /* rest -= rightMag, written limb by limb with a borrow. */
+      unsigned __int128 borrow = 0;
+      for (unsigned i = 0; i < 4; i += 1) {
+        const unsigned __int128 difference = (unsigned __int128)rest.limbs[i] - rightMag.limbs[i] - borrow;
+        rest.limbs[i] = (uint64_t)difference;
+        borrow = (difference >> 64) & 1u;
+      }
+      q.limbs[step / 64] |= (uint64_t)1u << (unsigned)(step % 64);
+    }
+  }
+  /* Apply the signs: the quotient is negative exactly when the signs differ, and the remainder keeps the dividend's sign. */
+  if ((leftSign ^ rightSign) != 0) blaze_i256_negate(&q);
+  if (leftSign != 0) blaze_i256_negate(&rest);
+  *quotient = q;
+  *remainder = rest;
+}
+
+void blaze_rt_i256_div(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  blaze_i256 remainder;
+  blaze_i256_divmod(out, &remainder, left, right);
+}
+
+void blaze_rt_i256_mod(blaze_i256* out, const blaze_i256* left, const blaze_i256* right) {
+  blaze_i256 quotient;
+  blaze_i256_divmod(&quotient, out, left, right);
+  (void)quotient;
+}
+
+/* Widening sign-extends, because the number is signed; narrowing keeps the low limb, read as a signed 64 bit number. */
+void blaze_rt_i256_from_i64(blaze_i256* out, int64_t value) {
+  *out = blaze_i256_of_i64(value);
+}
+
+int64_t blaze_rt_i256_to_i64(const blaze_i256* value) {
+  return (int64_t)value->limbs[0];
+}
+
+/* A wide number as text. Decimal prints a leading minus when the value is negative and then the magnitude's digits; hexadecimal reads the limbs top down and skips the leading zeros. Only decimal and hexadecimal are answered. */
+size_t blaze_rt_i256_format(const blaze_i256* value, unsigned base, unsigned char* buffer, size_t size) {
+  if (base != 10u && base != 16u) return 0;
+  char text[80];
+  size_t used = 0;
+  if (base == 10u) {
+    blaze_i256 rest = *value;
+    const int negative = blaze_i256_sign(&rest);
+    if (negative) blaze_i256_negate(&rest);
+    const blaze_i256 zero = blaze_i256_zero();
+    const blaze_i256 ten = blaze_i256_of_i64(10);
+    while (!blaze_rt_i256_equal(&rest, &zero)) {
+      unsigned __int128 remainder = 0;
+      for (unsigned i = 4; i-- > 0;) {
+        const unsigned __int128 current = (remainder << 64) | rest.limbs[i];
+        rest.limbs[i] = (uint64_t)(current / ten.limbs[0]);
+        remainder = current % ten.limbs[0];
+      }
+      if (used + 1u < sizeof text) text[used++] = (char)('0' + (unsigned)remainder);
+    }
+    if (used == 0u) text[used++] = '0';
+    /* The digits were collected least significant first, so reverse them to most significant first. */
+    for (size_t i = 0; i < used / 2u; i += 1) {
+      const char swap = text[i];
+      text[i] = text[used - 1u - i];
+      text[used - 1u - i] = swap;
+    }
+    /* A negative value carries a leading minus, which now goes at the front. */
+    if (negative) {
+      for (size_t i = used; i > 0; i -= 1) text[i] = text[i - 1];
+      text[0] = '-';
+      used += 1;
+    }
+  } else {
+    unsigned limb = 4;
+    while (limb > 0u && value->limbs[limb - 1u] == 0u) limb -= 1u;
+    int leading = 1;
+    while (limb > 0u) {
+      limb -= 1u;
+      for (unsigned nibble = 16u; nibble-- > 0;) {
+        const unsigned digit = (unsigned)((value->limbs[limb] >> (nibble * 4u)) & 0xfu);
+        if (leading && digit == 0u) continue;
+        leading = 0;
+        if (used + 1u < sizeof text) text[used++] = "0123456789abcdef"[digit];
+      }
+    }
+    if (leading) text[used++] = '0';
+  }
+  if (used + 1u > size) return 0;
+  memcpy(buffer, text, used);
+  buffer[used] = '\0';
+  return used;
+}
+
+/* The inverse of blaze_rt_i256_format for base ten: a leading minus is read into the sign and the digits are accumulated limb by limb, then the value is negated into two's complement when the sign was set. */
+int blaze_rt_i256_parse(blaze_i256* out, const char* text, size_t length) {
+  blaze_i256 value = blaze_i256_zero();
+  const blaze_i256 ten = blaze_i256_of_i64(10u);
+  size_t at = 0;
+  int negative = 0;
+  if (length > 0 && (text[0] == '-' || text[0] == '+')) {
+    negative = text[0] == '-';
+    at = 1;
+  }
+  int digits = 0;
+  for (; at < length; at += 1) {
+    const char character = text[at];
+    if (character < '0' || character > '9') return 0;
+    /* value * 10 + digit, over the four limbs, carrying as it goes. */
+    unsigned __int128 carry = (unsigned __int128)(unsigned)(character - '0');
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 current = (unsigned __int128)value.limbs[i] * 10u + carry;
+      value.limbs[i] = (uint64_t)current;
+      carry = current >> 64;
+    }
+    if (carry != 0) return 0;
+    digits += 1;
+  }
+  if (digits == 0) return 0;
+  if (negative) {
+    /* Two's complement over the four limbs, which is the whole of what a negative wide number is. */
+    unsigned __int128 borrow = 1;
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 current = (unsigned __int128)(~value.limbs[i]) + borrow;
+      value.limbs[i] = (uint64_t)current;
+      borrow = current >> 64;
+    }
+  }
+  *out = value;
+  return 1;
+}
+
+void blaze_rt_print_i256(const blaze_i256* value) {
+  unsigned char text[80];
+  const size_t written = blaze_rt_i256_format(value, 10u, text, sizeof text);
+  fwrite(text, 1, written, stdout);
+}
+
+void blaze_rt_print_i256_hex(const blaze_i256* value) {
+  unsigned char text[80];
+  const size_t written = blaze_rt_i256_format(value, 16u, text, sizeof text);
   fwrite(text, 1, written, stdout);
 }
 `;
@@ -1853,6 +2253,7 @@ const char* blaze_rt_last_error(void) {
 }
 
 ${U256_KERNEL}
+${I256_KERNEL}
 `;
 }
 

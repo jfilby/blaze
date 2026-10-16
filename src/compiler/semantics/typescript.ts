@@ -49,6 +49,7 @@ import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { CompilerError, isCompilerError } from "../core/errors.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
+import { desugar } from "./typescript-desugar.ts";
 import type { TypeExpr } from "../core/types.ts";
 import type {
   AssignOperator,
@@ -263,6 +264,7 @@ const PRIMITIVES: Record<string, string> = {
   // arithmetic at a fixed width wider than any the language has a keyword for,
   // and a value written at that width keeps it rather than widening to a
   // double, which is what every other whole number in a program does.
+  i256: "i256",
   u256: "u256",
 };
 
@@ -2260,6 +2262,7 @@ export const typeScriptFrontend: Frontend = {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
+    source = desugar(source);
     const diagnostics = new Diagnostics();
     const parser = new TypeScriptParser(tokenize(source), path, diagnostics);
     const analysis = parser.parseModule(path);

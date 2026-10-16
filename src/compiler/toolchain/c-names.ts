@@ -294,13 +294,15 @@ export function cLiteral(text: string, type: string): string {
   // reads a pointer to. There is no C literal for the width: an initializer
   // list is the only spelling that says which limb is which, and a decimal
   // constant wide enough would be something the C compiler has never heard of.
-  if (type === "u256") {
+  // A negative value is its two's complement limbs, which are the same bits
+  // whether the type is read as signed or unsigned; only the struct name differs.
+  if (type === "u256" || type === "i256") {
     const value = integerLiteral(text) ?? 0n;
     const limbs = [0, 1, 2, 3].map((limb) => `0x${((value >> BigInt(limb * 64)) & 0xffffffffffffffffn).toString(16)}ULL`);
     // Wrapped in a cast because a braced initializer is a statement rather than
     // an expression in C, and an initializer list is not something a ternary
     // arm or an argument may be written as.
-    return `(blaze_u256){${limbs.join(", ")}}`;
+    return `(${type === "i256" ? "blaze_i256" : "blaze_u256"}){${limbs.join(", ")}}`;
   }
   const width = UNSIGNED_WIDTHS[type];
   if (width !== undefined) {

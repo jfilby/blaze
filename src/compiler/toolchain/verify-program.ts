@@ -145,7 +145,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // program, so that the oracle is the source as it was written rather than a
   // source that cannot run at all.
   const deno = readFileSync(request.sourcePath, "utf8");
-  const before = readsDenoArgs(deno) ? ["--import", DENO_PRELUDE] : [];
+  const before = readsDenoArgs(deno) ? ["--experimental-transform-types", "--import", DENO_PRELUDE] : ["--experimental-transform-types"];
   const source = run(toolchain, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({

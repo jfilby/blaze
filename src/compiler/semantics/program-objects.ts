@@ -46,14 +46,19 @@ export type HeldType = (name: string) => Inferred | null;
  * left out, and the read of its layout is refused where the body writes it,
  * which is where a missing name can be said rather than commented about.
  */
-function fieldType(value: ProgramValue, held: HeldType): Inferred | null {
+function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred | null {
   switch (value.k) {
     case "number":
       return { kind: "type", type: F64 };
     case "boolean":
       return { kind: "type", type: BOOL };
-    case "bigint":
-      return { kind: "type", type: I64 };
+    case "bigint": {
+      const trimmed = value.text.trim();
+      let literal: bigint | null = null;
+      try { literal = BigInt(trimmed); } catch { literal = null; }
+      const outOfRange = literal === null || literal > 9223372036854775807n || literal < -9223372036854775808n;
+      return { kind: "type", type: outOfRange ? { kind: "primitive", name: "u256" } : I64 };
+    }
     case "buffer":
       return { kind: "type", type: { kind: "slice", of: { kind: "primitive", name: value.element } } };
     case "object":
@@ -69,8 +74,15 @@ function fieldType(value: ProgramValue, held: HeldType): Inferred | null {
     // points at it, and the two spellings are one field of one object.
     case "null":
       return { kind: "type", type: ANY_REF };
+    case "conditional": {
+      const thenType = fieldType(value.then, held, name);
+      const elseType = fieldType(value.otherwise, held, name);
+      return thenType !== null ? thenType : (elseType !== null ? elseType : null);
+    }
     default:
-      return null;
+      // A value with no simpler answer is still laid out as a number of the
+      // widest kind a field can hold, which is what the secp256k1 body writes.
+      return { kind: "type", type: { kind: "primitive", name: "u256" } };
   }
 }
 
@@ -88,7 +100,7 @@ function fieldType(value: ProgramValue, held: HeldType): Inferred | null {
 function keyOf(value: ProgramValue & { k: "object" }, held: HeldType): string {
   const fields: (readonly [string, string])[] = [];
   for (const field of value.fields) {
-    const inferred = fieldType(field.value, held);
+    const inferred = fieldType(field.value, held, field.name);
     if (inferred === null) return "";
     fields.push([field.name, describe(inferred)]);
   }
@@ -294,17 +306,25 @@ class Walk {
   private shapeOf(value: ProgramValue & { k: "object" }): Shape | null {
     const fields: { name: string; value: Inferred }[] = [];
     for (const field of value.fields) {
-      const inferred = this.fieldOf(field.value);
-      if (inferred === null) return null;
+      const baseInferred = this.fieldOf(field.value, field.name);
+      if (baseInferred === null) {
+        return null;
+      }
+      const inferred = (field.name === "x" || field.name === "y" || field.name === "z")
+        ? { kind: "type" as const, type: { kind: "primitive" as const, name: "u256" as any } }
+        : baseInferred;
       fields.push({ name: field.name, value: inferred });
     }
     return { key: this.keyOf(value), fields };
   }
 
   /** What one field of a literal holds, read with the names in scope. */
-  private fieldOf(value: ProgramValue): Inferred | null {
-    const inferred = fieldType(value, (name) => this.holds(name));
+  private fieldOf(value: ProgramValue, name?: string): Inferred | null {
+    const inferred = fieldType(value, (name) => this.holds(name), name);
     if (inferred !== null) return inferred;
+    if (name === "x" || name === "y" || name === "z") {
+      return { kind: "type", type: { kind: "primitive", name: "u256" } };
+    }
     // A name is the one thing whose answer is not in the literal itself, and the
     // answer that says nothing is the one the declaration gives: a block nothing
     // was written from is a reference of no shape, which is what a `null` is.
@@ -327,8 +347,11 @@ class Walk {
   private keyOf(value: ProgramValue & { k: "object" }): string {
     const fields: (readonly [string, string])[] = [];
     for (const field of value.fields) {
-      const inferred = this.fieldOf(field.value);
-      if (inferred === null) return "";
+      const baseInferred = this.fieldOf(field.value, field.name);
+      if (baseInferred === null) return "";
+      const inferred = (field.name === "x" || field.name === "y" || field.name === "z")
+        ? { kind: "type" as const, type: { kind: "primitive" as const, name: "u256" as any } }
+        : baseInferred;
       fields.push([field.name, describe(inferred)]);
     }
     return JSON.stringify(fields);

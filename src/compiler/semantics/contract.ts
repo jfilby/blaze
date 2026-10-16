@@ -41,6 +41,7 @@ const INTEGER_NAMES: Record<string, true> = {
   u64: true,
   usize: true,
   u256: true,
+  i256: true,
   isize: true,
 };
 

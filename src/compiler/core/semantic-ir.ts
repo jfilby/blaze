@@ -49,6 +49,7 @@ export const NUMERIC: readonly PrimitiveTypeName[] = [
   "i16",
   "i32",
   "i64",
+  "i256",
   "u8",
   "u16",
   "u32",
@@ -167,6 +168,7 @@ const WHOLE_RANK: Record<string, number> = {
   u64: 4,
   isize: 4,
   usize: 4,
+  i256: 5,
   u256: 5,
   // A wide number, ranked above every machine word. See the note above.
 };
@@ -186,7 +188,7 @@ const WHOLE_RANK: Record<string, number> = {
  * two limbs and `u512` is eight, and every backend reads this one table rather
  * than a width of its own.
  */
-export const WIDE_LIMBS: Readonly<Record<string, number>> = { u256: 4 };
+export const WIDE_LIMBS: Readonly<Record<string, number>> = { i256: 4, u256: 4 };
 
 /**
  * How many bytes one limb of a wide number is.

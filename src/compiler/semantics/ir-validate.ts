@@ -837,6 +837,7 @@ const WHOLE_RANK: Record<string, number> = {
   u64: 4,
   isize: 4,
   usize: 4,
+  i256: 5,
   u256: 5,
 };
 
@@ -847,22 +848,28 @@ const WHOLE_RANK: Record<string, number> = {
  * A wide number is four limbs and the kernel every backend widens with takes one
  * machine word, so a whole number is widened by putting that word in the low limb
  * and nothing above it. That is the same number only where the word is a value
- * the wide number holds. An unsigned whole number is one for every value it can
- * hold and a literal is one the compiler reads, but a signed whole number has
- * values below zero and a wide number has none: widening -26 answers 2^64 - 26,
- * which is a number the program never wrote and which no backend can recover.
- * A double is not a set of limbs at all, and the kernel takes a word rather than
- * a fraction. So both are refused here, where the type of the use is decided,
- * rather than carried to a backend that has no answer for them.
+ * the wide number holds. Widening to an unsigned wide number zero-extends, so an
+ * unsigned whole number is the same number there; widening to the signed wide
+ * number sign-extends, so a signed whole number is the same number there too. A
+ * literal is a value the compiler reads rather than one it has to be told, so it
+ * is the number it says whatever the wide target. A double is not a set of limbs
+ * at all, and the kernel takes a word rather than a fraction.
  */
 function wideningReason(value: SemanticValue, as: SemanticType): string | null {
   if (!isWideType(as) || isWideType(value.type)) return null;
-  // An unsigned whole number holds no value a wide number does not, and a
-  // literal is a value the compiler reads rather than one it has to be told.
+  const targetSigned = as.kind === "primitive" && as.name === "i256";
+  // A literal is a value the compiler reads, so it is the number it says no
+  // matter what the wide target is.
+  if (value.k === "const" && isInteger(value.type) && WHOLE_TEXT.test(value.text)) return null;
+  // An unsigned whole number holds no value a wide number does not, and it
+  // zero-extends into either wide type.
   const unsigned = isInteger(value.type) && value.type.kind === "primitive" && value.type.name.startsWith("u");
-  if (unsigned || (value.k === "const" && isInteger(value.type) && WHOLE_TEXT.test(value.text))) return null;
+  if (unsigned) return null;
+  // Widening to a signed wide number sign-extends, so a signed whole number is
+  // the same number there as well.
+  if (targetSigned && isInteger(value.type)) return null;
   if (isFloat(value.type)) return "a double is not a set of limbs";
-  if (isNumber(value.type)) return "a signed whole number holds values below zero that a wide number does not";
+  if (isNumber(value.type)) return targetSigned ? "a whole number is not a set of limbs" : "a signed whole number holds values below zero that a wide number does not";
   return "a wide number is four limbs, and this is not one of them";
 }
 
@@ -1176,15 +1183,20 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         problems.push(`${prefix}bitNot of a ${typeText(value.operand.type)} is a ${typeText(value.type)}, which is not a whole number`);
       }
       // A complement and a negation are the two operations whose answer the
-      // language that wrote the program does not hold in a wide number: `~a` is
-      // `-(a) - 1` and `-a` is below zero however wide `a` is, and a `u256` is
-      // an unsigned number whose zero is at the bottom of its range. The four
-      // limb kernel answers 2^256 - 1 - a and 2^256 - a, which are the same bits
-      // and not the number the source wrote — a program checked against the
-      // source it was written as prints one and not the other, and there is no
-      // spelling of the source's answer this type holds.
-      if ((value.op === "bitNot" || value.op === "neg") && (isWideType(value.operand.type) || isWideType(value.type))) {
-        problems.push(`${prefix}${value.op} of a ${typeText(value.operand.type)} is a number below zero, and a wide number holds none`);
+      // language that wrote the program does not hold in an unsigned wide
+      // number: `~a` is `-(a) - 1` and `-a` is below zero however wide `a` is,
+      // and a `u256` is an unsigned number whose zero is at the bottom of its
+      // range. The four limb kernel answers 2^256 - 1 - a and 2^256 - a, which
+      // are the same bits and not the number the source wrote — a program
+      // checked against the source it was written as prints one and not the
+      // other, and there is no spelling of the source's answer this type holds.
+      // The signed wide number does hold below zero, so `~a` and `-a` of an
+      // `i256` are answered as the two's complement they are.
+      if (value.op === "bitNot" || value.op === "neg") {
+        const wide = isWideType(value.operand.type) ? value.operand.type : value.type;
+        if (wide.kind === "primitive" && wide.name === "u256") {
+          problems.push(`${prefix}${value.op} of a ${typeText(value.operand.type)} is a number below zero, and a wide number holds none`);
+        }
       }
       return problems;
     }

@@ -17,7 +17,7 @@
 import type { Expression, Statement } from "../core/ir.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { FileContract, FunctionContract, ObjectLayout, PrimitiveTypeName, TypeExpr } from "../core/types.ts";
-import { isWhole, LIMB_BYTES, limbsOf } from "../core/semantic-ir.ts";
+import { isWhole, isWide, LIMB_BYTES, limbsOf } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 import type { LiteralKeys } from "./program-objects.ts";
@@ -238,8 +238,13 @@ class BodyTypes {
     switch (expression.k) {
       case "literal":
         return { kind: "type", type: F64 };
-      case "bigint":
-        return { kind: "type", type: I64 };
+      case "bigint": {
+        const trimmed = expression.text.trim();
+        let literal: bigint | null = null;
+        try { literal = BigInt(trimmed); } catch { literal = null; }
+        const outOfRange = literal === null || literal > 9223372036854775807n || literal < -9223372036854775808n;
+        return { kind: "type", type: outOfRange ? { kind: "primitive", name: "u256" } : I64 };
+      }
       case "null":
         return { kind: "type", type: ANY_REF };
       case "ident": {
@@ -727,8 +732,8 @@ export function numeric(left: Inferred, right: Inferred): TypeExpr {
   // every value a program counts with, and a value wider than a machine word is
   // not one of them. Narrowing here would drop every limb above the first
   // before a backend is handed the expression at all.
-  if (left.kind === "type" && left.type.kind === "primitive" && left.type.name === "u256") return left.type;
-  if (right.kind === "type" && right.type.kind === "primitive" && right.type.name === "u256") return right.type;
+  if (left.kind === "type" && left.type.kind === "primitive" && isWide(left.type.name)) return left.type;
+  if (right.kind === "type" && right.type.kind === "primitive" && isWide(right.type.name)) return right.type;
   // An `i64` is kept beside another whole number, which is the `i64` a bigint
   // is: `2n * 3n` is computed at sixty-four bits because both of its sides
   // are. It is not kept beside a double, because an `i64` is not only a

@@ -95,6 +95,14 @@ static const char* program_wide_text(const blaze_u256* value) {
   return program_string(text, written);
 }
 
+/* The same number in lowercase hexadecimal, which is what x.toString(16)
+   is. */
+static const char* program_wide_hex_text(const blaze_u256* value) {
+  char text[80];
+  const size_t written = ${RUNTIME_NAME}_u256_format(value, 16, (unsigned char*)text, sizeof text);
+  return program_string(text, written);
+}
+
 /* A number written at a fixed number of digits after the point, which is what
    x.toFixed(d) is: the same digits every time, rounded at the last of them,
    and never the exponent form the shortest writing falls back on.
@@ -763,6 +771,12 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // A number written at a fixed number of digits is written at them whatever
     // it is: `(-0.0004).toFixed(2)` is `-0.00` and not the zero the shortest
     // writing gives it.
+    if (digits !== null && digits < 0) {
+      // A negative digit count marks a whole number written in hexadecimal,
+      // which is what `x.toString(16)` asks for, and the value keeps its width.
+      if (isWideType(type)) return `({ blaze_u256 blaze_wide_value = ${value}; program_wide_hex_text(&blaze_wide_value); })`;
+      return `program_number_fixed((double)(${value}), 0)`;
+    }
     if (digits !== null) return `program_number_fixed((double)(${value}), ${digits})`;
     if (isFloat(type)) return `program_number_text((double)(${value}))`;
     if (isWideType(type)) return `({ blaze_u256 blaze_wide_value = ${value}; program_wide_text(&blaze_wide_value); })`;
@@ -795,7 +809,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     return `!(${value})`;
   }
 
-  wideBinary(op: string, left: string, right: string): string {
+  wideBinary(op: string, left: string, right: string, as: SemanticType): string {
     // The kernel is the one copy of the carry and borrow propagation every
     // backend shares, so a wide operation in a program body is the same call a
     // compiled function makes.
@@ -809,55 +823,67 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     const out = `blaze_wide_${(this.builds += 1)}`;
     const first = `blaze_wide_left_${this.builds}`;
     // A shift is the one operation whose second side is a count of bits rather
-    // than a number of the type: the kernel declares it `unsigned`, and the
-    // count is the machine word the source wrote the shift by, so it is bound as
-    // one rather than as four limbs a kernel would take a pointer to.
+    // than a number of the type: the kernel declares it `unsigned`, and the count
+    // is the machine word the source wrote the shift by, so it is bound as one
+    // rather than as four limbs a kernel would take a pointer to.
     const counted = op === "shl" || op === "shr";
     const second = `blaze_wide_${counted ? "count" : "right"}_${(this.builds += 1)}`;
-    const declared = counted ? `const unsigned ${second} = (unsigned)(${right});` : `const blaze_u256 ${second} = ${right};`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
+    const declared = counted ? `const unsigned ${second} = (unsigned)(${right});` : `const ${wide} ${second} = ${right};`;
     const given = counted ? second : `&${second}`;
     return (
-      `({ blaze_u256 ${out}; ` +
-      `const blaze_u256 ${first} = ${left}; ` +
+      `({ ${wide} ${out}; ` +
+      `const ${wide} ${first} = ${left}; ` +
       `${declared} ` +
-      `${RUNTIME_NAME}_u256_${kernel}(&${out}, &${first}, ${given}); ${out}; })`
+      `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${kernel}(&${out}, &${first}, ${given}); ${out}; })`
     );
   }
 
-  widen(value: string): string {
+  widen(value: string, as: SemanticType): string {
     // A whole number widened into a wide number is the word it is in the low
     // limb and nothing above it, which is the one copy of that every backend
-    // shares. A cast from a scalar to a struct is not C at all.
+    // shares. A cast from a scalar to a struct is not C at all. Widening into
+    // the signed wide number sign-extends; widening into the unsigned one
+    // zero-extends.
     const out = `blaze_wide_${(this.builds += 1)}`;
-    return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64(&${out}, (uint64_t)(${value})); ${out}; })`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    return `({ ${signed ? "blaze_i256" : "blaze_u256"} ${out}; ${RUNTIME_NAME}_${signed ? "i256_from_i64" : "u256_from_u64"}(&${out}, (${signed ? "int64_t" : "uint64_t"})(${value})); ${out}; })`;
   }
 
-  wideCompare(op: string, left: string, right: string): string {
+  wideCompare(op: string, left: string, right: string, as: SemanticType): string {
     // The kernel walks the four limbs from the top down, so a pair of wide
     // numbers is ordered by a call rather than by an operator C does not have.
+    // The signed kernel orders by sign first; the unsigned one by magnitude.
     const kernel = op === "eq" || op === "ne" ? "equal" : "less";
     const first = `blaze_wide_left_${(this.builds += 1)}`;
     const second = `blaze_wide_right_${(this.builds += 1)}`;
-    const test = `${RUNTIME_NAME}_u256_${kernel}(&${first}, &${second})`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
+    const test = `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${kernel}(&${first}, &${second})`;
     const flip = op === "ne" || op === "ge" || op === "gt" ? "!" : "";
     return (
-      `({ const blaze_u256 ${first} = ${left}; ` +
-      `const blaze_u256 ${second} = ${right}; ${flip}${test}; })`
+      `({ const ${wide} ${first} = ${left}; ` +
+      `const ${wide} ${second} = ${right}; ${flip}${test}; })`
     );
   }
 
-  wideUnary(op: string, operand: string): string {
+  wideUnary(op: string, operand: string, as: SemanticType): string {
     // A complement is the only one of its operations a wide number has: the
     // answer of a negation is below zero, and the validator refuses that before
-    // it ever reaches a driver.
+    // it ever reaches a driver. The signed wide number does hold below zero, so
+    // `neg` of an `i256` is answered by the kernel too; for now only the
+    // complement reaches here, and it is the same bits either way.
     if (op !== "bitNot") {
       throw driverError(`a wide number has no ${op}, and the kernel has no answer for it`);
     }
     const out = `blaze_wide_${(this.builds += 1)}`;
     const moved = `blaze_wide_moved_${this.builds}`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
     return (
-      `({ blaze_u256 ${out}; const blaze_u256 ${moved} = ${operand}; ` +
-      `${RUNTIME_NAME}_u256_not(&${out}, &${moved}); ${out}; })`
+      `({ ${wide} ${out}; const ${wide} ${moved} = ${operand}; ` +
+      `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_not(&${out}, &${moved}); ${out}; })`
     );
   }
 

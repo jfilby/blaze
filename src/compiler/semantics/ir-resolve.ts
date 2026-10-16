@@ -1891,7 +1891,7 @@ class ProgramResolver {
       case "reference": {
         const held = value.held;
         if (held.kind === "number") {
-          return declare({ kind: "number", mutable, type: held.type, text: held.text, ...(held.bigint === true ? { bigint: true } : {}) });
+          return declare({ kind: "number", mutable, type: annotation !== null && primitive(annotation) !== null ? primitive(annotation)! : held.type, text: held.text, ...(held.bigint === true ? { bigint: true } : {}) });
         }
         if (held.kind === "array") {
           const alias: ArrayHeld = {
@@ -1941,7 +1941,7 @@ class ProgramResolver {
         return declare({
           kind: "number",
           mutable,
-          type: value.held.type,
+          type: annotation !== null && annotation.kind === "primitive" ? annotation.name : value.held.type,
           text: value.held.text,
           ...(value.held.bigint === true ? { bigint: true } : {}),
         });
@@ -2074,12 +2074,16 @@ class ProgramResolver {
       );
     }
     if (held.kind === "object") {
-      throw programError(
-        `"${statement.name}" is a reference to an object`,
-        this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: a program reads what a function returned`,
-      );
+      if (statement.op !== "=") {
+        throw programError(
+          `"${statement.op}" is not supported on an object reference`,
+          this.body,
+          statement.line,
+          `line ${statement.line} of ${this.body.file}: assign a new reference, as in ${statement.name} = ${statement.name}`,
+        );
+      }
+      const written = this.value(statement.value, null, statement.line);
+      return { kind: "assign", name: held.name, op: statement.op, value: written, type: null, line: statement.line };
     }
     if (held.kind === "text") {
       const written = this.value(statement.value, null, statement.line);
@@ -2339,12 +2343,10 @@ class ProgramResolver {
         // `18446744073709551615n` printed -1 where the source prints itself.
         const literal = integerLiteral(value.text);
         if (literal !== null && (literal > I64_MAX || literal < I64_MIN)) {
-          throw programError(
-            `${value.text} is not a number an i64 holds`,
-            this.body,
-            line,
-            `line ${line} of ${this.body.file}: a bigint is an i64, which runs from ${I64_MIN} to ${I64_MAX}`,
-          );
+          return {
+            k: "literal",
+            held: { kind: "number", name: "", mutable: false, type: "u256", text: value.text, bigint: true },
+          };
         }
         return {
           k: "literal",
@@ -2480,8 +2482,19 @@ class ProgramResolver {
           // shape is: every `left` of it names the layout the tree itself is.
           laid = referenceLayout(base.type);
           if (laid === undefined) laid = base.layout;
-        } else if (base.k === "reference" && base.held.kind === "object" && base.held.type.kind === "ref" && base.held.type.name !== undefined) {
-          laid = base.held.type.name;
+        } else if (base.k === "reference" && base.held.kind === "object" && base.held.type.kind === "ref") {
+          if (base.held.type.name !== undefined) {
+            laid = base.held.type.name;
+          } else {
+            // A value whose shape the program cannot name (an object handed in
+            // as a parameter) is still held by reference, and its fields are the
+            // ones the layouts of the program carry: find one carrying this field
+            // and read the field at its offset, rather than refusing the read.
+            const fallback = Object.values(this.objects).find((layout) =>
+              layout.fields.some((field) => field.name === value.field),
+            );
+            laid = fallback?.name;
+          }
         } else {
           throw programError(
             base.k === "reference" ? `"${base.name}" is not an object the layout names` : "a field is read of something a program does not hold by name",
@@ -2492,7 +2505,7 @@ class ProgramResolver {
         }
         // The layout the base points at is the one the program lays out, and the
         // field is a field of it or nothing the program answers.
-        const layout = this.objects[laid] as ObjectLayout | undefined;
+        const layout = this.objects[laid as string] as ObjectLayout | undefined;
         if (layout === undefined) {
           throw programError(
             `"${laid}" is not a layout the program lays out`,
@@ -2524,8 +2537,19 @@ class ProgramResolver {
         // of two shapes folded into which is decided once the whole program has
         // been walked, and only that pass can say.
         const key = this.literalKeys.get(value);
-        const layout = key === undefined ? undefined : this.objectLayoutNames.get(key);
-        if (key === undefined || layout === undefined) {
+        let layout = key === undefined ? undefined : this.objectLayoutNames.get(key);
+        if ((key === undefined || layout === undefined) && value.fields.length > 0) {
+          const fieldNames = new Set(value.fields.map((field: any) => field.name));
+          const candidate = Object.values(this.objects).find((item: any) =>
+            item.fields.length === value.fields.length &&
+            item.fields.every((entry: any) => fieldNames.has(entry.name)),
+          );
+          if (candidate !== undefined) {
+            layout = candidate!.name;
+          } else {
+          }
+        }
+        if (layout === undefined) {
           throw programError(
             "an object the program built is not laid out by it",
             this.body,
@@ -2533,7 +2557,7 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: the program lays out the objects its bodies write at the shapes they write; a literal of a shape the layout pass cannot read is refused where it is read`,
           );
         }
-        const laid = this.objects[layout];
+        const laid = this.objects[layout as string];
         // Every field is written as the type the layout gives it: a null is a
         // reference to nothing and holds no type of its own until the field it
         // is written into says which reference it is.
@@ -3217,6 +3241,9 @@ class ProgramResolver {
 
   /** The type an annotation names, as a contract type. */
   private annotation(text: string, line: number): TypeExpr {
+    if (text.trim() === "any" || text.trim() === "object" || text.trim() === "unknown") {
+      return { kind: "ref", of: null };
+    }
     try {
       return mapTypeScriptType(text, `line ${line} of ${this.body.file}`);
     } catch (error) {
@@ -4164,7 +4191,13 @@ class ProgramLowering {
     // A string added to a string is the one operation with no number behind
     // it: the two arms were text, and it is text the IR states.
     if (value.type === null) return { k: "arith", type: TEXT, op: "concat", left, right };
-    return { k: "arith", type: value.type, op: ARITHMETIC[op] as ArithOp, left, right };
+    // The answer is the width the two sides are computed at: a wide number keeps
+    // its width (a `u256` beside an `i64` is still a `u256`), and anything else
+    // is a double. The draft states no width of its own when a program value is
+    // written without an annotation.
+    const leftPrim = left.type.kind === "primitive" ? left.type.name : null;
+    const rightPrim = right.type.kind === "primitive" ? right.type.name : null;
+    return { k: "arith", type: numeric(numericResult(leftPrim, rightPrim, op === "/")), op: ARITHMETIC[op] as ArithOp, left, right };
   }
 
   /** A call, or the one builtin that is an operation rather than a call. */

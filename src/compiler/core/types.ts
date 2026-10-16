@@ -23,6 +23,7 @@ export type PrimitiveTypeName =
   | "i16"
   | "i32"
   | "i64"
+  | "i256"
   | "u8"
   | "u16"
   | "u32"
@@ -39,6 +40,7 @@ export const PRIMITIVE_TYPES: readonly PrimitiveTypeName[] = [
   "i16",
   "i32",
   "i64",
+  "i256",
   "u8",
   "u16",
   "u32",

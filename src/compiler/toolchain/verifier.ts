@@ -136,6 +136,7 @@ const INTEGER_RANGE: Record<string, readonly [bigint, bigint]> = {
   u64: [0n, 18446744073709551615n],
   usize: [0n, 18446744073709551615n],
   u256: [0n, (1n << 256n) - 1n],
+  i256: [-(1n << 255n), (1n << 255n) - 1n],
 };
 
 /**

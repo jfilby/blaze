@@ -45,6 +45,7 @@ const C_SCALARS: Record<string, string> = {
   i16: "int16_t",
   i32: "int32_t",
   i64: "int64_t",
+  i256: "blaze_i256",
   u8: "uint8_t",
   u16: "uint16_t",
   u32: "uint32_t",
@@ -307,7 +308,8 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[], labe
       // parsed 64 bit number is C the compiler rejects, and a vector written as
       // decimal text names 256 bits of it.
       if (isWideScalar(type)) {
-        body.push(`    if (!blaze_rt_u256_parse(&${name}, token, strlen(token))) fail("malformed value for ${label}");`);
+        const parser = type.name === "i256" ? "blaze_rt_i256_parse" : "blaze_rt_u256_parse";
+        body.push(`    if (!${parser}(&${name}, token, strlen(token))) fail("malformed value for ${label}");`);
       } else {
         body.push(`    ${name} = (${cDeclarationType(type)})${scalarReadExpression(type, "token")};`);
       }
@@ -377,9 +379,11 @@ function resultPrint(returns: TypeExpr): string {
   // the compiler rejects as "aggregate value used where an integer was
   // expected", and the candidate was faulted for a harness the compiler wrote.
   if (isWideScalar(returns)) {
+    const name = returns.kind === "primitive" ? returns.name : "u256";
+    const formatter = name === "i256" ? "blaze_rt_i256_format" : "blaze_rt_u256_format";
     return [
       "{ char wide_text[80];",
-      "  const size_t wide_written = blaze_rt_u256_format(&value, 10, (unsigned char*)wide_text, sizeof wide_text);",
+      `  const size_t wide_written = ${formatter}(&value, 10, (unsigned char*)wide_text, sizeof wide_text);`,
       '  printf("RESULT %.*s\\n", (int)wide_written, wide_text); }',
     ].join("\n  ");
   }
@@ -506,7 +510,7 @@ int main(void) {
   const long long start = now_ns();
   for (long long iteration = 0; iteration < iterations; iteration += 1) {
     ${invocation}
-    sink += ${isWideScalar(returns) ? "(double)blaze_rt_u256_to_u64(&value)" : "(double)value"};
+    sink += ${isWideScalar(returns) ? `(double)${returns.kind === "primitive" && returns.name === "i256" ? "blaze_rt_i256_to_i64" : "blaze_rt_u256_to_u64"}(&value)` : "(double)value"};
   }
   const long long elapsed = now_ns() - start;
   printf("BENCH %lld %.17g\\n", elapsed, (double)sink);

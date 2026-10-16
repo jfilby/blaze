@@ -80,7 +80,7 @@ function defaultScalar(type: TypeExpr): string {
   // the initializer list that says which limb is which. Written as `0` it is
   // `passing argument 1 of 'wide' from incompatible pointer type`, and the
   // candidate was faulted for a call the harness wrote.
-  if (type.kind === "primitive" && type.name === "u256") return cLiteral("0", "u256");
+  if (type.kind === "primitive" && (type.name === "u256" || type.name === "i256")) return cLiteral("0", type.name);
   return "0";
 }
 

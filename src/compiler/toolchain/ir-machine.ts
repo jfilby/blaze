@@ -5984,7 +5984,18 @@ class Machine {
     }
     this.at(value, value.type);
     this.code.movRegReg(WIDE_WORK[0], RAX);
-    for (let limb = 1; limb < WIDE_WORK.length; limb += 1) this.code.alu("xor", WIDE_WORK[limb], WIDE_WORK[limb], false);
+    // A widening into a signed wide number sign-extends: the upper limbs are a
+    // copy of the low one shifted arithmetically so every bit above it is the
+    // sign bit. An unsigned one zeroes them.
+    const signed = signedOf(value.type);
+    for (let limb = 1; limb < WIDE_WORK.length; limb += 1) {
+      if (signed) {
+        this.code.movRegReg(WIDE_WORK[limb], RAX);
+        this.code.shiftImm("sar", WIDE_WORK[limb], 63);
+      } else {
+        this.code.alu("xor", WIDE_WORK[limb], WIDE_WORK[limb], false);
+      }
+    }
   }
 
   /**
@@ -6282,7 +6293,8 @@ class Machine {
     this.code.leaMemReg(mem(RSP, result.offset), RDI);
     this.code.leaMemReg(mem(RSP, a.offset), RSI);
     this.code.leaMemReg(mem(RSP, b.offset), RDX);
-    this.library(`${RUNTIME_NAME}_u256_${op}`);
+    const signed = type.kind === "primitive" && type.name === "i256";
+    this.library(`${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${op}`);
     // The kernel writes its answer through the first pointer, so it is in the
     // slot that pointer names and not in the registers. Every other wide value
     // is left in the working registers by whatever produced it, and the caller

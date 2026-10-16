@@ -836,7 +836,7 @@ ${anchor}
     return `not (${value})`;
   }
 
-  wideBinary(op: string, _left: string, _right: string): string {
+  wideBinary(op: string, _left: string, _right: string, _as: SemanticType): string {
     // The wide kernel is four limbs of carry and borrow propagation, written
     // once in C and shared by every backend that has it. This runtime has no
     // `u256` at all, so a program that computes one here is refused by name
@@ -851,7 +851,7 @@ ${anchor}
     });
   }
 
-  widen(_value: string): string {
+  widen(_value: string, _as: SemanticType): string {
     // The same reason as the binary above: a `u256` is four limbs and this
     // runtime declares no such type, so a whole number widened into one is
     // refused by name rather than written as a type this target does not have.
@@ -865,7 +865,7 @@ ${anchor}
     });
   }
 
-  wideCompare(_op: string, _left: string, _right: string): string {
+  wideCompare(_op: string, _left: string, _right: string, _as: SemanticType): string {
     // The same reason as the binary above: ordering two wide numbers is the
     // kernel's walk of four limbs and this runtime declares no such type.
     throw new CompilerError({
@@ -878,7 +878,7 @@ ${anchor}
     });
   }
 
-  wideUnary(_op: string, _operand: string): string {
+  wideUnary(_op: string, _operand: string, _as: SemanticType): string {
     // The same reason again: a complement and a negation cover all four limbs.
     throw new CompilerError({
       category: "ContractError",

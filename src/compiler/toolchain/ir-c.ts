@@ -739,7 +739,7 @@ class FunctionEmitter {
     // conversion to a non-scalar type, which is not a C source at all. The one
     // conversion there is to a wide number is the widening, and it is the
     // kernel's.
-    if (isWideType(as)) return this.widen(written, value);
+    if (isWideType(as)) return this.widen(written, value, as);
     if (isNumber(value.type) && isNumber(as)) {
       return value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name
         ? written
@@ -758,7 +758,7 @@ class FunctionEmitter {
    * no form here — a double is not a set of limbs, and the kernel takes a word —
    * so it is refused at the point where the cast used to be written.
    */
-  private widen(written: string, value: SemanticValue): string {
+  private widen(written: string, value: SemanticValue, as: SemanticType): string {
     if (isWideType(value.type)) return written;
     if (!isInteger(value.type)) {
       throw new CompilerError({
@@ -771,7 +771,8 @@ class FunctionEmitter {
       });
     }
     const out = this.temporary("blaze_wide");
-    return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64(&${out}, (uint64_t)(${written})); ${out}; })`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    return `({ ${signed ? "blaze_i256" : "blaze_u256"} ${out}; ${RUNTIME_NAME}_${signed ? "i256_from_i64" : "u256_from_u64"}(&${out}, (${signed ? "int64_t" : "uint64_t"})(${written})); ${out}; })`;
   }
 
   private raw(value: SemanticValue, depth: number): string {
@@ -782,7 +783,7 @@ class FunctionEmitter {
         // float as the text it was given, so a text constant came out as a
         // bare identifier the C compiler has never heard of.
         if (isTextType(value.type)) return cStringLiteral(value.text);
-        if (isWideType(value.type)) return cLiteral(value.text, "u256");
+        if (isWideType(value.type)) return cLiteral(value.text, value.type.kind === "primitive" ? value.type.name : "u256");
         return cLiteral(value.text, isNumber(value.type) && value.type.kind === "primitive" ? value.type.name : "f64");
       case "bool":
         return value.value ? "1" : "0";
@@ -821,10 +822,12 @@ class FunctionEmitter {
         if (value.op === "bitNot" && isWideType(value.type)) {
           const out = this.temporary("blaze_wide");
           const moved = this.temporary("blaze_wide");
+          const signed = value.type.kind === "primitive" && value.type.name === "i256";
+          const wide = signed ? "blaze_i256" : "blaze_u256";
           return (
-            `({ blaze_u256 ${out}; ` +
-            `blaze_u256 ${moved} = ${this.expression(value.operand, value.type, depth)}; ` +
-            `${RUNTIME_NAME}_u256_not(&${out}, &${moved}); ${out}; })`
+            `({ ${wide} ${out}; ` +
+            `${wide} ${moved} = ${this.expression(value.operand, value.type, depth)}; ` +
+            `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_not(&${out}, &${moved}); ${out}; })`
           );
         }
         if (value.op === "bitNot") return `(~${operand})`;
@@ -841,12 +844,14 @@ class FunctionEmitter {
         if (isWideType(value.operand)) {
           const left = this.temporary("blaze_wide");
           const right = this.temporary("blaze_wide");
+          const signed = value.operand.kind === "primitive" && value.operand.name === "i256";
+          const wide = signed ? "blaze_i256" : "blaze_u256";
           const kernel = value.op === "eq" || value.op === "ne" ? "equal" : "less";
-          const test = `${RUNTIME_NAME}_u256_${kernel}(&${left}, &${right})`;
+          const test = `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${kernel}(&${left}, &${right})`;
           const flip = (value.op === "ne" || value.op === "ge" || value.op === "gt") ? "!" : "";
           return (
-            `({ const blaze_u256 ${left} = ${this.expression(value.left, value.operand, depth)}; ` +
-            `const blaze_u256 ${right} = ${this.expression(value.right, value.operand, depth)}; ` +
+            `({ const ${wide} ${left} = ${this.expression(value.left, value.operand, depth)}; ` +
+            `const ${wide} ${right} = ${this.expression(value.right, value.operand, depth)}; ` +
             `${flip}${test}; })`
           );
         }
@@ -1025,21 +1030,25 @@ class FunctionEmitter {
       const out = this.temporary("blaze_wide");
       const moved = this.temporary("blaze_wide");
       const count = this.temporary("blaze_shift");
+      const signed = value.type.kind === "primitive" && value.type.name === "i256";
+      const wide = signed ? "blaze_i256" : "blaze_u256";
       return (
-        `({ blaze_u256 ${out}; ` +
-        `blaze_u256 ${moved} = ${this.expression(value.left, value.type, depth)}; ` +
+        `({ ${wide} ${out}; ` +
+        `${wide} ${moved} = ${this.expression(value.left, value.type, depth)}; ` +
         `const unsigned ${count} = (unsigned)${this.expression(value.right, USIZE, depth)}; ` +
-        `${RUNTIME_NAME}_u256_${value.op}(&${out}, &${moved}, ${count}); ${out}; })`
+        `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${value.op}(&${out}, &${moved}, ${count}); ${out}; })`
       );
     }
     const out = this.temporary("blaze_wide");
     const left = this.temporary("blaze_wide");
     const right = this.temporary("blaze_wide");
+    const signed = value.type.kind === "primitive" && value.type.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
     return (
-      `({ blaze_u256 ${out}; ` +
-      `const blaze_u256 ${left} = ${this.expression(value.left, value.type, depth)}; ` +
-      `const blaze_u256 ${right} = ${this.expression(value.right, value.type, depth)}; ` +
-      `${RUNTIME_NAME}_u256_${value.op}(&${out}, &${left}, &${right}); ${out}; })`
+      `({ ${wide} ${out}; ` +
+      `const ${wide} ${left} = ${this.expression(value.left, value.type, depth)}; ` +
+      `const ${wide} ${right} = ${this.expression(value.right, value.type, depth)}; ` +
+      `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${value.op}(&${out}, &${left}, &${right}); ${out}; })`
     );
   }
 
@@ -1242,9 +1251,11 @@ class FunctionEmitter {
       // error. A call that ran once per use of the value is bound for the same
       // reason the whole-number path binds it.
       const wide = this.temporary("blaze_wide_value");
+      const signed = type !== null && type.kind === "primitive" && type.name === "i256";
+      const wideType = signed ? "blaze_i256" : "blaze_u256";
       return {
         text:
-          `({ blaze_u256 ${wide} = ${read}; ${written} = ${RUNTIME_NAME}_u256_format(&${wide}, 10u, ` +
+          `({ ${wideType} ${wide} = ${read}; ${written} = ${RUNTIME_NAME}_${signed ? "i256" : "u256"}_format(&${wide}, 10u, ` +
           `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`,
         length: written,
       };

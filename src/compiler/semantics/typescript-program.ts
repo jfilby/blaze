@@ -307,6 +307,12 @@ class ProgramParser {
       return { kind: "update", name, op, prefix: true, line };
     }
     if (this.at("console")) return this.print();
+    if (this.at("throw")) {
+      this.next();
+      this.synchronize(";");
+      this.accept(";");
+      return null;
+    }
     if (this.at("return")) {
       this.next();
       const value = this.value();
@@ -838,6 +844,7 @@ class ProgramParser {
       // writes a number into every element of an array. Both are written of
       // whatever the value is, and both answer the value they were written of.
       if (member === "toFixed" && this.at("(")) return this.fixed(value);
+      if (member === "toString" && this.at("(")) return this.hexString(value);
       if (member === "fill" && this.at("(")) return this.filled(value);
       if (value.k === "name") {
         if (member === "length") return { k: "length", of: value.name };
@@ -874,8 +881,13 @@ class ProgramParser {
   private chainedField(value: ProgramValue): ProgramValue {
     let read = value;
     while (read.k === "field" && this.at(".")) {
+      const dot = this.peek();
       this.next();
-      read = { k: "field", object: read, field: this.identifier("the property of a value") };
+      const member = this.identifier("the property of a value");
+      if (member === "toFixed" && this.at("(")) return this.fixed(read);
+      if (member === "toString" && this.at("(")) return this.hexString(read);
+      if (member === "fill" && this.at("(")) return this.filled(read);
+      read = { k: "field", object: read, field: member };
     }
     return read;
   }
@@ -914,6 +926,26 @@ class ProgramParser {
       this.fail("a number is what is written at a fixed number of digits; a string is already text", open);
     }
     return { k: "fixed", of, digits: Number(digits.text) };
+  }
+
+  /** `x.toString(16)`: a wide number written as lowercase hexadecimal text. */
+  private hexString(of: ProgramValue): ProgramValue {
+    const open = this.peek();
+    this.next();
+    const token = this.peek();
+    if (token.kind !== "number" || token.text !== "16") {
+      this.fail("toString(16) writes a number as hexadecimal text", token);
+      this.skipArguments();
+      return of;
+    }
+    this.next();
+    if (!this.at(")")) this.fail("x.toString(16) takes one radix", this.peek());
+    this.expect(")");
+    if (of.k === "text" || of.k === "fixed") {
+      this.fail("a number is what is written as hexadecimal text; a string is already text", open);
+      return of;
+    }
+    return { k: "fixed", of, digits: -1 };
   }
 
   /** A value on its own. */
@@ -997,9 +1029,15 @@ class ProgramParser {
     const fields: { name: string; value: ProgramValue }[] = [];
     if (!this.at("}")) {
       for (;;) {
+        if (this.at("}")) break;
         const name = this.identifier("the name of a field");
-        this.expect(":");
-        fields.push({ name, value: this.value() });
+        let value: ProgramValue;
+        if (this.accept(":")) {
+          value = this.value();
+        } else {
+          value = { k: "name", name };
+        }
+        fields.push({ name, value });
         if (!this.accept(",")) break;
       }
     }
