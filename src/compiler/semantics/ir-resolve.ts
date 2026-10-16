@@ -2526,7 +2526,7 @@ class ProgramResolver {
         return {
           k: "field",
           object: base,
-          layout: laid,
+          layout: laid as string,
           field: value.field,
           type: parseType(found.type),
         };
@@ -4194,10 +4194,20 @@ class ProgramLowering {
     // The answer is the width the two sides are computed at: a wide number keeps
     // its width (a `u256` beside an `i64` is still a `u256`), and anything else
     // is a double. The draft states no width of its own when a program value is
-    // written without an annotation.
+    // written without an annotation. A whole operator keeps the width its two
     const leftPrim = left.type.kind === "primitive" ? left.type.name : null;
     const rightPrim = right.type.kind === "primitive" ? right.type.name : null;
-    return { k: "arith", type: numeric(numericResult(leftPrim, rightPrim, op === "/")), op: ARITHMETIC[op] as ArithOp, left, right };
+    // A whole operator keeps the width its two whole sides are computed at:
+    // `i % 2` is `i64`, not the `f64` the two sides were each read as when one
+    // of them was a count. `>>>` is a converting operator: it reads both sides
+    // as unsigned 32 bit numbers and answers one of those, so its type is the
+    // one the draft already fixed and not the width either side was read at.
+    const type = CONVERTING_OPERATORS.includes(op)
+      ? value.type
+      : WHOLE_OPERATORS.includes(op)
+        ? numeric(wholeResult(leftPrim, rightPrim))
+        : numeric(numericResult(leftPrim, rightPrim, op === "/"));
+    return { k: "arith", type, op: ARITHMETIC[op] as ArithOp, left, right };
   }
 
   /** A call, or the one builtin that is an operation rather than a call. */

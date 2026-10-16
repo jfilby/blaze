@@ -306,13 +306,10 @@ class Walk {
   private shapeOf(value: ProgramValue & { k: "object" }): Shape | null {
     const fields: { name: string; value: Inferred }[] = [];
     for (const field of value.fields) {
-      const baseInferred = this.fieldOf(field.value, field.name);
-      if (baseInferred === null) {
+      const inferred = this.fieldOf(field.value, field.name);
+      if (inferred === null) {
         return null;
       }
-      const inferred = (field.name === "x" || field.name === "y" || field.name === "z")
-        ? { kind: "type" as const, type: { kind: "primitive" as const, name: "u256" as any } }
-        : baseInferred;
       fields.push({ name: field.name, value: inferred });
     }
     return { key: this.keyOf(value), fields };
@@ -322,9 +319,6 @@ class Walk {
   private fieldOf(value: ProgramValue, name?: string): Inferred | null {
     const inferred = fieldType(value, (name) => this.holds(name), name);
     if (inferred !== null) return inferred;
-    if (name === "x" || name === "y" || name === "z") {
-      return { kind: "type", type: { kind: "primitive", name: "u256" } };
-    }
     // A name is the one thing whose answer is not in the literal itself, and the
     // answer that says nothing is the one the declaration gives: a block nothing
     // was written from is a reference of no shape, which is what a `null` is.
@@ -347,11 +341,8 @@ class Walk {
   private keyOf(value: ProgramValue & { k: "object" }): string {
     const fields: (readonly [string, string])[] = [];
     for (const field of value.fields) {
-      const baseInferred = this.fieldOf(field.value, field.name);
-      if (baseInferred === null) return "";
-      const inferred = (field.name === "x" || field.name === "y" || field.name === "z")
-        ? { kind: "type" as const, type: { kind: "primitive" as const, name: "u256" as any } }
-        : baseInferred;
+      const inferred = this.fieldOf(field.value, field.name);
+      if (inferred === null) return "";
       fields.push([field.name, describe(inferred)]);
     }
     return JSON.stringify(fields);
