@@ -1126,11 +1126,12 @@ test("a program refuses what the language has no answer for", () => {
     diagnostic(() => resolved({ "main.ts": ["console.log(7.5 % 2);", ""].join("\n") })),
     /"%" needs whole numbers/,
   );
-  // A bigint is an i64 here, and a literal outside that range was written out
-  // as the low sixty-four bits of itself: `18446744073709551615n` printed -1.
-  assert.match(
-    diagnostic(() => resolved({ "main.ts": ["console.log(18446744073709551615n);", ""].join("\n") })),
-    /18446744073709551615 is not a number an i64 holds/,
+  // A bigint outside the i64 range is a `u256`, which the program holds at
+  // four limbs: the `n` after it is preserved, so the source prints what it
+  // wrote and the build does not refuse it.
+  assert.deepEqual(
+    semanticIrProblems(resolved({ "main.ts": ["console.log(18446744073709551615n);", ""].join("\n") })),
+    [],
   );
   // The ends of the range are the numbers themselves, and are kept.
   assert.deepEqual(

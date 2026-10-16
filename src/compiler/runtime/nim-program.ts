@@ -249,7 +249,7 @@ const NIM_INTEGERS: Record<string, NimInteger> = {
   i16: { type: "int16", suffix: "'i16", low: -32768n, high: 32767n },
   i32: { type: "int32", suffix: "'i32", low: -2147483648n, high: 2147483647n },
   i64: { type: "int64", suffix: "'i64", low: -9223372036854775808n, high: 9223372036854775807n },
-  isize: { type: "clong", suffix: "'isize", low: -9223372036854775808n, high: 9223372036854775807n },
+  isize: { type: "clong", suffix: ".clong", low: -9223372036854775808n, high: 9223372036854775807n },
   u8: { type: "uint8", suffix: "'u8", low: 0n, high: 255n },
   u16: { type: "uint16", suffix: "'u16", low: 0n, high: 65535n },
   u32: { type: "uint32", suffix: "'u32", low: 0n, high: 4294967295n },
