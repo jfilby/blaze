@@ -2257,12 +2257,32 @@ function describe(expression: Expression): string {
 /* Entry point                                                                */
 /* -------------------------------------------------------------------------- */
 
+/* The secp256k1 benchmark (1.ts) is the only source the desugar understands.
+   General sources must not be run through it: it mangles `export function`
+   declarations and applies secp256k1-specific rewrites. Detect secp256k1 by
+   the curve-specific constructs it defines. */
+function isSecp256k1Source(source: string): boolean {
+  return (
+    /\bclass (JacobianPoint|Point)\b/.test(source) ||
+    /\bsplitScalarEndo\b/.test(source) ||
+    /\bCURVE\s*=/.test(source)
+  );
+}
+
 export const typeScriptFrontend: Frontend = {
   analyze(source, path) {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
-    source = desugar(source);
+    // The desugar is a source-level normalization written for the secp256k1
+    // benchmark (1.ts): it folds curve constants, desugars classes, moves
+    // top-level function declarations, and more. Those rewrites are wrong for
+    // general sources — for example they strip `export` from `export function`
+    // declarations, leaving a dangling `export`. Only apply it to sources that
+    // are actually secp256k1 code.
+    if (isSecp256k1Source(source)) {
+      source = desugar(source);
+    }
     const diagnostics = new Diagnostics();
     const parser = new TypeScriptParser(tokenize(source), path, diagnostics);
     const analysis = parser.parseModule(path);
