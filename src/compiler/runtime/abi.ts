@@ -1128,6 +1128,16 @@ void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256
 void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
   /* left and out may alias (when the caller writes the remainder back into the
      dividend), so copy left into a temporary before divmod zeroes out. */
+  uint64_t c;
+  if (special_prime_c(right, &c)) {
+    /* For special primes 2^256 - c with c < 2^64, left < 2^256 so at most one
+       conditional subtraction suffices: left mod mod = left - mod if left >= mod. */
+    *out = *left;
+    if (!blaze_rt_u256_less(out, right)) {
+      blaze_rt_u256_sub(out, out, right);
+    }
+    return;
+  }
   blaze_u256 tmp = *left;
   blaze_u256 quotient;
   blaze_u256_divmod(&quotient, out, &tmp, right);
