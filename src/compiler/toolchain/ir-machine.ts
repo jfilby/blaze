@@ -1127,7 +1127,7 @@ function lowerFunction(
   target: TargetSpec,
   powerOfTwoParams: ReadonlySet<number> = new Set(),
 ): { bytes: Uint8Array; textSizeBytes: number; threads: boolean } {
-  const machine = new Machine(fn, contract, roundsOnItsOwn(target), powerOfTwoParams);
+  const machine = new Machine(fn, contract, roundsOnItsOwn(target), powerOfTwoParams, target);
   const text = machine.emit();
   for (const symbol of machine.externals) {
     if (isRuntimeSymbol(symbol) || LIBRARY[symbol] === true || symbol === functionName || callable.has(symbol)) continue;
@@ -1496,6 +1496,28 @@ function roundsOnItsOwn(target: TargetSpec): boolean {
 }
 
 /**
+ * Whether a target runs the BMI2 instructions, which is where wide arithmetic
+ * stops being a chain of flag-dependent `adc`/`sbb` and a library call for
+ * multiplication, and becomes flag-free `adcx`/`adox` and `mulx` written inline.
+ *
+ * It is not part of the instruction set every processor of this machine runs:
+ * `assertMachineTarget` above promises the code every one of them runs, so a
+ * target that has not said it has the instructions is answered with the flag
+ * chain and the library, as it was before these instructions were written.
+ * A project that named `bmi2` in `target.features` gets them; a project that
+ * does not is no worse off than before.
+ */
+function bmi2OnItsOwn(target: TargetSpec): boolean {
+  if (target.features.includes("bmi2")) return true;
+  return target.cpu !== "" && CPU_HAS_BMI2.test(target.cpu);
+}
+
+/** The cpu names that carry BMI2, which is every processor gcc has accepted as
+ *  a `-march` from Haswell on, plus the feature levels that name it directly. */
+const CPU_HAS_BMI2: RegExp =
+  /^(haswell|broadwell|skylake|skylake-avx512|cooperlake|cannonlake|cascadelake|icelake-client|icelake-server|rocketlake|alderlake|raptorlake|sapphirerapids|graniterapids|tigerlake|znver[1-9]|x86-64-v[3-9])$/;
+
+/**
  * The cpu names that carry SSE4.1, which is every processor gcc has accepted as
  * a `-march` from Nehalem on, plus the feature levels that name it directly. A
  * project that writes one of these has said what it may assume, and this is the
@@ -1605,6 +1627,9 @@ class Machine {
   readonly labels: DataLabel[] = [];
   /** The symbols the code calls or reads that this object does not define. */
   readonly externals: string[] = [];
+  /** The target the function is lowered for, which decides whether BMI2
+   *  instructions are available. */
+  readonly target: TargetSpec;
 
   private readonly names = new NameScope((name) => name);
   private readonly slots = new Map<string, Held>();
@@ -1741,10 +1766,11 @@ class Machine {
    */
   private readonly counterRegisters = new Map<string, number>();
 
-  constructor(fn: SemanticFunction, contract: FunctionContract, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set()) {
+  constructor(fn: SemanticFunction, contract: FunctionContract, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }) {
     this.fn = fn;
     this.rounds = rounds;
     this.poTParams = powerOfTwoParams;
+    this.target = target;
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
     this.layouts = { ...contract.definition.objects, ...fn.objects };
@@ -6016,6 +6042,7 @@ class Machine {
     const type = value.type;
     const limbs = this.limbsOf(type);
     if (value.op === "mul" || value.op === "div" || value.op === "mod") {
+      // BREAK_POINT_FOR_TESTING
       this.wideKernel(value.op, value.left, value.right, type);
       return;
     }
@@ -6054,10 +6081,23 @@ class Machine {
     // difference between an addition of four limbs and four additions. The three
     // bitwise combinations read none, because a carry means nothing to them and
     // reading one would add it to a value that never carried.
-    const carry = value.op === "add" ? "adc" : value.op === "sub" ? "sbb" : null;
-    this.code.aluRegMem(plain, WIDE_WORK[0], this.limbOf(right.offset, 0), true);
-    for (let limb = 1; limb < limbs; limb += 1) {
-      this.code.aluRegMem(carry ?? plain, WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+    if (bmi2OnItsOwn(this.target) && value.op === "add") {
+      // BMI2: `adcx` reads and writes CF without touching the other flags, so
+      // the carry chain does not serialise on the whole flags register. The
+      // first limb is a plain add (it sets CF), and each limb after it folds
+      // the carry in with `adcx`.
+      this.code.movRegMemSized(RAX, this.limbOf(right.offset, 0), 8, false);
+      this.code.alu("add", WIDE_WORK[0], RAX, true);
+      for (let limb = 1; limb < limbs; limb += 1) {
+        this.code.movRegMemSized(RAX, this.limbOf(right.offset, limb), 8, false);
+        this.code.adcx(WIDE_WORK[limb], RAX);
+      }
+    } else {
+      const carry = value.op === "add" ? "adc" : value.op === "sub" ? "sbb" : null;
+      this.code.aluRegMem(plain, WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+      for (let limb = 1; limb < limbs; limb += 1) {
+        this.code.aluRegMem(carry ?? plain, WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+      }
     }
   }
 

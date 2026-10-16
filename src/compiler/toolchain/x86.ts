@@ -986,6 +986,73 @@ export class Encoder {
     this.word(value);
   }
 
+  /* ---------------------------------------------------------------------- */
+  /* BMI2 (VEX-encoded)                                                     */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The three-byte VEX prefix (C4 form): `C4`, byte2, byte3.
+   *
+   * Byte 2: [~R][~X][~B][mmmmm], where mmmmm selects the opcode map
+   * (00001 = the 0F escape map) and R, X, B are the inverted high bits of
+   * the register fields. Byte 3: [W][~vvvv][pp][L], where W selects 64 bit,
+   * vvvv is an additional source register (inverted), pp is 00 and L is 0.
+   */
+  private vex3(w: boolean, vvvv: number, reg: number, rm: number | { base: number | null; index: number | null }, map = 0b00001): void {
+    this.byte(0xc4);
+    const rBit = (reg >= 8) ? 0 : 1;
+    let xBit = 1;
+    let bBit: number;
+    if (typeof rm === "number") {
+      bBit = (rm >= 8) ? 0 : 1;
+    } else {
+      xBit = ((rm.index ?? 0) >= 8) ? 0 : 1;
+      bBit = ((rm.base ?? 0) >= 8) ? 0 : 1;
+    }
+    const byte2 = (rBit << 7) | (xBit << 6) | (bBit << 5) | map;
+    this.byte(byte2);
+    const vvvvInv = (~vvvv) & 0xf;
+    const byte3 = (w ? 0x80 : 0) | (vvvvInv << 3) | 0;
+    this.byte(byte3);
+  }
+
+  /**
+   * An unsigned 64×64→128 multiply that does not touch the flags:
+   * `high:low = src * low`, with `src` in VEX.vvvv and `low` also a source.
+   * The high half lands in `high` and the low half in `low`, which is
+   * overwritten. Neither operand is read after it is written, so a chain of
+   * these can run without the flag dependency that `imul` leaves behind.
+   */
+  mulx(high: number, low: number, src: number): void {
+    this.vex3(true, src, high, low);
+    this.byte(0xf6);
+    this.modrm(low, high);
+  }
+
+  /**
+   * Add with carry into the carry flag chain, without touching the flags:
+   * `dest = dest + src + CF`. The carry it reads and writes lives in CF and
+   * is independent of the one `adc` uses, so two add chains can run in
+   * parallel without serialising on the flags register.
+   */
+  adcx(dest: number, src: number): void {
+    this.vex3(true, src, 2, dest);
+    this.byte(0xf6);
+    this.modrm(dest, 2);
+  }
+
+  /**
+   * Add with carry into the overflow flag chain, without touching the flags:
+   * `dest = dest + src + OF`. The carry it reads and writes lives in OF and
+   * is independent of both `adc` and `adcx`, so a second carry chain can run
+   * alongside the first.
+   */
+  adox(dest: number, src: number): void {
+    this.vex3(true, src, 3, dest);
+    this.byte(0xf6);
+    this.modrm(dest, 3);
+  }
+
   /** A division of the accumulator by a register, signed or not. */
   divide(kind: "idiv" | "div", source: number, wide = true): void {
     this.rex(wide, 0, source);
