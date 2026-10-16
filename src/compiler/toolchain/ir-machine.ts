@@ -3308,6 +3308,18 @@ class Machine {
         // out as 9007199254740992. The C backend already wrote the digits of an
         // integer rather than handing it over; this is the same answer here.
         const type = statement.value.type;
+        if (isWideType(type)) {
+          // A wide number is printed in hexadecimal, most significant limb
+          // first, by the runtime's u256 hex formatter. The limbs are spilled
+          // to a slot and its address is passed.
+          this.at(statement.value, type);
+          const slot = this.hold(type, "blaze_print_wide");
+          this.wideStore(slot);
+          this.code.leaMemReg(mem(RSP, slot.offset), RDI);
+          this.library("blaze_rt_print_u256_hex");
+          this.freeSlot(slot);
+          return;
+        }
         if (isNumber(type) && isInteger(type)) {
           // A whole number narrower than a word is widened to one first, which
           // is exact and leaves the digits it always had.

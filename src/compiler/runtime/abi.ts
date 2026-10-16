@@ -381,6 +381,7 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_redc(blaze_u256* out, const blaze_u256* T_hi, const blaze_u256* T_lo, const blaze_u256* mod, uint64_t pinv)",
   "void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_or(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_xor(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
@@ -1142,6 +1143,51 @@ void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256
   blaze_u256 quotient;
   blaze_u256_divmod(&quotient, out, &tmp, right);
   (void)quotient;
+}
+
+/* Montgomery REDC: computes (T_hi * 2^256 + T_lo) * R^{-1} mod mod, where
+   R = 2^256 and pinv = -mod^{-1} mod 2^64. When T_lo is zero and T_hi is a
+   256-bit value, this returns T_hi mod mod. The 512-bit input is reduced by
+   folding each low limb into the modulus using the precomputed pinv, which
+   replaces 512 bit-by-bit shift-and-subtract iterations with four
+   multiply-add passes plus one conditional subtraction. */
+void blaze_rt_u256_redc(blaze_u256* out, const blaze_u256* T_hi, const blaze_u256* T_lo, const blaze_u256* mod, uint64_t pinv) {
+  uint64_t t[8];
+  for (unsigned i = 0; i < 4; i += 1) {
+    t[i] = T_lo->limbs[i];
+    t[i + 4] = T_hi->limbs[i];
+  }
+  for (unsigned i = 0; i < 4; i += 1) {
+    /* m = t[i] * pinv mod 2^64, chosen so t[i] + m * mod[0] ≡ 0 (mod 2^64). */
+    uint64_t m = t[i] * pinv;
+    /* t[i..i+3] += m * mod, carry chain runs through the limbs. */
+    unsigned __int128 carry = 0;
+    for (unsigned j = 0; j < 4; j += 1) {
+      const unsigned __int128 product =
+        (unsigned __int128)m * mod->limbs[j];
+      const unsigned __int128 sum =
+        (unsigned __int128)t[i + j] + (uint64_t)product + carry;
+      t[i + j] = (uint64_t)sum;
+      carry = (sum >> 64) + (uint64_t)(product >> 64);
+    }
+    /* Fold the remaining carry into the next limb. */
+    t[i + 4] += (uint64_t)carry;
+    if (carry > 0xffffffffffffffffULL && i + 5 < 8) {
+      uint64_t extra = (uint64_t)(carry >> 64);
+      for (unsigned k = i + 5; k < 8 && extra != 0; k += 1) {
+        const uint64_t old = t[k];
+        t[k] = old + extra;
+        extra = (t[k] < old) ? 1u : 0u;
+      }
+    }
+  }
+  /* t[0..3] are now zero (divisible by 2^256); the result is t[4..7]. */
+  blaze_u256 result;
+  for (unsigned i = 0; i < 4; i += 1) result.limbs[i] = t[4 + i];
+  if (!blaze_rt_u256_less(&result, mod)) {
+    blaze_rt_u256_sub(&result, &result, mod);
+  }
+  *out = result;
 }
 
 /* Widening zero-extends, because the number is unsigned; narrowing keeps the
@@ -2564,6 +2610,15 @@ void blaze_rt_print_whole(long long value, int bigint) {
 }
 void blaze_rt_print_newline(void) {
   fputc('\\n', stdout);
+}
+
+/* Prints one 64 bit limb as eight lowercase hex digits, most significant
+   nibble first. Used to print a u256 in hex, limb by limb from the top down. */
+void blaze_rt_print_hex_u64(uint64_t value) {
+  static const char hex[] = "0123456789abcdef";
+  for (int i = 28; i >= 0; i -= 4) {
+    fputc(hex[(value >> i) & 0xfu], stdout);
+  }
 }
 
 void blaze_rt_raise(const char* message) {
