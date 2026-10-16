@@ -621,10 +621,68 @@ void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256
   *out = accumulator;
 }
 
+/* For a modulus of the form 2^256 - c with c < 2^64 (e.g. secp256k1's
+   P = 2^256 - 2^32 - 977), 2^256 ≡ c (mod mod). A 512-bit value
+   high * 2^256 + low therefore reduces to (high * c + low) mod mod.
+   Since c is a single limb, high * c is just four limb-multiplies, and the
+   result is at most five limbs (~320 bits). Folding the top limb down
+   (top * 2^256 ≡ top * c) terminates in at most three iterations, then one
+   final conditional subtraction of mod. This replaces 512 bit-by-bit shift
+   and compare iterations with a handful of limb operations. */
+static void mul_mod_special(blaze_u256* out, const uint64_t prod[8], const blaze_u256* mod, uint64_t c) {
+  uint64_t t[5] = {0, 0, 0, 0, 0};
+  /* t = high * c, schoolbook with c as a single limb. */
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 product =
+      (unsigned __int128)prod[4 + i] * c + t[i];
+    t[i] = (uint64_t)product;
+    t[i + 1] = (uint64_t)(product >> 64);
+  }
+  /* t += low. */
+  unsigned __int128 carry = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 sum =
+      (unsigned __int128)t[i] + prod[i] + carry;
+    t[i] = (uint64_t)sum;
+    carry = sum >> 64;
+  }
+  t[4] += (uint64_t)carry;
+  /* Fold t[4] * 2^256 down as t[4] * c, repeating until t[4] is zero.
+     Bounded at 8 iterations for safety. */
+  for (unsigned round = 0; round < 8 && t[4] != 0; round += 1) {
+    const unsigned __int128 product =
+      (unsigned __int128)t[4] * c;
+    const uint64_t tc_lo = (uint64_t)product;
+    const uint64_t tc_hi = (uint64_t)(product >> 64);
+    unsigned __int128 cy = 0;
+    for (unsigned i = 0; i < 2; i += 1) {
+      const unsigned __int128 sum =
+        (unsigned __int128)t[i] + (i == 0 ? tc_lo : tc_hi) + cy;
+      t[i] = (uint64_t)sum;
+      cy = sum >> 64;
+    }
+    for (unsigned i = 2; i < 4 && cy != 0; i += 1) {
+      const unsigned __int128 sum =
+        (unsigned __int128)t[i] + cy;
+      t[i] = (uint64_t)sum;
+      cy = sum >> 64;
+    }
+    t[4] = (uint64_t)cy;
+  }
+  /* t[0..3] is now the residue, possibly >= mod. One conditional subtraction. */
+  blaze_u256 result;
+  for (unsigned i = 0; i < 4; i += 1) result.limbs[i] = t[i];
+  if (!blaze_rt_u256_less(&result, mod)) {
+    blaze_rt_u256_sub(&result, &result, mod);
+  }
+  *out = result;
+}
+
 /* Modular multiplication: computes (left * right) mod mod. The full 512 bit
-   product is accumulated in eight limbs, then reduced modulo mod by shifting
-   the high half down bit by bit, subtracting mod whenever the running value
-   reaches it. This is sound for any modulus below 2^256. */
+   product is accumulated in eight limbs. For moduli of the form 2^256 - c
+   with c < 2^64 (top bit of mod set, and c = ~mod + 1 fits in one limb) a
+   fast special-prime reduction is used; otherwise the general bit-by-bit
+   reduction applies. Both are sound for any modulus below 2^256. */
 void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
   uint64_t prod[8];
   for (unsigned i = 0; i < 8; i += 1) prod[i] = 0;
@@ -638,15 +696,30 @@ void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_
     }
     prod[i + 4] = (uint64_t)carry;
   }
+  /* Fast path for special primes: mod > 2^255 and c = 2^256 - mod < 2^64. */
+  if ((mod->limbs[3] >> 63) != 0) {
+    /* c = 2^256 - mod = ~mod + 1 (two's complement). */
+    uint64_t c_limbs[4];
+    for (unsigned i = 0; i < 4; i += 1) c_limbs[i] = ~mod->limbs[i];
+    unsigned __int128 cc = 1;
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 s =
+        (unsigned __int128)c_limbs[i] + cc;
+      c_limbs[i] = (uint64_t)s;
+      cc = s >> 64;
+    }
+    /* c fits in one limb? */
+    if (c_limbs[1] == 0 && c_limbs[2] == 0 && c_limbs[3] == 0) {
+      mul_mod_special(out, prod, mod, c_limbs[0]);
+      return;
+    }
+  }
+  /* General reduction: all 512 bits, most significant bit first. */
   blaze_u256 result = blaze_u256_zero();
   /* Reduce all 512 bits, most significant bit first, so each shift doubles the
      running value and the bit that comes in decides whether one is added.
      Starting from zero and processing every limb (high to low) computes
-     (low_256 + high_256 * 2^256) mod mod, which is the product modulo mod.
-     The previous code started from the low 256 bits and only processed the
-     high 256 bits, which computed (low_256 * 2^256 + high_256) mod mod — the
-     factors were swapped, giving the wrong result whenever the high 256 bits
-     were non-zero. */
+     (low_256 + high_256 * 2^256) mod mod, which is the product modulo mod. */
   for (unsigned i = 8; i-- > 0;) {
     for (unsigned bit = 64; bit-- > 0;) {
       const int overflow = (int)((result.limbs[3] >> 63) & 1u);
@@ -660,6 +733,25 @@ void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_
     }
   }
   *out = result;
+}
+
+/* If mod is of the form 2^256 - c with c < 2^64 (a "special prime" like
+   secp256k1's P = 2^256 - 2^32 - 977), returns 1 and stores c in *c_out.
+   Otherwise returns 0. */
+static int special_prime_c(const blaze_u256* mod, uint64_t* c_out) {
+  if ((mod->limbs[3] >> 63) == 0) return 0;
+  uint64_t c_limbs[4];
+  for (unsigned i = 0; i < 4; i += 1) c_limbs[i] = ~mod->limbs[i];
+  unsigned __int128 cc = 1;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 s =
+      (unsigned __int128)c_limbs[i] + cc;
+    c_limbs[i] = (uint64_t)s;
+    cc = s >> 64;
+  }
+  if (c_limbs[1] != 0 || c_limbs[2] != 0 || c_limbs[3] != 0) return 0;
+  *c_out = c_limbs[0];
+  return 1;
 }
 
 /* Computes 2^256 mod mod. When mod > 2^255, 2^256 < 2 * mod so the answer is
@@ -696,6 +788,39 @@ void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_
     carry = sum >> 64;
   }
   /* out = (left + right) mod 2^256, carry in {0, 1}. */
+  uint64_t c;
+  if (special_prime_c(mod, &c)) {
+    /* Fast path: 2^256 ≡ c (mod mod). */
+    if (!carry) {
+      /* result = out mod mod: out < 2^256, at most one subtraction. */
+      if (!blaze_rt_u256_less(out, mod)) {
+        blaze_rt_u256_sub(out, out, mod);
+      }
+    } else {
+      /* result = (out + c) mod mod. out + c may wrap past 2^256;
+         the wrap bit is 2^256 ≡ c, so add c again. */
+      unsigned __int128 cy = 0;
+      for (unsigned i = 0; i < 4; i += 1) {
+        const unsigned __int128 s =
+          (unsigned __int128)out->limbs[i] + (i == 0 ? c : 0) + cy;
+        out->limbs[i] = (uint64_t)s;
+        cy = s >> 64;
+      }
+      if (cy != 0) {
+        /* Wrapped: out is now small (< 2^64), add c again; result < 2^128 < mod. */
+        unsigned __int128 cy2 = 0;
+        for (unsigned i = 0; i < 4; i += 1) {
+          const unsigned __int128 s =
+            (unsigned __int128)out->limbs[i] + (i == 0 ? c : 0) + cy2;
+          out->limbs[i] = (uint64_t)s;
+          cy2 = s >> 64;
+        }
+      } else if (!blaze_rt_u256_less(out, mod)) {
+        blaze_rt_u256_sub(out, out, mod);
+      }
+    }
+    return;
+  }
   blaze_rt_u256_mod(out, out, mod);
   if (carry) {
     /* result = (out + 2^256) mod mod = (out + pow256) mod mod,
@@ -731,6 +856,46 @@ void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_
       (unsigned __int128)left->limbs[i] - right->limbs[i] - borrow;
     out->limbs[i] = (uint64_t)difference;
     borrow = (difference >> 64) & 1u;
+  }
+  uint64_t c;
+  if (special_prime_c(mod, &c)) {
+    /* Fast path: -2^256 ≡ -c (mod mod). */
+    if (!borrow) {
+      /* result = out mod mod: out < 2^256, at most one subtraction. */
+      if (!blaze_rt_u256_less(out, mod)) {
+        blaze_rt_u256_sub(out, out, mod);
+      }
+    } else {
+      /* result = (out - c) mod mod.
+         out >= c: result = out - c, which is < mod (out - c < 2^256 - c = mod).
+         out < c:  result = out - c + mod = out + 2^256 - 2c.
+                   Compute as out - 2c (256-bit, wraps to out + 2^256 - 2c). */
+      uint64_t diff[4];
+      unsigned __int128 b2 = 0;
+      for (unsigned i = 0; i < 4; i += 1) {
+        const unsigned __int128 d =
+          (unsigned __int128)out->limbs[i] - (i == 0 ? c : 0) - b2;
+        diff[i] = (uint64_t)d;
+        b2 = (d >> 64) & 1u;
+      }
+      if (b2 == 0) {
+        /* out >= c: result = out - c < mod. */
+        for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = diff[i];
+      } else {
+        /* out < c: diff = out - c + 2^256 (wrapped). Subtract c again;
+           result = out + 2^256 - 2c, which is < mod and > 0. */
+        unsigned __int128 b3 = 0;
+        for (unsigned i = 0; i < 4; i += 1) {
+          const unsigned __int128 d =
+            (unsigned __int128)diff[i] - (i == 0 ? c : 0) - b3;
+          diff[i] = (uint64_t)d;
+          b3 = (d >> 64) & 1u;
+        }
+        /* b3 must be 0: diff = out - c + 2^256 >= 2^256 - c > c. */
+        for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = diff[i];
+      }
+    }
+    return;
   }
   if (borrow) {
     /* left < right: true value = out - 2^256 (negative).
