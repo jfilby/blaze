@@ -638,13 +638,16 @@ void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_
     }
     prod[i + 4] = (uint64_t)carry;
   }
-  blaze_u256 result;
-  for (unsigned i = 0; i < 4; i += 1) result.limbs[i] = prod[i];
-  /* Reduce the high 256 bits down, most significant bit first, so each shift
-     doubles the running value and the bit that comes in decides whether one is
-     added. Processing low to high would double in the wrong order and the
-     reduction would not be the remainder modulo mod. */
-  for (unsigned i = 8; i-- > 4;) {
+  blaze_u256 result = blaze_u256_zero();
+  /* Reduce all 512 bits, most significant bit first, so each shift doubles the
+     running value and the bit that comes in decides whether one is added.
+     Starting from zero and processing every limb (high to low) computes
+     (low_256 + high_256 * 2^256) mod mod, which is the product modulo mod.
+     The previous code started from the low 256 bits and only processed the
+     high 256 bits, which computed (low_256 * 2^256 + high_256) mod mod — the
+     factors were swapped, giving the wrong result whenever the high 256 bits
+     were non-zero. */
+  for (unsigned i = 8; i-- > 0;) {
     for (unsigned bit = 64; bit-- > 0;) {
       const int overflow = (int)((result.limbs[3] >> 63) & 1u);
       result.limbs[3] = (result.limbs[3] << 1) | (result.limbs[2] >> 63);
@@ -656,9 +659,6 @@ void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_
       }
     }
   }
-  /* The low 256 bits may still be >= mod (when the product fits in 256 bits
-     and no high-bit reduction happened), so reduce once more. */
-  blaze_rt_u256_mod(&result, &result, mod);
   *out = result;
 }
 
