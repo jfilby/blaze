@@ -1288,11 +1288,16 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
   if (towards <= 0 || span < 0) return null;
   const turns = loop.inclusive ? Math.floor(span / towards) + 1 : Math.ceil(span / towards);
   if (!Number.isSafeInteger(turns) || turns < 2) return null;
-  let chosen: number | null = null;
-  for (const factor of [8, 4, 2]) {
-    if (turns % factor === 0) { chosen = factor; break; }
+  // A loop small enough to write out whole is written out whole: every turn
+  // carries its own counter in the instruction and there is no trip counter,
+  // no test and no step left to pay for. Only a loop larger than that is
+  // written a factor of turns at a time, which still leaves a trip to count.
+  let chosen: number | null = turns <= UNROLLABLE_TURNS ? turns : null;
+  if (chosen === null) {
+    for (const factor of [8, 4, 2]) {
+      if (turns % factor === 0) { chosen = factor; break; }
+    }
   }
-  chosen ??= turns <= UNROLLABLE_TURNS ? turns : null;
   return chosen === null ? null : { factor: chosen, step };
 }
 
