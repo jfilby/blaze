@@ -930,12 +930,20 @@ static void blaze_u256_divmod(blaze_u256* quotient, blaze_u256* remainder, const
   for (int step = blaze_u256_bits(left) - 1; step >= 0; step -= 1) {
     /* What is left moves up one bit and takes the dividend's bit at the bottom.
        A shift by the full width of a limb is undefined in C, so each limb takes
-       the top bit of the one below it rather than being shifted as a number. */
+       the top bit of the one below it rather than being shifted as a number.
+
+       The top bit of the top limb falls off the end when the whole is shifted:
+       that is the 256th bit, which cannot be held. When it is set the shifted
+       value is at least 2^256, which is greater than any divisor below 2^256,
+       so the subtraction always happens and the lost bit is exactly what makes
+       the comparison come out right. */
+    const int overflow = (int)((rest.limbs[3] >> 63) & 1u);
     rest.limbs[3] = (rest.limbs[3] << 1) | (rest.limbs[2] >> 63);
     rest.limbs[2] = (rest.limbs[2] << 1) | (rest.limbs[1] >> 63);
     rest.limbs[1] = (rest.limbs[1] << 1) | (rest.limbs[0] >> 63);
     rest.limbs[0] = (rest.limbs[0] << 1) | ((left->limbs[step / 64] >> (step % 64)) & 1u);
-    if (!blaze_rt_u256_less(&rest, right)) {
+    const int subtract = overflow || !blaze_rt_u256_less(&rest, right);
+    if (subtract) {
       blaze_rt_u256_sub(&rest, &rest, right);
       quotient->limbs[step / 64] |= (uint64_t)1u << (unsigned)(step % 64);
     }
