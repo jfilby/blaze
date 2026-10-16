@@ -24,10 +24,12 @@ of implementing those features.
 - Do take care not to cause an oom with benchmarking and testing.
 - Do use docs/specs to write any helpful specs about the compiler and related
 tools (e.g. blazeup).
+- Do try to optimize the compiler to generate more performance output.
 
 
 ## List of dont's
 
+- Don't edit example or benchmark programs.
 - Don't try to do anything that would require secrets you don't have.
 - Don't edit env files, ask the user to do this for you.
 - Don't look in archived files, they are assumed to be irrelevant.
