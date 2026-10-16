@@ -40,6 +40,7 @@ import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
 import { symbolOf } from "./semantics/contract.ts";
+import { powerOfTwoParams } from "./semantics/power-of-two.ts";
 import type { TargetSpec } from "./core/types.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
 
@@ -101,16 +102,16 @@ async function main(): Promise<void> {
   // handed: the pass rewrites the loops of the functions themselves rather than
   // a copy of them, so it runs here rather than inside `optimizeSemanticProgram`,
   // which is handed the program's own statements and its own bodies.
-  wholeElementArithmetic(
-    [...resolvedByName.values()],
-    phase.body === undefined
-      ? null
-      : resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts).entry,
-  );
+  const resolvedProgram = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
+  wholeElementArithmetic([...resolvedByName.values()], resolvedProgram.entry);
+  // Which arrays hold powers of two, propagated through the call graph, so the
+  // machine backend can strength-reduce division by one of their elements to a
+  // shift.
+  const powerOfTwo = powerOfTwoParams(resolvedByName, resolvedProgram.entry);
   const inlinable: RepairContext = { functions: resolvedByName };
 
   // The program, resolved and folded exactly as a build folds the driver.
-  const program = optimizeSemanticProgram(resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts), inlinable.functions);
+  const program = optimizeSemanticProgram(resolvedProgram, inlinable.functions);
   // The validator refuses rather than answers, so a program that is not one a
   // backend may lower stops here with the reason it gave.
   validateSemanticProgram(program, phase.program, inlinable.functions);
@@ -145,6 +146,7 @@ async function main(): Promise<void> {
         contract,
         target,
         callable,
+        powerOfTwoParams: powerOfTwo.params.get(name),
         objectPath: join(work, `${name}.o`),
       });
       objectPaths.push(join(work, `${name}.o`));

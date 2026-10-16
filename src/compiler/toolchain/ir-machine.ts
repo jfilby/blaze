@@ -522,6 +522,12 @@ export interface MachineRequest {
    * runtime, the C library and these is a reference nothing will resolve.
    */
   callable: ReadonlySet<string>;
+  /**
+   * The parameter indices that hold power-of-two arrays, as `powerOfTwoParams`
+   * computed over the whole program. Division by one of their elements is
+   * division by a power of two and can be strength-reduced to a shift.
+   */
+  powerOfTwoParams?: ReadonlySet<number>;
   /** Where the object is written. */
   objectPath: string;
   candidate?: string;
@@ -573,7 +579,14 @@ export function assertMachineTarget(target: TargetSpec): void {
 export async function buildObject(request: MachineRequest): Promise<MachineResult> {
   assertMachineTarget(request.target);
   const functionName = symbolOf(request.contract);
-  const object = lowerFunction(request.fn, request.contract, functionName, request.callable, request.target);
+  const object = lowerFunction(
+    request.fn,
+    request.contract,
+    functionName,
+    request.callable,
+    request.target,
+    request.powerOfTwoParams,
+  );
   await writeFile(request.objectPath, object.bytes);
   const written = inspectWrittenObject(request.objectPath, functionName);
   if (written.defined.length !== 1 || written.defined[0] !== functionName) {
@@ -1112,8 +1125,9 @@ function lowerFunction(
   functionName: string,
   callable: ReadonlySet<string>,
   target: TargetSpec,
+  powerOfTwoParams: ReadonlySet<number> = new Set(),
 ): { bytes: Uint8Array; textSizeBytes: number; threads: boolean } {
-  const machine = new Machine(fn, contract, roundsOnItsOwn(target));
+  const machine = new Machine(fn, contract, roundsOnItsOwn(target), powerOfTwoParams);
   const text = machine.emit();
   for (const symbol of machine.externals) {
     if (isRuntimeSymbol(symbol) || LIBRARY[symbol] === true || symbol === functionName || callable.has(symbol)) continue;
@@ -1714,10 +1728,23 @@ class Machine {
    * about the function being written.
    */
   private readonly rounds: boolean;
+  /**
+   * The parameter indices that hold power-of-two arrays, so division by one of
+   * their elements can be strength-reduced to a shift.
+   */
+  private readonly poTParams: ReadonlySet<number>;
+  /**
+   * The whole-number registers the counted loops of this function keep their
+   * counters in, keyed by the counter name. A counter that is whole-counted is
+   * stepped in a register of its own rather than held as a double in the frame,
+   * and that register is what a shift count is read out of.
+   */
+  private readonly counterRegisters = new Map<string, number>();
 
-  constructor(fn: SemanticFunction, contract: FunctionContract, rounds = false) {
+  constructor(fn: SemanticFunction, contract: FunctionContract, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set()) {
     this.fn = fn;
     this.rounds = rounds;
+    this.poTParams = powerOfTwoParams;
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
     this.layouts = { ...contract.definition.objects, ...fn.objects };
@@ -2973,7 +3000,19 @@ class Machine {
     // holding the few of them that are live at once rather than the sum of
     // every one the function ever bound.
     const mark = this.borrowed.length;
-    for (const statement of block.statements) this.statement(statement);
+    for (let at = 0; at < block.statements.length; at += 1) {
+      const statement = block.statements[at];
+      const next = block.statements[at + 1];
+      // A `let chunk = Math.floor(X / powers[idx])` followed by an `if` that
+      // tests whether `chunk` is odd is just "bit `idx` of `X` is set" when
+      // `powers` is a power-of-two array: a shift replaces the divide and its
+      // rounding. The `let` and the `if` are replaced together.
+      if (next !== undefined && this.tryPowerOfTwoBitTest(statement, next)) {
+        at += 1;
+        continue;
+      }
+      this.statement(statement);
+    }
     this.freeSlotsSince(mark);
     for (const name of block.releases) this.release(name);
     this.terminator(block.terminator);
@@ -2982,6 +3021,134 @@ class Machine {
     // next here.
     if (block.terminator.k === "jump") this.code.sealJump();
     this.names.leave();
+  }
+
+  /**
+   * The dividend of one power-of-two division, and the element it is divided
+   * by, when one is present. `Math.floor(X / powers[idx])` where `powers` is a
+   * parameter known to hold `2 ** i` at index `i`.
+   */
+  private powerOfTwoDivFloor(
+    value: SemanticValue,
+  ): { readonly value: SemanticValue; readonly index: SemanticValue & { k: "local" }; readonly paramName: string } | null {
+    if (value.k !== "call" || value.call.callee !== "Math.floor") return null;
+    const args = value.call.args;
+    if (args.length !== 1) return null;
+    const div = args[0];
+    if (div.k !== "arith" || div.op !== "div") return null;
+    // Division is not commutative: the divisor is the element read from the
+    // power-of-two array, and the dividend is everything else.
+    if (div.right.k !== "element") return null;
+    const element = div.right;
+    if (element.of.k !== "local" || element.index.k !== "local") return null;
+    return { value: div.left, index: element.index, paramName: element.of.name };
+  }
+
+  /**
+   * Whether one condition tests whether exactly one local `chunk` is odd:
+   * `chunk - Math.floor(chunk / 2) * 2 === 1`, with `chunk` read once on each
+   * side of the subtraction.
+   */
+  private ifTestsOddness(condition: SemanticValue, chunk: string): boolean {
+    if (condition.k !== "compare" || condition.op !== "eq") return false;
+    const { left, right } = condition;
+    if (right.k !== "const" || Number(right.text) !== 1) return false;
+    if (left.k !== "arith" || left.op !== "sub") return false;
+    if (left.left.k !== "local" || left.left.name !== chunk) return false;
+    const mul = left.right;
+    if (mul.k !== "arith" || mul.op !== "mul") return false;
+    const floorDiv = mul.left.k === "call" ? mul.left : mul.right.k === "call" ? mul.right : null;
+    if (floorDiv === null || floorDiv.k !== "call" || floorDiv.call.callee !== "Math.floor") return false;
+    const floorArgs = floorDiv.call.args;
+    if (floorArgs.length !== 1) return false;
+    const innerDiv = floorArgs[0];
+    if (innerDiv.k !== "arith" || innerDiv.op !== "div") return false;
+    const innerLeft = innerDiv.left.k === "local" ? innerDiv.left : null;
+    const innerRight = innerDiv.right.k === "local" ? innerDiv.right : null;
+    const chunkRead = innerLeft !== null && innerLeft.name === chunk ? innerLeft : innerRight;
+    if (chunkRead === null || chunkRead.name !== chunk) return false;
+    const two = innerLeft === chunkRead ? innerDiv.right : innerDiv.left;
+    if (two.k !== "const" || Number(two.text) !== 2) return false;
+    const other = mul.left === floorDiv ? mul.right : mul.left;
+    if (other.k !== "const" || Number(other.text) !== 2) return false;
+    return true;
+  }
+
+  /**
+   * How many times a local name is read as a value anywhere in the function,
+   * nested blocks included.
+   */
+  private localReads(name: string): number {
+    let count = 0;
+    const walk = (block: SemanticBlock): void => {
+      for (const statement of block.statements) {
+        for (const value of statementValues(statement)) {
+          walkValues(value, (one) => {
+            if (one.k === "local" && one.name === name) count += 1;
+          });
+        }
+        for (const nested of statementBlocksOf(statement)) walk(nested);
+      }
+      if (block.terminator.k === "return" && block.terminator.value !== null) {
+        walkValues(block.terminator.value, (one) => {
+          if (one.k === "local" && one.name === name) count += 1;
+        });
+      }
+    };
+    walk(this.fn.entry);
+    return count;
+  }
+
+  /**
+   * Whether one `let` followed by one `if` is a power-of-two division whose
+   * quotient is only ever tested for oddness, and if so writes the equivalent
+   * bit test in place of them.
+   *
+   * `chunk = Math.floor(X / powers[idx])` then `chunk - floor(chunk / 2) * 2
+   * === 1` is `bit idx of X is set` whenever `powers[idx] === 2 ** idx`. The
+   * divide and its floor become an integer shift right by `idx` and a test of
+   * the low bit.
+   */
+  private tryPowerOfTwoBitTest(statement: SemanticStatement, next: SemanticStatement): boolean {
+    if (statement.k !== "let" || next.k !== "if") return false;
+    const div = this.powerOfTwoDivFloor(statement.value);
+    if (div === null) return false;
+    const param = this.fn.params.find(
+      (p, position) => p.kind === "value" && p.name === div.paramName && this.poTParams.has(position),
+    );
+    if (param === undefined) return false;
+    // The shift count has to be a whole-number counter this function keeps in
+    // a register of its own; a counter held as a double in the frame cannot be
+    // used as a shift count here.
+    const shift = this.counterRegisters.get(div.index.name);
+    if (shift === undefined) return false;
+    const chunk = statement.slot.name;
+    if (!this.ifTestsOddness(next.condition, chunk)) return false;
+    // `chunk` may only be read inside this condition: the strength reduction
+    // never writes `chunk` as a number anywhere, so any other read would
+    // observe a value that was never computed.
+    if (this.localReads(chunk) !== 2) return false;
+    const otherwise = this.code.label("Lelse");
+    const end = this.code.label("Lend");
+    this.at(div.value, NUMBER);
+    this.code.cvtFloatToInt(RAX, XMM0, false, true);
+    this.code.movRegReg(RDX, RAX);
+    this.code.movRegReg(RCX, shift);
+    this.code.shift("sar", RDX, true);
+    this.code.testImm(RDX, 1, true);
+    // Bit clear means the condition is false: leave for the `otherwise` arm, or
+    // for the end of the statement when there is no other arm.
+    this.code.jcc("e", next.otherwise === null ? end : otherwise);
+    // The accumulator no longer holds anything meaningful past the test.
+    this.accumulator = null;
+    this.block(next.then);
+    if (next.otherwise !== null) {
+      if (next.then.terminator.k === "next") this.code.jmp(end);
+      this.code.bind(otherwise);
+      this.block(next.otherwise);
+    }
+    this.code.bind(end);
+    return true;
   }
 
   private statement(statement: SemanticStatement): void {
@@ -4226,6 +4393,10 @@ class Machine {
    * reads, which is what `readsCounterAsValue` is what says.
    */
   private wholeCounted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels, counter: number): void {
+    // A counter whole-counted is stepped in a register of its own, and that
+    // register is what a shift count is read out of when the loop divides by a
+    // power of two.
+    this.counterRegisters.set(loop.variable, counter);
     const from = wholeLiteral(loop.from) as number;
     const to = wholeLiteral(loop.to) as number;
     // The step is the signed amount the counter moves by, whatever the direction
