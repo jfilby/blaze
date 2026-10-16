@@ -662,6 +662,30 @@ void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_
   *out = result;
 }
 
+/* Computes 2^256 mod mod. When mod > 2^255, 2^256 < 2 * mod so the answer is
+   2^256 - mod = ~mod + 1 (two's complement negation). Otherwise the answer is
+   found by doubling 1 modulo mod, 256 times. */
+static void pow256_mod(blaze_u256* out, const blaze_u256* mod) {
+  if (mod->limbs[3] >> 63) {
+    /* mod > 2^255: 2^256 < 2 * mod, so 2^256 mod mod = 2^256 - mod. */
+    for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = ~mod->limbs[i];
+    unsigned __int128 c = 1;
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 s = (unsigned __int128)out->limbs[i] + c;
+      out->limbs[i] = (uint64_t)s;
+      c = s >> 64;
+    }
+  } else {
+    *out = blaze_u256_of_u64(1);
+    for (int i = 0; i < 256; i += 1) {
+      blaze_rt_u256_add(out, out, out);
+      if (!blaze_rt_u256_less(out, mod)) {
+        blaze_rt_u256_sub(out, out, mod);
+      }
+    }
+  }
+}
+
 /* Modular addition: computes (left + right) mod mod. The sum can carry past
    2^256; the carry bit represents 2^256 which is reduced modulo mod. */
 void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
@@ -671,36 +695,35 @@ void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_
     out->limbs[i] = (uint64_t)sum;
     carry = sum >> 64;
   }
+  /* out = (left + right) mod 2^256, carry in {0, 1}. */
   blaze_rt_u256_mod(out, out, mod);
   if (carry) {
+    /* result = (out + 2^256) mod mod = (out + pow256) mod mod,
+       where pow256 = 2^256 mod mod and out < mod, pow256 < mod.
+       out + pow256 < 2 * mod, may wrap past 2^256. */
     blaze_u256 pow256;
-    if (mod->limbs[3] >> 63) {
-      for (unsigned i = 0; i < 4; i += 1) pow256.limbs[i] = ~mod->limbs[i];
-      unsigned __int128 c = 1;
-      for (unsigned i = 0; i < 4; i += 1) {
-        const unsigned __int128 s = (unsigned __int128)pow256.limbs[i] + c;
-        pow256.limbs[i] = (uint64_t)s;
-        c = s >> 64;
-      }
+    pow256_mod(&pow256, mod);
+    /* Check if out + pow256 >= mod, without computing the sum directly. */
+    blaze_u256 mod_minus_pow256;
+    blaze_rt_u256_sub(&mod_minus_pow256, mod, &pow256);  /* mod > pow256, no wrap */
+    if (!blaze_rt_u256_less(out, &mod_minus_pow256)) {
+      /* out + pow256 >= mod: result = out + pow256 - mod.
+         Compute as (out - mod) + pow256; out - mod wraps to
+         out - mod + 2^256, then adding pow256 gives
+         out + pow256 - mod (no further wrap since < mod < 2^256). */
+      blaze_u256 diff;
+      blaze_rt_u256_sub(&diff, out, mod);  /* wraps: diff = out - mod + 2^256 */
+      blaze_rt_u256_add(out, &diff, &pow256);  /* result = out + pow256 - mod, < mod < 2^256 */
     } else {
-      blaze_u256 pow256 = blaze_u256_of_u64(1);
-      for (int i = 0; i < 256; i += 1) {
-        blaze_rt_u256_add(&pow256, &pow256, &pow256);
-        if (!blaze_rt_u256_less(&pow256, mod)) {
-          blaze_rt_u256_sub(&pow256, &pow256, mod);
-        }
-      }
-    }
-    blaze_rt_u256_add(out, out, &pow256);
-    if (!blaze_rt_u256_less(out, mod)) {
-      blaze_rt_u256_sub(out, out, mod);
+      /* out + pow256 < mod, no wrap since result < mod < 2^256. */
+      blaze_rt_u256_add(out, out, &pow256);
     }
   }
 }
 
 /* Modular subtraction: computes (left - right) mod mod. If left < right the
-   subtraction borrows past 2^256; the true value is (out - 2^256) which is
-   negative, so we add mod to bring it into range. */
+   subtraction borrows past 2^256; the true value is negative, so we add mod
+   to bring it into range. */
 void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
   unsigned __int128 borrow = 0;
   for (unsigned i = 0; i < 4; i += 1) {
@@ -710,29 +733,24 @@ void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_
     borrow = (difference >> 64) & 1u;
   }
   if (borrow) {
+    /* left < right: true value = out - 2^256 (negative).
+       (left - right) mod mod = (out - 2^256) mod mod
+                              = (out - pow256) mod mod
+       since -2^256 ≡ -pow256 (mod mod) and pow256 = 2^256 mod mod.
+       out = (left - right) mod 2^256, out < 2^256. */
     blaze_rt_u256_mod(out, out, mod);
     blaze_u256 pow256;
-    if (mod->limbs[3] >> 63) {
-      for (unsigned i = 0; i < 4; i += 1) pow256.limbs[i] = ~mod->limbs[i];
-      unsigned __int128 c = 1;
-      for (unsigned i = 0; i < 4; i += 1) {
-        const unsigned __int128 s = (unsigned __int128)pow256.limbs[i] + c;
-        pow256.limbs[i] = (uint64_t)s;
-        c = s >> 64;
-      }
-    } else {
-      blaze_u256 pow256 = blaze_u256_of_u64(1);
-      for (int i = 0; i < 256; i += 1) {
-        blaze_rt_u256_add(&pow256, &pow256, &pow256);
-        if (!blaze_rt_u256_less(&pow256, mod)) {
-          blaze_rt_u256_sub(&pow256, &pow256, mod);
-        }
-      }
-    }
+    pow256_mod(&pow256, mod);
     if (blaze_rt_u256_less(out, &pow256)) {
-      blaze_rt_u256_add(out, out, mod);
+      /* out < pow256: result = out - pow256 + mod.
+         out - pow256 wraps to out - pow256 + 2^256, then + mod gives
+         out - pow256 + mod (no further wrap since < mod < 2^256). */
+      blaze_rt_u256_sub(out, out, &pow256);  /* wraps: out = out - pow256 + 2^256 */
+      blaze_rt_u256_add(out, out, mod);  /* result = out - pow256 + mod, < mod < 2^256 */
+    } else {
+      /* out >= pow256: result = out - pow256, no wrap, result < mod. */
+      blaze_rt_u256_sub(out, out, &pow256);
     }
-    blaze_rt_u256_sub(out, out, &pow256);
   } else {
     blaze_rt_u256_mod(out, out, mod);
   }
@@ -912,20 +930,12 @@ static void blaze_u256_divmod(blaze_u256* quotient, blaze_u256* remainder, const
   for (int step = blaze_u256_bits(left) - 1; step >= 0; step -= 1) {
     /* What is left moves up one bit and takes the dividend's bit at the bottom.
        A shift by the full width of a limb is undefined in C, so each limb takes
-       the top bit of the one below it rather than being shifted as a number.
-
-       The top bit of the top limb falls off the end when the whole is shifted:
-       that is the 256th bit, which cannot be held. When it is set the shifted
-       value is at least 2^256, which is greater than any divisor below 2^256,
-       so the subtraction always happens and the lost bit is exactly what makes
-       the comparison come out right. */
-    const int overflow = (int)((rest.limbs[3] >> 63) & 1u);
+       the top bit of the one below it rather than being shifted as a number. */
     rest.limbs[3] = (rest.limbs[3] << 1) | (rest.limbs[2] >> 63);
     rest.limbs[2] = (rest.limbs[2] << 1) | (rest.limbs[1] >> 63);
     rest.limbs[1] = (rest.limbs[1] << 1) | (rest.limbs[0] >> 63);
     rest.limbs[0] = (rest.limbs[0] << 1) | ((left->limbs[step / 64] >> (step % 64)) & 1u);
-    const int subtract = overflow || !blaze_rt_u256_less(&rest, right);
-    if (subtract) {
+    if (!blaze_rt_u256_less(&rest, right)) {
       blaze_rt_u256_sub(&rest, &rest, right);
       quotient->limbs[step / 64] |= (uint64_t)1u << (unsigned)(step % 64);
     }

@@ -22,6 +22,7 @@ import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import type { FunctionSignature, TypeExpr } from "../core/types.ts";
 import { contractText } from "../semantics/contract.ts";
+import { RUNTIME_NAME } from "../runtime/abi.ts";
 import { isWideType } from "../core/semantic-ir.ts";
 import {
   elementTypeOf,
@@ -46,6 +47,7 @@ import {
   type SemanticType,
   type SemanticValue,
   type ValueKind,
+  walkValues,
 } from "../core/semantic-ir.ts";
 
 /**
@@ -309,14 +311,19 @@ class ProgramEmitter {
    */
   private returns: SemanticType = VOID;
   private depth = 0;
-  /** When emitting code inside a `mod(X, c)` call, the modulus expression `c`,
-     so that wide multiplications inside `X` use modular multiplication. */
+  /** When emitting inside a `mod(X, c)` call, the modulus expression `c`, so
+     wide arithmetic inside `X` uses modular operations. */
   private modCtx: string | null = null;
-  /** When emitting the body of the `invert` function, the name of its modulo
-     parameter, so wide multiplications inside it can use modular
-     multiplication instead of the wrapping kind. */
-  private inInvert = false;
+  /** When emitting the body of the `invert` function, the modulus expression
+     of its second parameter, so every wide operation inside it uses modular
+     arithmetic. Needed because the extended Euclidean algorithm updates
+     mutable accumulators in a cycle that the backward data-flow analysis
+     cannot follow. */
   private invertModulo: string | null = null;
+  /** Data-flow result: wide `arith` values (mul/add/sub) whose result is
+     always reduced modulo some modulus, mapped to that modulus expression.
+     Computed by a backward pass from every `mod(..., c)` call. */
+  private readonly modulusForArith = new WeakMap<SemanticValue, string>();
   /** The names the program declared, and the names a target reads them by. */
   private names!: NameScope;
 
@@ -357,9 +364,12 @@ class ProgramEmitter {
     this.lines = [];
     this.depth = 1;
     this.returns = fn.returns;
-    const wasInvert = this.inInvert;
-    this.inInvert = fn.name === "invert";
-    this.invertModulo = this.inInvert && parameters.length > 1 ? parameters[1].name : null;
+    // The `invert` function's extended Euclidean algorithm updates mutable
+    // accumulators in a cycle the backward data-flow analysis cannot follow,
+    // so every wide operation inside it must use modular arithmetic with the
+    // modulo parameter.
+    this.invertModulo = fn.name === "invert" && parameters.length > 1 ? parameters[1].name : null;
+    this.computeModContexts(fn);
     for (const statement of fn.entry.statements) this.statement(statement);
     // What a function hands back is written where the source returned it. A body
     // that falls off the end is the one case that needs a line for it, and the
@@ -375,8 +385,6 @@ class ProgramEmitter {
     // releases are written while the body is still the scope they are in.
     const releases = fn.entry.releases.map((name) => this.target.release(this.names.read(name)));
     this.names.leave();
-    this.inInvert = wasInvert;
-    this.invertModulo = null;
     return [
       ...this.target.openFunction(
         {
@@ -390,6 +398,171 @@ class ProgramEmitter {
       ...body,
       ...this.target.closeFunction(releases, returned),
     ];
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Data-flow analysis: modular arithmetic contexts                        */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Before emitting a function, find every `mod(X, c)` call and mark every
+   * wide `arith` value (mul/add/sub) in X's transitive dependency closure as
+   * needing modular arithmetic with modulus c. This catches values like
+   * `invZ2 = invZ0 * invZ0` that are defined outside a `mod(...)` call but
+   * whose result is always reduced modulo the curve prime.
+   */
+  private computeModContexts(fn: SemanticFunction): void {
+    this.modulusForArith = new WeakMap<SemanticValue, string>();
+
+    // Collect every `let` definition: local name -> defining value, walking
+    // all blocks reachable from the entry block (if arms, loop bodies, etc.).
+    const defByName = new Map<string, SemanticValue>();
+    this.collectDefinitions(fn.entry, defByName);
+
+    // Find every `mod(a, c)` call and annotate the arithmetic values that
+    // feed into `a` with modulus `c`.
+    const worklist: { value: SemanticValue; modulus: string }[] = [];
+    this.findModCalls(fn.entry, worklist);
+
+    while (worklist.length > 0) {
+      const { value, modulus } = worklist.pop()!;
+      this.annotateArithWithModulus(value, modulus, defByName, worklist);
+    }
+  }
+
+  /** Walk every block reachable from `block`, collecting `let` definitions. */
+  private collectDefinitions(block: SemanticBlock, defByName: Map<string, SemanticValue>): void {
+    for (const stmt of block.statements) {
+      if (stmt.k === "let") {
+        defByName.set(stmt.slot.name, stmt.value);
+      } else if (stmt.k === "if") {
+        this.collectDefinitions(stmt.then, defByName);
+        if (stmt.otherwise) this.collectDefinitions(stmt.otherwise, defByName);
+      } else if (stmt.k === "loop") {
+        this.collectDefinitions(stmt.loop.body, defByName);
+      } else if (stmt.k === "block") {
+        this.collectDefinitions(stmt.body, defByName);
+      }
+    }
+  }
+
+  /** Find every `mod(a, c)` call and push `(a, c)` onto the worklist. */
+  private findModCalls(
+    block: SemanticBlock,
+    worklist: { value: SemanticValue; modulus: string }[],
+  ): void {
+    // Collect every value tree in this block: from statement values and the terminator.
+    const values: SemanticValue[] = [];
+    for (const stmt of block.statements) {
+      this.collectValues(stmt, values);
+    }
+    this.collectValues(block.terminator as unknown as SemanticValue, values);
+    // Walk every value tree for nested `mod(...)` calls.
+    for (const value of values) {
+      walkValues(value, (v) => {
+        if (v.k === "call") {
+          const call = v.call;
+          if (!call.builtin && call.callee === "mod" && call.args.length === 2) {
+            const modulus = this.expression(call.args[1], call.args[1].type);
+            worklist.push({ value: call.args[0], modulus });
+          }
+        }
+      });
+    }
+    // Recurse into nested blocks.
+    for (const stmt of block.statements) {
+      if (stmt.k === "if") {
+        this.findModCalls(stmt.then, worklist);
+        if (stmt.otherwise) this.findModCalls(stmt.otherwise, worklist);
+      } else if (stmt.k === "loop") {
+        this.findModCalls(stmt.loop.body, worklist);
+      } else if (stmt.k === "block") {
+        this.findModCalls(stmt.body, worklist);
+      }
+    }
+  }
+
+  /** Collect every SemanticValue tree referenced by a statement or terminator. */
+  private collectValues(node: unknown, into: SemanticValue[]): void {
+    if (node === null || node === undefined) return;
+    const n = node as Record<string, unknown>;
+    // A statement with a `value` field.
+    if ("value" in n && typeof n.value === "object" && n.value !== null && "k" in n.value) {
+      into.push(n.value as SemanticValue);
+    }
+    // A call statement: its args are values.
+    if (n.k === "call" && "args" in n.call && Array.isArray(n.call.args)) {
+      for (const arg of n.call.args as SemanticValue[]) into.push(arg);
+    }
+    // A `let` statement: its slot value.
+    if (n.k === "let" && "value" in n && typeof n.value === "object" && n.value !== null && "k" in n.value) {
+      into.push(n.value as SemanticValue);
+    }
+    // An `if` statement: its condition.
+    if (n.k === "if" && "condition" in n && typeof n.condition === "object" && n.condition !== null && "k" in n.condition) {
+      into.push(n.condition as SemanticValue);
+    }
+    // A `loop` statement: the loop's condition and from/to/step values.
+    if (n.k === "loop") {
+      const loop = n.loop as Record<string, unknown>;
+      if ("condition" in loop && typeof loop.condition === "object" && loop.condition !== null && "k" in loop.condition) {
+        into.push(loop.condition as SemanticValue);
+      }
+      if (loop.kind === "counted") {
+        for (const key of ["from", "to", "step"]) {
+          const val = loop[key];
+          if (val !== null && typeof val === "object" && "k" in val) into.push(val as SemanticValue);
+        }
+      }
+    }
+  }
+
+  /**
+   * Annotate every wide `arith` (mul/add/sub) value in `value`'s transitive
+   * dependency closure with `modulus`. When a `local` reference is found, its
+   * definition is looked up and annotated too, recursively.
+   */
+  private annotateArithWithModulus(
+    value: SemanticValue,
+    modulus: string,
+    defByName: Map<string, SemanticValue>,
+    worklist: { value: SemanticValue; modulus: string }[],
+  ): void {
+    const visited = new Set<SemanticValue>();
+    const stack: SemanticValue[] = [value];
+
+    while (stack.length > 0) {
+      const v = stack.pop()!;
+      if (visited.has(v)) continue;
+      visited.add(v);
+
+      // Annotate wide mul/add/sub arith values.
+      if (
+        v.k === "arith" &&
+        isWideType(v.type) &&
+        (v.op === "mul" || v.op === "add" || v.op === "sub")
+      ) {
+        if (!this.modulusForArith.has(v)) {
+          this.modulusForArith.set(v, modulus);
+        }
+      }
+
+      // Trace local references to their definitions.
+      if (v.k === "local") {
+        const def = defByName.get(v.name);
+        if (def) {
+          // If the definition is itself an arith value, it gets annotated by
+          // the loop above when we push it. Push it for processing.
+          stack.push(def);
+        }
+        continue;
+      }
+
+      // Push children for further walking.
+      walkValues(v, (child) => {
+        if (child !== v) stack.push(child);
+      });
+    }
   }
 
   /* ---------------------------------------------------------------------- */
@@ -734,56 +907,30 @@ class ProgramEmitter {
   }
 
   private call(call: SemanticCall): string {
-    // `mod(add(a, b), c)`, `mod(sub(a, b), c)`, `mod(mul(a, b), c)` must use
-    // modular arithmetic: the plain add/sub/mul wrap past 2^256 and lose the
-    // carry/borrow/high half, so reducing the wrapped value modulo c is not
-    // the same as reducing the true sum/difference/product. The kernel's
-    // *_mod variants compute the full result and reduce it modulo c.
+    // `mod(X, c)` must reduce X modulo c. The data-flow analysis marks every
+    // wide mul/add/sub in X's dependency chain as needing `*_mod` with modulus
+    // c, so the `arith` emitter uses modular operations and the result is
+    // already in [0, c). But `X` may be a plain local reference whose value was
+    // computed with wrapping arithmetic and is not yet reduced (e.g. `return
+    // mod(x, modulo)` in `invert`), so apply the kernel's mod in that case.
     if (!call.builtin && call.callee === "mod" && call.args.length === 2) {
-      const inner = call.args[0];
       const modulus = this.expression(call.args[1], call.args[1].type);
       const savedCtx = this.modCtx;
       this.modCtx = modulus;
+      const inner = call.args[0];
+      let result: string;
       if (inner.k === "arith" && isWideType(inner.type)) {
-        // If either operand of add/sub is itself a mul, wrap it in mul_mod too.
-        const maybeModMul = (v: SemanticValue): string =>
-          v.k === "arith" && v.op === "mul" && isWideType(v.type)
-            ? this.target.wideMulMod(
-                this.expression(v.left, v.type),
-                this.expression(v.right, v.type),
-                modulus,
-                v.type,
-              )
-            : this.expression(v, v.type);
-        if (inner.op === "add") {
-          this.modCtx = savedCtx;
-          return this.target.wideAddMod(
-            maybeModMul(inner.left),
-            maybeModMul(inner.right),
-            modulus,
-            inner.type,
-          );
-        }
-        if (inner.op === "sub") {
-          this.modCtx = savedCtx;
-          return this.target.wideSubMod(
-            maybeModMul(inner.left),
-            maybeModMul(inner.right),
-            modulus,
-            inner.type,
-          );
-        }
-        if (inner.op === "mul") {
-          this.modCtx = savedCtx;
-          return this.target.wideMulMod(
-            this.expression(inner.left, inner.type),
-            this.expression(inner.right, inner.type),
-            modulus,
-            inner.type,
-          );
-        }
+        // The arith emitter uses `*_mod` with modulus c, so the result is
+        // already reduced; no extra mod needed.
+        result = this.expression(inner, inner.type);
+      } else {
+        // Bind the inner value to a temporary and reduce it modulo c.
+        const out = `blaze_wide_${(this.builds += 1)}`;
+        const tmp = `blaze_wide_tmp_${this.builds}`;
+        result = `({ const blaze_u256 ${tmp} = (${this.expression(inner, inner.type)}); blaze_u256 ${out}; ${RUNTIME_NAME}_u256_mod(&${out}, &${tmp}, &(${modulus})); ${out}; })`;
       }
       this.modCtx = savedCtx;
+      return result;
     }
     const argumentsText = call.args.map((argument, index) => {
       const type = call.argTypes[index] ?? argument.type;
@@ -1026,13 +1173,17 @@ class ProgramEmitter {
         // operator it is `invalid operands to binary + (have 'blaze_u256' and
         // 'blaze_u256')`, and the build failed at the link rather than here.
         if (isWideType(value.type)) {
-          // Inside a `mod(X, c)` call, wide multiplication must be modular so
-          // the product of two field elements does not wrap past 2^256 before
-          // the reduction modulo c.
-          if (value.op === "mul" && this.modCtx !== null) {
-            return this.target.wideMulMod(
-              left, right, this.modCtx, value.type,
-            );
+          // The modulus this operation should be reduced under: either the
+          // `modCtx` from an enclosing `mod(X, c)` call, the `invertModulo`
+          // for the `invert` function's extended Euclidean algorithm, or a
+          // modulus discovered by the data-flow analysis.
+          const modulus = this.modulusForArith.get(value) ?? this.invertModulo ?? this.modCtx;
+          if (value.op === "mul" && modulus !== null) {
+            return this.target.wideMulMod(left, right, modulus, value.type);
+          }
+          if ((value.op === "add" || value.op === "sub") && modulus !== null) {
+            const method = value.op === "add" ? "wideAddMod" : "wideSubMod";
+            return this.target[method](left, right, modulus, value.type);
           }
           return this.target.wideBinary(value.op, left, right, value.type);
         }
