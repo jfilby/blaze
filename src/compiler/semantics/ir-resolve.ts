@@ -4195,18 +4195,23 @@ class ProgramLowering {
     // its width (a `u256` beside an `i64` is still a `u256`), and anything else
     // is a double. The draft states no width of its own when a program value is
     // written without an annotation. A whole operator keeps the width its two
+    // whole sides are computed at: `i % 2` is `i64`, not the `f64` the two sides
+    // were each read as when one of them was a count. `>>>` is a converting
+    // operator: it reads both sides as unsigned 32 bit numbers and answers one
+    // of those, so its type is the one the draft already fixed. A bigint
+    // operation is computed at sixty-four bits, which the draft already states.
     const leftPrim = left.type.kind === "primitive" ? left.type.name : null;
     const rightPrim = right.type.kind === "primitive" ? right.type.name : null;
-    // A whole operator keeps the width its two whole sides are computed at:
-    // `i % 2` is `i64`, not the `f64` the two sides were each read as when one
-    // of them was a count. `>>>` is a converting operator: it reads both sides
-    // as unsigned 32 bit numbers and answers one of those, so its type is the
-    // one the draft already fixed and not the width either side was read at.
-    const type = CONVERTING_OPERATORS.includes(op)
-      ? value.type
-      : WHOLE_OPERATORS.includes(op)
-        ? numeric(wholeResult(leftPrim, rightPrim))
-        : numeric(numericResult(leftPrim, rightPrim, op === "/"));
+    // A wide number keeps the width its two whole sides are computed at, and a
+    // bigint operation is computed at sixty-four bits. Both are already stated
+    // by the draft, so only fall back to the arithmetic rule when neither.
+    const type = value.bigint && !isWideType(left.type) && !isWideType(right.type)
+      ? numeric(BIGINT_TYPE)
+      : CONVERTING_OPERATORS.includes(op)
+        ? value.type
+        : WHOLE_OPERATORS.includes(op)
+          ? numeric(wholeResult(leftPrim, rightPrim))
+          : numeric(numericResult(leftPrim, rightPrim, op === "/"));
     return { k: "arith", type, op: ARITHMETIC[op] as ArithOp, left, right };
   }
 
