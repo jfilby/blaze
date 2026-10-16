@@ -21,6 +21,7 @@ import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import {
   isBoolean,
   isFloat,
+  isReference,
   isTextType,
   isUnsigned,
   isWideType,
@@ -366,8 +367,13 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
   closeFunction(releases: readonly string[], returned: boolean): string[] {
     // What the body allocated is freed before it returns, in the reverse of the
     // order the body took it. A body that returns a value has already written
-    // its `return`, and one that falls off the end returns nothing at all.
-    return [...releases, ...(returned ? [] : ["return;"]), "}", ""];
+    // its `return`, and the releases that follow it would be dead code — the
+    // returned value is owned by the caller, and any other local reference was
+    // released when it was last reassigned. A body that falls off the end
+    // releases what it holds and then returns nothing.
+    return returned
+      ? ["}", ""]
+      : [...releases, "return;", "}", ""];
   }
 
   returnValue(value: string): string {
@@ -493,6 +499,15 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // form already lowers to.
     if (operator === "**=") return `${name} = pow(${name}, ${value});`;
     if (operator === ">>>=") return `${name} >>= ${value};`;
+    // A plain assignment over a reference releases the value the name held
+    // before the new one takes its place, so the old object is not leaked.
+    // The new value is computed first (it may read the name), then the name is
+    // overwritten, then the old object is released. A self-assignment (`x = x`)
+    // releases nothing: the name keeps the same object.
+    if (operator === "=" && type !== null && isReference(type) && name !== value) {
+      const old = `blaze_old_${this.builds += 1}`;
+      return `{ void* ${old} = ${name}; ${name} = ${value}; ${RUNTIME_NAME}_release(${old}); }`;
+    }
     return `${name} ${operator} ${value};`;
   }
 
@@ -840,6 +855,36 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     );
   }
 
+  wideMulMod(left: string, right: string, modulus: string, as: SemanticType): string {
+    const out = `blaze_wide_${(this.builds += 1)}`;
+    const first = `blaze_wide_left_${this.builds}`;
+    const second = `blaze_wide_right_${(this.builds += 1)}`;
+    const mod = `blaze_wide_mod_${(this.builds += 1)}`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
+    return `({ ${wide} ${out}; const ${wide} ${first} = ${left}; const ${wide} ${second} = ${right}; const ${wide} ${mod} = ${modulus}; ${RUNTIME_NAME}_u256_mul_mod(&${out}, &${first}, &${second}, &${mod}); ${out}; })`;
+  }
+
+  wideAddMod(left: string, right: string, modulus: string, as: SemanticType): string {
+    const out = `blaze_wide_${(this.builds += 1)}`;
+    const first = `blaze_wide_left_${this.builds}`;
+    const second = `blaze_wide_right_${(this.builds += 1)}`;
+    const mod = `blaze_wide_mod_${(this.builds += 1)}`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
+    return `({ ${wide} ${out}; const ${wide} ${first} = ${left}; const ${wide} ${second} = ${right}; const ${wide} ${mod} = ${modulus}; ${RUNTIME_NAME}_u256_add_mod(&${out}, &${first}, &${second}, &${mod}); ${out}; })`;
+  }
+
+  wideSubMod(left: string, right: string, modulus: string, as: SemanticType): string {
+    const out = `blaze_wide_${(this.builds += 1)}`;
+    const first = `blaze_wide_left_${this.builds}`;
+    const second = `blaze_wide_right_${(this.builds += 1)}`;
+    const mod = `blaze_wide_mod_${(this.builds += 1)}`;
+    const signed = as.kind === "primitive" && as.name === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
+    return `({ ${wide} ${out}; const ${wide} ${first} = ${left}; const ${wide} ${second} = ${right}; const ${wide} ${mod} = ${modulus}; ${RUNTIME_NAME}_u256_sub_mod(&${out}, &${first}, &${second}, &${mod}); ${out}; })`;
+  }
+
   widen(value: string, as: SemanticType): string {
     // A whole number widened into a wide number is the word it is in the low
     // limb and nothing above it, which is the one copy of that every backend
@@ -861,10 +906,13 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     const signed = as.kind === "primitive" && as.name === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     const test = `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${kernel}(&${first}, &${second})`;
-    const flip = op === "ne" || op === "ge" || op === "gt" ? "!" : "";
+    // `gt` and `le` swap the operands: `a > b` is `b < a`, `a <= b` is `!(b < a)`.
+    // `ge` and `ne` flip the sense: `a >= b` is `!(a < b)`, `a != b` is `!(a == b)`.
+    const flip = op === "ne" || op === "ge" || op === "le" ? "!" : "";
+    const swap = op === "gt" || op === "le";
     return (
-      `({ const ${wide} ${first} = ${left}; ` +
-      `const ${wide} ${second} = ${right}; ${flip}${test}; })`
+      `({ const ${wide} ${first} = ${swap ? right : left}; ` +
+      `const ${wide} ${second} = ${swap ? left : right}; ${flip}${test}; })`
     );
   }
 

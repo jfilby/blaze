@@ -376,6 +376,9 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_add(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_sub(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
+  "void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
+  "void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
@@ -618,6 +621,123 @@ void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256
   *out = accumulator;
 }
 
+/* Modular multiplication: computes (left * right) mod mod. The full 512 bit
+   product is accumulated in eight limbs, then reduced modulo mod by shifting
+   the high half down bit by bit, subtracting mod whenever the running value
+   reaches it. This is sound for any modulus below 2^256. */
+void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
+  uint64_t prod[8];
+  for (unsigned i = 0; i < 8; i += 1) prod[i] = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    unsigned __int128 carry = 0;
+    for (unsigned j = 0; j < 4; j += 1) {
+      const unsigned __int128 product =
+        (unsigned __int128)left->limbs[i] * right->limbs[j] + prod[i + j] + carry;
+      prod[i + j] = (uint64_t)product;
+      carry = product >> 64;
+    }
+    prod[i + 4] = (uint64_t)carry;
+  }
+  blaze_u256 result;
+  for (unsigned i = 0; i < 4; i += 1) result.limbs[i] = prod[i];
+  /* Reduce the high 256 bits down, most significant bit first, so each shift
+     doubles the running value and the bit that comes in decides whether one is
+     added. Processing low to high would double in the wrong order and the
+     reduction would not be the remainder modulo mod. */
+  for (unsigned i = 8; i-- > 4;) {
+    for (unsigned bit = 64; bit-- > 0;) {
+      const int overflow = (int)((result.limbs[3] >> 63) & 1u);
+      result.limbs[3] = (result.limbs[3] << 1) | (result.limbs[2] >> 63);
+      result.limbs[2] = (result.limbs[2] << 1) | (result.limbs[1] >> 63);
+      result.limbs[1] = (result.limbs[1] << 1) | (result.limbs[0] >> 63);
+      result.limbs[0] = (result.limbs[0] << 1) | ((prod[i] >> bit) & 1u);
+      if (overflow || !blaze_rt_u256_less(&result, mod)) {
+        blaze_rt_u256_sub(&result, &result, mod);
+      }
+    }
+  }
+  /* The low 256 bits may still be >= mod (when the product fits in 256 bits
+     and no high-bit reduction happened), so reduce once more. */
+  blaze_rt_u256_mod(&result, &result, mod);
+  *out = result;
+}
+
+/* Modular addition: computes (left + right) mod mod. The sum can carry past
+   2^256; the carry bit represents 2^256 which is reduced modulo mod. */
+void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
+  unsigned __int128 carry = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 sum = (unsigned __int128)left->limbs[i] + right->limbs[i] + carry;
+    out->limbs[i] = (uint64_t)sum;
+    carry = sum >> 64;
+  }
+  blaze_rt_u256_mod(out, out, mod);
+  if (carry) {
+    blaze_u256 pow256;
+    if (mod->limbs[3] >> 63) {
+      for (unsigned i = 0; i < 4; i += 1) pow256.limbs[i] = ~mod->limbs[i];
+      unsigned __int128 c = 1;
+      for (unsigned i = 0; i < 4; i += 1) {
+        const unsigned __int128 s = (unsigned __int128)pow256.limbs[i] + c;
+        pow256.limbs[i] = (uint64_t)s;
+        c = s >> 64;
+      }
+    } else {
+      blaze_u256 pow256 = blaze_u256_of_u64(1);
+      for (int i = 0; i < 256; i += 1) {
+        blaze_rt_u256_add(&pow256, &pow256, &pow256);
+        if (!blaze_rt_u256_less(&pow256, mod)) {
+          blaze_rt_u256_sub(&pow256, &pow256, mod);
+        }
+      }
+    }
+    blaze_rt_u256_add(out, out, &pow256);
+    if (!blaze_rt_u256_less(out, mod)) {
+      blaze_rt_u256_sub(out, out, mod);
+    }
+  }
+}
+
+/* Modular subtraction: computes (left - right) mod mod. If left < right the
+   subtraction borrows past 2^256; the true value is (out - 2^256) which is
+   negative, so we add mod to bring it into range. */
+void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
+  unsigned __int128 borrow = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 difference =
+      (unsigned __int128)left->limbs[i] - right->limbs[i] - borrow;
+    out->limbs[i] = (uint64_t)difference;
+    borrow = (difference >> 64) & 1u;
+  }
+  if (borrow) {
+    blaze_rt_u256_mod(out, out, mod);
+    blaze_u256 pow256;
+    if (mod->limbs[3] >> 63) {
+      for (unsigned i = 0; i < 4; i += 1) pow256.limbs[i] = ~mod->limbs[i];
+      unsigned __int128 c = 1;
+      for (unsigned i = 0; i < 4; i += 1) {
+        const unsigned __int128 s = (unsigned __int128)pow256.limbs[i] + c;
+        pow256.limbs[i] = (uint64_t)s;
+        c = s >> 64;
+      }
+    } else {
+      blaze_u256 pow256 = blaze_u256_of_u64(1);
+      for (int i = 0; i < 256; i += 1) {
+        blaze_rt_u256_add(&pow256, &pow256, &pow256);
+        if (!blaze_rt_u256_less(&pow256, mod)) {
+          blaze_rt_u256_sub(&pow256, &pow256, mod);
+        }
+      }
+    }
+    if (blaze_rt_u256_less(out, &pow256)) {
+      blaze_rt_u256_add(out, out, mod);
+    }
+    blaze_rt_u256_sub(out, out, &pow256);
+  } else {
+    blaze_rt_u256_mod(out, out, mod);
+  }
+}
+
 
 void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
   for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] & right->limbs[i];
@@ -792,12 +912,20 @@ static void blaze_u256_divmod(blaze_u256* quotient, blaze_u256* remainder, const
   for (int step = blaze_u256_bits(left) - 1; step >= 0; step -= 1) {
     /* What is left moves up one bit and takes the dividend's bit at the bottom.
        A shift by the full width of a limb is undefined in C, so each limb takes
-       the top bit of the one below it rather than being shifted as a number. */
+       the top bit of the one below it rather than being shifted as a number.
+
+       The top bit of the top limb falls off the end when the whole is shifted:
+       that is the 256th bit, which cannot be held. When it is set the shifted
+       value is at least 2^256, which is greater than any divisor below 2^256,
+       so the subtraction always happens and the lost bit is exactly what makes
+       the comparison come out right. */
+    const int overflow = (int)((rest.limbs[3] >> 63) & 1u);
     rest.limbs[3] = (rest.limbs[3] << 1) | (rest.limbs[2] >> 63);
     rest.limbs[2] = (rest.limbs[2] << 1) | (rest.limbs[1] >> 63);
     rest.limbs[1] = (rest.limbs[1] << 1) | (rest.limbs[0] >> 63);
     rest.limbs[0] = (rest.limbs[0] << 1) | ((left->limbs[step / 64] >> (step % 64)) & 1u);
-    if (!blaze_rt_u256_less(&rest, right)) {
+    const int subtract = overflow || !blaze_rt_u256_less(&rest, right);
+    if (subtract) {
       blaze_rt_u256_sub(&rest, &rest, right);
       quotient->limbs[step / 64] |= (uint64_t)1u << (unsigned)(step % 64);
     }
@@ -815,8 +943,11 @@ void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256
 }
 
 void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
+  /* left and out may alias (when the caller writes the remainder back into the
+     dividend), so copy left into a temporary before divmod zeroes out. */
+  blaze_u256 tmp = *left;
   blaze_u256 quotient;
-  blaze_u256_divmod(&quotient, out, left, right);
+  blaze_u256_divmod(&quotient, out, &tmp, right);
   (void)quotient;
 }
 

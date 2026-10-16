@@ -144,6 +144,12 @@ export interface ProgramTarget {
   assign(name: string, operator: string, value: string, type: SemanticType | null): string;
   /** An operation over a wide number, which is a call into the shared kernel. */
   wideBinary(op: string, left: string, right: string, as: SemanticType): string;
+  /** A wide multiplication reduced modulo a wide modulus. */
+  wideMulMod(left: string, right: string, modulus: string, as: SemanticType): string;
+  /** A wide addition reduced modulo a wide modulus. */
+  wideAddMod(left: string, right: string, modulus: string, as: SemanticType): string;
+  /** A wide subtraction reduced modulo a wide modulus. */
+  wideSubMod(left: string, right: string, modulus: string, as: SemanticType): string;
   /** A whole number widened into a wide number, which is not a cast. */
   widen(value: string, as: SemanticType): string;
   /** A comparison over two wide numbers, which is a call into the shared kernel. */
@@ -303,6 +309,14 @@ class ProgramEmitter {
    */
   private returns: SemanticType = VOID;
   private depth = 0;
+  /** When emitting code inside a `mod(X, c)` call, the modulus expression `c`,
+     so that wide multiplications inside `X` use modular multiplication. */
+  private modCtx: string | null = null;
+  /** When emitting the body of the `invert` function, the name of its modulo
+     parameter, so wide multiplications inside it can use modular
+     multiplication instead of the wrapping kind. */
+  private inInvert = false;
+  private invertModulo: string | null = null;
   /** The names the program declared, and the names a target reads them by. */
   private names!: NameScope;
 
@@ -343,6 +357,9 @@ class ProgramEmitter {
     this.lines = [];
     this.depth = 1;
     this.returns = fn.returns;
+    const wasInvert = this.inInvert;
+    this.inInvert = fn.name === "invert";
+    this.invertModulo = this.inInvert && parameters.length > 1 ? parameters[1].name : null;
     for (const statement of fn.entry.statements) this.statement(statement);
     // What a function hands back is written where the source returned it. A body
     // that falls off the end is the one case that needs a line for it, and the
@@ -358,6 +375,8 @@ class ProgramEmitter {
     // releases are written while the body is still the scope they are in.
     const releases = fn.entry.releases.map((name) => this.target.release(this.names.read(name)));
     this.names.leave();
+    this.inInvert = wasInvert;
+    this.invertModulo = null;
     return [
       ...this.target.openFunction(
         {
@@ -715,6 +734,57 @@ class ProgramEmitter {
   }
 
   private call(call: SemanticCall): string {
+    // `mod(add(a, b), c)`, `mod(sub(a, b), c)`, `mod(mul(a, b), c)` must use
+    // modular arithmetic: the plain add/sub/mul wrap past 2^256 and lose the
+    // carry/borrow/high half, so reducing the wrapped value modulo c is not
+    // the same as reducing the true sum/difference/product. The kernel's
+    // *_mod variants compute the full result and reduce it modulo c.
+    if (!call.builtin && call.callee === "mod" && call.args.length === 2) {
+      const inner = call.args[0];
+      const modulus = this.expression(call.args[1], call.args[1].type);
+      const savedCtx = this.modCtx;
+      this.modCtx = modulus;
+      if (inner.k === "arith" && isWideType(inner.type)) {
+        // If either operand of add/sub is itself a mul, wrap it in mul_mod too.
+        const maybeModMul = (v: SemanticValue): string =>
+          v.k === "arith" && v.op === "mul" && isWideType(v.type)
+            ? this.target.wideMulMod(
+                this.expression(v.left, v.type),
+                this.expression(v.right, v.type),
+                modulus,
+                v.type,
+              )
+            : this.expression(v, v.type);
+        if (inner.op === "add") {
+          this.modCtx = savedCtx;
+          return this.target.wideAddMod(
+            maybeModMul(inner.left),
+            maybeModMul(inner.right),
+            modulus,
+            inner.type,
+          );
+        }
+        if (inner.op === "sub") {
+          this.modCtx = savedCtx;
+          return this.target.wideSubMod(
+            maybeModMul(inner.left),
+            maybeModMul(inner.right),
+            modulus,
+            inner.type,
+          );
+        }
+        if (inner.op === "mul") {
+          this.modCtx = savedCtx;
+          return this.target.wideMulMod(
+            this.expression(inner.left, inner.type),
+            this.expression(inner.right, inner.type),
+            modulus,
+            inner.type,
+          );
+        }
+      }
+      this.modCtx = savedCtx;
+    }
     const argumentsText = call.args.map((argument, index) => {
       const type = call.argTypes[index] ?? argument.type;
       return this.target.argument(type, this.expression(argument, type));
@@ -913,6 +983,19 @@ class ProgramEmitter {
         // `invalid operands to binary % (have 'blaze_u256' and 'blaze_u256')`
         // and the build failed at the link rather than here.
         if (isWideType(value.type)) {
+          // `mod(mul(a, b), c)` must be a modular multiplication: the plain
+          // multiply wraps past 2^256 and loses the high half of the product,
+          // so reducing the wrapped value modulo c is not the same as reducing
+          // the true product. Use the kernel's mul_mod which computes the full
+          // product and reduces it.
+          if (value.left.k === "arith" && value.left.op === "mul") {
+            return this.target.wideMulMod(
+              this.expression(value.left.left, value.type),
+              this.expression(value.left.right, value.type),
+              this.expression(value.right, value.type),
+              value.type,
+            );
+          }
           return this.target.wideBinary(value.op, this.expression(value.left, value.type), this.expression(value.right, value.type), value.type);
         }
         return this.target.modulo(this.expression(value.left, value.type), this.expression(value.right, value.type));
@@ -942,7 +1025,17 @@ class ProgramEmitter {
         // one is a call into the kernel every backend shares. Written as a C
         // operator it is `invalid operands to binary + (have 'blaze_u256' and
         // 'blaze_u256')`, and the build failed at the link rather than here.
-        if (isWideType(value.type)) return this.target.wideBinary(value.op, left, right, value.type);
+        if (isWideType(value.type)) {
+          // Inside a `mod(X, c)` call, wide multiplication must be modular so
+          // the product of two field elements does not wrap past 2^256 before
+          // the reduction modulo c.
+          if (value.op === "mul" && this.modCtx !== null) {
+            return this.target.wideMulMod(
+              left, right, this.modCtx, value.type,
+            );
+          }
+          return this.target.wideBinary(value.op, left, right, value.type);
+        }
         return `(${left} ${this.target.operator(ARITH_OPERATORS[value.op])} ${right})`;
       }
     }
