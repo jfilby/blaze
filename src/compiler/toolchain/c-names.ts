@@ -281,9 +281,12 @@ export function integerLiteral(text: string): bigint | null {
     // BigInt takes the sign of a decimal literal only, so a negative
     // hexadecimal one is negated rather than converted with its sign.
     const negative = text.startsWith("-");
-    return (negative ? -1n : 1n) * BigInt(negative ? text.slice(1) : text);
+    const body = negative ? text.slice(1) : text;
+    const clean = body.endsWith("n") ? body.slice(0, -1) : body;
+    return (negative ? -1n : 1n) * BigInt(clean);
   }
-  return /^[+-]?[0-9]+$/.test(text) ? BigInt(text) : null;
+  const clean = text.endsWith("n") ? text.slice(0, -1) : text;
+  return /^[+-]?[0-9]+$/.test(clean) ? BigInt(clean) : null;
 }
 
 /** One number as the C type of the value it initializes. */

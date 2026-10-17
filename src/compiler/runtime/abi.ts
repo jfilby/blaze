@@ -391,6 +391,11 @@ const U256_DECLARATIONS: readonly string[] = [
   "int blaze_rt_u256_less(const blaze_u256* left, const blaze_u256* right)",
   "int blaze_rt_u256_equal(const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_from_u64(blaze_u256* out, uint64_t value)",
+  "void blaze_rt_u256_from_u64x2(blaze_u256* out, uint64_t low, uint64_t high)",
+  "void blaze_rt_u256_from_u64x4(blaze_u256* out, uint64_t l0, uint64_t l1, uint64_t l2, uint64_t l3)",
+  "void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
+  "void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
+  "void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "uint64_t blaze_rt_u256_to_u64(const blaze_u256* value)",
   "size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size)",
   "int blaze_rt_u256_parse(blaze_u256* out, const char* text, size_t length)",
@@ -1195,6 +1200,28 @@ void blaze_rt_u256_redc(blaze_u256* out, const blaze_u256* T_hi, const blaze_u25
    an error. */
 void blaze_rt_u256_from_u64(blaze_u256* out, uint64_t value) {
   *out = blaze_u256_of_u64(value);
+}
+
+/* Build a u256 from two 64 bit halves: the low half is limb 0 and the high
+   half is limb 1, and the two upper limbs are zero. A value whose high half is
+   itself above 2^64 does not fit in a u256, and the caller has to make sure it
+   does not. */
+void blaze_rt_u256_from_u64x2(blaze_u256* out, uint64_t low, uint64_t high) {
+  blaze_u256 result = blaze_u256_zero();
+  result.limbs[0] = low;
+  result.limbs[1] = high;
+  *out = result;
+}
+
+/* Build a u256 from four 64 bit limbs, least significant first. This is the
+   full construction mechanism: any 256 bit value can be built from its limbs. */
+void blaze_rt_u256_from_u64x4(blaze_u256* out, uint64_t l0, uint64_t l1, uint64_t l2, uint64_t l3) {
+  blaze_u256 result = blaze_u256_zero();
+  result.limbs[0] = l0;
+  result.limbs[1] = l1;
+  result.limbs[2] = l2;
+  result.limbs[3] = l3;
+  *out = result;
 }
 
 uint64_t blaze_rt_u256_to_u64(const blaze_u256* value) {

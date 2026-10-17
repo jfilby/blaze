@@ -202,6 +202,10 @@ interface Place {
 const CONDITION: Record<Condition, number> = {
   e: 0x4,
   ne: 0x5,
+  // `z` and `nz` are the same conditions as `e` and `ne` (zero flag set / clear),
+  // written by the lowering when it branches on a comparison's zero flag.
+  z: 0x4,
+  nz: 0x5,
   l: 0xc,
   le: 0xe,
   g: 0xf,
@@ -998,7 +1002,7 @@ export class Encoder {
    * the register fields. Byte 3: [W][~vvvv][pp][L], where W selects 64 bit,
    * vvvv is an additional source register (inverted), pp is 00 and L is 0.
    */
-  private vex3(w: boolean, vvvv: number, reg: number, rm: number | { base: number | null; index: number | null }, map = 0b00001): void {
+  private vex3(w: boolean, vvvv: number, reg: number, rm: number | { base: number | null; index: number | null }, map = 0b00000): void {
     this.byte(0xc4);
     const rBit = (reg >= 8) ? 0 : 1;
     let xBit = 1;
@@ -1024,9 +1028,9 @@ export class Encoder {
    * these can run without the flag dependency that `imul` leaves behind.
    */
   mulx(high: number, low: number, src: number): void {
-    this.vex3(true, src, high, low);
+    this.vex3(true, high, src, low);
     this.byte(0xf6);
-    this.modrm(low, high);
+    this.modrm(low, src);
   }
 
   /**
@@ -1036,9 +1040,9 @@ export class Encoder {
    * parallel without serialising on the flags register.
    */
   adcx(dest: number, src: number): void {
-    this.vex3(true, src, 2, dest);
+    this.vex3(true, dest, src, 1);
     this.byte(0xf6);
-    this.modrm(dest, 2);
+    this.modrm(1, src);
   }
 
   /**
@@ -1048,9 +1052,9 @@ export class Encoder {
    * alongside the first.
    */
   adox(dest: number, src: number): void {
-    this.vex3(true, src, 3, dest);
+    this.vex3(true, dest, src, 2);
     this.byte(0xf6);
-    this.modrm(dest, 3);
+    this.modrm(2, src);
   }
 
   /** A division of the accumulator by a register, signed or not. */

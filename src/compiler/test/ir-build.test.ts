@@ -19,7 +19,9 @@ import { runBuild } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
+import { printSemanticProgram } from "../semantics/ir-text.ts";
 import { NO_CALLEES } from "../semantics/parallel.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
@@ -33,6 +35,30 @@ const quiet = { stage: () => {} };
 
 /** A review that finds nothing to change, which is what most rounds answer. */
 const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
+
+/** A wide-number bigint literal resolves as `u256`, never as a machine word.
+ *
+ * A bigint written with a trailing `n` is a whole number the program cannot
+ * hold in one register, so when it does not fit in `i64` it must be typed
+ * `u256` and loaded as four limbs. The literal reader used to reject the
+ * trailing `n`, type the literal `i64`, and the machine backend then
+ * sign-extended one word into all four limbs — a wrong value.
+ */
+test("a u256 bigint literal resolves as a wide number, not a machine word", () => {
+  const source = "let x: u256 = 1234567890123456789012345678901234567890123456789012345678901234n;";
+  const phase = phaseOf("typescript", { "module.ts": source }, "module.ts");
+  assert.ok(phase.body !== undefined, "the source is a program body");
+  const program = resolveProgram(
+    phase.body,
+    phase.program,
+    phase.objectNames,
+    phase.objectLayouts,
+    phase.objectKeys,
+  );
+  const text = printSemanticProgram(program);
+  assert.match(text, /const\[u256\] 1234567890/, "the bigint literal is typed u256");
+  assert.ok(!/const\[i64\] 1234567890/.test(text), "no bigint literal is typed as a machine word");
+});
 
 /**
  * The library the program calls: a loop over a buffer, accumulating what it

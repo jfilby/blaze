@@ -1356,6 +1356,20 @@ class Body {
         if (builtinFor(value.call.callee) === null) {
           unreachable(`call ${value.call.callee}`, this.contract, this.candidate);
         }
+        if (value.call.callee === "u256_from_u64x2") {
+          unreachable(
+            `call ${value.call.callee} is not yet lowered by the WebAssembly backend: a u256 is four 64 bit limbs and the module has no instruction that carries one; build as c, asm or machine output instead`,
+            this.contract,
+            this.candidate,
+          );
+        }
+        if (value.call.callee === "u256_from_u64x4") {
+          unreachable(
+            `call ${value.call.callee} is not yet lowered by the WebAssembly backend: a u256 is four 64 bit limbs and the module has no instruction that carries one; build as c, asm or machine output instead`,
+            this.contract,
+            this.candidate,
+          );
+        }
         for (const [position, argument] of value.call.args.entries()) {
           this.value(argument, value.call.argTypes[position] ?? argument.type);
         }

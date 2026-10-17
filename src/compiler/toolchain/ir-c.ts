@@ -667,6 +667,14 @@ class FunctionEmitter {
       return `${call.signature.symbol}(${args.join(", ")})`;
     }
     if (call.callee === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
+    if (call.callee === "u256_from_u64x2") {
+      const out = this.temporary("blaze_wide");
+      return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x2(&${out}, ${args[0]}, ${args[1]}); ${out}; })`;
+    }
+    if (call.callee === "u256_from_u64x4") {
+      const out = this.temporary("blaze_wide");
+      return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}); ${out}; })`;
+    }
     return builtinExpression(call.callee, args);
   }
 

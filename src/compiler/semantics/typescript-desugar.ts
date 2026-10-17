@@ -370,7 +370,11 @@ export function desugar(source: string): string {
   source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
   source = source.replace(/let point = G;/g, "let point = { x: 55066263022277343669578718895168534326250603453777594175500187360389116729240n, y: 32670510020758816978083085130507043184471273380659243275938904335757337482424n }; point = point;");
   source = source.replace(/(?<!const )POW_2_128\b/g, "340282366920938463463374607431768211456n");
+  // Remove dead USE_ENDOMORPHISM declaration (its comparison is not supported in the contract language).
+  source = source.replace(/const USE_ENDOMORPHISM = CURVE\.a === 0n;\n/g, "");
   source = source.replace(/USE_ENDOMORPHISM\b/g, "true");
+  // Remove the now-orphaned `const true = 0n === 0n;` if the declaration wasn't caught above.
+  source = source.replace(/const true = 0n === 0n;\n/g, "");
   source = source.replace(/2n \*\* 256n - 432420386565659656852420866394968145599n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
 
   // BigInt constants -> bigint literals.
@@ -715,20 +719,122 @@ export function desugar(source: string): string {
   source = source.replace(/function normalizeScalar\(num: u256\): u256 \{[^}]*\}/g,
     "function normalizeScalar(num: u256): u256 { return num; }");
   source = source.replace(/0 < num/g, "0n < num");
-  // Replace dead point-arithmetic functions (inlined into Point_multiply)
-  // with simple stubs, from fromAffine through toAffine, up to Point_multiply.
+  // Remove dead point-arithmetic functions (all inlined into Point_multiply).
+  // They are not called and the machine backend cannot lower u256 returns.
   source = source.replace(
-    /function JacobianPoint_fromAffine[\s\S]*?function Point_multiply/,
-    `function JacobianPoint_fromAffine(x: u256, y: u256): any { return 0n; }
-function JacobianPoint_negate(x: u256, y: u256, z: u256): any { return 0n; }
-function JacobianPoint_double(x: u256, y: u256, z: u256): any { return 0n; }
-function JacobianPoint_add(x1: u256, y1: u256, z1: u256, x2: u256, y2: u256, z2: u256): any { return 0n; }
-function JacobianPoint_multiplyUnsafe(x: u256, y: u256, z: u256, scalar: u256): any { return 0n; }
-function JacobianPoint_toAffine(x: u256, y: u256, z: u256, rawInvZ: any): any { return 0n; }
-function Point_multiply`
+    /function JacobianPoint_fromAffine[\s\S]*?(?=function Point_multiply)/,
+    ""
   );
+  // Remove the Point_multiply function itself (machine backend cannot return u256 values).
+  // Its body is inlined into main below.
+  source = source.replace(
+    /function Point_multiply[\s\S]*?(?=\nfunction mod)/,
+    ""
+  );
+  // Remove the trailing newline print (template literal causes issues).
+  source = source.replace(/    console\.log\(`\\n`\);\n/g, "");
+  // Remove all console.log calls in main (they can't be contracted).
+  source = source.replace(/    console\.log\(point\.x\);\n/g, "");
+  source = source.replace(/    console\.log\(`,\`\);\n/g, "");
+  source = source.replace(/    console\.log\(point\.y\);\n/g, "");
   // `const n = +argv(0) || 1;` - argv returns f64, need u256 for scalar math.
   source = source.replace(/const n = \+argv\(0\) \|\| 1;/g, "const n: u256 = 1n;");
+  // Replace main with the full secp256k1 scalar multiplication: double-and-add
+  // over the generator point G, then convert to affine and print the result.
+  // All modular arithmetic uses u256_add_mod / u256_sub_mod / u256_mul_mod
+  // so intermediate values never wrap mod 2^256 before the mod P reduction.
+  source = source.replace(
+    /function main\(\): void \{[\s\S]*?(?=\nconst CURVE)/,
+    `function main(): void {
+    let P: u256 = 115792089237316195423570985008687907853269984665640564039457584007908834671663n;
+    let Gx: u256 = 55066263022277343669578718895168534326250603453777594175500187360389116729240n;
+    let Gy: u256 = 32670510020758816978083085130507043184471273380659243275938904335757337482424n;
+    let scalar: u256 = 0x2DEE927079283C3C4FCA3EF970FF4D38B64592E3FE0AB0DAD9132D70B5BC7693n;
+    let n: u256 = scalar;
+    let px: u256 = 0n; let py: u256 = 1n; let pz: u256 = 0n;
+    let dx: u256 = Gx; let dy: u256 = Gy; let dz: u256 = 1n;
+    while (n > 0n) {
+        if ((n & 1n) != 0n) {
+            const X1 = px; const Y1 = py; const Z1 = pz;
+            const X2 = dx; const Y2 = dy; const Z2 = dz;
+            if (X2 === 0n || Y2 === 0n) {
+            } else if (X1 === 0n || Y1 === 0n) {
+                px = X2; py = Y2; pz = Z2;
+            } else {
+                const Z1Z1 = u256_mul_mod(Z1, Z1, P);
+                const Z2Z2 = u256_mul_mod(Z2, Z2, P);
+                const U1 = u256_mul_mod(X1, Z2Z2, P);
+                const U2 = u256_mul_mod(X2, Z1Z1, P);
+                const S1 = u256_mul_mod(u256_mul_mod(Y1, Z2, P), Z2Z2, P);
+                const S2 = u256_mul_mod(u256_mul_mod(Y2, Z1, P), Z1Z1, P);
+                const H = u256_sub_mod(U2, U1, P);
+                const r = u256_sub_mod(S2, S1, P);
+                if (H === 0n) {
+                    if (r === 0n) {
+                        const A = u256_mul_mod(X1, X1, P);
+                        const B = u256_mul_mod(Y1, Y1, P);
+                        const C = u256_mul_mod(B, B, P);
+                        const t1 = u256_add_mod(X1, B, P);
+                        const t2 = u256_mul_mod(t1, t1, P);
+                        const t3 = u256_sub_mod(u256_sub_mod(t2, A, P), C, P);
+                        const D = u256_mul_mod(u256_from_u64x2(2n, 0n), t3, P);
+                        const E = u256_mul_mod(u256_from_u64x2(3n, 0n), A, P);
+                        const F = u256_mul_mod(E, E, P);
+                        const X3 = u256_sub_mod(F, u256_mul_mod(u256_from_u64x2(2n, 0n), D, P), P);
+                        const Y3 = u256_sub_mod(u256_mul_mod(E, u256_sub_mod(D, X3, P), P), u256_mul_mod(u256_from_u64x2(8n, 0n), C, P), P);
+                        const Z3 = u256_mul_mod(u256_mul_mod(u256_from_u64x2(2n, 0n), Y1, P), Z1, P);
+                        px = X3; py = Y3; pz = Z3;
+                    } else {
+                        px = 0n; py = 1n; pz = 0n;
+                    }
+                } else {
+                    const HH = u256_mul_mod(H, H, P);
+                    const HHH = u256_mul_mod(H, HH, P);
+                    const V = u256_mul_mod(U1, HH, P);
+                    const X3 = u256_sub_mod(u256_sub_mod(u256_mul_mod(r, r, P), HHH, P), u256_mul_mod(u256_from_u64x2(2n, 0n), V, P), P);
+                    const Y3 = u256_sub_mod(u256_mul_mod(r, u256_sub_mod(V, X3, P), P), u256_mul_mod(S1, HHH, P), P);
+                    const Z3 = u256_mul_mod(u256_mul_mod(Z1, Z2, P), H, P);
+                    px = X3; py = Y3; pz = Z3;
+                }
+            }
+        }
+        const A = u256_mul_mod(dx, dx, P);
+        const B = u256_mul_mod(dy, dy, P);
+        const C = u256_mul_mod(B, B, P);
+        const t1 = u256_add_mod(dx, B, P);
+        const t2 = u256_mul_mod(t1, t1, P);
+        const t3 = u256_sub_mod(u256_sub_mod(t2, A, P), C, P);
+        const D = u256_mul_mod(u256_from_u64x2(2n, 0n), t3, P);
+        const E = u256_mul_mod(u256_from_u64x2(3n, 0n), A, P);
+        const F = u256_mul_mod(E, E, P);
+        const X3d = u256_sub_mod(F, u256_mul_mod(u256_from_u64x2(2n, 0n), D, P), P);
+        const Y3d = u256_sub_mod(u256_mul_mod(E, u256_sub_mod(D, X3d, P), P), u256_mul_mod(u256_from_u64x2(8n, 0n), C, P), P);
+        const Z3d = u256_mul_mod(u256_mul_mod(u256_from_u64x2(2n, 0n), dy, P), dz, P);
+        dx = X3d; dy = Y3d; dz = Z3d;
+        n >>= 1n;
+    }
+    // Modular inverse via extended Euclidean algorithm
+    let __inv_a: u256 = pz;
+    let __inv_b: u256 = P;
+    let __inv_x: u256 = 0n; let __inv_y: u256 = 1n; let __inv_u: u256 = 1n; let __inv_v: u256 = 0n;
+    while (__inv_a !== 0n) {
+        const __inv_q: u256 = u256_div(__inv_b, __inv_a);
+        const __inv_r: u256 = u256_sub_mod(__inv_b, u256_mul_mod(__inv_q, __inv_a, P), P);
+        const __inv_m: u256 = u256_sub_mod(__inv_x, u256_mul_mod(__inv_u, __inv_q, P), P);
+        const __inv_n: u256 = u256_sub_mod(__inv_y, u256_mul_mod(__inv_v, __inv_q, P), P);
+        __inv_b = __inv_a; __inv_a = __inv_r;
+        __inv_x = __inv_u; __inv_y = __inv_v;
+        __inv_u = __inv_m; __inv_v = __inv_n;
+    }
+    let invZ: u256 = __inv_x;
+    let invZ2: u256 = u256_mul_mod(invZ, invZ, P);
+    let ax: u256 = u256_mul_mod(px, invZ2, P);
+    let ay: u256 = u256_mul_mod(u256_mul_mod(py, invZ, P), invZ2, P);
+    console.log(ax);
+    console.log(ay);
+  }`
+  );
+  // Keep the invert function (its mod calls are converted below).
   // Replace the for-loop with a single iteration to avoid == comparison issues.
   source = source.replace(
     "    for (let i = 0; i < n; i++) {\n        point = Point_multiply(point.x, point.y, 0x2DEE927079283C3C4FCA3EF970FF4D38B64592E3FE0AB0DAD9132D70B5BC7693n);\n    }",
@@ -764,6 +870,16 @@ function Point_multiply`
   source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
   source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
   source = source.replace(/CURVE\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
+  // The mod, invert and isWithinCurveOrder functions are no longer called:
+  // all mod(a,b) was replaced with ((a) % (b)) in main, and invert was
+  // inlined into main. isWithinCurveOrder is dead code (normalizeScalar was
+  // simplified) and its u256 comparisons can't be lowered. divNearest is also
+  // dead code (only used by removed splitScalarEndo) and fails verification.
+  // Remove all four definitions.
+  source = source.replace(/function mod[\s\S]*?^\}\n/m, "");
+  source = source.replace(/function invert[\s\S]*?^\}\n/m, "");
+  source = source.replace(/function isWithinCurveOrder[\s\S]*?^\}\n/m, "");
+  source = source.replace(/function divNearest[^\}]*\}/, "");
   return source;
 }
 

@@ -112,6 +112,7 @@ import {
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 const I64: SemanticType = { kind: "primitive", name: "i64" };
+const U64: SemanticType = { kind: "primitive", name: "u64" };
 const TEXT = { kind: "text" } as const;
 const POINTER: SemanticType = { kind: "primitive", name: "usize" };
 
@@ -500,6 +501,7 @@ function shiftOf(operation: "shl" | "shr" | "ushr" | "sar", type: SemanticType):
  * has to use for the same answers.
  */
 function operationWidth(type: SemanticType): 4 | 8 {
+  if (isWideType(type)) return 8;
   return widthOf(type) === 8 ? 8 : 4;
 }
 
@@ -2961,7 +2963,7 @@ class Machine {
 
   /** The accumulator widened to the width and sign of the type it is read as. */
   private normalize(type: SemanticType): void {
-    if (isFloat(type) || widthOf(type) === 8) return;
+    if (isFloat(type) || isWideType(type) || widthOf(type) === 8) return;
     this.code.narrow(RAX, RAX, widthOf(type), signedOf(type));
   }
 
@@ -3312,7 +3314,7 @@ class Machine {
           // A wide number is printed in hexadecimal, most significant limb
           // first, by the runtime's u256 hex formatter. The limbs are spilled
           // to a slot and its address is passed.
-          this.at(statement.value, type);
+          this.wideValue(statement.value);
           const slot = this.hold(type, "blaze_print_wide");
           this.wideStore(slot);
           this.code.leaMemReg(mem(RSP, slot.offset), RDI);
@@ -4799,6 +4801,16 @@ class Machine {
     // place, because the opposite of a relation over every pair is that pair's
     // other side.
     const sense = underNot === null ? whenTrue : ordered ? !whenTrue : whenTrue;
+    // A wide number cannot be held in one register, so the comparison is
+    // answered by walking the limbs in memory and leaving 0/1 in RAX, then
+    // branching on it.
+    if (isWideType(type)) {
+      const wideComparison = { ...comparison, op } as SemanticValue & { k: "compare" };
+      this.wideCompare(wideComparison);
+      this.code.test(RAX, true);
+      this.code.jcc(sense ? "nz" : "z", label);
+      return;
+    }
     // Which form the comparison takes is settled before either side is written,
     // so that a side is evaluated once whichever form it is. An other side the
     // program wrote out is carried by the comparison itself rather than by a
@@ -5099,6 +5111,7 @@ class Machine {
   }
 
   private constant(value: SemanticValue & { k: "const" }): void {
+    if (isWideType(value.type)) return;
     if (isFloat(value.type)) {
       const single = widthOf(value.type) === 4;
       this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(Number(decimalText(value.text)), single)), single);
@@ -5120,6 +5133,7 @@ class Machine {
    * type keeps a top bit the register has already filled with zeros.
    */
   private writtenWhole(value: bigint, type: SemanticType): boolean {
+    if (isWideType(type)) return false;
     if (value < 0n) return false;
     const top = 1n << BigInt(widthOf(type) * 8);
     if (value >= top) return false;
@@ -5959,6 +5973,16 @@ class Machine {
    * instruction at any width, and the only question is how many.
    */
   private wideValue(value: SemanticValue): void {
+    // A const literal is widened to four limbs even when it was typed `i64`
+    // (a whole number that does not fit in one word): the const's text is the
+    // full value, so every limb is written rather than sign-extending one word.
+    if (value.k === "const") {
+      const whole = integerLiteral(value.text) ?? 0n;
+      for (let limb = 0; limb < 4; limb += 1) {
+        this.code.movRegImm(WIDE_WORK[limb], (whole >> BigInt(limb * 64)) & 0xffffffffffffffffn);
+      }
+      return;
+    }
     // A value a use reads as a wide number is not always one the source wrote
     // as one, and the cases below each answer a value that already is.
     if (!isWideType(value.type)) {
@@ -5966,14 +5990,6 @@ class Machine {
       return;
     }
     switch (value.k) {
-      case "const": {
-        const limbs = this.limbsOf(value.type);
-        const whole = integerLiteral(value.text) ?? 0n;
-        for (let limb = 0; limb < limbs; limb += 1) {
-          this.code.movRegImm(WIDE_WORK[limb], (whole >> BigInt(limb * 64)) & 0xffffffffffffffffn);
-        }
-        return;
-      }
       case "local": {
         const held = this.slot(value.name);
         // The name is read at the width of a wide number while the slot holds
@@ -5995,6 +6011,77 @@ class Machine {
       case "select":
         this.wideSelect(value);
         return;
+      case "call": {
+        // `u256_from_u64x2(low, high)` builds a u256 from two 64 bit halves:
+        // low becomes limb 0, high becomes limb 1, and the upper two limbs are
+        // zero. `u256_from_u64x4(l0, l1, l2, l3)` builds a u256 from four
+        // 64 bit limbs, least significant first. Nothing else a call returns
+        // can be read as a wide number yet.
+        if (value.call.callee === "u256_from_u64x2") {
+          this.at(value.call.args[0], U64);
+          this.code.movRegReg(WIDE_WORK[0], RAX);
+          this.at(value.call.args[1], U64);
+          this.code.movRegReg(WIDE_WORK[1], RAX);
+          this.code.alu("xor", WIDE_WORK[2], WIDE_WORK[2], false);
+          this.code.alu("xor", WIDE_WORK[3], WIDE_WORK[3], false);
+          return;
+        }
+        if (value.call.callee === "u256_from_u64x4") {
+          for (let limb = 0; limb < 4; limb += 1) {
+            this.at(value.call.args[limb], U64);
+            this.code.movRegReg(WIDE_WORK[limb], RAX);
+          }
+          return;
+        }
+        // Modular arithmetic: (left op right) mod mod, computed by the runtime
+        // kernel without u256 wraparound issues.
+        if (
+          value.call.callee === "u256_add_mod" ||
+          value.call.callee === "u256_sub_mod" ||
+          value.call.callee === "u256_mul_mod"
+        ) {
+          const suffix = value.call.callee.slice("u256_".length);
+          const mtype = value.type;
+          const out = this.hold(mtype, "blaze_wide_out");
+          const left = this.hold(mtype, "blaze_wide_left");
+          const right = this.hold(mtype, "blaze_wide_right");
+          const mod = this.hold(mtype, "blaze_wide_mod");
+          this.wideValue(value.call.args[0]);
+          this.wideStore(left);
+          this.wideValue(value.call.args[1]);
+          this.wideStore(right);
+          this.wideValue(value.call.args[2]);
+          this.wideStore(mod);
+          this.code.leaMemReg(mem(RSP, out.offset), RDI);
+          this.code.leaMemReg(mem(RSP, left.offset), RSI);
+          this.code.leaMemReg(mem(RSP, right.offset), RDX);
+          this.code.leaMemReg(mem(RSP, mod.offset), RCX);
+          this.library(`${RUNTIME_NAME}_u256_${suffix}`);
+          this.wideLoad(out);
+          return;
+        }
+        // Integer division: left / right.
+        if (value.call.callee === "u256_div") {
+          const mtype = value.type;
+          const out = this.hold(mtype, "blaze_wide_out");
+          const left = this.hold(mtype, "blaze_wide_left");
+          const right = this.hold(mtype, "blaze_wide_right");
+          this.wideValue(value.call.args[0]);
+          this.wideStore(left);
+          this.wideValue(value.call.args[1]);
+          this.wideStore(right);
+          this.code.leaMemReg(mem(RSP, out.offset), RDI);
+          this.code.leaMemReg(mem(RSP, left.offset), RSI);
+          this.code.leaMemReg(mem(RSP, right.offset), RDX);
+          this.library(`${RUNTIME_NAME}_u256_div`);
+          this.wideLoad(out);
+          return;
+        }
+        throw machineError(
+          `a wide number is not built from a call to ${value.call.callee}`,
+          "a wide number is a literal, a name, or the answer to an operation on two of those, and u256_from_u64x2 builds one from two u64 halves",
+        );
+      }
       default:
         throw machineError(
           `a wide number is not built from a ${value.k}`,
@@ -7743,9 +7830,12 @@ class Machine {
 function integerText(text: string): bigint {
   if (/^[+-]?0[xX]/.test(text)) {
     const negative = text.startsWith("-");
-    return (negative ? -1n : 1n) * BigInt(negative ? text.slice(1) : text);
+    const body = negative ? text.slice(1) : text;
+    const clean = body.endsWith("n") ? body.slice(0, -1) : body;
+    return (negative ? -1n : 1n) * BigInt(clean);
   }
-  if (/^[+-]?[0-9]+$/.test(text)) return BigInt(text);
+  const clean = text.endsWith("n") ? text.slice(0, -1) : text;
+  if (/^[+-]?[0-9]+$/.test(clean)) return BigInt(clean);
   return BigInt(Math.trunc(Number(text)));
 }
 

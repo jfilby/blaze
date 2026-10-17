@@ -17,6 +17,8 @@ export interface BuiltinSignature {
 
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
 const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
+const U64: TypeExpr = { kind: "primitive", name: "u64" };
+const U256: TypeExpr = { kind: "primitive", name: "u256" };
 
 /**
  * The name a block of bytes a program laid out is allocated under. The
@@ -42,6 +44,21 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
   [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
   [ARGV]: { params: [USIZE], returns: F64, arity: 1 },
+  /** `u256_from_u64x2(low, high)` builds a `u256` from two 64-bit halves, so a
+   *  value that fits in 128 bits can be constructed from its low and high limbs
+   *  and the upper limbs are zero. */
+  "u256_from_u64x2": { params: [U64, U64], returns: U256, arity: 2 },
+  /** `u256_from_u64x4(l0, l1, l2, l3)` builds a `u256` from four 64-bit limbs,
+   *  least significant first, so any 256-bit value can be constructed. */
+  "u256_from_u64x4": { params: [U64, U64, U64, U64], returns: U256, arity: 4 },
+  /** `u256_add_mod(a, b, m)` computes (a + b) mod m without u256 wraparound. */
+  "u256_add_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
+  /** `u256_sub_mod(a, b, m)` computes (a - b) mod m without u256 wraparound. */
+  "u256_sub_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
+  /** `u256_mul_mod(a, b, m)` computes (a * b) mod m without u256 wraparound. */
+  "u256_mul_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
+  /** `u256_div(a, b)` computes integer division a / b. */
+  "u256_div": { params: [U256, U256], returns: U256, arity: 2 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

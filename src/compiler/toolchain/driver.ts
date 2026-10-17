@@ -719,6 +719,14 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
         return `trunc(${argument(0)})`;
       case "sharedBlock":
         return `${RUNTIME_NAME}_allocate((size_t)(${argument(0)}))`;
+      case "u256_from_u64x2": {
+        const out = "blaze_wide";
+        return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x2(&${out}, ${argument(0)}, ${argument(1)}); ${out}; })`;
+      }
+      case "u256_from_u64x4": {
+        const out = "blaze_wide";
+        return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${argument(0)}, ${argument(1)}, ${argument(2)}, ${argument(3)}); ${out}; })`;
+      }
       default:
         throw driverError(`the driver cannot write down ${call.callee}`);
     }

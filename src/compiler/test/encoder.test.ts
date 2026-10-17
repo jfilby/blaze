@@ -38,6 +38,7 @@ import {
   XMM10,
   XMM15,
   frame,
+  type Condition,
 } from "../toolchain/x86.ts";
 import { scratch } from "./scratch.ts";
 
@@ -257,6 +258,63 @@ test("a register above seven is named by the extension bit of the field it is wr
     encoder.alu("add", register, RAX, true);
     const [extension] = Array.from(encoder.finish());
     assert.equal(extension !== undefined && extension & 0b100, 4, `r${register} is written in the register field here, so the extension's R bit is what names it`);
+  }
+});
+
+test("z and nz encode as e and ne", () => {
+  // `z` and `nz` are the zero flag set / clear — the same conditions `e` and
+  // `ne` read off the flags. Before they were added to the condition table a
+  // wide conditional jump encoded as the undefined condition byte `0x00`
+  // (verr/sldt/lldt) instead of `0x0f 0x84|0x85`, and segfaulted at runtime.
+  // The short and wide forms must all agree on the condition byte.
+  const pairs: [Condition, Condition][] = [
+    ["z", "e"],
+    ["nz", "ne"],
+  ];
+  for (const [alias, real] of pairs) {
+    // Short form: 0x70 + condition. The target is bound at the next byte so
+    // the displacement is zero and the jump stays short; only the opcode byte
+    // is compared.
+    const shortAlias = new Encoder();
+    shortAlias.jcc(alias, "L");
+    shortAlias.bind("L");
+    const shortReal = new Encoder();
+    shortReal.jcc(real, "L");
+    shortReal.bind("L");
+    assert.deepEqual(
+      Array.from(shortAlias.finish()),
+      Array.from(shortReal.finish()),
+      `jcc("${alias}") must encode as jcc("${real}")`,
+    );
+    // Wide form: 0f 80 + condition. Pad past a signed byte so finish widens
+    // the jump and the condition byte lands at index 1.
+    const wideAlias = new Encoder();
+    wideAlias.jcc(alias, "Lfar");
+    for (let at = 0; at < 200; at += 1) wideAlias.byte(0x90);
+    wideAlias.bind("Lfar");
+    const wideReal = new Encoder();
+    wideReal.jcc(real, "Lfar");
+    for (let at = 0; at < 200; at += 1) wideReal.byte(0x90);
+    wideReal.bind("Lfar");
+    const aliasBytes = Array.from(wideAlias.finish());
+    const realBytes = Array.from(wideReal.finish());
+    assert.equal(aliasBytes[0], 0x0f, `jcc("${alias}") wide form begins with 0f`);
+    assert.equal(aliasBytes[1], realBytes[1], `jcc("${alias}") wide condition byte matches jcc("${real}")`);
+    // setcc and cmov read the same condition table.
+    const setAlias = new Encoder();
+    setAlias.setcc(alias, RAX);
+    const setReal = new Encoder();
+    setReal.setcc(real, RAX);
+    assert.deepEqual(Array.from(setAlias.finish()), Array.from(setReal.finish()), `setcc("${alias}") must match setcc("${real}")`);
+    const cmovAlias = new Encoder();
+    cmovAlias.cmov(alias, RAX, RCX, true);
+    const cmovReal = new Encoder();
+    cmovReal.cmov(real, RAX, RCX, true);
+    assert.deepEqual(
+      Array.from(cmovAlias.finish()),
+      Array.from(cmovReal.finish()),
+      `cmov("${alias}") must match cmov("${real}")`,
+    );
   }
 });
 

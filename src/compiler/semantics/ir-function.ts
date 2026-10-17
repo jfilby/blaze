@@ -62,6 +62,11 @@ import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIsWhole, coales
 import { isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
+
+/** The largest a `u64` holds, so a bigint that fits can be typed as `u64` when
+   one is expected. */
+const U64_MAX = 18446744073709551615n;
+const U64: TypeExpr = { kind: "primitive", name: "u64" };
 import type { AssignOperator, BinaryOp, Expression, Statement, UnaryOp as SourceUnaryOp } from "../core/ir.ts";
 import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
 import {
@@ -828,6 +833,16 @@ class FunctionBody {
         return { value: { k: "const", type: numberAt(expect) ?? F64, text: expression.text }, inferred: DOUBLE };
       }
       case "bigint":
+        // When a `u64` is expected and the value fits in 64 unsigned bits, type
+        // it as `u64` so it can be passed to `u256_from_u64x2` or
+        // `u256_from_u64x4` without first being widened to `u256`.
+        if (expect !== null && expect.kind === "type" && expect.type.kind === "primitive" && expect.type.name === "u64") {
+          let literal: bigint | null = null;
+          try { literal = BigInt(expression.text); } catch { /* not a valid bigint */ }
+          if (literal !== null && literal >= 0n && literal <= U64_MAX) {
+            return { value: { k: "const", type: U64, text: expression.text }, inferred: asType(U64) };
+          }
+        }
         return { value: { k: "const", type: I64, text: expression.text }, inferred: asType(I64) };
       case "ident": {
         const held = this.read(expression.name, line);

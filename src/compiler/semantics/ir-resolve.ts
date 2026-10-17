@@ -355,16 +355,23 @@ const isWholeLiteral = isWholeNumberText;
  * one thing the check the value feeds is there to keep from happening.
  */
 function integerLiteral(text: string): bigint | null {
-  if (/^[+-]?0[xX][0-9a-fA-F]+$/.test(text)) {
+  if (/^[+-]?0[xX]/.test(text)) {
     const negative = text.startsWith("-");
-    return (negative ? -1n : 1n) * BigInt(negative ? text.slice(1) : text);
+    const body = negative ? text.slice(1) : text;
+    const clean = body.endsWith("n") ? body.slice(0, -1) : body;
+    return (negative ? -1n : 1n) * BigInt(clean);
   }
-  return /^[+-]?[0-9]+$/.test(text) ? BigInt(text) : null;
+  const clean = text.endsWith("n") ? text.slice(0, -1) : text;
+  return /^[+-]?[0-9]+$/.test(clean) ? BigInt(clean) : null;
 }
 
 /** The range an `i64` holds, which is the range a bigint literal is written at. */
 const I64_MAX = 9223372036854775807n;
 const I64_MIN = -9223372036854775808n;
+
+/** The range a `u64` holds, so a bigint that fits in it can be typed as `u64`
+   when a `u64` is expected rather than being widened to `u256`. */
+const U64_MAX = 18446744073709551615n;
 
 /**
  * True of a value that is a whole number as written, and so of a loop index
@@ -2342,7 +2349,22 @@ class ProgramResolver {
         // was written out as the low sixty-four bits of itself, so
         // `18446744073709551615n` printed -1 where the source prints itself.
         const literal = integerLiteral(value.text);
-        if (literal !== null && (literal > I64_MAX || literal < I64_MIN)) {
+        if (literal === null) {
+          return {
+            k: "literal",
+            held: { kind: "number", name: "", mutable: false, type: "i64", text: value.text, bigint: true },
+          };
+        }
+        // When a `u64` is expected and the value fits in 64 unsigned bits, type
+        // it as `u64` so it can be passed to `u256_from_u64x2` or
+        // `u256_from_u64x4` without first being widened to `u256`.
+        if (expect !== null && expect.kind === "primitive" && expect.name === "u64" && literal >= 0n && literal <= U64_MAX) {
+          return {
+            k: "literal",
+            held: { kind: "number", name: "", mutable: false, type: "u64", text: value.text, bigint: true },
+          };
+        }
+        if (literal > I64_MAX || literal < I64_MIN) {
           return {
             k: "literal",
             held: { kind: "number", name: "", mutable: false, type: "u256", text: value.text, bigint: true },
