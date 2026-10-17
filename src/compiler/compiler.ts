@@ -823,7 +823,7 @@ function resolvedDriver(
   semantics: Record<string, SemanticFunction>,
 ): SemanticProgram {
   const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
-  wholeElementArithmetic(Object.values(semantics), driver.entry);
+  wholeElementArithmetic(driver.bodies, driver.entry);
   return driver;
 }
 
@@ -1668,12 +1668,11 @@ export async function runBuild(
         ? undefined
         : optimizeSemanticProgram(
             resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys, semantics),
-            new Map(Object.entries(semantics)),
           );
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
-      validateSemanticProgram(driver, undefined, new Map(Object.entries(semantics)));
+      validateSemanticProgram(driver, undefined, new Map(driver.bodies.map((fn) => [fn.name, fn])));
       reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
     }
     const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
@@ -2202,7 +2201,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     options.from === undefined
       ? resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys)
       : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
-  validateSemanticProgram(program, phase.program, callees);
+  validateSemanticProgram(program, phase.program, new Map(program.bodies.map((fn) => [fn.name, fn])));
   // As for a function: the program the backends lower is folded, so the one
   // printed here is the one they were handed.
   return printSemanticProgram(optimizeSemanticProgram(program, callees));

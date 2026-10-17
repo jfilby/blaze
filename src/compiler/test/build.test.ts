@@ -1251,3 +1251,33 @@ test("generate stops at candidate selection and delivers nothing", async () => {
   const store = await storeDirectory(directory, "input");
   await assert.rejects(() => readFile(join(store, "output/input"), "utf8"));
 });
+
+test("a program with a nested helper called from a parallel loop builds", async () => {
+  const directory = await scratch("blaze-nested-parallel-");
+  const source = [
+    "function mainThread(n: number): void {",
+    "    function a(i: number, j: number): number {",
+    "        return ((i + j) * (i + j + 1) >>> 1) + i + 1;",
+    "    }",
+    "    for (let i = 0; i < n; i++) {",
+    "        let t = 0;",
+    "        for (let j = 0; j < n; j++) {",
+    "            t += 1 / a(i, j);",
+    "        }",
+    "        console.log(t);",
+    "    }",
+    "}",
+    "mainThread(2);",
+  ].join("\n");
+  await writeFile(join(directory, "7.ts"), source, "utf8");
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    sourceFile: "7.ts",
+    output: "machine",
+    backend: "machine",
+    mode: "danger",
+    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+  });
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+});
