@@ -507,6 +507,7 @@ const MATH: Record<string, number> = {
   "Math.sqrt": 0x9f,
   "Math.floor": 0x9c,
   "Math.trunc": 0x9d,
+  "Math.ceil": 0x9b,
   "Math.min": 0xa4,
   "Math.max": 0xa5,
 };
@@ -1321,12 +1322,8 @@ class Body {
         // instruction and no runtime here. Refuse it by name rather than emit
         // a byte that does not decode, or nothing at all.
         if (value.k === "arith" && value.op === "pow") {
-          throw new CompilerError({
-            category: "AssemblyError",
-            stage: "wasm",
-            message: "this backend has not written a pow",
-            detail: "WebAssembly has no instruction for a power, and no runtime to call one of: a program that raises is written C or run as machine code",
-          });
+          // `pow` is the one arithmetic operation with no instruction of its
+          // own; the host provides it through the `env.pow` import.
         }
         const held = facts(compared).held;
         this.value(value.left, compared);
@@ -1334,6 +1331,12 @@ class Body {
         // A whole number the module holds as unsigned is divided, ordered and
         // shifted as unsigned, because the instruction is named for how the
         // bits read and not for how the value was declared.
+        if (value.op === "pow") {
+          this.op(0x10);
+          this.code.varuint(0);
+          this.convert(value.type, at);
+          return;
+        }
         const unsignedOp = facts(compared).unsigned ? UNSIGNED_BINARY[held][value.op] : undefined;
         const op = unsignedOp ?? BINARY[held][value.op];
         if (op === undefined) {
@@ -2078,6 +2081,14 @@ class Body {
           this.set(statement.name);
           return;
         }
+        if (statement.op === "**=") {
+          this.get(statement.name);
+          this.value(statement.value, type);
+          this.op(0x10);
+          this.code.varuint(0);
+          this.set(statement.name);
+          return;
+        }
         this.get(statement.name);
         this.value(statement.value, type);
         this.op(compoundCode(held, type, statement.op));
@@ -2448,24 +2459,42 @@ class Body {
 
   private builtin(callee: string): void {
     const code = MATH[callee];
-    if (code === undefined) {
-      if (ARGV_NAMES[callee] === true) this.noCommandLine();
-      // `Math.round` is the one maths builtin with no instruction of its own:
-      // the source language rounds a half up, and the only rounding a module
-      // has rounds a half to even, so nothing in it is the same number.
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: `a WebAssembly module cannot round the way the source language does, in ${symbolOf(this.contract)}`,
-        detail:
-          "Math.round rounds a half up and the module's own rounding rounds a half to even, so the two disagree " +
-          "on every half. Math.abs, Math.floor, Math.trunc, Math.min and Math.max are one instruction each and " +
-          "are lowered. Build this function as the c, asm or machine output kind to round as the source does",
-        function: symbolOf(this.contract),
-        candidate: this.candidate,
-      });
+    if (code !== undefined) {
+      this.op(code);
+      return;
     }
-    this.op(code);
+    if (ARGV_NAMES[callee] === true) this.noCommandLine();
+    if (callee === "Math.round") {
+      // `Math.round` rounds a half away from zero, and the module has no
+      // instruction that does. The two halves are computed with the
+      // instructions it does have — `floor(x + 0.5)` for a non-negative
+      // argument and `ceil(x - 0.5)` for a negative one — and the sign of
+      // the argument chooses between them.
+      const local = this.borrow(F64);
+      this.tee(local);
+      this.read(local);
+      this.float(0.5, true);
+      this.op(BINARY[F64].add as number);
+      this.op(0x9c); // floor
+      this.read(local);
+      this.float(0.5, true);
+      this.op(BINARY[F64].sub as number);
+      this.op(0x9b); // ceil
+      this.read(local);
+      this.float(0, true);
+      this.op(BINARY[F64].ge as number);
+      this.op(0x1b); // select
+      this.release(F64, local);
+      return;
+    }
+    throw new CompilerError({
+      category: "TargetError",
+      stage: "compile",
+      message: `a WebAssembly module cannot call ${callee}, in ${symbolOf(this.contract)}`,
+      detail: "this backend has no instruction for it",
+      function: symbolOf(this.contract),
+      candidate: this.candidate,
+    });
   }
 
   /**
@@ -2570,21 +2599,26 @@ export function moduleBytes(
   const module = new Bytes();
   module.raw(MODULE_HEADER);
   module.section(1, (types) =>
-    types.counted(1, (one) => {
+    types.counted(2, (one) => {
       one.byte(0x60);
       one.counted(parameters.length, (values) => parameters.forEach((type) => values.byte(type)));
       one.counted(result === undefined ? 0 : 1, (results) => {
         if (result !== undefined) results.byte(result);
       });
+      one.byte(0x60);
+      one.counted(2, (values) => { values.byte(0x7c); values.byte(0x7c); });
+      one.counted(1, (results) => results.byte(0x7c));
     }),
   );
   module.section(2, (imports) =>
-    imports.counted(1, (one) => {
+    imports.counted(2, (one) => {
       one.name("env");
       one.name("memory");
       one.byte(0x02);
-      // A memory is a limits pair — a flag byte and the pages it starts with —
-      // and not a vector, which costs a byte the format does not allow.
+      one.byte(0x00);
+      one.varuint(1);
+      one.name("env");
+      one.name("pow");
       one.byte(0x00);
       one.varuint(1);
     }),
@@ -2628,7 +2662,7 @@ export function moduleBytes(
     exports.counted(2, (each) => {
       each.name(symbolOf(contract));
       each.byte(0x00);
-      each.varuint(0);
+      each.varuint(1);
       // The global the host reads to learn where it may allocate from. `0x03`
       // is a global export; the index is past every pooled float.
       each.name(DATA_BASE_EXPORT);
@@ -2826,11 +2860,12 @@ const module = new WebAssembly.Module(bytes);
 const problems = [];
 const imports = WebAssembly.Module.imports(module);
 const memoryImports = imports.filter((entry) => entry.kind === "memory");
-if (imports.length !== 1 || memoryImports.length !== 1 || memoryImports[0].module !== "env" || memoryImports[0].name !== "memory") {
-  problems.push('the module must import exactly one memory: (import "env" "memory" ...)');
+const powImports = imports.filter((entry) => entry.kind === "function" && entry.module === "env" && entry.name === "pow");
+if (memoryImports.length !== 1 || memoryImports[0].module !== "env" || memoryImports[0].name !== "memory" || imports.length !== 2 || powImports.length !== 1) {
+  problems.push('the module must import one memory and one pow');
 }
-if (imports.some((entry) => entry.kind !== "memory")) {
-  problems.push("the module must not import functions, tables or globals");
+if (imports.some((entry) => entry.kind !== "memory" && !(entry.kind === "function" && entry.module === "env" && entry.name === "pow"))) {
+  problems.push("the module must not import anything but the memory and pow");
 }
 const exports = WebAssembly.Module.exports(module).map((entry) => entry.name);
 if (exports.includes("memory") || exports.includes("_start")) {

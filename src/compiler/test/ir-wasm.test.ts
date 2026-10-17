@@ -15,7 +15,6 @@ import { programWithSemantics } from "./phase.ts";
 import { run } from "../core/process.ts";
 import { encodeRunRequest, type TestVector } from "../toolchain/verifier.ts";
 import type { FunctionContract } from "../core/types.ts";
-import { CompilerError } from "../core/errors.ts";
 import { parseSemanticFunction } from "../semantics/ir-text.ts";
 import type { ArithOp, CompareOp, SemanticFunction, SemanticType } from "../core/semantic-ir.ts";
 import { scratch } from "./scratch.ts";
@@ -201,6 +200,8 @@ test("a maths builtin is the instruction of its own name", async () => {
   await compute("n: number", ["  return Math.abs(n);"], "run\n-2.5\n\n", "RESULT 2.5\n");
   await compute("n: number", ["  return Math.floor(n);"], "run\n-2.5\n\n", "RESULT -3\n");
   await compute("n: number", ["  return Math.trunc(n);"], "run\n-2.5\n\n", "RESULT -2\n");
+  await compute("n: number", ["  return Math.ceil(n);"], "run\n-2.5\n\n", "RESULT -2\n");
+  await compute("n: number", ["  return Math.ceil(n);"], "run\n2.5\n\n", "RESULT 3\n");
   // Used inside an expression rather than returned whole, so the argument and
   // the answer both have to sit on the stack around the instruction.
   await compute("n: number", ["  return Math.abs(n) + 1;"], "run\n-2.5\n\n", "RESULT 3.5\n");
@@ -234,19 +235,10 @@ test("a maths builtin written for its effect is an instruction and not an empty 
   await compute("n: number", ["  Math.abs(n);", "  return 2;"], "run\n-3\n\n", "RESULT 2\n");
 });
 
-test("a maths builtin that is not one instruction is refused by name", async () => {
-  // `Math.round` rounds a half up and the only rounding a module has rounds a
-  // half to even, so no instruction of it is the same number. The refusal says
-  // which one and why, rather than reporting it as a call a module cannot make.
-  await assert.rejects(
-    compute("n: number", ["  return Math.round(n);"], "run\n1\n\n", ""),
-    (error: unknown) => {
-      assert.ok(error instanceof CompilerError);
-      assert.match(error.message, /cannot round the way the source language does/);
-      assert.match(error.detail ?? "", /rounds a half up and the module's own rounding rounds a half to even/);
-      return true;
-    },
-  );
+test("a maths builtin that rounds a half up is the instruction the source expects", async () => {
+  await compute("n: number", ["  return Math.round(n);"], "run\n2.5\n\n", "RESULT 3\n");
+  await compute("n: number", ["  return Math.round(n);"], "run\n-2.5\n\n", "RESULT -3\n");
+  await compute("n: number", ["  return Math.round(n);"], "run\n2.4\n\n", "RESULT 2\n");
 });
 
 test("a walk stops at the count even when the memory past the buffer is not empty", async () => {
@@ -268,7 +260,7 @@ test("a walk stops at the count even when the memory past the buffer is not empt
   assert.ok(contract !== undefined, "the entry program imports the function under test");
   const memory = new engine.Memory({ initial: 1 });
   const instance = new engine.Instance(new engine.Module(moduleBytes(semantics.r as SemanticFunction, contract)), {
-    env: { memory },
+    env: { memory, pow: Math.pow },
   });
   const view = new DataView(memory.buffer);
   view.setBigUint64(1024, 3n, true);
@@ -532,7 +524,7 @@ test("a reference is tested for nothing against a zero of its own width", () => 
     definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
   } as FunctionContract;
   const memory = new engine.Memory({ initial: 1 });
-  const instance = new engine.Instance(new engine.Module(moduleBytes(fn, contract)), { env: { memory } });
+  const instance = new engine.Instance(new engine.Module(moduleBytes(fn, contract)), { env: { memory, pow: Math.pow } });
   const read = instance.exports.r as (p: number) => number;
   assert.equal(read(0), 1, "nothing is nothing, and an offset is not");
   assert.equal(read(64), 1, "an offset beside a buffer is not nothing either");
@@ -591,7 +583,7 @@ test("a field is stored at the width its type is read at", () => {
     definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
   } as FunctionContract;
   const memory = new engine.Memory({ initial: 1 });
-  const instance = new engine.Instance(new engine.Module(moduleBytes(fn, contract)), { env: { memory } });
+  const instance = new engine.Instance(new engine.Module(moduleBytes(fn, contract)), { env: { memory, pow: Math.pow } });
   assert.equal((instance.exports.r as (p: number) => number)(64), 7.25, "a double field holds the double it was written with");
 });
 
@@ -694,10 +686,7 @@ test("a compound write to an element reads the element it writes over", () => {
   assert.ok(throughIr(library, text) > 0, "a compound element write is a module the engine takes");
 });
 
-test("a power is refused by name, rather than silently lowered to nothing", () => {
-  // There is no power instruction and no runtime to call one of, so the build
-  // must stop here. It used to emit no opcode at all, or whatever byte happened
-  // to be in the slot.
+test("a power is lowered through the runtime import", () => {
   const library = "export function r(a: number): number {\n  return a ** 2;\n}\n";
   const text = [
     "function r(a: f64) -> f64",
@@ -712,11 +701,7 @@ test("a power is refused by name, rather than silently lowered to nothing", () =
     "  return [pow[f64] local[f64] a const[f64] 2]",
     "",
   ].join("\n");
-  assert.throws(
-    () => throughIr(library, text),
-    /has not written a pow/,
-    "a pow in IR text is refused by name",
-  );
+  assert.ok(throughIr(library, text) > 0, "a pow in IR text is a module the engine takes");
   const setText = [
     "function r(a: f64) -> f64",
     "  requires none",
@@ -732,11 +717,7 @@ test("a power is refused by name, rather than silently lowered to nothing", () =
     "  return local[f64] b",
     "",
   ].join("\n");
-  assert.throws(
-    () => throughIr(library, setText),
-    /has not written a pow/,
-    "a `**=` in IR text is refused by name",
-  );
+  assert.ok(throughIr(library, setText) > 0, "a `**=` in IR text is a module the engine takes");
 });
 
 test("two blocks that both declare a name are two values, not one", async () => {
@@ -774,7 +755,7 @@ test("a short-circuit operator does not run the arm the source never reaches", (
   assert.ok(contract !== undefined, "the entry program imports the function under test");
   const memory = new engine.Memory({ initial: 1 });
   const instance = new engine.Instance(new engine.Module(moduleBytes(semantics.r as SemanticFunction, contract)), {
-    env: { memory },
+    env: { memory, pow: Math.pow },
   });
   const view = new DataView(memory.buffer);
   view.setBigUint64(1024, 0n, true);
@@ -839,7 +820,7 @@ test("a wide constant is laid down in the module's own memory and read back", ()
   const memory = new engine.Memory({ initial: 1 });
   const instance = new engine.Instance(
     new engine.Module(moduleBytes(returnsConstant(U, TEXT), wideContract())),
-    { env: { memory } },
+    { env: { memory, pow: Math.pow } },
   );
   const address = (instance.exports as { subject: () => number }).subject();
   const view = new Uint8Array(memory.buffer);
@@ -914,7 +895,7 @@ test("a wide number is arithmetic on four limbs, in the module's own memory", ()
       const expected = op === "add" ? (left + right) & MASK : op === "sub" ? (left - right) & MASK : op === "and" ? left & right : op === "or" ? left | right : left ^ right;
       const bytes = moduleBytes(wideBinary(U, op, leftText, rightText), wideContract());
       const memory = new engine.Memory({ initial: 1 });
-      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
       const address = (instance.exports as { subject: () => number }).subject();
       const view = new Uint8Array(memory.buffer);
 
@@ -948,7 +929,7 @@ test("two whole numbers are subtracted a limb at a time, borrowing as it goes", 
     const right = BigInt(`0x${rightText}`);
     const bytes = moduleBytes(wideBinary(U, "sub", leftText, rightText), wideContract());
     const memory = new engine.Memory({ initial: 1 });
-    const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+    const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
     const address = (instance.exports as { subject: () => number }).subject();
     const view = new Uint8Array(memory.buffer);
     let limbs = "";
@@ -1013,7 +994,7 @@ test("two whole numbers are compared a limb at a time, from the top", () => {
         : op === "gt" ? left > right : left >= right;
       const memory = new engine.Memory({ initial: 1 });
       const bytes: Uint8Array = moduleBytes(wideComparison(U, op, leftText, rightText), boolContract());
-      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
       const answer: number = (instance.exports as { subject: () => number }).subject();
       assert.equal(answer !== 0, expected, `the ${op} of ${leftText} and ${rightText}`);
     }
@@ -1066,7 +1047,7 @@ test("a whole number is chosen between two, a limb at a time", () => {
     const otherwise = "0123456789abcdeffedcba987654321089abcdef0123456776543210fedcba98";
     const bytes: Uint8Array = moduleBytes(wideSelection(U, take, then, otherwise), wideContract());
     const memory = new engine.Memory({ initial: 1 });
-    const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+    const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
     const address: number = (instance.exports as { subject: () => number }).subject();
     const view = new Uint8Array(memory.buffer);
     let limbs = "";
@@ -1134,7 +1115,7 @@ test("a module imports the host's memory and nothing else", () => {
   const U: SemanticType = { kind: "primitive", name: "u256" };
   const bytes = moduleBytes(wideBinary(U, "add", "ff".repeat(32), "01".padStart(64, "0")), wideContract());
   const listed = (engine.Module as unknown as { imports(module: object): { module: string; name: string; kind: string }[] }).imports(new engine.Module(bytes));
-  assert.deepEqual(listed, [{ module: "env", name: "memory", kind: "memory" }], "the module asks for the host's memory and nothing else");
+  assert.deepEqual(listed, [{ module: "env", name: "memory", kind: "memory" }, { module: "env", name: "pow", kind: "function" }], "the module asks for the host's memory and pow");
 });
 
 test("a whole number moves by a number of bits, a limb at a time", () => {
@@ -1151,7 +1132,7 @@ test("a whole number moves by a number of bits, a limb at a time", () => {
       const expected = (op === "shl" ? left << BigInt(count) : left >> BigInt(count)) & MASK;
       const bytes = moduleBytes(wideShifted(U, op, VALUE, String(count)), wideContract());
       const memory = new engine.Memory({ initial: 1 });
-      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+      const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
       const address = (instance.exports as { subject: () => number }).subject();
       const view = new Uint8Array(memory.buffer);
       let limbs = "";
@@ -1191,7 +1172,7 @@ function shifted(fn: SemanticFunction, contract: FunctionContract): number {
   const bytes = moduleBytes(fn, contract);
   assert.ok(here.validate(bytes), "the engine accepts the module");
   const memory = new here.Memory({ initial: 1 });
-  const instance = new here.Instance(new here.Module(bytes), { env: { memory } });
+  const instance = new here.Instance(new here.Module(bytes), { env: { memory, pow: Math.pow } });
   return (instance.exports as { subject: () => number }).subject();
 }
 

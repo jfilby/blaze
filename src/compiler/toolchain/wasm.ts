@@ -188,11 +188,12 @@ export function boundaryProblems(bytes: Uint8Array, expected: string): string[] 
   const problems: string[] = [];
   const imports = engine.Module.imports(module);
   const memoryImports = imports.filter((entry) => entry.kind === "memory");
-  if (imports.length !== 1 || memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== "memory") {
-    problems.push('the module must import exactly one memory: (import "env" "memory" ...)');
+  const powImports = imports.filter((entry) => entry.kind === "function" && entry.module === "env" && entry.name === "pow");
+  if (memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== "memory" || imports.length !== 2 || powImports.length !== 1) {
+    problems.push('the module must import one memory and one pow: (import "env" "memory" ...) and (import "env" "pow" ...)');
   }
-  if (imports.some((entry) => entry.kind !== "memory")) {
-    problems.push("the module must not import functions, tables or globals");
+  if (imports.some((entry) => entry.kind !== "memory" && !(entry.kind === "function" && entry.module === "env" && entry.name === "pow"))) {
+    problems.push("the module must not import anything but the memory and pow");
   }
   const exports = engine.Module.exports(module).map((entry) => entry.name);
   if (exports.includes("memory") || exports.includes("_start")) {
@@ -377,7 +378,7 @@ function fail(message) {
 
 const module = new WebAssembly.Module(readFileSync(modulePath));
 const memory = new WebAssembly.Memory({ initial: 4 });
-const instance = new WebAssembly.Instance(module, { env: { memory } });
+const instance = new WebAssembly.Instance(module, { env: { memory, pow: Math.pow } });
 const entry = instance.exports[functionName];
 if (typeof entry !== "function") fail("the module does not export " + functionName);
 

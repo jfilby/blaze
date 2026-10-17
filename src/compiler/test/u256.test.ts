@@ -1803,7 +1803,7 @@ function wasmAnswerOf(value: SemanticValue): string {
       definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
     },
   );
-  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory } });
+  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
   const address = (instance.exports as { subject: () => number }).subject();
   const view = new Uint8Array(memory.buffer);
   let limbs = "";

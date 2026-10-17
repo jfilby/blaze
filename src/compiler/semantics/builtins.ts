@@ -42,6 +42,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.floor": { params: [F64], returns: F64, arity: 1 },
   "Math.round": { params: [F64], returns: F64, arity: 1 },
   "Math.trunc": { params: [F64], returns: F64, arity: 1 },
+  "Math.ceil": { params: [F64], returns: F64, arity: 1 },
   [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
   [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
   [ARGV]: { params: [USIZE], returns: ANY, arity: 1 },
