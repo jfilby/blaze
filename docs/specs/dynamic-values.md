@@ -35,9 +35,17 @@ set. Programs that consume JSON cannot be expressed in that model.
 
 ## Remaining
 
-- Runtime representation: a tagged dynamic value (number/string/object/array/null)
-  with heap allocation and boxing for primitives, strings and arrays.
-- Runtime operations: JSON parse/stringify, MD5 hashing, file read, array push.
-- Codegen lowering: emit calls to the above runtime services in the C, machine
-  and WASM backends (driver `builtin()` cases and `runtime/abi.ts`).
-- Tests covering dynamic values and a successful `jsonserde` build/run.
+- Runtime representation: implemented in the standalone C runtime for numbers,
+  strings, arrays, objects and hashers. The Nim adapter still returns stub
+  values, so hosted builds are not yet supported.
+- Runtime operations: JSON parse/stringify, MD5 hashing, file read and array
+  push are implemented in C.
+- C codegen lowering: partially implemented. Boxing of values into `any`,
+  dynamic array creation and `to_text` for `any` are handled, but chained method
+  calls (e.g. `hasher.update(str).digest('hex')`), `any` array literals and
+  numeric conversions in programs such as `jsonserde` are not yet lowered
+  correctly.
+- Machine and WASM backends: do not yet lower the dynamic builtins, and do not
+  treat `ref<any>` as the double handle the runtime expects.
+- Tests: no frontend/resolver or end-to-end tests for dynamic values exist yet;
+  `jsonserde` does not yet build and run successfully.

@@ -32,40 +32,31 @@ Each returns a managed handle (reference count 1) on success and calls
 
 ## Work items
 
-1. **Heap value kinds.** Define a tagged struct in `runtime/abi.ts` source:
-   `BLAZE_DYN` with a kind enum (number/string/object/array/hasher/null) and
-   a union payload. Allocate via `blaze_rt_allocate`.
+1. **Heap value kinds.** Done in the standalone C runtime (`BLAZE_DYN` struct
+   with kind enum and payload fields in `runtime/abi.ts`).
 
-2. **Boxing helpers.** `blaze_rt_box_number(double)`, `blaze_rt_box_string(char*)`,
-   `blaze_rt_box_null()`. Unboxing: `blaze_rt_as_number`, `blaze_rt_as_text`.
+2. **Boxing helpers.** Done (`blaze_rt_box_number`, `blaze_rt_box_string`,
+   `blaze_rt_box_null`, `blaze_rt_to_number`, `blaze_rt_to_text`).
 
-3. **JSON parse.** Recursive descent parser producing tagged values. Objects
-   become arrays of key/value pairs (or a small hash map). Arrays become
-   dynamic arrays. Strings/numbers/bools/null become boxed primitives.
+3. **JSON parse.** Done in the standalone C runtime.
 
-4. **JSON stringify.** Recursive serializer over tagged values, producing a
-   managed `char*`.
+4. **JSON stringify.** Done in the standalone C runtime.
 
-5. **MD5.** Implement RFC 1321 over a byte buffer; `create` allocates state,
-   `update` appends (growing a buffer), `digest` finalizes and returns a hex
-   string handle.
+5. **MD5.** Done in the standalone C runtime.
 
-6. **File read.** `fopen`/`fread` into a managed buffer, return as string handle.
+6. **File read.** Done in the standalone C runtime.
 
-7. **Array push.** Dynamic array of `double` handles with geometric growth;
-   return the (possibly reallocated) array handle.
+7. **Array push.** Done in the standalone C runtime.
 
-8. **Codegen.** Update `toolchain/driver.ts` `builtin()` (already has cases) to
-   pass handles. Update `toolchain/ir-c.ts` so that when an `any` value is used
-   as a string (concat/interpolation), it calls `blaze_rt_to_text`. Update
-   `toText` in the driver (already calls `blaze_rt_to_text`).
+8. **Codegen (C).** Partial. `driver.ts` `builtin()` has cases and `ir-c.ts`
+   boxes values and calls `blaze_rt_to_text` for `any`, but chained method calls,
+   dynamic array literals and some conversions are not yet correct (see
+   `jsonserde` IR).
 
-9. **Machine and WASM backends.** Add equivalent lowering for the dynamic
-   builtins, or route them through the C runtime where the backend supports
-   foreign calls.
+9. **Machine and WASM backends.** Not started.
 
-10. **Tests.** Add frontend/resolver tests for dynamic values and an end-to-end
-    `jsonserde` build+run test comparing against Node output.
+10. **Tests.** Not started. The Nim adapter also still returns stub values, so
+    hosted builds are unsupported.
 
 ## Ordering
 
