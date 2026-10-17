@@ -689,6 +689,20 @@ ${guarded ? "  if pointer == nil:\n    return 0" : ""}
 proc blaze_rt_last_error*(): cstring {.exportc, cdecl.} =
   blazeLastError.cstring
 
+proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_md5_create*(): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_md5_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
+proc blaze_rt_md5_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_array_push*(array, value: float64): float64 {.exportc, cdecl.} = array
+proc blaze_rt_dyn_array_new*(): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_to_text*(value: float64): cstring {.exportc, cdecl.} = nil
+proc blaze_rt_box_number*(value: float64): float64 {.exportc, cdecl.} = value
+proc blaze_rt_box_string*(value: cstring): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_box_null*(): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_to_number*(value: float64): float64 {.exportc, cdecl.} = value
+
 var blazeArguments: seq[float64] = @[]
 
 proc blaze_rt_arguments_set*(values: ptr UncheckedArray[float64], count: csize_t) {.exportc, cdecl.} =

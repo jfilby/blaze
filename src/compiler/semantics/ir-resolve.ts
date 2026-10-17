@@ -1859,7 +1859,12 @@ class ProgramResolver {
   }
 
   private declaration(statement: ProgramStatement & { kind: "declare" }): DraftStatement {
-    const annotation = statement.type === null ? null : this.annotation(statement.type, statement.line);
+    let annotation = statement.type === null ? null : this.annotation(statement.type, statement.line);
+    // An empty array literal declared without an annotation is a dynamic array,
+    // so it is resolved and checked as `any`.
+    if (annotation === null && statement.value.k === "buffer" && statement.value.values.length === 0) {
+      annotation = { kind: "ref", of: null };
+    }
     const value = this.value(statement.value, annotation, statement.line);
     const mutable = statement.mutable;
     // A declaration names the name the program declares, and the value is
@@ -1876,6 +1881,11 @@ class ProgramResolver {
       case "sized":
       case "view":
       case "fill":
+        // An empty array literal is a dynamic array: it has no element type to
+        // fix and grows at run time through `array.push`.
+        if (value.k === "buffer" && value.held.length === 0) {
+          return declare({ kind: "object", mutable, type: { kind: "ref", of: null } });
+        }
         return declare({
           kind: "array",
           mutable,

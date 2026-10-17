@@ -20,7 +20,7 @@ import { run } from "../core/process.ts";
 import { symbolOf } from "../semantics/contract.ts";
 import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
 import { parseType } from "../semantics/contract.ts";
-import { ARGV_LENGTH } from "../semantics/builtins.ts";
+import { ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   elementTypeOf,
   isBoolean,
@@ -31,7 +31,7 @@ import {
   isUnsigned,
   isWideType,
   isTextType,
-  slotType,
+  isSequence,  slotType,
   valueKind,
   type SemanticBlock,
   type SemanticCall,
@@ -639,11 +639,14 @@ class FunctionEmitter {
 
   /** Whether C text already written answers as a truth. */
   private truth(text: string, kind: ValueKind, type: SemanticType | null): string {
+    if (type !== null && type.kind === "ref" && type.of === null && type.name === undefined) {
+      return `((${text}) != 0.0)`;
+    }
     switch (kind) {
       case "text":
         return `((${text})[0] != '\\0')`;
       case "reference":
-        return `((${text}) != NULL)`;
+        return `((${text}) != 0)`;
       case "boolean":
         return `(${text})`;
       default:
@@ -659,9 +662,11 @@ class FunctionEmitter {
   }
 
   private call(call: SemanticCall, depth: number): string {
-    const args = call.args.map((argument, index) =>
-      this.expression(argument, call.argTypes[index] ?? argument.type, depth),
-    );
+    const args = call.args.map((argument, index) => {
+      const builtin = call.builtin ? builtinFor(call.callee) : null;
+      const targetType = builtin !== null ? builtin.params[index] : (call.argTypes[index] ?? argument.type);
+      return this.expression(argument, targetType, depth);
+    });
     if (!call.builtin) {
       this.declareCallee(call);
       return `${call.signature.symbol}(${args.join(", ")})`;
@@ -742,6 +747,14 @@ class FunctionEmitter {
   /** A value read as the type a use fixes it at. */
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
     const written = this.raw(value, depth);
+    const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
+    if (asAny) {
+      if (isTextType(value.type)) return `${RUNTIME_NAME}_box_string(${written})`;
+      if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;
+      if (isSequence(value.type)) return `${RUNTIME_NAME}_dyn_array_new()`;
+      if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return written;
+      return `${RUNTIME_NAME}_box_null()`;
+    }
     if (as === null || isTextType(value.type) || isTextType(as)) return written;
     // A wide number is a struct, so the cast the conversions below write is a
     // conversion to a non-scalar type, which is not a C source at all. The one
@@ -839,6 +852,11 @@ class FunctionEmitter {
           );
         }
         if (value.op === "bitNot") return `(~${operand})`;
+        const asAny = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+        if (asAny) {
+          const converted = `${RUNTIME_NAME}_to_number(${operand})`;
+          return value.op === "neg" ? `(-${converted})` : converted;
+        }
         // The sign binds to the operand, and the whole is parenthesised so a
         // negation of a product stays a negation of the whole product.
         return `(${value.op === "neg" ? "-" : "+"}${operand})`;
@@ -1195,6 +1213,10 @@ class FunctionEmitter {
     let inner = value;
     while (inner.k === "toText") inner = inner.of;
     value = inner;
+    if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) {
+      this.pending.push(`const char* ${name} = ${RUNTIME_NAME}_to_text(${this.raw(value, depth)});`);
+      return `${RUNTIME_NAME}_text_length(${name})`;
+    }
     if (isTextType(value.type)) {
       this.pending.push(`const char* ${name} = ${this.raw(value, depth)};`);
       return `strlen(${name})`;

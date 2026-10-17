@@ -804,6 +804,7 @@ function readTypeProblems(prefix: string, value: SemanticValue, scope: Scope): s
  */
 function narrowsTo(held: SemanticType, read: SemanticType): boolean {
   if (typeEquals(held, read)) return true;
+  if (read.kind === "ref" && read.of === null && read.name === undefined) return true;
   if (isSequence(held) && isSequence(read)) {
     const left = elementTypeOf(held);
     const right = elementTypeOf(read);

@@ -97,14 +97,19 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "For a caller that writes every byte before reading any: an array literal, an object literal and a built string each write their whole payload. Returns a managed pointer with one reference, owned by the caller.",
     { tags: ["memory"] },
   ),
-  entry("blaze_rt_json_parse", "double", [["text", "const char*"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
+  entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
   entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_md5_create", "double", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
   entry("blaze_rt_md5_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
   entry("blaze_rt_md5_digest", "double", [["hasher", "double"]], "Finalizes and returns the hex digest.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
+  entry("blaze_rt_dyn_array_new", "double", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_box_null", "double", [], "Boxes null as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_to_number", "double", [["value", "double"]], "Converts a dynamic value to a number.", "Returns the number.", { tags: ["object"] }),
   entry(
     "blaze_rt_region_enter",
     "void",
@@ -2666,14 +2671,479 @@ const char* blaze_rt_last_error(void) {
   return blaze_rt_last_message;
 }
 
-double blaze_rt_json_parse(const char* text) { fprintf(stderr, "blaze: json not implemented\\n"); exit(2); return 0.0; }
-double blaze_rt_json_stringify(double value) { fprintf(stderr, "blaze: json not implemented\\n"); exit(2); return 0.0; }
-double blaze_rt_md5_create(void) { fprintf(stderr, "blaze: md5 not implemented\\n"); exit(2); return 0.0; }
-double blaze_rt_md5_update(double hasher, const char* text) { fprintf(stderr, "blaze: md5 not implemented\\n"); exit(2); return 0.0; }
-double blaze_rt_md5_digest(double hasher) { fprintf(stderr, "blaze: md5 not implemented\\n"); exit(2); return 0.0; }
-double blaze_rt_file_read(const char* path, const char* mode) { fprintf(stderr, "blaze: file read not implemented\\n"); exit(2); return 0.0; }
-double blaze_rt_array_push(double array, double value) { fprintf(stderr, "blaze: array push not implemented\\n"); exit(2); return 0.0; }
-const char* blaze_rt_to_text(double value) { return "null"; }
+/* Dynamic value representation. */
+typedef enum { BLAZE_DYN_NULL, BLAZE_DYN_NUMBER, BLAZE_DYN_TEXT, BLAZE_DYN_ARRAY, BLAZE_DYN_OBJECT, BLAZE_DYN_HASHER } blaze_dyn_kind;
+typedef struct blaze_dyn {
+  blaze_dyn_kind kind;
+  double number;
+  char* text;
+  void* items;
+  size_t count;
+  size_t capacity;
+} blaze_dyn;
+
+static void** blaze_dyn_reg = NULL;
+static size_t blaze_dyn_reg_n = 0;
+static size_t blaze_dyn_reg_cap = 0;
+
+static double blaze_dyn_register(void* p) {
+  if (blaze_dyn_reg_n == blaze_dyn_reg_cap) {
+    blaze_dyn_reg_cap = blaze_dyn_reg_cap ? blaze_dyn_reg_cap * 2 : 64;
+    blaze_dyn_reg = realloc(blaze_dyn_reg, blaze_dyn_reg_cap * sizeof(void*));
+  }
+  blaze_dyn_reg[blaze_dyn_reg_n] = p;
+  return (double)(blaze_dyn_reg_n++);
+}
+static blaze_dyn* blaze_dyn_lookup(double h) {
+  size_t i = (size_t)h;
+  if (i >= blaze_dyn_reg_n) return NULL;
+  return (blaze_dyn*)blaze_dyn_reg[i];
+}
+
+static blaze_dyn* blaze_dyn_new(blaze_dyn_kind k) {
+  blaze_dyn* d = calloc(1, sizeof(blaze_dyn));
+  d->kind = k;
+  return d;
+}
+
+static char* blaze_dyn_strdup(const char* s) {
+  if (!s) return NULL;
+  size_t n = strlen(s);
+  char* r = malloc(n + 1);
+  memcpy(r, s, n + 1);
+  return r;
+}
+
+double blaze_rt_box_number(double value) {
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_NUMBER);
+  d->number = value;
+  return blaze_dyn_register(d);
+}
+double blaze_rt_box_string(const char* value) {
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_TEXT);
+  d->text = blaze_dyn_strdup(value);
+  return blaze_dyn_register(d);
+}
+double blaze_rt_box_null(void) {
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_NULL);
+  return blaze_dyn_register(d);
+}
+double blaze_rt_to_number(double value) {
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (!d) return value;
+  if (d->kind == BLAZE_DYN_NUMBER) return d->number;
+  if (d->kind == BLAZE_DYN_TEXT && d->text) return atof(d->text);
+  return 0.0;
+}
+const char* blaze_rt_to_text(double value) {
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (!d) {
+    static char buf[64];
+    snprintf(buf, 64, "%.17g", value);
+    return blaze_dyn_strdup(buf);
+  }
+  if (d->kind == BLAZE_DYN_NUMBER) {
+    char* buf = malloc(64);
+    snprintf(buf, 64, "%.17g", d->number);
+    return buf;
+  }
+  if (d->kind == BLAZE_DYN_TEXT) return d->text ? d->text : "";
+  if (d->kind == BLAZE_DYN_NULL) return "null";
+  if (d->kind == BLAZE_DYN_ARRAY) {
+    size_t cap = 64, len = 0;
+    char* out = malloc(cap);
+    out[len++] = '[';
+    for (size_t i = 0; i < d->count; i++) {
+      if (i) { if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
+      double h = ((double*)d->items)[i];
+      const char* t = blaze_rt_to_text(h);
+      blaze_dyn* id = blaze_dyn_lookup(h);
+      int isText = id && id->kind == BLAZE_DYN_TEXT;
+      size_t tl = strlen(t);
+      size_t need = tl + (isText?2:0) + 1;
+      if (len + need >= cap) { cap = cap*2 + need; out = realloc(out, cap); }
+      if (isText) out[len++] = '"';
+      memcpy(out + len, t, tl); len += tl;
+      if (isText) out[len++] = '"';
+    }
+    if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
+    out[len++] = ']';
+    out[len] = 0;
+    return out;
+  }
+  if (d->kind == BLAZE_DYN_OBJECT) {
+    double s = blaze_rt_json_stringify(value);
+    blaze_dyn* sd = blaze_dyn_lookup(s);
+    return sd && sd->text ? sd->text : "{}";
+  }
+  return "null";
+}
+
+double blaze_rt_dyn_array_new(void) {
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_ARRAY);
+  d->items = NULL;
+  d->count = 0;
+  d->capacity = 0;
+  return blaze_dyn_register(d);
+}
+double blaze_rt_array_push(double array, double value) {
+  blaze_dyn* d = blaze_dyn_lookup(array);
+  if (!d || d->kind != BLAZE_DYN_ARRAY) {
+    d = blaze_dyn_new(BLAZE_DYN_ARRAY);
+    array = blaze_dyn_register(d);
+  }
+  if (d->count == d->capacity) {
+    d->capacity = d->capacity ? d->capacity * 2 : 8;
+    d->items = realloc(d->items, d->capacity * sizeof(double));
+  }
+  ((double*)d->items)[d->count++] = value;
+  return array;
+}
+
+double blaze_rt_file_read(const char* path, const char* mode) {
+  FILE* f = fopen(path, "r");
+  if (!f) { blaze_rt_raise("file not found"); return 0.0; }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  char* buf = malloc(sz + 1);
+  fread(buf, 1, sz, f);
+  buf[sz] = 0;
+  fclose(f);
+  return blaze_rt_box_string(buf);
+}
+
+static void json_skip_ws(const char** p) { while (**p==' '||**p=='\\t'||**p=='\\n'||**p=='\\r') (*p)++; }
+
+static void json_append_utf8(char** out, size_t* len, size_t* cap, unsigned int cp) {
+  char buf[4]; int n;
+  if (cp < 0x80) { buf[0]=(char)cp; n=1; }
+  else if (cp < 0x800) { buf[0]=(char)(0xC0|(cp>>6)); buf[1]=(char)(0x80|(cp&0x3F)); n=2; }
+  else { buf[0]=(char)(0xE0|(cp>>12)); buf[1]=(char)(0x80|((cp>>6)&0x3F)); buf[2]=(char)(0x80|(cp&0x3F)); n=3; }
+  for (int i=0;i<n;i++){ if (*len+2>=*cap){ *cap = *cap ? *cap*2 : 64; *out=realloc(*out,*cap);} (*out)[(*len)++]=buf[i]; }
+}
+
+static char* json_parse_string(const char** p) {
+  if (**p != '"') return NULL;
+  (*p)++;
+  size_t cap=64,len=0;
+  char* out=malloc(cap);
+  while (**p && **p != '"') {
+    if (**p == '\\\\') {
+      (*p)++;
+      if (**p == '"') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='"'; (*p)++; }
+      else if (**p == '\\\\') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\\\'; (*p)++; }
+      else if (**p == '/') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='/'; (*p)++; }
+      else if (**p == 'b') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\b'; (*p)++; }
+      else if (**p == 'f') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\f'; (*p)++; }
+      else if (**p == 'n') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\n'; (*p)++; }
+      else if (**p == 'r') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\r'; (*p)++; }
+      else if (**p == 't') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\t'; (*p)++; }
+      else if (**p == 'u') {
+        (*p)++;
+        unsigned int cp=0;
+        for (int i=0;i<4;i++) {
+          if (!**p) { free(out); return NULL; }
+          char h=**p; int v;
+          if (h>='0'&&h<='9') v=h-'0';
+          else if (h>='a'&&h<='f') v=h-'a'+10;
+          else if (h>='A'&&h<='F') v=h-'A'+10;
+          else { free(out); return NULL; }
+          cp=cp*16+v;
+          (*p)++;
+        }
+        json_append_utf8(&out,&len,&cap,cp);
+      } else { free(out); return NULL; }
+    } else {
+      if (len+2>=cap){cap*=2;out=realloc(out,cap);}
+      out[len++]=**p;
+      (*p)++;
+    }
+  }
+  if (**p != '"') { free(out); return NULL; }
+  (*p)++;
+  out[len]=0;
+  return out;
+}
+
+static int json_parse_value(const char** p, double* out);
+
+static int json_parse_array(const char** p, double* out) {
+  if (**p != '[') return 0;
+  (*p)++;
+  json_skip_ws(p);
+  double arr = blaze_rt_dyn_array_new();
+  if (**p == ']') { (*p)++; *out = arr; return 1; }
+  while (1) {
+    double v;
+    if (!json_parse_value(p, &v)) return 0;
+    blaze_rt_array_push(arr, v);
+    json_skip_ws(p);
+    if (**p == ',') { (*p)++; json_skip_ws(p); continue; }
+    if (**p == ']') { (*p)++; break; }
+    return 0;
+  }
+  *out = arr;
+  return 1;
+}
+
+static int json_parse_object(const char** p, double* out) {
+  if (**p != '{') return 0;
+  (*p)++;
+  json_skip_ws(p);
+  blaze_dyn* od = blaze_dyn_new(BLAZE_DYN_OBJECT);
+  double oh = blaze_dyn_register(od);
+  if (**p == '}') { (*p)++; *out = oh; return 1; }
+  while (1) {
+    if (**p != '"') return 0;
+    char* keystr = json_parse_string(p);
+    if (!keystr) return 0;
+    json_skip_ws(p);
+    if (**p != ':') { free(keystr); return 0; }
+    (*p)++;
+    json_skip_ws(p);
+    double val;
+    if (!json_parse_value(p, &val)) { free(keystr); return 0; }
+    if (od->count == od->capacity) {
+      od->capacity = od->capacity ? od->capacity * 2 : 8;
+      od->items = realloc(od->items, od->capacity * 2 * sizeof(double));
+    }
+    ((double*)od->items)[od->count*2] = blaze_rt_box_string(keystr);
+    ((double*)od->items)[od->count*2+1] = val;
+    od->count++;
+    free(keystr);
+    json_skip_ws(p);
+    if (**p == ',') { (*p)++; json_skip_ws(p); continue; }
+    if (**p == '}') { (*p)++; break; }
+    return 0;
+  }
+  *out = oh;
+  return 1;
+}
+
+static int json_parse_value(const char** p, double* out) {
+  json_skip_ws(p);
+  if (**p == '"') {
+    char* s = json_parse_string(p);
+    if (!s) return 0;
+    *out = blaze_rt_box_string(s);
+    free(s);
+    return 1;
+  }
+  if (**p == '[') return json_parse_array(p, out);
+  if (**p == '{') return json_parse_object(p, out);
+  if (strncmp(*p, "true", 4) == 0) { *p += 4; *out = blaze_rt_box_number(1.0); return 1; }
+  if (strncmp(*p, "false", 5) == 0) { *p += 5; *out = blaze_rt_box_number(0.0); return 1; }
+  if (strncmp(*p, "null", 4) == 0) { *p += 4; *out = blaze_rt_box_null(); return 1; }
+  char* end = NULL;
+  double v = strtod(*p, &end);
+  if (end == *p) return 0;
+  *p = end;
+  *out = blaze_rt_box_number(v);
+  return 1;
+}
+
+double blaze_rt_json_parse(double text) {
+  const char* t = blaze_rt_to_text(text);
+  if (!t) { blaze_rt_raise("invalid JSON"); return blaze_rt_box_null(); }
+  const char* p = t;
+  double out;
+  if (!json_parse_value(&p, &out)) { blaze_rt_raise("invalid JSON"); return blaze_rt_box_null(); }
+  json_skip_ws(&p);
+  if (*p != '\\0') { blaze_rt_raise("trailing JSON"); return blaze_rt_box_null(); }
+  return out;
+}
+
+static char* blaze_dyn_stringify(blaze_dyn* d);
+
+static char* blaze_dyn_stringify_value(double value) {
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (!d) {
+    char* buf = malloc(64); snprintf(buf,64,"%.17g", value); return buf;
+  }
+  if (d->kind == BLAZE_DYN_TEXT) return blaze_dyn_strdup(d->text ? d->text : "");
+  if (d->kind == BLAZE_DYN_NUMBER) { char* buf=malloc(64); snprintf(buf,64,"%.17g", d->number); return buf; }
+  if (d->kind == BLAZE_DYN_NULL) return blaze_dyn_strdup("null");
+  if (d->kind == BLAZE_DYN_ARRAY || d->kind == BLAZE_DYN_OBJECT) return blaze_dyn_stringify(d);
+  return blaze_dyn_strdup("null");
+}
+
+static char* blaze_dyn_stringify(blaze_dyn* d) {
+  if (d->kind == BLAZE_DYN_ARRAY) {
+    size_t cap = 64, len = 0;
+    char* out = malloc(cap);
+    out[len++] = '[';
+    for (size_t i = 0; i < d->count; i++) {
+      if (i) { if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
+      double h = ((double*)d->items)[i];
+      char* t = blaze_dyn_stringify_value(h);
+      blaze_dyn* id = blaze_dyn_lookup(h);
+      int isText = id && id->kind == BLAZE_DYN_TEXT;
+      size_t tl = strlen(t);
+      if (isText) {
+        if (len + tl + 4 >= cap) { cap = cap*2 + tl + 4; out = realloc(out, cap); }
+        out[len++] = '"';
+        memcpy(out+len, t, tl); len += tl;
+        out[len++] = '"';
+      } else {
+        if (len + tl + 1 >= cap) { cap = cap*2 + tl + 1; out = realloc(out, cap); }
+        memcpy(out+len, t, tl); len += tl;
+      }
+      free(t);
+    }
+    if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
+    out[len++] = ']';
+    out[len] = 0;
+    return out;
+  }
+  if (d->kind == BLAZE_DYN_OBJECT) {
+    size_t cap = 64, len = 0;
+    char* out = malloc(cap);
+    out[len++] = '{';
+    for (size_t i = 0; i < d->count; i++) {
+      if (i) { if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
+      double kh = ((double*)d->items)[i*2];
+      double vh = ((double*)d->items)[i*2+1];
+      char* kt = blaze_dyn_stringify_value(kh);
+      size_t ktl = strlen(kt);
+      /* key must be text; ensure quotes */
+      if (len + ktl + 4 >= cap) { cap = cap*2 + ktl + 4; out = realloc(out, cap); }
+      out[len++] = '"';
+      /* kt already unquoted payload for text? stringify_value for text returns payload without quotes */
+      memcpy(out+len, kt, ktl); len += ktl;
+      out[len++] = '"';
+      free(kt);
+      if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
+      out[len++] = ':';
+      blaze_dyn* vid = blaze_dyn_lookup(vh);
+      int visText = vid && vid->kind == BLAZE_DYN_TEXT;
+      char* vt = blaze_dyn_stringify_value(vh);
+      size_t vtl = strlen(vt);
+      if (visText) {
+        if (len + vtl + 4 >= cap) { cap = cap*2 + vtl + 4; out = realloc(out, cap); }
+        out[len++] = '"';
+        memcpy(out+len, vt, vtl); len += vtl;
+        out[len++] = '"';
+      } else {
+        if (len + vtl + 1 >= cap) { cap = cap*2 + vtl + 1; out = realloc(out, cap); }
+        memcpy(out+len, vt, vtl); len += vtl;
+      }
+      free(vt);
+    }
+    if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
+    out[len++] = '}';
+    out[len] = 0;
+    return out;
+  }
+  return blaze_dyn_strdup("null");
+}
+
+double blaze_rt_json_stringify(double value) {
+  char* s = blaze_dyn_stringify_value(value);
+  double h = blaze_rt_box_string(s);
+  free(s);
+  return h;
+}
+
+/* MD5 implementation (RFC 1321). */
+typedef struct { unsigned int state[4]; unsigned int count[2]; unsigned char buffer[64]; } blaze_md5_ctx;
+static void blaze_md5_transform(unsigned int state[4], const unsigned char block[64]) {
+  unsigned int a=state[0],b=state[1],c=state[2],d=state[3],x[16];
+  for (int i=0;i<16;i++) x[i]=block[i*4]+(block[i*4+1]<<8)+(block[i*4+2]<<16)+(block[i*4+3]<<24);
+  #define F(x,y,z) ((x&y)|(~x&z))
+  #define G(x,y,z) ((x&z)|(y&~z))
+  #define H(x,y,z) (x^y^z)
+  #define I(x,y,z) (y^(x|~z))
+  #define ROTATE_LEFT(x,n) ((x<<n)|(x>>(32-n)))
+  #define FF(a,b,c,d,x,s,ac) { a+=F(b,c,d)+x+ac; a=ROTATE_LEFT(a,s); a+=b; }
+  #define GG(a,b,c,d,x,s,ac) { a+=G(b,c,d)+x+ac; a=ROTATE_LEFT(a,s); a+=b; }
+  #define HH(a,b,c,d,x,s,ac) { a+=H(b,c,d)+x+ac; a=ROTATE_LEFT(a,s); a+=b; }
+  #define II(a,b,c,d,x,s,ac) { a+=I(b,c,d)+x+ac; a=ROTATE_LEFT(a,s); a+=b; }
+  /* Round 1 */
+  FF(a,b,c,d,x[0],7,0xd76aa478); FF(d,a,b,c,x[1],12,0xe8c7b756); FF(c,d,a,b,x[2],17,0x242070db); FF(b,c,d,a,x[3],22,0xc1bdceee);
+  FF(a,b,c,d,x[4],7,0xf57c0faf); FF(d,a,b,c,x[5],12,0x4787c62a); FF(c,d,a,b,x[6],17,0xa8304613); FF(b,c,d,a,x[7],22,0xfd469501);
+  FF(a,b,c,d,x[8],7,0x698098d8); FF(d,a,b,c,x[9],12,0x8b44f7af); FF(c,d,a,b,x[10],17,0xffff5bb1); FF(b,c,d,a,x[11],22,0x895cd7be);
+  FF(a,b,c,d,x[12],7,0x6b901122); FF(d,a,b,c,x[13],12,0xfd987193); FF(c,d,a,b,x[14],17,0xa679438e); FF(b,c,d,a,x[15],22,0x49b40821);
+  /* Round 2 */
+  GG(a,b,c,d,x[1],5,0xf61e2562); GG(d,a,b,c,x[6],9,0xc040b340); GG(c,d,a,b,x[11],14,0x265e5a51); GG(b,c,d,a,x[0],20,0xe9b6c7aa);
+  GG(a,b,c,d,x[5],5,0xd62f105d); GG(d,a,b,c,x[10],9,0x02441453); GG(c,d,a,b,x[15],14,0xd8a1e681); GG(b,c,d,a,x[4],20,0xe7d3fbc8);
+  GG(a,b,c,d,x[9],5,0x21e1cde6); GG(d,a,b,c,x[14],9,0xc33707d6); GG(c,d,a,b,x[3],14,0xf4d50d87); GG(b,c,d,a,x[8],20,0x455a14ed);
+  GG(a,b,c,d,x[13],5,0xa9e3e905); GG(d,a,b,c,x[2],9,0xfcefa3f8); GG(c,d,a,b,x[7],14,0x676f02d9); GG(b,c,d,a,x[12],20,0x8d2a4c8a);
+  /* Round 3 */
+  HH(a,b,c,d,x[5],4,0xfffa3942); HH(d,a,b,c,x[8],11,0x8771f681); HH(c,d,a,b,x[11],16,0x6d9d6122); HH(b,c,d,a,x[14],23,0xfde5380c);
+  HH(a,b,c,d,x[1],4,0xa4beea44); HH(d,a,b,c,x[4],11,0x4bdecfa9); HH(c,d,a,b,x[7],16,0xf6bb4b60); HH(b,c,d,a,x[10],23,0xbebfbc70);
+  HH(a,b,c,d,x[13],4,0x289b7ec6); HH(d,a,b,c,x[0],11,0xeaa127fa); HH(c,d,a,b,x[3],16,0xd4ef3085); HH(b,c,d,a,x[6],23,0x04881d05);
+  HH(a,b,c,d,x[9],4,0xd9d4d039); HH(d,a,b,c,x[12],11,0xe6db99e5); HH(c,d,a,b,x[15],16,0x1fa27cf8); HH(b,c,d,a,x[2],23,0xc4ac5665);
+  /* Round 4 */
+  II(a,b,c,d,x[0],6,0xf4292244); II(d,a,b,c,x[7],10,0x432aff97); II(c,d,a,b,x[14],15,0xab9423a7); II(b,c,d,a,x[5],21,0xfc93a039);
+  II(a,b,c,d,x[12],6,0x655b59c3); II(d,a,b,c,x[3],10,0x8f0ccc92); II(c,d,a,b,x[10],15,0xffeff47d); II(b,c,d,a,x[1],21,0x85845dd1);
+  II(a,b,c,d,x[8],6,0x6fa87e4f); II(d,a,b,c,x[15],10,0xfe2ce6e0); II(c,d,a,b,x[6],15,0xa3014314); II(b,c,d,a,x[13],21,0x4e0811a1);
+  II(a,b,c,d,x[4],6,0xf7537e82); II(d,a,b,c,x[11],10,0xbd3af235); II(c,d,a,b,x[2],15,0x2ad7d2bb); II(b,c,d,a,x[9],21,0xeb86d391);
+  state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d;
+  #undef F
+  #undef G
+  #undef H
+  #undef I
+  #undef ROTATE_LEFT
+  #undef FF
+  #undef GG
+  #undef HH
+  #undef II
+}
+static void blaze_md5_init(blaze_md5_ctx* ctx) {
+  ctx->count[0]=ctx->count[1]=0;
+  ctx->state[0]=0x67452301; ctx->state[1]=0xefcdab89; ctx->state[2]=0x98badcfe; ctx->state[3]=0x10325476;
+}
+static void blaze_md5_update(blaze_md5_ctx* ctx, const unsigned char* input, unsigned int len) {
+  unsigned int i, index, partLen;
+  index = (ctx->count[0] >> 3) & 0x3F;
+  if ((ctx->count[0] += (len << 3)) < (len << 3)) ctx->count[1]++;
+  ctx->count[1] += (len >> 29);
+  partLen = 64 - index;
+  if (len >= partLen) {
+    memcpy(&ctx->buffer[index], input, partLen);
+    blaze_md5_transform(ctx->state, ctx->buffer);
+    for (i = partLen; i + 63 < len; i += 64) blaze_md5_transform(ctx->state, &input[i]);
+    index = 0;
+  } else i = 0;
+  memcpy(&ctx->buffer[index], &input[i], len - i);
+}
+static void blaze_md5_final(unsigned char digest[16], blaze_md5_ctx* ctx) {
+  unsigned char bits[8];
+  unsigned int index, padLen;
+  for (int i=0;i<8;i++) bits[i]=(unsigned char)((ctx->count[i>>2]>>(i&3)*8)&0xFF);
+  index=(ctx->count[0]>>3)&0x3F;
+  padLen = (index < 56) ? (56 - index) : (120 - index);
+  static unsigned char PADDING[64]={0x80};
+  blaze_md5_update(ctx, PADDING, padLen);
+  blaze_md5_update(ctx, bits, 8);
+  for (int i=0;i<16;i++) digest[i]=(unsigned char)((ctx->state[i>>2]>>(i&3)*8)&0xFF);
+}
+double blaze_rt_md5_create(void) {
+  blaze_md5_ctx* ctx = calloc(1, sizeof(blaze_md5_ctx));
+  blaze_md5_init(ctx);
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_HASHER);
+  d->text = (char*)ctx;
+  return blaze_dyn_register(d);
+}
+double blaze_rt_md5_update(double hasher, const char* text) {
+  blaze_dyn* d = blaze_dyn_lookup(hasher);
+  if (!d || d->kind != BLAZE_DYN_HASHER || !text) return hasher;
+  blaze_md5_ctx* ctx = (blaze_md5_ctx*)d->text;
+  blaze_md5_update(ctx, (const unsigned char*)text, (unsigned int)strlen(text));
+  return hasher;
+}
+double blaze_rt_md5_digest(double hasher) {
+  blaze_dyn* d = blaze_dyn_lookup(hasher);
+  if (!d || d->kind != BLAZE_DYN_HASHER) return blaze_rt_box_string("");
+  blaze_md5_ctx* ctx = (blaze_md5_ctx*)d->text;
+  unsigned char digest[16];
+  blaze_md5_final(digest, ctx);
+  char* hex = malloc(33);
+  for (int i=0;i<16;i++) sprintf(hex+i*2, "%02x", digest[i]);
+  hex[32]=0;
+  return blaze_rt_box_string(hex);
+}
 
 ${U256_KERNEL}
 ${I256_KERNEL}

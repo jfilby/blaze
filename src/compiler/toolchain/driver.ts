@@ -564,7 +564,12 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // A string holds when it has text in it, and an object holds when it is
     // there at all: an empty string is false, as it is in the language.
     if (kind === "text") return `(${expression})[0] != '\\0'`;
-    if (kind === "reference") return `(${expression}) != NULL`;
+    if (kind === "reference") {
+      if (type !== null && type.kind === "ref" && type.of === null && type.name === undefined) {
+        return `(${expression}) != 0`;
+      }
+      return `(${expression}) != NULL`;
+    }
     if (kind === "boolean") return `(${expression})`;
     // A value that is not a number holds nothing, and `NaN != 0` is true in C,
     // so the test asks for a number that is a number. The value is bound
