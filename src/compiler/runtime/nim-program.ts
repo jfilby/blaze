@@ -851,6 +851,33 @@ ${anchor}
     });
   }
 
+  wideMulMod(_left: string, _right: string, _modulus: string, _as: SemanticType): string {
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: "the Nim driver cannot write a wide number's mul_mod",
+      detail: "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel",
+    });
+  }
+
+  wideAddMod(_left: string, _right: string, _modulus: string, _as: SemanticType): string {
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: "the Nim driver cannot write a wide number's add_mod",
+      detail: "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel",
+    });
+  }
+
+  wideSubMod(_left: string, _right: string, _modulus: string, _as: SemanticType): string {
+    throw new CompilerError({
+      category: "ContractError",
+      stage: "program",
+      message: "the Nim driver cannot write a wide number's sub_mod",
+      detail: "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel",
+    });
+  }
+
   widen(_value: string, _as: SemanticType): string {
     // The same reason as the binary above: a `u256` is four limbs and this
     // runtime declares no such type, so a whole number widened into one is

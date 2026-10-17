@@ -294,7 +294,7 @@ function desugarClasses(source: string): string {
   return result;
 }
 
-export function rewriteCalls(source: string, fnName: string, arity: number, rewrite: (args: string) => string): string {
+export function rewriteCalls(source: string, fnName: string, _arity: number, rewrite: (args: string) => string): string {
   let out = "";
   let i = 0;
   const needle = fnName + "(";
@@ -485,8 +485,8 @@ export function desugar(source: string): string {
 
   source = source.replace(/CURVE\\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
   // Annotate generated function parameters with a type.
-  source = source.replace(/function (JacobianPoint_|Point_)(\w+)\(([^)]*)\)(\s*:\s*\w+)?\s*\{/g, (m, prefix, name, params, ret) => {
-    const annotated = params.split(",").map((part) => {
+  source = source.replace(/function (JacobianPoint_|Point_)(\w+)\(([^)]*)\)(\s*:\s*\w+)?\s*\{/g, (_m, prefix, name, params, _ret) => {
+    const annotated = params.split(",").map((part: string) => {
       part = part.trim();
       if (!part || part.includes(":")) return part;
       return part + ": any";

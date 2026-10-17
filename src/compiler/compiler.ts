@@ -820,7 +820,6 @@ function resolvedDriver(
   objectNames: Record<string, string>,
   objectLayouts: Record<string, ObjectLayout>,
   objectKeys: LiteralKeys,
-  semantics: Record<string, SemanticFunction>,
 ): SemanticProgram {
   const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
   wholeElementArithmetic(driver.bodies, driver.entry);
@@ -1667,7 +1666,7 @@ export async function runBuild(
       phase.body === undefined
         ? undefined
         : optimizeSemanticProgram(
-            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys, semantics),
+            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys),
           );
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.

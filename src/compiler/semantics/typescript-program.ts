@@ -881,7 +881,6 @@ class ProgramParser {
   private chainedField(value: ProgramValue): ProgramValue {
     let read = value;
     while (read.k === "field" && this.at(".")) {
-      const dot = this.peek();
       this.next();
       const member = this.identifier("the property of a value");
       if (member === "toFixed" && this.at("(")) return this.fixed(read);

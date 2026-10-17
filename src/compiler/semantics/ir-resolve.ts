@@ -1278,8 +1278,9 @@ function isNumberType(type: TypeExpr): boolean {
 }
 
 /** The wide number a type is, as the semantic IR states a type rather than as text. */
-function isWideType(type: TypeExpr): boolean {
-  const name = primitive(type);
+function isWideType(type: SemanticType): boolean {
+  if (type.kind === "text") return false;
+  const name = primitive(type as TypeExpr);
   return name !== null && isWide(name);
 }
 

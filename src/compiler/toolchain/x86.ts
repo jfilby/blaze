@@ -82,6 +82,8 @@ export type Width = 1 | 2 | 4 | 8;
 export type Condition =
   | "e"
   | "ne"
+  | "z"
+  | "nz"
   | "l"
   | "le"
   | "g"
@@ -485,7 +487,7 @@ export class Encoder {
   /* Fields                                                                 */
   /* ---------------------------------------------------------------------- */
 
-  private byte(value: number): void {
+  byte(value: number): void {
     // Anything written at all means the last instruction has ended, so a jump
     // is no longer the last thing in the code.
     this.pendingJump = null;

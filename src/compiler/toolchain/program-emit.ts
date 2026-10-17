@@ -323,7 +323,8 @@ class ProgramEmitter {
   /** Data-flow result: wide `arith` values (mul/add/sub) whose result is
      always reduced modulo some modulus, mapped to that modulus expression.
      Computed by a backward pass from every `mod(..., c)` call. */
-  private readonly modulusForArith = new WeakMap<SemanticValue, string>();
+  private modulusForArith = new WeakMap<SemanticValue, string>();
+  private buildCounter = 0;
   /** The names the program declared, and the names a target reads them by. */
   private names!: NameScope;
 
@@ -426,7 +427,7 @@ class ProgramEmitter {
 
     while (worklist.length > 0) {
       const { value, modulus } = worklist.pop()!;
-      this.annotateArithWithModulus(value, modulus, defByName, worklist);
+      this.annotateArithWithModulus(value, modulus, defByName);
     }
   }
 
@@ -491,8 +492,8 @@ class ProgramEmitter {
       into.push(n.value as SemanticValue);
     }
     // A call statement: its args are values.
-    if (n.k === "call" && "args" in n.call && Array.isArray(n.call.args)) {
-      for (const arg of n.call.args as SemanticValue[]) into.push(arg);
+    if (n.k === "call" && typeof n.call === "object" && n.call !== null && "args" in n.call && Array.isArray((n.call as Record<string, unknown>).args)) {
+      for (const arg of (n.call as Record<string, unknown>).args as SemanticValue[]) into.push(arg);
     }
     // A `let` statement: its slot value.
     if (n.k === "let" && "value" in n && typeof n.value === "object" && n.value !== null && "k" in n.value) {
@@ -526,7 +527,6 @@ class ProgramEmitter {
     value: SemanticValue,
     modulus: string,
     defByName: Map<string, SemanticValue>,
-    worklist: { value: SemanticValue; modulus: string }[],
   ): void {
     const visited = new Set<SemanticValue>();
     const stack: SemanticValue[] = [value];
@@ -925,8 +925,9 @@ class ProgramEmitter {
         result = this.expression(inner, inner.type);
       } else {
         // Bind the inner value to a temporary and reduce it modulo c.
-        const out = `blaze_wide_${(this.builds += 1)}`;
-        const tmp = `blaze_wide_tmp_${this.builds}`;
+        this.buildCounter += 1;
+        const out = `blaze_wide_${this.buildCounter}`;
+        const tmp = `blaze_wide_tmp_${this.buildCounter}`;
         result = `({ const blaze_u256 ${tmp} = (${this.expression(inner, inner.type)}); blaze_u256 ${out}; ${RUNTIME_NAME}_u256_mod(&${out}, &${tmp}, &(${modulus})); ${out}; })`;
       }
       this.modCtx = savedCtx;
