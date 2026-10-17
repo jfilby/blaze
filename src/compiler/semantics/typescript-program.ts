@@ -617,7 +617,7 @@ class ProgramParser {
         const parameter = this.identifier("the name of a parameter");
         let type: string | null = null;
         if (this.accept(":")) type = this.annotation("the type of a parameter");
-        params.push({ name: parameter, type });
+        params.push({ name: parameter, type: type === null ? "any" : type });
         if (!this.accept(",")) break;
       }
     }
@@ -696,6 +696,17 @@ class ProgramParser {
       this.next();
       this.next();
       return { kind: "invoke", function: name.text, args: this.arguments(), line: name.line };
+    }
+    if (token.text === "." && this.peek(2).kind === "ident" && this.peek(3).text === "(") {
+      const object = name.text;
+      const method = this.peek(2).text;
+      this.next();
+      this.next();
+      this.next();
+      this.next();
+      const args = this.arguments();
+      this.accept(";");
+      return { kind: "invoke", function: `${object}.${method}`, args, line: name.line };
     }
     if (token.text === ".") {
       // A field of an object is written the way a name is: the object is read
@@ -818,77 +829,71 @@ class ProgramParser {
 
   /** What is written after a value: a call, an element, a length, a count. */
   private postfix(): ProgramValue {
-    const value = this.primary();
+    let value = this.primary();
     if (this.at("++") || this.at("--")) {
       const op = this.next().text;
       const name = value.k === "name" ? value.name : "this value";
       this.fail(`"${name}${op}" is not a value; a program runs ++ and -- as statements`);
       return value;
     }
-    if (this.at("[")) {
-      if (value.k !== "name") {
-        this.fail("a program cannot read an element of a value; it reads a[i] of a name");
+    for (;;) {
+      if (this.at("[")) {
+        if (value.k !== "name") {
+          this.fail("a program cannot read an element of a value; it reads a[i] of a name");
+          this.next();
+          return value;
+        }
         this.next();
+        const index = this.value();
+        this.expect("]");
+        value = { k: "element", buffer: value.name, index };
+        continue;
+      }
+      if (this.at(".")) {
+        const dot = this.peek();
+        this.next();
+        const member = this.identifier("the property of a value");
+        // `x.toFixed(2)` writes a number as text at two digits, and `a.fill(x)`
+        // writes a number into every element of an array. Both are written of
+        // whatever the value is, and both answer the value they were written of.
+        if (member === "toFixed" && this.at("(")) return this.fixed(value);
+        if (member === "toString" && this.at("(")) return this.hexString(value);
+        if (member === "fill" && this.at("(")) return this.filled(value);
+        if (member === "length" && value.k === "name") {
+          value = { k: "length", of: value.name };
+          continue;
+        }
+        if (this.at("(")) {
+          this.next();
+          const fn = `${this.valuePath(value)}.${member}`;
+          value = { k: "call", function: fn, args: this.arguments() };
+          continue;
+        }
+        if (value.k === "name" || value.k === "field" || value.k === "call") {
+          value = { k: "field", object: value, field: member };
+          continue;
+        }
+        this.fail(
+          "a program cannot read a member of a value; it reads a field of a name, and writes a number as x.toFixed(digits)",
+          dot,
+        );
+        if (this.at("(")) this.skipArguments();
         return value;
       }
-      this.next();
-      const index = this.value();
-      this.expect("]");
-      return { k: "element", buffer: value.name, index };
-    }
-    if (this.at(".")) {
-      const dot = this.peek();
-      this.next();
-      const member = this.identifier("the property of a value");
-      // `x.toFixed(2)` writes a number as text at two digits, and `a.fill(x)`
-      // writes a number into every element of an array. Both are written of
-      // whatever the value is, and both answer the value they were written of.
-      if (member === "toFixed" && this.at("(")) return this.fixed(value);
-      if (member === "toString" && this.at("(")) return this.hexString(value);
-      if (member === "fill" && this.at("(")) return this.filled(value);
-      if (value.k === "name") {
-        if (member === "length") return { k: "length", of: value.name };
-        // The name is a reference or not — the member read is decided where
-        // the name is resolved to what it holds, not where it is read.
-        return this.chainedField({ k: "field", object: value, field: member });
+      if (this.at("(")) {
+        if (value.k !== "name" && value.k !== "field" && value.k !== "call") {
+          this.fail("a program cannot call a value; it calls a name");
+          this.skipArguments();
+          return value;
+        }
+        this.next();
+        const fn = this.valuePath(value);
+        value = { k: "call", function: fn, args: this.arguments() };
+        continue;
       }
-      // A field read of a field is the same read one level down: what is read
-      // of it is decided where that name is resolved.
-      if (value.k === "field") return this.chainedField({ k: "field", object: value, field: member });
-      this.fail(
-        "a program cannot read a member of a value; it reads a field of a name, and writes a number as x.toFixed(digits)",
-        dot,
-      );
-      if (this.at("(")) this.skipArguments();
-      return value;
-    }
-    if (this.at("(")) {
-      if (value.k !== "name") {
-        this.fail("a program cannot call a value; it calls a name");
-        this.skipArguments();
-        return value;
-      }
-      this.next();
-      return { k: "call", function: value.name, args: this.arguments() };
+      break;
     }
     return value;
-  }
-
-  /**
-   * A field read chains: `node.next.value` is one read of `node.next` and one
-   * of the field of what that names, and each is read the same way.
-   */
-  private chainedField(value: ProgramValue): ProgramValue {
-    let read = value;
-    while (read.k === "field" && this.at(".")) {
-      this.next();
-      const member = this.identifier("the property of a value");
-      if (member === "toFixed" && this.at("(")) return this.fixed(read);
-      if (member === "toString" && this.at("(")) return this.hexString(read);
-      if (member === "fill" && this.at("(")) return this.filled(read);
-      read = { k: "field", object: read, field: member };
-    }
-    return read;
   }
 
   /**
@@ -945,6 +950,15 @@ class ProgramParser {
       return of;
     }
     return { k: "fixed", of, digits: -1 };
+  }
+
+
+  /** The path a value is called by, for a call written of it. */
+  private valuePath(value: ProgramValue): string {
+    if (value.k === "name") return value.name;
+    if (value.k === "field") return `${this.valuePath(value.object)}.${value.field}`;
+    if (value.k === "call") return value.function;
+    return "this value";
   }
 
   /** A value on its own. */

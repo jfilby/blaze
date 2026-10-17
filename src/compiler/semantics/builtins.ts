@@ -59,6 +59,14 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "u256_mul_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
   /** `u256_div(a, b)` computes integer division a / b. */
   "u256_div": { params: [U256, U256], returns: U256, arity: 2 },
+  "require": { params: [F64], returns: F64, arity: 1 },
+  "JSON.stringify": { params: [F64], returns: F64, arity: 1 },
+  "JSON.parse": { params: [F64], returns: F64, arity: 1 },
+  "crypto.createHash": { params: [F64], returns: F64, arity: 1 },
+  "fs.readFileSync": { params: [F64, F64], returns: F64, arity: 2 },
+  "hasher.update": { params: [F64, F64], returns: F64, arity: 2 },
+  "hasher.update.digest": { params: [F64], returns: F64, arity: 1 },
+  "array.push": { params: [F64], returns: F64, arity: 1 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);
