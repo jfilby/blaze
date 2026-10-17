@@ -97,6 +97,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "For a caller that writes every byte before reading any: an array literal, an object literal and a built string each write their whole payload. Returns a managed pointer with one reference, owned by the caller.",
     { tags: ["memory"] },
   ),
+  entry("blaze_rt_json_parse", "double", [["text", "const char*"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
+  entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_md5_create", "double", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
+  entry("blaze_rt_md5_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
+  entry("blaze_rt_md5_digest", "double", [["hasher", "double"]], "Finalizes and returns the hex digest.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
+  entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
     "blaze_rt_region_enter",
     "void",
@@ -2657,6 +2665,15 @@ void blaze_rt_raise(const char* message) {
 const char* blaze_rt_last_error(void) {
   return blaze_rt_last_message;
 }
+
+double blaze_rt_json_parse(const char* text) { fprintf(stderr, "blaze: json not implemented\\n"); exit(2); return 0.0; }
+double blaze_rt_json_stringify(double value) { fprintf(stderr, "blaze: json not implemented\\n"); exit(2); return 0.0; }
+double blaze_rt_md5_create(void) { fprintf(stderr, "blaze: md5 not implemented\\n"); exit(2); return 0.0; }
+double blaze_rt_md5_update(double hasher, const char* text) { fprintf(stderr, "blaze: md5 not implemented\\n"); exit(2); return 0.0; }
+double blaze_rt_md5_digest(double hasher) { fprintf(stderr, "blaze: md5 not implemented\\n"); exit(2); return 0.0; }
+double blaze_rt_file_read(const char* path, const char* mode) { fprintf(stderr, "blaze: file read not implemented\\n"); exit(2); return 0.0; }
+double blaze_rt_array_push(double array, double value) { fprintf(stderr, "blaze: array push not implemented\\n"); exit(2); return 0.0; }
+const char* blaze_rt_to_text(double value) { return "null"; }
 
 ${U256_KERNEL}
 ${I256_KERNEL}

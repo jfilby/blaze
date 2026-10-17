@@ -1984,6 +1984,9 @@ class ProgramResolver {
       case "conditional": {
         const type = value.type;
         if (type === null) return declare({ kind: "text", mutable, value: null });
+        if (type.kind === "ref" || type.kind === "ptr") {
+          return declare({ kind: "object", mutable, type });
+        }
         const name = primitive(type);
         if (name === null || !NUMERIC.includes(name)) {
           throw programError(
@@ -3179,6 +3182,11 @@ class ProgramResolver {
 
   /** An array is used at one element type, and at a length a parameter fixes. */
   private expectArray(expect: TypeExpr, held: ArrayHeld, line: number): void {
+    // An array is a reference, so it may be passed where an unshaped reference
+    // (`any`) is expected: the array is boxed into the dynamic value it names.
+    if (expect.kind === "ref" && expect.of === null && expect.name === undefined) {
+      return;
+    }
     if (!isBufferType(expect)) {
       throw programError(
         `a typed array cannot be used as ${typeToString(expect)}`,
@@ -3303,13 +3311,20 @@ class ProgramResolver {
         `line ${line} of ${this.body.file}: print a number, or a string that interpolates one`,
       );
     }
-    if (value.k === "reference" && value.held.kind === "object") {
+    if (value.k === "reference" && value.held.kind === "object" &&
+        (((value.held.type as { name?: string }).name !== undefined) || ((value.held.type as { of?: TypeExpr | null }).of !== null))) {
       throw programError(
         "a program cannot print an object",
         this.body,
         line,
         `line ${line} of ${this.body.file}: print a number, or a string that interpolates one`,
       );
+    }
+    // A dynamic value (`any`) may be a string at run time, so printing one is
+    // allowed; the runtime prints it as text.
+    const type = draftType(value);
+    if (type !== null && type.kind === "ref" && (type as { of: TypeExpr | null }).of === null && (type as { name?: string }).name === undefined) {
+      return;
     }
     throw programError(
       "a program prints a number or a string",

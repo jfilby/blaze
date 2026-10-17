@@ -305,6 +305,9 @@ export function wholeOf(a: PrimitiveTypeName, b: PrimitiveTypeName): PrimitiveTy
  */
 export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (typeEquals(from, to)) return true;
+  // An unshaped reference (`any`) accepts anything the program can hand it:
+  // numbers, text, arrays, objects and other dynamic values alike.
+  if (to.kind === "ref" && to.of === null && to.name === undefined) return true;
   if (isNumber(from) && isNumber(to)) return !isWideType(from) || isWideType(to);
   if (isTextType(from) && isTextType(to)) return true;
   if (isReference(from) && isReference(to)) return true;

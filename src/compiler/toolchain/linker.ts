@@ -83,7 +83,12 @@ function isWideScalar(type: TypeExpr): boolean {
 /** C type used in the harness declaration for a contract type. */
 export function cDeclarationType(type: TypeExpr): string {
   if (type.kind === "void") return "void";
-  if (type.kind === "ref") return type.name === undefined ? "void*" : `struct ${type.name}*`;
+  if (type.kind === "ref") {
+    // An unshaped reference (`any`) is a dynamic value, carried as a double
+    // handle so it mixes with the arithmetic the generated C performs.
+    if (type.of === null && type.name === undefined) return "double";
+    return type.name === undefined ? "void*" : `struct ${type.name}*`;
+  }
   if (isBuffer(type)) return `${cDeclarationType(type.of)}*`;
   if (type.kind !== "primitive") throw linkError(`unsupported type ${typeToString(type)}`);
   const mapped = C_SCALARS[type.name];

@@ -727,6 +727,20 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
         const out = "blaze_wide";
         return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${argument(0)}, ${argument(1)}, ${argument(2)}, ${argument(3)}); ${out}; })`;
       }
+      case "JSON.parse":
+        return `${RUNTIME_NAME}_json_parse(${argument(0)})`;
+      case "JSON.stringify":
+        return `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
+      case "crypto.createHash":
+        return `${RUNTIME_NAME}_md5_create()`;
+      case "fs.readFileSync":
+        return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "hasher.update":
+        return `${RUNTIME_NAME}_md5_update(${argument(0)}, ${argument(1)})`;
+      case "hasher.update.digest":
+        return `${RUNTIME_NAME}_md5_digest(${argument(0)})`;
+      case "array.push":
+        return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
       default:
         throw driverError(`the driver cannot write down ${call.callee}`);
     }
@@ -786,6 +800,9 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
       // language prints: casting it to a number hands out the zero the source
       // never printed.
       return '"null"';
+    }
+    if (type.kind === "ref" && type.of === null && type.name === undefined) {
+      return `${RUNTIME_NAME}_to_text(${value})`;
     }
     if (type.kind === "ref" && type.of === null) {
       return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;
