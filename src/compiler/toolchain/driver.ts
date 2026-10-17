@@ -568,7 +568,7 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     if (kind === "text") return `(${expression})[0] != '\\0'`;
     if (kind === "reference") {
       if (type !== null && type.kind === "ref" && type.of === null && type.name === undefined) {
-        return `(${expression}) != 0`;
+        return `((${expression}) == (${expression}) && (${expression}) != 0)`;
       }
       return `(${expression}) != NULL`;
     }

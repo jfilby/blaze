@@ -1,4 +1,3 @@
-console.error("MODULELOAD IR-C");
 /**
  * Lowering a function's semantic IR to C.
  *
@@ -641,7 +640,7 @@ class FunctionEmitter {
   /** Whether C text already written answers as a truth. */
   private truth(text: string, kind: ValueKind, type: SemanticType | null): string {
     if (type !== null && type.kind === "ref" && type.of === null && type.name === undefined) {
-      return `((${text}) != 0.0)`;
+      return `((${text}) == (${text}) && (${text}) != 0.0)`;
     }
     switch (kind) {
       case "text":
@@ -803,7 +802,6 @@ class FunctionEmitter {
   }
 
   private raw(value: SemanticValue, depth: number): string {
-    console.error("RAW k", value.k);
     switch (value.k) {
       case "const":
         // A constant states the type it is written at, and a text one is a
@@ -907,7 +905,6 @@ class FunctionEmitter {
         );
       }
       case "logical": {
-        console.error("LOGICAL HIT", value.left.k, value.right.k, JSON.stringify(value.type));
         // The left arm decides and the value is one of the arms, which is what
         // C's own `&&` and `||` are: they return the arm that answered. It is
         // written down as the test and again as the value that answers, so it
@@ -934,7 +931,7 @@ class FunctionEmitter {
           `(${arm}) == NULL ? ${this.expression(value.right, value.type, depth)} : ${arm}; })`
         );
       }
-      case "select": { console.error("SELECT HIT", value.then.k, value.otherwise.k);
+      case "select": {
         const thenExpr = (value.then.k === "text" || (value.then.k === "const" && typeof (value.then as any).text === "string"))
           ? `${RUNTIME_NAME}_box_string(${this.raw(value.then, depth)})`
           : this.expression(value.then, value.type, depth);
@@ -1222,7 +1219,6 @@ class FunctionEmitter {
    * all, depending on which way the compiler read them.
    */
   private asText(value: SemanticValue, depth: number, name: string): string {
-    console.error("DEBUG asText k", value.k, "type", JSON.stringify(value.type));
     // A conversion is text by its own type, so handed whole it would be read as
     // a string that arrives without a length and measured for one. What it
     // wraps is what knows how long the text is.
