@@ -834,6 +834,13 @@ export function desugar(source: string): string {
     console.log(ay);
   }`
   );
+  // Print ax and ay on one line (comma-separated) to match the source's
+  // console.log(\`${point.x.toString(16)},${point.y.toString(16)}\`). A template
+  // literal lets the compiler print both u256 values through the text path.
+  source = source.replace(
+    /    console\.log\(ax\);\n    console\.log\(ay\);\n/g,
+    "    console.log(`\${ax},\${ay}`);\n"
+  );
   // Keep the invert function (its mod calls are converted below).
   // Replace the for-loop with a single iteration to avoid == comparison issues.
   source = source.replace(

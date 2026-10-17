@@ -6959,6 +6959,21 @@ class Machine {
       this.code.bind(end);
       return true;
     }
+    if (isWideType(value.type)) {
+      const slot = this.hold(value.type, "blaze_wide_text");
+      this.wideValue(value);
+      this.wideStore(slot);
+      const buffer = this.scratch(80, "blaze_wide_text_buffer");
+      this.code.leaMemReg(mem(RSP, slot.offset), RDI);
+      this.code.movRegImm(RSI, 16n);
+      this.code.lea(RDX, frame(buffer));
+      this.code.movRegImm(RCX, 80n);
+      this.library("blaze_rt_u256_format");
+      if (measured !== null) this.code.movMemRegSized(frame(measured.offset), RAX, 8);
+      this.code.lea(RAX, frame(buffer));
+      this.freeSlot(slot);
+      return true;
+    }
     this.at(value, NUMBER);
     this.formatNumber(measured, digits);
     return true;
