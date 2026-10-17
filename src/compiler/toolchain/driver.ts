@@ -743,9 +743,11 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
       case "hasher.update":
-        return `${RUNTIME_NAME}_md5_update(${argument(0)}, ${argument(1)})`;
+        return `${RUNTIME_NAME}_md5_update(${argument(0)}, ${RUNTIME_NAME}_to_text(${argument(1)}))`;
       case "hasher.update.digest":
         return `${RUNTIME_NAME}_md5_digest(${argument(0)})`;
+      case "array.new":
+        return `${RUNTIME_NAME}_dyn_array_new()`;
       case "array.push":
         return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
       default:

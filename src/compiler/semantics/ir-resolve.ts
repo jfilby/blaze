@@ -1883,10 +1883,11 @@ class ProgramResolver {
       case "sized":
       case "view":
       case "fill":
-        // An empty array literal is a dynamic array: it has no element type to
-        // fix and grows at run time through `array.push`.
         if (value.k === "buffer" && value.held.length === 0) {
-          return declare({ kind: "object", mutable, type: { kind: "ref", of: null } });
+          const emptyArrayValue = this.value({ k: "call", function: "array.new", args: [] }, annotation, statement.line);
+          const held = { kind: "object", mutable, type: { kind: "ref", of: null } as TypeExpr } as any;
+          const declared = this.declareName(statement.name, statement.line, held);
+          return { kind: "declare", name: declared.name, held: declared, value: emptyArrayValue, line: statement.line };
         }
         return declare({
           kind: "array",
@@ -3620,8 +3621,6 @@ class ProgramLowering {
   private draft(statement: DraftStatement): void {
     switch (statement.kind) {
       case "declare": {
-
-
         // An array the program wrote is the name it is declared as, not a name
         // of its own: the declaration is the allocation, whether the values
         // were written out, the count was settled on when the program ran, or

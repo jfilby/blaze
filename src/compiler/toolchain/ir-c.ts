@@ -751,7 +751,9 @@ class FunctionEmitter {
     const written = this.raw(value, depth);
     const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
     if (asAny) {
-      if (isTextType(value.type)) return `${RUNTIME_NAME}_box_string(${written})`;
+      if (isTextType(value.type) || (value.k === "const" && typeof (value as any).text === "string") || value.k === "text") {
+        return `${RUNTIME_NAME}_box_string(${written})`;
+      }
       if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;
       if (isSequence(value.type)) return `${RUNTIME_NAME}_dyn_array_new()`;
       if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return written;
@@ -909,7 +911,9 @@ class FunctionEmitter {
         // is bound first.
         const arm = this.temporary("blaze_arm");
         const left = this.raw(value.left, depth);
-        const right = this.expression(value.right, value.type, depth);
+        const right = (value.right.k === "text" || (value.right.k === "const" && typeof (value.right as any).text === "string"))
+          ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, depth)})`
+          : this.expression(value.right, value.type, depth);
         return (
           `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
           `${this.truth(arm, valueKind(value.left), value.left.type)} ? ` +
@@ -929,8 +933,15 @@ class FunctionEmitter {
           `(${arm}) == NULL ? ${this.expression(value.right, value.type, depth)} : ${arm}; })`
         );
       }
-      case "select":
-        return `((${this.condition(value.condition, depth)}) ? ${this.expression(value.then, value.type, depth)} : ${this.expression(value.otherwise, value.type, depth)})`;
+      case "select": {
+        const thenExpr = (value.then.k === "text" || (value.then.k === "const" && typeof (value.then as any).text === "string"))
+          ? `${RUNTIME_NAME}_box_string(${this.raw(value.then, depth)})`
+          : this.expression(value.then, value.type, depth);
+        const otherwiseExpr = (value.otherwise.k === "text" || (value.otherwise.k === "const" && typeof (value.otherwise as any).text === "string"))
+          ? `${RUNTIME_NAME}_box_string(${this.raw(value.otherwise, depth)})`
+          : this.expression(value.otherwise, value.type, depth);
+        return `((${this.condition(value.condition, depth)}) ? ${thenExpr} : ${otherwiseExpr})`;
+      }
 
       case "buffer":
         return this.buffer(value, depth);

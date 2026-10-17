@@ -704,8 +704,10 @@ class ProgramParser {
       this.next();
       this.next();
       this.next();
-      const args = this.arguments();
+      const methodArgs = this.arguments();
       this.accept(";");
+      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno"]);
+      const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
       return { kind: "invoke", function: `${object}.${method}`, args, line: name.line };
     }
     if (token.text === ".") {
@@ -866,7 +868,10 @@ class ProgramParser {
         if (this.at("(")) {
           this.next();
           const fn = `${this.valuePath(value)}.${member}`;
-          value = { k: "call", function: fn, args: this.arguments() };
+          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno"]);
+          const prepend = !(value.k === "name" && namespaces.has(value.name));
+          const args = prepend ? [value, ...this.arguments()] : this.arguments();
+          value = { k: "call", function: fn, args };
           continue;
         }
         if (value.k === "name" || value.k === "field" || value.k === "call") {

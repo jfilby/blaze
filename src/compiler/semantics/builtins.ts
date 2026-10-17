@@ -65,9 +65,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
   "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
   "fs.readFileSync": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  "hasher.update": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  "hasher.update.digest": { params: [ANY], returns: ANY, arity: 1 },
-  "array.push": { params: [ANY], returns: ANY, arity: 1 },
+  "hasher.update": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  "hasher.update.digest": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  "array.new": { params: [], returns: ANY, arity: 0 },
+  "array.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);
