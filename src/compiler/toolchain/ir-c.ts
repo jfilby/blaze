@@ -708,9 +708,11 @@ class FunctionEmitter {
    */
   private buildObject(value: SemanticValue & { k: "newObject" }): string {
     const name = this.temporary("blaze_object");
-    const written = value.fields.map(
-      (field) => `((${name})->${cMemberName(field.name)} = ${this.expression(field.value, null, 0)});`,
-    );
+    const written = value.fields.map((field) => {
+      const expr = this.expression(field.value, null, 0);
+      const assigned = expr === "NULL" ? "0.0" : expr;
+      return `((${name})->${cMemberName(field.name)} = ${assigned});`;
+    });
     const size = `sizeof(struct ${value.layout})`;
     const allocation = this.writesEveryField(value)
       ? `${RUNTIME_NAME}_allocate_uninitialized(${size})`
@@ -753,6 +755,7 @@ class FunctionEmitter {
       if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;
       if (isSequence(value.type)) return `${RUNTIME_NAME}_dyn_array_new()`;
       if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return written;
+      if (isReference(value.type)) return `((double)(uintptr_t)(${written}))`;
       return `${RUNTIME_NAME}_box_null()`;
     }
     if (as === null || isTextType(value.type) || isTextType(as)) return written;
