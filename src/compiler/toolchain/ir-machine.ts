@@ -109,6 +109,16 @@ import {
 /* Types as the machine holds them                                              */
 /* -------------------------------------------------------------------------- */
 
+function isDynamicType(type: SemanticType | null): boolean {
+  return type !== null && type.kind === "ref" && type.of === null && type.name === undefined;
+}
+
+function isFloatType(type: SemanticType | null): boolean {
+  if (type === null) return false;
+  if (isDynamicType(type)) return true;
+  return isFloat(type);
+}
+
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 const I64: SemanticType = { kind: "primitive", name: "i64" };
@@ -904,7 +914,7 @@ class Census {
       case "const":
         // A literal is the same number in both lanes, which is what a pair of
         // copies of it is.
-        return isFloat(value.type);
+        return isFloatType(value.type);
       case "local":
         // The counter is the pair itself. Any other name is loop-invariant,
         // because a counted loop here writes nothing but its counter and the
@@ -997,7 +1007,7 @@ class Census {
     // A double, and one of the four operations a double pair has. Every packed
     // instruction written below reads its lanes as doubles, so a lane of any
     // other type is a lane carrying a different number than the one written.
-    if (!isFloat(value.type)) return false;
+    if (!isFloatType(value.type)) return false;
     if (value.op !== "add" && value.op !== "sub" && value.op !== "mul" && value.op !== "div") return false;
     // Every side at the type of the answer, so that a lane is one value of that
     // type rather than one of some other width the pair load did not bring. This
@@ -1163,9 +1173,9 @@ function lowerFunction(
  */
 function lastArgumentRegister(types: readonly SemanticType[], last: number): number {
   let floating = 0;
-  for (const type of types.slice(0, last)) if (isFloat(type)) floating += 1;
+  for (const type of types.slice(0, last)) if (isFloatType(type)) floating += 1;
   const type = types[last] as SemanticType;
-  return isFloat(type) ? (SSE_ARGUMENTS[floating] as number) : (INTEGER_ARGUMENTS[last - floating] as number);
+  return isFloatType(type) ? (SSE_ARGUMENTS[floating] as number) : (INTEGER_ARGUMENTS[last - floating] as number);
 }
 
 /**
@@ -1183,8 +1193,8 @@ function firstArgumentOnStack(types: readonly SemanticType[]): number {
   let general = 0;
   let floating = 0;
   for (const [at, type] of types.entries()) {
-    if (isFloat(type) ? floating >= SSE_ARGUMENTS.length : general >= INTEGER_ARGUMENTS.length) return at;
-    if (isFloat(type)) floating += 1;
+    if (isFloatType(type) ? floating >= SSE_ARGUMENTS.length : general >= INTEGER_ARGUMENTS.length) return at;
+    if (isFloatType(type)) floating += 1;
     else general += 1;
   }
   return types.length;
@@ -1320,7 +1330,7 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
 /** The number a whole literal writes down, or null when it is not one. */
 function wholeLiteral(value: SemanticValue): number | null {
   if (value.k !== "const") return null;
-  const number = isFloat(value.type) ? Number(decimalText(value.text)) : Number(integerText(value.text));
+  const number = isFloatType(value.type) ? Number(decimalText(value.text)) : Number(integerText(value.text));
   return Number.isSafeInteger(number) ? number : null;
 }
 
@@ -1862,7 +1872,7 @@ class Machine {
         for (const inner of statementBlocksOf(statement)) turning(inner, depth + (statement.k === "loop" ? 1 : 0));
         if (depth === 0) continue;
         for (const value of statementValues(statement)) {
-          if (isFloat(value.type) && (value.k === "arith" || value.k === "compare")) arithmetic += 1;
+          if (isFloatType(value.type) && (value.k === "arith" || value.k === "compare")) arithmetic += 1;
         }
       }
     };
@@ -1889,7 +1899,7 @@ class Machine {
           const loop = statement.loop;
           if (
             loop.kind === "counted" &&
-            isFloat(loop.type) &&
+            isFloatType(loop.type) &&
             wholeLiteral(loop.from) !== null &&
             !writesCounter(loop.body, loop.variable)
           ) {
@@ -1994,7 +2004,7 @@ class Machine {
     // A wide number is carried in four registers of its own and is written from
     // those rather than from the accumulator, so there is nothing here to hold
     // it in.
-    const register = borrowable && isFloat(type) && !isWideType(type) ? this.takeSpareVector() : null;
+    const register = borrowable && isFloatType(type) && !isWideType(type) ? this.takeSpareVector() : null;
     const offset = this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8));
     this.heldCount += 1;
     const held: Held = { id: this.heldCount, offset, type, register, index: null, constant: null };
@@ -2323,7 +2333,7 @@ class Machine {
       const facts = liveness.get(name);
       if (facts === undefined || facts.live.length === 0) return;
       const live = facts.live;
-      const float = isFloat(type);
+      const float = isFloatType(type);
       const preserved = float ? VECTOR_CALLEE_SAVED : CALLEE_SAVED;
       const given = float ? VECTOR_CALLER_SAVED : CALLER_SAVED;
       const register = facts.acrossCall
@@ -2408,7 +2418,7 @@ class Machine {
           // numbers, which is what `counted` writes it as, so giving it a vector
           // register would be a register for a double nothing reads — and a
           // preserved one costs the function a push and a pop for it.
-          declare(loop.variable, loop.type, isFloat(loop.type) && !readsCounterAsValue(loop.body, loop.variable));
+          declare(loop.variable, loop.type, isFloatType(loop.type) && !readsCounterAsValue(loop.body, loop.variable));
           inside = new Set(enclosing).add(loop.variable);
         } else if (loop.kind === "each") {
           declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
@@ -2704,14 +2714,14 @@ class Machine {
         return { register: null, stack: here, limbs: this.limbsOf(type) };
       }
       const register =
-        exhausted ? undefined : isFloat(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+        exhausted ? undefined : isFloatType(type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
       if (register === undefined) {
         exhausted = true;
         const here = stack;
         stack += 1;
         return { register: null, stack: here, limbs: 1 };
       }
-      if (isFloat(type)) floating += 1;
+      if (isFloatType(type)) floating += 1;
       else general += 1;
       return { register, stack: -1, limbs: 1 };
     });
@@ -2749,12 +2759,12 @@ class Machine {
         // register is one the allocation was free to use.
         if (register === null) {
           const argument = this.stackArgument(8 + arrival.stack * 8);
-          if (isFloat(type)) this.code.movsLoad(held.register, argument, widthOf(type) === 4);
+          if (isFloatType(type)) this.code.movsLoad(held.register, argument, widthOf(type) === 4);
           else this.code.movRegMem(held.register, argument);
           continue;
         }
         if (held.register === register) continue;
-        if (isFloat(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
+        if (isFloatType(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
         else this.code.movRegReg(held.register, register);
         continue;
       }
@@ -2782,7 +2792,7 @@ class Machine {
       // The first float argument arrives in the accumulator itself, so writing
       // it down leaves the accumulator holding what the slot holds — which is
       // what the first read of that parameter is answered by.
-      if (isFloat(type)) {
+      if (isFloatType(type)) {
         this.code.movsStore(frame(offset), register, widthOf(type) === 4);
         if (register === XMM0) this.accumulator = { id: held.id, at: this.code.written };
       }
@@ -2810,13 +2820,13 @@ class Machine {
   private load(held: Held): void {
     if (this.accumulator?.id === held.id && this.accumulator.at === this.code.written) return;
     if (held.register !== null) {
-      if (isFloat(held.type)) this.code.movsMove(XMM0, held.register, widthOf(held.type) === 4);
+      if (isFloatType(held.type)) this.code.movsMove(XMM0, held.register, widthOf(held.type) === 4);
       else this.code.movRegReg(RAX, held.register);
       this.accumulator = { id: held.id, at: this.code.written };
       return;
     }
     if (this.accumulator?.id === held.id && this.accumulator.at === this.code.written) return;
-    if (isFloat(held.type)) {
+    if (isFloatType(held.type)) {
       this.code.movsLoad(XMM0, frame(held.offset), widthOf(held.type) === 4);
     } else {
       this.code.movRegMemSized(RAX, frame(held.offset), widthOf(held.type), signedOf(held.type));
@@ -2841,7 +2851,7 @@ class Machine {
    * rather than a move of the address, an addition to it, and the write.
    */
   private storeAt(type: SemanticType, where: Memory): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.code.movsStore(where, XMM0, widthOf(type) === 4);
       return;
     }
@@ -2867,7 +2877,7 @@ class Machine {
     if (value.k !== "arith") return false;
     if (value.op !== "shl" && value.op !== "shr" && value.op !== "ushr") return false;
     const type = target.type;
-    if (isFloat(type) || isWideType(type)) return false;
+    if (isFloatType(type) || isWideType(type)) return false;
     if (value.left.k !== "local") return false;
     const places = this.immediateOf(value.right, type);
     if (places === null) return false;
@@ -2889,12 +2899,12 @@ class Machine {
    */
   private store(held: Held): void {
     if (held.register !== null) {
-      if (isFloat(held.type)) this.code.movsMove(held.register, XMM0, widthOf(held.type) === 4);
+      if (isFloatType(held.type)) this.code.movsMove(held.register, XMM0, widthOf(held.type) === 4);
       else this.code.movRegReg(held.register, RAX);
       this.accumulator = { id: held.id, at: this.code.written };
       return;
     }
-    if (isFloat(held.type)) {
+    if (isFloatType(held.type)) {
       this.code.movsStore(frame(held.offset), XMM0, widthOf(held.type) === 4);
       return;
     }
@@ -2919,11 +2929,11 @@ class Machine {
   private storeFrom(held: Held, register: number): void {
     if (held.register !== null) {
       if (held.register === register) return;
-      if (isFloat(held.type)) this.code.movsMove(held.register, register, widthOf(held.type) === 4);
+      if (isFloatType(held.type)) this.code.movsMove(held.register, register, widthOf(held.type) === 4);
       else this.code.movRegReg(held.register, register);
       return;
     }
-    if (isFloat(held.type)) this.code.movsStore(frame(held.offset), register, widthOf(held.type) === 4);
+    if (isFloatType(held.type)) this.code.movsStore(frame(held.offset), register, widthOf(held.type) === 4);
     else this.code.movMemRegSized(frame(held.offset), register, widthOf(held.type));
     this.accumulator = null;
   }
@@ -2945,7 +2955,7 @@ class Machine {
    * index are both in registers is read without a register written at all.
    */
   private readFrom(type: SemanticType, where: Memory): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.code.movsLoad(XMM0, where, widthOf(type) === 4);
       return;
     }
@@ -2954,7 +2964,7 @@ class Machine {
 
   /** The value in a slot of the frame, read as the type it is declared at. */
   private readSlotAt(type: SemanticType, offset: number): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.code.movsLoad(XMM0, frame(offset), widthOf(type) === 4);
       return;
     }
@@ -2963,7 +2973,7 @@ class Machine {
 
   /** The accumulator widened to the width and sign of the type it is read as. */
   private normalize(type: SemanticType): void {
-    if (isFloat(type) || isWideType(type) || widthOf(type) === 8) return;
+    if (isFloatType(type) || isWideType(type) || widthOf(type) === 8) return;
     this.code.narrow(RAX, RAX, widthOf(type), signedOf(type));
   }
 
@@ -2985,14 +2995,14 @@ class Machine {
    * the long way.
    */
   private normalizeArithmetic(type: SemanticType, register = RAX): void {
-    if (isFloat(type) || widthOf(type) === 8) return;
+    if (isFloatType(type) || widthOf(type) === 8) return;
     if (widthOf(type) === 4 && !signedOf(type)) return;
     this.code.narrow(register, register, widthOf(type), signedOf(type));
   }
 
   /** The scratch register holding what the accumulator has. */
   private toScratch(type: SemanticType): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.code.movsMove(XMM1, XMM0, widthOf(type) === 4);
       return;
     }
@@ -3007,11 +3017,11 @@ class Machine {
    */
   private scratchFrom(held: Held): void {
     if (held.register !== null) {
-      if (isFloat(held.type)) this.code.movsMove(XMM1, held.register, widthOf(held.type) === 4);
+      if (isFloatType(held.type)) this.code.movsMove(XMM1, held.register, widthOf(held.type) === 4);
       else this.code.movRegReg(RCX, held.register);
       return;
     }
-    if (isFloat(held.type)) {
+    if (isFloatType(held.type)) {
       this.code.movsLoad(XMM1, frame(held.offset), widthOf(held.type) === 4);
       return;
     }
@@ -3400,7 +3410,7 @@ class Machine {
       // than the pair. A name the build gave a register of its own is a value
       // read on every turn of a loop as often as anything else — `borrow` is
       // one, and the eleven limbs of a modular subtraction assign it twice each.
-      if (value.k === "const" && isFloat(target.type) && target.register !== null && !isWideType(target.type)) {
+      if (value.k === "const" && isFloatType(target.type) && target.register !== null && !isWideType(target.type)) {
         this.floatConstant(Number(decimalText(value.text)), target.type, target.register);
         return;
       }
@@ -3466,7 +3476,7 @@ class Machine {
     const right = this.hold(target.type, "blaze_right");
     this.store(right);
     this.load(target);
-    if (isFloat(target.type)) {
+    if (isFloatType(target.type)) {
       this.scratchFrom(right);
     } else this.readInto(right, RCX);
     this.apply(operation, target.type);
@@ -3497,11 +3507,11 @@ class Machine {
     if (source.register === null) return false;
     const narrow = widthOf(target.type) === 4;
     if (target.register !== null) {
-      if (isFloat(target.type)) this.code.movsMove(target.register, source.register, narrow);
+      if (isFloatType(target.type)) this.code.movsMove(target.register, source.register, narrow);
       else this.code.movRegReg(target.register, source.register);
       return true;
     }
-    if (isFloat(target.type)) this.code.movsStore(frame(target.offset), source.register, narrow);
+    if (isFloatType(target.type)) this.code.movsStore(frame(target.offset), source.register, narrow);
     else this.code.movMemRegSized(frame(target.offset), source.register, widthOf(target.type));
     return true;
   }
@@ -3520,7 +3530,7 @@ class Machine {
    * lives — goes the other way.
    */
   private floatOverFrame(operation: Arithmetic, type: SemanticType, other: Held): boolean {
-    if (!isFloat(type) || (operation !== "add" && operation !== "mul")) return false;
+    if (!isFloatType(type) || (operation !== "add" && operation !== "mul")) return false;
     if (other.register !== null) return false;
     this.code.sseMem(operation, XMM0, frame(other.offset), widthOf(type) === 4);
     return true;
@@ -4019,7 +4029,7 @@ class Machine {
     const accumulator = this.slot(sum.accumulator);
     // The additions below are a double added into a double, so an accumulator of
     // another type is not one this can make at all.
-    if (counter === undefined || accumulator.register === null || !isFloat(accumulator.type)) return false;
+    if (counter === undefined || accumulator.register === null || !isFloatType(accumulator.type)) return false;
     const total = accumulator.register;
     // Three more: where a turn's value lands, the one its other side is built
     // in, and the one the other side borrows in turn. None of them is the
@@ -4243,7 +4253,7 @@ class Machine {
     // steps it beside the double: the conversion is done once for the loop.
     const writtenName = (value: SemanticValue): boolean => value.k === "local" && writesCounter(loop.body, value.name);
     const shadow =
-      isFloat(type) &&
+      isFloatType(type) &&
       this.spareIndexes.length > 0 &&
       wholeLiteral(loop.from) !== null &&
       (loop.step === null || wholeLiteral(loop.step) !== null) &&
@@ -4359,7 +4369,7 @@ class Machine {
       // and subtracting a step of minus one moved the index the other way and
       // ran a descending loop for ever.
       if (variable.register === null) this.load(variable);
-      if (isFloat(type)) {
+      if (isFloatType(type)) {
         // A float has no add-with-the-amount-inside form, so the step is written
         // into the scratch and the counter is advanced in the register it lies in.
         this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(step, widthOf(type) === 4)), widthOf(type) === 4);
@@ -4369,7 +4379,7 @@ class Machine {
     } else {
       this.scratchFrom(step);
       if (variable.register === null) this.load(variable);
-      else if (isFloat(type)) this.code.movsMove(XMM0, variable.register, widthOf(type) === 4);
+      else if (isFloatType(type)) this.code.movsMove(XMM0, variable.register, widthOf(type) === 4);
       else this.code.movRegReg(RAX, variable.register);
       this.apply("add", type);
       // A step that had to be read leaves the sum in the accumulator rather than
@@ -4378,7 +4388,7 @@ class Machine {
       // The counter is read back out of the accumulator here, which is what a
       // counter in the frame gets from the store below instead.
       if (variable.register !== null) {
-        if (isFloat(type)) this.code.movsMove(variable.register, XMM0, widthOf(type) === 4);
+        if (isFloatType(type)) this.code.movsMove(variable.register, XMM0, widthOf(type) === 4);
         else this.code.movRegReg(variable.register, RAX);
       }
     }
@@ -4503,7 +4513,7 @@ class Machine {
     // counter with no index register of its own is one whose number nothing
     // records, so an index read out of it is the counter's own value converted,
     // which is the double this is not writing.
-    const asIndex = shadow !== null && isFloat(type) && !readsCounterAsValue(loop.body, loop.variable);
+    const asIndex = shadow !== null && isFloatType(type) && !readsCounterAsValue(loop.body, loop.variable);
     // A loop whose turns are all written out runs once, so there is nothing left
     // to count: the bodies below stand one after another and control leaves them
     // into the exit. A counter of trips the loop never reads is a number in the
@@ -4610,7 +4620,7 @@ class Machine {
     // number of the turn is in the instruction beside it, so writing the double
     // would be a load and a store of a number nothing reads, on every turn.
     if (!asIndex) {
-      if (isFloat(type)) this.floatConstant(value, type, XMM0);
+      if (isFloatType(type)) this.floatConstant(value, type, XMM0);
       else this.code.movRegImm(RAX, BigInt(value));
       this.store(variable);
     }
@@ -4646,7 +4656,7 @@ class Machine {
     }
     const register = variable.register ?? RAX;
     if (variable.register === null) this.load(variable);
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.floatConstant(step, type, XMM1);
       this.code.sse("add", register, XMM1, widthOf(type) === 4);
     } else {
@@ -4730,7 +4740,7 @@ class Machine {
       this.code.test(RCX);
       return;
     }
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.floatTruth(type);
       return;
     }
@@ -4793,7 +4803,7 @@ class Machine {
     // The two comparisons that are not ordered are the other way round. `==` and
     // `!=` are relations over every pair, a pair that is in no ordered relation
     // included, so each is the opposite of the other.
-    const ordered = underNot !== null && isFloat(type) && comparison.op !== "eq" && comparison.op !== "ne";
+    const ordered = underNot !== null && isFloatType(type) && comparison.op !== "eq" && comparison.op !== "ne";
     const op = underNot === null || ordered ? comparison.op : OPPOSITE[comparison.op];
     // The branch is taken under the other sense of the comparison wherever the
     // comparison itself is what was kept, and under the sense it was asked for
@@ -4828,7 +4838,7 @@ class Machine {
     // A left side the comparison reads where it lies costs no slot and no copy:
     // the right side goes into the accumulator, and the element is the source
     // the instruction reads it against.
-    const carried = isFloat(type) ? this.carriedOperand(comparison.left, type, !hasCall(comparison.right)) : null;
+    const carried = isFloatType(type) ? this.carriedOperand(comparison.left, type, !hasCall(comparison.right)) : null;
     if (carried !== null) {
       this.at(comparison.right, type);
       this.floatBranch(op, widthOf(type) === 4, sense, label, carried, XMM0);
@@ -4861,7 +4871,7 @@ class Machine {
    * what the other arm of the `if` does.
    */
   private noteCompared(side: SemanticValue, type: SemanticType): void {
-    if (!isFloat(type) || side.k !== "local") return;
+    if (!isFloatType(type) || side.k !== "local") return;
     const held = this.slot(side.name);
     // The accumulator is asked whether it holds this slot rather than told, so
     // a form that moved it on the way to the comparison leaves nothing behind.
@@ -5103,7 +5113,7 @@ class Machine {
   }
 
   private zero(type: SemanticType): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
@@ -5112,7 +5122,7 @@ class Machine {
 
   private constant(value: SemanticValue & { k: "const" }): void {
     if (isWideType(value.type)) return;
-    if (isFloat(value.type)) {
+    if (isFloatType(value.type)) {
       const single = widthOf(value.type) === 4;
       this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(Number(decimalText(value.text)), single)), single);
       return;
@@ -5151,7 +5161,7 @@ class Machine {
    * twice its width and answers in two registers.
    */
   private apply(operation: Arithmetic, type: SemanticType): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       const names = { add: "add", sub: "sub", mul: "mul", div: "div" } as const;
       if (operation in names) this.code.sse(names[operation as "add" | "sub" | "mul" | "div"], XMM0, XMM1, widthOf(type) === 4);
       return;
@@ -5198,7 +5208,7 @@ class Machine {
 
   /** One, added to or taken from the value the accumulator has. */
   private one(type: SemanticType, operation: "add" | "sub", register = RAX): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       const single = widthOf(type) === 4;
       // The destination is named by the caller because a float counter the loop
       // was given a register for is stepped where it lies, and the accumulator a
@@ -5235,7 +5245,7 @@ class Machine {
    * equal arms below gate on, for the same reason.
    */
   private compare(type: SemanticType, op: CompareOp, right: Held | number): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       const single = widthOf(type) === 4;
       if (typeof right === "number") {
         // A number the program wrote out is the instruction's own second
@@ -5323,7 +5333,7 @@ class Machine {
    * flag, so the branch on it is a `jcc` on that flag and not a `test` on it.
    */
   private comparedBranch(type: SemanticType, op: CompareOp, right: Held | number, whenTrue: boolean, label: string, left = RAX): void {
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       const single = widthOf(type) === 4;
       // The comparison reads two registers, and a side the build gave one of
       // its own is read out of that rather than out of the frame it is not in.
@@ -5526,7 +5536,7 @@ class Machine {
    * instruction has none of.
    */
   private registerOperand(value: SemanticValue, type: SemanticType, survives: boolean): number | null {
-    if (value.k !== "local" || !isFloat(value.type) || !isFloat(type)) return null;
+    if (value.k !== "local" || !isFloatType(value.type) || !isFloatType(type)) return null;
     if (widthOf(value.type) !== widthOf(type)) return null;
     const held = this.slot(value.name);
     const register = held.register;
@@ -5543,7 +5553,7 @@ class Machine {
    * instruction has none of — or the operation has no form that takes memory.
    */
   private floatOperand(value: SemanticValue, type: SemanticType, op: string): string | null {
-    if (!isFloat(type) || value.k !== "const" || !isFloat(value.type)) return null;
+    if (!isFloatType(type) || value.k !== "const" || !isFloatType(value.type)) return null;
     if (FLOAT_OPERATION[op] !== true || widthOf(value.type) !== widthOf(type)) return null;
     return this.floatLiteral(floatBits(Number(decimalText(value.text)), widthOf(type) === 4));
   }
@@ -5563,12 +5573,12 @@ class Machine {
    * fields encode it — a sign-extended byte or a sign-extended word.
    */
   private literalOf(value: SemanticValue, type: SemanticType): number | null {
-    if (value.k === "bool") return isFloat(type) ? null : value.value ? 1 : 0;
+    if (value.k === "bool") return isFloatType(type) ? null : value.value ? 1 : 0;
     if (value.k !== "const") return null;
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       // A float the program wrote out at the other precision is a conversion
       // the instruction has no form of, so it is left to the frame.
-      if (!isFloat(value.type) || widthOf(value.type) !== widthOf(type)) return null;
+      if (!isFloatType(value.type) || widthOf(value.type) !== widthOf(type)) return null;
       const parsed = Number(decimalText(value.text));
       // A value that is not a number has no bits to be laid down, and the
       // answer it gives is the one the operation would have given anyway.
@@ -5590,7 +5600,7 @@ class Machine {
    * writes in practice.
    */
   private immediateOf(value: SemanticValue, type: SemanticType): number | null {
-    if (isFloat(type)) return null;
+    if (isFloatType(type)) return null;
     if (value.k === "bool") return value.value ? 1 : 0;
     if (value.k !== "const") return null;
     const parsed = integerText(value.text);
@@ -5725,7 +5735,7 @@ class Machine {
     // effect in either — and sound for a register because the register is one
     // the convention preserves, or is named only where the other side calls
     // nothing and so writes nothing over it.
-    if (isFloat(type) && FLOAT_OPERATION[value.op] === true) {
+    if (isFloatType(type) && FLOAT_OPERATION[value.op] === true) {
       const operation = value.op as "add" | "sub" | "mul" | "div";
       const commutative = operation === "add" || operation === "mul";
       const single = widthOf(type) === 4;
@@ -5774,7 +5784,7 @@ class Machine {
         }
       }
     }
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       const commutative = value.op === "add" || value.op === "mul";
       this.at(commutative ? value.left : value.right, type);
       // This side is held in a register where the function has one free and in
@@ -5860,7 +5870,7 @@ class Machine {
     register: number;
     carried: "left" | "right";
   } | null {
-    if (isFloat(type) || isWideType(type)) return null;
+    if (isFloatType(type) || isWideType(type)) return null;
     // Only the operations `applyRegister` writes are asked for here: a shift
     // takes its count in the scratch register the general path masks it in, and a
     // division needs both halves of the double width in the two registers the
@@ -6101,7 +6111,7 @@ class Machine {
    * held one of them.
    */
   private wideFrom(value: SemanticValue): void {
-    if (isFloat(value.type)) {
+    if (isFloatType(value.type)) {
       throw machineError(
         `a ${value.type.kind === "primitive" ? value.type.name : "f64"} is handed to a use that reads a wide number`,
         "a wide number is four limbs and a double is not a set of them: the kernel every backend widens with takes one machine word, so only a whole number has a limb in it",
@@ -6471,7 +6481,7 @@ class Machine {
     this.store(low);
     this.at(value.right, type);
     this.store(high);
-    if (!isFloat(type)) {
+    if (!isFloatType(type)) {
       this.load(low);
       this.scratchFrom(high);
       // The answer is the right side when the comparison does not hold, so the
@@ -6525,7 +6535,7 @@ class Machine {
     // below it: here the left side is the destination and the other one is the
     // source, which is the other way round from the branch, where the side held
     // is the destination.
-    const carried = isFloat(type) ? this.carriedOperand(value.right, type, !hasCall(value.left)) : null;
+    const carried = isFloatType(type) ? this.carriedOperand(value.right, type, !hasCall(value.left)) : null;
     if (carried !== null) {
       this.at(value.left, type);
       this.code.sseCompare(XMM0, carried, widthOf(type) === 4, true);
@@ -6704,6 +6714,11 @@ class Machine {
   private unary(value: SemanticValue & { k: "unary" }): void {
     switch (value.op) {
       case "pos":
+        if (isDynamicType(value.operand.type)) {
+          this.value(value.operand);
+          this.runtime("_to_number");
+          return;
+        }
         this.value(value.operand);
         return;
       case "not": {
@@ -6732,8 +6747,16 @@ class Machine {
         return;
       case "neg": {
         const type = value.operand.type;
+        if (isDynamicType(type)) {
+          this.value(value.operand);
+          this.runtime("_to_number");
+          this.code.movRegImm(RAX, -0x8000_0000_0000_0000n);
+          this.code.movdXmm(XMM1, RAX);
+          this.code.xorFloat(XMM0, XMM1);
+          return;
+        }
         this.value(value.operand);
-        if (isFloat(type)) {
+        if (isFloatType(type)) {
           // The sign of a float is its highest bit, so a negation turns that one
           // over rather than subtracting from nothing.
           this.code.movRegImm(RAX, widthOf(type) === 4 ? -0x8000_0000n : -0x8000_0000_0000_0000n);
@@ -6942,6 +6965,11 @@ class Machine {
       this.code.bind(end);
       return true;
     }
+    if (isDynamicType(value.type)) {
+      this.value(value);
+      this.runtime("_to_text");
+      return false;
+    }
     if (isReference(value.type)) {
       const pointer = this.hold(value.type, "blaze_reference");
       const otherwise = this.code.label("Lword");
@@ -7121,7 +7149,7 @@ class Machine {
     // takes the general form, which converts it into the accumulator first,
     // unless the loop that counts it holds the same number in a register of its
     // own, which is what an index is then read out of.
-    if (isFloat(held.type)) {
+    if (isFloatType(held.type)) {
       if (held.index === null) return null;
       // A value of its own rather than the counter's own identity: it stands in
       // for the index register and not for the counter, and a note about what
@@ -7235,7 +7263,7 @@ class Machine {
     const base = typeof sequence === "string" ? this.slot(sequence) : sequence.k === "local" ? this.slot(sequence.name) : null;
     // The sequence is a pointer wherever it came from: an array reaches a
     // function as a pointer to its elements, so it is one whole-register read.
-    if (base === null || base.register === null || widthOf(base.type) !== 8 || isFloat(base.type)) {
+    if (base === null || base.register === null || widthOf(base.type) !== 8 || isFloatType(base.type)) {
       return null;
     }
     const register = base.register;
@@ -7450,11 +7478,11 @@ class Machine {
       // of: its distance into the frame is zero, which is the first slot's own
       // address, so it is copied from the register it is in.
       if (held.register !== null) {
-        if (isFloat(held.type)) this.code.movsMove(register, held.register, widthOf(held.type) === 4);
+        if (isFloatType(held.type)) this.code.movsMove(register, held.register, widthOf(held.type) === 4);
         else this.code.movRegReg(register, held.register);
         return true;
       }
-      if (isFloat(type)) this.code.movsLoad(register, frame(held.offset), widthOf(type) === 4);
+      if (isFloatType(type)) this.code.movsLoad(register, frame(held.offset), widthOf(type) === 4);
       else this.code.movRegMemSized(register, frame(held.offset), widthOf(held.type), signedOf(held.type));
       return true;
     }
@@ -7467,7 +7495,7 @@ class Machine {
     const displacement = this.field(value.layout, value.field).offset;
     if (base.register !== null) {
       const at = mem(base.register, displacement);
-      if (isFloat(type)) this.code.movsLoad(register, at, widthOf(type) === 4);
+      if (isFloatType(type)) this.code.movsLoad(register, at, widthOf(type) === 4);
       else this.code.movRegMemSized(register, at, widthOf(type), signedOf(type));
       return true;
     }
@@ -7476,7 +7504,7 @@ class Machine {
     // read through that. Going through the accumulator is a move that answers
     // nothing, and reading the object into a slot first is a store and a load
     // for a value that was read exactly once.
-    if (isFloat(type)) {
+    if (isFloatType(type)) {
       this.code.movsLoad(register, frame(base.offset), widthOf(base.type) === 4);
       this.code.movsLoad(register, mem(register, displacement), widthOf(type) === 4);
       return true;
@@ -7641,12 +7669,12 @@ class Machine {
       // still takes one, so that the counts below are the ones the convention
       // hands out.
       const register =
-        onStack.length > 0 ? undefined : isFloat(argument.type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+        onStack.length > 0 ? undefined : isFloatType(argument.type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
       if (register === undefined) {
         onStack.push(argument);
         continue;
       }
-      if (isFloat(argument.type)) floating += 1;
+      if (isFloatType(argument.type)) floating += 1;
       else general += 1;
       registers.push({ register, held: argument, at });
     }
@@ -7664,7 +7692,7 @@ class Machine {
     onStack.forEach((argument, at) => {
       this.load(argument);
       const address = mem(RSP, at * 8 - slots * 8);
-      if (isFloat(argument.type)) {
+      if (isFloatType(argument.type)) {
         this.code.movsStore(address, XMM0, widthOf(argument.type) === 4);
         return;
       }
@@ -7690,7 +7718,7 @@ class Machine {
       // array answered the register instead of the element it read.
       const source =
         at === fresh && onStack.length === 0
-          ? isFloat(held.type)
+          ? isFloatType(held.type)
             ? XMM0
             : RAX
           : held.register !== null
@@ -7724,7 +7752,7 @@ class Machine {
         const move = moves[0] as Move;
         const source = move.source as number;
         const parked = this.holdSlot(move.held.type, "blaze_call_argument");
-        if (isFloat(move.held.type)) this.code.movsStore(frame(parked.offset), source, widthOf(move.held.type) === 4);
+        if (isFloatType(move.held.type)) this.code.movsStore(frame(parked.offset), source, widthOf(move.held.type) === 4);
         else this.code.movMemRegSized(frame(parked.offset), source, widthOf(move.held.type));
         move.held = parked;
         move.source = null;
@@ -7737,11 +7765,11 @@ class Machine {
     }
     for (const move of ordered) {
       if (move.source !== null) {
-        if (isFloat(move.held.type)) this.code.movsMove(move.register, move.source, widthOf(move.held.type) === 4);
+        if (isFloatType(move.held.type)) this.code.movsMove(move.register, move.source, widthOf(move.held.type) === 4);
         else this.code.movRegReg(move.register, move.source);
         continue;
       }
-      if (isFloat(move.held.type)) {
+      if (isFloatType(move.held.type)) {
         this.code.movsLoad(move.register, frame(move.held.offset), widthOf(move.held.type) === 4);
         continue;
       }
@@ -7754,7 +7782,7 @@ class Machine {
     if (slots > 0) this.code.aluImm("sub", RSP, slots * 8);
     this.code.call(symbol);
     if (slots > 0) this.code.aluImm("add", RSP, slots * 8);
-    if (returns.kind !== "void" && !isFloat(returns)) this.normalize(returns);
+    if (returns.kind !== "void" && !isFloatType(returns)) this.normalize(returns);
   }
 
   /** A call the body makes for what it does, with nothing of its own to pass. */
@@ -7786,18 +7814,18 @@ class Machine {
     if (to.kind === "void") return;
     if (isTextType(from) || isTextType(to) || isReference(from) || isReference(to)) return;
     if (!isNumber(from) || !isNumber(to)) return;
-    if (isFloat(from) && isFloat(to)) {
+    if (isFloatType(from) && isFloatType(to)) {
       // The opcode's prefix names the precision the value is read at, so it is
       // the source's width and not the destination's.
       if (widthOf(from) !== widthOf(to)) this.code.cvtFloatPrecision(XMM0, XMM0, widthOf(from) === 4);
       return;
     }
-    if (isFloat(from)) {
+    if (isFloatType(from)) {
       this.code.cvtFloatToInt(RAX, XMM0, widthOf(from) === 4, widthOf(to) === 8);
       this.normalizeArithmetic(to);
       return;
     }
-    if (isFloat(to)) {
+    if (isFloatType(to)) {
       this.wholeAsDouble(from, to);
       return;
     }
