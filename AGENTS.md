@@ -86,3 +86,10 @@ against.
 `src/compiler` is the npm package: manifest, lockfile, tsconfig, sources and
 tests all live there. Run commands from it.
 
+
+## Test suite
+
+Don't use a timeout of less than an hour for the test-suite.
+
+For every change or fix, add a test (or tests) to the test suite to prevent
+regressions.
