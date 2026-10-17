@@ -766,6 +766,10 @@ class FunctionEmitter {
     // conversion there is to a wide number is the widening, and it is the
     // kernel's.
     if (isWideType(as)) return this.widen(written, value, as);
+    const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+    if (fromDynamic && isNumber(as)) {
+      return `${RUNTIME_NAME}_to_number(${written})`;
+    }
     if (isNumber(value.type) && isNumber(as)) {
       return value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name
         ? written
@@ -858,7 +862,8 @@ class FunctionEmitter {
         }
         if (value.op === "bitNot") return `(~${operand})`;
         const asAny = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
-        if (asAny) {
+        const fromDynamic = value.operand.type.kind === "ref" && value.operand.type.of === null && value.operand.type.name === undefined;
+        if (asAny || fromDynamic) {
           const converted = `${RUNTIME_NAME}_to_number(${operand})`;
           return value.op === "neg" ? `(-${converted})` : converted;
         }

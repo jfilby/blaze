@@ -2672,7 +2672,7 @@ const char* blaze_rt_last_error(void) {
 }
 
 /* Dynamic value representation. */
-typedef enum { BLAZE_DYN_NULL, BLAZE_DYN_NUMBER, BLAZE_DYN_TEXT, BLAZE_DYN_ARRAY, BLAZE_DYN_OBJECT, BLAZE_DYN_HASHER } blaze_dyn_kind;
+typedef enum { BLAZE_DYN_NULL, BLAZE_DYN_NUMBER, BLAZE_DYN_BOOL, BLAZE_DYN_TEXT, BLAZE_DYN_ARRAY, BLAZE_DYN_OBJECT, BLAZE_DYN_HASHER } blaze_dyn_kind;
 typedef struct blaze_dyn {
   blaze_dyn_kind kind;
   double number;
@@ -2731,9 +2731,9 @@ double blaze_rt_box_null(void) {
 double blaze_rt_to_number(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) return value;
-  if (d->kind == BLAZE_DYN_NUMBER) return d->number;
+  if (d->kind == BLAZE_DYN_NUMBER || d->kind == BLAZE_DYN_BOOL) return d->number;
   if (d->kind == BLAZE_DYN_TEXT && d->text) return atof(d->text);
-  return 0.0;
+  return value;
 }
 const char* blaze_rt_to_text(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
@@ -2747,6 +2747,7 @@ const char* blaze_rt_to_text(double value) {
     snprintf(buf, 64, "%.17g", d->number);
     return buf;
   }
+  if (d->kind == BLAZE_DYN_BOOL) return d->number ? "true" : "false";
   if (d->kind == BLAZE_DYN_TEXT) return d->text ? d->text : "";
   if (d->kind == BLAZE_DYN_NULL) return "null";
   if (d->kind == BLAZE_DYN_ARRAY) {
@@ -2932,8 +2933,8 @@ static int json_parse_value(const char** p, double* out) {
   }
   if (**p == '[') return json_parse_array(p, out);
   if (**p == '{') return json_parse_object(p, out);
-  if (strncmp(*p, "true", 4) == 0) { *p += 4; *out = blaze_rt_box_number(1.0); return 1; }
-  if (strncmp(*p, "false", 5) == 0) { *p += 5; *out = blaze_rt_box_number(0.0); return 1; }
+  if (strncmp(*p, "true", 4) == 0) { *p += 4; blaze_dyn* _db = blaze_dyn_new(BLAZE_DYN_BOOL); _db->number = 1.0; *out = blaze_dyn_register(_db); return 1; }
+  if (strncmp(*p, "false", 5) == 0) { *p += 5; blaze_dyn* _db = blaze_dyn_new(BLAZE_DYN_BOOL); _db->number = 0.0; *out = blaze_dyn_register(_db); return 1; }
   if (strncmp(*p, "null", 4) == 0) { *p += 4; *out = blaze_rt_box_null(); return 1; }
   char* end = NULL;
   double v = strtod(*p, &end);
@@ -2959,10 +2960,11 @@ static char* blaze_dyn_stringify(blaze_dyn* d);
 static char* blaze_dyn_stringify_value(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) {
-    char* buf = malloc(64); snprintf(buf,64,"%.17g", value); return buf;
+    char* buf = malloc(64); size_t n = blaze_rt_format_number(value, (unsigned char*)buf, 64); buf[n]=0; return buf;
   }
+  if (d->kind == BLAZE_DYN_BOOL) return blaze_dyn_strdup(d->number ? "true" : "false");
   if (d->kind == BLAZE_DYN_TEXT) return blaze_dyn_strdup(d->text ? d->text : "");
-  if (d->kind == BLAZE_DYN_NUMBER) { char* buf=malloc(64); snprintf(buf,64,"%.17g", d->number); return buf; }
+  if (d->kind == BLAZE_DYN_NUMBER) { char* buf=malloc(64); size_t n = blaze_rt_format_number(d->number, (unsigned char*)buf, 64); buf[n]=0; return buf; }
   if (d->kind == BLAZE_DYN_NULL) return blaze_dyn_strdup("null");
   if (d->kind == BLAZE_DYN_ARRAY || d->kind == BLAZE_DYN_OBJECT) return blaze_dyn_stringify(d);
   return blaze_dyn_strdup("null");

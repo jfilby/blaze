@@ -946,6 +946,8 @@ class ProgramEmitter {
     // Only a number is written as another number: a reference and a string are
     // the one the value carries, and the resolver has already chosen the type
     // every use reads it as.
+    const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+    if (fromDynamic && isNumber(as) && value.k !== "local") return `${RUNTIME_NAME}_to_number(${text})`;
     if (!isNumber(value.type) || !isNumber(as)) return text;
     if (value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name) return text;
     // A wide number is a struct, and a cast from a scalar to a struct is a

@@ -541,7 +541,7 @@ function foldValue(value: SemanticValue): SemanticValue | null {
     }
     case "unary": {
       const operand = literalOf(value.operand);
-      if (value.op === "pos") return value.operand;
+      if (value.op === "pos" && !(value.operand.type.kind === "ref" && value.operand.type.of === null && value.operand.type.name === undefined)) return value.operand;
       if (value.op === "neg" && operand !== null) {
         const name = numberType(value);
         if (name === null) return null;
