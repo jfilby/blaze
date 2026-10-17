@@ -1149,6 +1149,9 @@ export async function runBuild(
 
   await store.mkdirp(paths.root);
   await store.mkdirp(paths.work);
+  if (options.recompile === true) {
+    try { await store.remove(join(paths.work, "program.c")); } catch {}
+  }
   await store.mkdirp(paths.output);
   // The project is stored as the record the rest of the compiler reads, which
   // is JSON whatever the project file is, so `blaze test` and `blaze benchmark`

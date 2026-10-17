@@ -1097,7 +1097,11 @@ class ProgramEmitter {
   private logical(value: SemanticValue & { k: "logical" }): string {
     const left = this.expression(value.left);
     const test = this.target.condition(left, valueKind(value.left), value.left.type);
-    const right = this.expression(value.right, value.type);
+    const rightIsText = value.right.k === "text" || (value.right.k === "const" && isTextType(value.right.type));
+    const leftIsAny = value.left.type.kind === "ref" && value.left.type.of === null && value.left.type.name === undefined;
+    const right = rightIsText && leftIsAny
+      ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, null)})`
+      : this.expression(value.right, value.type);
     return value.op === "and"
       ? this.target.conditional(test, right, left)
       : this.target.conditional(test, left, right);
