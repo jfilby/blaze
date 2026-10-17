@@ -1,1 +1,15 @@
-{"a":1,"b":"x"}
+{
+  "name": "jsonserde benchmark",
+  "version": 3,
+  "items": [
+    {"id": 1, "title": "first", "tags": ["a", "b"], "score": 12.5},
+    {"id": 2, "title": "second", "tags": ["c"], "score": 7.25},
+    {"id": 3, "title": "third", "tags": [], "score": null},
+    {"id": 4, "title": "fourth", "tags": ["x", "y", "z"], "score": 99.99}
+  ],
+  "metadata": {
+    "source": "sample",
+    "nested": {"deep": {"value": [1, 2, 3, 4, 5]}},
+    "flags": {"enabled": true, "count": 4}
+  }
+}
