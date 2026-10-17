@@ -827,7 +827,7 @@ class FunctionEmitter {
       case "newObject":
         return this.buildObject(value);
       case "loadField":
-        return `((struct ${value.layout}*)${this.raw(value.object, depth)})->${cMemberName(value.field)}`;
+        return `((struct ${value.layout}*)(uintptr_t)(${this.raw(value.object, depth)}))->${cMemberName(value.field)}`;
       case "length":
         return this.length(value.of, depth);
       case "element":

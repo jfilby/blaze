@@ -347,10 +347,12 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
     // identifier, and a program is free to call a parameter `double`. An
     // extern declaration only needs the names to be well formed, so they are
     // escaped the same way every other name the driver writes is.
-    const parameters = signature.params.map(
-      (param) => `${cDeclarationType(parseType(param.type))} ${this.escape(param.name)}`,
-    );
-    return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}(${parameters.join(", ") || "void"})${cSymbolLabel(signature.symbol)};`;
+    // The driver calls functions the compiler already built; their parameter
+    // types are fixed by those builds, and an `any` parameter may be carried as
+    // either a double or a pointer depending on how the body reads it. An
+    // empty parameter list leaves the call to the definition, so the link does
+    // not depend on a type the driver has to guess.
+    return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}()${cSymbolLabel(signature.symbol)};`;
   }
 
   openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[] {
@@ -1022,6 +1024,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller
   // naming a cpu asked for and what an unnamed one would not get otherwise.
+
   const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);

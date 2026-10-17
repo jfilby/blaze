@@ -1862,9 +1862,11 @@ class ProgramResolver {
     let annotation = statement.type === null ? null : this.annotation(statement.type, statement.line);
     // An empty array literal declared without an annotation is a dynamic array,
     // so it is resolved and checked as `any`.
+
     if (annotation === null && statement.value.k === "buffer" && statement.value.values.length === 0) {
       annotation = { kind: "ref", of: null };
     }
+
     const value = this.value(statement.value, annotation, statement.line);
     const mutable = statement.mutable;
     // A declaration names the name the program declares, and the value is
@@ -3618,7 +3620,8 @@ class ProgramLowering {
   private draft(statement: DraftStatement): void {
     switch (statement.kind) {
       case "declare": {
-        const slot = this.declared(statement.held);
+
+
         // An array the program wrote is the name it is declared as, not a name
         // of its own: the declaration is the allocation, whether the values
         // were written out, the count was settled on when the program ran, or
@@ -3626,6 +3629,7 @@ class ProgramLowering {
         // declaration is not: the fill is a loop, and a loop is a statement of
         // its own, so the array is written under a name first and the name
         // declared here is that array again.
+        const slot = this.declared(statement.held);
         const written: DraftValue | null =
           statement.held.kind === "array" && ARRAY_FORMS.has(statement.value.k) ? statement.value : null;
         const allocated =
