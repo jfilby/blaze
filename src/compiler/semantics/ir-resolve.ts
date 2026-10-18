@@ -276,6 +276,7 @@ type DraftStatement =
   | { kind: "print"; values: DraftValue[]; line: number }
   | { kind: "invoke"; call: DraftCall; line: number }
   | { kind: "if"; condition: DraftValue; then: DraftStatement[]; otherwise: DraftStatement[]; line: number }
+  | { kind: "try"; body: DraftStatement[]; catchParam: string | null; catchBody: DraftStatement[] | null; finallyBody: DraftStatement[] | null; line: number }
   | { kind: "while"; condition: DraftValue; body: DraftStatement[]; line: number }
   | { kind: "doWhile"; condition: DraftValue; body: DraftStatement[]; line: number }
   | {
@@ -1284,6 +1285,11 @@ function returnsIn(statements: readonly DraftStatement[]): (DraftStatement & { k
       case "forOf":
         found.push(...returnsIn(statement.body));
         break;
+      case "try":
+        if (statement.body) found.push(...returnsIn(statement.body));
+        if (statement.catchBody) found.push(...returnsIn(statement.catchBody));
+        if (statement.finallyBody) found.push(...returnsIn(statement.finallyBody));
+        break;
       default:
         break;
     }
@@ -1847,6 +1853,15 @@ class ProgramResolver {
           condition: this.condition(statement.condition, statement.line),
           then: this.block(statement.then),
           otherwise: this.block(statement.otherwise),
+          line: statement.line,
+        };
+      case "try":
+        return {
+          kind: "try",
+          body: this.block(statement.body),
+          catchParam: statement.catchParam,
+          catchBody: statement.catchBody === null ? null : this.block(statement.catchBody),
+          finallyBody: statement.finallyBody === null ? null : this.block(statement.finallyBody),
           line: statement.line,
         };
       case "while":
@@ -3879,6 +3894,12 @@ class ProgramLowering {
       case "invoke":
         this.statement({ k: "call", call: this.call(statement.call, statement.line), line: statement.line });
         return;
+      case "try": {
+        this.statements(statement.body);
+        if (statement.catchBody !== null) this.statements(statement.catchBody);
+        if (statement.finallyBody !== null) this.statements(statement.finallyBody);
+        return;
+      }
       case "if": {
         const condition = this.value(statement.condition, null, statement.line);
         const then = this.arm(statement.then, this.frame().loop);

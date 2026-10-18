@@ -111,7 +111,8 @@ export type Statement =
   /** A call kept for what it does, as in `main();`. */
   | { kind: "expression"; value: Expression; line: number }
   /** An element written, by `=` or by one of the compound operators. */
-  | { kind: "indexAssign"; buffer: string; index: Expression; op: AssignOperator; value: Expression; line: number };
+  | { kind: "indexAssign"; buffer: string; index: Expression; op: AssignOperator; value: Expression; line: number }
+  | { kind: "try"; body: Statement[]; catchParam: string | null; catchBody: Statement[] | null; finallyBody: Statement[] | null; line: number };
 
 /** Every operator `op=` accepts, and the operator it applies. */
 export const COMPOUND_OPERATORS: Record<string, BinaryOp> = {

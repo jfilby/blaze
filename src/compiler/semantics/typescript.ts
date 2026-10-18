@@ -220,9 +220,7 @@ const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
  */
 export const REFUSED_KEYWORDS: Record<string, string> = {
   switch: "a chain of comparisons, as in `if (x === 1) { ... } else { ... }`",
-  try: "nothing to catch: the program has no way to raise, so there is nothing to catch",
-  catch: "nothing to catch: the program has no way to raise, so there is nothing to catch",
-  finally: "nothing to catch: the program has no way to raise, so there is nothing to catch",
+  // try/catch/finally are supported: see docs/specs/try-catch.md
   throw: "a line written out with console.log, and an error as one",
   class: "an object written where it is made, as in `{ left: null, right: null }`",
   interface: "nothing: a program names a type with one word, as in `const n: usize = 0`",
@@ -884,6 +882,7 @@ class TypeScriptParser {
 
     if (this.at("for")) return this.readLoop();
     if (this.at("if")) return this.readIf();
+    if (this.at("try")) return this.readTry();
     if (this.at("while")) return this.readWhile();
     if (this.at("do")) return this.readDoWhile();
     if (this.at("break") || this.at("continue")) {
@@ -1147,6 +1146,26 @@ class TypeScriptParser {
     this.report("a loop must advance its index", `as in ${variable}++ or ${variable} += 2`, operator);
     this.synchronize();
     return null;
+  }
+
+  private readTry(): Statement {
+    const start = this.next();
+    const body = this.readBody();
+    let catchParam: string | null = null;
+    let catchBody: Statement[] | null = null;
+    if (this.accept("catch")) {
+      if (this.accept("(")) {
+        const param = this.next();
+        if (param.kind === "ident") catchParam = param.text;
+        this.expect(")");
+      }
+      catchBody = this.readBody();
+    }
+    let finallyBody: Statement[] | null = null;
+    if (this.accept("finally")) {
+      finallyBody = this.readBody();
+    }
+    return { kind: "try", body, catchParam, catchBody, finallyBody, line: start.line };
   }
 
   private readIf(): Statement {
@@ -1945,6 +1964,12 @@ class BodyAnalysis {
         this.uncontractable("leaves a loop", statement.line, LOOP_REMEDY);
       case "continue":
         this.uncontractable("skips the rest of a loop body", statement.line, LOOP_REMEDY);
+      case "try":
+        this.uncontractable(
+          "uses try/catch",
+          statement.line,
+          "a contract is one expression the result must equal, so a contracted function is straight-line",
+        );
       case "if":
         this.uncontractable(
           "branches",

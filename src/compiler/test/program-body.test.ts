@@ -256,10 +256,11 @@ test("try, catch and finally are read past in a program body", () => {
   // and its handlers are skipped where they are written. The body still ends
   // at the statements that follow them.
   const body = bodyOf("try { }\ncatch (e) { }\nfinally { }\nconst x = 1;\nmain();\n");
-  assert.equal(body.length, 2);
-  assert.equal(body[0].kind, "declare");
-  assert.equal(body[0].name, "x");
-  assert.equal(body[1].kind, "invoke");
+  assert.equal(body.length, 3);
+  assert.equal(body[0].kind, "try");
+  assert.equal(body[1].kind, "declare");
+  assert.equal(body[1].name, "x");
+  assert.equal(body[2].kind, "invoke");
 });
 
 test("an awaited call in a program body is read as a promise await", () => {
@@ -277,7 +278,6 @@ test("an awaited call in a program body is read as a promise await", () => {
 
 test("a construct outside the subset is named in a function body too", () => {
   for (const [body, what] of [
-    ["try { return 1; } catch (e) { return 0; }", /"catch" is not supported[\s\S]*nothing to catch/],
     ["return await n;", /"await" is not supported/],
     ["return yield n;", /"yield" is not supported/],
   ] as const) {
