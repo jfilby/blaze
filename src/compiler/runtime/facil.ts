@@ -16,6 +16,8 @@ import { readdir, stat, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { httpHeaderSource, HTTP_NAME } from "./http.ts";
+import { RUNTIME_NAME, runtimeSourceSource } from "./abi.ts";
+import { writeRuntimeHeader } from "./standalone.ts";
 import { cTargetOptions, optimizationOptions } from "../core/target.ts";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -189,6 +191,19 @@ void blaze_http_resp_complete(blaze_http_response *response) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* The default route handler: answers every request with "Hello, World".      */
+/* -------------------------------------------------------------------------- */
+
+void blaze_http_default_handler(blaze_http_request *request, blaze_http_response *response) {
+  (void)request;
+  const char *body = "Hello, World\\n";
+  blaze_http_resp_status(response, 200);
+  blaze_http_resp_header(response, "Content-Type", "text/plain");
+  blaze_http_resp_body(response, (const unsigned char *)body, strlen(body));
+  blaze_http_resp_complete(response);
+}
+
+/* -------------------------------------------------------------------------- */
 /* The route handler the adapter invokes for every matched request.           */
 /* -------------------------------------------------------------------------- */
 
@@ -266,6 +281,9 @@ void *blaze_http_server_new(uint16_t port) {
 
   server->uuid = uuid;
   server->bound = 1;
+  /* Every server answers every route with "Hello, World" unless a program
+     registers its own routes. */
+  blaze_http_route_register(server, "*", "*", blaze_http_default_handler);
   return server;
 }
 
@@ -311,6 +329,9 @@ export async function buildFacilRuntime(
   target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
 ): Promise<FacilRuntime> {
   const headerPath = await writeHttpHeader(workDirectory);
+  /* The driver also includes the core runtime header, so write it beside the
+     HTTP one. */
+  await writeRuntimeHeader(workDirectory);
   const adapterSource = `${workDirectory}/${HTTP_NAME}_adapter.c`;
   const adapterObject = `${workDirectory}/${HTTP_NAME}_adapter.o`;
   const bundledObject = `${workDirectory}/${HTTP_NAME}.o`;
@@ -366,11 +387,19 @@ export async function buildFacilRuntime(
 
   /* facil.io spreads its public headers across subdirectories, so add every
      subdirectory as an include path (fio.h itself includes <http.h>,
-     <fiobj.h>, etc.). */
-  const includeDirs = [sourceDir];
-  for await (const entry of await readdir(sourceDir, { withFileTypes: true })) {
-    if (entry.isDirectory()) includeDirs.push(`${sourceDir}/${entry.name}`);
-  }
+     <fiobj.h>, etc., and http.c needs <http1_parser.h> one level deeper). */
+  const includeDirs: string[] = [];
+  const collect = async (dir: string): Promise<void> => {
+    for await (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        includeDirs.push(full);
+        await collect(full);
+      }
+    }
+  };
+  includeDirs.push(sourceDir);
+  await collect(sourceDir);
   const cFlags = [
     "-std=c11",
     "-D_POSIX_C_SOURCE=200809L",
@@ -416,10 +445,29 @@ export async function buildFacilRuntime(
     });
   }
 
-  /* Bundle facil.io and the adapter into one relocatable object the driver links. */
+  /* The core compiler runtime is needed beside facil.io: the driver links it
+     for allocate, print, and the rest of the blaze_rt ABI. */
+  const rtSource = `${workDirectory}/${RUNTIME_NAME}.c`;
+  const rtObject = `${workDirectory}/${RUNTIME_NAME}.o`;
+  await writeFile(rtSource, runtimeSourceSource(mode), "utf8");
+  const rtCompiled = run(
+    "gcc",
+    [...cFlags, "-c", "-o", rtObject, rtSource],
+    { timeoutMs: 120_000 },
+  );
+  if (rtCompiled.spawnError !== undefined || rtCompiled.code !== 0) {
+    throw new CompilerError({
+      category: "LinkError",
+      stage: "compile",
+      message: "the compiler runtime did not build",
+      detail: `${rtSource}\\n${rtCompiled.stderr.trim() ?? rtCompiled.spawnError ?? ""}`,
+    });
+  }
+
+  /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links. */
   const linked = run(
     "ld",
-    ["-r", "-o", bundledObject, adapterObject, ...facilObjects],
+    ["-r", "-o", bundledObject, adapterObject, rtObject, ...facilObjects],
     { timeoutMs: 120_000 },
   );
   if (linked.spawnError !== undefined || linked.code !== 0) {

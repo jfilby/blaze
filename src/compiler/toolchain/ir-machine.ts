@@ -3359,6 +3359,10 @@ class Machine {
         this.runtime("_raise");
         return;
       case "call":
+        if (statement.call.callee === "http.serve") {
+          this.httpServe(statement.call);
+          return;
+        }
         this.callValue(statement.call, null);
         return;
       case "storeField":
@@ -6871,6 +6875,23 @@ class Machine {
    * A text that is a value rather than a template has nowhere to be written as
    * a value but the output, so it is written whole.
    */
+
+  /** `http.serve(port)`: create the server, run it. The server registers the
+   * default handler itself, so nothing else is needed. `blaze_http_server_run`
+   * never returns. */
+  private httpServe(call: SemanticCall): void {
+    // The port is read into the accumulator, then moved to RDI (first argument).
+    this.at(call.args[0], USIZE);
+    this.code.movRegReg(RDI, RAX);
+    // blaze_http_server_new(port) -> server handle in RAX.
+    this.external("blaze_http_server_new");
+    this.code.call("blaze_http_server_new");
+    // blaze_http_server_run(server) — never returns.
+    this.code.movRegReg(RDI, RAX);
+    this.external("blaze_http_server_run");
+    this.code.call("blaze_http_server_run");
+  }
+
   private printText(value: SemanticValue): void {
     const parts = value.k === "text" ? value.parts : null;
     const writes = parts === null ? 0 : parts.filter((part) => part.k !== "text").length;

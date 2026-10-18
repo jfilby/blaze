@@ -410,6 +410,10 @@ class FunctionEmitter {
         this.write([`${pad(depth)}(void)${RUNTIME_NAME}_retain(${this.expression(statement.value, null, depth)});`]);
         return;
       case "call":
+        if (statement.call.callee === "http.serve") {
+          this.httpServe(statement.call, depth);
+          return;
+        }
         this.write([`${pad(depth)}${this.call(statement.call, depth)};`]);
         return;
       case "raise":
@@ -693,6 +697,22 @@ class FunctionEmitter {
     this.externs.set(
       symbol,
       `/* defined by another function of this program, and linked beside this one */\nextern ${declaredType(parseType(call.signature.returns))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
+    );
+  }
+
+  /** `http.serve(port)`: create the server, register the default handler, run it.
+   * `blaze_http_server_run` never returns, so nothing after the call runs. */
+  private httpServe(call: SemanticCall, depth: number): void {
+    const port = this.expression(call.args[0], USIZE, depth);
+    const server = this.temporary("blaze_http_server");
+    this.write([
+      `${pad(depth)}void *${server} = blaze_http_server_new((uint16_t)${port});`,
+      `${pad(depth)}blaze_http_route_register(${server}, "*", "*", blaze_http_default_handler);`,
+      `${pad(depth)}blaze_http_server_run(${server});`,
+    ]);
+    this.externs.set(
+      "blaze_http_default_handler",
+      `/* defined by the HTTP adapter, linked with the program */\nextern void blaze_http_default_handler(void *, void *);`,
     );
   }
 

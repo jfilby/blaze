@@ -75,6 +75,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
   "process.exit": { params: [ANY], returns: ANY, arity: 1 },
   "parseInt": { params: [ANY], returns: ANY, arity: 1 },
+  /** `http.serve(port)` starts an HTTP server on the port and runs it until the
+   * process is stopped. Every route answers with "Hello, World". The call never
+   * returns while the server runs. */
+  "http.serve": { params: [USIZE], returns: { kind: "void" }, arity: 1 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

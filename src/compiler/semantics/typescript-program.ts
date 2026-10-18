@@ -735,7 +735,7 @@ class ProgramParser {
       this.next();
       const methodArgs = this.arguments();
       this.accept(";");
-      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun"]);
+      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
       return { kind: "invoke", function: `${object}.${method}`, args, line: name.line };
     }
@@ -916,7 +916,7 @@ class ProgramParser {
         if (this.at("(")) {
           this.next();
           const fn = `${this.valuePath(value)}.${member}`;
-          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun"]);
+          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           const args = prepend ? [value, ...this.arguments()] : this.arguments();
           value = { k: "call", function: fn, args };

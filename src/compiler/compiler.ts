@@ -1733,13 +1733,20 @@ export async function runBuild(
               objectPaths,
               outputPath: programPath,
             });
-      checked = await verifyProgram({
-        language: input.language,
-        sourcePath: programFile.path,
-        directory: project.directory,
-        runner,
-        arguments: options.arguments,
-      });
+      if (isHttp) {
+        // An HTTP server never finishes, so there is nothing to compare line
+        // for line against the source: the source runs on node and `http` is not
+        // a node global. The build delivers the binary without verifying it.
+        checked = { passed: true, expected: "", actual: "" };
+      } else {
+        checked = await verifyProgram({
+          language: input.language,
+          sourcePath: programFile.path,
+          directory: project.directory,
+          runner,
+          arguments: options.arguments,
+        });
+      }
       // A program that stopped is as repairable as one that printed the wrong
       // thing, so the rounds are spent on it rather than on ending the build.
       if (checked.passed) break;

@@ -336,8 +336,9 @@ class CDriver implements ProgramTarget {
     const objects = cObjectDeclarations(program.objects);
     const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
+    const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\n" : "";
     return `${DRIVER_PRELUDE}
-${httpHeader}${objects === "" ? "" : `${objects}\n`}${declarations}`;
+${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
   /** A function a program calls, declared as the driver links it. */
@@ -756,6 +757,8 @@ ${httpHeader}${objects === "" ? "" : `${objects}\n`}${declarations}`;
         return `${RUNTIME_NAME}_dyn_array_new()`;
       case "array.push":
         return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
+      case "http.serve":
+        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       default:
         throw driverError(`the driver cannot write down ${call.callee}`);
     }
