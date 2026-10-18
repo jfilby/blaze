@@ -239,7 +239,7 @@ static void blaze_http_on_request(http_s *h) {
   }
 
   void (*handler)(blaze_http_request *, blaze_http_response *) = NULL;
-  for (size_t index = 0; index < server->route_count; index += 1) {
+  for (size_t index = server->route_count; index-- > 0; ) {
     int method_match = server->methods[index][0] == '*' ||
         strcmp(server->methods[index], req.method_copy) == 0;
     int path_match = server->paths[index][0] == '*' ||
@@ -298,7 +298,7 @@ void blaze_http_server_stop(void *server_raw) {
   blaze_http_server_t *server = (blaze_http_server_t *)server_raw;
   if (!server) return;
   fio_stop();
-  for (size_t index = 0; index < server->route_count; index += 1) {
+  for (size_t index = server->route_count; index-- > 0; ) {
     free(server->methods[index]);
     free(server->paths[index]);
   }

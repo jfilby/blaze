@@ -759,13 +759,32 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
       case "http.serve":
         return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+      case "http.createServer": {
+        const cb = call.args[0];
+        let trampoline = "0.0";
+        if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {
+          trampoline = `(double)(uintptr_t)__arrow_trampoline_${cb.name.slice("__arrow_".length)}`;
+        }
+        return trampoline;
+      }
+      case "res.writeHead": {
+        const status = call.args[1];
+        const statusText = status.k === "number" ? status.text : argument(1);
+        return `(blaze_http_resp_status((void*) (uintptr_t) ${argument(0)}, (uint16_t) ${statusText}), 0.0)`;
+      }
+      case "res.end": {
+        const body = call.args[1];
+        const bodyExpr = argument(1);
+        return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyExpr}, strlen((const char*) ${bodyExpr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
+      }
       case "server.listen": {
         const cb = call.args[3];
         let invoke = `${argument(3)}()`;
         if (cb !== undefined && cb.k === "functionRef" && Array.isArray(cb.captures) && cb.captures.length > 0) {
           invoke = `${argument(3)}(${cb.captures.join(", ")})`;
         }
-        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); ${invoke}; blaze_http_server_run(blaze_http_srv); })`;
+        const handler = `((void(*)(void*, void*)) (uintptr_t) ${argument(0)})`;
+        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); ${invoke}; blaze_http_server_run(blaze_http_srv); })`;
       }
       case "Promise": {
         const cb = call.args[0];
@@ -791,10 +810,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "Math.random":
       case "require":
       case "req.on":
-      case "http.createServer":
       case "tasks.push":
-      case "res.writeHead":
-      case "res.end":
       case "req.end":
       case "req.write":
         return "0.0";

@@ -2457,7 +2457,9 @@ class ProgramResolver {
         // body is compiled on its own. Its value is not yet a first-class
         // function pointer; lowering passes it to callback sites by name.
         const name = `__arrow_${line}`;
-        const params: { name: string; type: string }[] = [];
+        const params: { name: string; type: string }[] = value.params
+          .filter((param) => param.name !== "resolve" && param.name !== "reject")
+          .map((param) => ({ name: param.name, type: param.type === null ? "any" : param.type }));
         const statement: ProgramStatement & { kind: "function" } = {
           kind: "function",
           name,
@@ -3563,6 +3565,16 @@ class ProgramLowering {
       (draft): draft is SettledFunction => draft.signature !== null && draft.compiled !== null,
     );
     const bodies = settled.map((draft) => this.function(draft));
+    const trampolines = settled
+      .filter((draft) => draft.name.startsWith("__arrow_"))
+      .map((draft) => {
+        const suffix = draft.name.slice("__arrow_".length);
+        const trampolineName = `__arrow_trampoline_${suffix}`;
+        const args = draft.signature.params.map((_, index) => `(double)(uintptr_t)p${index}`).join(", ");
+        const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+        const body = `void ${trampolineName}(void *p0, void *p1) {\n  ${call}\n}`;
+        return { name: trampolineName, body };
+      });
     // A block starts open and is closed by what ends it: a program ends by
     // handing back nothing, and a function ends by handing back what it
     // returns or by falling off the end of its body.
@@ -3577,7 +3589,7 @@ class ProgramLowering {
       functions: [...program.functions, ...settled.map((draft) => draft.signature)],
       bodies,
       objects: program.objects,
-      extraFunctions: [],
+      extraFunctions: trampolines,
     };
   }
 

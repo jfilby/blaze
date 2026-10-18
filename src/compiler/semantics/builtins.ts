@@ -86,6 +86,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "resolve": { params: [ANY], returns: ANY, arity: 1 },
   "reject": { params: [ANY], returns: ANY, arity: 1 },
   "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  "res.writeHead": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  "res.end": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
 };
 
