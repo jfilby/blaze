@@ -79,6 +79,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    * process is stopped. Every route answers with "Hello, World". The call never
    * returns while the server runs. */
   "http.serve": { params: [USIZE], returns: { kind: "void" }, arity: 1 },
+  "http.createServer": { params: [ANY], returns: ANY, arity: 1 },
+  "server.listen": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

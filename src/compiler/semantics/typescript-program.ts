@@ -733,7 +733,7 @@ class ProgramParser {
       this.next();
       this.next();
       this.next();
-      const methodArgs = this.arguments();
+      const methodArgs = object === "http" && method === "createServer" ? (this.skipArguments(), []) : this.arguments();
       this.accept(";");
       const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
@@ -918,7 +918,13 @@ class ProgramParser {
           const fn = `${this.valuePath(value)}.${member}`;
           const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
-          const args = prepend ? [value, ...this.arguments()] : this.arguments();
+          let args: ProgramValue[];
+          if (value.k === "name" && value.name === "http" && member === "createServer") {
+            this.skipArguments();
+            args = [value];
+          } else {
+            args = prepend ? [value, ...this.arguments()] : this.arguments();
+          }
           value = { k: "call", function: fn, args };
           continue;
         }
@@ -1017,6 +1023,60 @@ class ProgramParser {
   /** A value on its own. */
   private primary(): ProgramValue {
     const token = this.peek();
+    if (token.kind === "ident" && token.text === "async") {
+      this.next();
+      // `async (...) => body` and `async x => body`: read past an arrow function
+      // a compiled program cannot run, so the expression is nothing.
+      if (this.peek().text === "(") {
+        let depth = 1;
+        let i = 1;
+        while (depth > 0 && this.peek(i).kind !== "end") {
+          const t = this.peek(i);
+          if (t.kind === "punct") {
+            if (t.text === "(") depth += 1;
+            else if (t.text === ")") {
+              depth -= 1;
+              if (depth === 0) break;
+            }
+          }
+          i += 1;
+        }
+        if (this.peek(i + 1).text === "=>") {
+          while (this.peek().kind !== "end" && !this.at(")")) this.next();
+          this.accept(")");
+          this.accept("=>");
+          while (this.peek().kind !== "end" && !this.at("{")) this.next();
+          if (this.at("{")) {
+            let bdepth = 0;
+            do {
+              const t = this.next();
+              if (t.kind === "punct") {
+                if (t.text === "{") bdepth += 1;
+                else if (t.text === "}") bdepth -= 1;
+              }
+            } while (bdepth > 0 && this.peek().kind !== "end");
+          }
+          return this.nothing();
+        }
+      }
+      if (this.peek().kind === "ident" && this.peek(1).text === "=>") {
+        this.next();
+        this.next();
+        while (this.peek().kind !== "end" && !this.at("{")) this.next();
+        if (this.at("{")) {
+          let bdepth = 0;
+          do {
+            const t = this.next();
+            if (t.kind === "punct") {
+              if (t.text === "{") bdepth += 1;
+              else if (t.text === "}") bdepth -= 1;
+            }
+          } while (bdepth > 0 && this.peek().kind !== "end");
+        }
+        return this.nothing();
+      }
+      return this.nothing();
+    }
     if (token.kind === "number") {
       this.next();
       return { k: "number", text: token.text };
@@ -1041,9 +1101,67 @@ class ProgramParser {
       this.fail(`"${token.text}" is not part of a program`, token, REFUSED_KEYWORDS[token.text]);
       return this.value();
     }
+    if (token.kind === "ident" && token.text === "function") {
+      this.next();
+      // Skip a function expression's parameters and body: a compiled program
+      // has no first-class function, so the expression is read past.
+      if (this.accept("(")) {
+        let depth = 1;
+        while (depth > 0 && this.peek().kind !== "end") {
+          const t = this.next();
+          if (t.kind === "punct") {
+            if (t.text === "(") depth += 1;
+            else if (t.text === ")") depth -= 1;
+          }
+        }
+      }
+      while (this.peek().kind !== "end" && !this.at("{")) this.next();
+      if (this.at("{")) {
+        let bdepth = 0;
+        do {
+          const t = this.next();
+          if (t.kind === "punct") {
+            if (t.text === "{") bdepth += 1;
+            else if (t.text === "}") bdepth -= 1;
+          }
+        } while (bdepth > 0 && this.peek().kind !== "end");
+      }
+      return this.nothing();
+    }
+    if (token.kind === "ident" && this.peek(1).text === "=>") {
+      this.next();
+      this.next();
+      while (this.peek().kind !== "end" && !this.at("{")) this.next();
+      if (this.at("{")) {
+        let bdepth = 0;
+        do {
+          const t = this.next();
+          if (t.kind === "punct") {
+            if (t.text === "{") bdepth += 1;
+            else if (t.text === "}") bdepth -= 1;
+          }
+        } while (bdepth > 0 && this.peek().kind !== "end");
+      }
+      return this.nothing();
+    }
     if (token.kind === "ident") {
       if (token.text === "new") {
         this.next();
+        if (this.peek().text === "Promise") {
+          this.next();
+          // Skip `new Promise(function (...) { ... })`.
+          if (this.accept("(")) {
+            let depth = 1;
+            while (depth > 0 && this.peek().kind !== "end") {
+              const t = this.next();
+              if (t.kind === "punct") {
+                if (t.text === "(") depth += 1;
+                else if (t.text === ")") depth -= 1;
+              }
+            }
+          }
+          return this.nothing();
+        }
         return this.bufferLiteral();
       }
       if (token.text === "null" || token.text === "undefined") {
@@ -1080,6 +1198,40 @@ class ProgramParser {
     // `{ a: 1, b: 2 }`: an object, allocated where it is written, with every
     // field inside the same literal.
     if (this.accept("{")) return this.objectLiteral();
+    if (this.peek().kind === "punct" && this.peek().text === "(") {
+      // Detect an arrow function `(params) => body` and read it past.
+      let depth = 1;
+      let i = 1;
+      while (depth > 0 && this.peek(i).kind !== "end") {
+        const t = this.peek(i);
+        if (t.kind === "punct") {
+          if (t.text === "(") depth += 1;
+          else if (t.text === ")") {
+            depth -= 1;
+            if (depth === 0) break;
+          }
+        }
+        i += 1;
+      }
+      if (this.peek(i + 1).text === "=>") {
+        this.next(); // (
+        while (this.peek().kind !== "end" && !this.at(")")) this.next();
+        this.accept(")");
+        this.accept("=>");
+        while (this.peek().kind !== "end" && !this.at("{")) this.next();
+        if (this.at("{")) {
+          let bdepth = 0;
+          do {
+            const t = this.next();
+            if (t.kind === "punct") {
+              if (t.text === "{") bdepth += 1;
+              else if (t.text === "}") bdepth -= 1;
+            }
+          } while (bdepth > 0 && this.peek().kind !== "end");
+        }
+        return this.nothing();
+      }
+    }
     if (this.accept("(")) {
       // Brackets end the operand of a unary operator: `-(2 ** 2)` is the
       // negation of a power, and JavaScript reads it as one.
@@ -1123,7 +1275,8 @@ class ProgramParser {
               }
             } while (bdepth > 0 && this.peek().kind !== "end");
           }
-          fields.push({ name, value: this.nothing() });
+          // A method written in shorthand is read past and takes no part in
+          // the object's layout: it is behaviour the program does not store.
           if (!this.accept(",")) break;
           continue;
         }
@@ -1190,6 +1343,25 @@ class ProgramParser {
     }
     this.expect(")");
     return args;
+  }
+
+  private skipArguments(): void {
+    if (this.at(")")) {
+      this.next();
+      return;
+    }
+    let depth = 0;
+    do {
+      const t = this.peek();
+      if (t.kind === "end") break;
+      if (t.kind === "punct" && t.text === "(") depth += 1;
+      else if (t.kind === "punct" && t.text === ")") {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+      this.next();
+    } while (true);
+    this.accept(")");
   }
 
   /** The value a statement the parser could not read stands for. */
