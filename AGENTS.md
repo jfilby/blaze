@@ -11,6 +11,13 @@ Make use of:
 - Vercel AI SDK
 
 
+## Vendored dependencies
+
+facil.io is vendored at `deps/facil.io` (pinned to git master) and can be used
+as a high-performance HTTP server (plus websockets, JSON helpers, and other
+networking utilities it provides).
+
+
 ## Design notes
 
 - Move complexity down where possible.
