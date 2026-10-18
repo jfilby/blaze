@@ -132,10 +132,51 @@ identically on the unmodified baseline.
 
 ## Remaining work for http_server verification
 
-- The compiled client uses `http.request`/`fetch`, which are no-ops in the
-  machine backend; a real HTTP client runtime is needed.
-- The compiled server's `requestListener` is dropped; a real HTTP server
-  runtime that invokes a handler callback is needed.
-- JSON parsing/serialization on the wire (`JSON.parse`/`JSON.stringify`)
-  currently operate on in-memory strings only.
-- `calculateSum` must actually issue requests and sum responses to print 55.
+### Client side
+
+- `http.request` / `fetch` are currently lowered to no-ops. A real HTTP
+  client runtime is needed: open a TCP connection to `host:port`, write an
+  HTTP request (method, headers, body), read the response, and return the
+  response body to the caller. The runtime must expose this through the same
+  Blaze value model used by the program (strings/numbers) and must not block
+  the event loop indefinitely on a stalled peer.
+
+### Server side
+
+- `http.createServer(requestListener)` and `server.listen(port, host, cb)` are
+  currently dropped. A real HTTP server runtime is needed that:
+  - binds a listening socket on `port`,
+  - accepts connections in a background thread or non-blocking loop,
+  - parses the incoming HTTP request (method, path, headers, body),
+  - invokes the Blaze `requestListener(req, res)` callback with borrowed
+    request/response handles,
+  - supports `res.writeHead`, `res.end`, `req.on("data"/"end")`,
+  - and shuts down on `server.close()`.
+- The callback passed to `server.listen` (which runs `calculateSum` and then
+  closes the server) must be invoked after the listener is ready, otherwise
+  the client deadlocks against a server that never started.
+
+### JSON on the wire
+
+- `JSON.parse` / `JSON.stringify` currently operate on in-memory strings only.
+  The wire format must round-trip through the same JSON helpers so that
+  `JSON.parse(body)` on the server and `JSON.stringify({ value })` on the
+  client agree byte-for-byte.
+
+### Control flow and data
+
+- `tasks.push(sendAsync(api, i))` must actually append to the dynamic array;
+  the array push runtime exists but the `tasks.push` call is still a no-op in
+  the driver lowering.
+- `sendAsync`'s `while (true) { try { return await send(...); } catch {} }`
+  loop must be lowered as a real retry loop, not an empty infinite loop.
+- `calculateSum` must issue the `n` requests, await each, and sum the
+  responses, printing `55` for `n = 10`.
+
+### Verification
+
+- Once the above is in place, `isHttp` should no longer force
+  `checked.passed = true`; the compiled binary can be run against the source
+  (with a timeout / graceful shutdown) and its output compared line for line.
+- The build must continue to succeed for `--runtime none` programs that never
+  reference `http`.
