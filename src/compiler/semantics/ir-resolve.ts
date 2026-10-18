@@ -1424,6 +1424,12 @@ class ProgramResolver {
         );
       }
       if (held === undefined) {
+        const decl = this.body.statements.find((item) => item.kind === "declare" && item.name === name);
+        if (decl !== undefined && decl.kind === "declare" && decl.value.k === "text") {
+          // A const string the program declares is written inline where it is
+          // read, so a function that reads one needs no parameter for it.
+          continue;
+        }
         throw programError(
           `"${name}" is not declared`,
           this.body,
