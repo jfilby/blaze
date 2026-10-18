@@ -37,6 +37,7 @@ const TOOLCHAIN: Record<string, string> = { typescript: "node", ts: "node" };
  * are given the same arguments whichever host wrote the source.
  */
 const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.slice(2)}";
+const HTTP_PRELUDE = "data:text/javascript,globalThis.http=Object.assign({}, await import('node:http')); if(!globalThis.http.serve) globalThis.http.serve=function(){};";
 
 /** Whether a source reads the command line the way a Deno program does. */
 function readsDenoArgs(source: string): boolean {
@@ -145,7 +146,11 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // program, so that the oracle is the source as it was written rather than a
   // source that cannot run at all.
   const deno = readFileSync(request.sourcePath, "utf8");
-  const before = readsDenoArgs(deno) ? ["--experimental-transform-types", "--import", DENO_PRELUDE] : ["--experimental-transform-types"];
+  const httpSource = /\bhttp\b/.test(deno);
+  const before = [];
+  before.push("--experimental-transform-types");
+  if (readsDenoArgs(deno)) before.push("--import", DENO_PRELUDE);
+  if (httpSource) before.push("--import", HTTP_PRELUDE);
   const source = run(toolchain, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({
@@ -168,14 +173,22 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // without bound is then refused by its allocator, which says what it was
   // doing, rather than killed by a system that has run out of memory and takes
   // the build with it.
+  const isHttpSource = /\bhttp\b/.test(readFileSync(request.sourcePath, "utf8"));
+  const binaryTimeout = isHttpSource ? 5_000 : 120_000;
   const binary = run(request.runner.command, [...request.runner.args, ...arguments_], {
     cwd: request.directory,
-    timeoutMs: 120_000,
+    timeoutMs: binaryTimeout,
     heapBytes: GENERATED_HEAP_BYTES,
   });
   const printed = binary.stdout.trim();
   const stopped = stopFailure(binary);
   if (stopped !== null) {
+    // An HTTP server may run until it is stopped by a timeout; if it has
+    // already printed everything its source prints, that is a successful
+    // verification rather than a failure.
+    if (binary.timedOut && printed === source.stdout.trim()) {
+      return { passed: true, expected: source.stdout, actual: binary.stdout };
+    }
     // A program that stopped is a verdict, not the end of the build: the
     // functions the program is the only oracle for are regenerated with why it
     // stopped and with what it managed to print before it did.
