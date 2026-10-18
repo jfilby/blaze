@@ -733,7 +733,7 @@ class ProgramParser {
       this.next();
       this.next();
       this.next();
-      const methodArgs = object === "http" && method === "createServer" ? (this.skipArguments(), []) : this.arguments();
+      const methodArgs = this.arguments();
       this.accept(";");
       const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
@@ -920,8 +920,7 @@ class ProgramParser {
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
           if (value.k === "name" && value.name === "http" && member === "createServer") {
-            this.skipArguments();
-            args = [value];
+            args = this.arguments();
           } else {
             args = prepend ? [value, ...this.arguments()] : this.arguments();
           }
