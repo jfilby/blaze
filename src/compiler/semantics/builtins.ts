@@ -43,6 +43,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.round": { params: [F64], returns: F64, arity: 1 },
   "Math.trunc": { params: [F64], returns: F64, arity: 1 },
   "Math.ceil": { params: [F64], returns: F64, arity: 1 },
+  "Math.random": { params: [], returns: F64, arity: 0 },
   [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
   [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
   [ARGV]: { params: [USIZE], returns: ANY, arity: 1 },
@@ -70,6 +71,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "hasher.update.digest": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "array.new": { params: [], returns: ANY, arity: 0 },
   "array.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  "fetch": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
+  "process.exit": { params: [ANY], returns: ANY, arity: 1 },
+  "parseInt": { params: [ANY], returns: ANY, arity: 1 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

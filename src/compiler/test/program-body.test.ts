@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
+import type { ProgramValue } from "../semantics/module.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-validate.ts";
 import { typeText, type SemanticFunction, type SemanticValue } from "../core/semantic-ir.ts";
@@ -236,16 +237,38 @@ test("a construct outside the subset is named, with what to write instead", () =
   // place at, so a `catch` said "expected the name of a function" and a
   // `function*` said the same. They are named where they were written.
   for (const [source, what] of [
-    ["const x = await f();\n", /"await" is not part of a program[\s\S]*no promise to wait for/],
     ["const x = yield 1;\n", /"yield" is not part of a program[\s\S]*hands back with return/],
     ["class C { }\n", /"class" is not part of a program[\s\S]*object written where it is made/],
     ["enum E { A }\n", /"enum" is not part of a program[\s\S]*const RED = 0/],
-    ["try { f(); } catch (e) { }\n", /"catch" is not part of a program[\s\S]*nothing to catch/],
     ["function* g(): number { yield 1; }\n", /a generator is not supported/],
     ["async function g(): number { return 1; }\n", /an async function is not supported/],
   ] as const) {
     assert.match(diagnostic(() => bodyOf(source)), what);
   }
+});
+
+test("try, catch and finally are read past in a program body", () => {
+  // A compiled program cannot raise, so there is nothing to catch: a `try`
+  // and its handlers are skipped where they are written. The body still ends
+  // at the statements that follow them.
+  const body = bodyOf("try { }\ncatch (e) { }\nfinally { }\nconst x = 1;\nmain();\n");
+  assert.equal(body.length, 2);
+  assert.equal(body[0].kind, "declare");
+  assert.equal(body[0].name, "x");
+  assert.equal(body[1].kind, "invoke");
+});
+
+test("an awaited call in a program body is read past the await keyword", () => {
+  // `await` names a promise a compiled program has no way to wait for, so the
+  // keyword is dropped and the call it was written before is read as usual.
+  const body = bodyOf("function f(n: number): number { return n; }\nconst x = await f(1);\nmain();\n");
+  const declare = body.find((statement) => statement.kind === "declare" && statement.name === "x") as {
+    kind: "declare";
+    value: ProgramValue;
+  } | undefined;
+  assert.ok(declare);
+  assert.equal(declare.value.k, "call");
+  assert.equal(declare.value.function, "f");
 });
 
 test("a construct outside the subset is named in a function body too", () => {

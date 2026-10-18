@@ -156,8 +156,18 @@ interface TextHeld {
   value: string | null;
 }
 
+/** The command line bound to a name, as `const args = process.argv.slice(n)`;
+ *  `args[i]` reads argument `i + offset` of it. */
+interface ArgvHeld {
+  kind: "argv";
+  name: string;
+  mutable: boolean;
+  /** How many leading arguments the slice skips. */
+  offset: number;
+}
+
 /** What a declared name holds. */
-type Held = NumberHeld | ArrayHeld | ObjectHeld | TextHeld;
+type Held = NumberHeld | ArrayHeld | ObjectHeld | TextHeld | ArgvHeld;
 
 /** A name as a declaration states it, before it is declared. */
 type WithoutName<T> = T extends unknown ? Omit<T, "name"> : never;
@@ -694,7 +704,12 @@ function heldType(held: Held): TypeExpr | null {
       return held.type;
     case "number":
       return { kind: "primitive", name: held.type ?? "f64" };
+    case "argv":
+      // A name bound to the command line is read as an argument value, which
+      // the runtime hands back as a number.
+      return { kind: "primitive", name: "f64" };
   }
+  throw new Error(`unreachable: held type ${(held as Held).kind}`);
 }
 
 /** The type an array is written out as, which is the type its name is read as. */
@@ -1421,6 +1436,10 @@ class ProgramResolver {
       // reference, and a text value has none of them.
       const type = heldType(held);
       if (type === null) {
+        // A const string the scope holds is the text it was written as, so it
+        // is written inline where it is read: a function that reads one needs
+        // no parameter for it and no environment to close over.
+        if (held.kind === "text" && !held.mutable && held.value !== null) continue;
         throw programError(
           `"${name}" is a string`,
           this.body,
@@ -1867,6 +1886,18 @@ class ProgramResolver {
       annotation = { kind: "ref", of: null };
     }
 
+    // `const args = process.argv.slice(n)` binds `args` to the command line
+    // advanced past the first `n` arguments: `args[i]` reads argument
+    // `i + n` of it. The name is only ever indexed, so the binding stores the
+    // first slice element as its value.
+    if (statement.value.k === "argv") {
+      const held: WithoutName<ArgvHeld> = { kind: "argv", mutable: statement.mutable, offset: statement.value.offset };
+      const declared = this.declareName(statement.name, statement.line, held);
+      const callValue = { k: "call", function: ARGV, args: [{ k: "number", text: String(held.offset) }] } as ProgramValue & { k: "call" };
+      const value: DraftValue = { k: "call", call: this.call(callValue, statement.line) };
+      return { kind: "declare", name: declared.name, held: declared, value, line: statement.line };
+    }
+
     const value = this.value(statement.value, annotation, statement.line);
     const mutable = statement.mutable;
     // A declaration names the name the program declares, and the value is
@@ -1928,7 +1959,9 @@ class ProgramResolver {
           return { kind: "declare", name: named.name, held: named, value, line: statement.line };
         }
         if (held.kind === "text") return declare({ kind: "text", mutable, value: held.value });
-        return declare({ kind: "object", mutable, type: held.type });
+        if (held.kind === "object") return declare({ kind: "object", mutable, type: held.type });
+        // A name bound to `process.argv` is a reference to an argument value.
+        return declare({ kind: "object", mutable, type: { kind: "ref", of: null } });
       }
       case "null":
         return declare({ kind: "object", mutable, type: REF_NULL });
@@ -2116,7 +2149,7 @@ class ProgramResolver {
       const value = holdsText(written) ? written : { k: "text" as const, parts: [{ k: "value" as const, value: written }] };
       return { kind: "assign", name: held.name, op: statement.op, value, type: null, line: statement.line };
     }
-    const name = held.type ?? "f64";
+    const name = held.kind === "number" ? held.type ?? "f64" : "f64";
     // A compound assignment writes its operator down on the type of the name,
     // so `%=` on a double is a target no compiler accepts. The operator decides
     // what the name may be, as it does in a binary expression, where a whole
@@ -2483,7 +2516,32 @@ class ProgramResolver {
         // An array is used at one element type, whichever name it is passed by.
         const held = this.held(value.name, line);
         if (held.kind === "array" && expect !== null) this.expectArray(expect, held, line);
+        // A const string is the text it was written as, wherever it is read, so
+        // it is written inline as the literal it is: a function that reads one
+        // needs no parameter for it and no capture passed at the call.
+        if (held.kind === "text" && !held.mutable && held.value !== null) {
+          return { k: "text", parts: [{ k: "text", value: held.value }] };
+        }
         return this.reference(value.name, line);
+      }
+      case "argv": {
+        // `process.argv[i]` reads argument `i` of the command line, and
+        // `process.argv.slice(n)[i]` reads argument `i + n`; either way the
+        // argument is a number the runtime reads out of the arguments array.
+        const offset = value.offset;
+        const index = value.index === null ? { k: "number", text: String(offset) } : value.index;
+        const argument = offset === 0
+          ? index
+          : index.k === "number"
+            ? { k: "number", text: String(Number(index.text) + offset) }
+            : { k: "binary", op: "+", left: index, right: { k: "number", text: String(offset) } };
+        return {
+          k: "call",
+          call: this.call(
+            { k: "call", function: ARGV, args: [argument] } as ProgramValue & { k: "call" },
+            line,
+          ),
+        };
       }
       case "length": {
         const held = this.held(value.of, line);
@@ -2611,6 +2669,24 @@ class ProgramResolver {
       }
       case "element": {
         const held = this.held(value.buffer, line);
+        // `args[i]` where `args` is `process.argv.slice(n)` reads argument
+        // `i + n` of the command line, which the runtime hands back as a
+        // number.
+        if (held.kind === "argv") {
+          const index = value.index;
+          const argument = held.offset === 0
+            ? index
+            : index.k === "number"
+              ? { k: "number", text: String(Number(index.text) + held.offset) }
+              : { k: "binary", op: "+", left: index, right: { k: "number", text: String(held.offset) } };
+          return {
+            k: "call",
+            call: this.call(
+              { k: "call", function: ARGV, args: [argument] } as ProgramValue & { k: "call" },
+              line,
+            ),
+          };
+        }
         if (held.kind !== "array") {
           throw programError(
             `"${value.buffer}" is not a buffer`,
@@ -3596,6 +3672,7 @@ class ProgramLowering {
       };
     }
     if (held.kind === "object") return { kind: "object", name: held.name, mutable: held.mutable, type: held.type };
+    if (held.kind === "argv") return { kind: "value", name: held.name, mutable: held.mutable, type: numeric("f64") };
     return { kind: "value", name: held.name, mutable: held.mutable, type: numeric(held.type ?? "f64") };
   }
 

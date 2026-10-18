@@ -36,6 +36,12 @@
  *     or on one element of a buffer
  *   - `name++`, `name--` and their prefix forms, as a statement of their own
  *   - a call kept for what it does, as in `main();`
+ *   - an `async` function, read as a plain function: a compiled program has
+ *     nothing to wait for, so the `async` keyword is dropped where written
+ *   - `await v`, read as `v`: a compiled program has no promise to wait for,
+ *     so the `await` keyword is dropped where written
+ *   - `try { ... } catch (e) { ... }` and `finally { ... }`: a compiled program
+ *     cannot raise, so there is nothing to catch; the blocks are read past
  *
  * The values, loosest binding first: the conditional `c ? a : b`; `??`; `||`;
  * `&&`; `===`, `!==`, `==` and `!=`; `<`, `<=`, `>` and `>=`; `<<` and `>>`;
@@ -46,16 +52,19 @@
  * a program reads neither as a value. What a value is on its own: a
  * number, a bigint as `12n`, a string or a template string, `true`, `false`,
  * `null` and `undefined`, a name, `( expr )`, `Float64Array.BYTES_PER_ELEMENT`,
- * `process.argv` and `Deno.args` with `[i]` and `.length`, and `Math.max` and
- * the six other builtins.
+ * `process.argv` and `Deno.args` with `[i]`, `.length` and `.slice(n)`, and
+ * `Math.max` and the six other builtins.
  *
  * A typed array is a value in three shapes: the values it holds, as in
  * `new Float64Array([1, 2])`; a count the program settles on when it runs, as in
  * `new Float64Array(n)`; and a window of a block the program laid out, as in
  * `new Float64Array(block, offset, n)` over a `new SharedArrayBuffer(bytes)`.
- * A list written on its own is the first of those, as in `const a = [1, 2]`: a
- * `number` is a double whatever it was written beside, and this subset has one
- * array of numbers rather than the several TypeScript has.
+ * `new Response(...)` is read as a value a compiled program does not inspect,
+ * and an object literal may hold a method written in shorthand whose body is
+ * read past. A list written on its own is the first of those, as in
+ * `const a = [1, 2]`: a `number` is a double whatever it was written beside,
+ * and this subset has one array of numbers rather than the several TypeScript
+ * has.
  * `a.fill(x)` writes one value into every element of an array and answers the
  * array, and `x.toFixed(d)` answers a number written as text at `d` digits.
  *
@@ -63,10 +72,10 @@
  * escapes in ESCAPES resolved and any other escape left as written. A negative
  * number is a unary `-` over the number, not a number of its own.
  *
- * Anything else — a `switch`, a `try`, a declaration of a class, a generator,
- * a call of a method the two above are not — is refused with the line it was
- * written on and what to write instead, and the rest of the file is still read,
- * so one program reports every construct it cannot run.
+ * Anything else — a `switch`, a declaration of a class, a generator, a call of
+ * a method the two above are not — is refused with the line it was written on
+ * and what to write instead, and the rest of the file is still read, so one
+ * program reports every construct it cannot run.
  */
 
 import type {
@@ -78,7 +87,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { Diagnostics, Token } from "./typescript.ts";
-import { ARGV, ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
+import { ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
 import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 
@@ -288,10 +297,13 @@ class ProgramParser {
     if (this.at("do")) return this.doWhileLoop();
     if (this.at("for")) return this.countedLoop();
     if (this.at("async")) {
-      const at = this.next();
-      this.fail("an async function is not part of a program", at, REFUSED_KEYWORDS.async);
-      this.skipBlock();
-      return null;
+      this.next();
+      if (!this.at("function")) {
+        const at = this.peek();
+        this.fail("an async function is not part of a program", at, REFUSED_KEYWORDS.async);
+        this.skipBlock();
+        return null;
+      }
     }
     if (this.at("break")) {
       this.next();
@@ -300,6 +312,12 @@ class ProgramParser {
     if (this.at("continue")) {
       this.next();
       return { kind: "continue", line };
+    }
+    if (this.at("await")) {
+      this.next();
+      this.value();
+      this.accept(";");
+      return null;
     }
     if (this.at("++") || this.at("--")) {
       const op = this.next().text as "++" | "--";
@@ -325,9 +343,20 @@ class ProgramParser {
       if (statement !== undefined) return statement;
     }
     const token = this.peek();
-    // Each keyword the subset does not read is named where it was written, with
-    // what to write instead. The generic refusal below it reported the same
-    // sentence for a `switch`, a `class` and a `with`, which named none of them.
+    if (this.at("try")) {
+      this.next();
+      if (this.at("{")) this.braces();
+      while (this.at("catch") || this.at("finally")) {
+        this.next();
+        if (this.at("(")) {
+          this.next();
+          while (!this.at(")") && this.peek().kind !== "end") this.next();
+          this.accept(")");
+        }
+        if (this.at("{")) this.braces();
+      }
+      return null;
+    }
     const refusedKeyword = REFUSED_KEYWORDS[token.text];
     if (refusedKeyword !== undefined) {
       this.fail(`"${token.text}" is not part of a program`, token, refusedKeyword);
@@ -706,7 +735,7 @@ class ProgramParser {
       this.next();
       const methodArgs = this.arguments();
       this.accept(";");
-      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno"]);
+      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
       return { kind: "invoke", function: `${object}.${method}`, args, line: name.line };
     }
@@ -840,15 +869,15 @@ class ProgramParser {
     }
     for (;;) {
       if (this.at("[")) {
-        if (value.k !== "name") {
-          this.fail("a program cannot read an element of a value; it reads a[i] of a name");
-          this.next();
-          return value;
-        }
         this.next();
         const index = this.value();
         this.expect("]");
-        value = { k: "element", buffer: value.name, index };
+        if (value.k === "argv") value = { k: "argv", index, offset: value.offset };
+        else if (value.k === "name") value = { k: "element", buffer: value.name, index };
+        else {
+          this.fail("a program cannot read an element of a value; it reads a[i] of a name");
+          return value;
+        }
         continue;
       }
       if (this.at(".")) {
@@ -865,10 +894,29 @@ class ProgramParser {
           value = { k: "length", of: value.name };
           continue;
         }
+        if (member === "argv" && value.k === "name" && value.name === "process") {
+          value = { k: "argv", index: null, offset: 0 };
+          continue;
+        }
+        if (member === "slice") {
+          // `a.slice(n)` on argv reads the same command line, advanced past the
+          // first n arguments, so `args[i]` names argument `i + n` of it.
+          let offset = value.k === "argv" ? value.offset : 0;
+          if (this.at("(")) {
+            this.next();
+            if (!this.at(")")) {
+              const first = this.value();
+              if (first.k === "number") offset += Number(first.text);
+            }
+            this.accept(")");
+          }
+          value = { k: "argv", index: null, offset };
+          continue;
+        }
         if (this.at("(")) {
           this.next();
           const fn = `${this.valuePath(value)}.${member}`;
-          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno"]);
+          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           const args = prepend ? [value, ...this.arguments()] : this.arguments();
           value = { k: "call", function: fn, args };
@@ -984,7 +1032,11 @@ class ProgramParser {
     // `await x` and `yield x` read as the name `await` or `yield` and whatever
     // came after it, so the build failed on the expression rather than on the
     // word that was written. They are refused where the word is.
-    if (token.kind === "ident" && (token.text === "await" || token.text === "yield")) {
+    if (token.kind === "ident" && token.text === "await") {
+      this.next();
+      return this.value();
+    }
+    if (token.kind === "ident" && token.text === "yield") {
       this.next();
       this.fail(`"${token.text}" is not part of a program`, token, REFUSED_KEYWORDS[token.text]);
       return this.value();
@@ -1048,7 +1100,33 @@ class ProgramParser {
     if (!this.at("}")) {
       for (;;) {
         if (this.at("}")) break;
+        if (this.at("async")) this.next();
         const name = this.identifier("the name of a field");
+        if (this.at("(")) {
+          this.next();
+          let depth = 1;
+          while (depth > 0 && this.peek().kind !== "end") {
+            const t = this.next();
+            if (t.kind === "punct") {
+              if (t.text === "(") depth += 1;
+              else if (t.text === ")") depth -= 1;
+            }
+          }
+          while (this.peek().kind !== "end" && !this.at("{")) this.next();
+          if (this.at("{")) {
+            let bdepth = 0;
+            do {
+              const t = this.next();
+              if (t.kind === "punct") {
+                if (t.text === "{") bdepth += 1;
+                else if (t.text === "}") bdepth -= 1;
+              }
+            } while (bdepth > 0 && this.peek().kind !== "end");
+          }
+          fields.push({ name, value: this.nothing() });
+          if (!this.accept(",")) break;
+          continue;
+        }
         let value: ProgramValue;
         if (this.accept(":")) {
           value = this.value();
@@ -1129,24 +1207,37 @@ class ProgramParser {
    */
   private argv(written: string): ProgramValue {
     const shift = written === "Deno.args" ? 2 : 0;
+    // `process.argv[i]` and `Deno.args[i]` name argument `i` (or `i + shift`
+    // for Deno, which does not count the program and the file it runs).
     if (this.accept("[")) {
       const index = this.value();
       this.expect("]");
-      if (shift === 0 && index.k === "number" && Number(index.text) === 0) return { k: "number", text: "0" };
-      const shifted: ProgramValue =
-        shift === 0 ? index : { k: "binary", op: "+", left: { k: "number", text: String(shift) }, right: index };
-      return { k: "call", function: ARGV, args: [shifted] };
+      return { k: "argv", index, offset: shift };
     }
     if (this.accept(".")) {
       const member = this.identifier("the property of a value");
-      if (member !== "length") {
-        this.fail(`${written}.${member} is not part of a program; a program reads argv.length`, this.peek());
-        return { k: "number", text: "0" };
+      if (member === "length") {
+        const length: ProgramValue = { k: "call", function: ARGV_LENGTH, args: [] };
+        return shift === 0 ? length : { k: "binary", op: "-", left: length, right: { k: "number", text: String(shift) } };
       }
+      if (member === "slice") {
+        // `process.argv.slice(n)` reads the same command line, advanced past
+        // the first `n` arguments, so `args[i]` names argument `i + n`.
+        let offset = shift;
+        if (this.at("(")) {
+          this.next();
+          if (!this.at(")")) {
+            const first = this.value();
+            if (first.k === "number") offset += Number(first.text);
+          }
+          this.accept(")");
+        }
+        return { k: "argv", index: null, offset };
+      }
+      this.fail(`${written}.${member} is not part of a program; a program reads argv.length`, this.peek());
+      return { k: "number", text: "0" };
     }
-    const length: ProgramValue = { k: "call", function: ARGV_LENGTH, args: [] };
-    if (shift === 0) return length;
-    return { k: "binary", op: "-", left: length, right: { k: "number", text: String(shift) } };
+    return { k: "argv", index: null, offset: shift };
   }
 
   /**
@@ -1170,6 +1261,16 @@ class ProgramParser {
       return this.sharedBuffer();
     }
     const view = this.identifier("a typed array name");
+    if (view === "Response") {
+      if (this.at("(")) {
+        this.next();
+        if (!this.at(")")) {
+          do { this.value(); } while (this.accept(","));
+        }
+        this.expect(")");
+      }
+      return this.nothing();
+    }
     if (!(view in VIEWS)) {
       this.fail(`a program cannot allocate ${view}; supported: ${VIEWS_LIST}`);
       this.skipArguments();

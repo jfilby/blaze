@@ -76,6 +76,11 @@ export type ProgramValue =
   /** Every element of an array written as one value, as `a.fill(1)` is. */
   | { k: "fill"; buffer: ProgramValue; value: ProgramValue }
   | { k: "name"; name: string }
+  /** `process.argv` and `process.argv.slice(n)`: the command line, optionally
+   *  advanced past the first `offset` arguments; `index` names one argument of
+   *  it, or `null` names the slice itself (bound as a function parameter at
+   *  declaration). */
+  | { k: "argv"; index: ProgramValue | null; offset: number }
   /** `name.length`, of a buffer or of a string. */
   | { k: "length"; of: string }
   | { k: "element"; buffer: string; index: ProgramValue }
