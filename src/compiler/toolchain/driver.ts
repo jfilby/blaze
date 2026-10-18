@@ -770,8 +770,8 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "Promise": {
         const cb = call.args[0];
         let invoke = `${argument(0)}()`;
-        if (cb !== undefined && (cb.k === "functionRef" || cb.k === "function")) {
-          const name = cb.name ?? cb.function ?? cb.name;
+        if (cb !== undefined && cb.k === "functionRef") {
+          const name = cb.name;
           const captures = Array.isArray(cb.captures) ? cb.captures : [];
           invoke = `${name}(${captures.join(", ")})`;
         }

@@ -7669,7 +7669,7 @@ class Machine {
       this.external("blaze_promise_set_current");
       this.code.call("blaze_promise_set_current");
       const cb = call.args[0];
-      if (cb.k === "function" || cb.k === "functionRef") {
+      if (cb.k === "functionRef") {
         const captures = Array.isArray(cb.captures) ? cb.captures : [];
         const args = captures.map((name) => this.slot(name));
         this.external(cb.name);
