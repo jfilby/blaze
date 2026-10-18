@@ -91,7 +91,9 @@ export type ProgramValue =
   | { k: "call"; function: string; args: ProgramValue[] }
   | { k: "binary"; op: ProgramBinaryOp; left: ProgramValue; right: ProgramValue }
   | { k: "unary"; op: ProgramUnaryOp; operand: ProgramValue }
-  | { k: "conditional"; condition: ProgramValue; then: ProgramValue; otherwise: ProgramValue };
+  | { k: "conditional"; condition: ProgramValue; then: ProgramValue; otherwise: ProgramValue }
+  /** An arrow function, as a block of statements with parameters. */
+  | { k: "arrow"; params: { name: string; type: string | null }[]; body: ProgramStatement[] };
 
 /** The operators a program value may use, as the source language writes them. */
 export type ProgramBinaryOp =

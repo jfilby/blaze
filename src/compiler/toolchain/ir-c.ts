@@ -838,7 +838,8 @@ class FunctionEmitter {
       case "bool":
         return value.value ? "1" : "0";
       case "nothing":
-        return "NULL";
+      case "functionRef":
+        return (value as { k: "functionRef"; name: string }).name;
       case "local":
         return this.names.read(value.name);
       case "text":

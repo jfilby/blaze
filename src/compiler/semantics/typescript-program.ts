@@ -1042,38 +1042,38 @@ class ProgramParser {
           i += 1;
         }
         if (this.peek(i + 1).text === "=>") {
-          while (this.peek().kind !== "end" && !this.at(")")) this.next();
-          this.accept(")");
-          this.accept("=>");
-          while (this.peek().kind !== "end" && !this.at("{")) this.next();
-          if (this.at("{")) {
-            let bdepth = 0;
-            do {
-              const t = this.next();
-              if (t.kind === "punct") {
-                if (t.text === "{") bdepth += 1;
-                else if (t.text === "}") bdepth -= 1;
-              }
-            } while (bdepth > 0 && this.peek().kind !== "end");
+          const line = this.peek().line;
+          this.expect("(");
+          const params: { name: string; type: string | null }[] = [];
+          if (!this.at(")")) {
+            for (;;) {
+              const name = this.identifier("the name of a parameter");
+              let type: string | null = null;
+              if (this.accept(":")) type = this.annotation("the type of a parameter");
+              params.push({ name, type });
+              if (!this.accept(",")) break;
+            }
           }
-          return this.nothing();
+          this.expect(")");
+          this.accept("=>");
+          if (this.at("{")) {
+            const body = this.braces();
+            return { k: "arrow", params, body };
+          }
+          const value = this.value();
+          return { k: "arrow", params, body: [{ kind: "result", value, line }] };
         }
       }
       if (this.peek().kind === "ident" && this.peek(1).text === "=>") {
-        this.next();
-        this.next();
-        while (this.peek().kind !== "end" && !this.at("{")) this.next();
+        const line = this.peek().line;
+        const name = this.next().text;
+        this.next(); // =>
         if (this.at("{")) {
-          let bdepth = 0;
-          do {
-            const t = this.next();
-            if (t.kind === "punct") {
-              if (t.text === "{") bdepth += 1;
-              else if (t.text === "}") bdepth -= 1;
-            }
-          } while (bdepth > 0 && this.peek().kind !== "end");
+          const body = this.braces();
+          return { k: "arrow", params: [{ name, type: null }], body };
         }
-        return this.nothing();
+        const value = this.value();
+        return { k: "arrow", params: [{ name, type: null }], body: [{ kind: "result", value, line }] };
       }
       return this.nothing();
     }
@@ -1129,20 +1129,15 @@ class ProgramParser {
       return this.nothing();
     }
     if (token.kind === "ident" && this.peek(1).text === "=>") {
-      this.next();
-      this.next();
-      while (this.peek().kind !== "end" && !this.at("{")) this.next();
+      const line = token.line;
+      const name = this.next().text;
+      this.next(); // =>
       if (this.at("{")) {
-        let bdepth = 0;
-        do {
-          const t = this.next();
-          if (t.kind === "punct") {
-            if (t.text === "{") bdepth += 1;
-            else if (t.text === "}") bdepth -= 1;
-          }
-        } while (bdepth > 0 && this.peek().kind !== "end");
+        const body = this.braces();
+        return { k: "arrow", params: [{ name, type: null }], body };
       }
-      return this.nothing();
+      const value = this.value();
+      return { k: "arrow", params: [{ name, type: null }], body: [{ kind: "result", value, line }] };
     }
     if (token.kind === "ident") {
       if (token.text === "new") {
@@ -1214,22 +1209,26 @@ class ProgramParser {
         i += 1;
       }
       if (this.peek(i + 1).text === "=>") {
-        this.next(); // (
-        while (this.peek().kind !== "end" && !this.at(")")) this.next();
-        this.accept(")");
-        this.accept("=>");
-        while (this.peek().kind !== "end" && !this.at("{")) this.next();
-        if (this.at("{")) {
-          let bdepth = 0;
-          do {
-            const t = this.next();
-            if (t.kind === "punct") {
-              if (t.text === "{") bdepth += 1;
-              else if (t.text === "}") bdepth -= 1;
-            }
-          } while (bdepth > 0 && this.peek().kind !== "end");
+        const line = this.peek().line;
+        this.expect("(");
+        const params: { name: string; type: string | null }[] = [];
+        if (!this.at(")")) {
+          for (;;) {
+            const name = this.identifier("the name of a parameter");
+            let type: string | null = null;
+            if (this.accept(":")) type = this.annotation("the type of a parameter");
+            params.push({ name, type });
+            if (!this.accept(",")) break;
+          }
         }
-        return this.nothing();
+        this.expect(")");
+        this.accept("=>");
+        if (this.at("{")) {
+          const body = this.braces();
+          return { k: "arrow", params, body };
+        }
+        const value = this.value();
+        return { k: "arrow", params, body: [{ kind: "result", value, line }] };
       }
     }
     if (this.accept("(")) {

@@ -15,6 +15,15 @@ lower its body into the program's control flow instead of discarding it.
   `Promise` constructor is therefore dropped, and the program never runs the
   intended code.
 
+## Status
+
+- ✅ Frontend parsing: arrow bodies are parsed as real statement blocks (expression and block bodies).
+- ✅ Semantic IR: arrow functions are represented as `{ k: "arrow", params, body }`.
+- ✅ Function registration: arrow functions are registered as anonymous program functions.
+- ⬜ Lowering: trampolines and callback invocation at runtime sites. End-to-end requires backend-level function-pointer and trampoline support.
+- ⬜ Runtime ABI: callback registration entries beyond the existing handler pattern.
+- ⬜ Verification: end-to-end programs using arrow callbacks.
+
 ## Required changes
 
 ### Frontend parsing

@@ -759,10 +759,17 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
       case "http.serve":
         return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+      case "server.listen": {
+        const cb = call.args[3];
+        let invoke = `${argument(3)}()`;
+        if (cb !== undefined && cb.k === "functionRef" && Array.isArray(cb.captures) && cb.captures.length > 0) {
+          invoke = `${argument(3)}(${cb.captures.join(", ")})`;
+        }
+        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); ${invoke}; blaze_http_server_run(blaze_http_srv); })`;
+      }
       case "Math.random":
       case "require":
       case "req.on":
-      case "server.listen":
       case "http.createServer":
       case "tasks.push":
       case "res.writeHead":

@@ -150,6 +150,7 @@ import {
   type ArithOp,
   type CompareOp,
   TEXT,
+  VOID,
   type Ownership,
   type SemanticAssignOp,
   type SemanticBlock,
@@ -387,6 +388,8 @@ export function printSemanticValue(value: SemanticValue): string {
       return `bool[${typeText(value.type)}] ${value.value ? "true" : "false"}`;
     case "nothing":
       return `nothing[${typeText(value.type)}]`;
+    case "functionRef":
+      return `functionRef[${value.name}${value.captures.length ? ":" + value.captures.join(",") : ""}]`;
     case "local":
       return `local[${typeText(value.type)}] ${value.name}`;
     case "length":
@@ -1236,6 +1239,22 @@ class IrScanner {
       }
       case "nothing":
         return this.bare(bracketed, { k: "nothing", type: this.typed() });
+      case "functionRef": {
+        this.expect("[");
+        const name = this.word();
+        const captures: string[] = [];
+        if (this.peek() === ":") {
+          this.at += 1;
+          // captures are comma-separated names until "]"
+          while (this.peek() !== "]") {
+            captures.push(this.word());
+            if (this.peek() === ",") this.at += 1;
+            else break;
+          }
+        }
+        this.expect("]");
+        return this.bare(bracketed, { k: "functionRef", type: VOID, name, captures });
+      }
       case "local": {
         const type = this.typed();
         return this.bare(bracketed, { k: "local", type, name: this.word() });

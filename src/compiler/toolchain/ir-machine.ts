@@ -5035,6 +5035,11 @@ class Machine {
       case "nothing":
         this.zero(value.type);
         return;
+      case "functionRef":
+        // A function reference is not a value the machine can hold; lowering
+        // passes it by name where a callback site needs it.
+        this.zero(value.type);
+        return;
       case "local": {
         const slot = this.slot(value.name);
         this.load(slot);

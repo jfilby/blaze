@@ -975,6 +975,8 @@ class ProgramEmitter {
         return value.value ? "true" : "false";
       case "nothing":
         return this.target.nullLiteral();
+      case "functionRef":
+        return value.name;
       case "text":
         return this.text(value);
       case "local":

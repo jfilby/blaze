@@ -192,6 +192,10 @@ test("Deno names the command line node names", () => {
   ]);
 });
 
+test("an arrow function's body is read", () => {
+  assert.match(diagnostic(() => bodyOf("console.log((x) => { console.error(1); });\n")), /console\.error is not part of a program/);
+});
+
 test("a statement a program cannot run is refused", () => {
   assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
   // A refused statement names the keyword that was written and what to write

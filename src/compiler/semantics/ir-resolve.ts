@@ -251,7 +251,9 @@ type DraftValue =
   /** A field of one object a name holds, read out of it. */
   | { k: "field"; object: DraftValue; layout: string; field: string; type: TypeExpr }
   /** An object literal, resolved so it is allocated wherever it is written. */
-  | { k: "object"; fields: { name: string; value: DraftValue }[]; layout: string; type: TypeExpr };
+  | { k: "object"; fields: { name: string; value: DraftValue }[]; layout: string; type: TypeExpr }
+  /** A reference to a program function, as a function pointer. */
+  | { k: "function"; name: string; captures: string[] };
 
 /** A statement the program runs, before it is written down as blocks. */
 type DraftStatement =
@@ -645,6 +647,7 @@ function holdsText(value: DraftValue): boolean {
     case "unary":
     case "null":
     case "field":
+    case "function":
     case "object":
       return false;
   }
@@ -668,6 +671,8 @@ function draftType(value: DraftValue): TypeExpr | null {
       return null;
     case "field":
       return value.type;
+    case "function":
+      return VOID;
     case "object":
       return value.type;
     case "call":
@@ -2447,7 +2452,28 @@ class ProgramResolver {
         return { k: "boolean", value: value.value };
       case "null":
         return { k: "null", type: expect };
-      case "shared": {
+      case "arrow": {
+        // Register the arrow as an anonymous function of the program, so its
+        // body is compiled on its own. Its value is not yet a first-class
+        // function pointer; lowering passes it to callback sites by name.
+        const name = `__arrow_${line}`;
+        const params = value.params.map((param) => ({ name: param.name, type: param.type ?? "any" }));
+        const statement: ProgramStatement & { kind: "function" } = {
+          kind: "function",
+          name,
+          params,
+          body: value.body,
+          line,
+        };
+        this.declared(statement);
+        const declaredFn = this.functions.table.get(name);
+        const captures = declaredFn?.captured.map((capture) => {
+          const held = capture.held;
+          if (held.kind === "number" && !held.mutable) return held.text;
+          return held.name;
+        }) ?? [];
+        return { k: "function", name, captures };
+      }      case "shared": {
         // A block of bytes is what a view is taken of, and the runtime lays it
         // out: the program asks for a number of bytes and is given a block.
         const count = this.value(value.count, USIZE, line);
@@ -3476,6 +3502,7 @@ function draftHasCall(value: DraftValue): boolean {
     case "buffer":
     case "literal":
     case "boolean":
+    case "function":
     case "null":
     case "length":
     case "reference":
@@ -4050,6 +4077,8 @@ class ProgramLowering {
         return { k: "bool", type: BOOLEAN, value: value.value };
       case "null":
         return { k: "nothing", type: value.type ?? VOID };
+      case "function":
+        return { k: "functionRef", type: VOID, name: value.name, captures: value.captures };
       case "field": {
         // The base is written down first: it is a name of an object slot, or
         // the field of one the resolver has already read, and both answer as

@@ -417,7 +417,9 @@ export type SemanticValue =
   /** A number written as text, as a string carries it. */
   | { k: "toText"; type: TextType; of: SemanticValue; digits: number | null }
   /** `process.argv`, or one of its arguments. */
-  | { k: "argv"; type: SemanticType; index: SemanticValue | null };
+  | { k: "argv"; type: SemanticType; index: SemanticValue | null }
+  /** A reference to a program function, as a function pointer. */
+  | { k: "functionRef"; type: SemanticType; name: string; captures: string[] };
 
 /** What a value is, as printing and truth read it. */
 export type ValueKind = "text" | "number" | "boolean" | "null" | "reference";
