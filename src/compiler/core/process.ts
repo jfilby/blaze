@@ -63,7 +63,7 @@ export interface RunResult {
  */
 const KILL_SIGNAL = "SIGKILL";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
