@@ -32,6 +32,7 @@ of implementing those features.
 - Do use docs/specs to write any helpful specs about the compiler and related
 tools (e.g. blazeup).
 - Do try to optimize the compiler to generate more performance output.
+- Do edit compiler tests if they're not correct.
 
 
 ## List of dont's
