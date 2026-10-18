@@ -2059,7 +2059,7 @@ ${guarded ? '    if (fresh == NULL) blaze_rt_refuse("out of memory");' : ""}
   return aligned;
 }
 
-void blaze_rt_initialize(void) {}
+void blaze_rt_initialize(void) { setbuf(stdout, NULL); }
 
 void blaze_rt_finalize(void) {}
 
@@ -2695,6 +2695,7 @@ void blaze_rt_print_whole(long long value, int bigint) {
 }
 void blaze_rt_print_newline(void) {
   fputc('\\n', stdout);
+  fflush(stdout);
 }
 
 /* Prints one 64 bit limb as eight lowercase hex digits, most significant
