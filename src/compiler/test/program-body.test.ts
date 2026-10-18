@@ -262,9 +262,9 @@ test("try, catch and finally are read past in a program body", () => {
   assert.equal(body[1].kind, "invoke");
 });
 
-test("an awaited call in a program body is read past the await keyword", () => {
-  // `await` names a promise a compiled program has no way to wait for, so the
-  // keyword is dropped and the call it was written before is read as usual.
+test("an awaited call in a program body is read as a promise await", () => {
+  // `await` now waits on a promise, so the call it was written before is
+  // wrapped in a `Promise.await` call.
   const body = bodyOf("function f(n: number): number { return n; }\nconst x = await f(1);\nmain();\n");
   const declare = body.find((statement) => statement.kind === "declare" && statement.name === "x") as {
     kind: "declare";
@@ -272,7 +272,7 @@ test("an awaited call in a program body is read past the await keyword", () => {
   } | undefined;
   assert.ok(declare);
   assert.equal(declare.value.k, "call");
-  assert.equal(declare.value.function, "f");
+  assert.equal(declare.value.function, "Promise.await");
 });
 
 test("a construct outside the subset is named in a function body too", () => {

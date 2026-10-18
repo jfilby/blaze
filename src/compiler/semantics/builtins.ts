@@ -81,6 +81,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "http.serve": { params: [USIZE], returns: { kind: "void" }, arity: 1 },
   "http.createServer": { params: [ANY], returns: ANY, arity: 1 },
   "server.listen": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
+  "Promise": { params: [ANY], returns: ANY, arity: 1 },
+  "Promise.await": { params: [ANY], returns: F64, arity: 1 },
+  "resolve": { params: [ANY], returns: ANY, arity: 1 },
+  "reject": { params: [ANY], returns: ANY, arity: 1 },
   "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
   "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
 };

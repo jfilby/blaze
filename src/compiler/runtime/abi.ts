@@ -578,6 +578,7 @@ typedef struct blaze_i256 {
 `;
 
 const HEADER_EPILOGUE = `
+extern void *blaze_current_promise;
 #endif
 `;
 
@@ -3207,6 +3208,7 @@ void* blaze_promise_new(void) { blaze_promise* p = malloc(sizeof(blaze_promise))
 void blaze_promise_resolve(void* promise, double value) { blaze_promise* p = promise; p->settled = 1; p->value = value; }
 void blaze_promise_reject(void* promise, const char* message) { (void)message; blaze_promise* p = promise; p->settled = 1; p->value = 0.0/0.0; }
 double blaze_promise_await(void* promise) { blaze_promise* p = promise; return p->value; }
+void *blaze_current_promise = NULL;
 
 ${U256_KERNEL}
 ${I256_KERNEL}

@@ -1094,7 +1094,8 @@ class ProgramParser {
     // word that was written. They are refused where the word is.
     if (token.kind === "ident" && token.text === "await") {
       this.next();
-      return this.value();
+      const value = this.value();
+      return { k: "call", function: "Promise.await", args: [value] };
     }
     if (token.kind === "ident" && token.text === "yield") {
       this.next();
@@ -1144,18 +1145,11 @@ class ProgramParser {
         this.next();
         if (this.peek().text === "Promise") {
           this.next();
-          // Skip `new Promise(function (...) { ... })`.
-          if (this.accept("(")) {
-            let depth = 1;
-            while (depth > 0 && this.peek().kind !== "end") {
-              const t = this.next();
-              if (t.kind === "punct") {
-                if (t.text === "(") depth += 1;
-                else if (t.text === ")") depth -= 1;
-              }
-            }
-          }
-          return this.nothing();
+          // Parse `new Promise(arrow)` so the arrow is registered and lowered.
+          this.expect("(");
+          const callback = this.value();
+          this.expect(")");
+          return { k: "call", function: "Promise", args: [callback] };
         }
         return this.bufferLiteral();
       }
