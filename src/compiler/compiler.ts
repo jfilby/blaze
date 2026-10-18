@@ -1711,7 +1711,7 @@ export async function runBuild(
           if (!threads.includes(threading)) threads.push(threading);
         }
       }
-      const isHttp = runtimeKind === "facil";
+      const isHttp = runtimeKind === "facil" || /\bhttp\b/.test(project.entry.source);
       const runner =
         isHttp || runtimeKind === "none"
           ? await buildProgramDriver({
@@ -1722,7 +1722,7 @@ export async function runBuild(
               workDirectory: base,
               objectPaths,
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
-              includeHttpHeader: isHttp,
+              includeHttpHeader: runtimeKind === "facil",
               threads,
               outputPath: programPath,
             })

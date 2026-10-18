@@ -1932,9 +1932,9 @@ class ProgramResolver {
       case "sized":
       case "view":
       case "fill":
-        if (value.k === "buffer" && value.held.length === 0) {
+        if (value.k === "buffer" && Array.isArray(value.values) && value.values.length === 0) {
           const emptyArrayValue = this.value({ k: "call", function: "array.new", args: [] }, annotation, statement.line);
-          const held = { kind: "array", mutable, element: annotation === null ? "f64" : (elementOf(annotation) as any), length: 0, values: [] } as any;
+          const held = { kind: "object", mutable, type: { kind: "ref", of: null } as TypeExpr } as any;
           const declared = this.declareName(statement.name, statement.line, held);
           return { kind: "declare", name: declared.name, held: declared, value: emptyArrayValue, line: statement.line };
         }
@@ -2705,7 +2705,7 @@ class ProgramResolver {
             ),
           };
         }
-        if (held.kind !== "array") {
+        if (held.kind !== "array" && held.kind !== "object") {
           throw programError(
             `"${value.buffer}" is not a buffer`,
             this.body,
@@ -2713,14 +2713,17 @@ class ProgramResolver {
             `${this.body.file}: only an array has elements`,
           );
         }
-        const element = held.element ?? "f64";
-        held.element ??= element;
+        const element = held.kind === "array" ? (held.element ?? "f64") : "f64";
+        if (held.kind === "array") held.element ??= element;
         const index = this.value(value.index, USIZE, line);
         this.within(index, held, line);
         if (expect !== null) {
           this.coerce(`an element of ${value.buffer}`, { kind: "primitive", name: element }, expect, line);
         }
-        return { k: "element", buffer: held.name, bufferType: arrayType(held), index, type: element };
+        const bufferType = held.kind === "array"
+          ? arrayType(held)
+          : { kind: "array", of: { kind: "primitive", name: "f64" }, length: null };
+        return { k: "element", buffer: held.name, bufferType, index, type: element };
       }
       case "call":
         return { k: "call", call: this.call(value, line) };

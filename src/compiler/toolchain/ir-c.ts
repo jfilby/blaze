@@ -856,8 +856,9 @@ class FunctionEmitter {
         return `((struct ${value.layout}*)(uintptr_t)(${this.raw(value.object, depth)}))->${cMemberName(value.field)}`;
       case "length":
         return this.length(value.of, depth);
-      case "element":
-        return `${this.raw(value.of, depth)}[${this.expression(value.index, USIZE, depth)}]`;
+      case "element": {
+        return `${RUNTIME_NAME}_array_get(${this.raw(value.of, depth)}, ${this.expression(value.index, USIZE, depth)})`;
+      }
       case "argv":
         return value.index === null
           ? `${RUNTIME_NAME}_argv_count()`

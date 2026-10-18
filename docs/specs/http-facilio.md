@@ -129,3 +129,13 @@ boundary, `facil` is a known runtime kind, and a `--runtime none` build never
 references facil.io. No regressions: the pre-existing test failures (the
 ir-c "value the IR calls is run once" case and the Deno.args/argv cases) fail
 identically on the unmodified baseline.
+
+## Remaining work for http_server verification
+
+- The compiled client uses `http.request`/`fetch`, which are no-ops in the
+  machine backend; a real HTTP client runtime is needed.
+- The compiled server's `requestListener` is dropped; a real HTTP server
+  runtime that invokes a handler callback is needed.
+- JSON parsing/serialization on the wire (`JSON.parse`/`JSON.stringify`)
+  currently operate on in-memory strings only.
+- `calculateSum` must actually issue requests and sum responses to print 55.

@@ -3240,6 +3240,19 @@ class Machine {
         return;
       case "setElement": {
         const buffer = this.slot(statement.buffer);
+        const isDynamic = buffer.type.kind === "ref" && buffer.type.of === null;
+        if (isDynamic) {
+          this.value(statement.value);
+          this.code.movsMove(XMM2, XMM0, false);
+          this.at(statement.index, USIZE);
+          this.code.movRegReg(RDI, RAX);
+          this.code.movMemRegSized(frame(buffer.offset), RSI, 8);
+          // value in XMM2 -> move to XMM1 (second double arg) ... actually convention: first arg XMM0, second XMM1
+          this.code.movsMove(XMM1, XMM2, false);
+          this.code.movsLoad(XMM0, frame(buffer.offset), false);
+          this.runtime("_array_set");
+          return;
+        }
         const element = elementTypeOf(buffer.type) ?? statement.value.type;
         // A write of a value the program computed is the one write whose value
         // is finished before its address is needed, so the two can be written in
@@ -5062,9 +5075,19 @@ class Machine {
         this.length(value.of);
         return;
       case "element": {
-        // An element is read at the width the array holds it at, and a use
-        // that widens it converts it afterwards: an array of single precision
-        // numbers read as a double is one element widened, not two.
+        const bufferType = value.of.type;
+        const isDynamic = bufferType.kind === "ref" && bufferType.of === null;
+        if (isDynamic) {
+          this.value(value.of);
+          const slot = this.holdSlot(NUMBER, "blaze_dyn_arr");
+          this.store(slot);
+          this.value(value.index);
+          this.code.movsMove(XMM1, XMM0, false);
+          this.code.movsLoad(XMM0, frame(slot.offset), false);
+          this.runtime("_array_get");
+          this.convert(NUMBER, value.type);
+          return;
+        }
         const element = elementTypeOf(value.of.type) ?? value.type;
         this.readFrom(element, this.addressOf(value.of, value.index, element));
         this.convert(element, value.type);
@@ -7623,6 +7646,12 @@ class Machine {
     if (call.callee === "Math.floor") {
       this.at(argument, NUMBER);
       this.roundDown();
+      return;
+    }
+    if (call.callee === "array.new") {
+      this.code.movRegImm(RDI, 0n);
+      this.code.movRegImm(RSI, 8n);
+      this.runtime("_array_new");
       return;
     }
     if (call.callee === "Math.round") {

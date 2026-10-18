@@ -2802,6 +2802,20 @@ double blaze_rt_array_push(double array, double value) {
   ((double*)d->items)[d->count++] = value;
   return array;
 }
+double blaze_rt_array_get(double array, double index) {
+  blaze_dyn* d = blaze_dyn_lookup(array);
+  if (!d || d->kind != BLAZE_DYN_ARRAY) return 0.0;
+  size_t i = (size_t)index;
+  if (i >= d->count) return 0.0;
+  return ((double*)d->items)[i];
+}
+void blaze_rt_array_set(double array, double index, double value) {
+  blaze_dyn* d = blaze_dyn_lookup(array);
+  if (!d || d->kind != BLAZE_DYN_ARRAY) return;
+  size_t i = (size_t)index;
+  if (i >= d->count) return;
+  ((double*)d->items)[i] = value;
+}
 
 double blaze_rt_file_read(const char* path, const char* mode) {
   FILE* f = fopen(path, "r");
