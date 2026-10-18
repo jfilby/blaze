@@ -115,6 +115,11 @@ function isDynamicType(type: SemanticType | null): boolean {
 
 function isFloatType(type: SemanticType | null): boolean {
   if (type === null) return false;
+  // A reference is a pointer whatever it points at, even an unshaped one:
+  // `ref<any>` is still an address, not a floating point number. Treating
+  // it as a float made field access read through a register the pointer never
+  // reached and crashed programs that use unshaped references (binarytrees).
+  if (type.kind === "ref") return false;
   if (isDynamicType(type)) return true;
   return isFloat(type);
 }
@@ -6720,6 +6725,7 @@ class Machine {
       case "pos":
         if (isDynamicType(value.operand.type)) {
           this.value(value.operand);
+          this.code.movdXmm(XMM0, RAX);
           this.runtime("_to_number");
           return;
         }
@@ -6753,6 +6759,7 @@ class Machine {
         const type = value.operand.type;
         if (isDynamicType(type)) {
           this.value(value.operand);
+          this.code.movdXmm(XMM0, RAX);
           this.runtime("_to_number");
           this.code.movRegImm(RAX, -0x8000_0000_0000_0000n);
           this.code.movdXmm(XMM1, RAX);
