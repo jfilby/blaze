@@ -689,6 +689,11 @@ ${guarded ? "  if pointer == nil:\n    return 0" : ""}
 proc blaze_rt_last_error*(): cstring {.exportc, cdecl.} =
   blazeLastError.cstring
 
+proc blaze_promise_new*(): pointer {.exportc, cdecl.} = nil
+proc blaze_promise_resolve*(promise: pointer, value: float64) {.exportc, cdecl.} = discard
+proc blaze_promise_reject*(promise: pointer, message: cstring) {.exportc, cdecl.} = discard
+proc blaze_promise_await*(promise: pointer): float64 {.exportc, cdecl.} = 0.0
+
 proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_md5_create*(): float64 {.exportc, cdecl.} = 0.0
