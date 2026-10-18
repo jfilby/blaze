@@ -98,7 +98,7 @@ Options:
   --backend <name>          c, wasm or machine; defaults to the output's
   --mode <name>             debug (-O0 -g, default), release (-O3), or danger
                             (release, with the runtime's guards left out)
-  --runtime <name>          host runtime: none or nim (default none)
+  --runtime <name>          host runtime: none, nim or facil (default none)
   --max-candidates <n>      candidates to build per function (default 5)
   --max-attempts <n>        review rounds per candidate (default 3)
   --max-retries <n>         re-requests for an unreadable answer (default 3)

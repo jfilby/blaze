@@ -14,6 +14,7 @@
  */
 
 import type { BuildMode, RuntimeKind } from "../core/types.ts";
+import { isHttpSymbol } from "./http.ts";
 
 /** The name of the C header, the Nim adapter module and the object file. */
 export const RUNTIME_NAME = "blaze_rt";
@@ -31,6 +32,7 @@ export const DEFAULT_ALIGNMENT = 16;
 export const RUNTIME_TITLES: Record<RuntimeKind, string> = {
   none: "the compiler runtime",
   nim: "the Nim host runtime",
+  facil: "the facil.io HTTP server runtime",
 };
 
 /**
@@ -470,7 +472,7 @@ export const RUNTIME_ANCHOR: readonly string[] = RUNTIME_ABI.map((item) => item.
 
 /** True when generated code is allowed to reference a symbol. */
 export function isRuntimeSymbol(symbol: string): boolean {
-  return RUNTIME_SYMBOLS[symbol] === true || WIDE_SYMBOLS[symbol] === true;
+  return RUNTIME_SYMBOLS[symbol] === true || WIDE_SYMBOLS[symbol] === true || isHttpSymbol(symbol);
 }
 const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H
 #define BLAZE_RT_H

@@ -327,11 +327,17 @@ const WIDE_KERNELS: Record<string, string> = {
 class CDriver implements ProgramTarget {
   /** The objects built so far, so each one built as a value is named apart. */
   private builds = 0;
+  /** True when the program uses the HTTP runtime, so the driver includes its header. */
+  private readonly includeHttpHeader: boolean;
+  constructor(includeHttpHeader: boolean = false) {
+    this.includeHttpHeader = includeHttpHeader;
+  }
   prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
     const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
+    const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     return `${DRIVER_PRELUDE}
-${objects === "" ? "" : `${objects}\n`}${declarations}`;
+${httpHeader}${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
 
   /** A function a program calls, declared as the driver links it. */
@@ -983,8 +989,8 @@ ${objects === "" ? "" : `${objects}\n`}${declarations}`;
 }
 
 /** Emits the C driver for a program. The driver is compiler code. */
-export function generateProgramDriver(program: SemanticProgram): string {
-  return generateProgramSource(program, new CDriver());
+export function generateProgramDriver(program: SemanticProgram, includeHttpHeader: boolean = false): string {
+  return generateProgramSource(program, new CDriver(includeHttpHeader));
 }
 
 export interface ProgramDriverRequest {
@@ -1013,13 +1019,15 @@ export interface ProgramDriverRequest {
    * serves the pragma, and a program with no such object does not link one.
    */
   threads?: readonly Threading[];
+  /** True when the program uses the HTTP runtime, so the driver includes its header. */
+  includeHttpHeader?: boolean;
   outputPath: string;
 }
 
 /** Writes and links the C driver. What it links is what the build verified. */
 export async function buildProgramDriver(request: ProgramDriverRequest): Promise<Runner> {
   const driverPath = `${request.workDirectory}/program.c`;
-  await writeFile(driverPath, generateProgramDriver(request.program), "utf8");
+  await writeFile(driverPath, generateProgramDriver(request.program, request.includeHttpHeader ?? false), "utf8");
   const inputs = [driverPath, ...request.objectPaths];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
   // A program computes with the maths library, so the driver links it.

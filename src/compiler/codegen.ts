@@ -32,6 +32,7 @@ import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
+import { buildFacilRuntime } from "./runtime/facil.ts";
 import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
 import type { Review } from "./core/proposal.ts";
 
@@ -482,6 +483,10 @@ export function runtimePreparer(request: {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
       if (request.lowering === "wasm") return undefined;
       if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory, request.mode, request.target);
+      if (request.runtime === "facil") {
+        const runtime = await buildFacilRuntime(request.workspace.workDirectory, request.mode, request.target);
+        return { headerPath: runtime.headerPath, objectPath: runtime.objectPath };
+      }
       return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
     })();
     return pending;

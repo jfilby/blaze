@@ -1711,8 +1711,9 @@ export async function runBuild(
           if (!threads.includes(threading)) threads.push(threading);
         }
       }
+      const isHttp = runtimeKind === "facil";
       const runner =
-        runtimeKind === "none"
+        isHttp || runtimeKind === "none"
           ? await buildProgramDriver({
               objective: normalizeOptimize(input.optimize).primary,
               mode: buildMode,
@@ -1721,6 +1722,7 @@ export async function runBuild(
               workDirectory: base,
               objectPaths,
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
+              includeHttpHeader: isHttp,
               threads,
               outputPath: programPath,
             })
@@ -1848,7 +1850,7 @@ export async function runBuild(
         await deliver(programBinary, paths.outputBinary);
         run("strip", ["--strip-unneeded", programPath]);
         await copyFile(programPath, deliveredProgram);
-        await deliver(runtimeKind === "none" ? "program.c" : "program_host.nim", paths.outputProgram);
+        await deliver(runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
         delivered.push(deliveredProgram);
         outputPath = store.resolve(paths.outputBinary);
       } else {

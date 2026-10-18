@@ -383,10 +383,11 @@ export const BACKENDS: readonly BackendKind[] = ["c", "wasm", "machine"];
  *
  *   none  the compiler emits the runtime itself, on top of libc
  *   nim   a Nim host program and the Nim runtime adapter provide the services
+ *   facil the facil.io HTTP server runtime, behind a C adapter
  */
-export type RuntimeKind = "none" | "nim";
+export type RuntimeKind = "none" | "nim" | "facil";
 
-export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim"];
+export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim", "facil"];
 
 /**
  * How hard the toolchain builds, and how much of itself it checks:
