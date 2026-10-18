@@ -339,6 +339,11 @@ class ProgramEmitter {
     // written above the body that runs, and the program calls it as it calls
     // any other function.
     const declared = this.program.bodies.map((fn) => this.function(fn));
+    const extra = (this.program.extraFunctions ?? []).map((extraFn) =>
+      typeof extraFn.body === "string"
+        ? extraFn.body.split("\\n")
+        : this.function(extraFn.body as SemanticFunction),
+    );
     const body = this.entry();
     const opened = this.target.openProgram().map((line) => indent(1, line));
     const closed = this.target
@@ -347,6 +352,7 @@ class ProgramEmitter {
     return [
       this.target.prelude(this.program),
       ...declared.flatMap((lines) => lines),
+      ...extra.flatMap((lines) => lines),
       ...opened,
       ...body,
       ...closed,

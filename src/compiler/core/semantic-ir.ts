@@ -1033,6 +1033,18 @@ export interface SemanticModule {
  * calls, and the object layouts those functions hand back. No target appears
  * anywhere in it, so the same program lowers to every backend.
  */
+/** A trampoline or other extra top-level function the C backend emits. */
+export interface SemanticExtraFunction {
+  /** The name the function is defined under. */
+  name: string;
+  /** The parameters, as C declarations (`name: type` or `{ name, type }`). */
+  params?: { name: string; type: string }[] | string[];
+  /** The return type as C spells it, or `void` when omitted. */
+  returns?: string;
+  /** The body, as C text or as a full semantic function. */
+  body: string | SemanticFunction;
+}
+
 export interface SemanticProgram {
   /** The source file the program was written in, relative to the project. */
   file: string;
@@ -1048,4 +1060,9 @@ export interface SemanticProgram {
    */
   bodies: SemanticFunction[];
   objects: Record<string, ObjectLayout>;
+  /**
+   * Additional top-level functions (trampolines) the backend emits after the
+   * program functions, to adapt callbacks to runtime signatures.
+   */
+  extraFunctions?: SemanticExtraFunction[];
 }

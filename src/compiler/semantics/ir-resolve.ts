@@ -3577,6 +3577,7 @@ class ProgramLowering {
       functions: [...program.functions, ...settled.map((draft) => draft.signature)],
       bodies,
       objects: program.objects,
+      extraFunctions: [],
     };
   }
 
