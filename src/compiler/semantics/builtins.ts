@@ -81,6 +81,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "http.serve": { params: [USIZE], returns: { kind: "void" }, arity: 1 },
   "http.createServer": { params: [ANY], returns: ANY, arity: 1 },
   "server.listen": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
+  "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

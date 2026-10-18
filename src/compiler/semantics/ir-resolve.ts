@@ -1656,6 +1656,18 @@ class ProgramResolver {
       const held = this.scopes[index].get(name);
       if (held !== undefined) return held;
     }
+    // A top-level const string is written inline where it is read, so a
+    // function that reads one needs no parameter for it. Hand it back as a
+    // text held even before its declaration has been walked into scope.
+    const decl = this.body.statements.find((item) => item.kind === "declare" && item.name === name);
+    if (decl !== undefined && decl.kind === "declare" && decl.value.k === "text") {
+      const written = decl.value.parts
+        .filter((part: any) => part.k === "text")
+        .map((part: any) => part.value)
+        .join("");
+      const allText = decl.value.parts.every((part: any) => part.k === "text");
+      return { kind: "text", name, mutable: decl.mutable, value: allText ? written : null } as Held;
+    }
     return undefined;
   }
 
@@ -1922,7 +1934,7 @@ class ProgramResolver {
       case "fill":
         if (value.k === "buffer" && value.held.length === 0) {
           const emptyArrayValue = this.value({ k: "call", function: "array.new", args: [] }, annotation, statement.line);
-          const held = { kind: "object", mutable, type: { kind: "ref", of: null } as TypeExpr } as any;
+          const held = { kind: "array", mutable, element: annotation === null ? "f64" : (elementOf(annotation) as any), length: 0, values: [] } as any;
           const declared = this.declareName(statement.name, statement.line, held);
           return { kind: "declare", name: declared.name, held: declared, value: emptyArrayValue, line: statement.line };
         }
