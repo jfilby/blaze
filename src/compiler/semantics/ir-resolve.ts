@@ -2457,7 +2457,7 @@ class ProgramResolver {
         // body is compiled on its own. Its value is not yet a first-class
         // function pointer; lowering passes it to callback sites by name.
         const name = `__arrow_${line}`;
-        const params = value.params.map((param) => ({ name: param.name, type: param.type ?? "any" }));
+        const params: { name: string; type: string }[] = [];
         const statement: ProgramStatement & { kind: "function" } = {
           kind: "function",
           name,

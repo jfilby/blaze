@@ -769,11 +769,11 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       }
       case "Promise": {
         const cb = call.args[0];
-        let invoke = `${argument(0)}(0.0)`;
-        if (cb !== undefined && cb.k === "functionRef") {
-          const name = cb.name;
+        let invoke = `${argument(0)}()`;
+        if (cb !== undefined && (cb.k === "functionRef" || cb.k === "function")) {
+          const name = cb.name ?? cb.function ?? cb.name;
           const captures = Array.isArray(cb.captures) ? cb.captures : [];
-          invoke = `${name}(0.0${captures.length ? ", " + captures.join(", ") : ""})`;
+          invoke = `${name}(${captures.join(", ")})`;
         }
         return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
       }
@@ -781,8 +781,13 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
       case "resolve":
         return `(blaze_promise_resolve(blaze_current_promise, ${argument(0)}), 0.0)`;
-      case "reject":
-        return `(blaze_promise_reject(blaze_current_promise, blaze_rt_to_text(${argument(0)})), 0.0)`;
+      case "reject": {
+        const arg = call.args[0];
+        const text = (arg.k === "text" || arg.k === "const")
+          ? argument(0)
+          : `blaze_rt_to_text(${argument(0)})`;
+        return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
+      }
       case "Math.random":
       case "require":
       case "req.on":

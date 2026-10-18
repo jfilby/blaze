@@ -410,6 +410,10 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "Returns NaN on rejection.",
     { tags: ["host"] },
   ),
+  entry("blaze_promise_set_current", "void", [["promise", "void*"]], "Sets the current promise.", "For resolve/reject lowering.", { tags: ["host"] }),
+  entry("blaze_promise_clear_current", "void", [], "Clears the current promise.", "", { tags: ["host"] }),
+  entry("blaze_promise_resolve_current", "void", [["value", "double"]], "Resolves the current promise.", "", { tags: ["host"] }),
+  entry("blaze_promise_reject_current", "void", [["message", "const char*"]], "Rejects the current promise.", "", { tags: ["host"] }),
 ];
 
 /**
@@ -3208,6 +3212,10 @@ void* blaze_promise_new(void) { blaze_promise* p = malloc(sizeof(blaze_promise))
 void blaze_promise_resolve(void* promise, double value) { blaze_promise* p = promise; p->settled = 1; p->value = value; }
 void blaze_promise_reject(void* promise, const char* message) { (void)message; blaze_promise* p = promise; p->settled = 1; p->value = 0.0/0.0; }
 double blaze_promise_await(void* promise) { blaze_promise* p = promise; return p->value; }
+void blaze_promise_set_current(void* promise) { blaze_current_promise = promise; }
+void blaze_promise_clear_current(void) { blaze_current_promise = NULL; }
+void blaze_promise_resolve_current(double value) { if (blaze_current_promise) blaze_promise_resolve(blaze_current_promise, value); }
+void blaze_promise_reject_current(const char* message) { if (blaze_current_promise) blaze_promise_reject(blaze_current_promise, message); }
 void *blaze_current_promise = NULL;
 
 ${U256_KERNEL}

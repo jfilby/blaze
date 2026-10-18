@@ -7659,6 +7659,49 @@ class Machine {
       this.runtime("_array_new");
       return;
     }
+    if (call.callee === "Promise") {
+      this.external("blaze_promise_new");
+      this.code.call("blaze_promise_new");
+      const slot = this.holdSlot(NUMBER, "blaze_promise");
+      this.store(slot);
+      this.load(slot);
+      this.code.movRegReg(RDI, RAX);
+      this.external("blaze_promise_set_current");
+      this.code.call("blaze_promise_set_current");
+      const cb = call.args[0];
+      if (cb.k === "function" || cb.k === "functionRef") {
+        const captures = Array.isArray(cb.captures) ? cb.captures : [];
+        const args = captures.map((name) => this.slot(name));
+        this.external(cb.name);
+        this.callSymbol(cb.name, args, { kind: "void" });
+      }
+      this.external("blaze_promise_clear_current");
+      this.code.call("blaze_promise_clear_current");
+      this.load(slot);
+      return;
+    }
+    if (call.callee === "Promise.await") {
+      this.at(call.args[0], NUMBER);
+      this.code.movRegReg(RDI, RAX);
+      this.external("blaze_promise_await");
+      this.code.call("blaze_promise_await");
+      return;
+    }
+    if (call.callee === "resolve") {
+      this.at(call.args[0], call.argTypes[0] ?? NUMBER);
+      this.external("blaze_promise_resolve_current");
+      this.code.call("blaze_promise_resolve_current");
+      this.code.xorFloat(XMM0, XMM0);
+      return;
+    }
+    if (call.callee === "reject") {
+      this.at(call.args[0], call.argTypes[0] ?? NUMBER);
+      this.code.movRegReg(RDI, RAX);
+      this.external("blaze_promise_reject_current");
+      this.code.call("blaze_promise_reject_current");
+      this.code.xorFloat(XMM0, XMM0);
+      return;
+    }
     if (call.callee === "Math.round") {
       this.at(argument, NUMBER);
       const operand = this.holdSlot(NUMBER, "blaze_rounded");

@@ -1,0 +1,5 @@
+language = "typescript"
+sourceFile = "main.ts"
+output = "machine"
+backend = "machine"
+mode = "debug"
