@@ -1429,6 +1429,9 @@ class ProgramResolver {
         );
       }
       if (held === undefined) {
+        // A named program function is referenced by name rather than captured,
+        // so a function that reads one needs no parameter for it.
+        if (this.functions.table.has(name)) continue;
         const decl = this.body.statements.find((item) => item.kind === "declare" && item.name === name);
         if (decl !== undefined && decl.kind === "declare" && decl.value.k === "text") {
           // A const string the program declares is written inline where it is
@@ -2559,6 +2562,18 @@ class ProgramResolver {
         return { k: "fixed", of, digits: value.digits };
       }
       case "name": {
+        // A named program function is passed by name rather than by value, the
+        // way an arrow function is: the call site that receives it lowers the
+        // reference to the function's trampoline.
+        if (this.functions.table.has(value.name)) {
+          const declaredFn = this.functions.table.get(value.name);
+          const captures = declaredFn?.captured.map((capture) => {
+            const held = capture.held;
+            if (held.kind === "number" && !held.mutable) return held.text;
+            return held.name;
+          }) ?? [];
+          return { k: "function", name: value.name, captures };
+        }
         // An array is used at one element type, whichever name it is passed by.
         const held = this.held(value.name, line);
         if (held.kind === "array" && expect !== null) this.expectArray(expect, held, line);
