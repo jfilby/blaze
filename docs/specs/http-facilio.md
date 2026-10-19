@@ -41,6 +41,8 @@ facil.io. `--runtime facil` builds and links the facil.io adapter.
 | `blaze_http_resp_header(resp, name, value)` | Set a response header |
 | `blaze_http_resp_body(resp, bytes, length)` | Set the response body |
 | `blaze_http_resp_complete(resp)` | Send the response, ending the request |
+| `blaze_http_server_new_settings(port, max_clients, max_body_size, max_header_size, timeout, threads, workers)` | Create a server with resource limits, a connection timeout and a thread/worker count |
+| `blaze_http_server_new_tls(port, cert, key)` | Create an HTTPS (TLS) server on a port |
 
 Handles are opaque `void*`. A server handle is owned until `stop`; request and
 response handles are borrowed and valid for one request. `isHttpSymbol` (and
@@ -99,8 +101,13 @@ mentions `blaze_http` or `fio_`, and no facil.io object is linked.
    `blaze_http_server_stop`; `req.on` invokes the callback (the adapter already
    buffers the body); `req.text` reads `blaze_http_req_body` into a Blaze
    string. Verified by `test/http-end-to-end.test.ts` (C and machine backends).
-6. ⬜ Concurrency tests, resource limits, timeouts, HTTPS — facil.io provides
-   these; Blaze-side tests need (3)–(5) first
+6. ✅ Concurrency tests, resource limits, timeouts, HTTPS — facil.io provides
+   these; Blaze-side tests in `test/http-facilities.test.ts` verify concurrent
+   connections, `max_body_size` rejection (HTTP 413), a configured connection
+   timeout, and HTTPS (`http.serveTls` with a self-signed certificate), on both
+   backends. `http.serveSettings` configures limits/timeout/threads at server
+   creation; `blaze_http_server_run` applies the stored thread/worker count.
+   OpenSSL is enabled when bundling the facil runtime so TLS is available.
 
 ## Acceptance criteria
 

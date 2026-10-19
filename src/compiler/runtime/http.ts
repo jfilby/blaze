@@ -138,6 +138,32 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     "Sends the response and ends the request.",
     "The response handle is no longer valid after this.",
   ),
+  httpEntry(
+    "blaze_http_server_new_settings",
+    "void*",
+    [
+      ["port", "uint16_t"],
+      ["max_clients", "intptr_t"],
+      ["max_body_size", "size_t"],
+      ["max_header_size", "size_t"],
+      ["timeout", "uint8_t"],
+      ["threads", "int"],
+      ["workers", "int"],
+    ],
+    "Creates an HTTP server with resource limits, a connection timeout and a thread/worker count.",
+    "Returns an owned server handle; a null handle means the port could not be bound.",
+  ),
+  httpEntry(
+    "blaze_http_server_new_tls",
+    "void*",
+    [
+      ["port", "uint16_t"],
+      ["cert", "const char*"],
+      ["key", "const char*"],
+    ],
+    "Creates an HTTPS (TLS) server listening on a port.",
+    "Returns an owned server handle; a null handle means the port could not be bound or TLS could not be initialized.",
+  ),
 ];
 
 /** Symbols generated HTTP code may reference. Nothing else resolves at link time. */

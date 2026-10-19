@@ -37,7 +37,7 @@ const TOOLCHAIN: Record<string, string> = { typescript: "node", ts: "node" };
  * are given the same arguments whichever host wrote the source.
  */
 const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.slice(2)}";
-const HTTP_PRELUDE = "data:text/javascript,globalThis.http=Object.assign({}, await import('node:http')); globalThis.http.serve=function(){}; globalThis.http.createServer=function(){return{listen:function(){}}};";
+const HTTP_PRELUDE = "data:text/javascript,globalThis.http=Object.assign({}, await import('node:http')); globalThis.http.serve=function(){}; globalThis.http.createServer=function(){return{listen:function(){}}}; globalThis.http.serveSettings=function(){}; globalThis.http.serveTls=function(){};";
 
 /** Whether a source reads the command line the way a Deno program does. */
 function readsDenoArgs(source: string): boolean {

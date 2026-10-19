@@ -73,6 +73,7 @@ export function facilAdapterSource(): string {
    the public blaze_http.h header: they are confined to this adapter. */
 #include <fio.h>
 #include <http.h>
+#include <fio_tls.h>
 #include <fiobj_hash.h>
 #include <fiobj_str.h>
 
@@ -88,10 +89,24 @@ export function facilAdapterSource(): string {
 typedef struct blaze_http_server_s {
   intptr_t uuid;
   int bound;
+  uint16_t port;
   size_t route_count;
   char *methods[BLAZE_HTTP_MAX_ROUTES];
   char *paths[BLAZE_HTTP_MAX_ROUTES];
   void (*handlers[BLAZE_HTTP_MAX_ROUTES])(blaze_http_request *, blaze_http_response *);
+  /* Resource limits and tuning, applied to the listening socket before it is
+     bound. Zero/negative means "use facil.io's default". */
+  intptr_t max_clients;
+  size_t max_body_size;
+  size_t max_header_size;
+  uint8_t timeout;
+  int threads;
+  int workers;
+  /* TLS (HTTPS): certificate and private key files, or NULL for plain HTTP,
+     plus the prepared TLS context (created in blaze_http_server_new_tls). */
+  const char *cert;
+  const char *key;
+  fio_tls_s *tls;
 } blaze_http_server_t;
 
 /* A request, borrowed from facil.io for the duration of one callback. */
@@ -265,33 +280,102 @@ static void blaze_http_on_request(http_s *h) {
 /* The server: start, run and stop.                                           */
 /* -------------------------------------------------------------------------- */
 
+/* Applies the server's stored limits, timeout and TLS settings to a listening
+   socket, binds it, and registers the default "Hello, World" route. Returns
+   the facil.io uuid, or -1 when the port could not be bound. */
+static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
+  char port_str[8];
+  __builtin_snprintf(port_str, sizeof(port_str), "%u", (unsigned)server->port);
+
+  intptr_t uuid = http_listen(port_str, NULL, .on_request = blaze_http_on_request,
+                              .udata = server,
+                              .max_body_size = server->max_body_size,
+                              .max_header_size = server->max_header_size,
+                              .max_clients = server->max_clients,
+                              .timeout = server->timeout,
+                              .tls = server->tls);
+  if (uuid == -1) {
+    if (server->tls) fio_tls_destroy(server->tls);
+    server->tls = NULL;
+    return -1;
+  }
+  /* Every server answers every route with "Hello, World" unless a program
+     registers its own routes. */
+  blaze_http_route_register(server, "*", "*", blaze_http_default_handler);
+  return uuid;
+}
+
 void *blaze_http_server_new(uint16_t port) {
   blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
   if (!server) return NULL;
+  server->port = port;
+  /* Zero settings mean "use facil.io's defaults"; one thread and one worker. */
+  server->threads = 1;
+  server->workers = 1;
 
-  char port_str[8];
-  __builtin_snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
-  intptr_t uuid = http_listen(port_str, NULL, .on_request = blaze_http_on_request,
-                              .udata = server);
+  intptr_t uuid = blaze_http_server_do_listen(server);
   if (uuid == -1) {
     free(server);
     return NULL;
   }
-
   server->uuid = uuid;
   server->bound = 1;
-  /* Every server answers every route with "Hello, World" unless a program
-     registers its own routes. */
-  blaze_http_route_register(server, "*", "*", blaze_http_default_handler);
+  return server;
+}
+
+void *blaze_http_server_new_settings(uint16_t port,
+                                     intptr_t max_clients,
+                                     size_t max_body_size,
+                                     size_t max_header_size,
+                                     uint8_t timeout,
+                                     int threads,
+                                     int workers) {
+  blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
+  if (!server) return NULL;
+  server->port = port;
+  server->max_clients = max_clients;
+  server->max_body_size = max_body_size;
+  server->max_header_size = max_header_size;
+  server->timeout = timeout;
+  server->threads = threads > 0 ? threads : 1;
+  server->workers = workers > 0 ? workers : 1;
+
+  intptr_t uuid = blaze_http_server_do_listen(server);
+  if (uuid == -1) {
+    free(server);
+    return NULL;
+  }
+  server->uuid = uuid;
+  server->bound = 1;
+  return server;
+}
+
+void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key) {
+  blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
+  if (!server) return NULL;
+  server->port = port;
+  server->cert = cert;
+  server->key = key;
+  server->tls = fio_tls_new(NULL, cert, key, NULL);
+  server->threads = 1;
+  server->workers = 1;
+
+  intptr_t uuid = blaze_http_server_do_listen(server);
+  if (uuid == -1) {
+    free(server);
+    return NULL;
+  }
+  server->uuid = uuid;
+  server->bound = 1;
   return server;
 }
 
 void blaze_http_server_run(void *server_raw) {
   blaze_http_server_t *server = (blaze_http_server_t *)server_raw;
   if (!server || !server->bound) return;
-  /* facil.io runs the event loop on this thread until fio_stop is called. */
-  fio_start(.threads = 1, .workers = 1);
+  /* facil.io runs the event loop on this thread until fio_stop is called. The
+     thread and worker counts come from the server's stored settings. */
+  fio_start(.threads = server->threads, .workers = server->workers);
 }
 
 void blaze_http_server_stop(void *server_raw) {
@@ -356,9 +440,9 @@ export async function buildFacilRuntime(
 
   /* List facil.io's C translation units needed for an HTTP server.
      Excluded: cli (command-line parsing), legacy (broken legacy allocator),
-     redis (Redis client), and the OpenSSL TLS backend (Blaze does not enable
-     HAVE_OPENSSL; fio_tls_missing.c is kept as the TLS fallback). */
-  const excluded = ["/cli/", "/legacy/", "/redis/", "/tls/fio_tls_openssl.c"];
+     redis (Redis client), and the missing-stub TLS backend (Blaze enables
+     OpenSSL via fio_tls_openssl.c so HTTPS is available). */
+  const excluded = ["/cli/", "/legacy/", "/redis/", "/tls/fio_tls_missing.c"];
   const listed = run(
     "sh",
     ["-c", `find "${sourceDir}" -name "*.c" -type f | sort`],
@@ -403,6 +487,8 @@ export async function buildFacilRuntime(
   const cFlags = [
     "-std=c11",
     "-D_POSIX_C_SOURCE=200809L",
+    "-DHAVE_OPENSSL",
+    "-DFIO_TLS_FOUND",
     ...optimizationOptions(mode),
     ...cTargetOptions(target),
     "-ffunction-sections",
@@ -464,7 +550,8 @@ export async function buildFacilRuntime(
     });
   }
 
-  /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links. */
+  /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links.
+     OpenSSL symbols stay undefined here and are resolved when the final program is linked with -lssl -lcrypto. */
   const linked = run(
     "ld",
     ["-r", "-o", bundledObject, adapterObject, rtObject, ...facilObjects],

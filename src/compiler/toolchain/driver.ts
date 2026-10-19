@@ -760,6 +760,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
       case "http.serve":
         return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+      case "http.serveSettings":
+        return `({ void *blaze_http_srv = blaze_http_server_new_settings((uint16_t)${argument(0)}, (intptr_t)${argument(1)}, (size_t)${argument(2)}, (size_t)${argument(3)}, (uint8_t)${argument(4)}, (int)${argument(5)}, (int)${argument(6)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+      case "http.serveTls":
+        return `({ void *blaze_http_srv = blaze_http_server_new_tls((uint16_t)${argument(0)}, ${argument(1)}, ${argument(2)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.createServer": {
         const cb = call.args[0];
         let trampoline = "0.0";
@@ -1123,7 +1127,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // for the same machine as every function it links, which is what a caller
   // naming a cpu asked for and what an unnamed one would not get otherwise.
 
-  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...(request.runtimeObjectPath !== undefined ? ["-lssl", "-lcrypto"] : [])], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

@@ -79,6 +79,18 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    * process is stopped. Every route answers with "Hello, World". The call never
    * returns while the server runs. */
   "http.serve": { params: [USIZE], returns: { kind: "void" }, arity: 1 },
+  /** `http.serveSettings(port, maxClients, maxBodySize, maxHeaderSize, timeout, threads, workers)`
+   * starts an HTTP server with resource limits, a connection timeout (seconds)
+   * and a thread/worker count. The call never returns while the server runs. */
+  "http.serveSettings": {
+    params: [USIZE, USIZE, USIZE, USIZE, USIZE, USIZE, USIZE],
+    returns: { kind: "void" },
+    arity: 7,
+  },
+  /** `http.serveTls(port, cert, key)` starts an HTTPS (TLS) server on the port
+   * using the given certificate and private key files. The call never returns
+   * while the server runs. */
+  "http.serveTls": { params: [USIZE, ANY, ANY], returns: { kind: "void" }, arity: 3 },
   /** `blaze_error_clear()` clears the pending error flag a try block starts with. */
   "blaze_error_clear": { params: [], returns: { kind: "void" }, arity: 0 },
   /** `blaze_had_error()` is 1 when the last awaited call failed, else 0. */
