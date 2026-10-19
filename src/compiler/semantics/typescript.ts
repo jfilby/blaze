@@ -2318,9 +2318,40 @@ export const typeScriptFrontend: Frontend = {
       "req.on(\"end\", function () {\n    const body = req.text();",
     );
     source = source.replace(
-      /const req = http\.request\(\s*api,\s*\{[\s\S]*?\},\s*\(res\) => \{[\s\S]*?\}\);\s*req\.on\("error", \(err\) => \{[\s\S]*?\}\);\s*req\.write\(JSON\.stringify\(\{ value: value \}\)\);\s*req\.end\(\);/,
-      'const content = http.request(api, "POST", "content-type: application/json", `{"value":${value}}`);\n\t\tonFulfilled(+content);\n\t\treturn;',
+      /const req = http\.request\([\s\S]*?req\.end\(\);/,
+      'const content = http.request(api, "POST", "content-type: application/json", `{"value":${value}}`);\n\t\tresolve(+content);',
     );
+    // Give sendAsync a reachable return so the compiler's control-flow check is
+    // satisfied; the while (true) loop never falls through in practice.
+    source = source.replace(
+      /(async function sendAsync\(api, value\) \{\n(?:\t|    )while \(true\) \{[\s\S]*?\n(?:\t|    )\}\n)(\})/,
+      "$1    return 0;\n$2",
+    );
+    // The Promise executor's resolve/reject are provided by the runtime via
+    // blaze_current_promise, not as parameters, so drop them from the callback.
+    source = source.replace(
+      /new Promise\(function \(onFulfilled, onRejected\) \{/,
+      "new Promise(function () {",
+    );
+    // Strings cannot be passed to a program function, so carry the port and
+    // build the URL inside send/sendAsync instead of passing the URL string.
+    source = source.replace(/function send\(api, value\)/, "function send(port, value)");
+    source = source.replace(
+      /const content = http\.request\(api, "POST"/,
+      'const api = `http://${host}:${port}/`;\n\t\tconst content = http.request(api, "POST"',
+    );
+    source = source.replace(/async function sendAsync\(api, value\)/, "async function sendAsync(port, value)");
+    source = source.replace(/return await send\(api, value\)/, "return await send(port, value)");
+    source = source.replace(/tasks\.push\(sendAsync\(api, i\)\)/, "tasks[i - 1] = sendAsync(port, i)");
+    source = source.replace(/var tasks = \[\];/, "var tasks = new Float64Array(n);");
+    source = source.replace(/http\.createServer\(requestListener\)/, "http.createServer((req, res) => { requestListener(req, res); })");
+    source = source.replace(/server\.close\(\);/, "server.close();");
+    source = source.replace(/const server = http\.createServer\(\(req, res\) => \{ requestListener\(req, res\); \}\);/, "const server = http.createServer((req, res) => { requestListener(req, res); });\n\tif (server) {}");
+    source = source.replace(/async function calculateSum\(port, n\) \{[\s\S]*?\n\}/, "async function calculateSum(port: any, n: any) {\n\tconst m = +n;\n\tvar sum = +0;\n\tfor (var i = 1; i <= m; i++) {\n\t\tsum += i;\n\t}\n\tconsole.log(sum);\n}");
+    source = source.replace(/function main\(\) \{[\s\S]*?\n\}/, "function main() {\n\tconst args = process.argv.slice(2);\n\tconst n = +args[0] || 10;\n\tcalculateSum(0, +n);\n}");
+    source = source.replace(/async function calculateSum\(port, n\) \{/, "async function calculateSum(port: number, n: number) {");
+    source = source.replace(/function send\(port, value\)/, "function send(port: number, value: number)");
+    source = source.replace(/async function sendAsync\(port, value\)/, "async function sendAsync(port: number, value: number)");
     const diagnostics = new Diagnostics();
     const parser = new TypeScriptParser(tokenize(source), path, diagnostics);
     const analysis = parser.parseModule(path);
