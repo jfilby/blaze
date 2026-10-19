@@ -193,3 +193,15 @@ test("server.listen starts the event loop in the background and server.close sto
   assert.match(written, /blaze_http_server_join/, "server.listen joins the background thread so the callback can stop it");
   assert.match(written, /blaze_http_server_stop\(blaze_http_server_held\(\)\)/, "server.close stops the server the adapter holds");
 });
+
+test("http.request lowers to blaze_http_client_request", () => {
+  const source = `const body = http.request("http://127.0.0.1:8080/", "GET", "", "");\nconsole.log(body);\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(written, /blaze_http_client_request/, "http.request lowers to the client runtime call");
+});
+
+test("fetch lowers to blaze_http_client_request", () => {
+  const source = `const body = fetch("http://127.0.0.1:8080/", "GET", "", "");\nconsole.log(body);\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(written, /blaze_http_client_request/, "fetch lowers to the client runtime call");
+});

@@ -67,6 +67,11 @@ export function facilAdapterSource(): string {
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
 
 #include "${HTTP_NAME}.h"
 
@@ -455,7 +460,148 @@ void blaze_http_route_register(void *server_raw, const char *method,
   server->handlers[server->route_count] = handler;
   server->route_count += 1;
 }
+
+/* -------------------------------------------------------------------------- */
+/* HTTP client.                                                               */
+/* -------------------------------------------------------------------------- */
+
+static char blaze_http_client_body_buf[1 << 20]; /* 1 MiB response body buffer */
+
+const char *blaze_http_client_request(const char *url, const char *method,
+                                      const char *headers,
+                                      const unsigned char *body, size_t body_len,
+                                      int timeout_ms, size_t *length) {
+  if (length) *length = 0;
+  if (!url || !method) return NULL;
+
+  /* Parse the URL into host, port and path. */
+  char host[256];
+  int port = 80;
+  char path[4096];
+  snprintf(path, sizeof(path), "/");
+
+  const char *p = url;
+  if (strncmp(p, "http://", 7) == 0) p += 7;
+  else if (strncmp(p, "https://", 8) == 0) p += 8;
+
+  /* host */
+  size_t host_len = 0;
+  const char *slash = strchr(p, '/');
+  size_t p_len = slash ? (size_t)(slash - p) : strlen(p);
+  if (p_len >= sizeof(host)) p_len = sizeof(host) - 1;
+  memcpy(host, p, p_len);
+  host[p_len] = '\\0';
+
+  /* port */
+  char *colon = strchr(host, ':');
+  if (colon) {
+    *colon = '\\0';
+    port = atoi(colon + 1);
+    if (port <= 0) port = 80;
+  }
+
+  /* path */
+  if (slash) {
+    snprintf(path, sizeof(path), "%s", slash);
+  }
+
+  /* Resolve. */
+  struct addrinfo hints, *res = NULL;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+  if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return NULL;
+
+  int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+  if (sock < 0) { freeaddrinfo(res); return NULL; }
+
+  /* Timeouts. */
+  struct timeval tv;
+  int to = timeout_ms > 0 ? timeout_ms : 10000;
+  tv.tv_sec = to / 1000;
+  tv.tv_usec = (to % 1000) * 1000;
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+  if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) {
+    close(sock);
+    freeaddrinfo(res);
+    return NULL;
+  }
+  freeaddrinfo(res);
+
+  /* Build the request. */
+  char reqbuf[8192];
+  int req_len = snprintf(reqbuf, sizeof(reqbuf),
+    "%s %s HTTP/1.1\\r\\nHost: %s\\r\\nConnection: close\\r\\n",
+    method, path, host);
+  if (headers && headers[0] != '\\0') {
+    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "%s\\r\\n", headers);
+  }
+  if (body && body_len > 0) {
+    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len,
+      "Content-Length: %zu\\r\\n\\r\\n", body_len);
+    /* append body */
+    if ((size_t)req_len + body_len < sizeof(reqbuf)) {
+      memcpy(reqbuf + req_len, body, body_len);
+      req_len += (int)body_len;
+      reqbuf[req_len] = '\\0';
+    } else {
+      /* send headers first then body */
+      send(sock, reqbuf, req_len, 0);
+      send(sock, "\\r\\n", 2, 0);
+      send(sock, body, body_len, 0);
+      reqbuf[0] = '\\0';
+      req_len = 0;
+    }
+  } else {
+    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "\\r\\n");
+  }
+
+  if (req_len > 0) {
+    send(sock, reqbuf, req_len, 0);
+  }
+
+  /* Read the response. */
+  static char respbuf[1 << 20]; /* 1 MiB */
+  size_t resp_used = 0;
+  ssize_t n;
+  while ((n = recv(sock, respbuf + resp_used, sizeof(respbuf) - resp_used - 1, 0)) > 0) {
+    resp_used += (size_t)n;
+    if (resp_used >= sizeof(respbuf) - 1) break;
+  }
+  close(sock);
+  respbuf[resp_used] = '\\0';
+
+  /* Find body: after \\r\\n\\r\\n. */
+  char *body_start = strstr(respbuf, "\\r\\n\\r\\n");
+  if (!body_start) {
+    /* No headers separator; treat whole as body. */
+    body_start = respbuf;
+  } else {
+    body_start += 4;
+  }
+
+  /* Determine length. Try Content-Length, else read-to-EOF (already done). */
+  size_t blen = strlen(body_start);
+  /* Honour Content-Length if present. */
+  char *cl = strcasestr(respbuf, "Content-Length:");
+  if (cl) {
+    size_t clv = (size_t)strtoul(cl + 15, NULL, 10);
+    if (clv < blen) blen = clv;
+  }
+
+  if (blen >= sizeof(blaze_http_client_body_buf)) blen = sizeof(blaze_http_client_body_buf) - 1;
+  memcpy(blaze_http_client_body_buf, body_start, blen);
+  blaze_http_client_body_buf[blen] = '\\0';
+
+  if (length) *length = blen;
+  return blaze_http_client_body_buf;
+}
 `
+
 }
 
 /** Builds and compiles facil.io together with the adapter, bundled into one object. */
@@ -537,7 +683,8 @@ export async function buildFacilRuntime(
   includeDirs.push(sourceDir);
   await collect(sourceDir);
   const cFlags = [
-    "-std=c11",
+    "-std=gnu11",
+    "-D_GNU_SOURCE",
     "-D_POSIX_C_SOURCE=200809L",
     "-DHAVE_OPENSSL",
     "-DFIO_TLS_FOUND",

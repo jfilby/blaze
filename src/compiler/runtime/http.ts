@@ -164,6 +164,21 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     "Creates an HTTPS (TLS) server listening on a port.",
     "Returns an owned server handle; a null handle means the port could not be bound or TLS could not be initialized.",
   ),
+  httpEntry(
+    "blaze_http_client_request",
+    "const char*",
+    [
+      ["url", "const char*"],
+      ["method", "const char*"],
+      ["headers", "const char*"],
+      ["body", "const unsigned char*"],
+      ["body_len", "size_t"],
+      ["timeout_ms", "int"],
+      ["length", "size_t*"],
+    ],
+    "Performs an HTTP request and returns the response body bytes.",
+    "Returns a borrowed pointer to the response body (valid until the next client call); the body byte count is written through length. Returns NULL on failure.",
+  ),
 ];
 
 /** Symbols generated HTTP code may reference. Nothing else resolves at link time. */

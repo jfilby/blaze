@@ -853,6 +853,15 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return "0.0";
       case "tasks.push":
         return RUNTIME_NAME + "_array_push(" + argument(0) + ", " + argument(1) + ")";
+      case "fetch":
+      case "http.request": {
+        const urlExpr = `(const char*)(uintptr_t)${argument(0)}`;
+        const methodExpr = `(const char*)(uintptr_t)${argument(1)}`;
+        const headersExpr = `(const char*)(uintptr_t)${argument(2)}`;
+        const bodyExpr = `(const char*)(uintptr_t)${argument(3)}`;
+        const bodyLen = `strlen((const char*)(uintptr_t)${argument(3)})`;
+        return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_request(${urlExpr}, ${methodExpr}, ${headersExpr}, (const unsigned char*)${bodyExpr}, ${bodyLen}, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_body, blaze_http_len); })`;
+      }
       default:
         throw driverError(`the driver cannot write down ${call.callee}`);
     }

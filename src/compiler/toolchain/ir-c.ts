@@ -414,6 +414,10 @@ class FunctionEmitter {
           this.httpServe(statement.call, depth);
           return;
         }
+        if (statement.call.callee === "fetch" || statement.call.callee === "http.request") {
+          this.httpRequest(statement.call, depth);
+          return;
+        }
         this.write([`${pad(depth)}${this.call(statement.call, depth)};`]);
         return;
       case "raise":
@@ -684,6 +688,13 @@ class FunctionEmitter {
       const out = this.temporary("blaze_wide");
       return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}); ${out}; })`;
     }
+    if (call.callee === "fetch" || call.callee === "http.request") {
+      const url = this.expression(call.args[0], null, depth);
+      const method = this.expression(call.args[1], null, depth);
+      const headers = this.expression(call.args[2], null, depth);
+      const body = this.expression(call.args[3], null, depth);
+      return `({ const char *blaze_http_req_body = ${body}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); })`;
+    }
     return builtinExpression(call.callee, args);
   }
 
@@ -713,6 +724,21 @@ class FunctionEmitter {
     this.externs.set(
       "blaze_http_default_handler",
       `/* defined by the HTTP adapter, linked with the program */\nextern void blaze_http_default_handler(void *, void *);`,
+    );
+  }
+
+  private httpRequest(call: SemanticCall, depth: number): void {
+    const cstr = (index: number) => this.expression(call.args[index], null, depth);
+    const url = cstr(0);
+    const method = cstr(1);
+    const headers = cstr(2);
+    const body = cstr(3);
+    this.write([
+      `${pad(depth)}(void)({ const char *blaze_http_req_body = ${body}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); });`,
+    ]);
+    this.externs.set(
+      "blaze_http_client_request",
+      `/* defined by the HTTP adapter, linked with the program */\nextern const char* blaze_http_client_request(const char*, const char*, const char*, const unsigned char*, size_t, int, size_t*);`,
     );
   }
 

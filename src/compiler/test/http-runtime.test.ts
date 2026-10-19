@@ -38,6 +38,11 @@ test("the HTTP header keeps the core runtime header intact", () => {
   assert.ok(!header.includes("blaze_http"), "the core runtime header does not declare HTTP");
 });
 
+test("the HTTP ABI declares the client request entry", () => {
+  const header = httpHeaderSource();
+  assert.ok(header.includes("blaze_http_client_request"), "blaze_http_client_request must be declared in the HTTP header");
+});
+
 test("facil is a known runtime kind", () => {
   assert.ok(RUNTIME_KINDS.includes("facil"), "facil is a runtime kind");
   assert.equal(RUNTIME_TITLES["facil"], "the facil.io HTTP server runtime");
