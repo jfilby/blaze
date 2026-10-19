@@ -837,7 +837,12 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "req.on": {
         const req = argument(0);
         const event = call.args[1];
-        const eventName = event.k === "const" ? String(event.text).replace(/^"|"$/g, "") : "";
+        const eventName =
+          event.k === "const"
+            ? String(event.text).replace(/^"|"$/g, "")
+            : event.k === "text" && Array.isArray(event.parts) && event.parts.length === 1 && event.parts[0].k === "text"
+              ? String(event.parts[0].value)
+              : "";
         const cb = call.args[2];
         let invoke = "0.0";
         if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {

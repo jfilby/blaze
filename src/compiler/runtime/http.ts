@@ -179,6 +179,34 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     "Performs an HTTP request and returns the response body bytes.",
     "Returns a borrowed pointer to the response body (valid until the next client call); the body byte count is written through length. Returns NULL on failure.",
   ),
+  httpEntry(
+    "blaze_http_client_open",
+    "void*",
+    [["url", "const char*"]],
+    "Opens a buffered HTTP request handle for the callback form.",
+    "Returns an owned handle; the caller writes the body with blaze_http_client_write and completes it with blaze_http_client_end.",
+  ),
+  httpEntry(
+    "blaze_http_client_write",
+    "void",
+    [["handle", "void*"], ["body", "const unsigned char*"], ["body_len", "size_t"]],
+    "Appends bytes to a buffered request body.",
+    "No-op on a null handle.",
+  ),
+  httpEntry(
+    "blaze_http_client_end",
+    "void*",
+    [["handle", "void*"]],
+    "Completes a buffered request and returns a response handle.",
+    "Returns an owned response handle; NULL on failure.",
+  ),
+  httpEntry(
+    "blaze_http_client_resp_body",
+    "const char*",
+    [["handle", "void*"], ["length", "size_t*"]],
+    "Reads the response body of a completed request.",
+    "Returns a borrowed pointer; the byte count is written through length.",
+  ),
 ];
 
 /** Symbols generated HTTP code may reference. Nothing else resolves at link time. */

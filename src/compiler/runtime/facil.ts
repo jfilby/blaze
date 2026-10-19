@@ -600,6 +600,63 @@ const char *blaze_http_client_request(const char *url, const char *method,
   if (length) *length = blen;
   return blaze_http_client_body_buf;
 }
+  return blaze_http_client_body_buf;
+}
+
+/* Buffered client request handle for the callback form. */
+typedef struct blaze_http_client_handle_s {
+  char *url;
+  char *method;
+  char *headers;
+  char *body;
+  size_t body_len;
+  size_t body_cap;
+  char *resp_body;
+  size_t resp_len;
+} blaze_http_client_handle_t;
+
+void *blaze_http_client_open(const char *url) {
+  blaze_http_client_handle_t *h = calloc(1, sizeof(*h));
+  if (!h) return NULL;
+  h->url = url ? strdup(url) : NULL;
+  h->method = strdup("GET");
+  h->headers = strdup("");
+  return h;
+}
+
+void blaze_http_client_write(void *handle, const unsigned char *body, size_t body_len) {
+  blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
+  if (!h || !body || body_len == 0) return;
+  if (h->body_len + body_len + 1 > h->body_cap) {
+    size_t nc = h->body_cap == 0 ? 4096 : h->body_cap * 2;
+    while (nc < h->body_len + body_len + 1) nc *= 2;
+    char *nb = realloc(h->body, nc);
+    if (!nb) return;
+    h->body = nb;
+    h->body_cap = nc;
+  }
+  memcpy(h->body + h->body_len, body, body_len);
+  h->body_len += body_len;
+  h->body[h->body_len] = '\0';
+}
+
+void *blaze_http_client_end(void *handle) {
+  blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
+  if (!h) return NULL;
+  size_t len = 0;
+  const char *resp = blaze_http_client_request(h->url, h->method ? h->method : "GET", h->headers ? h->headers : "", (const unsigned char *)h->body, h->body_len, 10000, &len);
+  if (!h->resp_body) h->resp_body = malloc(len + 1);
+  else h->resp_body = realloc(h->resp_body, len + 1);
+  if (h->resp_body) { memcpy(h->resp_body, resp ? resp : "", len); h->resp_body[len] = '\0'; h->resp_len = len; }
+  return h;
+}
+
+const char *blaze_http_client_resp_body(void *handle, size_t *length) {
+  blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
+  if (!h) { if (length) *length = 0; return NULL; }
+  if (length) *length = h->resp_len;
+  return h->resp_body ? h->resp_body : "";
+}
 `
 
 }

@@ -75,6 +75,12 @@ synchronous `blaze_http_client_request`; the supported form lowers
 returned by a new `blaze_http_client_open` (rather than a Promise wrapper
 around the synchronous call).
 
+Implementation steps:
+1. Fix the boxed mutable text capture regression in `requestListener` so the existing `http_server` benchmark builds again (the `body` cell must be passed to `__arrow_7`). (In progress: program emitter now allocates the shared cell for boxed text locals.)
+2. Add a client request handle API to the runtime: `blaze_http_client_open` (returns a handle), buffered `req.write`/`req.end`, a client response handle, and `blaze_http_client_resp_body` for `data`/`end` events. (In progress: runtime handle API and buffered write/end added to facil.io adapter.)
+3. Extend builtins and the driver to accept the 3-arg `http.request(url, options, callback)` form, parse object request options (`method`, `headers`), and lower it to immediate callback invocation plus buffered writes/ends.
+4. Remove only the item-2 rewrite from `src/compiler/semantics/typescript.ts` once the benchmark builds and the frontend tests pass.
+
 ### 3. Promise executor parameters
 Executors are invoked by the runtime as `cb()` with no arguments, while
 `blaze_current_promise` carries resolve/reject. Supporting `onFulfilled(x)` /

@@ -707,6 +707,14 @@ class ProgramEmitter {
 
   private declaration(slot: SemanticSlot, value: SemanticValue): void {
     const name = this.names.declare(slot.name, slotType(slot));
+    if (slot.kind === "text" && (slot as { boxed?: boolean }).boxed === true) {
+      // A mutable text local captured by a nested program function is stored in a
+      // shared cell, so writes inside the function update this binding.
+      this.write(`char** ${name} = (char**)${RUNTIME_NAME}_allocate(sizeof(char*));`);
+      this.write(`if (${name} == NULL) program_fail("out of memory");`);
+      this.write(`*${name} = (char*)${this.expression(value)};`);
+      return;
+    }
     if (slot.kind === "text") {
       this.write(this.target.declare(name, null, this.expression(value)));
       return;
