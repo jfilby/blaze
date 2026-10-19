@@ -108,6 +108,7 @@ export function parsePrimitiveName(name: string): PrimitiveTypeName {
 
 export function parseType(text: string): TypeExpr {
   const source = text.trim();
+  if (source === "text") return { kind: "primitive", name: "usize" };
   if (source === "void") return { kind: "void" };
   const composite = /^([A-Za-z_][A-Za-z0-9_]*)\s*<(.+)>$/.exec(source);
   if (composite === null) {
@@ -517,7 +518,7 @@ export function symbolOf(contract: FunctionContract): string {
 export function signatureTypeEnv(contract: FunctionContract): TypeEnv {
   const env = new Map<string, TypeExpr>();
   for (const param of contract.function.params) {
-    env.set(param.name, parseType(param.type));
+    env.set(param.name, param.type === "text" ? { kind: "primitive", name: "usize" } : parseType(param.type));
   }
   env.set("result", parseType(contract.function.returns));
   return env;
@@ -1044,7 +1045,7 @@ export function parseContract(contract: FunctionContract): ParsedContract {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(param.name)) throw contractError(`invalid parameter name "${param.name}"`);
     if (seen.has(param.name)) throw contractError(`duplicate parameter "${param.name}"`);
     seen.add(param.name);
-    parseType(param.type);
+    if (param.type !== "text") parseType(param.type);
   }
 
   const requires = contract.requires.map((text) => checkBoolean(text, "requires", env));

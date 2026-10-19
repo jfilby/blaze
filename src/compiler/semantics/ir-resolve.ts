@@ -3669,15 +3669,17 @@ class ProgramLowering {
   /** One function the program declared, as the IR holds a function whole. */
   private function(draft: SettledFunction): SemanticFunction {
     const signature = draft.signature as FunctionSignature;
+    if (draft.name.startsWith("__arrow_")) console.error("FN", draft.name, JSON.stringify(signature.params.map(p=>p.type)), "=>", JSON.stringify((draft.signature as any).params.map((p:any)=>p.type)));
     // The parameters are the parameters of the signature the resolver settled,
     // read back as the types the body reads them at: a buffer is a pointer to
     // its first element, and a number is the number it is.
     const params = signature.params.map((param) => ({
       kind: "value" as const,
       name: param.name,
-      mutable: false,
-      type: parseType(param.type) as SemanticType,
+      mutable: param.type === "text",
+      type: (param.type === "text" ? { kind: "text" } : parseType(param.type)) as SemanticType,
     }));
+    if (draft.name.startsWith("__arrow_")) console.error("SEM", draft.name, JSON.stringify(params.map(p=>p.type)));
     // The body is lowered on its own: its own entry block, its own names, and
     // a value of its own for each parameter it is given.
     const inner = new ProgramLowering(new Set(this.used));

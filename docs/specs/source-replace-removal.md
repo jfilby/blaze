@@ -10,21 +10,9 @@ the compiler/runtime support that has to exist before the rewrite can be deleted
 - `http.createServer(requestListener)` -> arrow wrapper (dead after `main` rewrite; function references as callbacks already work in `http.createServer`).
 - `while (true)` reachable-return insertion (supported: constant-true loops mark their block unreachable).
 - `const server = ...;` -> `...; if (server) {}` (identity/unused-variable hack).
+- Request body accumulation `var body = ""; req.on("data", ...)` -> `const body = req.text();` (boxing support for mutable text locals captured by nested program functions).
 
 ## Remaining rewrites and required support
-
-### 1. Request body accumulation
-Original:
-```js
-var body = "";
-req.on("data", function (chunk) { body += chunk; });
-req.on("end", function () { ... JSON.parse(body) ... });
-```
-Rewrite turns it into `const body = req.text();`.
-Required support:
-- String-typed locals and string concatenation (`body += chunk`).
-- `req.on("data", callback)` and `req.on("end", callback)` as supported server-side events.
-- Object/JSON parsing of a request body (`JSON.parse`).
 
 ### 2. Node-style `http.request` callback form
 Original:

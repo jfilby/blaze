@@ -2314,10 +2314,6 @@ export const typeScriptFrontend: Frontend = {
     // callback form into the forms the compiler supports (see
     // docs/specs/http_server.md).
     source = source.replace(
-      /var body = ""\s*;\s*req\.on\("data", function \(chunk\) \{\s*body \+= chunk;\s*\}\);\s*req\.on\("end", function \(\) \{/,
-      "req.on(\"end\", function () {\n    const body = req.text();",
-    );
-    source = source.replace(
       /const req = http\.request\([\s\S]*?req\.end\(\);/,
       'const content = http.request(api, "POST", "content-type: application/json", `{"value":${value}}`);\n\t\tresolve(+content);',
     );

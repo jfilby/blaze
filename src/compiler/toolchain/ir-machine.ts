@@ -1792,6 +1792,9 @@ class Machine {
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
     this.layouts = { ...contract.definition.objects, ...fn.objects };
+    for (const parameter of fn.params) {
+      if (parameter.type.kind === "text") this.boxedTexts.add(parameter.name);
+    }
     // A bound label is a place control reaches from somewhere other than the
     // instruction in front of it, so what the accumulator held before one is a
     // fact about the path that fell through and about no other. That is what

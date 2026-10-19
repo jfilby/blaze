@@ -883,7 +883,7 @@ function compilationUnits(program: ProgramContract, isProgram: boolean): Compila
   for (const file of program.files) {
     for (const [name, contract] of Object.entries(file.functions)) {
       if (!isProgram && !(program.entry.file === file.path && program.entry.function === name)) continue;
-      units.push({ file: file.path, contract, parsed: parseContract(contract) });
+      try { units.push({ file: file.path, contract, parsed: parseContract(contract) }); } catch (e) { console.error("COMPILE UNIT FAIL", file.path, name, contract.function.params, contract.function.returns); throw e; }
     }
   }
   return units;

@@ -255,9 +255,12 @@ class FunctionEmitter {
   emit(): string {
     // Parameters are the scope the body reads its arguments from, bound before
     // anything is written so a body that shadows one writes a second name.
-    const parameters = this.fn.params.map(
-      (param) => `${declaredType(slotType(param))} ${this.names.declare(param.name, slotType(param))}`,
-    );
+    const parameters = this.fn.params.map((param) => {
+      const type = slotType(param);
+      const name = this.names.declare(param.name, type);
+      if (isTextType(type)) this.boxedTexts.add(param.name);
+      return isTextType(type) ? `char **${name}` : `${declaredType(type)} ${name}`;
+    });
     this.block(this.fn.entry, 1);
     const layouts = cObjectDeclarations(this.fn.objects);
     const signature = `${declaredType(this.fn.returns)} ${this.fn.symbol}(${parameters.join(", ") || "void"})`;
