@@ -13,6 +13,9 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
+import { generateProgramDriver } from "../toolchain/driver.ts";
+import { phaseOf } from "./phase.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
@@ -172,4 +175,21 @@ test("machine backend echoes request body via req.text", async () => {
     server.kill();
     await new Promise((r) => setTimeout(r, 300));
   }
+});
+
+function resolved(source: string) {
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  if (phase.body === undefined) throw new Error("no program body");
+  return resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+}
+
+test("server.listen starts the event loop in the background and server.close stops the held server", () => {
+  const source = `const port = 18090;\n` +
+    `const server = http.createServer((req, res) => { res.writeHead(200); res.end("closed\n"); });\n` +
+    `server.listen(port, "127.0.0.1", () => { server.close(); });\n` +
+    `console.log("done");\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(written, /blaze_http_server_start_background/, "server.listen starts the event loop on a background thread");
+  assert.match(written, /blaze_http_server_join/, "server.listen joins the background thread so the callback can stop it");
+  assert.match(written, /blaze_http_server_stop\(blaze_http_server_held\(\)\)/, "server.close stops the server the adapter holds");
 });

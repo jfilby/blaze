@@ -337,7 +337,7 @@ class CDriver implements ProgramTarget {
     const objects = cObjectDeclarations(program.objects);
     const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
-    const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\n" : "";
+    const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
     return `${DRIVER_PRELUDE}
 ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations}`;
   }
@@ -786,7 +786,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyPtr}, strlen((const char*) ${bodyPtr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
       }
       case "server.close": {
-        return `(blaze_http_server_stop((void*) (uintptr_t) ${argument(0)}), 0.0)`;
+        /* Stop the server `server.listen` last created. The listener passed in
+           is the callback, not the handle, so the handle is read from the one the
+           adapter holds. A null handle is ignored by the adapter. */
+        return `(blaze_http_server_stop(blaze_http_server_held()), 0.0)`;
       }
       case "server.listen": {
         const cb = call.args[3];
@@ -795,10 +798,12 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
           invoke = `${argument(3)}(${cb.captures.join(", ")})`;
         }
         const handler = `((void(*)(void*, void*)) (uintptr_t) ${argument(0)})`;
-        /* The port is bound by blaze_http_server_new before the callback runs,
-           so the listener is ready; blaze_http_server_run then blocks in this
-           thread, exactly as http.serve does. */
-        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); ${invoke}; blaze_http_server_run(blaze_http_srv); })`;
+        /* blaze_http_server_new binds the listening socket before it returns, so
+           the listener is ready when the callback runs. The event loop runs on a
+           detached background thread, so server.listen returns and the callback —
+           and anything after it, such as server.close — can run without
+           deadlocking against a server that never started. */
+        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); blaze_http_server_start_background(blaze_http_srv); ${invoke}; blaze_http_server_join(); 0.0; })`;
       }
       case "Promise": {
         const cb = call.args[0];
@@ -1127,7 +1132,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // for the same machine as every function it links, which is what a caller
   // naming a cpu asked for and what an unnamed one would not get otherwise.
 
-  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...(request.runtimeObjectPath !== undefined ? ["-lssl", "-lcrypto"] : [])], { timeoutMs: 120_000 });
+  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...(request.runtimeObjectPath !== undefined ? ["-pthread", "-lssl", "-lcrypto"] : [])], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

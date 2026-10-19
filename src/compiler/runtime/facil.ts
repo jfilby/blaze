@@ -63,6 +63,7 @@ export function facilAdapterSource(): string {
  * the lifetime of the request the handler is serving.
  */
 
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -79,6 +80,25 @@ export function facilAdapterSource(): string {
 
 #define BLAZE_HTTP_MAX_ROUTES 16
 #define BLAZE_HTTP_HEADER_BUF 2048
+
+/* -------------------------------------------------------------------------- */
+/* The server the program most recently created.                            */
+/* -------------------------------------------------------------------------- */
+
+/* "blaze_http_server_new" (and its settings and TLS variants) store the handle
+   they create here, so "server.close" — which receives the listener, not the
+   handle — can still stop the server the program is listening on. */
+static void *blaze_http_server_handle = NULL;
+
+/* The thread the event loop runs on once "blaze_http_server_start_background"
+   has started it. "blaze_http_server_join" waits for it. */
+static pthread_t blaze_http_server_thread;
+
+/* Returns the server handle "blaze_http_server_new" last created, or NULL when
+   no server has been created yet. */
+void *blaze_http_server_held(void) {
+  return blaze_http_server_handle;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Internal handle representations (opaque in blaze_http.h).                  */
@@ -320,6 +340,7 @@ void *blaze_http_server_new(uint16_t port) {
   }
   server->uuid = uuid;
   server->bound = 1;
+  blaze_http_server_handle = server;
   return server;
 }
 
@@ -347,6 +368,7 @@ void *blaze_http_server_new_settings(uint16_t port,
   }
   server->uuid = uuid;
   server->bound = 1;
+  blaze_http_server_handle = server;
   return server;
 }
 
@@ -367,15 +389,45 @@ void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key
   }
   server->uuid = uuid;
   server->bound = 1;
+  blaze_http_server_handle = server;
   return server;
 }
 
 void blaze_http_server_run(void *server_raw) {
   blaze_http_server_t *server = (blaze_http_server_t *)server_raw;
   if (!server || !server->bound) return;
+  /* Copy the thread and worker counts before handing the server to facil.io:
+     "blaze_http_server_stop" frees the handle from another thread once the
+     loop stops, so the running loop must not read the struct again. */
+  int threads = server->threads;
+  int workers = server->workers;
   /* facil.io runs the event loop on this thread until fio_stop is called. The
      thread and worker counts come from the server's stored settings. */
-  fio_start(.threads = server->threads, .workers = server->workers);
+  fio_start(.threads = threads, .workers = workers);
+}
+
+/* Runs the event loop on a detached background thread, so the caller is not
+   blocked: "blaze_http_server_run" never returns while the server runs. The
+   caller is responsible for stopping the server with "blaze_http_server_stop",
+   which makes "fio_start" return and lets the thread end. */
+static void *blaze_http_server_run_thread(void *arg) {
+  blaze_http_server_run(arg);
+  return NULL;
+}
+
+void blaze_http_server_start_background(void *server) {
+  if (!server || !((blaze_http_server_t *)server)->bound) return;
+  /* Joinable: "blaze_http_server_join" reaps it once the server is stopped. */
+  if (pthread_create(&blaze_http_server_thread, NULL, blaze_http_server_run_thread, server) != 0) return;
+}
+
+/* Waits for the background event loop to finish. "blaze_http_server_stop"
+   (reached through "server.close") makes "fio_start" return, so this returns
+   once the server has been shut down. When the callback passed to
+   "server.listen" does not close the server, this waits for as long as the
+   server runs, which keeps the process alive to serve requests. */
+void blaze_http_server_join(void) {
+  pthread_join(blaze_http_server_thread, NULL);
 }
 
 void blaze_http_server_stop(void *server_raw) {
@@ -493,6 +545,7 @@ export async function buildFacilRuntime(
     ...cTargetOptions(target),
     "-ffunction-sections",
     "-fdata-sections",
+    "-pthread",
     ...includeDirs.map((dir) => `-I${dir}`),
   ];
 

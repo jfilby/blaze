@@ -95,12 +95,15 @@ mentions `blaze_http` or `fio_`, and no facil.io object is linked.
    and end-to-end test as (3).
 5. ✅ Routing, request bodies, headers, error responses, graceful shutdown —
    `http.createServer` + `server.listen` lower to `blaze_http_route_register`
-   and `blaze_http_server_run` in a background thread; `res.writeHead` lowers
+   and `blaze_http_server_run` on a background thread (`blaze_http_server_start_background`
+   + `blaze_http_server_join`); the listener is bound before the callback runs
+   so the callback is invoked once the server is ready. `res.writeHead` lowers
    to `blaze_http_resp_status`; `res.end` lowers to `blaze_http_resp_body` +
    `blaze_http_resp_complete`; `server.close` lowers to
-   `blaze_http_server_stop`; `req.on` invokes the callback (the adapter already
-   buffers the body); `req.text` reads `blaze_http_req_body` into a Blaze
-   string. Verified by `test/http-end-to-end.test.ts` (C and machine backends).
+   `blaze_http_server_stop(blaze_http_server_held())`; `req.on` invokes the
+   callback (the adapter already buffers the body); `req.text` reads
+   `blaze_http_req_body` into a Blaze string. HTTP builds link `-pthread`.
+   Verified by `test/http-end-to-end.test.ts` (C and machine backends).
 6. ✅ Concurrency tests, resource limits, timeouts, HTTPS — facil.io provides
    these; Blaze-side tests in `test/http-facilities.test.ts` verify concurrent
    connections, `max_body_size` rejection (HTTP 413), a configured connection
@@ -157,18 +160,21 @@ identically on the unmodified baseline.
 
 ### Server side
 
-- [ ] `http.createServer(requestListener)` and `server.listen(port, host, cb)` are
-  currently dropped. A real HTTP server runtime is needed that:
-  - [ ] binds a listening socket on `port`,
-  - [ ] accepts connections in a background thread or non-blocking loop,
-  - [ ] parses the incoming HTTP request (method, path, headers, body),
-  - [ ] invokes the Blaze `requestListener(req, res)` callback with borrowed
-    request/response handles,
-  - [ ] supports `res.writeHead`, `res.end`, `req.on("data"/"end")`,
-  - [ ] and shuts down on `server.close()`.
-- [ ] The callback passed to `server.listen` (which runs `calculateSum` and then
-  closes the server) must be invoked after the listener is ready, otherwise
-  the client deadlocks against a server that never started.
+- [x] `http.createServer(requestListener)` and `server.listen(port, host, cb)`:
+  `blaze_http_server_new` binds the listening socket before it returns, so the
+  listener is ready when the callback runs; `blaze_http_route_register` wires
+  the listener to `blaze_http_on_request`, which parses the request and invokes
+  the Blaze `requestListener(req, res)` with borrowed request/response handles;
+  `res.writeHead`, `res.end`, `req.on("data"/"end")` and `req.text` are handled
+  by the adapter. `blaze_http_server_run` runs on a background thread
+  (`blaze_http_server_start_background`) so `server.listen` returns after the
+  callback runs; `blaze_http_server_join` waits for that thread, keeping the
+  process serving until `server.close()` stops the held handle via
+  `blaze_http_server_held()` / `blaze_http_server_stop`. Verified by
+  `test/http-end-to-end.test.ts` (C and machine backends).
+- [x] The callback passed to `server.listen` (which runs `calculateSum` and then
+  closes the server) is invoked after the listener is ready, so the client no
+  longer deadlocks against a server that never started.
 
 ### JSON on the wire
 
