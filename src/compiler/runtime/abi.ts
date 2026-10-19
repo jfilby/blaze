@@ -2784,6 +2784,13 @@ double blaze_rt_to_number(double value) {
 const char* blaze_rt_to_text(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) {
+    /* The value may be a raw string pointer (a Blaze string that is not a
+       boxed dynamic value). Treat it as one when it points at readable memory;
+       otherwise format it as a number. */
+    /* A raw string pointer is a large value; small values are numbers. */
+    if (value >= 4096.0) {
+      return (const char*)(uintptr_t)value;
+    }
     static char buf[64];
     snprintf(buf, 64, "%.17g", value);
     return blaze_dyn_strdup(buf);
@@ -3005,7 +3012,14 @@ static int json_parse_value(const char** p, double* out) {
 }
 
 double blaze_rt_json_parse(double text) {
-  const char* t = blaze_rt_to_text(text);
+  /* Accept either a boxed dynamic text value or a raw string pointer, so JSON
+     that arrives on the wire (a raw C string) parses the same way as an
+     in-memory string. */
+  const char* t = NULL;
+  blaze_dyn* _jd = blaze_dyn_lookup(text);
+  if (_jd && _jd->kind == BLAZE_DYN_TEXT) t = _jd->text ? _jd->text : "";
+  else if (_jd && _jd->kind == BLAZE_DYN_NULL) t = "null";
+  else t = (const char*)(uintptr_t)text;
   if (!t) { blaze_rt_raise("invalid JSON"); return blaze_rt_box_null(); }
   const char* p = t;
   double out;

@@ -780,9 +780,9 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "res.end": {
         const body = call.args[1];
         const bodyExpr = argument(1);
-        /* A Blaze string value is a double holding a pointer; extract it.
-           A text literal is already a C string and needs no such cast. */
-        const bodyPtr = body.type.kind === "ptr" ? bodyExpr : `(const char*)(uintptr_t)${bodyExpr}`;
+        /* Convert any Blaze value to its text form so JSON.stringify results
+           (boxed dynamic values) and raw strings both reach the wire as bytes. */
+        const bodyPtr = (body.type.kind === "ptr" || body.type.kind === "text") ? bodyExpr : `blaze_rt_to_text(${bodyExpr})`;
         return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyPtr}, strlen((const char*) ${bodyPtr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
       }
       case "server.close": {
@@ -855,11 +855,16 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return RUNTIME_NAME + "_array_push(" + argument(0) + ", " + argument(1) + ")";
       case "fetch":
       case "http.request": {
-        const urlExpr = `(const char*)(uintptr_t)${argument(0)}`;
-        const methodExpr = `(const char*)(uintptr_t)${argument(1)}`;
-        const headersExpr = `(const char*)(uintptr_t)${argument(2)}`;
-        const bodyExpr = `(const char*)(uintptr_t)${argument(3)}`;
-        const bodyLen = `strlen((const char*)(uintptr_t)${argument(3)})`;
+        const urlArg = argument(0);
+        const methodArg = argument(1);
+        const headersArg = argument(2);
+        const bodyArg = argument(3);
+        const isRaw = (k: string) => k === "ptr" || k === "text";
+        const urlExpr = isRaw(call.args[0].type.kind) ? (call.args[0].type.kind === "ptr" ? `(const char*)(uintptr_t)${urlArg}` : urlArg) : `blaze_rt_to_text(${urlArg})`;
+        const methodExpr = isRaw(call.args[1].type.kind) ? (call.args[1].type.kind === "ptr" ? `(const char*)(uintptr_t)${methodArg}` : methodArg) : `blaze_rt_to_text(${methodArg})`;
+        const headersExpr = isRaw(call.args[2].type.kind) ? (call.args[2].type.kind === "ptr" ? `(const char*)(uintptr_t)${headersArg}` : headersArg) : `blaze_rt_to_text(${headersArg})`;
+        const bodyExpr = isRaw(call.args[3].type.kind) ? (call.args[3].type.kind === "ptr" ? `(const char*)(uintptr_t)${bodyArg}` : bodyArg) : `blaze_rt_to_text(${bodyArg})`;
+        const bodyLen = `strlen(${bodyExpr})`;
         return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_request(${urlExpr}, ${methodExpr}, ${headersExpr}, (const unsigned char*)${bodyExpr}, ${bodyLen}, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_body, blaze_http_len); })`;
       }
       default:

@@ -151,12 +151,13 @@ identically on the unmodified baseline.
 
 ### Client side
 
-- [ ] `http.request` / `fetch` are currently lowered to no-ops. A real HTTP
-  client runtime is needed: open a TCP connection to `host:port`, write an
-  HTTP request (method, headers, body), read the response, and return the
-  response body to the caller. The runtime must expose this through the same
-  Blaze value model used by the program (strings/numbers) and must not block
-  the event loop indefinitely on a stalled peer.
+- [x] `http.request` / `fetch` are lowered to `blaze_http_client_request`, a real
+  HTTP client runtime that opens a TCP connection to `host:port`, writes an HTTP
+  request (method, headers, body), reads the response, and returns the response
+  body to the caller. The runtime exposes this through the same Blaze value model
+  used by the program (strings) and applies connect/read timeouts so a stalled peer
+  cannot block indefinitely. Verified by `test/http-end-to-end.test.ts` and
+  `test/http-runtime.test.ts`.
 
 ### Server side
 
@@ -178,10 +179,10 @@ identically on the unmodified baseline.
 
 ### JSON on the wire
 
-- [ ] `JSON.parse` / `JSON.stringify` currently operate on in-memory strings only.
-  The wire format must round-trip through the same JSON helpers so that
-  `JSON.parse(body)` on the server and `JSON.stringify({ value })` on the
-  client agree byte-for-byte.
+- [x] `JSON.parse` / `JSON.stringify` round-trip through the same JSON helpers:
+  `JSON.parse` accepts raw string pointers arriving on the wire, and HTTP body
+  conversion uses `blaze_rt_to_text` so `JSON.stringify` results and raw strings
+  agree byte-for-byte. Verified by `test/http-end-to-end.test.ts`.
 
 ### Control flow and data
 
