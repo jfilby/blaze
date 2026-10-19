@@ -75,7 +75,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "http.request": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
   "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
   "process.exit": { params: [ANY], returns: ANY, arity: 1 },
-  "parseInt": { params: [ANY], returns: ANY, arity: 1 },
+  "parseInt": { params: [ANY], returns: F64, arity: 1 },
   /** `http.serve(port)` starts an HTTP server on the port and runs it until the
    * process is stopped. Every route answers with "Hello, World". The call never
    * returns while the server runs. */

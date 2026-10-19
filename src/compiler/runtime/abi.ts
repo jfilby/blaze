@@ -111,6 +111,8 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_null", "double", [], "Boxes null as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_json_get", "double", [["obj", "double"], ["field", "const char*"]], "Reads a field from a dynamic object.", "Returns the value.", { tags: ["object"] }),
+  entry("blaze_rt_random", "double", [], "Returns a pseudo-random double in [0, 1).", "Returns the value.", { tags: ["host"] }),
   entry("blaze_rt_to_number", "double", [["value", "double"]], "Converts a dynamic value to a number.", "Returns the number.", { tags: ["object"] }),
   entry(
     "blaze_rt_region_enter",
@@ -2774,6 +2776,9 @@ double blaze_rt_box_null(void) {
   blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_NULL);
   return blaze_dyn_register(d);
 }
+double blaze_rt_random(void) {
+  return (double)rand() / ((double)RAND_MAX + 1.0);
+}
 double blaze_rt_to_number(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) return value;
@@ -3119,6 +3124,17 @@ double blaze_rt_json_stringify(double value) {
   double h = blaze_rt_box_string(s);
   free(s);
   return h;
+}
+double blaze_rt_json_get(double obj, const char* field) {
+  blaze_dyn* d = blaze_dyn_lookup(obj);
+  if (!d || d->kind != BLAZE_DYN_OBJECT || !d->items) return 0.0;
+  for (size_t i = 0; i < d->count; i++) {
+    double keyHandle = ((double*)d->items)[i*2];
+    blaze_dyn* kd = blaze_dyn_lookup(keyHandle);
+    const char* key = kd && kd->kind == BLAZE_DYN_TEXT ? kd->text : NULL;
+    if (key && strcmp(key, field) == 0) return ((double*)d->items)[i*2+1];
+  }
+  return 0.0;
 }
 
 /* MD5 implementation (RFC 1321). */

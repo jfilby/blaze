@@ -2057,7 +2057,7 @@ class ProgramResolver {
       case "unary":
       case "conditional": {
         const type = value.type;
-        if (type === null) return declare({ kind: "text", mutable, value: null });
+        if (type === null) return declare({ kind: "number", mutable, type: "f64", text: "" });
         if (type.kind === "ref" || type.kind === "ptr") {
           return declare({ kind: "object", mutable, type });
         }
@@ -2644,18 +2644,15 @@ class ProgramResolver {
           // shape is: every `left` of it names the layout the tree itself is.
           laid = referenceLayout(base.type);
           if (laid === undefined) laid = base.layout;
+        } else if (base.k === "reference" && base.held.kind === "number") {
+          laid = "JSON";
         } else if (base.k === "reference" && base.held.kind === "object" && base.held.type.kind === "ref") {
           if (base.held.type.name !== undefined) {
             laid = base.held.type.name;
           } else {
-            // A value whose shape the program cannot name (an object handed in
-            // as a parameter) is still held by reference, and its fields are the
-            // ones the layouts of the program carry: find one carrying this field
-            // and read the field at its offset, rather than refusing the read.
-            const fallback = Object.values(this.objects).find((layout) =>
-              layout.fields.some((field) => field.name === value.field),
-            );
-            laid = fallback?.name;
+            // A dynamic value (such as the result of JSON.parse) has no fixed
+            // layout; read its field through the JSON runtime.
+            laid = "JSON";
           }
         } else {
           throw programError(
@@ -2667,8 +2664,8 @@ class ProgramResolver {
         }
         // The layout the base points at is the one the program lays out, and the
         // field is a field of it or nothing the program answers.
-        const layout = this.objects[laid as string] as ObjectLayout | undefined;
-        if (layout === undefined) {
+        const layout = laid === "JSON" ? undefined : (this.objects[laid as string] as ObjectLayout | undefined);
+        if (laid !== "JSON" && layout === undefined) {
           throw programError(
             `"${laid}" is not a layout the program lays out`,
             this.body,
@@ -2676,7 +2673,16 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: a program reads the fields of the objects it laid out, and nothing else lays out ${laid}`,
           );
         }
-        const found = layout.fields.find((field) => field.name === value.field);
+        if (laid === "JSON") {
+          return {
+            k: "field",
+            object: base,
+            layout: laid as string,
+            field: value.field,
+            type: { kind: "primitive", name: "f64" },
+          };
+        }
+        const found = layout!.fields.find((field) => field.name === value.field);
         if (found === undefined) {
           throw programError(
             `${laid} has no field "${value.field}"`,

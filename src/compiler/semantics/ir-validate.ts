@@ -979,7 +979,7 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // already built is read: the layout must be one the program lays out, the
       // field must be one of its fields, and what is written must be readable
       // as the type the layout gives that field.
-      if (!isLayout(context, value.layout) && !isContractLayout(context.contract, value.layout)) {
+      if (value.layout !== "JSON" && !isLayout(context, value.layout) && !isContractLayout(context.contract, value.layout)) {
         problems.push(`${prefix}the object ${value.layout} is not a layout the program lays out`);
         return problems;
       }
@@ -1249,7 +1249,8 @@ function writeProblems(prefix: string, what: string, declared: SemanticType, val
 
 /** A field of a layout the body lays out, and the type the layout gives it. */
 function layoutProblems(prefix: string, layout: string, field: string, context: Context): string[] {
-  if (!isLayout(context, layout) && !isContractLayout(context.contract, layout)) {
+  if (layout === "JSON") return [];
+  if (layout !== "JSON" && !isLayout(context, layout) && !isContractLayout(context.contract, layout)) {
     return [`${prefix}the object ${layout} is not a layout the program lays out`];
   }
   const found = layoutOf(context, layout);
@@ -1276,6 +1277,7 @@ function layoutOf(context: Context, name: string): ObjectLayout | undefined {
 
 /** The type a layout gives a field, as a type the IR states. */
 function fieldType(layout: string, field: string, context: Context): SemanticType | null {
+  if (layout === "JSON") return { kind: "primitive", name: "f64" };
   const found = layoutOf(context, layout);
   const declared = found?.fields.find((one) => one.name === field);
   return declared === undefined ? null : parseType(declared.type);

@@ -540,6 +540,9 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
   }
 
   field(object: string, layout: string, field: string): string {
+    if (layout === "JSON") {
+      return `${RUNTIME_NAME}_json_get(${object}, "${field}")`;
+    }
     // A reference is held as a pointer, and a pointer has no fields, so the
     // layout the access names is what the field is read through. The member is
     // spelled the way `cObjectDeclarations` declared it, because a field the
@@ -732,6 +735,8 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `program_round(${argument(0)})`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
+      case "Math.random":
+        return `${RUNTIME_NAME}_random()`;
       case "sharedBlock":
         return `${RUNTIME_NAME}_allocate((size_t)(${argument(0)}))`;
       case "u256_from_u64x2": {
@@ -742,6 +747,8 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         const out = "blaze_wide";
         return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${argument(0)}, ${argument(1)}, ${argument(2)}, ${argument(3)}); ${out}; })`;
       }
+      case "parseInt":
+        return `${RUNTIME_NAME}_to_number(${argument(0)})`;
       case "JSON.parse":
         return `${RUNTIME_NAME}_json_parse(${argument(0)})`;
       case "JSON.stringify":
@@ -826,7 +833,6 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
           : `blaze_rt_to_text(${argument(0)})`;
         return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
       }
-      case "Math.random":
       case "require":
       case "req.on": {
         const req = argument(0);
