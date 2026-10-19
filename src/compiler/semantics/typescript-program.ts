@@ -345,7 +345,7 @@ class ProgramParser {
     const token = this.peek();
     if (this.at("try")) {
       this.next();
-      if (this.at("{")) this.braces();
+      const body = this.at("{") ? this.braces() : [];
       while (this.at("catch") || this.at("finally")) {
         this.next();
         if (this.at("(")) {
@@ -355,7 +355,7 @@ class ProgramParser {
         }
         if (this.at("{")) this.braces();
       }
-      return null;
+      return { kind: "block", body, line };
     }
     const refusedKeyword = REFUSED_KEYWORDS[token.text];
     if (refusedKeyword !== undefined) {
@@ -994,6 +994,10 @@ class ProgramParser {
   private hexString(of: ProgramValue): ProgramValue {
     const open = this.peek();
     this.next();
+    if (this.at(")")) {
+      this.expect(")");
+      return of;
+    }
     const token = this.peek();
     if (token.kind !== "number" || token.text !== "16") {
       this.fail("toString(16) writes a number as hexadecimal text", token);
@@ -1103,30 +1107,22 @@ class ProgramParser {
     }
     if (token.kind === "ident" && token.text === "function") {
       this.next();
-      // Skip a function expression's parameters and body: a compiled program
-      // has no first-class function, so the expression is read past.
+      // A function expression used as a value (such as a Promise executor)
+      // is read as an arrow: its parameters and body are kept, so the
+      // surrounding call can invoke it.
+      const params: { name: string; type: string | null }[] = [];
       if (this.accept("(")) {
-        let depth = 1;
-        while (depth > 0 && this.peek().kind !== "end") {
-          const t = this.next();
-          if (t.kind === "punct") {
-            if (t.text === "(") depth += 1;
-            else if (t.text === ")") depth -= 1;
-          }
+        while (!this.at(")") && this.peek().kind !== "end") {
+          const name = this.peek().text;
+          this.next();
+          params.push({ name, type: null });
+          if (!this.accept(",")) break;
         }
+        this.expect(")");
       }
-      while (this.peek().kind !== "end" && !this.at("{")) this.next();
-      if (this.at("{")) {
-        let bdepth = 0;
-        do {
-          const t = this.next();
-          if (t.kind === "punct") {
-            if (t.text === "{") bdepth += 1;
-            else if (t.text === "}") bdepth -= 1;
-          }
-        } while (bdepth > 0 && this.peek().kind !== "end");
-      }
-      return this.nothing();
+      if (this.peek().kind === "ident") this.next(); // optional name
+      const body = this.at("{") ? this.braces() : [];
+      return { k: "arrow", params, body };
     }
     if (token.kind === "ident" && this.peek(1).text === "=>") {
       const line = token.line;
@@ -1245,7 +1241,13 @@ class ProgramParser {
       for (;;) {
         if (this.at("}")) break;
         if (this.at("async")) this.next();
-        const name = this.identifier("the name of a field");
+        let name: string;
+        if (this.peek().kind === "string") {
+          const tok = this.next();
+          name = tok.text.replace(/^["']|["']$/g, "");
+        } else {
+          name = this.identifier("the name of a field");
+        }
         if (this.at("(")) {
           this.next();
           let depth = 1;
@@ -1330,6 +1332,7 @@ class ProgramParser {
     const args: ProgramValue[] = [];
     if (!this.at(")")) {
       do {
+        if (this.at(")")) break;
         args.push(this.value());
       } while (this.accept(","));
     }
