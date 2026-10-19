@@ -46,6 +46,7 @@ import {
   slotType,
   statementBlocksOf,
   isWideType,
+  TEXT,
   UNSTATED_LINE,
   typeEquals,
   typeText,
@@ -1418,6 +1419,9 @@ function typeProblems(context: Context, tree: Tree): string[] {
 
 /** The type a parameter or a return is written as, or null when it is not one. */
 function contractType(text: string): SemanticType | null {
+  // A string is a string: the contract type language has no type of its own for
+  // one, so it is named the way the signature names it.
+  if (text === "text" || text === "boxedtext") return TEXT;
   try {
     return parseType(text);
   } catch {

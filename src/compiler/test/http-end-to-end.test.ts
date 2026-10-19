@@ -266,3 +266,74 @@ test("a request that cannot be made rejects the promise the executor holds", () 
   const written = generateProgramDriver(resolved(source), true);
   assert.match(written, /blaze_http_client_watch/, "the error handler is bound to the request");
 });
+
+/**
+ * A program that answers a request with the value the body carries, written the
+ * way the source is written: a handler the program names, a body it reads as it
+ * arrives, and a JSON field it reads out of it.
+ */
+function bodyServerSource(port: number): string {
+  return `const port = ${port};\n` +
+    `function handler(req, res) {\n` +
+    `  var body = "";\n` +
+    `  req.on("data", function (chunk) { body += chunk; });\n` +
+    `  req.on("end", function () {\n` +
+    `    const payload = JSON.parse(body);\n` +
+    `    res.writeHead(200);\n` +
+    `    res.end(payload.value.toString());\n` +
+    `  });\n` +
+    `}\n` +
+    `const server = http.createServer(handler);\n` +
+    `server.listen(port, "localhost", () => {});\n`;
+}
+
+/**
+ * A program that sends a value to a server and prints what it answers, written
+ * the way the source is written: a string the program builds and hands to a
+ * function of its own, a promise the function answers, and an await of it.
+ */
+function bodyClientSource(port: number): string {
+  return `const port = ${port};\n` +
+    `const api = \`http://localhost:\${port}/\`;\n` +
+    `function send(api, value) {\n` +
+    `  return new Promise(function (onFulfilled, onRejected) {\n` +
+    `    const req = http.request(api, { method: "POST", headers: { "content-type": "application/json" } }, (res) => {\n` +
+    `      var content = "";\n` +
+    `      res.on("data", (chunk) => { content += chunk; });\n` +
+    `      res.on("end", () => { onFulfilled(+content); });\n` +
+    `    });\n` +
+    `    req.on("error", (err) => { onRejected(err); });\n` +
+    `    req.write(JSON.stringify({ value: value }));\n` +
+    `    req.end();\n` +
+    `  });\n` +
+    `}\n` +
+    `const answer = await send(api, 42);\n` +
+    `console.log(answer);\n`;
+}
+
+test("a string is handed to a function of a program and the request it makes is answered", async () => {
+  const port = 18091;
+  const server = await buildHttpBinary("c", bodyServerSource(port));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("c", bodyClientSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.equal(answered.stdout.trim(), "42", "the client read the value the server answered with");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+test("the request a program makes carries the body it wrote", async () => {
+  // The body of a request is written after the headers, and the headers end
+  // where the length of the body begins: a blank line between them ends the
+  // header block, and the server reads the length of the body as the body.
+  const source = `const req = http.request("http://127.0.0.1:1/", { method: "POST", headers: { "content-type": "application/json" } }, (res) => {});\n` +
+    `req.write("hello");\n` +
+    `req.end();\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(written, /blaze_http_client_write/, "the body of the request is written on the request");
+  assert.match(written, /blaze_http_client_end/, "the request is sent");
+});

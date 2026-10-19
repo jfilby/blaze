@@ -2314,26 +2314,6 @@ export const typeScriptFrontend: Frontend = {
     // for, and the compiler reads the names the source wrote them by
     // (`resolve`, `reject`, `onFulfilled`, `onRejected`) as the ones that
     // settle it, so the executor's parameters are not written out again.
-    //
-    // Strings cannot be passed to a program function, so carry the port and
-    // build the URL inside send/sendAsync instead of passing the URL string.
-    source = source.replace(/function send\(api, value\)/, "function send(port, value)");
-    // The request line of the buffered client request is built from the port
-    // the function carries, where the URL the source passes as an argument
-    // would have to be a string a program hands a function.
-    source = source.replace(
-      /const req = http\.request\(\s*api,/,
-      'const api = `http://${host}:${port}/`;\n\t\tconst req = http.request(\n\t\t\tapi,',
-    );
-    source = source.replace(/async function sendAsync\(api, value\)/, "async function sendAsync(port, value)");
-    source = source.replace(/return await send\(api, value\)/, "return await send(port, value)");
-    source = source.replace(/tasks\.push\(sendAsync\(api, i\)\)/, "tasks[i - 1] = sendAsync(port, i)");
-    source = source.replace(/var tasks = \[\];/, "var tasks = new Float64Array(n);");
-    source = source.replace(/async function calculateSum\(port, n\) \{[\s\S]*?\n\}/, "async function calculateSum(port: any, n: any) {\n\tconst m = +n;\n\tvar sum = +0;\n\tfor (var i = 1; i <= m; i++) {\n\t\tsum += i;\n\t}\n\tconsole.log(sum);\n}");
-    source = source.replace(/function main\(\) \{[\s\S]*?\n\}/, "function main() {\n\tconst args = process.argv.slice(2);\n\tconst n = +args[0] || 10;\n\tcalculateSum(0, +n);\n}");
-    source = source.replace(/async function calculateSum\(port, n\) \{/, "async function calculateSum(port: number, n: number) {");
-    source = source.replace(/function send\(port, value\)/, "function send(port: number, value: number)");
-    source = source.replace(/async function sendAsync\(port, value\)/, "async function sendAsync(port: number, value: number)");
     const diagnostics = new Diagnostics();
     const parser = new TypeScriptParser(tokenize(source), path, diagnostics);
     const analysis = parser.parseModule(path);

@@ -81,6 +81,11 @@ const COMPARE_OPERATORS: Record<CompareOp, string> = {
   ge: ">=",
 };
 
+/** Whether a type is a value the runtime holds rather than a number or a string. */
+function fromDynamicType(type: SemanticType): boolean {
+  return type.kind === "ref" && type.of === null && type.name === undefined;
+}
+
 /**
  * How a target spells what a program does. Every method returns the text of a
  * line, or of a group of them, without indentation: the walk owns the shape of
@@ -343,6 +348,11 @@ class ProgramEmitter {
   }
 
   emit(): string {
+    // The prelude is written first, so a target knows what the program holds
+    // before the bodies are written out: the driver writes the functions the
+    // program declares for itself as functions of its own file, and it can
+    // only say which those are once it has seen the program.
+    const prelude = this.target.prelude(this.program);
     // A function the program declares is a function of the program: it is
     // written above the body that runs, and the program calls it as it calls
     // any other function.
@@ -372,7 +382,7 @@ class ProgramEmitter {
       .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.names.read(name))))
       .map((line) => indent(1, line));
     return [
-      this.target.prelude(this.program),
+      prelude,
       ...prototypes,
       ...declared.flatMap((lines) => lines),
       ...extra.flatMap((lines) => lines),
@@ -980,7 +990,27 @@ class ProgramEmitter {
       return this.target.argument(type, this.expression(argument, type));
     });
     const expression = (value: SemanticValue, as: SemanticType | null = null): string => this.expression(value, as);
-    return call.builtin ? this.target.builtin(call, argumentsText, expression) : this.target.call(call, argumentsText);
+    return call.builtin
+      ? this.target.builtin(this.readCaptures(call), argumentsText, expression)
+      : this.target.call(call, argumentsText);
+  }
+
+  /**
+   * The call as the target reads it. A function reference carries the names of
+   * the bindings it captured, and the target knows those bindings by names of
+   * its own: a name the source wrote is a name the target renames when another
+   * declaration holds it.
+   */
+  private readCaptures(call: SemanticCall): SemanticCall {
+    let changed = false;
+    const args = call.args.map((argument) => {
+      if (argument.k !== "functionRef") return argument;
+      const captures = argument.captures.map((name) => this.names.read(name));
+      if (captures.every((name, index) => name === argument.captures[index])) return argument;
+      changed = true;
+      return { ...argument, captures };
+    });
+    return changed ? { ...call, args } : call;
   }
 
   private expression(value: SemanticValue, as: SemanticType | null = null): string {
@@ -989,8 +1019,12 @@ class ProgramEmitter {
     // Only a number is written as another number: a reference and a string are
     // the one the value carries, and the resolver has already chosen the type
     // every use reads it as.
-    const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+    const fromDynamic = fromDynamicType(value.type);
     if (fromDynamic && isNumber(as) && value.k !== "local") return `${RUNTIME_NAME}_to_number(${text})`;
+    // A value the runtime holds is written as the string it is when it is
+    // handed to a parameter of a string: the runtime renders it, and the
+    // string it answers is the text the value holds.
+    if (fromDynamic && isTextType(as)) return `${RUNTIME_NAME}_to_text(${text})`;
     // A string a use reads as a number is the number its text states: `+text`
     // is the spelling the language writes it by, and the runtime boxes the
     // pointer it carries and answers the number that text names.

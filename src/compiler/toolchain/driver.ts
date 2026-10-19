@@ -332,12 +332,26 @@ class CDriver implements ProgramTarget {
   private builds = 0;
   /** True when the program uses the HTTP runtime, so the driver includes its header. */
   private readonly includeHttpHeader: boolean;
+  /**
+   * The symbols of the functions the program declares for itself. They are
+   * written as functions of the driver's own file, so a name the source gave
+   * one of them is a name nothing else in the program can hold: a program may
+   * call a function `send`, and the C library has one of that name.
+   */
+  private own = new Set<string>();
   constructor(includeHttpHeader: boolean = false) {
     this.includeHttpHeader = includeHttpHeader;
   }
   prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
-    const declarations = program.functions.map((signature) => this.declaration(signature)).join("\n");
+    // The functions the program declares for itself are written out in this
+    // file, so they are not declared here: what is declared is what the program
+    // calls of the objects the build linked beside it.
+    this.own = new Set(program.bodies.map((body) => body.symbol));
+    const declarations = program.functions
+      .filter((signature) => !this.own.has(signature.symbol))
+      .map((signature) => this.declaration(signature))
+      .join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
     return `${DRIVER_PRELUDE}
@@ -369,11 +383,23 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     // A function the program declares is a C function of its own: it is called
     // by name from the body that runs and from the other functions, and what it
     // hands back is what its own body settled.
+    //
+    // A function the program declares for itself is a function of this file and
+    // of no other: the name the source gave it is a name nothing else in the
+    // program holds, so a program may call a function `send` and the C library
+    // may have one of that name.
     const returns = cDeclarationType(parseType(signature.returns));
     const given = parameters
-      .map((param) => (param.type === "boxedtext" ? `char ** ${param.name}` : `${cDeclarationType(parseType(param.type))} ${param.name}`))
+      .map((param) => {
+        // A string the program passes by value is a C string, and a string it
+        // writes through is the cell that holds it.
+        if (param.type === "boxedtext") return `char ** ${param.name}`;
+        if (param.type === "text") return `const char * ${param.name}`;
+        return `${cDeclarationType(parseType(param.type))} ${param.name}`;
+      })
       .join(", ");
-    return [`${returns} ${cSymbolName(signature.symbol)}(${given || "void"})${cSymbolLabel(signature.symbol)} {`];
+    const own = this.own.has(signature.symbol) ? "static " : "";
+    return [`${own}${returns} ${cSymbolName(signature.symbol)}(${given || "void"})${cSymbolLabel(signature.symbol)} {`];
   }
 
   closeFunction(releases: readonly string[], returned: boolean): string[] {
@@ -543,7 +569,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
 
   field(object: string, layout: string, field: string): string {
     if (layout === "JSON") {
-      return `${RUNTIME_NAME}_json_get(${object}, "${field}")`;
+      // A field of a dynamic object is a value the runtime holds, and the IR
+      // reads it as the number it is: the runtime answers the handle of the
+      // value, and the handle is a small number of its own.
+      return `${RUNTIME_NAME}_to_number(${RUNTIME_NAME}_json_get(${object}, "${field}"))`;
     }
     // A reference is held as a pointer, and a pointer has no fields, so the
     // layout the access names is what the field is read through. The member is
@@ -798,6 +827,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `${RUNTIME_NAME}_dyn_array_new()`;
       case "array.push":
         return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
+      case "array.get":
+        return `${RUNTIME_NAME}_array_get(${argument(0)}, ${argument(1)})`;
+      case "array.length":
+        return `${RUNTIME_NAME}_array_length(${argument(0)})`;
       case "http.serve":
         return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.serveSettings":
@@ -807,8 +840,13 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "http.createServer": {
         const cb = call.args[0];
         let trampoline = "0.0";
-        if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {
-          trampoline = `(double)(uintptr_t)__arrow_trampoline_${cb.name.slice("__arrow_".length)}`;
+        if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string") {
+          // A handler the program wrote where the call is made is an arrow, and
+          // one it named is called through a trampoline of its own: what calls
+          // it is not a program, and passes it two values.
+          trampoline = cb.name.startsWith("__arrow_")
+            ? `(double)(uintptr_t)__arrow_trampoline_${cb.name.slice("__arrow_".length)}`
+            : `(double)(uintptr_t)__callback_${cb.name}`;
         }
         return trampoline;
       }
@@ -821,8 +859,13 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         const body = call.args[1];
         const bodyExpr = argument(1);
         /* Convert any Blaze value to its text form so JSON.stringify results
-           (boxed dynamic values) and raw strings both reach the wire as bytes. */
-        const bodyPtr = (body.type.kind === "ptr" || body.type.kind === "text") ? bodyExpr : `blaze_rt_to_text(${bodyExpr})`;
+           (boxed dynamic values) and raw strings both reach the wire as bytes.
+           A number is written as the language writes it, and only a value the
+           runtime holds is rendered by the runtime: a number the program holds
+           is not a handle the runtime knows. */
+        const bodyPtr = (body.type.kind === "ptr" || body.type.kind === "text")
+          ? bodyExpr
+          : this.toText(bodyExpr, body.type, null);
         return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyPtr}, strlen((const char*) ${bodyPtr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
       }
       case "server.close": {
@@ -855,20 +898,44 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         }
         return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
       }
-      case "Promise.await":
+      case "Promise.await": {
+        // A value that is not a promise is the value itself: awaiting a number
+        // is the number, and awaiting a function that hands back nothing is
+        // nothing. What is awaited is a promise when it is one, and the
+        // promise the program is running is settled by the time it is read.
+        const awaited = call.args[0];
+        const kind = awaited === undefined
+          ? null
+          : awaited.k === "call"
+            ? awaited.call.returns
+            : awaited.type;
+        if (kind !== null && kind.kind === "void") {
+          // What is awaited is a call that hands back nothing: the call still
+          // runs, and what the statement answers is nothing.
+          return `(${argument(0)}, 0.0)`;
+        }
+        if (kind !== null && isNumber(kind)) return argument(0);
         return `blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
+      }
       case "resolve":
       case "onFulfilled":
         return `(blaze_promise_resolve(blaze_current_promise, ${argument(0)}), 0.0)`;
       case "reject":
       case "onRejected": {
         const arg = call.args[0];
-        const text = (arg.k === "text" || arg.k === "const")
+        // The message of a failure is the text of what was handed to it: a
+        // string is the text it is, and a number the program holds is written
+        // as the language writes it rather than read as a handle.
+        const text = (arg.k === "text" || arg.k === "const" || isTextType(arg.type))
           ? argument(0)
-          : `blaze_rt_to_text(${argument(0)})`;
+          : this.toText(argument(0), arg.type, null);
         return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
       }
       case "require":
+        // The module a program requires is a namespace the compiler reads the
+        // calls of out of, so the value the require answers is nothing: what
+        // the program does with it is the calls it names.
+        return "0.0";
       case "req.on":
       case "res.on": {
         const owner = argument(0);
@@ -1018,7 +1085,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
   private requestBody(value: SemanticValue, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
     const text = expression(value, value.type);
     if (value.k === "const" || value.k === "text" || isTextType(value.type)) return text;
-    return `blaze_rt_to_text(${text})`;
+    // A value the runtime holds is rendered by the runtime, and a number the
+    // program holds is written as the language writes it: the runtime's
+    // handles are small numbers, and a number the program holds is one of them.
+    return this.toText(text, value.type, null);
   }
 
   /** One header line an options object named, as `name: value`. */
@@ -1052,8 +1122,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         );
       }
       // The field name is written as JSON names it: quoted, with the escape a
-      // string the JSON reader takes carries.
-      const key = cStringLiteral(JSON.stringify(field.name));
+      // string the JSON reader takes carries. The quotes are the JSON's own,
+      // so the name is written as it is and the escaping is left to the
+      // literal it is written into.
+      const key = JSON.stringify(field.name);
       return this.stringConcat(this.stringLiteral(`${key}:`), text);
     });
     let json: string | null = null;
@@ -1130,6 +1202,9 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
   }
 
   toText(value: string, type: SemanticType, digits: number | null): string {
+    // A string is the text it is: it is already the bytes it names, and the
+    // runtime is not asked to render it again.
+    if (isTextType(type)) return value;
     // A reference to nothing has no number of its own, and the word for it is
     // what the language prints: casting it to a number hands out the zero the
     // source never printed.

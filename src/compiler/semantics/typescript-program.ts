@@ -182,6 +182,16 @@ const BLOCK_KEYWORDS: readonly string[] = [
 const PROGRAM_BODY =
   "a program runs declarations, function declarations, return, assignment, blocks, if, while, do-while, for and for-of, break, continue, console.log and calls, over numbers, bigints, booleans, strings, names, buffers, Math, process.argv and Deno.args";
 
+/**
+ * The name a method is called by. A method every array has is called by the
+ * name the compiler knows it by, so that `a.push(x)` is the same call
+ * wherever `a` was written, and the receiver is passed as the first argument.
+ */
+function methodCall(object: string, member: string): string {
+  if (member === "push") return "array.push";
+  return `${object}.${member}`;
+}
+
 /** What the third clause of a counted loop says, or that it says nothing. */
 interface LoopStep {
   /** The step, or null for an index that moves one the way it already travels. */
@@ -315,9 +325,12 @@ class ProgramParser {
     }
     if (this.at("await")) {
       this.next();
-      this.value();
+      const value = this.value();
       this.accept(";");
-      return null;
+      // `await x;` is a call of the promise the value is, written as a
+      // statement: what it waits for has already run by the time the program
+      // reads it, so the statement is the reading of it.
+      return { kind: "invoke", function: "Promise.await", args: [value], line };
     }
     if (this.at("++") || this.at("--")) {
       const op = this.next().text as "++" | "--";
@@ -646,7 +659,9 @@ class ProgramParser {
         const parameter = this.identifier("the name of a parameter");
         let type: string | null = null;
         if (this.accept(":")) type = this.annotation("the type of a parameter");
-        params.push({ name: parameter, type: type === null ? "any" : type });
+        // A parameter the source wrote no type for is read at the type its
+        // callers pass it at, which is what the call sites of the program say.
+        params.push({ name: parameter, type });
         if (!this.accept(",")) break;
       }
     }
@@ -737,7 +752,7 @@ class ProgramParser {
       this.accept(";");
       const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
-      return { kind: "invoke", function: `${object}.${method}`, args, line: name.line };
+      return { kind: "invoke", function: methodCall(object, method), args, line: name.line };
     }
     if (token.text === ".") {
       // A field of an object is written the way a name is: the object is read
@@ -915,7 +930,6 @@ class ProgramParser {
         }
         if (this.at("(")) {
           this.next();
-          const fn = `${this.valuePath(value)}.${member}`;
           const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
@@ -924,7 +938,8 @@ class ProgramParser {
           } else {
             args = prepend ? [value, ...this.arguments()] : this.arguments();
           }
-          value = { k: "call", function: fn, args };
+          const object = this.valuePath(value);
+          value = { k: "call", function: methodCall(object, member), args };
           continue;
         }
         if (value.k === "name" || value.k === "field" || value.k === "call") {

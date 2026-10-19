@@ -75,6 +75,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "hasher.update.digest": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "array.new": { params: [], returns: ANY, arity: 0 },
   "array.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** `a[i]` where `a` is a dynamic array: the element the runtime holds. */
+  "array.get": { params: [ANY, USIZE], returns: F64, arity: 2 },
+  /** `a.length` where `a` is a dynamic array: how many elements it holds. */
+  "array.length": { params: [ANY], returns: USIZE, arity: 1 },
   "fetch": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
   /** `http.request(url, method, headers, body)` performs one request synchronously,
    * and `http.request(url, options, callback)` opens a buffered request whose

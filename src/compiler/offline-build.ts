@@ -39,6 +39,7 @@ import { inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
+import { buildFacilRuntime } from "./runtime/facil.ts";
 import { symbolOf } from "./semantics/contract.ts";
 import { powerOfTwoParams } from "./semantics/power-of-two.ts";
 import type { TargetSpec } from "./core/types.ts";
@@ -67,6 +68,7 @@ interface ProjectFile {
   language: string;
   target?: Partial<TargetSpec>;
   sourceFile: string;
+  runtime?: "none" | "facil" | "nim";
 }
 
 async function main(): Promise<void> {
@@ -155,7 +157,13 @@ async function main(): Promise<void> {
   }
   console.log(`  ${objectPaths.length} object(s), ${textBytes} bytes of code`);
 
-  const runtime = await buildStandaloneRuntime(work, "danger", target);
+  // A program that asks for the HTTP runtime links the facil.io adapter beside
+  // it, the same way a build does: the source names `http`, so the driver
+  // writes the `blaze_http_*` calls the adapter answers.
+  const isHttp = project.runtime === "facil" || /\bhttp\b/.test(source);
+  const runtime = isHttp
+    ? await buildFacilRuntime(work, "danger", target)
+    : await buildStandaloneRuntime(work, "danger", target);
   const outputPath = join(work, "program");
   await buildProgramDriver({
     mode: "danger",
@@ -165,6 +173,7 @@ async function main(): Promise<void> {
     workDirectory: work,
     objectPaths,
     runtimeObjectPath: runtime.objectPath,
+    includeHttpHeader: isHttp,
     threads: programIsParallel(program.entry, program.bodies) ? ["openmp"] : [],
     outputPath,
   });

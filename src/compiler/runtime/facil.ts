@@ -514,23 +514,31 @@ const char *blaze_http_client_request(const char *url, const char *method,
   snprintf(port_str, sizeof(port_str), "%d", port);
   if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return NULL;
 
-  int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-  if (sock < 0) { freeaddrinfo(res); return NULL; }
+  /* A host may name more than one address, and the first is not always the
+     one that answers: "localhost" names the loopback address of IPv6 before
+     the one of IPv4, and a server that listens on one of them is not reached
+     through the other. Every address is tried until one of them connects. */
+  int sock = -1;
+  for (struct addrinfo *candidate = res; candidate != NULL; candidate = candidate->ai_next) {
+    int attempt = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
+    if (attempt < 0) continue;
 
-  /* Timeouts. */
-  struct timeval tv;
-  int to = timeout_ms > 0 ? timeout_ms : 10000;
-  tv.tv_sec = to / 1000;
-  tv.tv_usec = (to % 1000) * 1000;
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    /* Timeouts. */
+    struct timeval tv;
+    int to = timeout_ms > 0 ? timeout_ms : 10000;
+    tv.tv_sec = to / 1000;
+    tv.tv_usec = (to % 1000) * 1000;
+    setsockopt(attempt, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(attempt, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-  if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) {
-    close(sock);
-    freeaddrinfo(res);
-    return NULL;
+    if (connect(attempt, candidate->ai_addr, candidate->ai_addrlen) == 0) {
+      sock = attempt;
+      break;
+    }
+    close(attempt);
   }
   freeaddrinfo(res);
+  if (sock < 0) return NULL;
 
   /* Build the request. */
   char reqbuf[8192];
@@ -538,7 +546,11 @@ const char *blaze_http_client_request(const char *url, const char *method,
     "%s %s HTTP/1.1\\r\\nHost: %s\\r\\nConnection: close\\r\\n",
     method, path, host);
   if (headers && headers[0] != '\\0') {
-    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "%s\\r\\n", headers);
+    /* The headers are written as the lines they are, each of which ends with
+       the carriage return and the line feed of a header. A blank line after
+       them would end the header block, and the length of the body would be
+       read as the body. */
+    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "%s", headers);
   }
   if (body && body_len > 0) {
     req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len,

@@ -1505,6 +1505,13 @@ function inlineSingleUses(body: Body): boolean {
   for (const block of nestedSemanticBlocks(body.entry)) {
     valuesOf(block, (one) => {
       if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
+      // A captured name is a read the values do not show: the function
+      // reference hands the nested function the binding's value, and inlining
+      // the binding away leaves the call site naming a name the block never
+      // declared.
+      if (one.k === "functionRef") {
+        for (const capture of one.captures) reads.set(capture, (reads.get(capture) ?? 0) + 1);
+      }
     });
     // A name a buffer write names is read by that write, and a binding dropped
     // while the write stands leaves the write naming a name the block does not

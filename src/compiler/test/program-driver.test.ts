@@ -314,8 +314,25 @@ test("a string interpolated in a string is the string, not the address of it", a
   }
 });
 
-test("a sign in front of a string is the number the string states", async () => {
-  // `+text` is the number the text names, as the language reads it: the text
+test("a string is handed to a function of the program, and a value the runtime holds is written as the string it is", async () => {
+  // A parameter the source wrote no type for is read at the type its callers
+  // pass it at: a string where a string is passed. A value the runtime holds is
+  // rendered by the runtime when it is handed to such a parameter.
+  const source = [
+    "const start = 1;",
+    "function show(text) { console.log(text); }",
+    "show(`hello`);",
+    "show(JSON.parse(`5`));",
+    "",
+  ].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "hello\n5\n");
+  assert.equal(delivered.stdout, original);
+});
+
+test("a sign in front of a string is the number the string states", async () => {  // `+text` is the number the text names, as the language reads it: the text
   // is boxed and the runtime reads the number out of it.
   const cases: readonly [string, string][] = [
     ["const s = `42`;\nconsole.log(+s);\n", "42\n"],

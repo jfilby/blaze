@@ -565,10 +565,92 @@ test("a mutable string a nested function captures is stored in a shared cell", (
   const nested = program.bodies.find((body) => body.name === "f");
   assert.ok(nested !== undefined, "the nested function is compiled on its own");
   if (nested === undefined) throw new Error("expected a nested function");
-  const parameter = nested.params.find((one) => one.kind === "text");
+  // The cell is the captured name: the parameter the source wrote is the
+  // string it is given, and the capture is the cell it writes through.
+  const parameter = nested.params.find((one) => one.kind === "text" && one.name === "body");
   assert.ok(parameter !== undefined, "the nested function is given the string");
   if (parameter === undefined) throw new Error("expected a parameter");
   assert.equal(parameter.kind === "text" ? parameter.boxed : false, true, "the parameter is the cell");
+});
+
+test("a parameter the source wrote no type for is read at the type its callers pass it at", () => {
+  // A function of a program is compiled on its own, and what a parameter is
+  // read at is what the callers of the function pass it at: a string where a
+  // string is passed, and a number where a number is.
+  const program = resolved({
+    "main.ts": [
+      "const start = 1;",
+      "function show(text, count) { console.log(text, count); }",
+      "show(`hello`, 2);",
+      "",
+    ].join("\n"),
+  });
+  const body = program.bodies.find((one) => one.name === "show");
+  assert.ok(body !== undefined, "the function is compiled on its own");
+  if (body === undefined) throw new Error("expected a function");
+  const text = body.params.find((one) => one.name === "text");
+  const count = body.params.find((one) => one.name === "count");
+  assert.equal(text?.kind, "text", "the string the caller passes is a string");
+  assert.equal(count?.kind, "value", "the number the caller passes is a number");
+  assert.equal(count?.kind === "value" ? typeText(count.type) : "", "f64", "the number is a double");
+});
+
+test("a string is given to a function of a program by value", () => {
+  // The string the caller builds is the string the callee reads: it is handed
+  // over as the text it is, not as a number the caller holds.
+  const program = resolved({
+    "main.ts": [
+      "const greeting = `hello`;",
+      "function show(text) { console.log(text); }",
+      "show(greeting);",
+      "",
+    ].join("\n"),
+  });
+  const body = program.bodies.find((one) => one.name === "show");
+  assert.ok(body !== undefined, "the function is compiled on its own");
+  if (body === undefined) throw new Error("expected a function");
+  const text = body.params.find((one) => one.name === "text");
+  assert.equal(text?.kind, "text", "the parameter is a string");
+  assert.equal(text?.kind === "text" ? text.boxed : true, false, "the string is the string itself");
+});
+
+test("an awaited call in a program body is a statement that runs", () => {
+  // `await x;` is a call of the promise the value is, written as a statement:
+  // what it waits for has already run by the time the program reads it.
+  const program = resolved({
+    "main.ts": [
+      "const start = 1;",
+      "function f() { console.log(`done`); }",
+      "await f();",
+      "",
+    ].join("\n"),
+  });
+  const statement = program.entry.statements.find((one) => one.k === "call");
+  assert.ok(statement !== undefined, "the awaited call is a statement of the program");
+  if (statement === undefined) throw new Error("expected a call");
+  assert.equal(statement.call.callee, "Promise.await", "the statement awaits the promise");
+});
+
+test("an element of a dynamic array is read through the runtime", () => {
+  // A dynamic array is a value the runtime holds rather than a block of bytes,
+  // so an element of one is read through the runtime.
+  const program = resolved({
+    "main.ts": [
+      "var tasks = [];",
+      "tasks.push(7);",
+      "console.log(tasks[0]);",
+      "",
+    ].join("\n"),
+  });
+  const read = program.entry.statements.find((one) => one.k === "printNumber" || one.k === "printText");
+  assert.ok(read !== undefined, "the element is read");
+  if (read === undefined) throw new Error("expected a print");
+  const value = read.k === "printNumber" || read.k === "printText" ? read.value : null;
+  assert.ok(value !== null, "the element is printed");
+  if (value === null) throw new Error("expected a value");
+  assert.equal(value.k, "call", "the element is read by a call");
+  if (value.k !== "call") throw new Error("expected a call");
+  assert.equal(value.call.callee, "array.get", "the element is read through the runtime");
 });
 
 test("a name declared in a block is a variable of its own", () => {

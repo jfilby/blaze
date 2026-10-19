@@ -56,7 +56,7 @@
  * type: it is declared as a string, and `+` on a string is concatenation.
  */
 
-import { parseType, typeToString } from "./contract.ts";
+import { contractText, parseType, typeToString } from "./contract.ts";
 import { isWholeNumberText } from "./objects.ts";
 import type { LiteralKeys } from "./program-objects.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
@@ -156,6 +156,13 @@ interface TextHeld {
   value: string | null;
   /** True when this mutable text local is stored in a shared cell (boxed). */
   boxed?: boolean;
+  /**
+   * True when the string is one the function was given rather than one it
+   * declared. A function is given a string by value, and a function that
+   * reads it is given the string: the binding of a parameter is the
+   * parameter's own, not one a nested function shares with it.
+   */
+  parameter?: boolean;
 }
 
 /** The command line bound to a name, as `const args = process.argv.slice(n)`;
@@ -1174,6 +1181,14 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
           if (part.k === "value") value(part.value);
         });
         return;
+      case "arrow": {
+        // An arrow is called where it is written, so the names its body reads
+        // are the names the function around it reads: the call passes them.
+        for (const name of readsAround(one.body, new Set(one.params.map((param) => param.name)))) {
+          note(name);
+        }
+        return;
+      }
       case "fixed":
         value(one.of);
         return;
@@ -1212,8 +1227,8 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
  * read out of; and everything else is a number.
  */
 function heldOf(text: string): Held {
-  if (text === "text") {
-    return { kind: "text", name: "", mutable: true, value: null };
+  if (text === "text" || text === "boxedtext") {
+    return { kind: "text", name: "", mutable: true, value: null, boxed: text === "boxedtext" };
   }
   const type = parseType(text);
   if (type.kind === "slice" || type.kind === "array") {
@@ -1223,6 +1238,88 @@ function heldOf(text: string): Held {
     return { kind: "object", name: "", mutable: true, type };
   }
   return { kind: "number", name: "", mutable: true, type: primitive(type), text: "" };
+}
+
+/**
+ * The type a parameter of a program is read at, as the signature states it. A
+ * string is a string, whether it is passed by value or as the cell a mutable
+ * one is shared through.
+ */
+function parameterType(text: string): SemanticType {
+  return text === "text" || text === "boxedtext" ? TEXT : parseType(text);
+}
+
+/**
+ * The type a value is read as when it is passed as a parameter of that type. A
+ * string is read as a string by what it holds, not by what the use asks for, so
+ * a parameter of that type fixes nothing about the value it is given.
+ */
+function parameterExpect(text: string): TypeExpr | null {
+  return text === "text" || text === "boxedtext" ? null : parseType(text);
+}
+
+/**
+ * What the call sites of a program say about the parameters the source wrote
+ * no type for. A function of a program is compiled on its own, and what a
+ * parameter is read as is what its callers pass it: a string where a string is
+ * passed, a number where a number is, and a shape the compiler does not know
+ * where anything else is.
+ *
+ * The kinds are read at the call sites, and a program is resolved again and
+ * again until they stop changing: a parameter of a function is read at the type
+ * the callers of that function pass it at, and a caller may itself be read at a
+ * type only a later round settles.
+ */
+class Observations {
+  /** The kinds seen at each parameter of each function, by name and position. */
+  private readonly kinds = new Map<string, string[][]>();
+  /** True when a kind was seen at a parameter that was not seen there before. */
+  changed = false;
+
+  /** What a parameter of a function is read at, given what its callers pass. */
+  kindOf(name: string, position: number): "text" | "number" | "other" {
+    const seen = this.kinds.get(name)?.[position];
+    if (seen === undefined || seen.length === 0) return "other";
+    if (seen.length === 1) return seen[0] as "text" | "number";
+    // A parameter its callers pass two shapes of is a shape the compiler does
+    // not know: it is read at whatever the caller passed it.
+    return "other";
+  }
+
+  /** What a caller passed at a parameter of a function. */
+  record(name: string, position: number, kind: "text" | "number"): void {
+    let positions = this.kinds.get(name);
+    if (positions === undefined) {
+      positions = [];
+      this.kinds.set(name, positions);
+    }
+    let seen = positions[position];
+    if (seen === undefined) {
+      seen = [];
+      positions[position] = seen;
+    }
+    if (seen.includes(kind)) return;
+    seen.push(kind);
+    this.changed = true;
+  }
+}
+
+/** The type a parameter the source wrote no type for is read at. */
+function inferredType(kind: "text" | "number" | "other"): string {
+  if (kind === "text") return "text";
+  if (kind === "number") return "f64";
+  return "ref<any>";
+}
+
+/**
+ * The parameters a trampoline is declared with. What calls a trampoline is not
+ * a program: the HTTP adapter passes it two values, and the program passes it
+ * the value of the event and the names the arrow captured, so a trampoline is
+ * given room for as many as the arrow holds and for the two the adapter
+ * passes.
+ */
+function trampolineParameters(count: number): string {
+  return Array.from({ length: Math.max(2, count) }, (_, index) => `void *p${index}`).join(", ");
 }
 
 /** A function the program declared, and what has been settled about it. */
@@ -1236,15 +1333,26 @@ interface ProgramFunctionDraft {
    * the same name — passing that one changes what the call computes without
    * anything being wrong with it visibly.
    */
-  captured: { name: string; type: TypeExpr | null; held: Held }[];
-  /** The parameters the source wrote, in the order it wrote them. */
-  params: { name: string; type: TypeExpr }[];
+  captured: { name: string; type: SemanticType; held: Held; boxed: boolean }[];
+  /**
+   * The parameters the source wrote, in the order it wrote them. A type of null
+   * is one the source wrote no type for: what it is read at is what the call
+   * sites of the function say, and a function nobody calls is read at whatever
+   * the program holds.
+   */
+  params: { name: string; type: TypeExpr | null }[];
   body: ProgramStatement[];
   line: number;
   /** Set once the scope it is declared in has settled the type of every name. */
   signature: FunctionSignature | null;
   /** The body, resolved, once the names it reads are all declared. */
   compiled: DraftProgram | null;
+  /**
+   * True when the program handed this function to something as a callback.
+   * What calls it is not a program, and passes it two values rather than the
+   * arguments the source wrote, so it is called through a trampoline of its own.
+   */
+  callback: boolean;
 }
 
 /** A declared function whose body has been read, and so is settled whole. */
@@ -1265,6 +1373,8 @@ interface ProgramFunctions {
   readonly settling: Set<ProgramFunctionDraft>;
   /** The names the program holds, so a generated name is not one of them. */
   readonly used: Set<string>;
+  /** What the call sites say about the parameters the source wrote no type for. */
+  readonly observed: Observations;
 }
 
 /**
@@ -1414,23 +1524,19 @@ class ProgramResolver {
     // that reached it finds it already there.
     if (this.functions.table.has(statement.name)) return;
     const params = statement.params.map((param) => {
-      if (param.type === null) {
-        throw programError(
-          `"${param.name}" has no type`,
-          this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: a function of a program is compiled on its own, so every name it is given is written with its type, as in function f(n: number)`,
-        );
-      }
+      // A parameter the source wrote no type for is read at the type its
+      // callers pass it at, which is what the call sites of the program say.
+      // The kind is settled in `closure`, once the call sites have been read.
+      if (param.type === null) return { name: param.name, type: null };
       return { name: param.name, type: this.annotation(param.type, statement.line) };
     });
     // Every name the body reads of the scope around it is a parameter of the
     // function, of the type the scope holds it at: a function of a program is
     // compiled on its own, so what it reads from around it is passed to it at
     // every call, and the call is where that scope is.
-    const captures: { name: string; type: TypeExpr | null; held: Held }[] = [];
+    const captures: { name: string; type: SemanticType; held: Held; boxed: boolean }[] = [];
     for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
-      const held = this.lookup(name);
+      const held = this.lookup(name) ?? this.topLevelText(name);
       if (declaredHere.includes(name)) {
         throw programError(
           `${statement.name} reads "${name}", which the block it is declared in declares`,
@@ -1458,19 +1564,14 @@ class ProgramResolver {
       }
       // A mutable text local captured by a nested program function is boxed:
       // the function is given a pointer to the shared cell that holds it, so a
-      // write inside the function updates the caller's binding. An immutable
-      // const string is still written inline and needs no parameter.
+      // write inside the function updates the caller's binding. A const string
+      // is passed by value: the function is given the string itself, and a
+      // const string written out in full is written inline where it is read.
+      // A string the function was given is passed by value as well: it is the
+      // function's own binding, and a function that reads it reads a copy.
       if (held.kind === "text") {
         if (!held.mutable && held.value !== null) continue;
-        if (!held.mutable) {
-          throw programError(
-            `"${name}" is a string`,
-            this.body,
-            statement.line,
-            `line ${statement.line} of ${this.body.file}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
-          );
-        }
-        captures.push({ name, type: null, held });
+        captures.push({ name, type: TEXT, held, boxed: held.mutable && held.parameter !== true });
         continue;
       }
       const type = heldType(held);
@@ -1482,7 +1583,7 @@ class ProgramResolver {
           `line ${statement.line} of ${this.body.file}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
         );
       }
-      captures.push({ name, type, held });
+      captures.push({ name, type, held, boxed: false });
     }
     const draft: ProgramFunctionDraft = {
       name: statement.name,
@@ -1494,6 +1595,7 @@ class ProgramResolver {
       // names it is given are settled here, where the scope it reads is.
       signature: null,
       compiled: null,
+      callback: false,
     };
     this.functions.table.set(statement.name, draft);
     this.functions.used.add(statement.name);
@@ -1529,7 +1631,30 @@ class ProgramResolver {
       if (!changed) break;
     }
     for (const draft of this.functions.table.values()) {
-      const params = [...draft.params, ...draft.captured];
+      // The parameters the source wrote come first, in the order it wrote them,
+      // and the names the body reads of the scope around it come after: a
+      // function of a program is compiled on its own, so what it reads from
+      // around it is passed to it after the arguments the source wrote.
+      const params = [
+        ...draft.params.map((param, position) => ({
+          name: param.name,
+          // A parameter the source wrote no type for is read at the type its
+          // callers pass it at.
+          type:
+            param.type === null
+              ? inferredType(this.functions.observed.kindOf(draft.name, position))
+              : contractText(param.type),
+        })),
+        ...draft.captured.map((capture) => ({
+          // The name a capture arrives under is the name the scope it was taken
+          // from holds it by, which is the name the body reads it by.
+          name: capture.held.name,
+          // A mutable string is shared through a cell, and the cell is what the
+          // function is given; a string that is not written through is the
+          // string itself.
+          type: capture.boxed ? "boxedtext" : contractText(capture.type),
+        })),
+      ];
       draft.signature = {
         name: draft.name,
         symbol: draft.name === "main" ? PROGRAM_ENTRY_SYMBOL : draft.name,
@@ -1542,7 +1667,7 @@ class ProgramResolver {
         // constants first and its `main` last. Both are the same program, so
         // both spell the entry the one way, or the C the driver is written in
         // carries two `main` definitions and the link fails.
-        params: params.map((param) => ({ name: param.name, type: param.type === null ? "text" : typeToString(param.type) })),
+        params,
         returns: draft.signature?.returns ?? "void",
       };
     }
@@ -1657,10 +1782,12 @@ class ProgramResolver {
       this.literalKeys,
     );
     inner.open();
-    for (const param of draft.signature.params) {
-      const held = param.type === "text"
-        ? { kind: "text" as const, name: "", mutable: true, value: null, boxed: true }
-        : heldOf(param.type);
+    for (const [position, param] of draft.signature.params.entries()) {
+      const held = heldOf(param.type);
+      // A string the source wrote as a parameter is the function's own
+      // binding: a function that reads it is given the string, and not the
+      // cell a mutable local is shared through.
+      if (held.kind === "text" && position < draft.params.length) held.parameter = true;
       inner.declareName(param.name, draft.line, held);
     }
     const statements = inner.statements(draft.body);
@@ -1683,14 +1810,28 @@ class ProgramResolver {
   /* Scopes                                                                  */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * The binding a name of the scope around holds, or nothing where the scope
+   * holds none. The scope alone answers: a name is bound where it is declared,
+   * and a declaration that shadows a name outside it is a binding of its own.
+   */
   private lookup(name: string): Held | undefined {
     for (let index = this.scopes.length - 1; index >= 0; index -= 1) {
       const held = this.scopes[index].get(name);
       if (held !== undefined) return held;
     }
-    // A top-level const string is written inline where it is read, so a
-    // function that reads one needs no parameter for it. Hand it back as a
-    // text held even before its declaration has been walked into scope.
+    return undefined;
+  }
+
+  /**
+   * A const string the program declares at its top, which is written inline
+   * where it is read: a function that reads one needs no parameter for it.
+   *
+   * The answer is a binding of its own, and it is not one the scope holds: a
+   * name the program declares is bound when it is declared, and this is the
+   * string as it was written out, which every reader of it agrees on.
+   */
+  private topLevelText(name: string): Held | undefined {
     const decl = this.body.statements.find((item) => item.kind === "declare" && item.name === name);
     if (decl !== undefined && decl.kind === "declare" && decl.value.k === "text") {
       const written = decl.value.parts
@@ -1704,7 +1845,7 @@ class ProgramResolver {
   }
 
   private held(name: string, line: number): Held {
-    const held = this.lookup(name);
+    const held = this.lookup(name) ?? this.topLevelText(name);
     if (held === undefined) {
       throw programError(
         `"${name}" is not declared`,
@@ -2405,7 +2546,7 @@ class ProgramResolver {
         return true;
       case "name": {
         if (this.functions.table.has(value.name)) return false;
-        const held = this.lookup(value.name);
+        const held = this.lookup(value.name) ?? this.topLevelText(value.name);
         if (held === undefined) return false;
         return held.kind === "number" && held.bigint === true;
       }
@@ -2513,7 +2654,10 @@ class ProgramResolver {
         const declaredFn = this.functions.table.get(name);
         const captures = declaredFn?.captured.map((capture) => {
           const held = capture.held;
-          if (held.kind === "number" && !held.mutable) return held.text;
+          // A number the program wrote out is the number it was written as,
+          // wherever it is read; a number it computed is read by the name it
+          // was declared under.
+          if (held.kind === "number" && !held.mutable && held.text !== "") return held.text;
           return held.name;
         }) ?? [];
         return { k: "function", name, captures };
@@ -2606,9 +2750,16 @@ class ProgramResolver {
         // reference to the function's trampoline.
         if (this.functions.table.has(value.name)) {
           const declaredFn = this.functions.table.get(value.name);
+          // A function handed to something as a callback is called by
+          // something that is not a program, and passes it two values rather
+          // than the arguments the source wrote.
+          if (declaredFn !== undefined) declaredFn.callback = true;
           const captures = declaredFn?.captured.map((capture) => {
             const held = capture.held;
-            if (held.kind === "number" && !held.mutable) return held.text;
+            // A number the program wrote out is the number it was written as,
+            // wherever it is read; a number it computed is read by the name it
+            // was declared under.
+            if (held.kind === "number" && !held.mutable && held.text !== "") return held.text;
             return held.name;
           }) ?? [];
           return { k: "function", name: value.name, captures };
@@ -2647,6 +2798,21 @@ class ProgramResolver {
         const held = this.held(value.of, line);
         if (held.kind === "text") {
           return { k: "stringLength", of: { k: "reference", name: held.name, held } };
+        }
+        // A dynamic array is a value the runtime holds rather than a block of
+        // bytes, so its length is read through the runtime.
+        if (held.kind === "object") {
+          return {
+            k: "call",
+            call: this.call(
+              {
+                k: "call",
+                function: "array.length",
+                args: [{ k: "name", name: held.name }],
+              } as ProgramValue & { k: "call" },
+              line,
+            ),
+          };
         }
         if (held.kind !== "array") {
           throw programError(
@@ -2801,17 +2967,29 @@ class ProgramResolver {
             `${this.body.file}: only an array has elements`,
           );
         }
-        const element = (held.kind === "array" ? (held.element ?? "f64") : "f64") as PrimitiveTypeName;
-        if (held.kind === "array") held.element ??= element;
+        // A dynamic array is a value the runtime holds rather than a block of
+        // bytes, so an element of one is read through the runtime.
+        if (held.kind === "object") {
+          return {
+            k: "call",
+            call: this.call(
+              {
+                k: "call",
+                function: "array.get",
+                args: [{ k: "name", name: held.name }, value.index],
+              } as ProgramValue & { k: "call" },
+              line,
+            ),
+          };
+        }
+        const element = (held.element ?? "f64") as PrimitiveTypeName;
+        held.element ??= element;
         const index = this.value(value.index, USIZE, line);
-        if (held.kind === "array") this.within(index, held, line);
+        this.within(index, held, line);
         if (expect !== null) {
           this.coerce(`an element of ${value.buffer}`, { kind: "primitive", name: element }, expect, line);
         }
-        const bufferType = held.kind === "array"
-          ? arrayType(held)
-          : { kind: "array", of: { kind: "primitive", name: "f64" }, length: null };
-        return { k: "element", buffer: held.name, bufferType: bufferType as TypeExpr, index, type: element };
+        return { k: "element", buffer: held.name, bufferType: arrayType(held), index, type: element };
       }
       case "call":
         return { k: "call", call: this.call(value, line) };
@@ -3266,6 +3444,19 @@ class ProgramResolver {
     // call reads the body of what it calls before it types the call.
     const declared = this.functions.table.get(value.function);
     if (declared !== undefined) {
+      // What the arguments are written as is what the parameters the source
+      // wrote no type for are read at. The kinds are read here, at the call
+      // site, and the program is read again until they stop changing: a
+      // parameter of a function is read at the type the callers of that
+      // function pass it at, and a caller may itself be read at a type only a
+      // later round settles.
+      for (const [position, argument] of value.args.entries()) {
+        if (declared.params[position]?.type !== null) continue;
+        const kind = this.kindOf(argument, line);
+        if (kind === "text" || kind === "number") {
+          this.functions.observed.record(value.function, position, kind);
+        }
+      }
       this.settle(declared);
       const signature = declared.signature as FunctionSignature;
       // The arguments the source wrote are the ones it takes: what it reads of
@@ -3286,9 +3477,24 @@ class ProgramResolver {
       // What the function reads of the scope it was declared in is passed to it
       // at every call, after the arguments the source wrote: the call is the
       // only place the two scopes meet, so the call is what hands them over.
-      const written = value.args.map((argument, position) =>
-        this.value(argument, parseType(signature.params[position].type), line),
-      );
+      const written = value.args.map((argument, position) => {
+        const wanted = signature.params[position].type;
+        const resolved = this.value(argument, parameterExpect(wanted), line);
+        // A parameter written as a string is given a string: a number is not
+        // one, and the language has no way of turning a number into a string
+        // the caller did not write. A value the runtime holds is a string when
+        // it holds one, and the runtime renders it at the use.
+        const given = draftType(resolved);
+        if ((wanted === "text" || wanted === "boxedtext") && given !== null && isNumberType(given)) {
+          throw programError(
+            `"${signature.params[position].name}" is given a value that is not a string`,
+            this.body,
+            line,
+            `line ${line} of ${this.body.file}: a parameter written as a string is given a string`,
+          );
+        }
+        return resolved;
+      });
       // The binding the capture was taken from, not a name looked up here: the
       // call is in a different scope from the declaration, and a declaration
       // that shadows the name between the two is a different binding that
@@ -3297,7 +3503,7 @@ class ProgramResolver {
       // inner binding answered 110.
       const captured = declared.captured.map((capture, position) => {
         const paramType = signature.params[value.args.length + position].type;
-        if (paramType !== "text") {
+        if (paramType !== "text" && paramType !== "boxedtext") {
           const expected = parseType(paramType);
           if (capture.held.kind === "array") this.expectArray(expected, capture.held, line);
         }
@@ -3366,6 +3572,71 @@ class ProgramResolver {
   /* ---------------------------------------------------------------------- */
   /* Uses                                                                    */
   /* ---------------------------------------------------------------------- */
+
+  /**
+   * What a value is written as, for the parameter it is passed as: a string, a
+   * number, or a shape the compiler does not know. A parameter the source wrote
+   * no type for is read at the shape its callers pass it at, and this is what
+   * says so.
+   *
+   * The shape is read off the source rather than off the resolved value, so
+   * that a name is read at the shape the scope holds it at and not at the shape
+   * the parameter it is passed as happens to be read at: a name a caller was
+   * given is a name whatever the parameter it is passed as is.
+   */
+  private kindOf(value: ProgramValue, line: number): "text" | "number" | "other" {
+    switch (value.k) {
+      case "number":
+      case "bigint":
+        return "number";
+      case "text":
+      case "fixed":
+        return "text";
+      case "name": {
+        // A named function is a function, and no parameter of a program is read
+        // at one.
+        if (this.functions.table.has(value.name)) return "other";
+        const held = this.lookup(value.name) ?? this.topLevelText(value.name);
+        if (held === undefined) return "other";
+        if (held.kind === "text") return "text";
+        if (held.kind === "number") return "number";
+        return "other";
+      }
+      case "call": {
+        const builtin = builtinFor(value.function);
+        if (builtin !== null) {
+          return isNumberType(builtin.returns) ? "number" : "other";
+        }
+        const declared = this.functions.table.get(value.function);
+        if (declared === undefined || declared.signature === null) return "other";
+        const returns = declared.signature.returns;
+        if (returns === "text" || returns === "boxedtext") return "text";
+        return isNumberType(parseType(returns)) ? "number" : "other";
+      }
+      case "binary": {
+        // A string added to a string is a string, and every other operation is
+        // a number. The `||` and `&&` operators answer one of their two sides,
+        // so they answer what the left one is.
+        if (value.op === "+") {
+          const left = this.kindOf(value.left, line);
+          const right = this.kindOf(value.right, line);
+          return left === "text" && right === "text" ? "text" : "number";
+        }
+        if (value.op === "||" || value.op === "&&") return this.kindOf(value.left, line);
+        return "number";
+      }
+      case "unary":
+        // A sign in front of a value reads it as a number, whatever it was.
+        return value.op === "+" || value.op === "-" ? "number" : "other";
+      case "conditional":
+        return this.kindOf(value.then, line);
+      case "length":
+      case "element":
+        return "number";
+      default:
+        return "other";
+    }
+  }
 
   /** A number is used at one type; the program declares it that way. */
   private expectNumber(expect: TypeExpr, held: NumberHeld, line: number): void {
@@ -3646,7 +3917,11 @@ class ProgramLowering {
     for (const draft of program.declared) {
       if (draft.signature === null || draft.compiled === null) continue;
       for (const capture of draft.captured) {
-        if (capture.held.kind === "text" && capture.held.mutable) {
+        // A string the function writes through is shared through a cell, and
+        // the cell is named by the binding the capture was taken from and by
+        // the name the capture arrives under, which are two names when the
+        // declaration was renamed to keep the two apart — so both are boxed.
+        if (capture.boxed) {
           this.boxedTexts.add(capture.held.name);
           this.boxedTexts.add(capture.name);
         }
@@ -3668,10 +3943,28 @@ class ProgramLowering {
         // holds it, so it is passed on as the pointer it is; every other
         // parameter is narrowed into the double the trampoline is called with.
         const args = draft.signature.params
-          .map((param, index) => (param.type === "text" ? `p${index}` : `(double)(uintptr_t)p${index}`))
+          .map((param, index) => (param.type === "text" || param.type === "boxedtext" ? `p${index}` : `(double)(uintptr_t)p${index}`))
           .join(", ");
         const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
-        const body = `void ${trampolineName}(void *p0, void *p1) {\n  ${call}\n}`;
+        // What calls the trampoline passes it two values, and what the program
+        // passes it is the value of the event and the names the arrow captured,
+        // so the trampoline is given room for as many as the arrow holds.
+        const body = `static void ${trampolineName}(${trampolineParameters(draft.signature.params.length)}) {\n  ${call}\n}`;
+        return { name: trampolineName, body };
+      });
+    // A named function the program hands to something as a callback is called
+    // through a trampoline of its own: what calls it is not a program, and
+    // passes it two values rather than the arguments the source wrote.
+    const callbacks = settled
+      .filter((draft) => draft.callback)
+      .map((draft) => {
+        const trampolineName = `__callback_${draft.name}`;
+        const args = draft.signature.params
+          .slice(0, draft.params.length)
+          .map((param, index) => (param.type === "text" || param.type === "boxedtext" ? `p${index}` : `(double)(uintptr_t)p${index}`))
+          .join(", ");
+        const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+        const body = `static void ${trampolineName}(${trampolineParameters(draft.params.length)}) {\n  ${call}\n}`;
         return { name: trampolineName, body };
       });
     // A block starts open and is closed by what ends it: a program ends by
@@ -3688,7 +3981,7 @@ class ProgramLowering {
       functions: [...program.functions, ...settled.map((draft) => draft.signature)],
       bodies,
       objects: program.objects,
-      extraFunctions: trampolines,
+      extraFunctions: [...trampolines, ...callbacks],
     };
   }
 
@@ -3699,12 +3992,14 @@ class ProgramLowering {
     // read back as the types the body reads them at: a buffer is a pointer to
     // its first element, and a number is the number it is.
     const params = signature.params.map((param) => {
-      if (param.type === "text") {
+      if (param.type === "text" || param.type === "boxedtext") {
         return {
           kind: "text" as const,
           name: param.name,
           mutable: true,
-          boxed: this.boxedTexts.has(param.name),
+          // A string the function writes through is shared through a cell, and
+          // a string it is given is the string itself.
+          boxed: param.type === "boxedtext" || this.boxedTexts.has(param.name),
         };
       }
       return {
@@ -4550,11 +4845,13 @@ class ProgramLowering {
     return {
       callee: call.name,
       signature: call.signature,
-      args: call.args.map((argument, position) => this.value(argument, parseType(call.signature.params[position].type), line)),
+      args: call.args.map((argument, position) =>
+        this.value(argument, parameterExpect(call.signature.params[position].type), line),
+      ),
       // A call of a count the call lower in arities names carries one type per
       // argument the call was made with, and the types the rest of the
       // signature names are the ones the longer form would have read them at.
-      argTypes: call.signature.params.map((param) => parseType(param.type)).slice(0, call.args.length),
+      argTypes: call.signature.params.map((param) => parameterType(param.type)).slice(0, call.args.length),
       returns: call.returns,
       effects: call.effects,
       // What the caller owns is what the callee made: a block of bytes is laid
@@ -4663,20 +4960,35 @@ export function resolveProgram(
       Object.assign(layouts, contract.definition?.objects ?? {});
     }
   }
-  const resolver = new ProgramResolver(
-    body,
-    contractsOf(program),
-    layouts,
-    {
-      table: new Map(),
-      waiting: [],
-      settling: new Set(),
-      used: new Set(),
-    },
-    new Map(Object.entries(objectNames)),
-    objectKeys,
-  );
-  return new ProgramLowering(resolver.taken()).lower(resolver.resolve());
+  // A parameter the source wrote no type for is read at the type its callers
+  // pass it at, and what the callers pass is read at the types the parameters
+  // of the functions they call are read at. The program is therefore read
+  // again and again until the kinds stop changing: what one round settles,
+  // the next round reads at, and the round after that settles what that read
+  // says. The kinds are kept beside the resolution rather than inside it, so
+  // every round starts from what the last one learned.
+  const observed = new Observations();
+  let resolved: SemanticProgram | null = null;
+  for (let round = 0; round < 16; round += 1) {
+    observed.changed = false;
+    const resolver = new ProgramResolver(
+      body,
+      contractsOf(program),
+      layouts,
+      {
+        table: new Map(),
+        waiting: [],
+        settling: new Set(),
+        used: new Set(),
+        observed,
+      },
+      new Map(Object.entries(objectNames)),
+      objectKeys,
+    );
+    resolved = new ProgramLowering(resolver.taken()).lower(resolver.resolve());
+    if (!observed.changed) break;
+  }
+  return resolved as SemanticProgram;
 }
 
 // A backend is handed what this module resolved, so the type of it is named

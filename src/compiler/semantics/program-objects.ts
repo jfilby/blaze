@@ -240,7 +240,10 @@ class Walk {
         this.open();
         for (const param of statement.params) {
           if (param.type === "number") this.bind(param.name, { k: "number", text: "" });
-          else if (param.type !== null) this.bind(param.name, { k: "null" });
+          // A parameter the source wrote no type for is read at the type its
+          // callers pass it at, which is not known here: the shape of a literal
+          // naming one is the shape of a reference, which is what a null is.
+          else this.bind(param.name, { k: "null" });
         }
         this.statements(statement.body);
         this.close();

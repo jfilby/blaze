@@ -107,6 +107,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
   entry("blaze_rt_array_get", "double", [["array", "double"], ["index", "double"]], "Reads one element of a dynamic array.", "Returns the element.", { tags: ["object"] }),
+  entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_set", "void", [["array", "double"], ["index", "double"], ["value", "double"]], "Writes one element of a dynamic array.", "Returns nothing.", { tags: ["object"] }),
   entry("blaze_rt_dyn_array_new", "double", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
@@ -2866,6 +2867,15 @@ double blaze_rt_array_get(double array, double index) {
   size_t i = (size_t)index;
   if (i >= d->count) return 0.0;
   return ((double*)d->items)[i];
+}
+double blaze_rt_array_length(double array) {
+  blaze_dyn* d = blaze_dyn_lookup(array);
+  if (!d) return 0.0;
+  /* An object holds its fields in pairs, so it has half as many of them as
+     it has items. */
+  if (d->kind == BLAZE_DYN_OBJECT) return (double)(d->count / 2);
+  if (d->kind != BLAZE_DYN_ARRAY) return 0.0;
+  return (double)d->count;
 }
 void blaze_rt_array_set(double array, double index, double value) {
   blaze_dyn* d = blaze_dyn_lookup(array);
