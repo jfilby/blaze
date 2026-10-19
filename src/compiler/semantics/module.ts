@@ -146,7 +146,6 @@ export type ProgramStatement =
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; line: number }
   | { kind: "print"; values: ProgramValue[]; line: number }
   | { kind: "if"; condition: ProgramValue; then: ProgramStatement[]; otherwise: ProgramStatement[]; line: number }
-  | { kind: "try"; body: ProgramStatement[]; catchParam: string | null; catchBody: ProgramStatement[] | null; finallyBody: ProgramStatement[] | null; line: number }
   | { kind: "while"; condition: ProgramValue; body: ProgramStatement[]; line: number }
   | { kind: "doWhile"; condition: ProgramValue; body: ProgramStatement[]; line: number }
   | {

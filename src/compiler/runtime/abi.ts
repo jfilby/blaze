@@ -3207,17 +3207,28 @@ double blaze_rt_md5_digest(double hasher) {
   return blaze_rt_box_string(hex);
 }
 
+void blaze_error_clear(void);
+void blaze_error_set(const char* message);
+int blaze_had_error(void);
+
 /* Minimal promise implementation. */
-typedef struct { int settled; double value; } blaze_promise;
-void* blaze_promise_new(void) { blaze_promise* p = malloc(sizeof(blaze_promise)); p->settled = 0; p->value = 0.0; return p; }
-void blaze_promise_resolve(void* promise, double value) { blaze_promise* p = promise; p->settled = 1; p->value = value; }
-void blaze_promise_reject(void* promise, const char* message) { (void)message; blaze_promise* p = promise; p->settled = 1; p->value = 0.0/0.0; }
-double blaze_promise_await(void* promise) { blaze_promise* p = promise; return p->value; }
+typedef struct { int settled; int failed; double value; const char* message; } blaze_promise;
+void* blaze_promise_new(void) { blaze_promise* p = malloc(sizeof(blaze_promise)); p->settled = 0; p->failed = 0; p->value = 0.0; p->message = NULL; return p; }
+void blaze_promise_resolve(void* promise, double value) { blaze_promise* p = promise; p->settled = 1; p->failed = 0; p->value = value; p->message = NULL; }
+void blaze_promise_reject(void* promise, const char* message) { blaze_promise* p = promise; p->settled = 1; p->failed = 1; p->value = 0.0/0.0; p->message = message; blaze_error_set(message); }
+double blaze_promise_await(void* promise) { blaze_promise* p = promise; if (p && p->failed) blaze_error_set(p->message); return p ? p->value : 0.0; }
+int blaze_promise_failed(void* promise) { blaze_promise* p = promise; return p ? p->failed : 0; }
+const char* blaze_promise_message(void* promise) { blaze_promise* p = promise; return p ? p->message : NULL; }
 void blaze_promise_set_current(void* promise) { blaze_current_promise = promise; }
 void blaze_promise_clear_current(void) { blaze_current_promise = NULL; }
 void blaze_promise_resolve_current(double value) { if (blaze_current_promise) blaze_promise_resolve(blaze_current_promise, value); }
 void blaze_promise_reject_current(const char* message) { if (blaze_current_promise) blaze_promise_reject(blaze_current_promise, message); }
 void *blaze_current_promise = NULL;
+static int blaze_error_flag = 0;
+const char* blaze_last_error = NULL;
+void blaze_error_clear(void) { blaze_error_flag = 0; blaze_last_error = NULL; }
+void blaze_error_set(const char* message) { blaze_error_flag = 1; blaze_last_error = message; }
+int blaze_had_error(void) { return blaze_error_flag; }
 
 ${U256_KERNEL}
 ${I256_KERNEL}

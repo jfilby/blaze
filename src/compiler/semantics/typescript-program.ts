@@ -293,7 +293,6 @@ class ProgramParser {
     if (this.at("{")) return this.block();
     if (this.at("const") || this.at("let") || this.at("var")) return this.declaration();
     if (this.at("if")) return this.conditional();
-    if (this.at("try")) return this.tryBlock();
     if (this.at("while")) return this.whileLoop();
     if (this.at("do")) return this.doWhileLoop();
     if (this.at("for")) return this.countedLoop();
@@ -452,30 +451,6 @@ class ProgramParser {
   }
 
   /** `if (c) body else body`, where the second body may be another `if`. */
-  private tryBlock(): ProgramStatement {
-    const line = this.peek().line;
-    this.expect("try");
-    const body = this.statements();
-    let catchParam: string | null = null;
-    let catchBody: ProgramStatement[] | null = null;
-    if (this.accept("catch")) {
-      if (this.accept("(")) {
-        const param = this.peek();
-        if (param.kind === "ident") {
-          this.next();
-          catchParam = param.text;
-        }
-        this.expect(")");
-      }
-      catchBody = this.statements();
-    }
-    let finallyBody: ProgramStatement[] | null = null;
-    if (this.accept("finally")) {
-      finallyBody = this.statements();
-    }
-    return { kind: "try", body, catchParam, catchBody, finallyBody, line };
-  }
-
   private conditional(): ProgramStatement {
     const line = this.peek().line;
     this.expect("if");

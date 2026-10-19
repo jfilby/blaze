@@ -610,6 +610,40 @@ class FunctionBody {
         this.write({ k: "if", condition, then, otherwise, line: statement.line });
         return;
       }
+      case "try": {
+        // Start the protected block with no pending error, so an error left by
+        // an earlier call cannot be mistaken for one this body raised.
+        this.write({
+          k: "call",
+          call: this.semanticCall(
+            "blaze_error_clear",
+            { name: "blaze_error_clear", symbol: "blaze_error_clear", params: [], returns: "void" },
+            [],
+            { kind: "void" },
+            [],
+            true,
+          ),
+          line: statement.line,
+        });
+        // Run the protected body. It may leave the block early (return / jump),
+        // in which case there is nothing to catch and the check below is not
+        // reached.
+        this.statements(statement.body);
+        // If the body fell through, an error is pending and there is a catch
+        // arm, run it.
+        if (statement.catchBody !== null) {
+          const hadError = this.typed(
+            { k: "call", name: "blaze_had_error", args: [] },
+            null,
+            statement.line,
+          ).value;
+          const catchBlock = this.arm(statement.catchBody, this.frame().loop);
+          this.write({ k: "if", condition: hadError, then: catchBlock, otherwise: null, line: statement.line });
+        }
+        // Finally runs whether or not the catch arm ran.
+        this.statements(statement.finallyBody ?? []);
+        return;
+      }
       case "while": {
         const condition = this.typed(statement.condition, null, statement.line).value;
         this.write({ k: "loop", loop: { kind: "while", condition, ...this.loop(statement.body) }, line: statement.line });
