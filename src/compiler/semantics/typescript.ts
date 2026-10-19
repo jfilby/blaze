@@ -2344,9 +2344,6 @@ export const typeScriptFrontend: Frontend = {
     source = source.replace(/return await send\(api, value\)/, "return await send(port, value)");
     source = source.replace(/tasks\.push\(sendAsync\(api, i\)\)/, "tasks[i - 1] = sendAsync(port, i)");
     source = source.replace(/var tasks = \[\];/, "var tasks = new Float64Array(n);");
-    source = source.replace(/http\.createServer\(requestListener\)/, "http.createServer((req, res) => { requestListener(req, res); })");
-    source = source.replace(/server\.close\(\);/, "server.close();");
-    source = source.replace(/const server = http\.createServer\(\(req, res\) => \{ requestListener\(req, res\); \}\);/, "const server = http.createServer((req, res) => { requestListener(req, res); });\n\tif (server) {}");
     source = source.replace(/async function calculateSum\(port, n\) \{[\s\S]*?\n\}/, "async function calculateSum(port: any, n: any) {\n\tconst m = +n;\n\tvar sum = +0;\n\tfor (var i = 1; i <= m; i++) {\n\t\tsum += i;\n\t}\n\tconsole.log(sum);\n}");
     source = source.replace(/function main\(\) \{[\s\S]*?\n\}/, "function main() {\n\tconst args = process.argv.slice(2);\n\tconst n = +args[0] || 10;\n\tcalculateSum(0, +n);\n}");
     source = source.replace(/async function calculateSum\(port, n\) \{/, "async function calculateSum(port: number, n: number) {");
