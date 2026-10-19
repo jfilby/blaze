@@ -2374,7 +2374,9 @@ class ProgramResolver {
       case "bigint":
         return true;
       case "name": {
-        const held = this.held(value.name, line);
+        if (this.functions.table.has(value.name)) return false;
+        const held = this.lookup(value.name);
+        if (held === undefined) return false;
         return held.kind === "number" && held.bigint === true;
       }
       case "binary":
