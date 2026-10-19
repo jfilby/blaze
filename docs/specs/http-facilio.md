@@ -85,13 +85,20 @@ mentions `blaze_http` or `fio_`, and no facil.io object is linked.
 
 1. ✅ Define the runtime ABI and handler lifecycle (`runtime/http.ts`)
 2. ✅ Integrate facil.io behind the adapter (`runtime/facil.ts`)
-3. ⬜ Run a minimal `GET /` application using the C backend — needs a Blaze
-   HTTP source form that lowers to `blaze_http_*` calls (front-end + IR work)
-   and facil.io source present at build time
-4. ⬜ Run the same application using the machine-code backend — same
-   dependency as (3)
-5. ⬜ Routing, request bodies, headers, error responses, graceful shutdown —
-   the ABI entries exist; lowering them from source is the remaining step
+3. ✅ Run a minimal `GET /` application using the C backend — `http.serve(port)`
+   lowers to `blaze_http_*` calls in both backends; verified by
+   `test/http-end-to-end.test.ts` (C and machine backends, facil.io source at
+   `deps/facil.io`).
+4. ✅ Run the same application using the machine-code backend — same lowering
+   and end-to-end test as (3).
+5. ✅ Routing, request bodies, headers, error responses, graceful shutdown —
+   `http.createServer` + `server.listen` lower to `blaze_http_route_register`
+   and `blaze_http_server_run` in a background thread; `res.writeHead` lowers
+   to `blaze_http_resp_status`; `res.end` lowers to `blaze_http_resp_body` +
+   `blaze_http_resp_complete`; `server.close` lowers to
+   `blaze_http_server_stop`; `req.on` invokes the callback (the adapter already
+   buffers the body); `req.text` reads `blaze_http_req_body` into a Blaze
+   string. Verified by `test/http-end-to-end.test.ts` (C and machine backends).
 6. ⬜ Concurrency tests, resource limits, timeouts, HTTPS — facil.io provides
    these; Blaze-side tests need (3)–(5) first
 

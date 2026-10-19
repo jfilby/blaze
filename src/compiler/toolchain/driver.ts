@@ -776,7 +776,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "res.end": {
         const body = call.args[1];
         const bodyExpr = argument(1);
-        return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyExpr}, strlen((const char*) ${bodyExpr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
+        /* A Blaze string value is a double holding a pointer; extract it.
+           A text literal is already a C string and needs no such cast. */
+        const bodyPtr = body.type.kind === "ptr" ? bodyExpr : `(const char*)(uintptr_t)${bodyExpr}`;
+        return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyPtr}, strlen((const char*) ${bodyPtr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
       }
       case "server.close": {
         return `(blaze_http_server_stop((void*) (uintptr_t) ${argument(0)}), 0.0)`;
@@ -788,7 +791,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
           invoke = `${argument(3)}(${cb.captures.join(", ")})`;
         }
         const handler = `((void(*)(void*, void*)) (uintptr_t) ${argument(0)})`;
-        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); pthread_t _blaze_http_tid; pthread_create(&_blaze_http_tid, NULL, (void*(*)(void*))blaze_http_server_run, blaze_http_srv); ${invoke}; })`;
+        /* The port is bound by blaze_http_server_new before the callback runs,
+           so the listener is ready; blaze_http_server_run then blocks in this
+           thread, exactly as http.serve does. */
+        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); ${invoke}; blaze_http_server_run(blaze_http_srv); })`;
       }
       case "Promise": {
         const cb = call.args[0];
@@ -813,9 +819,28 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       }
       case "Math.random":
       case "require":
-      case "req.on":
+      case "req.on": {
+        const req = argument(0);
+        const cb = call.args[2];
+        let invoke = "0.0";
+        if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {
+          const trampoline = `__arrow_trampoline_${cb.name.slice("__arrow_".length)}`;
+          /* The request body is already buffered by the facil.io adapter, so
+             "data" and "end" fire immediately: invoke the callback with the
+             request handle (as a double) and a null second handle. */
+          invoke = `(${trampoline}((void *)(uintptr_t)${req}, NULL), 1.0)`;
+        }
+        return invoke;
+      }
+      case "req.text": {
+        /* Read the buffered request body and return it as a Blaze string. */
+        return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${argument(0)}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`;
+      }
       case "req.end":
+        /* Server-side: the response is ended by res.end; req.end is a no-op here. */
+        return "0.0";
       case "req.write":
+        /* Server-side: writing to a request is client-side only; a no-op here. */
         return "0.0";
       case "tasks.push":
         return RUNTIME_NAME + "_array_push(" + argument(0) + ", " + argument(1) + ")";

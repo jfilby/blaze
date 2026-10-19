@@ -344,6 +344,20 @@ class ProgramEmitter {
         ? extraFn.body.split("\\n")
         : this.function(extraFn.body as SemanticFunction),
     );
+    // Forward declarations so every function can call every other function
+    // (and every trampoline) regardless of definition order. Without these a
+    // function body that calls a trampoline defined later in the file is an
+    // implicit declaration, which modern C treats as an error.
+    const prototypes: string[] = [];
+    const collectPrototypes = (units: string[][]) => {
+      for (const lines of units) {
+        const first = lines[0];
+        const brace = first.indexOf("{");
+        if (brace >= 0) prototypes.push(first.slice(0, brace).trimEnd() + ";");
+      }
+    };
+    collectPrototypes(declared);
+    collectPrototypes(extra);
     const body = this.entry();
     const opened = this.target.openProgram().map((line) => indent(1, line));
     const closed = this.target
@@ -351,6 +365,7 @@ class ProgramEmitter {
       .map((line) => indent(1, line));
     return [
       this.target.prelude(this.program),
+      ...prototypes,
       ...declared.flatMap((lines) => lines),
       ...extra.flatMap((lines) => lines),
       ...opened,

@@ -83,6 +83,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_error_clear": { params: [], returns: { kind: "void" }, arity: 0 },
   /** `blaze_had_error()` is 1 when the last awaited call failed, else 0. */
   "blaze_had_error": { params: [], returns: F64, arity: 0 },
+  /** `blaze_last_error()` is the message of the last failure, for `catch (e)`. */
+  "blaze_last_error": { params: [], returns: ANY, arity: 0 },
   "http.createServer": { params: [ANY], returns: ANY, arity: 1 },
   "server.listen": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
   "server.close": { params: [ANY], returns: ANY, arity: 1 },
@@ -91,6 +93,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "resolve": { params: [ANY], returns: ANY, arity: 1 },
   "reject": { params: [ANY], returns: ANY, arity: 1 },
   "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  "req.text": { params: [ANY], returns: ANY, arity: 1 },
   "res.writeHead": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "res.end": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },

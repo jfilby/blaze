@@ -73,3 +73,19 @@ test("try/catch/finally lowers finally after the check", () => {
   assert.match(ir, /blaze_error_clear/);
   assert.match(ir, /blaze_had_error/);
 });
+
+test("catch (e) binds e to blaze_last_error", () => {
+  const source = [
+    "export function h(x: number): void {",
+    "  try {",
+    "    const y = x + 1;",
+    "  } catch (e) {",
+    "    const caught = e;",
+    "  }",
+    "}",
+  ].join("\n");
+  const ir = functionIr(source, "h");
+  assert.match(ir, /blaze_error_clear/);
+  assert.match(ir, /blaze_had_error/);
+  assert.match(ir, /blaze_last_error/);
+});

@@ -3210,6 +3210,7 @@ double blaze_rt_md5_digest(double hasher) {
 void blaze_error_clear(void);
 void blaze_error_set(const char* message);
 int blaze_had_error(void);
+const char* blaze_last_error(void);
 
 /* Minimal promise implementation. */
 typedef struct { int settled; int failed; double value; const char* message; } blaze_promise;
@@ -3225,10 +3226,11 @@ void blaze_promise_resolve_current(double value) { if (blaze_current_promise) bl
 void blaze_promise_reject_current(const char* message) { if (blaze_current_promise) blaze_promise_reject(blaze_current_promise, message); }
 void *blaze_current_promise = NULL;
 static int blaze_error_flag = 0;
-const char* blaze_last_error = NULL;
-void blaze_error_clear(void) { blaze_error_flag = 0; blaze_last_error = NULL; }
-void blaze_error_set(const char* message) { blaze_error_flag = 1; blaze_last_error = message; }
+static const char* blaze_error_message = NULL;
+void blaze_error_clear(void) { blaze_error_flag = 0; blaze_error_message = NULL; }
+void blaze_error_set(const char* message) { blaze_error_flag = 1; blaze_error_message = message; }
 int blaze_had_error(void) { return blaze_error_flag; }
+const char* blaze_last_error(void) { return blaze_error_message; }
 
 ${U256_KERNEL}
 ${I256_KERNEL}

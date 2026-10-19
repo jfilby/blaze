@@ -630,14 +630,29 @@ class FunctionBody {
         // reached.
         this.statements(statement.body);
         // If the body fell through, an error is pending and there is a catch
-        // arm, run it.
+        // arm, run it. The catch parameter is bound to `blaze_last_error()` so
+        // a `catch (e)` can inspect the error, and it is declared inside the
+        // catch arm so it is only initialized when there actually is an error.
         if (statement.catchBody !== null) {
+          const catchBody: Statement[] =
+            statement.catchParam === null
+              ? statement.catchBody
+              : [
+                  {
+                    kind: "declare",
+                    name: statement.catchParam,
+                    type: null,
+                    init: { k: "call", name: "blaze_last_error", args: [] } as Expression,
+                    line: statement.line,
+                  },
+                  ...statement.catchBody,
+                ];
           const hadError = this.typed(
             { k: "call", name: "blaze_had_error", args: [] },
             null,
             statement.line,
           ).value;
-          const catchBlock = this.arm(statement.catchBody, this.frame().loop);
+          const catchBlock = this.arm(catchBody, this.frame().loop);
           this.write({ k: "if", condition: hadError, then: catchBlock, otherwise: null, line: statement.line });
         }
         // Finally runs whether or not the catch arm ran.
