@@ -1210,6 +1210,9 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
  * read out of; and everything else is a number.
  */
 function heldOf(text: string): Held {
+  if (text === "text") {
+    return { kind: "text", name: "", mutable: true, value: null };
+  }
   const type = parseType(text);
   if (type.kind === "slice" || type.kind === "array") {
     return { kind: "array", name: "", mutable: true, element: elementOf(type) ?? "f64", length: null, values: [] };
@@ -1231,7 +1234,7 @@ interface ProgramFunctionDraft {
    * the same name — passing that one changes what the call computes without
    * anything being wrong with it visibly.
    */
-  captured: { name: string; type: TypeExpr; held: Held }[];
+  captured: { name: string; type: TypeExpr | null; held: Held }[];
   /** The parameters the source wrote, in the order it wrote them. */
   params: { name: string; type: TypeExpr }[];
   body: ProgramStatement[];
@@ -1423,7 +1426,7 @@ class ProgramResolver {
     // function, of the type the scope holds it at: a function of a program is
     // compiled on its own, so what it reads from around it is passed to it at
     // every call, and the call is where that scope is.
-    const captures: { name: string; type: TypeExpr; held: Held }[] = [];
+    const captures: { name: string; type: TypeExpr | null; held: Held }[] = [];
     for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
       const held = this.lookup(name);
       if (declaredHere.includes(name)) {
@@ -1451,15 +1454,25 @@ class ProgramResolver {
           `line ${statement.line} of ${this.body.file}: ${statement.name} reads "${name}" of the scope it is declared in, and a name it reads is one the scope holds`,
         );
       }
-      // A name of no type is a string, and a string is not something a function
-      // of a program can be given: a parameter is a number, a buffer or a
-      // reference, and a text value has none of them.
+      // A mutable text local captured by a nested program function is boxed:
+      // the function is given a pointer to the shared cell that holds it, so a
+      // write inside the function updates the caller's binding. An immutable
+      // const string is still written inline and needs no parameter.
+      if (held.kind === "text") {
+        if (!held.mutable && held.value !== null) continue;
+        if (!held.mutable) {
+          throw programError(
+            `"${name}" is a string`,
+            this.body,
+            statement.line,
+            `line ${statement.line} of ${this.body.file}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
+          );
+        }
+        captures.push({ name, type: null, held });
+        continue;
+      }
       const type = heldType(held);
       if (type === null) {
-        // A const string the scope holds is the text it was written as, so it
-        // is written inline where it is read: a function that reads one needs
-        // no parameter for it and no environment to close over.
-        if (held.kind === "text" && !held.mutable && held.value !== null) continue;
         throw programError(
           `"${name}" is a string`,
           this.body,
@@ -1527,7 +1540,7 @@ class ProgramResolver {
         // constants first and its `main` last. Both are the same program, so
         // both spell the entry the one way, or the C the driver is written in
         // carries two `main` definitions and the link fails.
-        params: params.map((param) => ({ name: param.name, type: typeToString(param.type) })),
+        params: params.map((param) => ({ name: param.name, type: param.type === null ? "text" : typeToString(param.type) })),
         returns: draft.signature?.returns ?? "void",
       };
     }
@@ -3265,8 +3278,11 @@ class ProgramResolver {
       // } { let base = 100; console.log(f(10)); }` answers 11, and passing the
       // inner binding answered 110.
       const captured = declared.captured.map((capture, position) => {
-        const expected = parseType(signature.params[value.args.length + position].type);
-        if (capture.held.kind === "array") this.expectArray(expected, capture.held, line);
+        const paramType = signature.params[value.args.length + position].type;
+        if (paramType !== "text") {
+          const expected = parseType(paramType);
+          if (capture.held.kind === "array") this.expectArray(expected, capture.held, line);
+        }
         return { k: "reference", name: capture.held.name, held: capture.held } satisfies DraftValue;
       });
       const held = primitive(parseType(signature.returns));
