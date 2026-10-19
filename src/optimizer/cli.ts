@@ -699,8 +699,8 @@ async function gatherBuildFeedbackContext(project?: ProjectInfo): Promise<string
  * already there.
  */
 export interface SuiteResult {
-  /** Whether the suite ran to the end: a suite killed by the bound, or one
-   *  that could not be started, has said nothing about the compiler. */
+  /** Whether the suite ran to the end: a suite that could not be started has
+   *  said nothing about the compiler. */
   readonly completed: boolean;
   /** Whether it passed, which is what the exit status settles. */
   readonly passed: boolean;
@@ -712,12 +712,13 @@ export interface SuiteResult {
   readonly output: string;
 }
 
-/** How long the test suite may run before it is abandoned. The suite takes
- * a few minutes on its own, so the bound is a generous multiple of it. */
-const TEST_TIMEOUT_MS = 30 * 60 * 1000;
-
 /**
  * Run the compiler's test suite.
+ *
+ * The suite is not bounded: it takes as long as it takes, because a suite
+ * that is killed by a bound has said nothing about the compiler, and the time
+ * it had already spent is wasted. The suite says how far it has got as it
+ * goes, so a run that is watching it knows that it is still going.
  *
  * @param live Let the suite write to this process's own streams rather than
  *   reading it, for the runs a person is watching as they happen
@@ -737,12 +738,11 @@ export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteRe
   };
   delete env["FORCE_COLOR"];
   const result = live
-    ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", timeout: TEST_TIMEOUT_MS, env })
+    ? spawnSync("npm", ["test"], { cwd: compilerDir, stdio: "inherit", env })
     : spawnSync("npm", ["test"], {
         cwd: compilerDir,
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
-        timeout: TEST_TIMEOUT_MS,
         env,
       });
 
@@ -752,10 +752,7 @@ export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteRe
       passed: false,
       failures: 0,
       passedCount: 0,
-      output:
-        /timed out/i.test(result.error.message) && result.error.name === "Error"
-          ? `the suite did not finish within ${TEST_TIMEOUT_MS / 60000} minutes`
-          : `the suite could not be run: ${result.error.message}`,
+      output: `the suite could not be run: ${result.error.message}`,
     };
   }
 

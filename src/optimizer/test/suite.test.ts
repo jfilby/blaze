@@ -76,6 +76,20 @@ test("a suite with no test script says so, and did not pass", async () => {
   assert.match(result.output, /Missing script|npm error/);
 });
 
+test("a suite that takes its time is run to its end", async () => {
+  // The suite is not bounded: it takes as long as it takes, because a suite
+  // that is killed by a bound has said nothing about the compiler, and the
+  // time it had already spent is wasted. A suite that takes a few seconds is
+  // a suite that ran to its end.
+  const dir = await fakeCompiler("node -e \"setTimeout(() => process.stdout.write('# pass 1\\n'), 2000)\"");
+
+  const result = runTestSuite(false, dir);
+
+  assert.equal(result.completed, true);
+  assert.equal(result.passed, true);
+  assert.equal(result.passedCount, 1);
+});
+
 test("a session that forces colour does not carry it into the suite", async () => {
   // A run driven from a coloured terminal or an agent's own session inherits
   // FORCE_COLOR, which makes console.log write ANSI codes and a test that

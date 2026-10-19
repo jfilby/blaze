@@ -87,6 +87,11 @@ went wrong: what it answered when it went well is a file or a build log, and
 none of that is what it did. The change is still read out of the tree rather
 than out of this, and it is judged by the same three gates.
 
+The suite the change is judged by says how far it has got as it goes, every
+tenth of it, and it is not bounded: it takes as long as it takes. A suite that
+is killed by a bound has said nothing about the compiler, and the time it had
+already spent is wasted.
+
 ## blazeup-report
 
 ```
