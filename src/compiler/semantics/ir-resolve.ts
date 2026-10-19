@@ -3420,6 +3420,8 @@ class ProgramResolver {
   }
 
   private coerce(what: string, from: TypeExpr, to: TypeExpr, line: number): void {
+    // A `ref<any>` (an unshaped reference) accepts any value.
+    if (to.kind === "ref" && to.of === null) return;
     const source = primitive(from);
     const target = primitive(to);
     if (source === null || target === null || !NUMERIC.includes(source) || !NUMERIC.includes(target)) {

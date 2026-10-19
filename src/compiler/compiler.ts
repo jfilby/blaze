@@ -1060,6 +1060,9 @@ export async function runBuild(
     target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
     outputKind = resolveOutputKind(options.output ?? input.output);
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
+    // HTTP programs need the facil runtime even when the user did not ask for
+    // it: the generated code references blaze_http_* symbols.
+    if (runtimeKind === "none" && /\bhttp\b/.test(project.entry.source)) runtimeKind = "facil";
     backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
     buildMode = resolveBuildMode(options.mode ?? input.mode);
   } catch (cause) {

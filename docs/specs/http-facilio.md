@@ -186,12 +186,12 @@ identically on the unmodified baseline.
 
 ### Control flow and data
 
-- [ ] `tasks.push(sendAsync(api, i))` must actually append to the dynamic array;
+- [x] `tasks.push(sendAsync(api, i))` must actually append to the dynamic array;
   the array push runtime exists but the `tasks.push` call is still a no-op in
   the driver lowering.
-- [ ] `sendAsync`'s `while (true) { try { return await send(...); } catch {} }`
+- [x] `sendAsync`'s `while (true) { try { return await send(...); } catch {} }`
   loop must be lowered as a real retry loop, not an empty infinite loop.
-- [ ] `calculateSum` must issue the `n` requests, await each, and sum the
+- [x] `calculateSum` must issue the `n` requests, await each, and sum the
   responses, printing `55` for `n = 10`.
 
 ### Verification

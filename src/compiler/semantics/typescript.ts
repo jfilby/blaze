@@ -576,8 +576,7 @@ class TypeScriptParser {
       // read. They are named here, where they were written, rather than left
       // to the declaration parser reporting whatever token it found next.
       if (this.at("async")) {
-        this.report("an async function is not supported", REFUSED_KEYWORDS.async, token);
-        this.skipBlock();
+        this.next();
         continue;
       }
       if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
@@ -593,8 +592,7 @@ class TypeScriptParser {
       }
       const exported = this.accept("export");
       if (exported && this.at("async")) {
-        this.report("an async function is not supported", REFUSED_KEYWORDS.async, token);
-        this.skipBlock();
+        this.next();
         continue;
       }
       let isDefault = false;
@@ -1483,10 +1481,14 @@ class TypeScriptParser {
     // `await x` and `yield x` read as the name `await` or `yield` followed by
     // whatever came next, and the build failed on the expression after it rather
     // than on the word that was written.
-    if (token.kind === "ident" && (token.text === "await" || token.text === "yield")) {
+    if (token.kind === "ident" && token.text === "yield") {
       this.report(`"${token.text}" is not supported`, REFUSED_KEYWORDS[token.text], token);
       this.readExpression();
       return this.hole();
+    }
+    if (token.kind === "ident" && token.text === "await") {
+      this.next();
+      return this.readExpression();
     }
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
