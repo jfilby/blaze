@@ -227,6 +227,7 @@ class FunctionEmitter {
   private readonly fn: SemanticFunction;
   private readonly body: string[] = [];
   private readonly names = new NameScope((name) => cEscape(name, TAKEN));
+  private readonly boxedTexts = new Set<string>();
   private readonly loops: { header: string; exit: string }[] = [];
   /**
    * The region loop the code being written is inside the body of, if any.
@@ -270,6 +271,7 @@ class FunctionEmitter {
       // of the program. The runtime source, which does print, includes it
       // itself.
       "#include <string.h>",
+      "#include <stdlib.h>",
       "",
       `#include "${RUNTIME_NAME}.h"`,
       ...(layouts === "" ? [] : ["", layouts]),
@@ -342,17 +344,27 @@ class FunctionEmitter {
       case "let": {
         const type = slotType(statement.slot);
         const name = this.names.declare(statement.slot.name, type);
+        const boxed = statement.slot.kind === "text" && (statement.slot as { boxed?: boolean }).boxed === true;
+        if (boxed) this.boxedTexts.add(statement.slot.name);
+        if (boxed) {
+          this.write([`${pad(depth)}char **${name} = (char **)malloc(sizeof(char *));`]);
+          this.write([`${pad(depth)}*${name} = ${this.expression(statement.value, type, depth)};`]);
+          return;
+        }
         this.write([`${pad(depth)}${declaredType(type)} ${name} = ${this.expression(statement.value, type, depth)};`]);
         return;
       }
       case "set": {
         const type = this.names.typeOf(statement.name, statement.value.type);
-        const target = this.names.read(statement.name);
+        const baseTarget = this.names.read(statement.name);
+        const target = (isTextType(type) && this.boxedTexts.has(statement.name)) ? `*${baseTarget}` : baseTarget;
         // A string grows: `+=` is a new value rather than an addition in place,
         // and C adds two pointers by their addresses. It is written as the
         // concatenation the IR states, which is what the other targets do.
         if (statement.op === "+=" && (type === null || isTextType(type))) {
           const held: SemanticValue = { k: "local", type: type ?? { kind: "text" }, name: statement.name };
+          // concat reads the (possibly boxed) local via expression(), which
+          // already dereferences; the store goes through the cell.
           this.write([`${pad(depth)}${target} = ${this.concat(held, statement.value, depth)};`]);
           return;
         }
@@ -673,6 +685,9 @@ class FunctionEmitter {
     const args = call.args.map((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;
       const targetType = builtin !== null ? builtin.params[index] : (call.argTypes[index] ?? argument.type);
+      if (argument.k === "local" && isTextType(argument.type) && this.boxedTexts.has(argument.name)) {
+        return this.names.read(argument.name);
+      }
       return this.expression(argument, targetType, depth);
     });
     if (!call.builtin) {
@@ -869,6 +884,9 @@ class FunctionEmitter {
       case "functionRef":
         return (value as { k: "functionRef"; name: string }).name;
       case "local":
+        if (isTextType(value.type) && this.boxedTexts.has(value.name)) {
+          return `*${this.names.read(value.name)}`;
+        }
         return this.names.read(value.name);
       case "text":
         return this.text(value, depth);

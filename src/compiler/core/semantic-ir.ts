@@ -618,7 +618,7 @@ export type SemanticSlot =
   /** A number, a truth, a reference: one value of one type. */
   | { kind: "value"; name: string; mutable: boolean; type: SemanticType }
   /** A string, as text when the program wrote it out, or built at run time. */
-  | { kind: "text"; name: string; mutable: boolean }
+  | { kind: "text"; name: string; mutable: boolean; boxed?: boolean }
   /**
    * An array the program allocated, written out element by element where the
    * count was settled on when the program ran. A view is a buffer too: it holds

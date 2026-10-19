@@ -154,6 +154,8 @@ interface TextHeld {
   mutable: boolean;
   /** The text as written, or null when the program built the string. */
   value: string | null;
+  /** True when this mutable text local is stored in a shared cell (boxed). */
+  boxed?: boolean;
 }
 
 /** The command line bound to a name, as `const args = process.argv.slice(n)`;
@@ -1656,7 +1658,10 @@ class ProgramResolver {
     );
     inner.open();
     for (const param of draft.signature.params) {
-      inner.declareName(param.name, draft.line, heldOf(param.type));
+      const held = param.type === "text"
+        ? { kind: "text" as const, name: "", mutable: true, value: null, boxed: true }
+        : heldOf(param.type);
+      inner.declareName(param.name, draft.line, held);
     }
     const statements = inner.statements(draft.body);
     inner.close();
@@ -3603,6 +3608,9 @@ class ProgramLowering {
   private readonly frames: BlockFrame[] = [];
   /** The names the program holds, so a generated one is not one of them. */
   private readonly used: Set<string>;
+  /** Mutable text locals that are captured by a nested program function, and so
+   *  are stored in a shared cell rather than by value. */
+  private readonly boxedTexts: Set<string> = new Set();
   /** What a value hoisted, to be written before the statement it is used in. */
   private pending: SemanticStatement[] = [];
   private counters: Record<"t" | "a" | "i", number> = { t: 0, a: 0, i: 0 };
@@ -3613,6 +3621,16 @@ class ProgramLowering {
   }
 
   lower(program: DraftProgram): SemanticProgram {
+    // Mutable text locals captured by a nested program function are boxed: they
+    // are stored in a shared cell rather than by value.
+    for (const draft of program.declared) {
+      if (draft.signature === null || draft.compiled === null) continue;
+      for (const capture of draft.captured) {
+        if (capture.held.kind === "text" && capture.held.mutable) {
+          this.boxedTexts.add(capture.held.name);
+        }
+      }
+    }
     // A function the program declares is a function of its own, lowered by a
     // lowering of its own: the names it holds are its own, and a name it
     // generates is not one the program around it generated.
@@ -3770,14 +3788,14 @@ class ProgramLowering {
 
   /** A slot that holds a value of this type, so a name of it can be declared. */
   private slot(name: string, type: SemanticType, mutable: boolean): SemanticSlot {
-    if (isTextType(type)) return { kind: "text", name, mutable };
+    if (isTextType(type)) return { kind: "text", name, mutable, boxed: this.boxedTexts.has(name) };
     if (type.kind === "ref" || type.kind === "ptr") return { kind: "object", name, mutable, type };
     return { kind: "value", name, mutable, type };
   }
 
   /** The slot a declaration makes, and the type the name is read as. */
   private declared(held: Held): SemanticSlot {
-    if (held.kind === "text") return { kind: "text", name: held.name, mutable: held.mutable };
+    if (held.kind === "text") return { kind: "text", name: held.name, mutable: held.mutable, boxed: held.boxed === true || this.boxedTexts.has(held.name) };
     if (held.kind === "array") {
       return {
         kind: "buffer",
