@@ -43,6 +43,8 @@ tools (e.g. blazeup).
 - Don't look in archived files, they are assumed to be irrelevant.
 - Don't create or edit anything under the private-docs dir.
 - Don't modify this AGENTS.md file.
+- Don't rewrite specific strings from programs to versions that works. Instead
+add support to the compiler for the original form.
 
 
 ## Specs
