@@ -85,6 +85,9 @@ function endsByLeaving(block: SemanticBlock): boolean {
   const last = block.statements[block.statements.length - 1];
   if (last === undefined) return false;
   if (last.k === "raise") return true;
+  if (last.k === "loop" && last.loop.kind === "while" && last.loop.neverExits === true) {
+    return true;
+  }
   if (last.k !== "if" || last.otherwise === null) return false;
   return last.then.terminator.k !== "next" && last.otherwise.terminator.k !== "next";
 }

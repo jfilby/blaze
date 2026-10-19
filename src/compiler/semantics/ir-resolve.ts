@@ -1285,6 +1285,11 @@ function returnsIn(statements: readonly DraftStatement[]): (DraftStatement & { k
       case "forOf":
         found.push(...returnsIn(statement.body));
         break;
+      case "try":
+        found.push(...returnsIn(statement.body));
+        if (statement.catchBody !== null) found.push(...returnsIn(statement.catchBody));
+        if (statement.finallyBody !== null) found.push(...returnsIn(statement.finallyBody));
+        break;
       default:
         break;
     }
@@ -3915,11 +3920,22 @@ class ProgramLowering {
       }
       case "while": {
         const condition = this.value(statement.condition, null, statement.line);
+        const loop = { kind: "while" as const, condition, ...this.loop(statement.body) };
+        const cond = statement.condition as { k?: string; value?: boolean; text?: string };
+        const isConstantTrue =
+          (cond.k === "boolean" && cond.value === true) ||
+          (cond.k === "literal" && (cond.text === "true" || cond.text === "1"));
+        if (isConstantTrue) (loop as { neverExits?: boolean }).neverExits = true;
         this.statement({
           k: "loop",
-          loop: { kind: "while", condition, ...this.loop(statement.body) },
+          loop,
           line: statement.line,
         });
+        if (isConstantTrue) {
+          if (this.frame().block.terminator.k === "next") {
+            this.frame().block.terminator = { k: "unreachable" };
+          }
+        }
         return;
       }
       case "doWhile": {

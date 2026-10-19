@@ -2321,12 +2321,6 @@ export const typeScriptFrontend: Frontend = {
       /const req = http\.request\([\s\S]*?req\.end\(\);/,
       'const content = http.request(api, "POST", "content-type: application/json", `{"value":${value}}`);\n\t\tresolve(+content);',
     );
-    // Give sendAsync a reachable return so the compiler's control-flow check is
-    // satisfied; the while (true) loop never falls through in practice.
-    source = source.replace(
-      /(async function sendAsync\(api, value\) \{\n(?:\t|    )while \(true\) \{[\s\S]*?\n(?:\t|    )\}\n)(\})/,
-      "$1    return 0;\n$2",
-    );
     // The Promise executor's resolve/reject are provided by the runtime via
     // blaze_current_promise, not as parameters, so drop them from the callback.
     source = source.replace(

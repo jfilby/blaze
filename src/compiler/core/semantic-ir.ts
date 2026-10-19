@@ -741,6 +741,8 @@ export type SemanticLoop =
       header: string;
       exit: string;
       body: SemanticBlock;
+      /** True when the condition is a constant true, so the loop never exits. */
+      neverExits?: boolean;
     }
   | {
       kind: "doWhile";
