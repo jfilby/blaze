@@ -1650,6 +1650,7 @@ class Machine {
 
   private readonly names = new NameScope((name) => name);
   private readonly slots = new Map<string, Held>();
+  private readonly boxedTexts = new Set<string>();
   private readonly loops: { header: string; exit: string; names: { header: string; exit: string } }[] = [];
   /**
    * The region loop the code being written is inside the body of, if any.
@@ -3208,6 +3209,28 @@ class Machine {
     switch (statement.k) {
       case "let": {
         const type = slotType(statement.slot);
+        const boxed = statement.slot.kind === "text" && (statement.slot as { boxed?: boolean }).boxed === true;
+        if (boxed) this.boxedTexts.add(statement.slot.name);
+        if (boxed) {
+          // Allocate a shared cell holding the text pointer, store the initial
+          // value into it, and bind the local to the cell pointer.
+          this.at(statement.value, type);
+          const valueSlot = this.hold(type, "blaze_boxed_value");
+          this.store(valueSlot);
+          this.code.movRegImm(RDI, 8n);
+          this.runtime("_allocate");
+          const cellSlot = this.hold(POINTER, "blaze_boxed_cell");
+          this.store(cellSlot);
+          this.load(valueSlot);
+          this.code.movRegMem(RCX, frame(cellSlot.offset));
+          this.code.movMemRegSized(mem(RCX, 0), RAX, 8);
+          const held = this.bind(statement.slot.name, type);
+          this.load(cellSlot);
+          this.store(held);
+          this.freeSlot(valueSlot);
+          this.freeSlot(cellSlot);
+          return;
+        }
         if (statement.slot.kind === "buffer") {
           this.value(statement.value);
           this.store(this.bind(statement.slot.name, type));
@@ -3418,11 +3441,39 @@ class Machine {
   /** A name given a value, or one changed by the operator it was written with. */
   private assign(name: string, op: string, value: SemanticValue): void {
     const target = this.slot(name);
+    const boxed = isTextType(target.type) && this.boxedTexts.has(name);
     // A string grows: `+=` is a new value rather than an addition in place, and
     // two addresses added together are not a string.
     if (op === "+=" && isTextType(target.type)) {
       this.concat({ k: "local", type: TEXT, name }, value, target.type);
-      this.store(target);
+      if (boxed) {
+        const valueSlot = this.hold(target.type, "blaze_boxed_value");
+        this.store(valueSlot);
+        const cellSlot = this.hold(POINTER, "blaze_boxed_cell");
+        this.load(target);
+        this.store(cellSlot);
+        this.load(valueSlot);
+        this.code.movRegMem(RCX, frame(cellSlot.offset));
+        this.code.movMemRegSized(mem(RCX, 0), RAX, 8);
+        this.freeSlot(valueSlot);
+        this.freeSlot(cellSlot);
+      } else {
+        this.store(target);
+      }
+      return;
+    }
+    if (op === "=" && boxed) {
+      this.at(value, target.type);
+      const valueSlot = this.hold(target.type, "blaze_boxed_value");
+      this.store(valueSlot);
+      const cellSlot = this.hold(POINTER, "blaze_boxed_cell");
+      this.load(target);
+      this.store(cellSlot);
+      this.load(valueSlot);
+      this.code.movRegMem(RCX, frame(cellSlot.offset));
+      this.code.movMemRegSized(mem(RCX, 0), RAX, 8);
+      this.freeSlot(valueSlot);
+      this.freeSlot(cellSlot);
       return;
     }
     if (op === "=") {
@@ -5043,6 +5094,10 @@ class Machine {
       case "local": {
         const slot = this.slot(value.name);
         this.load(slot);
+        if (isTextType(slot.type) && this.boxedTexts.has(value.name)) {
+          // Boxed text local holds a cell pointer; dereference it.
+          this.code.movRegMemSized(RAX, mem(RAX, 0), 8, false);
+        }
         // A name is loaded at the width its own declaration gives it, which is
         // not always the width this read asks for: a whole number read as a
         // double is every value the slot holds said as the wider of the two, and

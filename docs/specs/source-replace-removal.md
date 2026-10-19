@@ -101,15 +101,7 @@ just the rewrite itself, so it is not a real removal path.
 String concatenation (`body += chunk`) and `JSON.parse` already lower; only the
 mutable-capture part is missing.
 
-Implementation details for the boxing approach (status):
-- `ir-resolve.ts` now allows mutable text held values to be captured and marks
-  the resulting slot as boxed/mutable (done).
-- `ir-c.ts` now allocates a cell per boxed text local, dereferences on read,
-  stores on write/`+=`, and passes the cell to capturing functions (done).
-- `ir-validate.ts` already permits writes to mutable slots, including boxed
-  text slots (done).
-- `ir-machine.ts` still needs the analogous cell allocation/dereference/store
-  (remaining).
+(All backends now support boxed mutable text locals; the boxing approach is complete.)
 
 ### 2. Node-style `http.request` callback form
 Needs an async/callback lowering: the callback form creates a request, registers
