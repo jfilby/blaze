@@ -781,7 +781,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       }
       case "res.writeHead": {
         const status = call.args[1];
-        const statusText = status.k === "number" ? status.text : argument(1);
+        const statusText = status.k === "const" ? status.text : argument(1);
         return `(blaze_http_resp_status((void*) (uintptr_t) ${argument(0)}, (uint16_t) ${statusText}), 0.0)`;
       }
       case "res.end": {

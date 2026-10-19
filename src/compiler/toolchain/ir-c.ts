@@ -865,6 +865,7 @@ class FunctionEmitter {
       case "bool":
         return value.value ? "1" : "0";
       case "nothing":
+        return "NULL";
       case "functionRef":
         return (value as { k: "functionRef"; name: string }).name;
       case "local":
@@ -885,7 +886,11 @@ class FunctionEmitter {
       case "length":
         return this.length(value.of, depth);
       case "element": {
-        return `${RUNTIME_NAME}_array_get(${this.raw(value.of, depth)}, ${this.expression(value.index, USIZE, depth)})`;
+        const isDynamic = value.of.type?.kind === "ref" && value.of.type?.of === null;
+        if (isDynamic) {
+          return `${RUNTIME_NAME}_array_get(${this.raw(value.of, depth)}, ${this.expression(value.index, USIZE, depth)})`;
+        }
+        return `${this.raw(value.of, depth)}[${this.expression(value.index, USIZE, depth)}]`;
       }
       case "argv":
         return value.index === null
@@ -965,7 +970,11 @@ class FunctionEmitter {
         // is bound first.
         const arm = this.temporary("blaze_arm");
         const left = this.raw(value.left, depth);
-        const right = `${RUNTIME_NAME}_box_string(${this.raw(value.right, depth)})`;
+        const right = isTextType(value.right.type)
+          ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, depth)})`
+          : isNumber(value.right.type)
+            ? `${RUNTIME_NAME}_box_number(${this.raw(value.right, depth)})`
+            : this.raw(value.right, depth);
         return (
           `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
           `${this.truth(arm, valueKind(value.left), value.left.type)} ? ` +

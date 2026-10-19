@@ -1340,25 +1340,6 @@ class ProgramParser {
     return args;
   }
 
-  private skipArguments(): void {
-    if (this.at(")")) {
-      this.next();
-      return;
-    }
-    let depth = 0;
-    do {
-      const t = this.peek();
-      if (t.kind === "end") break;
-      if (t.kind === "punct" && t.text === "(") depth += 1;
-      else if (t.kind === "punct" && t.text === ")") {
-        if (depth === 0) break;
-        depth -= 1;
-      }
-      this.next();
-    } while (true);
-    this.accept(")");
-  }
-
   /** The value a statement the parser could not read stands for. */
   private nothing(): ProgramValue {
     return { k: "number", text: "0" };
