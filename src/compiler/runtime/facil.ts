@@ -600,8 +600,6 @@ const char *blaze_http_client_request(const char *url, const char *method,
   if (length) *length = blen;
   return blaze_http_client_body_buf;
 }
-  return blaze_http_client_body_buf;
-}
 
 /* Buffered client request handle for the callback form. */
 typedef struct blaze_http_client_handle_s {
@@ -613,7 +611,25 @@ typedef struct blaze_http_client_handle_s {
   size_t body_cap;
   char *resp_body;
   size_t resp_len;
+  /* The response happens at "end", so the handler the program registered may
+     not have run yet. The compiler binds one for each side of the completes:
+     one that the callback fired when the request is ready and one that the
+     program handed an exception to when it is not. A trampoline is the
+     program's own function, so the adapter carries the pointer it was given
+     and calls it with the handle and the captured value that was bound. */
+  void *resp_tramp;
+  void *resp_cap;
+  void *error_tramp;
+  void *error_cap;
 } blaze_http_client_handle_t;
+
+/* The first void* a bound callback receives is the handle the response came
+   through, or nothing when the request could not be made. The second is the
+   value the program captured when it registered the handler. */
+typedef void (*blaze_http_client_callback)(void *p0, void *p1);
+
+#define BLAZE_HTTP_ON_RESPONSE 0
+#define BLAZE_HTTP_ON_ERROR 1
 
 void *blaze_http_client_open(const char *url) {
   blaze_http_client_handle_t *h = calloc(1, sizeof(*h));
@@ -622,6 +638,41 @@ void *blaze_http_client_open(const char *url) {
   h->method = strdup("GET");
   h->headers = strdup("");
   return h;
+}
+
+void blaze_http_client_method(void *handle, const char *method) {
+  blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
+  if (!h || !method) return;
+  char *t = strdup(method);
+  if (!t) return;
+  if (h->method) free(h->method);
+  h->method = t;
+}
+
+void blaze_http_client_header(void *handle, const char *line) {
+  blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
+  if (!h || !line || line[0] == '\\0') return;
+  size_t len = strlen(h->headers ? h->headers : "");
+  size_t add = strlen(line);
+  char *t = realloc(h->headers, len + add + 3);
+  if (!t) return;
+  h->headers = t;
+  memcpy(t + len, line, add);
+  t[len + add] = '\\r';
+  t[len + add + 1] = '\\n';
+  t[len + add + 2] = '\\0';
+}
+
+void blaze_http_client_watch(void *handle, int what, void *trampoline, void *captured) {
+  blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
+  if (!h) return;
+  if (what == BLAZE_HTTP_ON_ERROR) {
+    h->error_tramp = trampoline;
+    h->error_cap = captured;
+  } else {
+    h->resp_tramp = trampoline;
+    h->resp_cap = captured;
+  }
 }
 
 void blaze_http_client_write(void *handle, const unsigned char *body, size_t body_len) {
@@ -637,7 +688,7 @@ void blaze_http_client_write(void *handle, const unsigned char *body, size_t bod
   }
   memcpy(h->body + h->body_len, body, body_len);
   h->body_len += body_len;
-  h->body[h->body_len] = '\0';
+  h->body[h->body_len] = '\\0';
 }
 
 void *blaze_http_client_end(void *handle) {
@@ -645,10 +696,26 @@ void *blaze_http_client_end(void *handle) {
   if (!h) return NULL;
   size_t len = 0;
   const char *resp = blaze_http_client_request(h->url, h->method ? h->method : "GET", h->headers ? h->headers : "", (const unsigned char *)h->body, h->body_len, 10000, &len);
-  if (!h->resp_body) h->resp_body = malloc(len + 1);
-  else h->resp_body = realloc(h->resp_body, len + 1);
-  if (h->resp_body) { memcpy(h->resp_body, resp ? resp : "", len); h->resp_body[len] = '\0'; h->resp_len = len; }
-  return h;
+  if (resp == NULL) {
+    /* The request did not answer with a response: the handler the program
+       gave the error side of the request runs, the way Node.js fires the
+       "error" event of the request object it handed back. The message is
+       the one the request failed with, and the program reads it as the text
+       it is. */
+    if (h->error_tramp != NULL) {
+      ((blaze_http_client_callback)h->error_tramp)((void *)"the request could not be made", h->error_cap);
+    }
+    return NULL;
+  }
+  if (h->resp_body) free(h->resp_body);
+  h->resp_body = malloc(len + 1);
+  if (h->resp_body) { memcpy(h->resp_body, resp, len); h->resp_body[len] = '\\0'; h->resp_len = len; }
+  /* The response is in the handle now, so the callback the program gave the
+     request runs against it and its own handlers read it out. */
+  if (h->resp_tramp != NULL) {
+    ((blaze_http_client_callback)h->resp_tramp)(handle, h->resp_cap);
+  }
+  return handle;
 }
 
 const char *blaze_http_client_resp_body(void *handle, size_t *length) {

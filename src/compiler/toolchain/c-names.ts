@@ -218,7 +218,15 @@ export function cEscape(name: string, reserved: Readonly<Record<string, true>>):
  * for a program the source is entitled to write.
  */
 export function cMemberName(name: string): string {
-  return cEscape(name, { ...C_KEYWORDS, ...cMacroNames() });
+  let escaped = "";
+  for (let index = 0; index < name.length; index += 1) {
+    // A member is an identifier: a name the source quoted writes its characters
+    // a C name cannot carry as the digit or dot they stand for, so every one of
+    // them is an underscore the declaration and the access agree on.
+    escaped += /[A-Za-z0-9_]/.test(name[index]) ? name[index] : "_";
+  }
+  if (escaped === "" || /^[0-9]/.test(escaped)) escaped = `_${escaped}`;
+  return cEscape(escaped, { ...C_KEYWORDS, ...cMacroNames() });
 }
 
 /**

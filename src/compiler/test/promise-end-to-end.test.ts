@@ -11,9 +11,18 @@ const QUIET = { stage: () => {} };
 
 const SOURCE = "const p = new Promise((resolve) => resolve(42));\nconsole.log(await p);\n";
 
+/** A program whose executor names its resolve and reject the long way. */
+const SOURCE_NAMED =
+  "const p = new Promise(function (onFulfilled, onRejected) { onFulfilled(42); });\nconsole.log(await p);\n";
+
 async function buildBinary(backend: "c" | "machine"): Promise<string> {
-  const directory = await scratch(`blaze-promise-${backend}-`);
-  await writeFile(join(directory, "main.ts"), SOURCE, "utf8");
+  return buildSource(backend, SOURCE, `blaze-promise-${backend}-`);
+}
+
+/** The binary a program of this source is built into. */
+async function buildSource(backend: "c" | "machine", source: string, name: string): Promise<string> {
+  const directory = await scratch(`${name}-`);
+  await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
     sourceFile: "main.ts",
@@ -35,6 +44,17 @@ async function buildBinary(backend: "c" | "machine"): Promise<string> {
 for (const backend of ["c", "machine"] as const) {
   test(`${backend} backend supports promise runtime`, async () => {
     const binary = await buildBinary(backend);
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, "42\n");
+  });
+}
+
+for (const backend of ["c", "machine"] as const) {
+  test(`${backend} backend resolves with the names an executor is written by`, async () => {
+    // The executor names its resolve and reject `onFulfilled` and
+    // `onRejected`, and the promise is settled by the names the source used.
+    const binary = await buildSource(backend, SOURCE_NAMED, `blaze-promise-named-${backend}`);
     const delivered = run(binary, [], { timeoutMs: 60_000 });
     assert.equal(delivered.code, 0, delivered.stderr);
     assert.equal(delivered.stdout, "42\n");

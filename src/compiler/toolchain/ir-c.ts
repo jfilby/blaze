@@ -825,7 +825,16 @@ class FunctionEmitter {
       if (isReference(value.type)) return `((double)(uintptr_t)(${written}))`;
       return `${RUNTIME_NAME}_box_null()`;
     }
-    if (as === null || isTextType(value.type) || isTextType(as)) return written;
+    if (as === null || isTextType(value.type) || isTextType(as)) {
+      // A string a use reads as a number is the number its text states: the
+      // language reads the '+text' written in front of one as the number it
+      // names, and a string is boxed the runtime reads the pointer it carries
+      // out of.
+      if (isTextType(value.type) && as !== null && isNumber(as) && !isTextType(as)) {
+        return `${RUNTIME_NAME}_to_number(${RUNTIME_NAME}_box_string(${written}))`;
+      }
+      return written;
+    }
     // A wide number is a struct, so the cast the conversions below write is a
     // conversion to a non-scalar type, which is not a C source at all. The one
     // conversion there is to a wide number is the widening, and it is the

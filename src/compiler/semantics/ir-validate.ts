@@ -64,6 +64,7 @@ import type {
   SemanticValue,
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
+import { cMemberName } from "../toolchain/c-names.ts";
 import { parseType, typeToString } from "./contract.ts";
 import { NO_CALLEES, reductionsFor, refusalFor, type Callees } from "./parallel.ts";
 import { refusalFor as regionRefusalFor } from "./region.ts";
@@ -1495,11 +1496,12 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     problems.push(`${prefix}${call.callee} is called against a signature of ${call.signature.params.length} parameters`);
   }
 
-  if (call.args.length !== params.length) {
+  const allowed = builtin?.arities ?? [builtin?.arity ?? params.length];
+  if (call.args.length !== params.length && !allowed.includes(call.args.length)) {
     problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${params.length}`);
   }
-  if (builtin?.arity !== undefined && call.args.length !== builtin.arity) {
-    problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${builtin.arity}`);
+  if (!allowed.includes(call.args.length)) {
+    problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${allowed.join(" or ")}`);
   }
   if (call.argTypes.length !== call.args.length) {
     problems.push(`${prefix}${call.callee} passes ${call.args.length} arguments as ${call.argTypes.length} types`);
@@ -1808,11 +1810,15 @@ function nameProblems(context: Context, tree: Tree): string[] {
       walked(value, (inner) => {
         if (inner.k === "newObject") {
           checkName(problems, prefix, inner.layout);
-          for (const field of inner.fields) checkName(problems, prefix, field.name);
+          // A field is read and written through the member the backend spells
+          // it by, which is an identifier of its own however the source named
+          // the field: a quoted key such as "content-type" is legal source and
+          // a member the escape answers.
+          for (const field of inner.fields) checkName(problems, prefix, cMemberName(field.name));
         }
         if (inner.k === "loadField") {
           checkName(problems, prefix, inner.layout);
-          checkName(problems, prefix, inner.field);
+          checkName(problems, prefix, cMemberName(inner.field));
         }
       });
     }
@@ -1827,7 +1833,7 @@ function nameProblems(context: Context, tree: Tree): string[] {
   }
   for (const layout of Object.values(context.objects)) {
     checkName(problems, "", layout.name);
-    for (const field of layout.fields) checkName(problems, "", field.name);
+    for (const field of layout.fields) checkName(problems, "", cMemberName(field.name));
   }
   for (const name of context.declared) checkName(problems, "", name);
 

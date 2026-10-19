@@ -2494,8 +2494,13 @@ class ProgramResolver {
         // body is compiled on its own. Its value is not yet a first-class
         // function pointer; lowering passes it to callback sites by name.
         const name = `__arrow_${line}`;
+        // The parameters a Promise executor names its own resolve and reject by:
+        // they are not values of the program, so a body that calls one resolves
+        // the promise the executor runs for. The same reading answers whichever
+        // of the four names the source wrote the pair by.
+        const executorParams = new Set(["resolve", "reject", "onFulfilled", "onRejected"]);
         const params: { name: string; type: string }[] = value.params
-          .filter((param) => param.name !== "resolve" && param.name !== "reject")
+          .filter((param) => !executorParams.has(param.name))
           .map((param) => ({ name: param.name, type: param.type === null ? "any" : param.type }));
         const statement: ProgramStatement & { kind: "function" } = {
           kind: "function",
@@ -2902,7 +2907,14 @@ class ProgramResolver {
         const text = value.op === "-" ? `-${value.operand.text}` : value.operand.text;
         return { k: "literal", held: { kind: "number", name: "", mutable: false, type: null, text } };
       }
-      if (value.op === "+") return this.value(value.operand, null, line);
+      const resolved = this.value(value.operand, null, line);
+      // A sign in front of a number is the number itself. A sign in front of a
+      // string is the number the text names: the `+content` of a Promise the
+      // HTTP answers in text is the read `Number(content)` makes of it.
+      if (value.op === "+" && holdsText(resolved)) {
+        return { k: "call", call: this.call({ k: "call", function: "Number", args: [value.operand] } as ProgramValue & { k: "call" }, line) };
+      }
+      if (value.op === "+") return resolved;
     }
     const operand = this.value(value.operand, null, line);
     if (value.op === "!") {
@@ -3223,9 +3235,10 @@ class ProgramResolver {
   private call(value: ProgramValue & { k: "call" }, line: number): DraftCall {
     const builtin = builtinFor(value.function);
     if (builtin !== null) {
-      if (value.args.length !== builtin.params.length) {
+      const counts = builtin.arities ?? [builtin.arity ?? builtin.params.length];
+      if (!counts.includes(value.args.length)) {
         throw programError(
-          `${value.function} takes ${builtin.params.length} argument(s), not ${value.args.length}`,
+          `${value.function} takes ${counts.join(" or ")} argument(s), not ${value.args.length}`,
           this.body,
           line,
         );
@@ -3609,25 +3622,33 @@ class ProgramLowering {
   /** The names the program holds, so a generated one is not one of them. */
   private readonly used: Set<string>;
   /** Mutable text locals that are captured by a nested program function, and so
-   *  are stored in a shared cell rather than by value. */
-  private readonly boxedTexts: Set<string> = new Set();
+   *  are stored in a shared cell rather than by value. Built once on the outer
+   *  lowering and shared with every function body lowering it hands work to,
+   *  so a declaration inside a function is boxed the same way the captures of
+   *  it are. */
+  private readonly boxedTexts: Set<string>;
   /** What a value hoisted, to be written before the statement it is used in. */
   private pending: SemanticStatement[] = [];
   private counters: Record<"t" | "a" | "i", number> = { t: 0, a: 0, i: 0 };
   private blockCount = 0;
 
-  constructor(used: Set<string>) {
+  constructor(used: Set<string>, boxedTexts?: Set<string>) {
     this.used = used;
+    this.boxedTexts = boxedTexts ?? new Set();
   }
 
   lower(program: DraftProgram): SemanticProgram {
     // Mutable text locals captured by a nested program function are boxed: they
-    // are stored in a shared cell rather than by value.
+    // are stored in a shared cell rather than by value. The cell is named by
+    // the binding the capture was taken from, and the parameter the capture
+    // arrives under is named by the source, which are two names when the
+    // declaration was renamed to keep the two apart — so both are boxed.
     for (const draft of program.declared) {
       if (draft.signature === null || draft.compiled === null) continue;
       for (const capture of draft.captured) {
         if (capture.held.kind === "text" && capture.held.mutable) {
           this.boxedTexts.add(capture.held.name);
+          this.boxedTexts.add(capture.name);
         }
       }
     }
@@ -3643,7 +3664,12 @@ class ProgramLowering {
       .map((draft) => {
         const suffix = draft.name.slice("__arrow_".length);
         const trampolineName = `__arrow_trampoline_${suffix}`;
-        const args = draft.signature.params.map((_, index) => `(double)(uintptr_t)p${index}`).join(", ");
+        // A captured text local arrives as the pointer to the shared cell that
+        // holds it, so it is passed on as the pointer it is; every other
+        // parameter is narrowed into the double the trampoline is called with.
+        const args = draft.signature.params
+          .map((param, index) => (param.type === "text" ? `p${index}` : `(double)(uintptr_t)p${index}`))
+          .join(", ");
         const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
         const body = `void ${trampolineName}(void *p0, void *p1) {\n  ${call}\n}`;
         return { name: trampolineName, body };
@@ -3669,20 +3695,28 @@ class ProgramLowering {
   /** One function the program declared, as the IR holds a function whole. */
   private function(draft: SettledFunction): SemanticFunction {
     const signature = draft.signature as FunctionSignature;
-    if (draft.name.startsWith("__arrow_")) console.error("FN", draft.name, JSON.stringify(signature.params.map(p=>p.type)), "=>", JSON.stringify((draft.signature as any).params.map((p:any)=>p.type)));
     // The parameters are the parameters of the signature the resolver settled,
     // read back as the types the body reads them at: a buffer is a pointer to
     // its first element, and a number is the number it is.
-    const params = signature.params.map((param) => ({
-      kind: "value" as const,
-      name: param.name,
-      mutable: param.type === "text",
-      type: (param.type === "text" ? { kind: "text" } : parseType(param.type)) as SemanticType,
-    }));
-    if (draft.name.startsWith("__arrow_")) console.error("SEM", draft.name, JSON.stringify(params.map(p=>p.type)));
+    const params = signature.params.map((param) => {
+      if (param.type === "text") {
+        return {
+          kind: "text" as const,
+          name: param.name,
+          mutable: true,
+          boxed: this.boxedTexts.has(param.name),
+        };
+      }
+      return {
+        kind: "value" as const,
+        name: param.name,
+        mutable: false,
+        type: parseType(param.type) as SemanticType,
+      };
+    });
     // The body is lowered on its own: its own entry block, its own names, and
     // a value of its own for each parameter it is given.
-    const inner = new ProgramLowering(new Set(this.used));
+    const inner = new ProgramLowering(new Set(this.used), this.boxedTexts);
     const entry = inner.body(draft.compiled as DraftProgram);
     const allocates = entry.releases.length > 0;
     return {
@@ -4517,7 +4551,10 @@ class ProgramLowering {
       callee: call.name,
       signature: call.signature,
       args: call.args.map((argument, position) => this.value(argument, parseType(call.signature.params[position].type), line)),
-      argTypes: call.signature.params.map((param) => parseType(param.type)),
+      // A call of a count the call lower in arities names carries one type per
+      // argument the call was made with, and the types the rest of the
+      // signature names are the ones the longer form would have read them at.
+      argTypes: call.signature.params.map((param) => parseType(param.type)).slice(0, call.args.length),
       returns: call.returns,
       effects: call.effects,
       // What the caller owns is what the callee made: a block of bytes is laid

@@ -21,6 +21,7 @@ import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import {
   isBoolean,
   isFloat,
+  isNumber,
   isReference,
   isTextType,
   isUnsigned,
@@ -28,6 +29,7 @@ import {
   type SemanticCall,
   type SemanticReduction,
   type SemanticType,
+  type SemanticValue,
   type ValueKind,
 } from "../core/semantic-ir.ts";
 import type { BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
@@ -369,7 +371,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     // hands back is what its own body settled.
     const returns = cDeclarationType(parseType(signature.returns));
     const given = parameters
-      .map((param) => `${cDeclarationType(parseType(param.type))} ${param.name}`)
+      .map((param) => (param.type === "boxedtext" ? `char ** ${param.name}` : `${cDeclarationType(parseType(param.type))} ${param.name}`))
       .join(", ");
     return [`${returns} ${cSymbolName(signature.symbol)}(${given || "void"})${cSymbolLabel(signature.symbol)} {`];
   }
@@ -722,7 +724,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     return `${cSymbolName(call.signature.symbol)}(${argumentsText.join(", ")})`;
   }
 
-  builtin(call: SemanticCall, argumentsText: string[]): string {
+  builtin(call: SemanticCall, argumentsText: string[], expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
     switch (call.callee) {
       case "Math.abs":
@@ -747,12 +749,43 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         const out = "blaze_wide";
         return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${argument(0)}, ${argument(1)}, ${argument(2)}, ${argument(3)}); ${out}; })`;
       }
-      case "parseInt":
-        return `${RUNTIME_NAME}_to_number(${argument(0)})`;
+      case "parseInt": {
+        // A text argument is the number its text states, so the runtime boxes
+        // the pointer it carries and reads the number out of it; a dynamic
+        // value is already the number it holds, and a number is itself.
+        const raw = argument(0);
+        const value = isTextType(call.args[0]?.type) ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
+        return `${RUNTIME_NAME}_to_number(${value})`;
+      }
+      // `Number(value)` is the whole of what a value is: a string is the
+      // number its text states, a dynamic value is the number it holds, and a
+      // number is itself.
+      case "Number": {
+        const raw = argument(0);
+        // A text value is the pointer to the bytes it names, and the runtime
+        // reads the number out of a box; a dynamic value is already a box.
+        const value = isTextType(call.args[0]?.type) ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
+        return `${RUNTIME_NAME}_to_number(${value})`;
+      }
+      // A text value crosses the dynamic wall as the pointer it is, written
+      // into a double, because the ABI carries a double there: the runtime
+      // reads the raw string out of it again. A dynamic value is already the
+      // double it is handed over as.
       case "JSON.parse":
-        return `${RUNTIME_NAME}_json_parse(${argument(0)})`;
-      case "JSON.stringify":
-        return `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
+        return isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
+          ? `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${argument(0)}))`
+          : `${RUNTIME_NAME}_json_parse(${argument(0)})`;
+      case "JSON.stringify": {
+        // An object literal is serialized where it is written: the field names
+        // are the source's and the values are rendered as text one by one, so no
+        // object the program laid out is boxed into a dynamic value first.
+        if (call.args[0]?.k === "newObject") {
+          return `(double)(uintptr_t)blaze_rt_box_string(${this.objectJson(call.args[0], expression)})`;
+        }
+        return isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
+          ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_string(${argument(0)}))`
+          : `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
+      }
       case "crypto.createHash":
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
@@ -825,8 +858,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "Promise.await":
         return `blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
       case "resolve":
+      case "onFulfilled":
         return `(blaze_promise_resolve(blaze_current_promise, ${argument(0)}), 0.0)`;
-      case "reject": {
+      case "reject":
+      case "onRejected": {
         const arg = call.args[0];
         const text = (arg.k === "text" || arg.k === "const")
           ? argument(0)
@@ -834,8 +869,12 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
       }
       case "require":
-      case "req.on": {
-        const req = argument(0);
+      case "req.on":
+      case "res.on": {
+        const owner = argument(0);
+        /* A client response is the request handle itself: the response the
+           callback is given reads the buffered body through the handle. */
+        const clientResponse = call.callee === "res.on";
         const event = call.args[1];
         const eventName =
           event.k === "const"
@@ -843,25 +882,46 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
             : event.k === "text" && Array.isArray(event.parts) && event.parts.length === 1 && event.parts[0].k === "text"
               ? String(event.parts[0].value)
               : "";
+        /* The "error" event of a buffered client request happens at req.end,
+           when the request cannot be made, so the handler is bound to the
+           request when it is written and the adapter calls it there; nothing
+           fires here. */
+        if (eventName === "error") {
+          const bound = this.callbackRef(call.args[2], "an event the request carries a listener for");
+          return `({ blaze_http_client_watch((void *)(uintptr_t)${owner}, 1, ${bound.trampoline}, ${bound.captured}); 1.0; })`;
+        }
         const cb = call.args[2];
         let invoke = "0.0";
         if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {
           const trampoline = `__arrow_trampoline_${cb.name.slice("__arrow_".length)}`;
           const captures = Array.isArray(cb.captures) ? cb.captures : [];
-          /* The request body is already buffered by the facil.io adapter, so
-             "data" and "end" fire immediately. Pass the value the callback's
-             first parameter names (the chunk for "data"), followed by the
-             captured locals, so boxed captures stay shared. */
+          /* The request and response bodies are already buffered by the facil.io
+             adapter, so "data" and "end" fire where they are written. Pass the
+             value the callback's first parameter names (the chunk for "data"),
+             followed by the captured locals, so boxed captures stay shared. */
           let args: string[] = [];
           if (eventName === "data") {
-            args.push(`(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${req}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`);
-          } else if (eventName === "error") {
-            args.push("(void *)(uintptr_t)0.0");
+            if (clientResponse) {
+              /* The response the request the program asked for is in the
+                 handle the callback was given; read it out of the handle. */
+              args.push(
+                `(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_resp_body((void *)(uintptr_t)${owner}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`,
+              );
+            } else {
+              /* The server side reads the request the peer sent. */
+              args.push(
+                `(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${owner}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`,
+              );
+            }
           }
-          args = args.concat(captures);
-          const trampCall = args.length > 0
-            ? `${trampoline}(${args.map((a) => `(void *)(uintptr_t)${a}`).join(", ")})`
-            : `${trampoline}()`;
+          // A capture is the value the arrow was bound with, read as the
+          // pointer the trampoline receives it as. The trampoline takes the
+          // two values the event and the captures answer, so the slots the
+          // call does not fill are written as the nothing a param-less one
+          // reads out of.
+          for (const capture of captures) args.push(`(void *)(uintptr_t)${capture}`);
+          while (args.length < 2) args.push("(void*)0");
+          const trampCall = args.length > 0 ? `${trampoline}(${args.join(", ")})` : `${trampoline}((void*)0, (void*)0)`;
           invoke = `(${trampCall}, 1.0)`;
         }
         return invoke;
@@ -871,15 +931,27 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${argument(0)}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`;
       }
       case "req.end":
-        /* Server-side: the response is ended by res.end; req.end is a no-op here. */
-        return "0.0";
-      case "req.write":
-        /* Server-side: writing to a request is client-side only; a no-op here. */
-        return "0.0";
+        /* Client-side: the buffered request is sent here, and every handler the
+           callback of the `http.request` call left on it fires as the response
+           arrives. A server-side request ends with res.end instead. */
+        return `({ void *blaze_http_resp = blaze_http_client_end((void *)(uintptr_t)${argument(0)}); (void)blaze_http_resp; 1.0; })`;
+      case "req.write": {
+        /* Client-side: the body bytes of the buffered request are appended here
+           and sent by req.end. A server-side request reads its body with
+           req.on and req.text instead. The body is bound to a name of its own
+           because one statement expression cannot be written out twice: the
+           value a call computes is built once and read twice. */
+        const body = `const char *blaze_http_body = ${this.requestBody(call.args[1], expression)};`;
+        return `({ ${body} blaze_http_client_write((void *)(uintptr_t)${argument(0)}, (const unsigned char *)blaze_http_body, strlen(blaze_http_body)); 1.0; })`;
+      }
       case "tasks.push":
         return RUNTIME_NAME + "_array_push(" + argument(0) + ", " + argument(1) + ")";
       case "fetch":
       case "http.request": {
+        // `http.request(url, method, headers, body)` performs one request here;
+        // `http.request(url, options, callback)` opens a buffered request whose
+        // handlers the callback registers fire when req.end sends it.
+        if (call.args.length === 3) return this.bufferedRequest(call, expression);
         const urlArg = argument(0);
         const methodArg = argument(1);
         const headersArg = argument(2);
@@ -895,6 +967,121 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       default:
         throw driverError(`the driver cannot write down ${call.callee}`);
     }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* The callback form of the client                                          */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * The body of one buffered client request an `http.request(url, options,
+   * callback)` call opens. The options the source wrote are read off the
+   * literal, and the callback is bound to the handle so the adapter calls it
+   * with the response once req.end has sent the request.
+   */
+  private bufferedRequest(call: SemanticCall, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
+    const options = call.args[1];
+    if (options.k !== "newObject") {
+      throw driverError(
+        "http.request is given the request an object literal asks for",
+        "as in http.request(url, { method: \"POST\", headers: { ... } }, (res) => { ... })",
+      );
+    }
+    const method = options.fields.find((field) => field.name === "method");
+    const headers = options.fields.find((field) => field.name === "headers");
+    const lines: string[] = [
+      `void *blaze_http_req = blaze_http_client_open(${this.requestBody(call.args[0], expression)});`,
+      method === undefined ? "void" : `blaze_http_client_method(blaze_http_req, ${this.requestBody(method.value, expression)});`,
+    ];
+    if (headers !== undefined) {
+      if (headers.value.k !== "newObject") {
+        throw driverError(
+          "http.request is given the headers it asks for as an object literal",
+          "as in { method: \"POST\", headers: { \"content-type\": \"application/json\" } }",
+        );
+      }
+      for (const field of headers.value.fields) {
+        lines.push(`blaze_http_client_header(blaze_http_req, ${this.headerLine(field.name, field.value, expression)});`);
+      }
+    }
+    const bound = this.callbackRef(call.args[2], "a response, the one the callback of the request it opens reads");
+    lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.captured});`);
+    lines.push("(double)(uintptr_t)blaze_http_req;");
+    return `({ ${lines.join(" ")} })`;
+  }
+
+  /**
+   * The text of a value an HTTP call reads as bytes. A program string is
+   * already the pointer the adapter writes the request out of; a dynamic one
+   * is rendered by the runtime first.
+   */
+  private requestBody(value: SemanticValue, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
+    const text = expression(value, value.type);
+    if (value.k === "const" || value.k === "text" || isTextType(value.type)) return text;
+    return `blaze_rt_to_text(${text})`;
+  }
+
+  /** One header line an options object named, as `name: value`. */
+  private headerLine(name: string, value: SemanticValue, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
+    if (value.k !== "const" && value.k !== "text" && !isTextType(value.type)) {
+      throw driverError(
+        `the header "${name}" is not a string the compiler can read`,
+        "an options object carries the headers a request is written with as strings",
+      );
+    }
+    return this.stringConcat(this.stringLiteral(`${name}: `), expression(value, value.type));
+  }
+
+  /**
+   * The JSON of an object literal, built out of the values it was written
+   * with: each field is named as the source wrote it and its value is rendered
+   * as text, which is what the runtime answers an object stringify with.
+   */
+  private objectJson(object: SemanticValue & { k: "newObject" }, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
+    const fields = object.fields.map((field) => {
+      const value = field.value;
+      let text: string;
+      if (value.k === "text" || (value.k === "const" && isTextType(value.type)) || isTextType(value.type)) {
+        text = expression(value, value.type);
+      } else if (isNumber(value.type)) {
+        text = this.toText(expression(value, value.type), value.type, null);
+      } else {
+        throw driverError(
+          `the field "${field.name}" of an object stringify is not a number or a string on its own`,
+          "JSON.stringify of an object literal renders the values the fields name as text",
+        );
+      }
+      // The field name is written as JSON names it: quoted, with the escape a
+      // string the JSON reader takes carries.
+      const key = cStringLiteral(JSON.stringify(field.name));
+      return this.stringConcat(this.stringLiteral(`${key}:`), text);
+    });
+    let json: string | null = null;
+    for (const field of fields) {
+      json = json === null ? field : this.stringConcat(this.stringConcat(json, this.stringLiteral(",")), field);
+    }
+    return json === null
+      ? this.stringLiteral("{}")
+      : this.stringConcat(this.stringConcat(this.stringLiteral("{"), json), this.stringLiteral("}"));
+  }
+
+  /**
+   * The trampoline of a function reference an HTTP call is given, and the value
+   * to hand what it captured. A capture is the value it was bound with, so the
+   * adapter carries the pointer to it and nothing changes between the
+   * registration and the firing of the handler.
+   */
+  private callbackRef(value: SemanticValue, what: string): { trampoline: string; captured: string } {
+    if (value === undefined || value.k !== "functionRef" || typeof value.name !== "string" || !value.name.startsWith("__arrow_")) {
+      throw driverError(
+        `http requests hand ${what} an arrow written where the call is made`,
+        "the callback of an http.request, or the listener an event is given, is a function the program lowered",
+      );
+    }
+    const trampoline = `__arrow_trampoline_${value.name.slice("__arrow_".length)}`;
+    const captures = Array.isArray(value.captures) ? value.captures : [];
+    const first = captures.length === 0 ? "(void *)0" : `(void *)(uintptr_t)${captures[0]}`;
+    return { trampoline: `(void *)${trampoline}`, captured: first };
   }
 
   argument(type: SemanticType, expression: string): string {

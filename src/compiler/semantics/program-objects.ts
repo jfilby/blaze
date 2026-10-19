@@ -63,6 +63,11 @@ function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred
       return { kind: "type", type: { kind: "slice", of: { kind: "primitive", name: value.element } } };
     case "object":
       return { kind: "object", key: keyOf(value, held) };
+    // A string the body wrote out is a pointer to the bytes it names, which
+    // is how the backends carry one: the field is a reference to the text, and
+    // the reader of the literal handles the value it points at.
+    case "text":
+      return { kind: "type", type: ANY_REF };
     // A name is a field of whatever the name holds, which is its own
     // declaration's answer: a literal is the shape it was written at, and a
     // reference nothing was written from is a reference of no shape — the same
@@ -225,15 +230,22 @@ class Walk {
       case "invoke":
         for (const argument of statement.args) this.value(argument);
         return;
-      case "function":
+      case "function": {
         // The body of a function is a block of its own, and the names its
         // parameters bind are not names the body declares: a literal naming one
-        // is a field of a shape only a caller knows, so it is left out here and
-        // the body is contracted by what it is given.
+        // is a field of a shape only a caller knows. The type the annotation
+        // names is what a use of the body can still say, so an annotated
+        // parameter answers at that type and one of none answers as the
+        // reference a program holds values by.
         this.open();
+        for (const param of statement.params) {
+          if (param.type === "number") this.bind(param.name, { k: "number", text: "" });
+          else if (param.type !== null) this.bind(param.name, { k: "null" });
+        }
         this.statements(statement.body);
         this.close();
         return;
+      }
       case "result":
         this.value(statement.value);
         return;
@@ -296,6 +308,17 @@ class Walk {
           this.shapes.set(shape.key, shape);
           this.keys.set(value, shape.key);
         }
+        return;
+      }
+      case "arrow": {
+        // The body of an arrow is written in the same body: the callback of a
+        // Promise or of an `http.request` call carries the literals its own
+        // statements write. The parameters are values the one that calls the
+        // arrow names, so a literal naming one is left out here — the same
+        // answer a declaration of a parameter of a function gives.
+        this.open();
+        this.statements(value.body);
+        this.close();
         return;
       }
       default:

@@ -236,7 +236,13 @@ export interface ProgramTarget {
   newline(): string;
   /** A call of a function the program compiled, and one the compiler provides. */
   call(call: SemanticCall, argumentsText: string[]): string;
-  builtin(call: SemanticCall, argumentsText: string[]): string;
+  builtin(
+    call: SemanticCall,
+    argumentsText: string[],
+    // The line the emitter writes any value of the call by, which a builtin
+    // whose own arguments are values the target reads as text asks for.
+    expression: (value: SemanticValue, as?: SemanticType | null) => string,
+  ): string;
   /** One argument of a call, placed in the type its parameter takes. */
   argument(type: SemanticType, expression: string): string;
   /** How many arguments the program was started with, and one of them. */
@@ -325,6 +331,8 @@ class ProgramEmitter {
      Computed by a backward pass from every `mod(..., c)` call. */
   private modulusForArith = new WeakMap<SemanticValue, string>();
   private buildCounter = 0;
+  /** The names of mutable text locals stored in a shared cell (boxed). */
+  private readonly boxedTexts: Set<string> = new Set();
   /** The names the program declared, and the names a target reads them by. */
   private names!: NameScope;
 
@@ -381,7 +389,10 @@ class ProgramEmitter {
     this.names.enter();
     const parameters = fn.params.map((param) => {
       const type = slotType(param);
-      return { name: this.names.declare(param.name, type), type: contractText(type) };
+      const emitted = this.names.declare(param.name, type);
+      const boxed = param.kind === "text" && (param as { boxed?: boolean }).boxed === true;
+      if (boxed) this.boxedTexts.add(param.name);
+      return { name: emitted, type: boxed ? "boxedtext" : contractText(type) };
     });
     this.lines = [];
     this.depth = 1;
@@ -616,8 +627,9 @@ class ProgramEmitter {
         return;
       case "set": {
         const type = this.names.typeOf(statement.name, statement.value.type);
+        const targetName = this.boxedTexts.has(statement.name) ? `*${this.names.read(statement.name)}` : this.names.read(statement.name);
         this.write(
-          this.target.assign(this.names.read(statement.name), statement.op, this.expression(statement.value, type), type),
+          this.target.assign(targetName, statement.op, this.expression(statement.value, type), type),
         );
         return;
       }
@@ -708,6 +720,7 @@ class ProgramEmitter {
   private declaration(slot: SemanticSlot, value: SemanticValue): void {
     const name = this.names.declare(slot.name, slotType(slot));
     if (slot.kind === "text" && (slot as { boxed?: boolean }).boxed === true) {
+      this.boxedTexts.add(slot.name);
       // A mutable text local captured by a nested program function is stored in a
       // shared cell, so writes inside the function update this binding.
       this.write(`char** ${name} = (char**)${RUNTIME_NAME}_allocate(sizeof(char*));`);
@@ -966,7 +979,8 @@ class ProgramEmitter {
       const type = call.argTypes[index] ?? argument.type;
       return this.target.argument(type, this.expression(argument, type));
     });
-    return call.builtin ? this.target.builtin(call, argumentsText) : this.target.call(call, argumentsText);
+    const expression = (value: SemanticValue, as: SemanticType | null = null): string => this.expression(value, as);
+    return call.builtin ? this.target.builtin(call, argumentsText, expression) : this.target.call(call, argumentsText);
   }
 
   private expression(value: SemanticValue, as: SemanticType | null = null): string {
@@ -977,6 +991,12 @@ class ProgramEmitter {
     // every use reads it as.
     const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
     if (fromDynamic && isNumber(as) && value.k !== "local") return `${RUNTIME_NAME}_to_number(${text})`;
+    // A string a use reads as a number is the number its text states: `+text`
+    // is the spelling the language writes it by, and the runtime boxes the
+    // pointer it carries and answers the number that text names.
+    if (isTextType(value.type) && isNumber(as)) {
+      return `${RUNTIME_NAME}_to_number(${RUNTIME_NAME}_box_string(${text}))`;
+    }
     if (!isNumber(value.type) || !isNumber(as)) return text;
     if (value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name) return text;
     // A wide number is a struct, and a cast from a scalar to a struct is a
@@ -1009,6 +1029,7 @@ class ProgramEmitter {
       case "text":
         return this.text(value);
       case "local":
+        if (this.boxedTexts.has(value.name)) return `*${this.names.read(value.name)}`;
         return this.names.read(value.name);
       case "length":
         return this.length(value);

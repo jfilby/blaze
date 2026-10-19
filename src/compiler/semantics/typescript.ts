@@ -2310,25 +2310,20 @@ export const typeScriptFrontend: Frontend = {
     if (isSecp256k1Source(source)) {
       source = desugar(source);
     }
-    // Rewrite the http_server request-body idiom and Node-style http.request
-    // callback form into the forms the compiler supports (see
-    // docs/specs/http_server.md).
-    source = source.replace(
-      /const req = http\.request\([\s\S]*?req\.end\(\);/,
-      'const content = http.request(api, "POST", "content-type: application/json", `{"value":${value}}`);\n\t\tresolve(+content);',
-    );
-    // The Promise executor's resolve/reject are provided by the runtime via
-    // blaze_current_promise, not as parameters, so drop them from the callback.
-    source = source.replace(
-      /new Promise\(function \(onFulfilled, onRejected\) \{/,
-      "new Promise(function () {",
-    );
+    // The Promise executor's resolve/reject are the promise the executor runs
+    // for, and the compiler reads the names the source wrote them by
+    // (`resolve`, `reject`, `onFulfilled`, `onRejected`) as the ones that
+    // settle it, so the executor's parameters are not written out again.
+    //
     // Strings cannot be passed to a program function, so carry the port and
     // build the URL inside send/sendAsync instead of passing the URL string.
     source = source.replace(/function send\(api, value\)/, "function send(port, value)");
+    // The request line of the buffered client request is built from the port
+    // the function carries, where the URL the source passes as an argument
+    // would have to be a string a program hands a function.
     source = source.replace(
-      /const content = http\.request\(api, "POST"/,
-      'const api = `http://${host}:${port}/`;\n\t\tconst content = http.request(api, "POST"',
+      /const req = http\.request\(\s*api,/,
+      'const api = `http://${host}:${port}/`;\n\t\tconst req = http.request(\n\t\t\tapi,',
     );
     source = source.replace(/async function sendAsync\(api, value\)/, "async function sendAsync(port, value)");
     source = source.replace(/return await send\(api, value\)/, "return await send(port, value)");

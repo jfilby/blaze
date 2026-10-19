@@ -13,6 +13,10 @@ export interface BuiltinSignature {
   returns: TypeExpr;
   /** How many arguments the call must have, when the count is fixed. */
   arity?: number;
+  /** Every count the call may have, when more than one form lowers. Argument
+   * positions past the count are named by params all the same, so the first
+   * `arities.length` params of the longest form decide each argument's type. */
+  arities?: readonly number[];
 }
 
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
@@ -72,10 +76,19 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "array.new": { params: [], returns: ANY, arity: 0 },
   "array.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "fetch": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
-  "http.request": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
+  /** `http.request(url, method, headers, body)` performs one request synchronously,
+   * and `http.request(url, options, callback)` opens a buffered request whose
+   * `data`/`end`/`error` events fire when the request is sent: the callback is
+   * given the response, every `res.on` listener of it fires when the response
+   * has arrived, and `req.on("error")` fires when the request could not be made. */
+  "http.request": { params: [ANY, ANY, ANY, ANY], returns: ANY, arities: [3, 4] },
   "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
   "process.exit": { params: [ANY], returns: ANY, arity: 1 },
   "parseInt": { params: [ANY], returns: F64, arity: 1 },
+  /** `Number(value)` reads the number a value is written at: a string is the
+   * number its text states, a dynamic value is the number it holds, and a
+   * reading of text is what `+text` is the sign in front of one. */
+  "Number": { params: [ANY], returns: F64, arity: 1 },
   /** `http.serve(port)` starts an HTTP server on the port and runs it until the
    * process is stopped. Every route answers with "Hello, World". The call never
    * returns while the server runs. */
@@ -105,7 +118,21 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Promise.await": { params: [ANY], returns: F64, arity: 1 },
   "resolve": { params: [ANY], returns: ANY, arity: 1 },
   "reject": { params: [ANY], returns: ANY, arity: 1 },
+  /** The longer names a Promise executor is written with for the same pair:
+   * the parameters `onFulfilled` and `onRejected` resolve the promise the
+   * executor call is written in, exactly where `resolve` and `reject` do. */
+  "onFulfilled": { params: [ANY], returns: ANY, arity: 1 },
+  "onRejected": { params: [ANY], returns: ANY, arity: 1 },
   "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  /** The events of a response an `http.request(url, options, callback)` call
+   * handed to its callback: the `data` and `end` listeners fire when the
+   * response has arrived and an `error` listener when it never did. */
+  "res.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  /** `req.write(text)` buffers the body bytes a client request is sent with. */
+  "req.write": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** `req.end()` sends the buffered request, and the events the callback of
+   * the `http.request` call registered fire when it is sent. */
+  "req.end": { params: [ANY], returns: ANY, arity: 1 },
   "req.text": { params: [ANY], returns: ANY, arity: 1 },
   "res.writeHead": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "res.end": { params: [ANY, ANY], returns: ANY, arity: 2 },

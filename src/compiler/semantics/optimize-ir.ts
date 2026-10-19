@@ -740,6 +740,11 @@ function readCounts(body: Body): Map<string, number> {
     valuesOf(block, (value) => {
       walkSemanticValue(value, (one) => {
         if (one.k === "local") count(one.name);
+        // A captured name is a read the program cannot see in the values: the
+        // function reference hands the nested function the binding's value,
+        // and dropping the declaration the capture names leaves the call site
+        // passing a name the block never declared.
+        if (one.k === "functionRef") for (const capture of one.captures) count(capture);
       });
     });
     for (const statement of block.statements) {

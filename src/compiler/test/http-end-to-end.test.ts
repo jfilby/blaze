@@ -205,3 +205,64 @@ test("fetch lowers to blaze_http_client_request", () => {
   const written = generateProgramDriver(resolved(source), true);
   assert.match(written, /blaze_http_client_request/, "fetch lowers to the client runtime call");
 });
+
+/** A program that makes a request in the Node.js callback form. */
+function clientRequestSource(port: number): string {
+  return `const port = ${port};\n` +
+    `const req = http.request(\`http://127.0.0.1:\${port}/\`, { method: "POST", headers: { "content-type": "application/json" } }, (res) => {\n` +
+    `  var content = "";\n` +
+    `  res.on("data", (chunk) => { content += chunk; });\n` +
+    `  res.on("end", () => { console.log(content); });\n` +
+    `});\n` +
+    `req.write("hello");\n` +
+    `req.end();\n`;
+}
+
+test("http.request in the callback form opens a buffered request", () => {
+  const written = generateProgramDriver(resolved(clientRequestSource(18085)), true);
+  assert.match(written, /blaze_http_client_open/, "the callback form opens a buffered request");
+  assert.match(written, /blaze_http_client_method/, "the method the options name is written on the request");
+  assert.match(written, /blaze_http_client_header/, "the headers the options name are written on the request");
+  assert.match(written, /blaze_http_client_write/, "req.write buffers the body of the request");
+  assert.match(written, /blaze_http_client_end/, "req.end sends the request");
+});
+
+test("C backend answers a request made in the callback form", async () => {
+  const port = 18086;
+  const server = await buildHttpBinary("c", createServerSource(port));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("c", clientRequestSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.match(answered.stdout, /custom response/, "the client read the response the server sent");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+test("machine backend answers a request made in the callback form", async () => {
+  const port = 18087;
+  const server = await buildHttpBinary("machine", createServerSource(port));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("machine", clientRequestSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.match(answered.stdout, /custom response/, "the client read the response the server sent");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+test("a request that cannot be made rejects the promise the executor holds", () => {
+  const source = `const req = http.request("http://127.0.0.1:1/", { method: "GET" }, (res) => {\n` +
+    `  res.on("error", (err) => { console.log("failed"); });\n` +
+    `});\n` +
+    `req.on("error", (err) => { console.log("no request"); });\n` +
+    `req.end();\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(written, /blaze_http_client_watch/, "the error handler is bound to the request");
+});

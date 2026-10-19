@@ -314,6 +314,23 @@ test("a string interpolated in a string is the string, not the address of it", a
   }
 });
 
+test("a sign in front of a string is the number the string states", async () => {
+  // `+text` is the number the text names, as the language reads it: the text
+  // is boxed and the runtime reads the number out of it.
+  const cases: readonly [string, string][] = [
+    ["const s = `42`;\nconsole.log(+s);\n", "42\n"],
+    ["const s = `3.5`;\nconsole.log(+s);\n", "3.5\n"],
+    ["const s = `-7`;\nconsole.log(+s);\n", "-7\n"],
+  ];
+  for (const [source, expected] of cases) {
+    const { binary, original } = await deliver(source);
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, expected, `for ${JSON.stringify(source)}`);
+    assert.equal(delivered.stdout, original);
+  }
+});
+
 test("a name the driver's own headers define is declared under another one", async () => {
   // `bool` is the _Bool of <stdbool.h> and `size_t` a typedef, so declaring
   // either of them is C the compiler turns away.

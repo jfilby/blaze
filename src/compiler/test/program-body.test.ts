@@ -543,6 +543,34 @@ test("a typed array holds the elements its view says it does", async () => {
   assert.equal(expected.stdout.trim().split("\n").join(","), "-56,16777216,3000000000,6");
 });
 
+test("a mutable string a nested function captures is stored in a shared cell", () => {
+  // The string the outer body writes and the nested function reads are one
+  // value, so the binding is a cell the two share: a write inside the nested
+  // function updates the binding the outer body reads.
+  const source = [
+    "let body = ``;",
+    "function f(chunk) { body += chunk; }",
+    "f(`a`);",
+    "f(`b`);",
+    "console.log(body);",
+    "",
+  ].join("\n");
+  const program = resolved({ "main.ts": source });
+  const declared = program.entry.statements.find((one) => one.k === "let" && one.slot.kind === "text");
+  assert.ok(declared !== undefined, "the string is declared");
+  if (declared === undefined || declared.k !== "let") throw new Error("expected a declaration");
+  assert.equal(declared.slot.kind === "text" ? declared.slot.boxed : false, true, "the string is boxed");
+
+  // The nested function is given the cell, and writes through it.
+  const nested = program.bodies.find((body) => body.name === "f");
+  assert.ok(nested !== undefined, "the nested function is compiled on its own");
+  if (nested === undefined) throw new Error("expected a nested function");
+  const parameter = nested.params.find((one) => one.kind === "text");
+  assert.ok(parameter !== undefined, "the nested function is given the string");
+  if (parameter === undefined) throw new Error("expected a parameter");
+  assert.equal(parameter.kind === "text" ? parameter.boxed : false, true, "the parameter is the cell");
+});
+
 test("a name declared in a block is a variable of its own", () => {
   const program = resolved({
     "main.ts": ["let total = 0;", "{", "  let total = 10;", "  total += 1;", "}", "console.log(total);", ""].join("\n"),
