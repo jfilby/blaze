@@ -67,30 +67,6 @@ Required support:
 
 ## Implementation notes (added)
 
-### 1. Request body accumulation — string locals/capture
-The blocker is not string *values* (const strings already lower, `req.text()` works)
-but a *mutable* string variable captured by a nested program function:
-
-```js
-var body = "";
-req.on("data", function (chunk) { body += chunk; });
-```
-
-Program functions capture by value: a captured name becomes an extra
-parameter passed at the call site, so reassigning `body` inside the callback
-would only update the callback's own copy. Supporting this requires boxing:
-a mutable text local captured by a nested program function must be stored in a
-shared cell rather than passed by value.
-The captured parameter becomes a pointer to that cell (e.g. `char **`), reads
-dereference it, and `+=`/assignments update `*cell`. The transform option
-(recognising the idiom and folding it into `const body = req.text();`) is
-just the rewrite itself, so it is not a real removal path.
-
-String concatenation (`body += chunk`) and `JSON.parse` already lower; only the
-mutable-capture part is missing.
-
-(All backends now support boxed mutable text locals; the boxing approach is complete.)
-
 ### 2. Node-style `http.request` callback form
 Needs an async/callback lowering: the callback form creates a request, registers
 `data`/`end`/`error` handlers, writes, and ends. The runtime already has the
@@ -126,7 +102,7 @@ running to completion before `server.close()`.
 
 ## Notes
 
-- Items 1 and 4 depend on string support, which is the largest missing piece.
+- Item 4 depends on string support, which is the largest missing piece.
 - Items 2 and 3 depend on callback/Promise lowering that the runtime already
   implements internally but does not yet expose as source-level forms.
 - Removing the rewrites should be done one at a time, with a build of the

@@ -836,14 +836,28 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "require":
       case "req.on": {
         const req = argument(0);
+        const event = call.args[1];
+        const eventName = event.k === "const" ? String(event.text).replace(/^"|"$/g, "") : "";
         const cb = call.args[2];
         let invoke = "0.0";
         if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {
           const trampoline = `__arrow_trampoline_${cb.name.slice("__arrow_".length)}`;
+          const captures = Array.isArray(cb.captures) ? cb.captures : [];
           /* The request body is already buffered by the facil.io adapter, so
-             "data" and "end" fire immediately: invoke the callback with the
-             request handle (as a double) and a null second handle. */
-          invoke = `(${trampoline}((void *)(uintptr_t)${req}, NULL), 1.0)`;
+             "data" and "end" fire immediately. Pass the value the callback's
+             first parameter names (the chunk for "data"), followed by the
+             captured locals, so boxed captures stay shared. */
+          let args: string[] = [];
+          if (eventName === "data") {
+            args.push(`(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${req}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`);
+          } else if (eventName === "error") {
+            args.push("(void *)(uintptr_t)0.0");
+          }
+          args = args.concat(captures);
+          const trampCall = args.length > 0
+            ? `${trampoline}(${args.map((a) => `(void *)(uintptr_t)${a}`).join(", ")})`
+            : `${trampoline}()`;
+          invoke = `(${trampCall}, 1.0)`;
         }
         return invoke;
       }

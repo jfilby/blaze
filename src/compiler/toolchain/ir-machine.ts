@@ -1793,7 +1793,7 @@ class Machine {
     // states is the contract's, and both are the same struct to every reader.
     this.layouts = { ...contract.definition.objects, ...fn.objects };
     for (const parameter of fn.params) {
-      if (parameter.type.kind === "text") this.boxedTexts.add(parameter.name);
+      if (parameter.kind === "text") this.boxedTexts.add(parameter.name);
     }
     // A bound label is a place control reaches from somewhere other than the
     // instruction in front of it, so what the accumulator held before one is a

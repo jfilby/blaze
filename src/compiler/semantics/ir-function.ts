@@ -1501,7 +1501,7 @@ class FunctionBody {
 
   /** The slot a name declared as this value is read by. */
   private slot(name: string, value: Typed, annotation: Inferred | null, line: number): SemanticSlot {
-    if (isText(value.value.type)) return { kind: "text", name, mutable: true };
+    if (isText(value.value.type)) return { kind: "text", name, mutable: true, boxed: true };
     const type =
       annotation !== null && value.inferred.kind !== "object" ? this.typeOf(annotation, line) : this.typeOf(value.inferred, line);
     return this.slotOf(name, type, true);
@@ -1509,7 +1509,7 @@ class FunctionBody {
 
   /** A slot that holds a value of this type, so a name of it can be declared. */
   private slotOf(name: string, type: SemanticType, mutable: boolean): SemanticSlot {
-    if (isText(type)) return { kind: "text", name, mutable };
+    if (isText(type)) return { kind: "text", name, mutable, boxed: mutable };
     if (isReference(type)) return { kind: "object", name, mutable, type };
     return { kind: "value", name, mutable, type };
   }
