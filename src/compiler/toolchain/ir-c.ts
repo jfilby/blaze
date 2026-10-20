@@ -258,8 +258,9 @@ class FunctionEmitter {
     const parameters = this.fn.params.map((param) => {
       const type = slotType(param);
       const name = this.names.declare(param.name, type);
-      if (isTextType(type)) this.boxedTexts.add(param.name);
-      return isTextType(type) ? `char **${name}` : `${declaredType(type)} ${name}`;
+      const boxed = param.kind === "text" && (param as { boxed?: boolean }).boxed === true;
+      if (boxed) this.boxedTexts.add(param.name);
+      return boxed ? `char **${name}` : `${declaredType(type)} ${name}`;
     });
     this.block(this.fn.entry, 1);
     const layouts = cObjectDeclarations(this.fn.objects);
