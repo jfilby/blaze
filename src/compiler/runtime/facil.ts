@@ -31,6 +31,16 @@ export interface FacilRuntime {
 /** The facil.io version Blaze is pinned to: the latest code from git master. */
 export const FACIL_IO_VERSION = "facil.io@git-master";
 
+/**
+ * How long facil.io's event loop waits for an event, in milliseconds.
+ *
+ * The loop is stopped from another thread, and the thread that waits for an
+ * event is not woken by the request: it notices the request when the wait is
+ * over. With the tick facil.io is built with (a second), a server that is
+ * closed waits a second for its loop to end.
+ */
+export const FACIL_IO_POLL_TICK_MS = 10;
+
 /** The repository root, used to locate the vendored facil.io source. */
 const compilerDir = dirname(fileURLToPath(import.meta.url));
 /** .../src/compiler/runtime -> repository root. */
@@ -64,13 +74,16 @@ export function facilAdapterSource(): string {
  */
 
 #include <pthread.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 
 #include "${HTTP_NAME}.h"
@@ -132,7 +145,18 @@ typedef struct blaze_http_server_s {
   const char *cert;
   const char *key;
   fio_tls_s *tls;
+  /* The lock and the condition of the server: the event loop is stopped from
+     another thread, and a stop that comes before the loop has started is
+     lost, because starting the loop sets it running again. The stop waits
+     for the loop to be running, and the loop says when it has ended. */
+  pthread_mutex_t lock;
+  pthread_cond_t cond;
+  int loop_ended;
 } blaze_http_server_t;
+
+/* The server whose event loop runs on the background thread. The thread that
+   waits for it frees it once the loop has ended. */
+static blaze_http_server_t *blaze_http_server_background = NULL;
 
 /* A request, borrowed from facil.io for the duration of one callback. */
 typedef struct blaze_http_request_s {
@@ -231,6 +255,80 @@ void blaze_http_resp_complete(blaze_http_response *response) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Event streams (Server-Sent Events).                                         */
+/* -------------------------------------------------------------------------- */
+
+/* The event streams that are open. A stream is a connection the program turned
+   into an event stream: it stays open, every event published afterwards is
+   written to it, and it is dropped when the connection closes. The list is
+   touched by the event loop alone, which is the one thread a program serves
+   its requests on. */
+#define BLAZE_HTTP_SSE_MAX 64
+static http_sse_s *blaze_http_sse_streams[BLAZE_HTTP_SSE_MAX];
+static size_t blaze_http_sse_open = 0;
+
+/* The stream opened: it is written to from now on. A stream beyond what the
+   adapter holds is closed rather than kept, because a stream nobody writes to
+   is a connection that stays open for nothing. */
+static void blaze_http_sse_on_open(http_sse_s *sse) {
+  if (blaze_http_sse_open >= BLAZE_HTTP_SSE_MAX) {
+    http_sse_close(sse);
+    return;
+  }
+  blaze_http_sse_streams[blaze_http_sse_open] = sse;
+  blaze_http_sse_open += 1;
+}
+
+/* The stream closed: it is dropped from the list, so that publishing does not
+   write to a connection that is gone. */
+static void blaze_http_sse_on_close(http_sse_s *sse) {
+  for (size_t index = 0; index < blaze_http_sse_open; index++) {
+    if (blaze_http_sse_streams[index] != sse) continue;
+    blaze_http_sse_streams[index] = blaze_http_sse_streams[blaze_http_sse_open - 1];
+    blaze_http_sse_open -= 1;
+    return;
+  }
+}
+
+int blaze_http_sse_subscribe(void *response_raw) {
+  blaze_http_response_t *resp = (blaze_http_response_t *)response_raw;
+  if (!resp || !resp->h) return 0;
+  http_s *h = resp->h;
+  /* The connection belongs to facil.io once it is an event stream, so the
+     response is finished here: a header or a body written after this would
+     be written to a handle that is no longer there. */
+  resp->h = NULL;
+  resp->body_len = 0;
+  if (http_upgrade2sse(h, .on_open = blaze_http_sse_on_open,
+                       .on_close = blaze_http_sse_on_close) != 0) {
+    return 0;
+  }
+  return 1;
+}
+
+int blaze_http_sse_publish(const char *bytes, size_t length) {
+  int written = 0;
+  for (size_t index = 0; index < blaze_http_sse_open;) {
+    http_sse_s *sse = blaze_http_sse_streams[index];
+    fio_str_info_s data = {0, length, (char *)bytes};
+    if (http_sse_write(sse, .data = data) < 0) {
+      /* The connection is gone: the stream is dropped, and the slot it held
+         is taken by the last one, which is written to next. */
+      blaze_http_sse_streams[index] = blaze_http_sse_streams[blaze_http_sse_open - 1];
+      blaze_http_sse_open -= 1;
+      continue;
+    }
+    written += 1;
+    index += 1;
+  }
+  return written;
+}
+
+int blaze_http_sse_count(void) {
+  return (int)blaze_http_sse_open;
+}
+
+/* -------------------------------------------------------------------------- */
 /* The default route handler: answers every request with "Hello, World".      */
 /* -------------------------------------------------------------------------- */
 
@@ -305,6 +403,45 @@ static void blaze_http_on_request(http_s *h) {
 /* The server: start, run and stop.                                           */
 /* -------------------------------------------------------------------------- */
 
+/* The number of threads the event loop of a server runs on. A server that
+   answers one request at a time is a server that queues, so the loop runs on
+   more than one thread when the machine has more than one core. Four is as
+   many as a small server needs: more threads than that cost more than they
+   answer. */
+static int blaze_http_server_default_threads(void) {
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  if (cores < 2) return 1;
+  if (cores > 4) return 4;
+  return (int)cores;
+}
+
+/* Allocates a server and the lock its stop waits on. */
+static blaze_http_server_t *blaze_http_server_alloc(uint16_t port) {
+  blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
+  if (!server) return NULL;
+  server->port = port;
+  pthread_mutex_init(&server->lock, NULL);
+  pthread_cond_init(&server->cond, NULL);
+  return server;
+}
+
+/* Frees a server and the routes registered against it. The server is freed
+   where the event loop ends, and not where the loop is stopped: a request
+   that was being answered when the loop was stopped is still reading the
+   routes of the server. */
+static void blaze_http_server_free(blaze_http_server_t *server) {
+  if (!server) return;
+  for (size_t index = server->route_count; index-- > 0; ) {
+    free(server->methods[index]);
+    free(server->paths[index]);
+  }
+  if (blaze_http_server_handle == (void *)server) blaze_http_server_handle = NULL;
+  if (blaze_http_server_background == server) blaze_http_server_background = NULL;
+  pthread_mutex_destroy(&server->lock);
+  pthread_cond_destroy(&server->cond);
+  free(server);
+}
+
 /* Applies the server's stored limits, timeout and TLS settings to a listening
    socket, binds it, and registers the default "Hello, World" route. Returns
    the facil.io uuid, or -1 when the port could not be bound. */
@@ -331,16 +468,17 @@ static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
 }
 
 void *blaze_http_server_new(uint16_t port) {
-  blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
+  blaze_http_server_t *server = blaze_http_server_alloc(port);
   if (!server) return NULL;
-  server->port = port;
-  /* Zero settings mean "use facil.io's defaults"; one thread and one worker. */
-  server->threads = 1;
+  /* Zero settings mean "use facil.io's defaults"; the event loop runs on as
+     many threads as the machine has cores to run them on, and there is one
+     worker. */
+  server->threads = blaze_http_server_default_threads();
   server->workers = 1;
 
   intptr_t uuid = blaze_http_server_do_listen(server);
   if (uuid == -1) {
-    free(server);
+    blaze_http_server_free(server);
     return NULL;
   }
   server->uuid = uuid;
@@ -356,19 +494,18 @@ void *blaze_http_server_new_settings(uint16_t port,
                                      uint8_t timeout,
                                      int threads,
                                      int workers) {
-  blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
+  blaze_http_server_t *server = blaze_http_server_alloc(port);
   if (!server) return NULL;
-  server->port = port;
   server->max_clients = max_clients;
   server->max_body_size = max_body_size;
   server->max_header_size = max_header_size;
   server->timeout = timeout;
-  server->threads = threads > 0 ? threads : 1;
+  server->threads = threads > 0 ? threads : blaze_http_server_default_threads();
   server->workers = workers > 0 ? workers : 1;
 
   intptr_t uuid = blaze_http_server_do_listen(server);
   if (uuid == -1) {
-    free(server);
+    blaze_http_server_free(server);
     return NULL;
   }
   server->uuid = uuid;
@@ -378,18 +515,17 @@ void *blaze_http_server_new_settings(uint16_t port,
 }
 
 void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key) {
-  blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
+  blaze_http_server_t *server = blaze_http_server_alloc(port);
   if (!server) return NULL;
-  server->port = port;
   server->cert = cert;
   server->key = key;
   server->tls = fio_tls_new(NULL, cert, key, NULL);
-  server->threads = 1;
+  server->threads = blaze_http_server_default_threads();
   server->workers = 1;
 
   intptr_t uuid = blaze_http_server_do_listen(server);
   if (uuid == -1) {
-    free(server);
+    blaze_http_server_free(server);
     return NULL;
   }
   server->uuid = uuid;
@@ -398,32 +534,59 @@ void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key
   return server;
 }
 
-void blaze_http_server_run(void *server_raw) {
-  blaze_http_server_t *server = (blaze_http_server_t *)server_raw;
-  if (!server || !server->bound) return;
+/* The event loop of a server, with the settings the server was given. It runs
+   until the server is stopped. */
+static void blaze_http_server_loop(blaze_http_server_t *server) {
   /* Copy the thread and worker counts before handing the server to facil.io:
-     "blaze_http_server_stop" frees the handle from another thread once the
-     loop stops, so the running loop must not read the struct again. */
+     the server is freed by the thread that waits for the loop, so the running
+     loop must not read the struct again. */
   int threads = server->threads;
   int workers = server->workers;
   /* facil.io runs the event loop on this thread until fio_stop is called. The
      thread and worker counts come from the server's stored settings. */
   fio_start(.threads = threads, .workers = workers);
+  /* The loop has ended: a stop that was waiting for it is woken, and a
+     program that waits for the server is told that the server is gone. */
+  pthread_mutex_lock(&server->lock);
+  server->loop_ended = 1;
+  pthread_cond_broadcast(&server->cond);
+  pthread_mutex_unlock(&server->lock);
 }
 
-/* Runs the event loop on a detached background thread, so the caller is not
-   blocked: "blaze_http_server_run" never returns while the server runs. The
-   caller is responsible for stopping the server with "blaze_http_server_stop",
-   which makes "fio_start" return and lets the thread end. */
+void blaze_http_server_run(void *server_raw) {
+  blaze_http_server_t *server = (blaze_http_server_t *)server_raw;
+  if (!server || !server->bound) return;
+  blaze_http_server_loop(server);
+  /* The loop has ended, so nothing reads the server any more: it is freed
+     here, and not where the loop was stopped, because a request that was
+     being answered when the loop was stopped is still reading it. */
+  blaze_http_server_free(server);
+}
+
+/* Runs the event loop on a background thread, so the caller is not blocked:
+   "blaze_http_server_run" never returns while the server runs. The caller is
+   responsible for stopping the server with "blaze_http_server_stop", which
+   makes "fio_start" return and lets the thread end. */
 static void *blaze_http_server_run_thread(void *arg) {
-  blaze_http_server_run(arg);
+  blaze_http_server_t *server = (blaze_http_server_t *)arg;
+  blaze_http_server_loop(server);
   return NULL;
 }
 
 void blaze_http_server_start_background(void *server) {
   if (!server || !((blaze_http_server_t *)server)->bound) return;
+  blaze_http_server_background = (blaze_http_server_t *)server;
   /* Joinable: "blaze_http_server_join" reaps it once the server is stopped. */
-  if (pthread_create(&blaze_http_server_thread, NULL, blaze_http_server_run_thread, server) != 0) return;
+  if (pthread_create(&blaze_http_server_thread, NULL, blaze_http_server_run_thread, server) != 0) {
+    /* The loop will not run, so a stop that waits for it must not wait for
+       ever: the server is as good as ended. */
+    blaze_http_server_t *held = (blaze_http_server_t *)server;
+    pthread_mutex_lock(&held->lock);
+    held->loop_ended = 1;
+    pthread_cond_broadcast(&held->cond);
+    pthread_mutex_unlock(&held->lock);
+    blaze_http_server_background = NULL;
+  }
 }
 
 /* Waits for the background event loop to finish. "blaze_http_server_stop"
@@ -433,17 +596,37 @@ void blaze_http_server_start_background(void *server) {
    server runs, which keeps the process alive to serve requests. */
 void blaze_http_server_join(void) {
   pthread_join(blaze_http_server_thread, NULL);
+  /* The loop has ended, so nothing reads the server any more: it is freed
+     here, and not where the loop was stopped, because a request that was
+     being answered when the loop was stopped is still reading it. */
+  blaze_http_server_free(blaze_http_server_background);
 }
 
 void blaze_http_server_stop(void *server_raw) {
   blaze_http_server_t *server = (blaze_http_server_t *)server_raw;
   if (!server) return;
-  fio_stop();
-  for (size_t index = server->route_count; index-- > 0; ) {
-    free(server->methods[index]);
-    free(server->paths[index]);
+  /* The event loop is stopped from another thread, and the thread that waits
+     for an event is not woken by the request: it notices the request when
+     its wait is over. A stop that comes before the loop has started is lost,
+     because starting the loop sets it running again. So the stop waits for
+     the loop to be running, and stops it there. */
+  pthread_mutex_lock(&server->lock);
+  while (!server->loop_ended && !fio_is_running()) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 1000000;
+    if (deadline.tv_nsec >= 1000000000) {
+      deadline.tv_nsec -= 1000000000;
+      deadline.tv_sec += 1;
+    }
+    pthread_cond_timedwait(&server->cond, &server->lock, &deadline);
   }
-  free(server);
+  pthread_mutex_unlock(&server->lock);
+  /* The loop is asked to stop, and the server is freed where the loop ends:
+     a request that was being answered when the loop was stopped is still
+     reading the routes of the server, and freeing them there would leave it
+     reading memory that is gone. */
+  fio_stop();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -465,7 +648,363 @@ void blaze_http_route_register(void *server_raw, const char *method,
 /* HTTP client.                                                               */
 /* -------------------------------------------------------------------------- */
 
-static char blaze_http_client_body_buf[1 << 20]; /* 1 MiB response body buffer */
+/* A connection the client keeps open between two requests to the same server.
+   The connection is kept because a request that opens a new connection pays
+   for a name lookup, a handshake and a teardown that the next request to the
+   same server does not have to pay. */
+typedef struct blaze_http_client_conn_s {
+  int sock;                 /* the socket, or -1 when the entry is unused */
+  char host[256];           /* the host the socket is connected to */
+  int port;                 /* the port the socket is connected to */
+  long long used;           /* when the connection was last used */
+} blaze_http_client_conn_t;
+
+/* How many connections are kept open at once: a program that talks to one
+   server keeps one, and a program that talks to many keeps one each. */
+#define BLAZE_HTTP_CLIENT_MAX_CONNECTIONS 8
+
+static blaze_http_client_conn_t blaze_http_client_conns[BLAZE_HTTP_CLIENT_MAX_CONNECTIONS];
+static long long blaze_http_client_clock = 0;
+static int blaze_http_client_ready = 0;
+
+/* The connections and the buffer they are read into belong to the client
+   alone: a program may make its requests from more than one thread. */
+static pthread_mutex_t blaze_http_client_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The buffer a response is read into. The body of the answer is a part of it,
+   so it is valid until the next request is made. */
+static char blaze_http_client_read_buf[1 << 20];
+
+/* Marks every connection as unused. The connections are used before the first
+   request is made, and the entry of a socket number of zero is a socket that
+   is open, so they are marked here rather than left to the zero a program
+   never writes. */
+static void blaze_http_client_init(void) {
+  if (blaze_http_client_ready) return;
+  for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_CONNECTIONS; index++) {
+    blaze_http_client_conns[index].sock = -1;
+  }
+  blaze_http_client_ready = 1;
+}
+
+/* Finds the connection that is open to a host and a port, or NULL when there
+   is none. A connection the peer closed while it was idle is not a connection
+   any more: it is closed here, and the entry is freed. */
+static blaze_http_client_conn_t *blaze_http_client_find_cached(const char *host, int port) {
+  for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_CONNECTIONS; index++) {
+    blaze_http_client_conn_t *conn = &blaze_http_client_conns[index];
+    if (conn->sock < 0) continue;
+    if (conn->port != port || strcmp(conn->host, host) != 0) continue;
+    /* The peer may have closed the connection while it was idle: a socket the
+       peer closed reads as the end of the stream, and it is closed here rather
+       than handed to a request that would fail on it. */
+    char byte = 0;
+    ssize_t peeked = recv(conn->sock, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (peeked == 0 ||
+        (peeked < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+      close(conn->sock);
+      conn->sock = -1;
+      return NULL;
+    }
+    return conn;
+  }
+  return NULL;
+}
+
+/* Keeps a connection open for the next request to the same server. The oldest
+   connection is closed when there is no room for another one. */
+static void blaze_http_client_cache_connection(const char *host, int port, int sock) {
+  blaze_http_client_conn_t *oldest = NULL;
+  for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_CONNECTIONS; index++) {
+    blaze_http_client_conn_t *conn = &blaze_http_client_conns[index];
+    if (conn->sock < 0) {
+      conn->sock = sock;
+      conn->port = port;
+      conn->used = ++blaze_http_client_clock;
+      snprintf(conn->host, sizeof(conn->host), "%s", host);
+      return;
+    }
+    if (oldest == NULL || conn->used < oldest->used) oldest = conn;
+  }
+  /* Every connection is in use: the oldest one makes room for this one. */
+  if (oldest == NULL) {
+    close(sock);
+    return;
+  }
+  close(oldest->sock);
+  oldest->sock = sock;
+  oldest->port = port;
+  oldest->used = ++blaze_http_client_clock;
+  snprintf(oldest->host, sizeof(oldest->host), "%s", host);
+}
+
+/* Closes a connection and frees its entry. */
+static void blaze_http_client_uncache(blaze_http_client_conn_t *conn) {
+  if (conn == NULL) return;
+  if (conn->sock >= 0) close(conn->sock);
+  conn->sock = -1;
+}
+
+/* Connects to a host and a port. A host may name more than one address, and
+   the first is not always the one that answers: "localhost" names the
+   loopback address of IPv6 before the one of IPv4, and a server that listens
+   on one of them is not reached through the other. Every address is tried
+   until one of them connects. Returns the socket, or -1. */
+static int blaze_http_client_connect(const char *host, int port, int timeout_ms) {
+  struct addrinfo hints, *res = NULL;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+  if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return -1;
+
+  int sock = -1;
+  for (struct addrinfo *candidate = res; candidate != NULL; candidate = candidate->ai_next) {
+    int attempt = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
+    if (attempt < 0) continue;
+
+    /* Timeouts. */
+    struct timeval tv;
+    int to = timeout_ms > 0 ? timeout_ms : 10000;
+    tv.tv_sec = to / 1000;
+    tv.tv_usec = (to % 1000) * 1000;
+    setsockopt(attempt, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(attempt, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    /* The request is written in two pieces, the headers and the body, and a
+       connection that waits for the other piece to arrive would make every
+       request wait for it. The option belongs to the TCP level: at the
+       socket level, the same number is a different option, and asking for it
+       there does nothing at all. */
+    int one = 1;
+    setsockopt(attempt, SOL_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    if (connect(attempt, candidate->ai_addr, candidate->ai_addrlen) == 0) {
+      sock = attempt;
+      break;
+    }
+    close(attempt);
+  }
+  freeaddrinfo(res);
+  return sock;
+}
+
+/* Sends every byte of a buffer. Returns 0 when all of it was sent. */
+static int blaze_http_client_send_all(int sock, const char *data, size_t len) {
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = send(sock, data + sent, len - sent, 0);
+    if (n > 0) {
+      sent += (size_t)n;
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    return -1;
+  }
+  return 0;
+}
+
+/* Reads from a socket into the buffer, appending what it reads. Returns the
+   number of bytes read, 0 at the end of the stream, and -1 when the socket
+   failed. */
+static ssize_t blaze_http_client_fill(int sock, char *buf, size_t cap, size_t *used) {
+  if (*used >= cap) return -1;
+  for (;;) {
+    ssize_t n = recv(sock, buf + *used, cap - *used, 0);
+    if (n > 0) {
+      *used += (size_t)n;
+      return n;
+    }
+    if (n == 0) return 0;
+    if (errno == EINTR) continue;
+    return -1;
+  }
+}
+
+/* Finds the end of the header block in what has been read: the first empty
+   line. Returns the number of bytes the block takes, or 0 when it is not all
+   there yet. */
+static size_t blaze_http_client_header_end(const char *buf, size_t len) {
+  for (size_t index = 0; index + 3 < len; index++) {
+    if (buf[index] == '\\r' && buf[index + 1] == '\\n' &&
+        buf[index + 2] == '\\r' && buf[index + 3] == '\\n') return index + 4;
+  }
+  return 0;
+}
+
+/* Finds the CRLF that ends a line, starting at a place in the buffer. Returns
+   the place the line ends at, or 0 when the line is not all there yet. */
+static size_t blaze_http_client_find_crlf(const char *buf, size_t from, size_t len) {
+  for (size_t index = from; index + 1 < len; index++) {
+    if (buf[index] == '\\r' && buf[index + 1] == '\\n') return index;
+  }
+  return 0;
+}
+
+/* Reads one header out of a header block. The block is a copy of the headers
+   of a response and it ends with a NUL. Returns 1 when the header is there,
+   and writes its value into the buffer it is given. */
+static int blaze_http_client_read_header(const char *head, const char *name,
+                                     char *value, size_t value_cap) {
+  size_t name_len = strlen(name);
+  /* The first line is the status line, and it is not a header. */
+  const char *line = strstr(head, "\\r\\n");
+  if (line == NULL) return 0;
+  line += 2;
+  while (*line != '\\0') {
+    const char *eol = strstr(line, "\\r\\n");
+    size_t len = eol != NULL ? (size_t)(eol - line) : strlen(line);
+    if (len == 0) break;
+    if (len > name_len && strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+      const char *start = line + name_len + 1;
+      size_t value_len = len - name_len - 1;
+      while (value_len > 0 && (*start == ' ' || *start == '\\t')) {
+        start += 1;
+        value_len -= 1;
+      }
+      while (value_len > 0 && (start[value_len - 1] == ' ' || start[value_len - 1] == '\\t')) {
+        value_len -= 1;
+      }
+      if (value_len >= value_cap) value_len = value_cap - 1;
+      memcpy(value, start, value_len);
+      value[value_len] = '\\0';
+      return 1;
+    }
+    if (eol == NULL) break;
+    line = eol + 2;
+  }
+  return 0;
+}
+
+/* Reads a body that is written in chunks and writes it out as one: the body
+   is decoded where the chunks were, which is never past where they were read.
+   Returns 0 when the body was read, and -1 when it was not. */
+static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
+                                           size_t body_start, size_t *used,
+                                           size_t *body_len) {
+  size_t read_at = body_start;
+  size_t write_at = body_start;
+  for (;;) {
+    /* The size of the chunk, written as hex digits and closed by a CRLF. */
+    size_t line_end = 0;
+    while (line_end == 0) {
+      line_end = blaze_http_client_find_crlf(buf, read_at, *used);
+      if (line_end > 0) break;
+      ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+      if (n <= 0) return -1;
+    }
+    unsigned long long size = strtoull(buf + read_at, NULL, 16);
+    read_at = line_end + 2;
+    if (size == 0) {
+      /* The last chunk is followed by the trailers, and the trailers end with
+         an empty line. */
+      for (;;) {
+        size_t line = blaze_http_client_find_crlf(buf, read_at, *used);
+        if (line > 0) {
+          if (line == read_at) {
+            read_at += 2;
+            break;
+          }
+          read_at = line + 2;
+          continue;
+        }
+        ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+        if (n <= 0) return -1;
+      }
+      *body_len = write_at - body_start;
+      return 0;
+    }
+    /* The chunk itself. */
+    while (*used < read_at + size) {
+      ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+      if (n <= 0) return -1;
+    }
+    memcpy(buf + write_at, buf + read_at, (size_t)size);
+    write_at += (size_t)size;
+    read_at += (size_t)size;
+    /* The CRLF that ends the chunk. */
+    while (*used < read_at + 2) {
+      ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+      if (n <= 0) return -1;
+    }
+    read_at += 2;
+  }
+}
+
+/* Reads the answer to a request that was sent on a socket. The body of the
+   answer is a part of the buffer it is given, and its place and its length
+   are written through body_at and body_len. The answer says where its body
+   ends, and the body ends there: a connection that is kept open carries more
+   than one answer, and reading past the end of one of them would read into
+   the next. Returns 0 when the answer was read, and -1 when it was not.
+   Writes through reusable whether the connection may carry another request. */
+static int blaze_http_client_read_response(int sock, char *buf, size_t cap,
+                                            size_t *body_at, size_t *body_len,
+                                            int *reusable) {
+  size_t used = 0;
+  size_t header_len = 0;
+
+  /* The header block is read until it is whole. */
+  for (;;) {
+    header_len = blaze_http_client_header_end(buf, used);
+    if (header_len > 0) break;
+    ssize_t n = blaze_http_client_fill(sock, buf, cap, &used);
+    if (n <= 0) return -1;
+  }
+
+  /* The headers are read into a copy of their own, so they can be read as
+     text: the body of the answer follows them in the same buffer. */
+  char head[8192];
+  if (header_len >= sizeof(head)) return -1;
+  memcpy(head, buf, header_len);
+  head[header_len] = '\\0';
+
+  char value[256];
+  long long content_length = -1;
+  int chunked = 0;
+  int ends = 0;
+
+  if (blaze_http_client_read_header(head, "content-length", value, sizeof(value))) {
+    content_length = strtoll(value, NULL, 10);
+    if (content_length < 0) content_length = -1;
+  }
+  if (blaze_http_client_read_header(head, "transfer-encoding", value, sizeof(value))) {
+    if (strcasestr(value, "chunked") != NULL) chunked = 1;
+  }
+  if (blaze_http_client_read_header(head, "connection", value, sizeof(value))) {
+    if (strcasecmp(value, "close") == 0) ends = 1;
+  }
+  /* An answer of an older version of the protocol ends the connection when it
+     does not say otherwise. */
+  if (strncmp(head, "HTTP/1.0", 8) == 0) ends = 1;
+
+  const size_t body_start = header_len;
+  size_t avail = used - header_len;
+
+  if (chunked) {
+    if (blaze_http_client_read_chunked(sock, buf, cap, body_start, &used, body_len) != 0) return -1;
+  } else if (content_length >= 0) {
+    const size_t want = (size_t)content_length;
+    while (avail < want) {
+      ssize_t n = blaze_http_client_fill(sock, buf, cap, &used);
+      if (n <= 0) return -1;
+      avail = used - body_start;
+    }
+    *body_len = want;
+  } else {
+    /* The body ends where the connection ends. */
+    for (;;) {
+      ssize_t n = blaze_http_client_fill(sock, buf, cap, &used);
+      if (n <= 0) break;
+    }
+    *body_len = used - body_start;
+    ends = 1;
+  }
+  *body_at = body_start;
+  *reusable = ends ? 0 : 1;
+  return 0;
+}
 
 const char *blaze_http_client_request(const char *url, const char *method,
                                       const char *headers,
@@ -485,7 +1024,6 @@ const char *blaze_http_client_request(const char *url, const char *method,
   else if (strncmp(p, "https://", 8) == 0) p += 8;
 
   /* host */
-  size_t host_len = 0;
   const char *slash = strchr(p, '/');
   size_t p_len = slash ? (size_t)(slash - p) : strlen(p);
   if (p_len >= sizeof(host)) p_len = sizeof(host) - 1;
@@ -505,45 +1043,11 @@ const char *blaze_http_client_request(const char *url, const char *method,
     snprintf(path, sizeof(path), "%s", slash);
   }
 
-  /* Resolve. */
-  struct addrinfo hints, *res = NULL;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  char port_str[16];
-  snprintf(port_str, sizeof(port_str), "%d", port);
-  if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return NULL;
-
-  /* A host may name more than one address, and the first is not always the
-     one that answers: "localhost" names the loopback address of IPv6 before
-     the one of IPv4, and a server that listens on one of them is not reached
-     through the other. Every address is tried until one of them connects. */
-  int sock = -1;
-  for (struct addrinfo *candidate = res; candidate != NULL; candidate = candidate->ai_next) {
-    int attempt = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
-    if (attempt < 0) continue;
-
-    /* Timeouts. */
-    struct timeval tv;
-    int to = timeout_ms > 0 ? timeout_ms : 10000;
-    tv.tv_sec = to / 1000;
-    tv.tv_usec = (to % 1000) * 1000;
-    setsockopt(attempt, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(attempt, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    if (connect(attempt, candidate->ai_addr, candidate->ai_addrlen) == 0) {
-      sock = attempt;
-      break;
-    }
-    close(attempt);
-  }
-  freeaddrinfo(res);
-  if (sock < 0) return NULL;
-
-  /* Build the request. */
-  char reqbuf[8192];
+  /* Build the request. The connection is kept open between two requests to
+     the same server, and the request asks for that. */
+  char reqbuf[16384];
   int req_len = snprintf(reqbuf, sizeof(reqbuf),
-    "%s %s HTTP/1.1\\r\\nHost: %s\\r\\nConnection: close\\r\\n",
+    "%s %s HTTP/1.1\\r\\nHost: %s\\r\\nConnection: keep-alive\\r\\n",
     method, path, host);
   if (headers && headers[0] != '\\0') {
     /* The headers are written as the lines they are, each of which ends with
@@ -555,62 +1059,89 @@ const char *blaze_http_client_request(const char *url, const char *method,
   if (body && body_len > 0) {
     req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len,
       "Content-Length: %zu\\r\\n\\r\\n", body_len);
-    /* append body */
+    /* The body is written after the headers, and the two are written in one
+       piece when the body fits beside them: a request that arrives in two
+       pieces is a request the peer waits for the second piece of. */
     if ((size_t)req_len + body_len < sizeof(reqbuf)) {
       memcpy(reqbuf + req_len, body, body_len);
       req_len += (int)body_len;
       reqbuf[req_len] = '\\0';
-    } else {
-      /* send headers first then body */
-      send(sock, reqbuf, req_len, 0);
-      send(sock, "\\r\\n", 2, 0);
-      send(sock, body, body_len, 0);
-      reqbuf[0] = '\\0';
-      req_len = 0;
+      body = NULL;
+      body_len = 0;
     }
   } else {
     req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "\\r\\n");
   }
 
-  if (req_len > 0) {
-    send(sock, reqbuf, req_len, 0);
+  pthread_mutex_lock(&blaze_http_client_lock);
+  blaze_http_client_init();
+
+  const char *answer = NULL;
+  size_t answer_len = 0;
+
+  /* A request that is made on a connection that was kept open from an earlier
+     request is made again on a new connection when it fails: the peer may
+     have closed the connection while it was idle, and the request that was
+     made on it is lost with it. A request that fails on a connection of its
+     own is not made again: the server that did not answer is not going to
+     answer the second time either. */
+  for (int attempt = 0; attempt < 2 && answer == NULL; attempt++) {
+    blaze_http_client_conn_t *conn = blaze_http_client_find_cached(host, port);
+    int sock = conn != NULL ? conn->sock : -1;
+    if (sock < 0) {
+      sock = blaze_http_client_connect(host, port, timeout_ms);
+      if (sock < 0) break;
+    }
+
+    int sent = blaze_http_client_send_all(sock, reqbuf, (size_t)req_len);
+    if (sent == 0 && body && body_len > 0) {
+      sent = blaze_http_client_send_all(sock, (const char *)body, body_len);
+    }
+    if (sent != 0) {
+      /* The request could not be sent: the connection is of no use to the
+         next request either. */
+      if (conn != NULL) {
+        blaze_http_client_uncache(conn);
+        continue;
+      }
+      close(sock);
+      break;
+    }
+
+    size_t body_at = 0;
+    size_t answer_size = 0;
+    int reusable = 0;
+    if (blaze_http_client_read_response(sock, blaze_http_client_read_buf,
+                                        sizeof(blaze_http_client_read_buf),
+                                        &body_at, &answer_size, &reusable) != 0) {
+      if (conn != NULL) {
+        blaze_http_client_uncache(conn);
+        continue;
+      }
+      close(sock);
+      break;
+    }
+
+    if (reusable) {
+      if (conn == NULL) blaze_http_client_cache_connection(host, port, sock);
+    } else {
+      /* The answer ends the connection, so it is closed and the next request
+         opens a new one. */
+      if (conn != NULL) {
+        blaze_http_client_uncache(conn);
+      } else {
+        close(sock);
+      }
+    }
+    answer = blaze_http_client_read_buf + body_at;
+    answer_len = answer_size;
   }
 
-  /* Read the response. */
-  static char respbuf[1 << 20]; /* 1 MiB */
-  size_t resp_used = 0;
-  ssize_t n;
-  while ((n = recv(sock, respbuf + resp_used, sizeof(respbuf) - resp_used - 1, 0)) > 0) {
-    resp_used += (size_t)n;
-    if (resp_used >= sizeof(respbuf) - 1) break;
-  }
-  close(sock);
-  respbuf[resp_used] = '\\0';
+  pthread_mutex_unlock(&blaze_http_client_lock);
 
-  /* Find body: after \\r\\n\\r\\n. */
-  char *body_start = strstr(respbuf, "\\r\\n\\r\\n");
-  if (!body_start) {
-    /* No headers separator; treat whole as body. */
-    body_start = respbuf;
-  } else {
-    body_start += 4;
-  }
-
-  /* Determine length. Try Content-Length, else read-to-EOF (already done). */
-  size_t blen = strlen(body_start);
-  /* Honour Content-Length if present. */
-  char *cl = strcasestr(respbuf, "Content-Length:");
-  if (cl) {
-    size_t clv = (size_t)strtoul(cl + 15, NULL, 10);
-    if (clv < blen) blen = clv;
-  }
-
-  if (blen >= sizeof(blaze_http_client_body_buf)) blen = sizeof(blaze_http_client_body_buf) - 1;
-  memcpy(blaze_http_client_body_buf, body_start, blen);
-  blaze_http_client_body_buf[blen] = '\\0';
-
-  if (length) *length = blen;
-  return blaze_http_client_body_buf;
+  if (answer == NULL) return NULL;
+  if (length) *length = answer_len;
+  return answer;
 }
 
 /* Buffered client request handle for the callback form. */
@@ -824,6 +1355,16 @@ export async function buildFacilRuntime(
     "-D_POSIX_C_SOURCE=200809L",
     "-DHAVE_OPENSSL",
     "-DFIO_TLS_FOUND",
+    /* How long facil.io's event loop waits for an event before it looks at
+       what it was asked to do. The loop is stopped from another thread, and
+       the thread that waits for the event is not woken by the request: it
+       notices it when the wait is over. With the tick facil.io is built with
+       (a second), a server that is closed waits a second for the loop to
+       end, and a program that closes the server it started waits a second
+       for nothing. Ten milliseconds is short enough for the wait to be
+       shorter than the work that follows it, and long enough that an idle
+       server does not wake up for every millisecond of the day. */
+    `-DFIO_POLL_TICK=${FACIL_IO_POLL_TICK_MS}`,
     ...optimizationOptions(mode),
     ...cTargetOptions(target),
     "-ffunction-sections",

@@ -847,6 +847,16 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
           trampoline = cb.name.startsWith("__arrow_")
             ? `(double)(uintptr_t)__arrow_trampoline_${cb.name.slice("__arrow_".length)}`
             : `(double)(uintptr_t)__callback_${cb.name}`;
+          // The runtime calls the handler with the request and the response
+          // and nothing else, so the names the handler captured are left where
+          // the trampoline reads them from.
+          const captures = Array.isArray(cb.captures) ? cb.captures : [];
+          if (captures.length > 0) {
+            const held = captures.map(
+              (capture, index) => `blaze_capture_${cb.name}_${index} = (void *)(uintptr_t)(${capture})`,
+            );
+            trampoline = `(${held.join(", ")}, ${trampoline})`;
+          }
         }
         return trampoline;
       }
@@ -854,6 +864,44 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         const status = call.args[1];
         const statusText = status.k === "const" ? status.text : argument(1);
         return `(blaze_http_resp_status((void*) (uintptr_t) ${argument(0)}, (uint16_t) ${statusText}), 0.0)`;
+      }
+      case "res.setHeader": {
+        /* The name and the value are text: a header is written out as the two
+           lines it is, and a program that writes one writes text. */
+        const name = this.requestBody(call.args[1], expression);
+        const value = this.requestBody(call.args[2], expression);
+        return `(blaze_http_resp_header((void*) (uintptr_t) ${argument(0)}, (const char *) ${name}, (const char *) ${value}), 0.0)`;
+      }
+      case "req.path":
+      case "req.method": {
+        /* The path and the method are borrowed from the request, so they are
+           copied into a managed string: the program holds the copy, and the
+           request keeps its own. */
+        const which = call.callee === "req.path" ? "blaze_http_req_path" : "blaze_http_req_method";
+        return `({ const char *blaze_http_request_text = ${which}((void*) (uintptr_t) ${argument(0)});` +
+          ` (double)(uintptr_t)${RUNTIME_NAME}_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)); })`;
+      }
+      case "http.sseSubscribe": {
+        /* The response becomes an event stream: the connection stays open, and
+           the events published afterwards are written to it. */
+        return `(blaze_http_sse_subscribe((void*) (uintptr_t) ${argument(0)}), 0.0)`;
+      }
+      case "http.ssePublish": {
+        /* The event is held in a temporary: it is passed to the runtime and
+           measured there, and an expression that is computed twice is computed
+           twice. */
+        const text = this.requestBody(call.args[0], expression);
+        return `({ const char *blaze_http_sse_text = (const char *) ${text};` +
+          ` blaze_http_sse_publish(blaze_http_sse_text, strlen(blaze_http_sse_text)); 0.0; })`;
+      }
+      case "http.sseCount": {
+        return `(blaze_http_sse_count(), 0.0)`;
+      }
+      case "performance.now": {
+        /* The clock is monotonic, so a duration measured over it is a
+           duration and not the difference of two readings of a clock that can
+           be moved. */
+        return `${RUNTIME_NAME}_monotonic_ms()`;
       }
       case "res.end": {
         const body = call.args[1];
@@ -866,7 +914,16 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         const bodyPtr = (body.type.kind === "ptr" || body.type.kind === "text")
           ? bodyExpr
           : this.toText(bodyExpr, body.type, null);
-        return `(blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) ${bodyPtr}, strlen((const char*) ${bodyPtr})), blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}), 0.0)`;
+        /* Hold the body pointer in a temporary so it is evaluated once: it is
+           both passed to blaze_http_resp_body and measured with strlen, and a
+           complex expression (such as program_number_text) would otherwise be
+           computed twice, allocating a managed string each time. The temporary
+           is a statement, so the whole call is written as a statement
+           expression: a declaration is not an expression, and a comma
+           expression cannot hold one. */
+        return `({ const char *blaze_http_resp_body_text = (const char *) ${bodyPtr};` +
+          ` blaze_http_resp_body((void*) (uintptr_t) ${argument(0)}, (const unsigned char*) blaze_http_resp_body_text, strlen(blaze_http_resp_body_text));` +
+          ` blaze_http_resp_complete((void*) (uintptr_t) ${argument(0)}); 0.0; })`;
       }
       case "server.close": {
         /* Stop the server `server.listen` last created. The listener passed in
