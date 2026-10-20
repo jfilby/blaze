@@ -1322,6 +1322,55 @@ function trampolineParameters(count: number): string {
   return Array.from({ length: Math.max(2, count) }, (_, index) => `void *p${index}`).join(", ");
 }
 
+/**
+ * How one value is handed to a callback: a string and a buffer are pointers,
+ * and a number is the value the caller passed.
+ */
+function callbackValue(type: string, value: string): string {
+  if (type === "text" || type === "boxedtext") return value;
+  const parsed = parseType(type);
+  if (parsed.kind === "slice" || parsed.kind === "array" || parsed.kind === "ptr") {
+    return `(void*)(uintptr_t)(${value})`;
+  }
+  return `(double)(uintptr_t)(${value})`;
+}
+
+/**
+ * The names the captures of a handler are held under, one for each of them.
+ *
+ * A handler the runtime calls is given the request and the response and
+ * nothing else, so the names it captured are held here instead: the program
+ * writes them when the server is created, and the trampoline that calls the
+ * handler reads them when a request arrives.
+ */
+function captureHolders(draft: ProgramFunctionDraft): string[] {
+  return draft.captured.map((capture, index) => `blaze_capture_${draft.name}_${index}`);
+}
+
+/**
+ * The trampoline of a handler the runtime calls: it is given the request and
+ * the response, and it reads the names the handler captured from where the
+ * program left them.
+ */
+function serverHandlerTrampoline(
+  trampolineName: string,
+  draft: ProgramFunctionDraft,
+  holders: readonly string[],
+  call: string,
+): { name: string; body: string }[] {
+  /* The holders are declared above the trampoline that reads them, and in a
+     unit of their own: a unit that opens a block is a definition, and the
+     prototypes the file carries are taken from those. */
+  const declarations = holders.map((holder) => `static void *${holder} = 0;`).join("\n");
+  return [
+    { name: `${trampolineName}_captures`, body: declarations },
+    {
+      name: trampolineName,
+      body: `static void ${trampolineName}(${trampolineParameters(draft.params.length)}) {\n  ${call}\n}`,
+    },
+  ];
+}
+
 /** A function the program declared, and what has been settled about it. */
 interface ProgramFunctionDraft {
   name: string;
@@ -1353,6 +1402,13 @@ interface ProgramFunctionDraft {
    * arguments the source wrote, so it is called through a trampoline of its own.
    */
   callback: boolean;
+  /**
+   * True when this function is the handler a server was given. The runtime
+   * calls the handler with the request and the response, and the names the
+   * handler captured are not among them: the program leaves them where the
+   * trampoline that calls the handler reads them.
+   */
+  serverHandler: boolean;
 }
 
 /** A declared function whose body has been read, and so is settled whole. */
@@ -1596,6 +1652,7 @@ class ProgramResolver {
       signature: null,
       compiled: null,
       callback: false,
+      serverHandler: false,
     };
     this.functions.table.set(statement.name, draft);
     this.functions.used.add(statement.name);
@@ -3421,6 +3478,19 @@ class ProgramResolver {
           line,
         );
       }
+      const args = value.args.map((argument, position) => this.value(argument, builtin.params[position], line));
+      // The handler a server is given is called by the runtime, which passes
+      // it the request and the response and nothing else. The names the
+      // handler captured are not among them, so the handler is marked here and
+      // the trampoline that calls it reads them from where the program left
+      // them.
+      if (value.function === "http.createServer") {
+        const handler = args[0];
+        if (handler !== undefined && handler.k === "function" && typeof handler.name === "string") {
+          const draft = this.functions.table.get(handler.name);
+          if (draft !== undefined) draft.serverHandler = true;
+        }
+      }
       return {
         name: value.function,
         signature: {
@@ -3429,9 +3499,11 @@ class ProgramResolver {
           params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) })),
           returns: typeToString(builtin.returns),
         },
-        args: value.args.map((argument, position) => this.value(argument, builtin.params[position], line)),
+        args,
         returns: builtin.returns,
-        effects: [],
+        // What the builtin does beyond answering: a builtin that reads the
+        // world is not a value the optimizer may compute twice or move.
+        effects: [...(builtin.effects ?? [])],
         builtin: true,
         bigint: false,
         // A builtin is written by the compiler and returns a double, so the
@@ -3936,36 +4008,64 @@ class ProgramLowering {
     const bodies = settled.map((draft) => this.function(draft));
     const trampolines = settled
       .filter((draft) => draft.name.startsWith("__arrow_"))
-      .map((draft) => {
+      .flatMap((draft) => {
         const suffix = draft.name.slice("__arrow_".length);
         const trampolineName = `__arrow_trampoline_${suffix}`;
+        // A handler the runtime calls is given the request and the response and
+        // nothing else, so the names it captured are read from where the
+        // program left them rather than from the call.
+        if (draft.serverHandler) {
+          const holders = captureHolders(draft);
+          const written = draft.signature.params.slice(0, draft.params.length);
+          const captured = draft.signature.params.slice(draft.params.length);
+          const args = [
+            ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
+            ...captured.map((param, index) => callbackValue(param.type, holders[index] ?? "0")),
+          ].join(", ");
+          const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+          return serverHandlerTrampoline(trampolineName, draft, holders, call);
+        }
         // A captured text local arrives as the pointer to the shared cell that
         // holds it, so it is passed on as the pointer it is; every other
         // parameter is narrowed into the double the trampoline is called with.
         const args = draft.signature.params
-          .map((param, index) => (param.type === "text" || param.type === "boxedtext" ? `p${index}` : `(double)(uintptr_t)p${index}`))
+          .map((param, index) => callbackValue(param.type, `p${index}`))
           .join(", ");
         const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
         // What calls the trampoline passes it two values, and what the program
         // passes it is the value of the event and the names the arrow captured,
         // so the trampoline is given room for as many as the arrow holds.
         const body = `static void ${trampolineName}(${trampolineParameters(draft.signature.params.length)}) {\n  ${call}\n}`;
-        return { name: trampolineName, body };
+        return [{ name: trampolineName, body }];
       });
     // A named function the program hands to something as a callback is called
     // through a trampoline of its own: what calls it is not a program, and
     // passes it two values rather than the arguments the source wrote.
     const callbacks = settled
       .filter((draft) => draft.callback)
-      .map((draft) => {
+      .flatMap((draft) => {
         const trampolineName = `__callback_${draft.name}`;
+        // A handler the runtime calls is given the request and the response
+        // and nothing else, so the names it captured are read from where the
+        // program left them rather than from the call.
+        if (draft.serverHandler) {
+          const holders = captureHolders(draft);
+          const written = draft.signature.params.slice(0, draft.params.length);
+          const captured = draft.signature.params.slice(draft.params.length);
+          const args = [
+            ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
+            ...captured.map((param, index) => callbackValue(param.type, holders[index] ?? "0")),
+          ].join(", ");
+          const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+          return serverHandlerTrampoline(trampolineName, draft, holders, call);
+        }
         const args = draft.signature.params
           .slice(0, draft.params.length)
-          .map((param, index) => (param.type === "text" || param.type === "boxedtext" ? `p${index}` : `(double)(uintptr_t)p${index}`))
+          .map((param, index) => callbackValue(param.type, `p${index}`))
           .join(", ");
         const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
         const body = `static void ${trampolineName}(${trampolineParameters(draft.params.length)}) {\n  ${call}\n}`;
-        return { name: trampolineName, body };
+        return [{ name: trampolineName, body }];
       });
     // A block starts open and is closed by what ends it: a program ends by
     // handing back nothing, and a function ends by handing back what it

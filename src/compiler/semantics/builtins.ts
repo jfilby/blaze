@@ -6,7 +6,7 @@
  * object pass types a call through them, and the driver emits them.
  */
 
-import type { TypeExpr } from "../core/types.ts";
+import type { Effect, TypeExpr } from "../core/types.ts";
 
 export interface BuiltinSignature {
   params: TypeExpr[];
@@ -17,6 +17,12 @@ export interface BuiltinSignature {
    * positions past the count are named by params all the same, so the first
    * `arities.length` params of the longest form decide each argument's type. */
   arities?: readonly number[];
+  /**
+   * What the call does beyond answering: a call that reads the world is not a
+   * value the optimizer may compute twice or move, so what a builtin has an
+   * effect on is stated here.
+   */
+  effects?: readonly Effect[];
 }
 
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
@@ -128,6 +134,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "onFulfilled": { params: [ANY], returns: ANY, arity: 1 },
   "onRejected": { params: [ANY], returns: ANY, arity: 1 },
   "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  /** `req.path` is the path the request was sent to, and `req.method` the
+   *  method it was sent with: the two a program routes on. Both are read as
+   *  text, so a program compares them with the strings it wrote. */
+  "req.path": { params: [ANY], returns: ANY, arity: 1 },
+  "req.method": { params: [ANY], returns: ANY, arity: 1 },
   /** The events of a response an `http.request(url, options, callback)` call
    * handed to its callback: the `data` and `end` listeners fire when the
    * response has arrived and an `error` listener when it never did. */
@@ -139,8 +150,26 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "req.end": { params: [ANY], returns: ANY, arity: 1 },
   "req.text": { params: [ANY], returns: ANY, arity: 1 },
   "res.writeHead": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** `res.setHeader(name, value)` sets a header of the response, and is
+   *  written before the body is sent. */
+  "res.setHeader": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
   "res.end": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** `http.sseSubscribe(res)` turns a response into an event stream: the
+   *  connection stays open and every event published afterwards is written to
+   *  it. It answers 1 when the connection became an event stream, 0 when it
+   *  did not. */
+  "http.sseSubscribe": { params: [ANY], returns: F64, arity: 1 },
+  /** `http.ssePublish(text)` writes an event to every event stream that is
+   *  open, and answers how many of them it was written to. */
+  "http.ssePublish": { params: [ANY], returns: F64, arity: 1 },
+  /** `http.sseCount()` answers how many event streams are open. */
+  "http.sseCount": { params: [], returns: F64, arity: 0 },
+  /** `performance.now()` is the milliseconds on a monotonic clock: the time a
+   *  duration is measured over, which a clock that can be moved is no good
+   *  for. It reads the clock, so it is not a value the optimizer may compute
+   *  twice or move. */
+  "performance.now": { params: [], returns: F64, arity: 0, effects: ["clock"] },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

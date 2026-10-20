@@ -1,0 +1,198 @@
+/* Blaze Pulse: the dashboard's own look. */
+
+:root {
+	--ink: #e8ecf4;
+	--dim: #8b97ad;
+	--panel: #141924;
+	--edge: #232b3a;
+	--accent: #4fd1c5;
+	--warm: #f6ad55;
+	--bad: #fc8181;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: #0b0e15;
+	color: var(--ink);
+	font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+	font-size: 15px;
+	line-height: 1.5;
+}
+
+.bar {
+	display: flex;
+	align-items: baseline;
+	gap: 1rem;
+	flex-wrap: wrap;
+	padding: 1.1rem 1.6rem;
+	border-bottom: 1px solid var(--edge);
+	background: linear-gradient(180deg, #111621 0%, #0b0e15 100%);
+}
+
+.bar h1 {
+	margin: 0;
+	font-size: 1.25rem;
+	font-weight: 650;
+	letter-spacing: 0.02em;
+}
+
+.bar .tag {
+	margin: 0;
+	color: var(--dim);
+	font-size: 0.85rem;
+}
+
+.status {
+	margin: 0 0 0 auto;
+	padding: 0.15rem 0.6rem;
+	border: 1px solid var(--edge);
+	border-radius: 999px;
+	color: var(--dim);
+	font-size: 0.75rem;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.status.live {
+	color: var(--accent);
+	border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+main {
+	display: grid;
+	gap: 1.2rem;
+	grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+	padding: 1.6rem;
+	align-items: start;
+}
+
+.tiles {
+	grid-column: 1 / -1;
+	display: grid;
+	gap: 0.9rem;
+	grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.tile,
+.panel {
+	background: var(--panel);
+	border: 1px solid var(--edge);
+	border-radius: 12px;
+	padding: 1rem 1.1rem;
+}
+
+.tile h2,
+.panel h2 {
+	margin: 0 0 0.4rem;
+	color: var(--dim);
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+}
+
+.tile .value {
+	margin: 0;
+	font-size: 1.9rem;
+	font-variant-numeric: tabular-nums;
+	font-weight: 600;
+}
+
+.tile .unit {
+	margin: 0;
+	color: var(--dim);
+	font-size: 0.78rem;
+	font-variant-numeric: tabular-nums;
+}
+
+.panel h3 {
+	margin: 1.1rem 0 0.4rem;
+	font-size: 0.8rem;
+	color: var(--dim);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+
+#chart {
+	width: 100%;
+	height: 220px;
+	display: block;
+}
+
+.grid line {
+	stroke: var(--edge);
+	stroke-width: 1;
+}
+
+.line {
+	fill: none;
+	stroke: var(--accent);
+	stroke-width: 2;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+}
+
+.area {
+	fill: color-mix(in srgb, var(--accent) 14%, transparent);
+	stroke: none;
+}
+
+.peak {
+	fill: var(--dim);
+	font-size: 12px;
+}
+
+.caption {
+	margin: 0.6rem 0 0;
+	color: var(--dim);
+	font-size: 0.78rem;
+}
+
+.caption code {
+	color: var(--warm);
+}
+
+.facts {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 0.35rem 1rem;
+	margin: 0;
+	font-size: 0.85rem;
+}
+
+.facts dt {
+	color: var(--dim);
+}
+
+.facts dd {
+	margin: 0;
+	font-variant-numeric: tabular-nums;
+	text-align: right;
+}
+
+.report {
+	margin-top: 0.4rem;
+	padding-top: 0.6rem;
+	border-top: 1px solid var(--edge);
+}
+
+footer {
+	padding: 1.4rem 1.6rem 2.2rem;
+	color: var(--dim);
+	font-size: 0.8rem;
+}
+
+footer p {
+	margin: 0;
+	max-width: 60ch;
+}
+
+@media (max-width: 900px) {
+	main {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}

@@ -74,6 +74,7 @@ export function facilAdapterSource(): string {
  */
 
 #include <pthread.h>
+#include <stdio.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -259,62 +260,82 @@ void blaze_http_resp_complete(blaze_http_response *response) {
 /* -------------------------------------------------------------------------- */
 
 /* The event streams that are open. A stream is a connection the program turned
-   into an event stream: it stays open, every event published afterwards is
-   written to it, and it is dropped when the connection closes. The list is
-   touched by the event loop alone, which is the one thread a program serves
-   its requests on. */
+   into an event stream: the response head is written by hand, so the stream
+   has no length and the connection stays open, and every event published
+   afterwards is written to it. The list is touched by the event loop alone,
+   which is the one thread a program serves its requests on. */
 #define BLAZE_HTTP_SSE_MAX 64
-static http_sse_s *blaze_http_sse_streams[BLAZE_HTTP_SSE_MAX];
+static intptr_t blaze_http_sse_streams[BLAZE_HTTP_SSE_MAX];
 static size_t blaze_http_sse_open = 0;
 
-/* The stream opened: it is written to from now on. A stream beyond what the
-   adapter holds is closed rather than kept, because a stream nobody writes to
-   is a connection that stays open for nothing. */
-static void blaze_http_sse_on_open(http_sse_s *sse) {
-  if (blaze_http_sse_open >= BLAZE_HTTP_SSE_MAX) {
-    http_sse_close(sse);
-    return;
-  }
-  blaze_http_sse_streams[blaze_http_sse_open] = sse;
-  blaze_http_sse_open += 1;
-}
+/* Whether the head of a stream has been written to it yet. The head is
+   written with the first event, because a write made on its own is a write
+   the connection does not carry: the client would read the events without
+   the response they belong to. */
+static int blaze_http_sse_headed[BLAZE_HTTP_SSE_MAX];
 
-/* The stream closed: it is dropped from the list, so that publishing does not
-   write to a connection that is gone. */
-static void blaze_http_sse_on_close(http_sse_s *sse) {
-  for (size_t index = 0; index < blaze_http_sse_open; index++) {
-    if (blaze_http_sse_streams[index] != sse) continue;
-    blaze_http_sse_streams[index] = blaze_http_sse_streams[blaze_http_sse_open - 1];
-    blaze_http_sse_open -= 1;
-    return;
-  }
-}
+/* The head of an event stream. It is written by hand because the response of
+   an event stream has no length: a length would tell the client that the
+   stream ends where the head ends. */
+static const char blaze_http_sse_head[] =
+    "HTTP/1.1 200 OK\\r\\n"
+    "Content-Type: text/event-stream\\r\\n"
+    "Cache-Control: no-cache\\r\\n"
+    "\\r\\n";
 
 int blaze_http_sse_subscribe(void *response_raw) {
   blaze_http_response_t *resp = (blaze_http_response_t *)response_raw;
   if (!resp || !resp->h) return 0;
   http_s *h = resp->h;
-  /* The connection belongs to facil.io once it is an event stream, so the
-     response is finished here: a header or a body written after this would
-     be written to a handle that is no longer there. */
+  /* The connection is taken away from the HTTP protocol here, so the response
+     is finished: a header or a body written after this would be written to a
+     handle that is no longer there. */
   resp->h = NULL;
   resp->body_len = 0;
-  if (http_upgrade2sse(h, .on_open = blaze_http_sse_on_open,
-                       .on_close = blaze_http_sse_on_close) != 0) {
-    return 0;
-  }
+  if (blaze_http_sse_open >= BLAZE_HTTP_SSE_MAX) return 0;
+  /* What the client sent after the request is left in the buffer of the
+     protocol, which is freed with it: an event stream is a stream the client
+     reads and does not write to. */
+  fio_str_info_s leftover = {0};
+  intptr_t uuid = http_hijack(h, &leftover);
+  if (uuid < 0) return 0;
+  blaze_http_sse_streams[blaze_http_sse_open] = uuid;
+  blaze_http_sse_headed[blaze_http_sse_open] = 0;
+  blaze_http_sse_open += 1;
   return 1;
 }
 
 int blaze_http_sse_publish(const char *bytes, size_t length) {
   int written = 0;
+  const size_t head_length = sizeof(blaze_http_sse_head) - 1;
   for (size_t index = 0; index < blaze_http_sse_open;) {
-    http_sse_s *sse = blaze_http_sse_streams[index];
-    fio_str_info_s data = {0, length, (char *)bytes};
-    if (http_sse_write(sse, .data = data) < 0) {
-      /* The connection is gone: the stream is dropped, and the slot it held
-         is taken by the last one, which is written to next. */
+    intptr_t uuid = blaze_http_sse_streams[index];
+    const char *payload = bytes;
+    size_t payload_length = length;
+    char *message = NULL;
+    if (!blaze_http_sse_headed[index]) {
+      /* The head and the first event are written as one, so that the client
+         reads a response and the event that belongs to it together. */
+      message = (char *)malloc(head_length + length);
+      if (message == NULL) {
+        blaze_http_sse_headed[index] = 1;
+      } else {
+        memcpy(message, blaze_http_sse_head, head_length);
+        memcpy(message + head_length, bytes, length);
+        payload = message;
+        payload_length = head_length + length;
+        blaze_http_sse_headed[index] = 1;
+      }
+    }
+    ssize_t wrote = fio_write(uuid, payload, payload_length);
+    if (message != NULL) free(message);
+    if (wrote < 0) {
+      /* The client is gone: the socket is closed and the stream is dropped,
+         and the slot it held is taken by the last one, which is written to
+         next. */
+      fio_close(uuid);
       blaze_http_sse_streams[index] = blaze_http_sse_streams[blaze_http_sse_open - 1];
+      blaze_http_sse_headed[index] = blaze_http_sse_headed[blaze_http_sse_open - 1];
       blaze_http_sse_open -= 1;
       continue;
     }
@@ -399,6 +420,24 @@ static void blaze_http_on_request(http_s *h) {
   free(resp.body_copy);
 }
 
+/**
+ * A request that asks to be upgraded.
+ *
+ * A browser's EventSource asks for an event stream with an Accept header of
+ * text/event-stream, and facil.io answers such a request with its own
+ * upgrade handler before the program's handler is called. The program is the
+ * one that decides what a request is answered with, so the request is handed
+ * to it as it is: the program reads the path of the request and answers it the
+ * way it answers every other.
+ */
+static void blaze_http_on_upgrade(http_s *h, char *type, size_t length) {
+  if (length == 3 && memcmp(type, "sse", 3) == 0) {
+    blaze_http_on_request(h);
+    return;
+  }
+  http_send_error(h, 400);
+}
+
 /* -------------------------------------------------------------------------- */
 /* The server: start, run and stop.                                           */
 /* -------------------------------------------------------------------------- */
@@ -450,6 +489,7 @@ static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
   __builtin_snprintf(port_str, sizeof(port_str), "%u", (unsigned)server->port);
 
   intptr_t uuid = http_listen(port_str, NULL, .on_request = blaze_http_on_request,
+                              .on_upgrade = blaze_http_on_upgrade,
                               .udata = server,
                               .max_body_size = server->max_body_size,
                               .max_header_size = server->max_header_size,

@@ -899,6 +899,19 @@ class ProgramParser {
         const dot = this.peek();
         this.next();
         const member = this.identifier("the property of a value");
+        // `req.path` and `req.method` read the request the handler was given:
+        // the path it was asked for and the method it was sent with. They are
+        // read as text, so a program routes on them the way it routes on any
+        // string it wrote. The request is named `req` because that is the name
+        // the runtime answers to, the way `req.text()` is.
+        if ((member === "path" || member === "method") && value.k === "name" && value.name === "req") {
+          if (this.at("(")) this.skipArguments();
+          value = {
+            k: "text",
+            parts: [{ k: "value", value: { k: "call", function: `req.${member}`, args: [value] } }],
+          };
+          continue;
+        }
         // `x.toFixed(2)` writes a number as text at two digits, and `a.fill(x)`
         // writes a number into every element of an array. Both are written of
         // whatever the value is, and both answer the value they were written of.
@@ -930,7 +943,7 @@ class ProgramParser {
         }
         if (this.at("(")) {
           this.next();
-          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
+          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
           if (value.k === "name" && value.name === "http" && member === "createServer") {

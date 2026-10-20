@@ -369,9 +369,13 @@ class ProgramEmitter {
     const prototypes: string[] = [];
     const collectPrototypes = (units: string[][]) => {
       for (const lines of units) {
-        const first = lines[0];
+        // The first line that opens a block is the definition: a unit may
+        // declare what it holds above it, and those lines are not a
+        // definition of anything.
+        const first = lines.find((line) => line.indexOf("{") >= 0);
+        if (first === undefined) continue;
         const brace = first.indexOf("{");
-        if (brace >= 0) prototypes.push(first.slice(0, brace).trimEnd() + ";");
+        prototypes.push(first.slice(0, brace).trimEnd() + ";");
       }
     };
     collectPrototypes(declared);
@@ -987,6 +991,13 @@ class ProgramEmitter {
     }
     const argumentsText = call.args.map((argument, index) => {
       const type = call.argTypes[index] ?? argument.type;
+      // A string a function writes through is shared through a cell, and the
+      // cell is what the function is given: what is passed is the name of the
+      // cell and not the text it holds, for the text in the cell is what the
+      // function writes.
+      if (call.signature.params[index]?.type === "boxedtext" && argument.k === "local") {
+        return this.names.read(argument.name);
+      }
       return this.target.argument(type, this.expression(argument, type));
     });
     const expression = (value: SemanticValue, as: SemanticType | null = null): string => this.expression(value, as);

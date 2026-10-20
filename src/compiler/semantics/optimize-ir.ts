@@ -629,6 +629,45 @@ function valuesOf(block: SemanticBlock, visit: (value: SemanticValue) => void): 
   }
 }
 
+/**
+ * The names the body shares with the scope around it: the strings a function
+ * is given to write through, which are held in a cell the caller holds too.
+ *
+ * A write to one of them is a write the caller sees, so a rewrite that drops a
+ * write nothing reads may not drop it: what reads it is in another body.
+ */
+function sharedNames(body: Body): Set<string> {
+  const names = new Set<string>();
+  for (const param of body.params) {
+    if (param.kind !== "text") continue;
+    if ((param as { boxed?: boolean }).boxed !== true) continue;
+    names.add(param.name);
+  }
+  return names;
+}
+
+/**
+ * The names a function reference of the body captures: the names the program
+ * reads of the scope around it and hands to the function it names.
+ *
+ * A capture is a name written down as text and not as a value, so a rewrite
+ * that replaces a read of a name with a value does not reach it: the function
+ * is still handed the name, and the name has to be there. A name that is
+ * captured is therefore a name no rewrite may write out of the body.
+ */
+function capturedNames(body: Body): Set<string> {
+  const names = new Set<string>();
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    valuesOf(block, (value) => {
+      walkSemanticValue(value, (one) => {
+        if (one.k !== "functionRef") return;
+        for (const capture of one.captures) names.add(capture);
+      });
+    });
+  }
+  return names;
+}
+
 /** A block with every value in it folded, and with its nested blocks folded. */
 function foldBlock(block: SemanticBlock): boolean {
   let changed = false;
@@ -767,6 +806,11 @@ function readCounts(body: Body): Map<string, number> {
       // naming a slot the block never declared, which the validator refuses by
       // name.
       if (statement.k === "step") count(statement.name);
+      // A compound assignment reads the name it writes: `text += more` is a
+      // read of the text and a write of it, and a binding that is read only
+      // that way is one this would otherwise drop, leaving the write naming a
+      // name the block never declared.
+      if (statement.k === "set" && statement.op !== "=") count(statement.name);
     }
   };
   walk(body.entry);
@@ -1405,6 +1449,7 @@ function namesWrittenHere(block: SemanticBlock): Set<string> {
 function propagateCopies(body: Body): boolean {
   const writes = new Set<string>();
   const buffers = new Set<string>();
+  const captured = capturedNames(body);
   const candidates: { name: string; source: string }[] = [];
   for (const block of nestedSemanticBlocks(body.entry)) {
     for (const statement of block.statements) {
@@ -1420,7 +1465,14 @@ function propagateCopies(body: Body): boolean {
   }
   const copied = candidates.filter(
     (copy) =>
-      !writes.has(copy.source) && !writes.has(copy.name) && !buffers.has(copy.source) && !buffers.has(copy.name),
+      !writes.has(copy.source) &&
+      !writes.has(copy.name) &&
+      !buffers.has(copy.source) &&
+      !buffers.has(copy.name) &&
+      // A name a function reference captures is handed to that function by
+      // name, and the copy would leave the name the function is given with
+      // nothing behind it.
+      !captured.has(copy.name),
   );
   if (copied.length === 0) return false;
   // Keyed by the read of the copy rather than by the read it becomes, because
@@ -1502,6 +1554,7 @@ function localTypeOf(body: Body, name: string): SemanticType {
  */
 function inlineSingleUses(body: Body): boolean {
   const reads = new Map<string, number>();
+  const captured = capturedNames(body);
   for (const block of nestedSemanticBlocks(body.entry)) {
     valuesOf(block, (one) => {
       if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
@@ -1528,7 +1581,10 @@ function inlineSingleUses(body: Body): boolean {
     const replacements = new Map<string, SemanticValue>();
     for (let at = 0; at < block.statements.length; at += 1) {
       const statement = block.statements[at];
-      const name = statement !== undefined && statement.k === "let" ? singleUseBinding(statement, at, block, reads) : null;
+      const name =
+        statement !== undefined && statement.k === "let"
+          ? singleUseBinding(statement, at, block, reads, captured)
+          : null;
       if (statement === undefined || name === null || statement.k !== "let") {
         if (statement !== undefined) keep.push(statement);
         continue;
@@ -1568,9 +1624,14 @@ function singleUseBinding(
   at: number,
   block: SemanticBlock,
   reads: ReadonlyMap<string, number>,
+  captured: ReadonlySet<string>,
 ): string | null {
   if (statement.k !== "let" || statement.value.k === "local") return null;
   const name = statement.slot.name;
+  // A name a function reference captures is handed to that function by name,
+  // and the function is handed the name and not the value: writing the value
+  // out of the body leaves the function with a name nothing holds.
+  if (captured.has(name)) return null;
   if (reads.get(name) !== 1) return null;
   if (block.releases.includes(name)) return null;
   if (!isSafeToCompute(statement.value)) return null;
@@ -1663,6 +1724,7 @@ function readsName(value: SemanticValue, name: string): boolean {
  */
 function dropDeadWrites(body: Body): boolean {
   const reads = new Map<string, number>();
+  const shared = sharedNames(body);
   for (const block of nestedSemanticBlocks(body.entry)) {
     valuesOf(block, (value) => {
       walkSemanticValue(value, (one) => {
@@ -1676,6 +1738,9 @@ function dropDeadWrites(body: Body): boolean {
     block.statements = block.statements.filter((statement) => {
       if (statement.k !== "set" || statement.op !== "=") return true;
       if (block.releases.includes(statement.name)) return true;
+      // A write to a string the caller holds is a write the caller sees, and
+      // what reads it is in the caller's body and not in this one.
+      if (shared.has(statement.name)) return true;
       if ((reads.get(statement.name) ?? 0) > 0) return true;
       let calls = false;
       walkSemanticValue(statement.value, (one) => {
@@ -1750,6 +1815,7 @@ function readsLocal(value: SemanticValue, name: string): boolean {
 }
 function dropOverwrittenStores(body: Body): boolean {
   let changed = false;
+  const shared = sharedNames(body);
   const note = (after: Set<string>, value: SemanticValue | null): void => {
     if (value === null) return;
     walkSemanticValue(value, (one) => {
@@ -1808,6 +1874,9 @@ function dropOverwrittenStores(body: Body): boolean {
         !readsItself &&
         !after.has(statement.name) &&
         !block.releases.includes(statement.name) &&
+        // A write to a string the caller holds is a write the caller sees, and
+        // the caller reads it after this body has ended.
+        !shared.has(statement.name) &&
         !carriesAValue(statement)
       ) {
         changed = true;
@@ -2403,8 +2472,12 @@ export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees 
  * program is a loop like any other, and the value its body computes on every
  * turn is computed once above it here as it is in a function.
  */
-export function optimizeSemanticEntry(entry: SemanticBlock, callees: Callees = NO_CALLEES): SemanticBlock {
-  optimizeBody({ params: [], entry }, callees);
+export function optimizeSemanticEntry(
+  entry: SemanticBlock,
+  callees: Callees = NO_CALLEES,
+  params: readonly SemanticSlot[] = [],
+): SemanticBlock {
+  optimizeBody({ params, entry }, callees);
   return entry;
 }
 
@@ -2443,7 +2516,7 @@ export function optimizeSemanticProgram(
   const bodies = new Map(program.bodies.map((fn) => [fn.name, fn]));
   for (let index = 0; index < program.bodies.length; index += 1) {
     const fn = program.bodies[index] as SemanticFunction;
-    optimizeSemanticEntry(fn.entry, bodies);
+    optimizeSemanticEntry(fn.entry, bodies, fn.params);
     // The same call-boundary rewrite a single function gets, run here over a
     // body the program declares. Whole-number arithmetic runs after this, so
     // a body it has fused is one the whole-number pass reads.
@@ -2451,7 +2524,7 @@ export function optimizeSemanticProgram(
     if ("refused" in restructured) continue;
     program.bodies[index] = restructured.applied;
     bodies.set(fn.name, restructured.applied);
-    optimizeSemanticEntry(restructured.applied.entry, bodies);
+    optimizeSemanticEntry(restructured.applied.entry, bodies, restructured.applied.params);
   }
   // Whole-number arithmetic is the one rewrite here that is a question about a
   // whole program rather than about one body: what it needs to know is what

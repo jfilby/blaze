@@ -443,6 +443,11 @@ export function isSafeToCompute(value: SemanticValue): boolean {
     // that released the name would release it twice.
     case "newObject":
       return false;
+    case "call":
+      // A call that has an effect is not a value: it reads the world, so
+      // computing it twice reads the world twice, and computing it on a turn
+      // that did not read it reads the world on a turn the source did not.
+      return value.call.effects.length === 0;
     case "toText":
       return isSafeToCompute(value.of);
     case "text":

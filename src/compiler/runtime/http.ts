@@ -228,6 +228,30 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     "Reads the response body of a completed request.",
     "Returns a borrowed pointer; the byte count is written through length.",
   ),
+  httpEntry(
+    "blaze_http_sse_subscribe",
+    "int",
+    [["response", "void*"]],
+    "Turns a response into an event stream: the connection stays open and every event published afterwards is written to it.",
+    "Returns 1 when the connection became an event stream, 0 when it did not. The response is owned by the caller until the stream is closed.",
+  ),
+  httpEntry(
+    "blaze_http_sse_publish",
+    "int",
+    [
+      ["bytes", "const char*"],
+      ["length", "size_t"],
+    ],
+    "Writes an event to every event stream that is open.",
+    "Returns how many streams the event was written to.",
+  ),
+  httpEntry(
+    "blaze_http_sse_count",
+    "int",
+    [],
+    "How many event streams are open.",
+    "Returns the count.",
+  ),
 ];
 
 /** Symbols generated HTTP code may reference. Nothing else resolves at link time. */

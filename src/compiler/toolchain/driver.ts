@@ -883,8 +883,9 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       }
       case "http.sseSubscribe": {
         /* The response becomes an event stream: the connection stays open, and
-           the events published afterwards are written to it. */
-        return `(blaze_http_sse_subscribe((void*) (uintptr_t) ${argument(0)}), 0.0)`;
+           the events published afterwards are written to it. The call answers
+           whether the connection became one. */
+        return `(double)blaze_http_sse_subscribe((void*) (uintptr_t) ${argument(0)})`;
       }
       case "http.ssePublish": {
         /* The event is held in a temporary: it is passed to the runtime and
@@ -892,10 +893,10 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
            twice. */
         const text = this.requestBody(call.args[0], expression);
         return `({ const char *blaze_http_sse_text = (const char *) ${text};` +
-          ` blaze_http_sse_publish(blaze_http_sse_text, strlen(blaze_http_sse_text)); 0.0; })`;
+          ` (double)blaze_http_sse_publish(blaze_http_sse_text, strlen(blaze_http_sse_text)); })`;
       }
       case "http.sseCount": {
-        return `(blaze_http_sse_count(), 0.0)`;
+        return `(double)blaze_http_sse_count()`;
       }
       case "performance.now": {
         /* The clock is monotonic, so a duration measured over it is a
