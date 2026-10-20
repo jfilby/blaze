@@ -69,6 +69,14 @@ export interface ModuleRequest {
    * word for, and a truth as `true` where the other writes `True`.
    */
   language?: string;
+  /**
+   * Whether the folds the backend knows are safe are applied.
+   *
+   * A build folds. The flag is here so that the folded module and the
+   * unfolded one can be compared, which is the only way to say that a fold
+   * changed nothing but the size.
+   */
+  optimize?: boolean;
 }
 
 /**
@@ -754,13 +762,29 @@ class Body {
 
   /** How far through the scratch below the constants the arithmetic has come. */
   private wideInFlight = 0;
+  /**
+   * Whether the folds the backend knows are safe are applied.
+   *
+   * A build folds: the module it writes is the folded one. The flag is here
+   * so that the folded module and the unfolded one can be compared, which is
+   * the only way to say that a fold changed nothing but the size.
+   */
+  private readonly optimize: boolean;
 
-  constructor(fn: SemanticFunction, contract: FunctionContract, returns: SemanticType, candidate: string | undefined, style = 0) {
+  constructor(
+    fn: SemanticFunction,
+    contract: FunctionContract,
+    returns: SemanticType,
+    candidate: string | undefined,
+    style = 0,
+    optimize = true,
+  ) {
     this.fn = fn;
     this.contract = contract;
     this.returns = returns;
     this.candidate = candidate;
     this.style = style;
+    this.optimize = optimize;
     // A parameter is a local the module numbers before any other, because the
     // function's type is written in that order, and it is never handed back
     // to the pool: the host filled it before the body ran and every `local`
@@ -2879,6 +2903,15 @@ class Body {
     let bound = -1;
     let step = -1;
     let end = -1;
+    /**
+     * The step of a counted loop, when it is a constant.
+     *
+     * A constant is the same number on every turn of the loop, so it is read
+     * where it is used rather than kept in a local of its own: the local costs
+     * a byte in the declaration and two in the write the body does not need,
+     * and the read is the same size either way.
+     */
+    let stepConstant: { text: string; type: SemanticType } | null = null;
     if (loop.kind === "counted") {
       const held = facts(loop.type).held;
       // The bound, the step and the index it starts at are read before the index
@@ -2889,23 +2922,31 @@ class Body {
       bound = this.borrow(held);
       this.value(loop.to, loop.type);
       this.keep(bound);
-      step = this.borrow(held);
-      this.countedStep(loop);
-      this.keep(step);
-      const start = this.borrow(held);
-      this.value(loop.from, loop.type);
-      this.keep(start);
+      stepConstant = this.optimize ? countedStepOf(loop) : null;
+      step = stepConstant === null ? this.borrow(held) : -1;
+      if (stepConstant === null) {
+        this.countedStep(loop);
+        this.keep(step);
+      }
+      const startConstant = this.optimize ? constantOf(loop.from) : null;
+      const start = startConstant === null ? this.borrow(held) : -1;
+      if (startConstant === null) {
+        this.value(loop.from, loop.type);
+        this.keep(start);
+      }
       this.holdLocal(loop.variable, loop.type);
       // A counted loop moves its index at the head of the turn rather than at
       // the foot, because a `continue` branches to the head: a step at the foot
       // is a step a `continue` skips, and a loop whose index never moves is a
       // loop that never ends. The turn before the first is a turn of its own,
       // so the index starts one step short of the value the source wrote.
-      this.read(start);
-      this.read(step);
+      if (startConstant === null) this.read(start);
+      else this.constant(startConstant.text, startConstant.type, loop.type);
+      if (stepConstant === null) this.read(step);
+      else this.constant(stepConstant.text, stepConstant.type, loop.type);
       this.op(BINARY[held].sub as number);
       this.set(loop.variable);
-      this.release(held, start);
+      if (start !== -1) this.release(held, start);
     }
     if (loop.kind === "each") {
       // A for-of walks a buffer by a cursor: the index of the element the turn
@@ -2965,13 +3006,20 @@ class Body {
       this.op(0x0d);
       this.code.varuint(0);
     } else if (loop.kind === "counted") {
-      this.get(loop.variable);
-      this.read(step);
+      const counter = this.get(loop.variable);
+      if (stepConstant === null) this.read(step);
+      else this.constant(stepConstant.text, stepConstant.type, loop.type);
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
       this.op(BINARY[facts(loop.type).held].add as number);
-      this.set(loop.variable);
-      this.get(loop.variable);
+      // The value the counter moves to is the value the test below reads, so
+      // it is written down and left on the stack: a `local.tee` is one
+      // instruction where a write and a read are two.
+      if (this.optimize) this.tee(counter.index);
+      else {
+        this.set(loop.variable);
+        this.get(loop.variable);
+      }
       this.read(bound);
       const stop = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
       // The counter is ordered the way it was declared, which is what the
@@ -3025,7 +3073,7 @@ class Body {
     // again: a loop inside this one borrows the same carriers and is finished
     // with them by now.
     if (loop.kind === "counted") {
-      this.release(facts(loop.type).held, step);
+      if (step !== -1) this.release(facts(loop.type).held, step);
       this.release(facts(loop.type).held, bound);
     }
     if (loop.kind === "each") this.release(I32, end);
@@ -3366,14 +3414,88 @@ const MODULE_HEADER = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 /** The byte a WebAssembly value type is written as in a type section. */
 const TYPE_CODES: Record<string, number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
+/**
+ * The constant a value is, or null where it is not one.
+ *
+ * A constant is a number the source wrote out, and a number the source wrote
+ * out is the same number on every turn of a loop and on every pass of a
+ * branch. The backend reads such a number where it is used rather than
+ * keeping it in a local of its own, which is a fold the backend knows is safe
+ * because it is the one that wrote the number.
+ */
+function constantOf(value: SemanticValue | null): { text: string; type: SemanticType } | null {
+  if (value === null) return null;
+  if (value.k !== "const") return null;
+  if (value.type.kind !== "primitive") return null;
+  if (isWide(value.type.name)) return null;
+  return { text: value.text, type: value.type };
+}
+
+/**
+ * The step a counted loop moves its index by, when it is a number the source
+ * wrote out.
+ *
+ * A loop that writes no step of its own moves its index by one, or by one
+ * less when it counts down, and that is a number like any other.
+ */
+function countedStepOf(loop: Extract<SemanticLoop, { kind: "counted" }>): { text: string; type: SemanticType } | null {
+  if (loop.step !== null) return constantOf(loop.step);
+  return { text: loop.down ? "-1" : "1", type: loop.type };
+}
+
+/**
+ * Whether the body of a function always answers, which is what makes the value
+ * a body that falls out of its own end leaves behind unnecessary.
+ *
+ * A body that ends in a return never falls out of its own end, so the value
+ * the function leaves behind is written where nothing reaches it. A jump to
+ * the entry block lands at the end of the function, and that path does reach
+ * it, so a body with such a jump needs the value after all.
+ */
+function alwaysReturns(fn: SemanticFunction): boolean {
+  const entry = fn.entry;
+  if (entry.terminator.k !== "return" && entry.terminator.k !== "unreachable") return false;
+  return !blocksOf(entry).some(
+    (block) => block.terminator.k === "jump" && block.terminator.target === entry.id,
+  );
+}
+
+/** Every block of a body, the one it starts with and the ones inside it. */
+function blocksOf(block: SemanticBlock): SemanticBlock[] {
+  const blocks: SemanticBlock[] = [block];
+  for (const statement of block.statements) {
+    if (statement.k === "if") {
+      blocks.push(...blocksOf(statement.then));
+      if (statement.otherwise !== null) blocks.push(...blocksOf(statement.otherwise));
+      continue;
+    }
+    if (statement.k === "loop") {
+      blocks.push(...blocksOf(statement.loop.body));
+      continue;
+    }
+    if (statement.k === "block") blocks.push(...blocksOf(statement.body));
+  }
+  return blocks;
+}
+
+/**
+ * The function's own body as the module writes it, and the bytes of the code
+ * section it is written into.
+ *
+ * The folded module is the one a build writes: the folds the backend knows
+ * are safe are applied to what it writes, and a fold that changed an answer
+ * would be a fold the backend did not know was safe.
+ */
 export function moduleBytes(
   fn: SemanticFunction,
   contract: FunctionContract,
   candidate?: string,
   style = 0,
+  options: { optimize?: boolean } = {},
 ): Uint8Array {
   const returns = parseType(contract.function.returns);
-  const body = new Body(fn, contract, returns, candidate, style);
+  const optimize = options.optimize ?? true;
+  const body = new Body(fn, contract, returns, candidate, style, optimize);
   const parameters = fn.params.map((param) => facts(slotType(param)).held);
   const result = returns.kind === "void" ? undefined : facts(returns).held;
   // The body is emitted into a buffer of its own, because a statement that
@@ -3387,7 +3509,11 @@ export function moduleBytes(
   // the body is written into: an `answer` after they were read appends to a
   // buffer nothing reads again, and the `end` that closes the function is left
   // with an empty stack under a type section that declares a result.
-  if (result !== undefined) body.answer();
+  //
+  // A body that always answers does not fall out of its own end, so the value
+  // is written where nothing reaches it: the module carries it and nothing
+  // reads it.
+  if (result !== undefined && !(optimize && alwaysReturns(fn))) body.answer();
   // The locals are declared in front of the body rather than after it, because
   // a statement that needs a value twice borrows a local for it, and a local
   // borrowed while the body was emitted was not declared yet. Both are written
@@ -4106,7 +4232,7 @@ const INSTRUCTIONS: Record<number, [string, string]> = {
 export async function buildModule(request: ModuleRequest): Promise<ModuleResult> {
   const functionName = symbolOf(request.contract);
   const style = rulesFor(request.language).style === "python" ? 1 : 0;
-  const bytes = moduleBytes(request.fn, request.contract, request.candidate, style);
+  const bytes = moduleBytes(request.fn, request.contract, request.candidate, style, { optimize: request.optimize ?? true });
   const detail = await inspect(request.modulePath, functionName, bytes);
   if (detail !== null) {
     throw new CompilerError({

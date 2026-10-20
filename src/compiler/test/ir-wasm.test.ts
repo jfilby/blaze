@@ -1308,3 +1308,41 @@ test("a whole number of thirty-two bits moves by a number of bits", () => {
   assert.equal(shifted(scalarShifted(S32, "shr", "-2", "1"), numberContract("i32")), -1);
 });
 
+
+test("the folded module answers the same as the unfolded one, and is smaller", async () => {
+  // The module the backend writes is the folded one: the folds it knows are
+  // safe are applied to what it writes. A fold that changed an answer would be
+  // a fold the backend did not know was safe, so the two are run against the
+  // same vectors and their answers are compared.
+  const library = [
+    "export function r(a: Float64Array, n: number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i++) { total += a[i] * 2.5; }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
+  const contract = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const vectors = "run\n3 2\n1 2 3\n";
+  const answers: string[] = [];
+  const sizes: number[] = [];
+  for (const optimize of [false, true]) {
+    const directory = await scratch("blaze-wasm-fold-");
+    const built = await buildModule({
+      fn: semantics.r as SemanticFunction,
+      contract,
+      modulePath: join(directory, "candidate.wasm"),
+      hostPath: join(directory, "host.mjs"),
+      optimize,
+    });
+    const result = run("node", [built.hostPath, built.modulePath], { input: vectors, timeoutMs: 60_000 });
+    assert.equal(result.code, 0, result.stderr);
+    answers.push(result.stdout);
+    sizes.push(built.moduleSizeBytes);
+  }
+  assert.equal(answers[0], answers[1], "the folded module answers what the unfolded one answers");
+  assert.ok((sizes[1] as number) < (sizes[0] as number), "the folded module is smaller than the unfolded one");
+});
