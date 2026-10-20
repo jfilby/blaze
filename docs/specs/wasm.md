@@ -279,13 +279,14 @@ it is the part of the design that is not in the code yet:
 
 ### The review artifact
 
-A review of a module reads `describeModule` (`ir-wasm.ts:2758`): the size of
-each section and the exports. The machine backend hands its review a listing
-of the object — the instructions a processor would run — and the C backend
-hands its review the C or the assembly it wrote. A module has no text, so
-something has to decode it. Writing a disassembler for the code section is
-the same work `describeMachineObject` does for an object, and it is what makes
-a review of a module worth asking for.
+A review of a module reads `describeModule` (`toolchain/ir-wasm.ts`): a listing
+of the module — the sections and their sizes, the types, the imports and their
+signatures, the exports, the globals, and the code section decoded into
+instructions with their immediates read back. The machine backend hands its
+review a listing of the object — the instructions a processor would run — and
+the C backend hands its review the C or the assembly it wrote. A module has no
+text, so something has to decode it, and the decoder is the same work
+`describeMachineObject` does for an object.
 
 ### The proof
 
@@ -423,8 +424,10 @@ publishes. A buffer the host passes in is laid out the way the C runtime lays
 one out, at the width of its element, with the count in the word before it.
 
 A wide number is the one thing that does not come from the host: it is four
-64-bit limbs in the module's own scratch, and the arithmetic over it is
-written out limb by limb. That stays.
+64-bit limbs in the module's own scratch. The arithmetic that has an
+instruction is written out limb by limb, and the arithmetic that has none —
+the multiply, the division and the remainder — is a call of the kernel the
+other two backends call.
 
 ### Text
 
@@ -437,10 +440,11 @@ number, which is what the C backend does as well.
 
 The one thing that has to be decided is what a text *parameter* of a contract
 means. In the C ABI a text parameter is a `char*` the caller owns. In the wasm
-ABI it is a byte offset into the shared memory, and the host has to write the
-bytes there before it calls the module — the same way it lays out a buffer.
-That is a change to `generateWasmHost` and to the ABI table, and it is what
-makes a text parameter work instead of crashing the host generator.
+ABI it would be a byte offset into the shared memory, and the host would have
+to write the bytes there before it calls the module — the same way it lays out
+a buffer. The vector protocol carries a buffer as a count and its elements and
+a text is neither, so a text parameter is refused by name: the refusal says
+which parameter it is and what the protocol carries.
 
 ### Objects, arrays and dynamic values
 
@@ -473,18 +477,18 @@ live in the host's memory, so the counting is the runtime's counting.
 
 The wide arithmetic the backend has — add, subtract, the bitwise operators,
 the shifts, the equality — is written out limb by limb and is correct. What
-is missing is what the format has no instruction for:
+the format has no instruction for is a call of the kernel the other two
+backends call, and the host carries it:
 
 - **a multiply.** There is no `mulhi`, so a 64×64 product is four 32×32
   products put back together, and the answer is the sum of ten of them with
-  the carry chain. The runtime has a kernel for it (`runtime/abi.ts:664`,
+  the carry chain. The runtime has a kernel for it (`runtime/abi.ts`,
   `U256_KERNEL`), and the C and machine backends call it. The wasm backend
-  can either write the limb walk out by hand, as it has for the other
-  operations, or call a host service that does it — the latter is one import
-  and one line of the host, and it is what the other two backends do.
+  calls it as a service of the host ABI, which is one import and one line of
+  the host.
 - **a division and a remainder.** The same: a host service, or a long
   division written out. A division by zero has to be the same answer the C
-  backend gives.
+  backend gives, and the host raises the same way the runtime does.
 - **an ordered comparison.** Comparing two wide numbers is a subtraction and a
   borrow out of the top limb; the borrow is the sign of the difference, so it
   is two instructions the backend already has.
@@ -497,8 +501,8 @@ calls as well.
 
 ### The program and the calls between functions
 
-A wasm build of a program lowers **one module** holding every function of the
-program. The lowering changes:
+**This is the design of what is not done.** A wasm build of a program lowers
+**one module** holding every function of the program. The lowering changes:
 
 - the module holds a function per contracted function of the program, each
   with its own type entry, and the contracted symbol of each is exported;
