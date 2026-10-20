@@ -689,6 +689,125 @@ test("a compound write to an element reads the element it writes over", () => {
   assert.ok(throughIr(library, text) > 0, "a compound element write is a module the engine takes");
 });
 
+test("a compound power converts its operands and its answer to the slot's type", () => {
+  // The power is the host's own, and it takes two doubles and answers one. The
+  // operands were handed to the call at the slot's own width, so a `u64` slot
+  // called it with two `i64` and the engine refused the module: "call[0]
+  // expected type f64, found local.get of type i64". The C backend truncates
+  // the answer into the slot, so the two backends answered differently: one a
+  // number, one a module the engine refuses.
+  const U64: SemanticType = { kind: "primitive", name: "u64" };
+  const fn: SemanticFunction = {
+    name: "r",
+    symbol: "r",
+    params: [{ kind: "value", name: "a", mutable: true, type: U64 }],
+    returns: U64,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [
+        {
+          k: "let",
+          slot: { kind: "value", name: "b", mutable: true, type: U64 },
+          value: { k: "local", type: U64, name: "a" },
+          line: 1,
+        },
+        { k: "set", name: "b", op: "**=", value: { k: "const", type: U64, text: "3" }, line: 2 },
+      ],
+      releases: [],
+      terminator: { k: "return", value: { k: "local", type: U64, name: "b" } },
+    },
+  };
+  const contract = {
+    version: "1",
+    function: { name: "r", symbol: "r", params: [{ name: "a", type: "u64" }], returns: "u64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  } as FunctionContract;
+  const bytes = moduleBytes(fn, contract);
+  assert.ok(engine !== undefined);
+  assert.ok(engine.validate(bytes), "a compound power over a whole number is a module the engine takes");
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
+  const read = instance.exports.r as (a: bigint) => bigint;
+  assert.equal(read(2n), 8n, "the answer is the power the source wrote");
+});
+
+test("a fill writes every element of the array it names", () => {
+  // A fill is a statement the C, the machine and the WebAssembly backends all
+  // dropped: none of the three had a case for it and none of the three refused
+  // it, so a fill was silently not written. The WebAssembly backend writes it
+  // out as the walk it is.
+  const F64: SemanticType = { kind: "primitive", name: "f64" };
+  const fn: SemanticFunction = {
+    name: "r",
+    symbol: "r",
+    params: [{ kind: "buffer", name: "a", mutable: true, element: F64, length: 3 }],
+    returns: F64,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [
+        { k: "fill", buffer: "a", index: "i", value: { k: "const", type: F64, text: "2.5" }, type: F64, line: 1 },
+      ],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: {
+          k: "arith",
+          type: F64,
+          op: "add",
+          left: { k: "element", type: F64, of: { k: "local", type: { kind: "array", of: F64, length: 3 }, name: "a" }, index: { k: "const", type: { kind: "primitive", name: "usize" }, text: "0" } },
+          right: { k: "element", type: F64, of: { k: "local", type: { kind: "array", of: F64, length: 3 }, name: "a" }, index: { k: "const", type: { kind: "primitive", name: "usize" }, text: "2" } },
+        },
+      },
+    },
+  };
+  const contract = {
+    version: "1",
+    function: { name: "r", symbol: "r", params: [{ name: "a", type: "array<f64,3>" }], returns: "f64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  } as FunctionContract;
+  const bytes = moduleBytes(fn, contract);
+  assert.ok(engine !== undefined);
+  assert.ok(engine.validate(bytes), "a fill is a module the engine takes");
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
+  const view = new DataView(memory.buffer);
+  // The count of a buffer is the word the offset sits one before, so the three
+  // elements are laid out the way the host lays them out.
+  const base = 1024;
+  view.setBigUint64(base - 8, 3n, true);
+  for (let index = 0; index < 3; index += 1) view.setFloat64(base + index * 8, 0, true);
+  const read = instance.exports.r as (a: number) => number;
+  assert.equal(read(base), 5, "every element of the array was written");
+});
+
 test("a power is lowered through the runtime import", () => {
   const library = "export function r(a: number): number {\n  return a ** 2;\n}\n";
   const text = [
