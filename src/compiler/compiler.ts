@@ -43,7 +43,7 @@ import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type 
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
-import { contractsByName, type ContractsByName } from "./semantics/calls.ts";
+import { contractsByName, vectorChecked, type ContractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
 import type { SemanticFunction, SemanticProgram } from "./core/semantic-ir.ts";
 import { resolveObjects } from "./semantics/objects.ts";
@@ -825,7 +825,7 @@ function resolvedDriver(
   objectKeys: LiteralKeys,
 ): SemanticProgram {
   const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
-  wholeElementArithmetic(driver.bodies, driver.entry);
+  wholeElementArithmetic(driver.bodies, driver.entry, vectorChecked(contractsByName(program.files)));
   return driver;
 }
 
@@ -855,6 +855,7 @@ function semanticFunctions(
     wholeElementArithmetic(
       Object.values(resolved),
       resolveProgram(body, program, objectNames, objectLayouts, objectKeys).entry,
+      vectorChecked(contractsByName(program.files)),
     );
   }
   // Every body is resolved before any of them is checked, because a function is

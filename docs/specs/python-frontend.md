@@ -177,6 +177,14 @@ The length of a value written out is not read: `len("hello")` is the length of
 a text, and the compiler reads a length off the name it is written by, so a
 program writes `s = "hello"` and then `len(s)`.
 
+**A compiled program cannot raise, so nothing catches.** The block of a
+`try` that catches is read past, and the block of a `finally` runs: the body
+runs as it is written, and what Python would have raised is not raised at all.
+A program that divides by zero prints `inf` where Python prints nothing and
+raises, and the build says so — the source is the specification, and the two
+disagree. This is the rule the TypeScript frontend keeps as well, and the
+reason is the same one: there is no exception to raise in a compiled program.
+
 ### What is refused, and what it says
 
 Every construct outside the subset is refused with the line it was written on
@@ -495,6 +503,17 @@ compiler refuses it (`semantics/program.ts:321`), because nothing can check
 it on its own. It is still compiled as a part of a program, and the program is
 the oracle for it.
 
+**A function with a postcondition is checked with vectors, and the vectors are
+not the program's buffers.** The checker builds inputs of the declared types
+and asks whether the function answers what the contract says. A vector holds
+the values the declared type allows, and the whole-number rewrite
+(`semantics/whole-elements.ts`) reads the elements of a buffer as whole
+numbers — which is the same number only where the elements are whole numbers.
+So a function the checker runs with vectors is left as the source wrote it,
+and the bodies written out into it as well. A Python function that states a
+postcondition is such a function, and a Python function that does not is not:
+what it reads is what the program wrote, and the rewrite is sound in it.
+
 **The two runs must not share what the program writes.** A program that
 writes a file and reads it back writes it in the source run and finds it
 again in the binary run. This is the same rule the SQLite facility has, and
@@ -525,6 +544,7 @@ to give each run a directory of its own.
 | `toolchain/linker.ts` | the harness of a function build sets the style before it calls the function |
 | `toolchain/verifier.ts` | a buffer named in a range is not a count: the vector planner gives a buffer a length of its own, and a count a range is written in terms of a count |
 | `toolchain/verify-program.ts` | the toolchain of a language is a command and its flags, and `python3` is the toolchain of a Python source |
+| `semantics/calls.ts`, `semantics/whole-elements.ts` | the whole-number rewrite leaves a function the checker runs with vectors alone, and the bodies written out into it |
 
 ### The rules of a language, in one place
 
@@ -611,6 +631,10 @@ a new section and needs nothing else.
 - **A condition is a boolean.** The wider truth of Python is not in the
   subset, and the message says what to write instead.
 - **Printing a list or a dict is refused.** The two styles do not cover them.
+- **Nothing is caught.** A compiled program cannot raise, so the block of a
+  `try` that catches is read past and the block of a `finally` runs. A program
+  that Python would have raised in prints what the compiled program prints, and
+  the build says that the two disagree.
 - **The arguments of a program are numbers.** A program that wants an
   argument as a text has no way to ask for one.
 - **A module of the project is a file beside the entry file.** An import names

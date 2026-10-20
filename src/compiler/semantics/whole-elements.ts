@@ -841,10 +841,18 @@ function initialOf(value: SemanticValue): Known {
  * Every body is read before any is rewritten, because whether a loop may be
  * rewritten is a question about the buffers it reads, and those are a question
  * about the whole program.
+ *
+ * A body named in `leave` is not rewritten. The rewrite reads the elements of a
+ * buffer as whole numbers, which is the same number only where the elements
+ * are whole numbers, and the checker runs a function with vectors of its own:
+ * a vector holds the values the declared type allows, and those are not the
+ * program's buffers. So a function the checker runs with vectors is left as the
+ * source wrote it.
  */
 export function wholeElementArithmetic(
   functions: readonly SemanticFunction[],
   entry: SemanticBlock | null,
+  leave: ReadonlySet<string> = new Set(),
 ): SemanticBlock | null {
   if (functions.length === 0 && entry === null) return entry;
   const sequencesByCallee = sequencesOf(functions);
@@ -857,6 +865,7 @@ export function wholeElementArithmetic(
   // given the same one.
   const named = new Map<string, number>();
   for (const body of bodies) {
+    if (body.fn !== null && leave.has(body.fn)) continue;
     const fresh = (): string => {
       const at = (named.get(body.fn ?? "") ?? 0) + 1;
       named.set(body.fn ?? "", at);

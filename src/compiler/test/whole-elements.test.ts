@@ -24,6 +24,7 @@ import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { resolveFunction } from "../semantics/ir-function.ts";
 import { optimizeSemanticProgram, optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { wholeElementArithmetic } from "../semantics/whole-elements.ts";
+import { contractsByName, vectorChecked } from "../semantics/calls.ts";
 import { semanticIrProblems, validateSemanticFunction } from "../semantics/ir-validate.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { RUNTIME_NAME, runtimeHeaderSource } from "../runtime/abi.ts";
@@ -98,6 +99,24 @@ const FILLED_BY_CALL = [
   "",
 ].join("\n");
 
+/**
+ * A function whose body is one reduction, and so states a postcondition: the
+ * checker runs it with vectors of its own, and a vector is not the program's
+ * buffer.
+ */
+const CONTRACTED = [
+  "function sumAll(a: Float64Array, n: number): number {",
+  "  let total = 0;",
+  "  for (let i = 0; i < n; i += 1) total += a[i];",
+  "  return total;",
+  "}",
+  "",
+  "const A = new Float64Array(4);",
+  "for (let i = 0; i < 4; i += 1) A[i] = 9000000 + i * 7;",
+  "console.log(sumAll(A, 4));",
+  "",
+].join("\n");
+
 /** What a source is contracted and resolved into, and what the pass left it. */
 interface Phased {
   readonly program: SemanticProgram;
@@ -106,20 +125,20 @@ interface Phased {
 }
 
 /** A program contracted, with its own statements and every function resolved. */
-function phased(source: string): Phased {
+function phased(source: string, leave: ReadonlySet<string> = new Set()): Phased {
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   assert.ok(phase.body !== undefined);
   const contracts = phase.program.files.flatMap((file) => Object.entries(file.functions));
   const context: FunctionContext = { objectNames: phase.objectNames, functions: Object.fromEntries(contracts) };
   const functions = new Map(contracts.map(([name, contract]) => [name, resolveFunction(contract, context)]));
   const program = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
-  wholeElementArithmetic([...functions.values()], program.entry);
+  wholeElementArithmetic([...functions.values()], program.entry, leave);
   return { program, functions, phase };
 }
 
 /** The IR one function of a program is left in, after the pass and the rounds. */
-function bodyOf(source: string, name: string): string {
-  const { functions } = phased(source);
+function bodyOf(source: string, name: string, leave: ReadonlySet<string> = new Set()): string {
+  const { functions } = phased(source, leave);
   const fn = functions.get(name);
   assert.ok(fn !== undefined, `${name} is a function of the program`);
   return JSON.stringify(optimizeSemanticFunction(fn, functions));
@@ -329,4 +348,23 @@ test("the C the pass leaves a loop in computes the same numbers", () => {
   // The other program keeps the arithmetic the source wrote, which is what says
   // the first one was not the shape it always had.
   assert.match(written(FRACTION, "addMod"), /floor\(/);
+});
+
+test("a function the checker runs with vectors is left as the source wrote it", () => {
+  // The checker builds inputs of the declared types and asks whether the
+  // function answers what its contract says, and a vector is not the program's
+  // buffer: it holds the values the type allows, and the whole-number form
+  // answers another number for the ones that are not whole numbers. So a
+  // function with a postcondition is left alone, and the loop of a function
+  // without one is still the whole-number form.
+  const phase = phaseOf("typescript", { "main.ts": CONTRACTED }, "main.ts");
+  const checked = vectorChecked(contractsByName(phase.program.files));
+
+  assert.deepEqual([...checked], ["sumAll"], "the function with a postcondition is the one the checker runs");
+
+  const rewritten = bodyOf(CONTRACTED, "sumAll");
+  const untouched = bodyOf(CONTRACTED, "sumAll", checked);
+
+  assert.match(rewritten, /"name":"i64"/, "the loop is the whole-number form");
+  assert.doesNotMatch(untouched, /"name":"i64"/, "the function is left as the source wrote it");
 });

@@ -309,6 +309,52 @@ test("a Python program is built and checked against the source it was written as
   assert.equal(delivered.stdout, "hello\n1.0\n");
 });
 
+test("a Python program that calls a function of another file is built and checked", async (t) => {
+  // The function of the other file is checked against its contract with
+  // vectors of its own, and a vector is not the program's buffer: it holds the
+  // values the declared type allows. So the function is left as the source
+  // wrote it, and the contract it states holds for the vectors as well as for
+  // the program's own lists.
+  const previous = process.env.AI_MODEL;
+  delete process.env.AI_MODEL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AI_MODEL;
+    else process.env.AI_MODEL = previous;
+  });
+  const directory = await scratch("blaze-python-module-build-");
+  await writeFile(
+    join(directory, "main.py"),
+    ["from helpers import dot", "", "print(dot([1.0, 2.0], [3.0, 4.0], 2))", ""].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "helpers.py"),
+    [
+      "def dot(a: list[float], b: list[float], n: int) -> float:",
+      "    total: float = 0.0",
+      "    for i in range(n):",
+      "        total += a[i] * b[i]",
+      "    return total",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeProject(join(directory, "input.toml"), {
+    language: "python",
+    sourceFile: "main.py",
+    target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+    output: "c",
+    generation: { maxCandidates: 1, maxAttempts: 2 },
+    test: { randomCases: 6, maxLength: 64, seed: 7 },
+    benchmark: { iterations: 200 },
+  });
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  assert.equal(outcome.build.status, "success", outcome.build.error?.message ?? "");
+  const delivered = run(join(directory, "input"), [], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "11.0\n");
+});
+
 test("a program is checked against the toolchain that runs its source", async () => {
   // The build runs the source on its own toolchain and the delivered binary
   // beside it, and compares what the two print: the source is the

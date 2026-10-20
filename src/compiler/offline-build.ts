@@ -32,6 +32,7 @@ import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, type FunctionContext } from "./semantics/ir-function.ts";
 import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
 import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
+import { contractsByName, vectorChecked } from "./semantics/calls.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
 import { printSemanticProgram } from "./semantics/ir-text.ts";
 import { semanticFunctionProblems, validateSemanticProgram } from "./semantics/ir-validate.ts";
@@ -107,7 +108,7 @@ async function main(): Promise<void> {
   // a copy of them, so it runs here rather than inside `optimizeSemanticProgram`,
   // which is handed the program's own statements and its own bodies.
   const resolvedProgram = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts);
-  wholeElementArithmetic([...resolvedByName.values()], resolvedProgram.entry);
+  wholeElementArithmetic([...resolvedByName.values()], resolvedProgram.entry, vectorChecked(contractsByName(phase.program.files)));
   // Which arrays hold powers of two, propagated through the call graph, so the
   // machine backend can strength-reduce division by one of their elements to a
   // shift.

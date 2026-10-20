@@ -50,6 +50,37 @@ function isVerified(contract: FunctionContract): boolean {
 }
 
 /**
+ * The functions the checker runs with vectors of its own.
+ *
+ * A function with a postcondition is checked against vectors: the checker
+ * builds inputs of the declared types and asks whether the function answers
+ * what the contract says. A vector is not the program's buffer — it holds the
+ * values the declared type allows — so a rewrite that reads the elements of a
+ * buffer as whole numbers is not sound in such a function: the contract states
+ * what the function answers for every input of the type, and the rewrite
+ * answers another one.
+ *
+ * A body written out is a body of the candidate that carries it, and that
+ * candidate is the one the vectors run against, so the bodies written out are
+ * left alone as well.
+ *
+ * A function that calls another function of the program is judged by the program
+ * and by nothing else, so what it reads is what the program wrote, and the
+ * rewrite is sound in it.
+ */
+export function vectorChecked(contracts: ContractsByName): Set<string> {
+  const checked = new Set<string>();
+  for (const contract of contracts.values()) {
+    if (!isVerified(contract)) continue;
+    const calls = contract.definition.calls.some((edge) => edge.strategy === "call" && contracts.has(edge.callee));
+    if (calls) continue;
+    checked.add(contract.function.name);
+    for (const body of writtenOut(contracts, contract)) checked.add(body.function.name);
+  }
+  return checked;
+}
+
+/**
  * Whether a body owns anything a caller's frame would have to take over. What
  * it allocates, prints or reads is what its own body does, so this is read from
  * the body rather than from the conditions beside it.
