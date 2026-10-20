@@ -750,7 +750,7 @@ class ProgramParser {
       this.next();
       const methodArgs = this.arguments();
       this.accept(";");
-      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http"]);
+      const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "sqlite"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
       return { kind: "invoke", function: methodCall(object, method), args, line: name.line };
     }
@@ -943,7 +943,7 @@ class ProgramParser {
         }
         if (this.at("(")) {
           this.next();
-          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance"]);
+          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance", "sqlite"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
           if (value.k === "name" && value.name === "http" && member === "createServer") {

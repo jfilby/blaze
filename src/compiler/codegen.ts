@@ -33,6 +33,7 @@ import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
 import { buildFacilRuntime, FACIL_IO_LIBRARIES } from "./runtime/facil.ts";
+import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
 import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
 import type { Review } from "./core/proposal.ts";
 
@@ -43,6 +44,9 @@ import type { Review } from "./core/proposal.ts";
  * build writes the header and links no C runtime, since the host program is
  * what carries the runtime services. A candidate of a hosted build still needs
  * the header on its include path, so the header is reported either way.
+ *
+ * A library is beside the runtime and not part of it: it is a thing the
+ * program links, and the build prepares it once for the whole build as well.
  */
 export interface PreparedRuntime {
   headerPath: string;
@@ -54,6 +58,21 @@ export interface PreparedRuntime {
    * the HTTP runtime in it has the libraries of TLS in it too.
    */
   libraries?: readonly string[];
+  /**
+   * The objects of the libraries the program links beside the runtime, in
+   * link order: the SQLite library, when the program uses SQLite. A library
+   * is a thing the program links, and not a host the program runs on.
+   */
+  libraryObjects?: readonly PreparedLibrary[];
+}
+
+/**
+ * A library prepared for a build: the header the generated code includes and
+ * the object the program links.
+ */
+export interface PreparedLibrary {
+  headerPath: string;
+  objectPath: string;
 }
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -75,6 +94,7 @@ import type {
   ProgramContract,
   ProgramFailure,
   RuntimeKind,
+  LibraryKind,
   GenerationConfig,
   OutputKind,
   Runner,
@@ -483,20 +503,42 @@ export function runtimePreparer(request: {
   runtime: RuntimeKind;
   target: TargetSpec;
   workspace: CodegenWorkspace;
+  /** The libraries the program links beside the runtime, in link order. */
+  libraries?: readonly LibraryKind[];
 }): () => Promise<PreparedRuntime | undefined> {
   let pending: Promise<PreparedRuntime | undefined> | null = null;
   return () => {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
       if (request.lowering === "wasm") return undefined;
-      if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory, request.mode, request.target);
-      if (request.runtime === "facil") {
-        const runtime = await buildFacilRuntime(request.workspace.workDirectory, request.mode, request.target);
-        return { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: FACIL_IO_LIBRARIES };
+      const workDirectory = request.workspace.workDirectory;
+      let prepared: PreparedRuntime;
+      if (request.runtime === "none") {
+        prepared = await buildStandaloneRuntime(workDirectory, request.mode, request.target);
+      } else if (request.runtime === "facil") {
+        const runtime = await buildFacilRuntime(workDirectory, request.mode, request.target);
+        prepared = { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: FACIL_IO_LIBRARIES };
+      } else {
+        prepared = { headerPath: await writeRuntimeHeader(workDirectory) };
       }
-      return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
+      // The libraries are built after the runtime, because the adapter of a
+      // library includes the runtime's header and calls into it.
+      const libraryObjects: PreparedLibrary[] = [];
+      for (const library of request.libraries ?? []) {
+        if (library === "sqlite") {
+          libraryObjects.push(await buildSqliteLibrary(workDirectory, request.mode, request.target));
+        }
+      }
+      return { ...prepared, libraryObjects };
     })();
     return pending;
   };
+}
+
+/**
+ * The objects of the libraries a build prepared, in the order they are linked.
+ */
+function libraryObjects(runtime: PreparedRuntime | undefined): string[] {
+  return (runtime?.libraryObjects ?? []).map((library) => library.objectPath);
 }
 
 /**
@@ -726,6 +768,7 @@ async function materialize(
       harnessPath: paths.harness,
       objectPath: paths.object,
       runtimeObjectPath: runtime.objectPath,
+      libraryObjectPaths: libraryObjects(runtime),
       // A candidate whose object carries a pragma needs the runtime that serves
       // it at the link, and one whose object does not links none.
       threads,
@@ -1032,6 +1075,7 @@ async function probeCandidate(
     harnessPath: paths.probeHarness,
     objectPath: paths.object,
     runtimeObjectPath: runtime.objectPath,
+    libraryObjectPaths: libraryObjects(runtime),
     threads,
     includeDirectories: [dirname(runtime.headerPath)],
     outputPath: paths.probeExecutable,

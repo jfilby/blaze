@@ -40,6 +40,8 @@ import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
 import { buildFacilRuntime } from "./runtime/facil.ts";
+import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
+import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { symbolOf } from "./semantics/contract.ts";
 import { powerOfTwoParams } from "./semantics/power-of-two.ts";
 import type { TargetSpec } from "./core/types.ts";
@@ -164,6 +166,10 @@ async function main(): Promise<void> {
   const runtime = isHttp
     ? await buildFacilRuntime(work, "danger", target)
     : await buildStandaloneRuntime(work, "danger", target);
+  // A program that uses SQLite links the SQLite library beside the runtime, the
+  // same way a build does.
+  const isSqlite = usesSqliteSource(source);
+  const library = isSqlite ? await buildSqliteLibrary(work, "danger", target) : undefined;
   const outputPath = join(work, "program");
   await buildProgramDriver({
     mode: "danger",
@@ -174,6 +180,8 @@ async function main(): Promise<void> {
     objectPaths,
     runtimeObjectPath: runtime.objectPath,
     includeHttpHeader: isHttp,
+    includeSqliteHeader: isSqlite,
+    libraryObjectPaths: library === undefined ? [] : [library.objectPath],
     threads: programIsParallel(program.entry, program.bodies) ? ["openmp"] : [],
     outputPath,
   });

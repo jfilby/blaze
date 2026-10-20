@@ -15,6 +15,7 @@
 
 import type { BuildMode, RuntimeKind } from "../core/types.ts";
 import { isHttpSymbol } from "./http.ts";
+import { isSqliteSymbol } from "./sqlite.ts";
 
 /** The name of the C header, the Nim adapter module and the object file. */
 export const RUNTIME_NAME = "blaze_rt";
@@ -525,9 +526,23 @@ export const RUNTIME_SYMBOLS: Record<string, true> = Object.fromEntries(
  */
 export const RUNTIME_ANCHOR: readonly string[] = RUNTIME_ABI.map((item) => item.symbol);
 
-/** True when generated code is allowed to reference a symbol. */
+/**
+ * True when generated code is allowed to reference a symbol.
+ *
+ * The SQLite symbols are here because a program that uses SQLite calls the
+ * library it links beside the runtime, and the sandbox every backend checks a
+ * call against has to admit them: the C backend refuses a candidate that calls
+ * outside the runtime ABI, and the machine backend refuses a function that
+ * refers to a symbol that is neither the runtime, nor the C library, nor a
+ * function of the program.
+ */
 export function isRuntimeSymbol(symbol: string): boolean {
-  return RUNTIME_SYMBOLS[symbol] === true || WIDE_SYMBOLS[symbol] === true || isHttpSymbol(symbol);
+  return (
+    RUNTIME_SYMBOLS[symbol] === true ||
+    WIDE_SYMBOLS[symbol] === true ||
+    isHttpSymbol(symbol) ||
+    isSqliteSymbol(symbol)
+  );
 }
 const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H
 #define BLAZE_RT_H

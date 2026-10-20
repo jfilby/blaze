@@ -640,6 +640,13 @@ export interface LinkRequest {
   includeDirectories?: string[];
   /** The compiler runtime object, when the build links one. */
   runtimeObjectPath?: string;
+  /**
+   * The objects of the libraries the program links beside the runtime: the
+   * SQLite library, when the program uses SQLite. A candidate of such a
+   * program links them too, so that a candidate that calls into the library
+   * resolves against the same object the program will.
+   */
+  libraryObjectPaths?: readonly string[];
   outputPath: string;
   /**
    * True when the object carries a loop the compiler proved its turns
@@ -654,6 +661,9 @@ export interface LinkRequest {
 export function link(request: LinkRequest): void {
   const inputs = [request.harnessPath, request.objectPath];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
+  // A library the program uses is linked beside the runtime, in the order the
+  // build prepared it.
+  inputs.push(...(request.libraryObjectPaths ?? []));
   // The harness includes the runtime header by name, and a build keeps the
   // runtime beside the work directory rather than beside every candidate.
   const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);

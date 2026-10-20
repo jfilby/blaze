@@ -332,6 +332,8 @@ class CDriver implements ProgramTarget {
   private builds = 0;
   /** True when the program uses the HTTP runtime, so the driver includes its header. */
   private readonly includeHttpHeader: boolean;
+  /** True when the program uses SQLite, so the driver includes its header. */
+  private readonly includeSqliteHeader: boolean;
   /**
    * The backend the functions of the program were lowered by.
    *
@@ -349,9 +351,10 @@ class CDriver implements ProgramTarget {
    * call a function `send`, and the C library has one of that name.
    */
   private own = new Set<string>();
-  constructor(includeHttpHeader: boolean = false, lowering: BackendKind = "c") {
+  constructor(includeHttpHeader: boolean = false, lowering: BackendKind = "c", includeSqliteHeader: boolean = false) {
     this.includeHttpHeader = includeHttpHeader;
     this.lowering = lowering;
+    this.includeSqliteHeader = includeSqliteHeader;
   }
   prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
@@ -365,9 +368,10 @@ class CDriver implements ProgramTarget {
       .join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
+    const sqliteHeader = this.includeSqliteHeader ? '#include "blaze_sqlite.h"\n' : "";
     const bridges = this.bridges(program);
     return `${DRIVER_PRELUDE}
-${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations}${bridges === "" ? "" : `\n${bridges}`}`;
+${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`}${declarations}${bridges === "" ? "" : `\n${bridges}`}`;
   }
 
   /**
@@ -974,6 +978,67 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
            be moved. */
         return `${RUNTIME_NAME}_monotonic_ms()`;
       }
+      /* ------------------------------------------------------------------ */
+      /* The SQLite facility.                                                 */
+      /* ------------------------------------------------------------------ */
+      case "sqlite.open": {
+        /* The path is text, so a number written where a path belongs is the
+           text of that number and not a number the library cannot read. */
+        const path = this.requestBody(call.args[0], expression);
+        return `blaze_sqlite_open(${path})`;
+      }
+      case "sqlite.close": {
+        return `(blaze_sqlite_close(${argument(0)}), 0.0)`;
+      }
+      case "sqlite.exec": {
+        const sql = this.requestBody(call.args[1], expression);
+        return `blaze_sqlite_exec(${argument(0)}, ${sql})`;
+      }
+      case "sqlite.prepare": {
+        const sql = this.requestBody(call.args[1], expression);
+        return `blaze_sqlite_prepare(${argument(0)}, ${sql})`;
+      }
+      case "sqlite.bindText": {
+        const value = this.requestBody(call.args[2], expression);
+        return `(blaze_sqlite_bind_text(${argument(0)}, ${argument(1)}, ${value}), 0.0)`;
+      }
+      case "sqlite.bindNumber": {
+        return `(blaze_sqlite_bind_number(${argument(0)}, ${argument(1)}, ${argument(2)}), 0.0)`;
+      }
+      case "sqlite.bindNull": {
+        return `(blaze_sqlite_bind_null(${argument(0)}, ${argument(1)}), 0.0)`;
+      }
+      case "sqlite.step": {
+        return `blaze_sqlite_step(${argument(0)})`;
+      }
+      case "sqlite.columnCount": {
+        return `blaze_sqlite_column_count(${argument(0)})`;
+      }
+      case "sqlite.columnType": {
+        return `blaze_sqlite_column_type(${argument(0)}, ${argument(1)})`;
+      }
+      case "sqlite.columnNumber": {
+        return `blaze_sqlite_column_number(${argument(0)}, ${argument(1)})`;
+      }
+      case "sqlite.columnText": {
+        /* The text is copied into the runtime's own text by the adapter, so
+           the program holds it after the statement is stepped again. It is
+           carried as the pointer it is, the way the runtime carries a string
+           in a number. */
+        return `({ const char *blaze_sqlite_text = blaze_sqlite_column_text(${argument(0)}, ${argument(1)}); (double)(uintptr_t)blaze_sqlite_text; })`;
+      }
+      case "sqlite.finalize": {
+        return `(blaze_sqlite_finalize(${argument(0)}), 0.0)`;
+      }
+      case "sqlite.changes": {
+        return `blaze_sqlite_changes(${argument(0)})`;
+      }
+      case "sqlite.lastInsertRowid": {
+        return `blaze_sqlite_last_insert_rowid(${argument(0)})`;
+      }
+      case "sqlite.error": {
+        return `({ const char *blaze_sqlite_message = blaze_sqlite_error(${argument(0)}); (double)(uintptr_t)blaze_sqlite_message; })`;
+      }
       case "res.end": {
         const body = call.args[1];
         const bodyExpr = argument(1);
@@ -1519,8 +1584,9 @@ export function generateProgramDriver(
   program: SemanticProgram,
   includeHttpHeader: boolean = false,
   lowering: BackendKind = "c",
+  includeSqliteHeader: boolean = false,
 ): string {
-  return generateProgramSource(program, new CDriver(includeHttpHeader, lowering));
+  return generateProgramSource(program, new CDriver(includeHttpHeader, lowering, includeSqliteHeader));
 }
 
 export interface ProgramDriverRequest {
@@ -1557,6 +1623,13 @@ export interface ProgramDriverRequest {
    * registered, and how a reference is carried is what the backend decides.
    */
   lowering?: BackendKind;
+  /** True when the program uses SQLite, so the driver includes its header. */
+  includeSqliteHeader?: boolean;
+  /**
+   * The objects of the libraries the program links beside the runtime: the
+   * SQLite library, when the program uses SQLite.
+   */
+  libraryObjectPaths?: readonly string[];
   outputPath: string;
 }
 
@@ -1565,11 +1638,19 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   const driverPath = `${request.workDirectory}/program.c`;
   await writeFile(
     driverPath,
-    generateProgramDriver(request.program, request.includeHttpHeader ?? false, request.lowering ?? "c"),
+    generateProgramDriver(
+      request.program,
+      request.includeHttpHeader ?? false,
+      request.lowering ?? "c",
+      request.includeSqliteHeader ?? false,
+    ),
     "utf8",
   );
   const inputs = [driverPath, ...request.objectPaths];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
+  // A library the program uses is linked beside the runtime: it is a library
+  // the program links, not a host the program runs on.
+  inputs.push(...(request.libraryObjectPaths ?? []));
   // A program computes with the maths library, so the driver links it.
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller

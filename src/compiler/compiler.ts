@@ -50,6 +50,7 @@ import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
+import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import type { LiteralKeys } from "./semantics/program-objects.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
@@ -1053,6 +1054,7 @@ export async function runBuild(
   let runtimeKind: RuntimeKind;
   let backendKind: BackendKind;
   let buildMode: BuildMode;
+  let usesSqlite = false;
   try {
     project = readInput(absoluteInput);
     const input = project.input;
@@ -1063,6 +1065,27 @@ export async function runBuild(
     // HTTP programs need the facil runtime even when the user did not ask for
     // it: the generated code references blaze_http_* symbols.
     if (runtimeKind === "none" && /\bhttp\b/.test(project.entry.source)) runtimeKind = "facil";
+    // A program that uses SQLite links the SQLite library beside the runtime
+    // it runs on. A wasm module links no library at all, and a program hosted
+    // by Nim is lowered by the host's own emitter, which knows no library, so
+    // both are refused here rather than failing later at the link.
+    usesSqlite = usesSqliteSource(project.entry.source);
+    if (usesSqlite && outputKind === "wasm") {
+      throw new CompilerError({
+        category: "InputError",
+        stage: "input",
+        message: "a WebAssembly module cannot use SQLite",
+        detail: "a wasm module links no library; build it with --output machine, or drop the SQLite calls",
+      });
+    }
+    if (usesSqlite && runtimeKind === "nim") {
+      throw new CompilerError({
+        category: "InputError",
+        stage: "input",
+        message: "a program hosted by Nim cannot use SQLite",
+        detail: "the Nim host links the runtime and no library; build it with --runtime none, or drop the SQLite calls",
+      });
+    }
     backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
     buildMode = resolveBuildMode(options.mode ?? input.mode);
   } catch (cause) {
@@ -1300,6 +1323,7 @@ export async function runBuild(
       runtime: runtimeKind,
       target,
       workspace: { workDirectory: base, functionName: program.entry.file },
+      libraries: usesSqlite ? ["sqlite"] : [],
     });
     // The machine, one measurement at a time however many functions are being
     // generated.
@@ -1727,6 +1751,8 @@ export async function runBuild(
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
               includeHttpHeader: runtimeKind === "facil",
               lowering: backendKind,
+              includeSqliteHeader: usesSqlite,
+              libraryObjectPaths: (runtime?.libraryObjects ?? []).map((library) => library.objectPath),
               threads,
               outputPath: programPath,
             })
@@ -2058,6 +2084,7 @@ export async function runStored(
     runtime,
     target,
     workspace: { workDirectory: base, functionName: program.entry.file },
+    libraries: usesSqliteSource(input.source) ? ["sqlite"] : [],
   });
   // A stored candidate is given the same symbols the build that stored it was
   // given, which is what its own recorded calls say rather than what the build

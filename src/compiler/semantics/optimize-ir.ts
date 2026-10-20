@@ -1159,6 +1159,12 @@ function readsMemoryOrChanges(value: SemanticValue, written: ReadonlySet<string>
   walkSemanticValue(value, (one) => {
     if (one.k === "element" || one.k === "loadField" || one.k === "length") unsafe = true;
     if (one.k === "local" && written.has(one.name)) unsafe = true;
+    // A call that has an effect is not the same value on every turn: it reads
+    // the world, so computing it once above the loop reads the world once
+    // where the source read it on every turn. A loop whose condition is
+    // `sqlite.step(stmt) > 0` hoisted out of the loop reads one row and then
+    // loops on it forever.
+    if (one.k === "call" && one.call.effects.length > 0) unsafe = true;
   });
   return unsafe;
 }

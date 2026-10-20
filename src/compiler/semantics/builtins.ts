@@ -43,6 +43,16 @@ const U256: TypeExpr = { kind: "primitive", name: "u256" };
 const ANY: TypeExpr = { kind: "ref", of: null };
 
 /**
+ * What a call of the SQLite facility has an effect on.
+ *
+ * A database is a file and a statement is a read of it, so every call of the
+ * facility reads the filesystem and does I/O. Without these the optimizer may
+ * copy a call out of a loop, because a call with no effects is a value it may
+ * compute twice, and a loop that writes rows may be marked parallel.
+ */
+const SQLITE_EFFECTS: readonly Effect[] = ["filesystem", "io"];
+
+/**
  * The name a block of bytes a program laid out is allocated under. The
  * runtime provides the block and the views over it are the compiler's: what the
  * program writes is `new SharedArrayBuffer(bytes)`, and this is what that is.
@@ -220,6 +230,60 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  for. It reads the clock, so it is not a value the optimizer may compute
    *  twice or move. */
   "performance.now": { params: [], returns: F64, arity: 0, effects: ["clock"] },
+
+  /* ---------------------------------------------------------------------- */
+  /* The SQLite facility.                                                     */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * `sqlite.open(path)` opens the database at the path, creating it when it
+   * is not there; `":memory:"` is a database in memory. It answers a handle,
+   * which is a number the program holds.
+   */
+  "sqlite.open": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
+  /** `sqlite.close(db)` closes the connection and finalizes what it holds. */
+  "sqlite.close": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: SQLITE_EFFECTS },
+  /**
+   * `sqlite.exec(db, sql)` runs the statements of the SQL that answer no
+   * rows. It answers 1 when they ran and 0 when they did not.
+   */
+  "sqlite.exec": { params: [ANY, ANY], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
+  /** `sqlite.prepare(db, sql)` compiles one statement and answers a handle. */
+  "sqlite.prepare": { params: [ANY, ANY], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
+  /**
+   * `sqlite.bindText(stmt, index, text)` binds a parameter to text. The index
+   * is 1-based, as SQLite counts them.
+   */
+  "sqlite.bindText": { params: [ANY, F64, ANY], returns: { kind: "void" }, arity: 3, effects: SQLITE_EFFECTS },
+  /** `sqlite.bindNumber(stmt, index, number)` binds a parameter to a number. */
+  "sqlite.bindNumber": { params: [ANY, F64, F64], returns: { kind: "void" }, arity: 3, effects: SQLITE_EFFECTS },
+  /** `sqlite.bindNull(stmt, index)` binds a parameter to null. */
+  "sqlite.bindNull": { params: [ANY, F64], returns: { kind: "void" }, arity: 2, effects: SQLITE_EFFECTS },
+  /**
+   * `sqlite.step(stmt)` runs the statement one row at a time. It answers 1
+   * while there is a row and 0 when there is none.
+   */
+  "sqlite.step": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
+  /** `sqlite.columnCount(stmt)` answers how many columns the row has. */
+  "sqlite.columnCount": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
+  /**
+   * `sqlite.columnType(stmt, index)` answers the kind of the column: 0 null,
+   * 1 integer, 2 float, 3 text, 4 blob. The index of a column is 0-based, as
+   * SQLite counts them.
+   */
+  "sqlite.columnType": { params: [ANY, F64], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
+  /** `sqlite.columnNumber(stmt, index)` answers the column as a number. */
+  "sqlite.columnNumber": { params: [ANY, F64], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
+  /** `sqlite.columnText(stmt, index)` answers the column as text. */
+  "sqlite.columnText": { params: [ANY, F64], returns: ANY, arity: 2, effects: SQLITE_EFFECTS },
+  /** `sqlite.finalize(stmt)` releases the statement. */
+  "sqlite.finalize": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: SQLITE_EFFECTS },
+  /** `sqlite.changes(db)` answers how many rows the last statement changed. */
+  "sqlite.changes": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
+  /** `sqlite.lastInsertRowid(db)` answers the rowid of the last row inserted. */
+  "sqlite.lastInsertRowid": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
+  /** `sqlite.error(db)` answers the message of the last failure of the connection. */
+  "sqlite.error": { params: [ANY], returns: ANY, arity: 1, effects: SQLITE_EFFECTS },
 };
 
 export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);

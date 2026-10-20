@@ -19,8 +19,12 @@
  */
 
 import { readFileSync } from "node:fs";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
+import { usesSqliteSource } from "../runtime/sqlite.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
 
 /** The language a source is checked against. */
@@ -59,6 +63,158 @@ const HTTP_PRELUDE = [
   "globalThis.http.responseEnd=function(){};",
 ].join("");
 const HTTP_PRELUDE_URL = `data:text/javascript,${HTTP_PRELUDE}`;
+
+/**
+ * The SQLite facility, as the source of a program runs it.
+ *
+ * Node has no `sqlite` global, so the source is run with a prelude that
+ * provides one — the same way an HTTP source is run with a prelude that
+ * provides `http`. The prelude is a JavaScript implementation of the same API,
+ * over `node:sqlite`, and it is the second implementation of the API: the C
+ * adapter is the first, and the two have to agree, because a program that
+ * prints what one says and not the other fails its own verification.
+ *
+ * The handles are numbers, and they are the slots the handles are held in, so
+ * that the source and the program the compiler built print the same handle.
+ */
+const SQLITE_PRELUDE_SOURCE = `
+globalThis.sqlite = await (async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const handles = [];
+  const hold = (value) => { handles.push(value); return handles.length - 1; };
+  const take = (handle) => {
+    const value = handles[handle];
+    if (value === undefined) throw new Error("the handle is not a handle");
+    return value;
+  };
+  const text = (value) => (value === null || value === undefined ? "" : String(value));
+  const connection = (handle) => {
+    const held = take(handle);
+    if (held.kind !== "connection") throw new Error("the handle is not a database");
+    return held;
+  };
+  const statement = (handle) => {
+    const held = take(handle);
+    if (held.kind !== "statement") throw new Error("the handle is not a statement");
+    return held;
+  };
+  const cell = (held, index) => {
+    if (held.current === null) return null;
+    const column = held.columns[index];
+    if (column === undefined) return null;
+    const key = column.name === null || column.name === undefined ? column.column : column.name;
+    const value = held.current[key];
+    return value === undefined ? null : value;
+  };
+  return {
+    open: (path) => hold({ kind: "connection", db: new DatabaseSync(text(path)), statements: [], error: "not an error", changes: 0, rowid: 0 }),
+    close: (handle) => {
+      if (handles[handle] === undefined) return;
+      const held = connection(handle);
+      for (const one of held.statements) one.closed = true;
+      held.statements = [];
+      held.db.close();
+      handles[handle] = undefined;
+    },
+    exec: (handle, sql) => {
+      const held = connection(handle);
+      try {
+        held.db.exec(text(sql));
+        held.error = "not an error";
+        return 1;
+      } catch (failure) {
+        held.error = String(failure.message);
+        return 0;
+      }
+    },
+    prepare: (handle, sql) => {
+      const held = connection(handle);
+      const stmt = held.db.prepare(text(sql));
+      const one = { kind: "statement", db: held, stmt, columns: stmt.columns(), values: [], started: false, iterator: null, row: null, current: null };
+      held.statements.push(one);
+      held.error = "not an error";
+      return hold(one);
+    },
+    bindText: (handle, index, value) => { statement(handle).values[index - 1] = text(value); },
+    bindNumber: (handle, index, value) => { statement(handle).values[index - 1] = Number(value); },
+    bindNull: (handle, index) => { statement(handle).values[index - 1] = null; },
+    step: (handle) => {
+      const held = statement(handle);
+      if (!held.started) {
+        held.started = true;
+        if (held.columns.length > 0) {
+          held.iterator = held.stmt.iterate(...held.values);
+          held.row = held.iterator.next();
+        } else {
+          const result = held.stmt.run(...held.values);
+          held.db.changes = result.changes;
+          held.db.rowid = result.lastInsertRowid;
+          held.row = { done: true, value: null };
+        }
+      } else {
+        held.row = held.iterator.next();
+      }
+      held.db.error = "not an error";
+      if (held.row.done) return 0;
+      held.current = held.row.value;
+      return 1;
+    },
+    columnCount: (handle) => statement(handle).columns.length,
+    columnType: (handle, index) => {
+      const held = statement(handle);
+      const value = cell(held, index);
+      if (value === null) return 0;
+      if (typeof value === "bigint") return 1;
+      if (typeof value === "number") {
+        const declared = held.columns[index] === undefined ? null : held.columns[index].type;
+        if (declared !== null && /REAL|FLOAT|DOUBLE/i.test(declared)) return 2;
+        return Number.isInteger(value) ? 1 : 2;
+      }
+      if (typeof value === "string") return 3;
+      return 4;
+    },
+    columnNumber: (handle, index) => {
+      const held = statement(handle);
+      const value = cell(held, index);
+      return value === null ? 0 : Number(value);
+    },
+    columnText: (handle, index) => {
+      const held = statement(handle);
+      const value = cell(held, index);
+      return value === null ? "" : String(value);
+    },
+    finalize: (handle) => {
+      if (handles[handle] === undefined) return;
+      const held = statement(handle);
+      held.closed = true;
+      handles[handle] = undefined;
+    },
+    changes: (handle) => connection(handle).changes,
+    lastInsertRowid: (handle) => connection(handle).rowid,
+    error: (handle) => connection(handle).error,
+  };
+})();
+`;
+
+/**
+ * The prelude that gives a source a `sqlite` to call.
+ *
+ * It is written to a file of its own rather than carried in the command line:
+ * the prelude is a program of a few kilobytes, and a command line that holds
+ * it is a command line no reader can read — and the command line is what the
+ * build prints when the source does not run.
+ */
+let sqlitePrelude: Promise<string> | null = null;
+
+async function sqlitePreludePath(): Promise<string> {
+  sqlitePrelude ??= (async () => {
+    const directory = await mkdtemp(join(tmpdir(), "blaze-sqlite-"));
+    const path = join(directory, "sqlite-prelude.mjs");
+    await writeFile(path, SQLITE_PRELUDE_SOURCE, "utf8");
+    return path;
+  })();
+  return sqlitePrelude;
+}
 
 /** Whether a source reads the command line the way a Deno program does. */
 function readsDenoArgs(source: string): boolean {
@@ -168,10 +324,12 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // source that cannot run at all.
   const deno = readFileSync(request.sourcePath, "utf8");
   const httpSource = /\bhttp\b/.test(deno);
+  const sqliteSource = usesSqliteSource(deno);
   const before = [];
   before.push("--experimental-transform-types");
   if (readsDenoArgs(deno)) before.push("--import", DENO_PRELUDE);
   if (httpSource) before.push("--import", HTTP_PRELUDE_URL);
+  if (sqliteSource) before.push("--import", await sqlitePreludePath());
   const source = run(toolchain, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({

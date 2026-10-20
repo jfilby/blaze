@@ -390,6 +390,16 @@ export type RuntimeKind = "none" | "nim" | "facil";
 export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim", "facil"];
 
 /**
+ * A library a program links beside the runtime it runs on.
+ *
+ * A runtime is a host: it says what the program runs on. A library is not a
+ * host — it is a thing the program links, beside the host, and the program
+ * calls into it the way it calls into the runtime. SQLite is the first one:
+ * a program that uses SQLite links the SQLite library beside its runtime.
+ */
+export type LibraryKind = "sqlite";
+
+/**
  * How hard the toolchain builds, and how much of itself it checks:
  *
  *   debug     optimized for reading: `-O0 -g`, so a delivered program is the
