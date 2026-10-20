@@ -26,6 +26,34 @@ generation and request handling are kept apart. The load script opens the
 measurement window on the server, runs the tool against it, posts what the
 tool measured back, and closes the window.
 
+## The load
+
+`bench/load.sh [port] [duration] [connections]` drives `oha` (asked for first)
+or `wrk`, against `/ping`, and posts what was measured back as one JSON
+object: the rate, the percentiles, the mean, the count of the requests, the
+count of the errors and the length of the run. The server reads the object
+into the slots of its state, and the dashboard shows it beside the server's
+own numbers.
+
+The two tools report what they measured in different shapes, and the script
+reads each in its own shape:
+
+- **oha** is asked for JSON with `--output-format json`. (`--output` names the
+  *file* the results are written to, and a file named `json` is not what a
+  dashboard wants.) The numbers are read out of what oha writes under
+  `metrics`: the rate is `metrics.requests_per_sec`, and the latencies are
+  `metrics.latency_ms`, in milliseconds. The count of the requests is the sum
+  of the counts of the status codes, and the errors are what never got an
+  answer at all.
+- **wrk** is asked for its text summary, and the numbers are read out of the
+  lines it writes: the rate from `Requests/sec:`, the count from the line
+  that says how many requests it made, the mean from its `Latency` line, and
+  the percentiles from the distribution it prints when it is asked for
+  `--latency`.
+
+Both tools report their latencies in milliseconds, which is the unit the
+dashboard shows them in.
+
 ## The routes
 
 | Route | Method | What it answers |
@@ -40,7 +68,10 @@ tool measured back, and closes the window.
 | `/api/bench/result` | POST | the report of the load generator is recorded |
 | `/ping` | GET | `pong`, and the request is counted and timed |
 
-Anything else is a 404, and is counted as a request the server could not answer.
+Anything else is a 404, and is counted as a request the server could not
+answer: it is counted as served (the server did answer it) and as failed (the
+answer was not the one that was asked for), so the two counters count it
+between them.
 
 The dashboard's own traffic (the files, the stream, the API) is not counted:
 the numbers are the numbers of the load, not the numbers of the dashboard
@@ -57,8 +88,8 @@ one JSON object:
   "running": 1, "windowServed": 12043, "windowFailed": 0, "elapsedMs": 10004,
   "latencyCount": 12043, "meanMs": 0.061, "maxMs": 0.42,
   "p50Us": 58, "p95Us": 120, "p99Us": 310,
-  "reportRps": 1200.4, "reportP50": 0.058, "reportP95": 0.121, "reportP99": 0.3,
-  "reportErrors": 0, "reportTotal": 12043, "reportDurationMs": 10004, "reportMean": 0.061
+  "reportRps": 1204.3, "reportP50": 58, "reportP95": 121, "reportP99": 300,
+  "reportErrors": 3, "reportTotal": 12043, "reportDurationMs": 10004, "reportMean": 61
 }
 ```
 
@@ -68,7 +99,9 @@ one JSON object:
   when a percentile is read).
 - `meanMs` and `maxMs` are the mean and the maximum over every request the
   window counted.
-- `report*` are the numbers the load generator posted.
+- `report*` are the numbers the load generator posted: the rate in requests
+  per second, the latencies in **milliseconds**, the count of the errors, the
+  count of the requests and the length of the run.
 
 The rate is *not* in the snapshot: a rate is a question about two readings of
 the counter and the time between them, and the time between them is the
@@ -155,10 +188,10 @@ Blaze Pulse is the first program to ask for these, and they are what it took:
    leaves such names alone, and a write to a string the caller holds is a
    write the caller sees, so it is left alone as well.
 
-7. **A call that reads the world is not a value.** `performance.now()` has the
-   effect `clock`, so the optimizer may not compute it twice or move it: the
-   duration a program measures is the difference of two readings, and the order
-   they are read in is the program's own.
+7. **A call that reads the world is not a value.** A call that has an effect
+   is not something the optimizer may compute twice or move: the clock is the
+   one such call today, and the duration a program measures is the difference
+   of two readings, read in the program's own order.
 
 8. **A compound assignment reads the name it writes.** `text += more` is a
    read of the text and a write of it, and a binding that is read only that
@@ -206,6 +239,10 @@ here because they are the shape of what a Blaze program can be today.
 
 ## What is not done
 
+The gaps, written down so that nobody has to find them the hard way.
+
+### The measurements
+
 - **The server does not measure the load.** It measures itself: the time its
   own handler took. The rate the load generator saw is the report it posted,
   and the two are shown side by side.
@@ -219,8 +256,59 @@ here because they are the shape of what a Blaze program can be today.
 - **There is no history.** The dashboard keeps the last minute of readings in
   the browser; the server keeps the last 256 latencies and nothing else.
 
+- **The rate is the browser's.** It is computed from two readings of the
+  counter and the time between them, which is the browser's to know. It is
+  neither the server's rate nor the load generator's, and the two are shown
+  side by side without being reconciled: a difference between them is the
+  difference between what the client saw and what the server counted.
+
 - **The stream is one stream per browser tab.** Every tab opens its own, and
   every tab is published to.
+
+### The program
+
+- **The dashboard has never been rendered in a browser.** The routes, the
+  content types, the event stream (including the `Accept: text/event-stream`
+  a browser sends, which facil.io answers with its own upgrade before the
+  program is asked) and the JavaScript are checked; the layout and the SVG
+  chart are not.
+
+- **There is no end-to-end test of the program.** The compiler's suite covers
+  the features the program needs — routing on the path, headers, the event
+  stream, the state a handler shares with its program, the clock — but
+  nothing asserts the dashboard's own routes, nothing asserts that a report
+  the load generator posted is recorded, and the load script is not covered
+  by the suite at all. The load script was exercised by hand, against
+  stand-ins for `oha` and `wrk` that write what those tools write: the
+  stand-in for `oha` writes the JSON its published schema describes, and the
+  stand-in for `wrk` writes the lines its summary is made of. Neither tool
+  itself was run, because neither is installed here.
+
+- **The program reads its own files from the working directory.** It reads
+  `web/index.html`, `web/app.js` and `web/style.css` when it starts, so it
+  has to be started from the directory that holds it.
+
+### The backends
+
+- **The program is a C program.** A program that serves HTTP is written as C
+  today, because the HTTP API is not available to the functions of a module,
+  which are the ones the machine backend lowers. The comparison of the C
+  backend and the machine backend over the same workload, which this program's
+  own `AGENTS.md` asks for, cannot be made with this program: the machine
+  backend is exercised by the benchmarks under `src/benchmarks/`.
+
+- **No benchmark of the program is recorded.** The program measures the server
+  it serves, and nothing measures the program. A reproducible configuration
+  and its numbers are what the same `AGENTS.md` asks for, and there are
+  none.
+
+### This document
+
+- **The document stays in `docs/specs/`.** Although the README of that
+  directory says a spec is removed once the work is done and the source is
+  the single point of truth, it is kept: the design, the decisions behind it
+  and the gaps above are worth more than the code they explain, and it was
+  asked for here.
 
 ## How to run it
 
