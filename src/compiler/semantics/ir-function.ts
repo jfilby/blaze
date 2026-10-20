@@ -360,7 +360,6 @@ class FunctionBody {
   lower(): SemanticBlock {
     const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "next" } };
     this.enter(entry, null);
-    console.error("DEBUG lower statements", this.definition.statements.map(s=>s.kind));
     this.statements(this.definition.statements);
     this.leave();
     // A body that falls off the end returns nothing: a function with no
@@ -678,10 +677,8 @@ class FunctionBody {
         // nothing written after it is reachable; mark the block accordingly,
         // the way an `if` whose every arm leaves is marked.
         const conditionText = (statement.condition as { text?: string; name?: string }).text ?? (statement.condition as { name?: string }).name;
-        console.error("DEBUG while conditionText=", conditionText, "frame block id=", this.frame().block.id, "entry?", this.frame().block.id);
         if (conditionText === "true" || conditionText === "1") {
           this.frame().block.terminator = { k: "unreachable" };
-          console.error("DEBUG set unreachable, now", this.frame().block.terminator.k);
         }
         return;
       }
