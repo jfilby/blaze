@@ -102,13 +102,13 @@ test("a function every caller hands whole numbers to computes in whole numbers",
 
   // The parameters are whole numbers now, so the function is declared with them
   // and its callers hand their counters over without converting them first.
-  assert.match(c, /^extern double triangle\(int64_t x, int64_t y\);$/m);
+  assert.match(c, /^static double triangle\(int64_t x, int64_t y\);$/m);
   assert.match(c, /triangle\(i, i\)/);
 
   // The body answers the whole-number form first and the arithmetic the source
   // wrote after it, and what chooses between them is one comparison over each
   // parameter, read as the unsigned number the reach is added to.
-  const arm = c.slice(c.indexOf("\ndouble triangle(int64_t"));
+  const arm = c.slice(c.indexOf("\nstatic double triangle(int64_t"));
   assert.match(arm, /\+ 33554432ULL\) <= 67108864ULL/);
   // The shift is a whole-number shift of a whole-number product, and the answer
   // is read as the double the caller is waiting for.
@@ -124,7 +124,7 @@ test("a function one caller hands a double to is left as the source wrote it", (
   // said was whole, so the body keeps the arithmetic it had.
   const c = written(programOf("  for (let i = 0; i < reach; i += 1) console.log(triangle(i + 0.5, i));"));
 
-  assert.match(c, /^extern double triangle\(double x, double y\);$/m);
+  assert.match(c, /^static double triangle\(double x, double y\);$/m);
   assert.match(c, /common\w+ = \(x \+ y\);/);
   assert.doesNotMatch(c, /uint64_t/);
 });
@@ -147,7 +147,10 @@ test("a body that writes one of its names is left as the source wrote it", () =>
   );
   const c = written(source);
 
-  assert.match(c, /^extern double rewrite\(double x, double y\);$/m);
+  // The parameters are named apart from the ones around them: the function is
+  // written inside another one, and its own `x` and `y` shadow the ones of
+  // the scope it is written in.
+  assert.match(c, /^static double rewrite\(double x_2, double y_2\);$/m);
   assert.doesNotMatch(c, /uint64_t/);
 });
 

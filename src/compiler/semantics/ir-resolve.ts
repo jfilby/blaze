@@ -4797,7 +4797,7 @@ class ProgramLowering {
           throw new CompilerError({
             category: "ContractError",
             stage: "program",
-            message: "a field is read of a name that holds no object",
+            message: `"${object.name}" is not an object`,
             detail: "the field read's object is a name of a slot that is not an object; the resolver refuses one that is",
           });
         }
