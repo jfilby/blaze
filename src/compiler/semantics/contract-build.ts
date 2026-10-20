@@ -96,6 +96,20 @@ export function bufferContract(
 }
 
 /**
+ * The symbol a function is compiled under.
+ *
+ * `main` is the entry point of a C program, and a function of that name is
+ * written under another one: the program and the function would be two
+ * definitions of the same symbol, and the link would fail on a name the
+ * source chose. A Python program is written with a `main` of its own more
+ * often than not, and it is the entry point of the program that carries the
+ * name.
+ */
+export function symbolFor(name: string): string {
+  return name === "main" ? "blaze_main" : name;
+}
+
+/**
  * The contract of one function: the body it always carries, and the
  * postcondition it carries when one expression can state what it returns.
  */
@@ -110,7 +124,7 @@ export function assembleContract(assembly: ContractAssembly): FunctionContract {
 
   return {
     version: "1",
-    function: { name, symbol: assembly.symbol ?? name, params: parameters, returns: typeToString(returns) },
+    function: { name, symbol: assembly.symbol ?? symbolFor(name), params: parameters, returns: typeToString(returns) },
     requires: buffers.requires,
     ensures: assembly.result === null ? [] : [`result == ${assembly.result}`],
     memory: { reads: buffers.reads, writes: [], aliasing: [] },

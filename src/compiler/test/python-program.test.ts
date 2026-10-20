@@ -28,23 +28,28 @@ import { scratch } from "./scratch.ts";
 let runtime: Promise<string> | null = null;
 
 /** A one file Python program, resolved exactly as a build resolves it. */
-function resolved(source: string): SemanticProgram {
-  const phase = phaseOf("python", { "main.py": source }, "main.py");
+function resolved(source: string, files: Record<string, string> = { "main.py": source }): SemanticProgram {
+  const phase = phaseOf("python", files, "main.py");
   assert.ok(phase.body !== undefined);
   return resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 }
 
 /** The program written to disk and the binary it was linked into. */
-async function linked(source: string): Promise<{ directory: string; binary: string }> {
+async function linked(
+  source: string,
+  files: Record<string, string> = { "main.py": source },
+): Promise<{ directory: string; binary: string }> {
   const directory = await scratch("blaze-python-");
-  await writeFile(join(directory, "main.py"), source, "utf8");
+  for (const [name, content] of Object.entries(files)) {
+    await writeFile(join(directory, name), content, "utf8");
+  }
   // The driver includes the runtime header by name, as a build keeps the
   // runtime beside the driver it links.
   await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
   runtime ??= buildStandaloneRuntime(await scratch("blaze-runtime-")).then((built) => built.objectPath);
   // The functions of a program are objects of their own, compiled one at a
   // time and linked beside the driver, as a build compiles them.
-  const phase = phaseOf("python", { "main.py": source }, "main.py");
+  const phase = phaseOf("python", files, "main.py");
   const context: FunctionContext = {
     objectNames: phase.objectNames,
     functions: Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions))),
@@ -54,13 +59,13 @@ async function linked(source: string): Promise<{ directory: string; binary: stri
   for (const file of phase.program.files) {
     for (const contract of Object.values(file.functions)) {
       const fn = resolveFunction(contract, context);
-      const objectPath = join(directory, `${contract.function.name}.o`);
+      const objectPath = join(directory, `${contract.function.symbol}.o`);
       await compileFunctionC({
         fn,
         contract,
         target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
         mode: "debug",
-        sourcePath: join(directory, `${contract.function.name}.c`),
+        sourcePath: join(directory, `${contract.function.symbol}.c`),
         objectPath,
         includeDirectories: [directory],
       });
@@ -70,7 +75,7 @@ async function linked(source: string): Promise<{ directory: string; binary: stri
   const runner = await buildProgramDriver({
     mode: "debug",
     target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
-    program: resolved(source),
+    program: resolved(source, files),
     workDirectory: directory,
     objectPaths,
     runtimeObjectPath: await runtime,
@@ -80,8 +85,11 @@ async function linked(source: string): Promise<{ directory: string; binary: stri
 }
 
 /** The binary the program was linked into, and what the source printed. */
-async function deliver(source: string): Promise<{ binary: string; original: string }> {
-  const { directory, binary } = await linked(source);
+async function deliver(
+  source: string,
+  files: Record<string, string> = { "main.py": source },
+): Promise<{ binary: string; original: string }> {
+  const { directory, binary } = await linked(source, files);
   const original = run("python3", ["main.py"], { cwd: directory, timeoutMs: 60_000 });
   assert.equal(original.code, 0, original.stderr);
   return { binary, original: original.stdout };
@@ -162,6 +170,38 @@ test("a dict is read by its key", async () => {
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, original);
   assert.equal(delivered.stdout, "1\n2\n");
+});
+
+test("a program calls a function of another file of the project", async () => {
+  // The program is the shape a Python program is written in: a `main` of its
+  // own, a guard that names the entry module, and a function of another file
+  // that does the work.
+  const main = [
+    "from helpers import dot",
+    "",
+    "def main() -> int:",
+    "    a = [1.0, 2.0, 3.0]",
+    "    b = [4.0, 5.0, 6.0]",
+    "    print(dot(a, b, 3))",
+    "    return 0",
+    "",
+    'if __name__ == "__main__":',
+    "    main()",
+    "",
+  ].join("\n");
+  const helpers = [
+    "def dot(a: list[float], b: list[float], n: int) -> float:",
+    "    total: float = 0.0",
+    "    for i in range(n):",
+    "        total += a[i] * b[i]",
+    "    return total",
+    "",
+  ].join("\n");
+  const { binary, original } = await deliver(main, { "main.py": main, "helpers.py": helpers });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "32.0\n");
 });
 
 test("a function of a program is called and its result is printed", async () => {

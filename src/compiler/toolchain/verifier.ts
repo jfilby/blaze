@@ -14,6 +14,7 @@
 import {
   comparisonTolerance,
   evaluate,
+  isBufferType,
   isFloatType,
   isIntegerType,
   parseType,
@@ -112,7 +113,15 @@ function lengthParameters(parsed: ParsedContract): string[] {
     if (match === null) continue;
     for (const bound of [match[1], match[2]]) {
       for (const identifier of bound.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
-        if (parsed.env.has(identifier)) names.add(identifier);
+        const type = parsed.env.get(identifier);
+        if (type === undefined) continue;
+        // A buffer is not a count. The bound `len(a)` is the length of the
+        // buffer `a`, and the vector gives a buffer a length of its own: a
+        // vector that gave the buffer a count would read the count as the
+        // buffer, and the precondition the range states would be checked
+        // against a number.
+        if (isBufferType(type)) continue;
+        names.add(identifier);
       }
     }
   }

@@ -63,9 +63,9 @@ otherwise.
 A module, `helpers.py`:
 
 ```python
-def dot(a: list[float], b: list[float]) -> float:
+def dot(a: list[float], b: list[float], n: int) -> float:
     total: float = 0.0
-    for i in range(len(a)):
+    for i in range(n):
         total += a[i] * b[i]
     return total
 ```
@@ -78,7 +78,7 @@ from helpers import dot
 def main() -> int:
     a = [1.0, 2.0, 3.0]
     b = [4.0, 5.0, 6.0]
-    print(dot(a, b))
+    print(dot(a, b, 3))
     return 0
 
 if __name__ == "__main__":
@@ -88,6 +88,11 @@ if __name__ == "__main__":
 Both are read into the shapes the compiler already has: `dot` is a declared
 function with typed parameters and a declared return, and `main` is a
 function of the program body, and the statements around it are the program.
+
+The length of a list is a parameter of its own, and not `len(a)`: a list
+reaches a function as a pointer to its first element and no length arrives
+with it, so a function that asks the list for its length is refused (see
+"What is refused, and what it says" below).
 
 ## The subset
 
@@ -134,8 +139,8 @@ builtins of Python either, and a program that wants one writes it as
 project (see the program subset below).
 
 A loop that accumulates into a name is stated as a reduction, as it is for a
-TypeScript module: the body of `dot` above is a reduction over `range(len(a))`,
-and its contract says `result == sum(i = 0..<len(a), (a[i] * b[i]))`.
+TypeScript module: the body of `dot` above is a reduction over `range(n)`,
+and its contract says `result == sum(i = 0..<n, (a[i] * b[i]))`.
 
 ### The program subset
 
@@ -200,6 +205,7 @@ matter are the ones a Python program is most likely to write:
 | `sys.argv` in a function of a module | a module is a library of functions, and a library reads no command line: the command line is read by the program |
 | `d.key` where `d` is a dict | a dict is read by its key, as in `d["key"]` |
 | `len("hello")` | the length of a value written out is not read: write it into a name and take the length of that |
+| `len(a)` where `a` is a list parameter | a list reaches a function as a pointer to its first element and no length arrives with it: the length is a parameter of its own |
 
 ## The types
 
@@ -496,6 +502,7 @@ to give each run a directory of its own.
 | `core/ir.ts` | the IR has a `//`, which is a floor division |
 | `core/semantic-ir.ts` | two new operations: `floorDiv` and `floorMod` |
 | `semantics/builtins.ts` | the whole numbers: `whole.abs`, `whole.min`, `whole.max`, `whole.floor`, `whole.ceil` and `whole.trunc` |
+| `semantics/contract-build.ts` | a function named `main` is compiled under another symbol: `main` is the entry point of a C program, and a Python program is written with a `main` of its own |
 | `semantics/ir-resolve.ts`, `semantics/ir-function.ts` | the arithmetic rules of the source language: a division of two whole numbers is a true division in Python, a remainder takes the sign of its divisor, a whole number beside a fraction is a fraction, and the answer of a call keeps the kind of the number it was given |
 | `semantics/module.ts` | the whole-number kind of the program model is named for what it is, and a module says whether its body is the entry guard |
 | `semantics/program.ts` | a module the program merely imports runs nothing, even when it holds the entry guard |
@@ -505,6 +512,7 @@ to give each run a directory of its own.
 | `runtime/abi.ts`, `runtime/nim.ts` | the style a value is written as text in, and the entry point that sets it |
 | `toolchain/driver.ts`, `toolchain/program-emit.ts` | the driver sets the style when the program starts, and writes a boolean, a null and a whole number the way the language writes them |
 | `toolchain/linker.ts` | the harness of a function build sets the style before it calls the function |
+| `toolchain/verifier.ts` | a buffer named in a range is not a count: the vector planner gives a buffer a length of its own, and a count a range is written in terms of a count |
 | `toolchain/verify-program.ts` | the toolchain of a language is a command and its flags, and `python3` is the toolchain of a Python source |
 
 ### The rules of a language, in one place
@@ -619,6 +627,11 @@ a new section and needs nothing else.
 - **The length of a value written out is not read.** `len("hello")` is
   refused: the compiler reads a length off the name it is written by, and a
   program writes the value into a name first.
+- **The length of a list a function was given is not read.** `len(a)` where
+  `a` is a list parameter is refused: a list reaches a function as a pointer
+  to its first element and no length arrives with it, and the length is a
+  parameter of its own. The compiler's own backends say the same, and a
+  program that takes the length as a parameter is compiled and checked.
 
 ### Open questions
 

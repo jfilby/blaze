@@ -34,20 +34,35 @@ function contractOf(source: string, name = "f"): {
 
 test("a function of a Python module is contracted with the reduction its loop states", () => {
   const source = [
-    "def dot(a: list[float], b: list[float]) -> float:",
+    "def dot(a: list[float], b: list[float], n: int) -> float:",
     "    total: float = 0.0",
-    "    for i in range(len(a)):",
+    "    for i in range(n):",
     "        total += a[i] * b[i]",
     "    return total",
     "",
   ].join("\n");
   const contract = contractOf(source, "dot");
-  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<len(a), (a[i] * b[i]))"]);
+  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<n, (a[i] * b[i]))"]);
   assert.deepEqual(contract.params, [
     { name: "a", type: "slice<f64>" },
     { name: "b", type: "slice<f64>" },
+    { name: "n", type: "i64" },
   ]);
   assert.equal(contract.returns, "f64");
+});
+
+test("the length of a list a function was given is not read", () => {
+  // A list reaches a function as a pointer to its first element, and no
+  // length arrives with it: the length is a parameter of its own.
+  const refused = diagnostic(() =>
+    phaseOf(
+      "python",
+      { "main.py": "def dot(a: list[float], b: list[float]) -> float:\n    total: float = 0.0\n    for i in range(len(a)):\n        total += a[i] * b[i]\n    return total\n" },
+      "main.py",
+    ),
+  );
+  assert.match(refused, /reads the length of a list, which the compiler does not carry/);
+  assert.match(refused, /take the length as a parameter of its own/);
 });
 
 test("the types of Python are the types of the contract", () => {
