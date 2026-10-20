@@ -64,6 +64,89 @@ test("a division of two whole numbers is a fraction, and the compiler answers on
   assert.equal(value.op, "/");
 });
 
+test("a whole number beside a fraction is a fraction, and the compiler answers one", () => {
+  // Python has no such a thing as a whole number beside a fraction: the pair
+  // is a fraction there, and `1 + 1.5` is 2.5.
+  const phase = phaseOf("python", { "main.py": "print(1 + 2.5)\n" }, "main.py");
+  const statement = phase.body?.statements[0];
+  assert.ok(statement !== undefined && statement.kind === "print");
+  const value = statement.values[0];
+  assert.equal(value.k, "binary");
+  assert.equal(value.op, "+");
+  // The answer is a fraction and not a whole number: the two are two kinds of
+  // number and the printer writes them differently.
+  const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+  const printed = resolved.entry.statements[0];
+  assert.ok(printed.k === "printNumber");
+  assert.equal(printed.value.k, "arith");
+  assert.equal(printed.value.type.kind, "primitive");
+  assert.equal(printed.value.type.kind === "primitive" ? printed.value.type.name : "", "f64");
+});
+
+test("the magnitude of a whole number is a whole number, and the compiler answers one", () => {
+  // Python's `abs` of a whole number is a whole number, and the compiler's
+  // `Math.abs` answers a fraction: the two are two kinds of number.
+  const phase = phaseOf("python", { "main.py": "print(abs(-3))\n" }, "main.py");
+  const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+  const printed = resolved.entry.statements[0];
+  assert.ok(printed.k === "printNumber");
+  assert.equal(printed.value.k, "call");
+  // The call is answered by the whole one, and the answer is a whole number.
+  assert.equal(printed.value.k === "call" ? printed.value.call.callee : "", "whole.abs");
+  assert.equal(printed.value.k === "call" ? printed.value.type.kind : "", "primitive");
+  assert.equal(
+    printed.value.k === "call" && printed.value.type.kind === "primitive" ? printed.value.type.name : "",
+    "i64",
+  );
+  // The answer is written as a whole number, and not as a fraction.
+  assert.equal(printed.k === "printNumber" ? printed.bigint : false, true);
+});
+
+test("a fraction beside a whole number is a fraction, and the compiler answers one", () => {
+  // The magnitude of a fraction is a fraction: `abs(-3.5)` is 3.5 there.
+  const phase = phaseOf("python", { "main.py": "print(abs(-3.5))\n" }, "main.py");
+  const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+  const printed = resolved.entry.statements[0];
+  assert.ok(printed.k === "printNumber");
+  assert.equal(printed.value.k === "call" ? printed.value.call.callee : "", "Math.abs");
+});
+
+test("a conversion answers a whole number, and the compiler answers one", () => {
+  // `int(x)` and `math.floor(x)` answer a whole number in Python, and the
+  // compiler's answers are fractions unless it is told the language's rule.
+  const conversions: [string, string][] = [
+    ["print(int(3.7))\n", "whole.trunc"],
+    ["import math\nprint(math.floor(3.7))\n", "whole.floor"],
+    ["import math\nprint(math.ceil(3.2))\n", "whole.ceil"],
+  ];
+  for (const [source, callee] of conversions) {
+    const phase = phaseOf("python", { "main.py": source }, "main.py");
+    const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+    const printed = resolved.entry.statements[0];
+    assert.ok(printed.k === "printNumber", `${source} prints a number`);
+    assert.equal(printed.value.k === "call" ? printed.value.call.callee : "", callee);
+    assert.equal(
+      printed.value.k === "call" && printed.value.type.kind === "primitive" ? printed.value.type.name : "",
+      "i64",
+    );
+    assert.equal(printed.k === "printNumber" ? printed.bigint : false, true);
+  }
+});
+
+test("a whole number read as a fraction is a fraction, and the compiler answers one", () => {
+  // `math.sqrt(9)` is 3.0 in Python: the whole number is read as the fraction
+  // it is.
+  const phase = phaseOf("python", { "main.py": "import math\nprint(math.sqrt(9))\n" }, "main.py");
+  const resolved = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+  const printed = resolved.entry.statements[0];
+  assert.ok(printed.k === "printNumber");
+  assert.equal(printed.value.k === "call" ? printed.value.call.callee : "", "Math.sqrt");
+  assert.equal(
+    printed.value.k === "call" && printed.value.type.kind === "primitive" ? printed.value.type.name : "",
+    "f64",
+  );
+});
+
 test("a remainder of Python takes the sign of its divisor", () => {
   const phase = phaseOf("python", { "main.py": "print(-7 % 2)\n" }, "main.py");
   const statement = phase.body?.statements[0];

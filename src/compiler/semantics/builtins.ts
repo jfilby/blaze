@@ -37,6 +37,7 @@ export interface BuiltinSignature {
 }
 
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
+const I64: TypeExpr = { kind: "primitive", name: "i64" };
 const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 const U64: TypeExpr = { kind: "primitive", name: "u64" };
 const U256: TypeExpr = { kind: "primitive", name: "u256" };
@@ -75,6 +76,25 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.trunc": { params: [F64], returns: F64, arity: 1 },
   "Math.ceil": { params: [F64], returns: F64, arity: 1 },
   "Math.random": { params: [], returns: F64, arity: 0 },
+  /**
+   * The magnitude of a whole number, which is a whole number. The `Math.abs`
+   * above answers a fraction, and a language whose whole numbers are whole
+   * answers the magnitude of one as a whole number: the two are two kinds of
+   * number, and the printer writes them differently.
+   */
+  "whole.abs": { params: [I64], returns: I64, arity: 1 },
+  /** The smaller of two whole numbers, which is a whole number. */
+  "whole.min": { params: [I64, I64], returns: I64, arity: 2 },
+  /** The larger of two whole numbers, which is a whole number. */
+  "whole.max": { params: [I64, I64], returns: I64, arity: 2 },
+  /**
+   * A number as a whole number: the floor of it, the ceiling of it, and the
+   * whole part of it. The three are the answers of the languages whose whole
+   * numbers are whole numbers, and each is a whole number.
+   */
+  "whole.floor": { params: [F64], returns: I64, arity: 1 },
+  "whole.ceil": { params: [F64], returns: I64, arity: 1 },
+  "whole.trunc": { params: [F64], returns: I64, arity: 1 },
   [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
   [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
   [ARGV]: { params: [USIZE], returns: ANY, arity: 1 },

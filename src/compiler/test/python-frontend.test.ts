@@ -127,6 +127,65 @@ test("an import of a module that is not a file of the project is refused", () =>
   assert.deepEqual(pythonFrontend.resolveImport("helpers"), ["helpers.py"]);
 });
 
+test("the two modules of the standard library the compiler knows are read", () => {
+  // `math` is where the roundings and the root the compiler has are written,
+  // and `sys` is where the command line is: the two are the only imports a
+  // Python file may write.
+  const phase = phaseOf(
+    "python",
+    { "main.py": "import math\nimport sys\n\ndef f(a: int) -> int:\n    return a\n" },
+    "main.py",
+  );
+  assert.equal(phase.body, undefined);
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "import os\nprint(1)\n" }, "main.py"),
+  );
+  assert.match(refused, /"os" is not a module the compiler knows/);
+  assert.match(refused, /math and sys/);
+});
+
+test("a call of a name the compiler does not know is refused", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "print(missing(1))\n" }, "main.py"),
+  );
+  assert.match(refused, /"missing" is not a function this file may call/);
+  // The name is looked for in every statement of a body, and not only in the
+  // first one.
+  const later = diagnostic(() =>
+    phaseOf("python", { "main.py": "x = 1\nfor i in range(3):\n    print(missing(i))\n" }, "main.py"),
+  );
+  assert.match(later, /"missing" is not a function this file may call/);
+  // A name the file declares is a name it may call.
+  const declared = phaseOf(
+    "python",
+    { "main.py": "def f(a: int) -> int:\n    return a\n\nprint(f(1))\n" },
+    "main.py",
+  );
+  assert.equal(declared.body?.statements.length, 1);
+});
+
+test("a conversion is not part of a module, and a module says so", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: float) -> int:\n    return int(a)\n" }, "main.py"),
+  );
+  assert.match(refused, /"int" is not part of a module/);
+});
+
+test("a power is not part of the subset", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "print(2 ** 3)\n" }, "main.py"),
+  );
+  assert.match(refused, /a power is not part of the subset/);
+  assert.match(refused, /write the multiplication out/);
+});
+
+test("a function of a module reads no command line", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f() -> int:\n    x = 1\n    return len(sys.argv) + x\n" }, "main.py"),
+  );
+  assert.match(refused, /reads the command line, which a module may not/);
+});
+
 test("the constructs outside the subset are refused with what to write instead", () => {
   const cases: [string, RegExp][] = [
     ["class C:\n    pass\n", /an object written where it is made/],

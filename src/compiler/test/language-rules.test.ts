@@ -25,12 +25,16 @@ test("the rules of a language are the rules of that language", () => {
   const typescript = rulesFor("typescript");
   assert.equal(typescript.division, "whole");
   assert.equal(typescript.remainder, "truncated");
+  assert.equal(typescript.promotion, "refuse");
+  assert.equal(typescript.wholeAnswers, false);
   assert.equal(typescript.style, "javascript");
   assert.equal(typescript.strictConditions, false);
 
   const python = rulesFor("python");
   assert.equal(python.division, "true");
   assert.equal(python.remainder, "floored");
+  assert.equal(python.promotion, "promote");
+  assert.equal(python.wholeAnswers, true);
   assert.equal(python.style, "python");
   assert.equal(python.strictConditions, true);
 });

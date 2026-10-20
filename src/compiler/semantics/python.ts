@@ -444,6 +444,14 @@ export interface PyModule {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The modules of the standard library the compiler knows: `math` for the
+ * roundings and the root the compiler has, and `sys` for the command line the
+ * program was given. Every other import is refused, because a module of the
+ * standard library is a file the compiler does not read.
+ */
+export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys"]);
+
+/**
  * The keywords the subset does not read, and what a source writes instead of
  * each one. They are named here rather than left to the parser reading past
  * them: a construct refused by a shape error is reported as whatever token
@@ -465,7 +473,6 @@ export const REFUSED_KEYWORDS: Record<string, string> = {
   raise: "a line written out with print, and a failure as one",
   match: "a chain of if / elif",
   case: "a chain of if / elif",
-  import: "a module of the project is named by `from name import f`",
   is: "the comparison `==`, and `!=` for what is not there",
   in: "a loop that looks for the value",
   not: "the comparison `!=`, and `not` before a value that is not there",
@@ -567,36 +574,49 @@ export function builtinName(name: string): string {
     case "max":
       return "Math.max";
     case "int":
-      return "Math.trunc";
+      return "whole.trunc";
     case "float":
       return "Number";
     case "math.floor":
-      return "Math.floor";
+      return "whole.floor";
     case "math.ceil":
-      return "Math.ceil";
+      return "whole.ceil";
     case "math.sqrt":
       return "Math.sqrt";
     case "math.trunc":
-      return "Math.trunc";
+      return "whole.trunc";
     default:
       return name;
   }
 }
 
-/** The names a Python program may call that are not functions of the project. */
-export const PROGRAM_ONLY_CALLS: readonly string[] = ["int", "float", "str", "print"];
+/**
+ * The conversions, which are a program of its own: `int(x)` answers a whole
+ * number and `str(x)` a text, and a module of functions has neither.
+ */
+const CONVERSIONS: readonly string[] = ["int", "float", "str"];
 
-/** The builtins a Python program may call, and what each of them answers. */
+/**
+ * The builtins a function of a module may call: the ones Python has as
+ * builtins and the compiler has as operations. A module is a library of
+ * functions, and a library has no conversions and no command line.
+ */
+export const MODULE_BUILTINS: readonly string[] = ["len", "range", "abs", "min", "max", "print"];
+
+/**
+ * The builtins a program may call: the ones of a module, and the conversions
+ * and the roundings a program has. A program is a sequence of statements whose
+ * only effect is what it prints, and a conversion is a program of its own.
+ */
 export const PYTHON_BUILTINS: readonly string[] = [
-  "len",
-  "range",
-  "abs",
-  "min",
-  "max",
+  ...MODULE_BUILTINS,
   "int",
   "float",
   "str",
-  "print",
+  "math.floor",
+  "math.ceil",
+  "math.sqrt",
+  "math.trunc",
 ];
 
 class PythonParser {
@@ -684,6 +704,10 @@ class PythonParser {
         imports.push(this.importStatement());
         continue;
       }
+      if (token.kind === "name" && token.text === "import") {
+        this.standardImport();
+        continue;
+      }
       const statement = this.statement();
       if (statement === null) continue;
       // The guard that names the entry module is the one statement a module
@@ -692,6 +716,45 @@ class PythonParser {
       body.push(statement);
     }
     return { functions, imports, body, entryGuard };
+  }
+
+  /**
+   * `import math`: a module of the standard library the compiler knows.
+   *
+   * The standard library is not in the subset, and the two modules that are
+   * are the ones the compiler's own operations are written under: `math` for
+   * the roundings and the root the compiler has, and `sys` for the command
+   * line the program was given. Every other import is refused, because a
+   * module of the standard library is a file the compiler does not read.
+   */
+  private standardImport(): void {
+    this.next();
+    const module = this.peek();
+    if (module.kind !== "name") {
+      this.report("expected the name of a module", `near "${module.text}"`, module);
+      this.skipStatement();
+      return;
+    }
+    this.next();
+    if (this.accept("as")) {
+      this.report(
+        "renaming an import is not supported",
+        `as written on line ${module.line}; write the name the compiler knows`,
+        module,
+      );
+      this.skipStatement();
+      return;
+    }
+    if (!KNOWN_MODULES.has(module.text)) {
+      this.report(
+        `"${module.text}" is not a module the compiler knows`,
+        `line ${module.line}: the compiler reads the modules of the project, as in \`from helpers import dot\`, and the two of the standard library it knows are ${[...KNOWN_MODULES].join(" and ")}`,
+        module,
+      );
+      this.skipStatement();
+      return;
+    }
+    this.skipNewline();
   }
 
   /** `from helpers import dot, cross`: the functions of another file. */
@@ -929,6 +992,14 @@ class PythonParser {
           this.next();
           this.skipNewline();
           return { k: "pass", line: token.line };
+        case "import":
+          this.report(
+            "an import is written at the top of the module",
+            "a module of the project is named by `from name import f`",
+            token,
+          );
+          this.skipStatement();
+          return null;
         default:
           break;
       }
@@ -1288,9 +1359,17 @@ class PythonParser {
   private power(): PyValue {
     const base = this.postfix();
     if (!this.at("**")) return base;
-    this.next();
-    const exponent = this.unary();
-    return { k: "binary", op: "**", left: base, right: exponent };
+    const token = this.next();
+    // A power is not in the subset: the compiler's power is a fraction and
+    // Python's is a whole number when both sides are whole, and the two are two
+    // numbers that print differently.
+    this.report(
+      "a power is not part of the subset",
+      "the compiler's power is a fraction and Python's is a whole number when both sides are whole, and the two are two numbers; write the multiplication out",
+      token,
+    );
+    this.unary();
+    return base;
   }
 
   /** What is written after a value: a call, an element, a field. */
@@ -1592,6 +1671,126 @@ export function describeValue(value: PyValue): string {
 /* -------------------------------------------------------------------------- */
 /* Reading a file                                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Every value a body holds, and the line it was written on.
+ *
+ * The line of a statement is the line of the values in it: a value carries no
+ * line of its own, and the statement it was written in is where it was
+ * written.
+ */
+function eachValue(body: readonly PyStatement[], visit: (value: PyValue, line: number) => void): void {
+  for (const statement of body) {
+    switch (statement.k) {
+      case "declare":
+      case "assign":
+        eachValueIn(statement.value, visit, statement.line);
+        break;
+      case "return":
+        if (statement.value !== null) eachValueIn(statement.value, visit, statement.line);
+        break;
+      case "if":
+        eachValueIn(statement.condition, visit, statement.line);
+        eachValue(statement.then, visit);
+        eachValue(statement.otherwise, visit);
+        break;
+      case "while":
+        eachValueIn(statement.condition, visit, statement.line);
+        eachValue(statement.body, visit);
+        break;
+      case "for":
+        eachValueIn(statement.from, visit, statement.line);
+        eachValueIn(statement.to, visit, statement.line);
+        if (statement.step !== null) eachValueIn(statement.step, visit, statement.line);
+        eachValue(statement.body, visit);
+        break;
+      case "print":
+        statement.values.forEach((value) => eachValueIn(value, visit, statement.line));
+        break;
+      case "try":
+        eachValue(statement.body, visit);
+        if (statement.catchBody !== null) eachValue(statement.catchBody, visit);
+        if (statement.finallyBody !== null) eachValue(statement.finallyBody, visit);
+        break;
+      case "call":
+        eachValueIn(statement.value, visit, statement.line);
+        break;
+      case "break":
+      case "continue":
+      case "pass":
+      case "function":
+        break;
+    }
+  }
+}
+
+/** The values a value holds, and the value itself. */
+function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => void, line: number): void {
+  visit(value, line);
+  switch (value.k) {
+    case "call":
+      value.args.forEach((argument) => eachValueIn(argument, visit, line));
+      return;
+    case "binary":
+      eachValueIn(value.left, visit, line);
+      eachValueIn(value.right, visit, line);
+      return;
+    case "unary":
+      eachValueIn(value.operand, visit, line);
+      return;
+    case "conditional":
+      eachValueIn(value.condition, visit, line);
+      eachValueIn(value.then, visit, line);
+      eachValueIn(value.otherwise, visit, line);
+      return;
+    case "index":
+      eachValueIn(value.base, visit, line);
+      eachValueIn(value.index, visit, line);
+      return;
+    case "field":
+      eachValueIn(value.base, visit, line);
+      return;
+    case "list":
+      value.items.forEach((item) => eachValueIn(item, visit, line));
+      return;
+    case "dict":
+      value.entries.forEach((entry) => eachValueIn(entry.value, visit, line));
+      return;
+    case "text":
+      value.parts.forEach((part) => {
+        if (part.k === "value") eachValueIn(part.value, visit, line);
+      });
+      return;
+    case "number":
+    case "boolean":
+    case "none":
+    case "name":
+      return;
+  }
+}
+
+/**
+ * Every call a body makes, with the line it was written on.
+ */
+function callsOf(body: readonly PyStatement[], into: Map<string, number>): void {
+  eachValue(body, (value, line) => {
+    if (value.k !== "call" || into.has(value.name)) return;
+    into.set(value.name, line);
+  });
+}
+
+/**
+ * Whether a body reads the command line, which a module function may not: a
+ * module is a library of functions, and a library reads no command line.
+ */
+function readsCommandLine(body: readonly PyStatement[]): boolean {
+  let found = false;
+  eachValue(body, (value) => {
+    if (value.k !== "field" || value.field !== "argv") return;
+    if (value.base.k === "name" && value.base.name === "sys") found = true;
+  });
+  return found;
+}
 
 /**
  * A Python file, read into what it declares, imports and runs.
@@ -2470,6 +2669,42 @@ export const pythonFrontend: Frontend = {
     }
     const diagnostics = new Diagnostics();
     const parsed = parsePython(source, path, diagnostics);
+    // A call of a name the compiler does not know is refused, as it is for a
+    // TypeScript module: the subset is a list of the names a file may call,
+    // and a name outside it is a name the compiler cannot compile.
+    const known = new Set<string>(parsed.functions.map((declaration) => declaration.name));
+    for (const imported of parsed.imports) {
+      for (const name of imported.names ?? []) known.add(name);
+    }
+    // A file that holds statements is a program, and a program has the
+    // conversions and the roundings a module of functions has not.
+    const builtins = parsed.body.length === 0 ? MODULE_BUILTINS : PYTHON_BUILTINS;
+    const calls = new Map<string, number>();
+    for (const declaration of parsed.functions) callsOf(declaration.body, calls);
+    for (const statement of parsed.body) {
+      // The guard that names the entry module runs in the entry module and
+      // nowhere else, and the compiler cannot tell which file that is while it
+      // reads the file: a call in it is refused when the program is lowered,
+      // where the entry is known.
+      if (isEntryGuard(statement)) continue;
+      callsOf([statement], calls);
+    }
+    for (const [name, line] of calls) {
+      if (known.has(name) || builtins.includes(name)) continue;
+      if (CONVERSIONS.includes(name) && builtins === MODULE_BUILTINS) {
+        diagnostics.report(
+          `"${name}" is not part of a module`,
+          `line ${line}: a module is a library of functions, and a conversion is a program of its own`,
+          line,
+        );
+        continue;
+      }
+      diagnostics.report(
+        `"${name}" is not a function this file may call`,
+        `line ${line}: a file calls the functions it declares, the functions it imports, and the builtins of the subset (${builtins.join(", ")})`,
+        line,
+      );
+    }
     diagnostics.throwIfAny(path);
     const functions: DeclaredFunction[] = parsed.functions.map((declaration) => ({
       name: declaration.name,
@@ -2497,6 +2732,15 @@ export const pythonFrontend: Frontend = {
 
   contractFor(analysis, declared, input) {
     const declaration = declared.handle as PyFunction;
+    // A module is a library of functions, and a library reads no command line:
+    // the command line is read by the program, which is the statements of the
+    // entry module.
+    if (readsCommandLine(declaration.body)) {
+      throw frontendError(
+        `${declaration.name} reads the command line, which a module may not`,
+        `line ${declaration.line} of ${analysis.path}: the command line is read by the program, as in \`sys.argv\` in the statements of the entry module`,
+      );
+    }
     // A conversion is a program of its own: `int(x)` answers a whole number
     // and `str(x)` a text, and a module of functions has neither.
     if (analysis.body.length === 0) {

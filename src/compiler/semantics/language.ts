@@ -4,8 +4,9 @@
  * Two languages disagree about a handful of things that are written the same
  * way. A division of two whole numbers is a whole division in TypeScript and
  * a true division in Python; a remainder takes the sign of its left side in
- * one and of its right side in the other; a number is written as text in a
- * language's own way.
+ * one and of its right side in the other; a whole number beside a fraction
+ * raises in one and is a fraction in the other; a number is written as text in
+ * a language's own way.
  *
  * Those rules are asked of the language and not of the code that reads them.
  * The resolver reads the language from the program contract and from the
@@ -24,6 +25,15 @@ export type DivisionRule = "whole" | "true";
 export type RemainderRule = "truncated" | "floored";
 
 /**
+ * How a language answers a whole number beside a fraction.
+ *
+ * TypeScript raises on a bigint beside a number: `1n + 1.5` is a type error
+ * there. Python has no such a thing: a whole number beside a fraction is a
+ * fraction there, and `1 + 1.5` is 2.5.
+ */
+export type PromotionRule = "refuse" | "promote";
+
+/**
  * The rules of one source language.
  *
  * A language the compiler does not read has no rules here, and the reader
@@ -38,6 +48,19 @@ export interface LanguageRules {
   readonly division: DivisionRule;
   /** How `a % b` is answered. */
   readonly remainder: RemainderRule;
+  /**
+   * How a whole number beside a fraction is answered: a language that refuses
+   * raises on the pair, and a language that promotes answers a fraction.
+   */
+  readonly promotion: PromotionRule;
+  /**
+   * Whether the answer of a call that takes a number and answers a number
+   * keeps the kind of the number it was given. Python's `abs` of a whole
+   * number is a whole number, and the compiler's `Math.abs` answers a
+   * fraction: the two are two kinds of number, and the printer writes them
+   * differently.
+   */
+  readonly wholeAnswers: boolean;
   /** How a number, a boolean and a null are written as text. */
   readonly style: TextStyle;
   /**
@@ -55,6 +78,8 @@ const TYPESCRIPT: LanguageRules = {
   name: "typescript",
   division: "whole",
   remainder: "truncated",
+  promotion: "refuse",
+  wholeAnswers: false,
   style: "javascript",
   strictConditions: false,
 };
@@ -64,6 +89,8 @@ const PYTHON: LanguageRules = {
   name: "python",
   division: "true",
   remainder: "floored",
+  promotion: "promote",
+  wholeAnswers: true,
   style: "python",
   strictConditions: true,
 };

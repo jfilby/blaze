@@ -199,6 +199,26 @@ function builtinExpression(name: string, args: string[]): string {
       // The runtime's own random is what a program body is given, so a module
       // function and a program body answer the same call the same way.
       return `${RUNTIME_NAME}_random()`;
+    // The whole numbers: a magnitude, a smaller, a larger, and the three
+    // roundings that answer a whole number. The `Math` builtins above answer a
+    // fraction, and a whole number is written as one, so each of these is the
+    // fraction one cast to the whole number it is.
+    //
+    // The operands are bound first: an argument may be a call, and one written
+    // into the argument list would run once per mention rather than once per
+    // operation.
+    case "whole.abs":
+      return `({ long long blaze_operand = (long long)(${args[0]}); (long long)(blaze_operand < 0 ? -blaze_operand : blaze_operand); })`;
+    case "whole.min":
+      return `({ long long blaze_left = (long long)(${args[0]}); long long blaze_right = (long long)(${args[1]}); (long long)(blaze_left < blaze_right ? blaze_left : blaze_right); })`;
+    case "whole.max":
+      return `({ long long blaze_left = (long long)(${args[0]}); long long blaze_right = (long long)(${args[1]}); (long long)(blaze_left > blaze_right ? blaze_left : blaze_right); })`;
+    case "whole.floor":
+      return `((long long)floor(${args[0]}))`;
+    case "whole.ceil":
+      return `((long long)ceil(${args[0]}))`;
+    case "whole.trunc":
+      return `((long long)trunc(${args[0]}))`;
     case "Math.round":
       // The argument is read twice, so it is bound: a value the IR calls is a
       // call that would otherwise run twice.

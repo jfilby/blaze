@@ -99,6 +99,11 @@ A module is a file of functions. The frontend reads:
   typed by annotation and its result typed by annotation;
 - `from helpers import dot` — an import that binds the named functions of
   another file of the project;
+- `import math`, `import sys` — the two modules of the standard library the
+  compiler knows: `math` is where the roundings and the root the compiler has
+  are written, and `sys` is where the command line is. Every other import is
+  refused, because a module of the standard library is a file the compiler
+  does not read;
 - and, in the body of a function: a binding (`x = expr`), a compound
   assignment (`x += expr` and the other compound forms), a counted `for` over
   `range(...)`, a `while`, an `if` / `elif` / `else`, a `return`, a `break`, a
@@ -138,15 +143,27 @@ The entry module of a program may also carry statements. The frontend reads
 the module subset's statements and, in addition:
 
 - `print(a, b)` — what the program writes;
-- `int(x)`, `float(x)`, `str(x)` — a conversion;
+- `int(x)`, `float(x)`, `str(x)` — a conversion. `int(x)` answers a whole
+  number, as it does in Python;
 - `math.floor`, `math.ceil`, `math.sqrt`, `math.trunc` — the compiler's other
   operations, under the names Python spells them in its `math` module. `math`
-  is a name the compiler knows: it is not a file of the project, and
-  `import math` is refused;
+  is a name the compiler knows: it is not a file of the project, and the file
+  that uses it writes `import math` as Python does. `math.floor(x)` and
+  `math.ceil(x)` answer a whole number, as they do in Python, and
+  `math.sqrt(x)` answers a fraction;
 - `if ... elif ... else`, `while`, `for ... in range(...)`, `try` / `except` /
   `finally`, `def`, `return`, `break`, `continue`, `pass`;
 - a list literal (`[1.0, 2.0]`), a dict literal (`{"a": 1}`), an f-string
   (`f"{x} items"`), and the indexing and the field access of both.
+
+A dict is an object, and its fields are read by their key: `d["key"]` is a
+field of the object the name holds, and not an element of a buffer of
+numbers. A dict has no fields of its own in Python — `d.key` is an attribute
+the language does not have — so a field read of one is refused.
+
+The length of a value written out is not read: `len("hello")` is the length of
+a text, and the compiler reads a length off the name it is written by, so a
+program writes `s = "hello"` and then `len(s)`.
 
 ### What is refused, and what it says
 
@@ -177,6 +194,12 @@ matter are the ones a Python program is most likely to write:
 | a match | a chain of `if` / `elif` |
 | a walrus, `:=` | a name bound by a statement |
 | `print(..., sep=`, `end=` | a plain `print` |
+| a power, `a ** b` | the compiler's power is a fraction and Python's is a whole number when both sides are whole, and the two are two numbers: write the multiplication out |
+| an import of a module but `math` and `sys` | a module of the standard library is a file the compiler does not read |
+| a call of a name the compiler does not know | a file calls the functions it declares, the functions it imports, and the builtins of the subset |
+| `sys.argv` in a function of a module | a module is a library of functions, and a library reads no command line: the command line is read by the program |
+| `d.key` where `d` is a dict | a dict is read by its key, as in `d["key"]` |
+| `len("hello")` | the length of a value written out is not read: write it into a name and take the length of that |
 
 ## The types
 
@@ -277,6 +300,49 @@ different signs.
 The contract language has no `%` at all, so a Python function whose result is
 `a % b` states no postcondition — see "Checking the program" below.
 
+### A whole number beside a fraction is a fraction
+
+Python has no such a thing as a whole number beside a fraction: `1 + 1.5` is
+2.5 there, and the whole number is read as the fraction it is. The compiler's
+program model refuses the pair, because TypeScript has no such a thing either:
+`1n + 1.5` is a type error there, and a double holds a whole number exactly
+only up to 2^53.
+
+So the rule is per language, and it is stated in `semantics/language.ts` beside
+the division and the remainder:
+
+| Language | a whole number beside a fraction |
+|---|---|
+| TypeScript | refused: the two kinds of number are not mixed |
+| Python | a fraction: the whole number is read as the fraction it is |
+
+The resolver applies it in the one place every use passes through: a value
+read where a fraction is expected, and the arithmetic of a pair that is not of
+one kind. A promoted pair is answered at the width of the fraction, and the
+answer is not a whole number, so it is written the way a fraction is written.
+
+### The answer of a call keeps the kind of the number it was given
+
+Python's `abs` of a whole number is a whole number, and `abs` of a fraction is
+a fraction. The compiler's `Math.abs` answers a fraction either way, and the
+two kinds of number print differently: `abs(-3)` is `3` in Python and `3.0` in
+the compiler.
+
+So the compiler has the whole numbers the answers are: `whole.abs`,
+`whole.min`, `whole.max`, `whole.floor`, `whole.ceil` and `whole.trunc`, in
+`semantics/builtins.ts`. They answer an `i64`, which is what says the answer
+is a whole number and not a fraction, and they are lowered by the C backend
+and by the driver of a program. The machine and the WebAssembly backends have
+no whole number of their own and refuse them by name, as they refuse a floor
+division.
+
+The resolver applies the rule: a call of `Math.abs`, `Math.min` or
+`Math.max` whose arguments are all whole numbers is answered by the whole one
+in a language that says so, and by the fraction one otherwise. The conversions
+of a program — `int(x)`, `math.floor(x)`, `math.ceil(x)` and `math.trunc(x)` —
+answer a whole number in every language that has them, because that is what
+they are for.
+
 ### A condition is a boolean
 
 Python's truth is wider than a boolean: a number is false when it is zero, a
@@ -375,6 +441,9 @@ numbers: `blaze_rt_argv` answers the number an argument states
 - An argument is a number, as it is in every other language the compiler
   reads. A program that wants an argument as a text has no way to ask for one
   in this version, and the message says so.
+- A file that reads the command line writes `import sys` as Python does. The
+  command line is read by the program and not by a function of a module: a
+  module is a library of functions, and a library reads no command line.
 
 ## Where a Python program is checked
 
@@ -421,15 +490,17 @@ to give each run a directory of its own.
 |---|---|
 | `semantics/python.ts` | **new**: the tokenizer, the parser, the module analysis, and the contract of a Python function |
 | `semantics/python-program.ts` | **new**: the statements of the entry module, as the program body |
-| `semantics/language.ts` | **new**: the rules of a source language — the division, the floor, the remainder, the truth of a value, the text of a value |
+| `semantics/language.ts` | **new**: the rules of a source language — the division, the floor, the remainder, the promotion of a whole number, the kind of the answer of a call, the truth of a value, the text of a value |
 | `semantics/frontend.ts` | `frontendFor` answers the Python frontend for `python` and `py` |
 | `core/types.ts` | the contract's type language has a `text`, which is the type of a string |
 | `core/ir.ts` | the IR has a `//`, which is a floor division |
 | `core/semantic-ir.ts` | two new operations: `floorDiv` and `floorMod` |
-| `semantics/ir-resolve.ts`, `semantics/ir-function.ts` | the arithmetic rules of the source language: a division of two whole numbers is a true division in Python, and a remainder takes the sign of its divisor |
+| `semantics/builtins.ts` | the whole numbers: `whole.abs`, `whole.min`, `whole.max`, `whole.floor`, `whole.ceil` and `whole.trunc` |
+| `semantics/ir-resolve.ts`, `semantics/ir-function.ts` | the arithmetic rules of the source language: a division of two whole numbers is a true division in Python, a remainder takes the sign of its divisor, a whole number beside a fraction is a fraction, and the answer of a call keeps the kind of the number it was given |
 | `semantics/module.ts` | the whole-number kind of the program model is named for what it is, and a module says whether its body is the entry guard |
 | `semantics/program.ts` | a module the program merely imports runs nothing, even when it holds the entry guard |
-| `toolchain/ir-c.ts` | the two new operations, lowered |
+| `toolchain/ir-c.ts` | the two new operations, lowered, and the whole numbers beside them |
+| `toolchain/driver.ts` | the whole numbers of a program, lowered beside the driver |
 | `toolchain/ir-machine.ts`, `toolchain/ir-wasm.ts` | the two new operations are **not** lowered: a build that asks for them is refused by name |
 | `runtime/abi.ts`, `runtime/nim.ts` | the style a value is written as text in, and the entry point that sets it |
 | `toolchain/driver.ts`, `toolchain/program-emit.ts` | the driver sets the style when the program starts, and writes a boolean, a null and a whole number the way the language writes them |
@@ -445,6 +516,8 @@ The rules that differ between the languages are stated in one file,
 |---|---|---|
 | the division of two whole numbers | a whole division | a true division |
 | the remainder | truncated | floored |
+| a whole number beside a fraction | refused | a fraction |
+| the answer of a call that takes a number | a fraction | the kind of the number it was given |
 | the truth of a value | a number is false when it is zero, a text when it is empty, a reference when it is nothing | a condition is a boolean; the rest is refused |
 | the text of a value | the JavaScript style | the Python style |
 
@@ -492,8 +565,9 @@ here because they are the shape of what a Blaze program is.
   that the binary printed what the source prints.
 - `test/python-semantics.test.ts` — the rules that differ, each with the
   program that shows them: a whole number, a true division, a floored
-  division, a floored remainder, a boolean condition, and the text of a
-  number, of a boolean and of `None`.
+  division, a floored remainder, a whole number beside a fraction, the kind of
+  the answer of a call, a boolean condition, and the text of a number, of a
+  boolean and of `None`.
 - `test/language-rules.test.ts` — the rules of a language are asked of the
   language: the same expression under two languages is two answers.
 
@@ -506,9 +580,10 @@ a new section and needs nothing else.
   managers, no pattern matching, no `async`.** Each is refused with the line
   it was written on.
 - **No standard library.** A module of the project is a file of the project:
-  `import os` and `import math` are refused, and `from helpers import dot` is
-  the only import there is. The operations the compiler has are written
-  `math.floor(x)` and the rest, and `math` is a name the compiler knows.
+  `from helpers import dot` is the only import there is, beside the two
+  modules of the standard library the compiler knows: `math` and `sys`. The
+  operations the compiler has are written `math.floor(x)` and the rest, and
+  `math` is a name the compiler knows and not a file of the project.
 - **The whole numbers are sixty-four bits and Python's are not.** A program
   that overflows differs from its source, and the build catches it only where
   the value is printed.
@@ -535,7 +610,15 @@ a new section and needs nothing else.
   the two are two numbers. A program writes the multiplication out.
 - **The machine and the WebAssembly backends have no floor division.** The
   C backend has one, and a build that asks another backend for it is refused by
-  name rather than answered with the truncating division it has.
+  name rather than answered with the truncating division it has. The whole
+  numbers are refused by name there too: a whole number is a machine word and
+  a double is not.
+- **A whole operator is a whole operator.** `a % b` and `a // b` need whole
+  numbers on both sides, as they do in the compiler, and a fraction beside one
+  is refused rather than answered with the fraction Python answers it with.
+- **The length of a value written out is not read.** `len("hello")` is
+  refused: the compiler reads a length off the name it is written by, and a
+  program writes the value into a name first.
 
 ### Open questions
 

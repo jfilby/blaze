@@ -866,6 +866,34 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
         return `trunc(${argument(0)})`;
       case "Math.random":
         return `${RUNTIME_NAME}_random()`;
+      // The whole numbers: a magnitude, a smaller, a larger, and the three
+      // roundings that answer a whole number. The compiler's `Math` builtins
+      // answer a fraction, and a whole number is written as one, so each of
+      // these is the fraction one cast to the whole number it is.
+      //
+      // The operands are bound first: an argument may be a call, and one
+      // written into the argument list would run once per mention rather than
+      // once per operation.
+      case "whole.abs": {
+        const value = argument(0);
+        return `({ long long blaze_operand = (long long)(${value}); (long long)(blaze_operand < 0 ? -blaze_operand : blaze_operand); })`;
+      }
+      case "whole.min": {
+        const left = argument(0);
+        const right = argument(1);
+        return `({ long long blaze_left = (long long)(${left}); long long blaze_right = (long long)(${right}); (long long)(blaze_left < blaze_right ? blaze_left : blaze_right); })`;
+      }
+      case "whole.max": {
+        const left = argument(0);
+        const right = argument(1);
+        return `({ long long blaze_left = (long long)(${left}); long long blaze_right = (long long)(${right}); (long long)(blaze_left > blaze_right ? blaze_left : blaze_right); })`;
+      }
+      case "whole.floor":
+        return `((long long)floor(${argument(0)}))`;
+      case "whole.ceil":
+        return `((long long)ceil(${argument(0)}))`;
+      case "whole.trunc":
+        return `((long long)trunc(${argument(0)}))`;
       case "sharedBlock":
         return `${RUNTIME_NAME}_allocate((size_t)(${argument(0)}))`;
       case "u256_from_u64x2": {

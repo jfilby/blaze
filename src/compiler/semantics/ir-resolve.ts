@@ -73,8 +73,8 @@ import type {
 } from "./module.ts";
 import type { CallEdge, Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
 import type { Expression, Statement } from "../core/ir.ts";
-import { ARGV, ARGV_LENGTH, SHARED, builtinFor } from "./builtins.ts";
-import { rulesFor } from "./language.ts";
+import { ARGV, ARGV_LENGTH, SHARED, builtinFor, type BuiltinSignature } from "./builtins.ts";
+import { rulesFor, type LanguageRules } from "./language.ts";
 import {
   BOOLEAN,
   NUMERIC,
@@ -907,6 +907,16 @@ const UNARY: Record<ProgramUnaryOp, UnaryOp> = { "-": "neg", "+": "pos", "!": "n
 /** The two `Math.` builtins that are one operation rather than a call. */
 const EXTREMES: Record<string, "min" | "max"> = { "Math.min": "min", "Math.max": "max" };
 
+/**
+ * The builtin that answers a call in whole numbers, where the language says
+ * the answer keeps the kind of the number it was given.
+ */
+const WHOLE_ANSWERS: Record<string, string> = {
+  "Math.abs": "whole.abs",
+  "Math.min": "whole.min",
+  "Math.max": "whole.max",
+};
+
 /* -------------------------------------------------------------------------- */
 /* What a function reads of the scope around it                               */
 /* -------------------------------------------------------------------------- */
@@ -1557,11 +1567,11 @@ class ProgramResolver {
    */
   private readonly httpHandlers: string[] = [];
   /**
-   * The language the program was written in, whose rules are asked of the
-   * language: a division of two whole numbers is a whole division in one
-   * language and a true division in another.
+   * The rules of that language, asked of the language rather than of the code
+   * that reads them: a whole number beside a fraction is refused in one
+   * language and promoted to a fraction in the other.
    */
-  private readonly language: string;
+  private readonly rules: LanguageRules;
 
   constructor(
     body: ProgramBody,
@@ -1578,7 +1588,7 @@ class ProgramResolver {
     this.functions = functions;
     this.objectLayoutNames = objectLayoutNames;
     this.literalKeys = literalKeys;
-    this.language = language;
+    this.rules = rulesFor(language);
   }
 
   resolve(): DraftProgram {
@@ -2666,8 +2676,13 @@ class ProgramResolver {
     // so does this, at the one place every use passes through: a call's
     // argument, a name written, an element written, a counter stepped and a
     // chosen arm all arrive here with the type their use fixed them at.
+    //
+    // A language that promotes does not refuse: a whole number beside a
+    // fraction is a fraction there, and the whole number is read as the
+    // fraction it is. That is the one place the two kinds of number meet, and
+    // the language is what says which way they meet.
     const wanted = primitive(expect);
-    if (this.bigintWritten(value, line) && wanted !== null && isFloat(numeric(wanted))) {
+    if (this.rules.promotion === "refuse" && this.bigintWritten(value, line) && wanted !== null && isFloat(numeric(wanted))) {
       const read = numeric(wanted);
       throw programError(
         `a bigint is read as a ${typeToString(read)}`,
@@ -3377,7 +3392,7 @@ class ProgramResolver {
       const name = primitive(draftType(value));
       return name !== null && isWide(name);
     });
-    if (leftBig !== rightBig && !wideBeside) {
+    if (leftBig !== rightBig && !wideBeside && this.rules.promotion === "refuse") {
       // What each side is, rather than which of the two is a bigint: a `u256`
       // is held at sixty-four bits and so reads as one here, and naming the two
       // as "a bigint and a bigint" says of a program that nothing is wrong.
@@ -3409,11 +3424,16 @@ class ProgramResolver {
     // language: a division of two whole numbers is a whole division in one
     // language and a true division in another, and the answer of a true
     // division is a fraction however whole its sides were.
-    const rules = rulesFor(this.language);
+    const rules = this.rules;
     const trueDivision = op === "/" && rules.division === "true";
+    // A whole number beside a fraction is a fraction in a language that
+    // promotes: `1 + 1.5` is 2.5 there, and the answer is the fraction it is.
+    // The whole number is read as the fraction it is, and the answer is not a
+    // whole number, so it is written the way a fraction is written.
+    const promoted = leftBig !== rightBig && rules.promotion === "promote";
     const type = COMPARISONS[op] !== null
       ? numeric("bool")
-      : trueDivision
+      : trueDivision || promoted
         ? numeric("f64")
         : // A wide number beside a bigint keeps its own width: the `i64` a bigint
         // is computed in would drop the three limbs above the first before a
@@ -3426,7 +3446,7 @@ class ProgramResolver {
           : whole
             ? numeric(wholeResult(leftName, wholeRightName))
             : numeric(numericResult(leftName, wholeRightName, op === "/"));
-    return leftBig && !trueDivision
+    return leftBig && !trueDivision && !promoted
       ? { k: "binary", op, left, right, type, bigint: true }
       : { k: "binary", op, left, right, type };
   }
@@ -3515,6 +3535,26 @@ class ProgramResolver {
     return { kind: "primitive", name: numericResult(primitive(a), primitive(b), false) };
   }
 
+  /**
+   * The builtin a call is answered by, when the answer of the call keeps the
+   * kind of the number it was given.
+   *
+   * The compiler's `Math.abs` answers a fraction, and a language whose whole
+   * numbers are whole answers the magnitude of one as a whole number. The
+   * language is what says which one a program means, and the call is answered
+   * by the whole one where the language says so.
+   */
+  private answeredBy(name: string, builtin: BuiltinSignature, args: readonly DraftValue[]): { name: string; builtin: BuiltinSignature } {
+    if (!this.rules.wholeAnswers) return { name, builtin };
+    const whole = WHOLE_ANSWERS[name];
+    if (whole === undefined || args.length === 0) return { name, builtin };
+    // Every side has to be a whole number: the answer of a call over a whole
+    // number and a fraction is a fraction, which is what the language says.
+    if (!args.every((argument) => isBigint(argument))) return { name, builtin };
+    const answered = builtinFor(whole);
+    return answered === null ? { name, builtin } : { name: whole, builtin: answered };
+  }
+
   private call(value: ProgramValue & { k: "call" }, line: number): DraftCall {
     const builtin = builtinFor(value.function);
     if (builtin !== null) {
@@ -3537,6 +3577,13 @@ class ProgramResolver {
       const args = value.args.map((argument, position) =>
         this.value(argument, builtin.params[position].kind === "text" ? null : builtin.params[position], line),
       );
+      // The answer of a call that takes a number and answers a number keeps the
+      // kind of the number it was given, in a language that says so: Python's
+      // `abs` of a whole number is a whole number, and the compiler's
+      // `Math.abs` answers a fraction. The two are two kinds of number, and
+      // the printer writes them differently, so the call is answered by the
+      // whole one where the language says so.
+      const answered = this.answeredBy(value.function, builtin, args);
       // The handler a server is given is called by the runtime, which passes
       // it the request and the response and nothing else. The names the
       // handler captured are not among them, so the handler is marked here and
@@ -3557,22 +3604,25 @@ class ProgramResolver {
         }
       }
       return {
-        name: value.function,
+        name: answered.name,
         signature: {
-          name: value.function,
-          symbol: value.function,
-          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
-          returns: contractText(builtin.returns),
+          name: answered.name,
+          symbol: answered.name,
+          params: answered.builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          returns: contractText(answered.builtin.returns),
         },
         args,
-        returns: builtin.returns,
+        returns: answered.builtin.returns,
         // What the builtin does beyond answering: a builtin that reads the
         // world is not a value the optimizer may compute twice or move.
-        effects: [...(builtin.effects ?? [])],
+        effects: [...(answered.builtin.effects ?? [])],
         builtin: true,
-        bigint: false,
-        // A builtin is written by the compiler and returns a double, so the
-        // question a wide number asks it does not arise.
+        // A builtin that answers a whole number answers a bigint, which is
+        // what says the answer is a whole number and not a fraction: the
+        // printer writes the two differently.
+        bigint: returnsBigint(contractText(answered.builtin.returns)),
+        // A builtin is written by the compiler and returns a number of its
+        // own, so the question a wide number asks it does not arise.
         wide: null,
       };
     }
@@ -4046,11 +4096,17 @@ class ProgramLowering {
    * divisor in the other.
    */
   private readonly language: string;
+  /**
+   * The rules of that language, asked of the language rather than of the code
+   * that reads them.
+   */
+  private readonly rules: LanguageRules;
 
   constructor(used: Set<string>, boxedTexts?: Set<string>, language: string = "typescript") {
     this.used = used;
     this.boxedTexts = boxedTexts ?? new Set();
     this.language = language;
+    this.rules = rulesFor(language);
   }
 
   lower(program: DraftProgram): SemanticProgram {
@@ -4996,7 +5052,7 @@ class ProgramLowering {
     // language: a division of two whole numbers is a whole division in one
     // language and a true division in another, and a remainder takes the sign
     // of its left side in one and of its divisor in the other.
-    const rules = rulesFor(this.language);
+    const rules = this.rules;
     const trueDivision = op === "/" && rules.division === "true";
     const type = trueDivision
       ? numeric("f64")

@@ -123,6 +123,47 @@ test("a division is a true division, and a remainder takes the sign of its divis
   assert.equal(delivered.stdout, "3.5\n3\n1\n");
 });
 
+test("a whole number beside a fraction is a fraction", async () => {
+  // Python has no such a thing as a whole number beside a fraction: the pair
+  // is a fraction there.
+  const source = ["print(1 + 2.5)", "print(2.5 + 1)", "x = 3", "print(x * 1.5)", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "3.5\n3.5\n4.5\n");
+});
+
+test("the magnitude of a whole number is a whole number", async () => {
+  // Python's `abs` of a whole number is a whole number, and the compiler's
+  // `Math.abs` answers a fraction: the two are two kinds of number, and they
+  // print differently.
+  const source = ["print(abs(-3))", "print(abs(-3.5))", "print(min(3, 4))", "print(max(3, 4))", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "3\n3.5\n3\n4\n");
+});
+
+test("a conversion answers a whole number", async () => {
+  const source = ["print(int(3.7))", "import math", "print(math.floor(3.7))", "print(math.ceil(3.2))", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "3\n3\n4\n");
+});
+
+test("a dict is read by its key", async () => {
+  const source = ["d = {'left': 1, 'right': 2}", "print(d['left'])", 'print(f"{d[\'right\']}")', ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "1\n2\n");
+});
+
 test("a function of a program is called and its result is printed", async () => {
   const source = [
     "def twice(n: int) -> int:",
