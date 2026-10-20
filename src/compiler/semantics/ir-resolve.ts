@@ -259,7 +259,7 @@ type DraftValue =
       bigint?: true;
     }
   /** A field of one object a name holds, read out of it. */
-  | { k: "field"; object: DraftValue; layout: string; field: string; type: TypeExpr }
+  | { k: "field"; object: DraftValue; layout: string; field: string; type: TypeExpr; bigint?: true }
   /** An object literal, resolved so it is allocated wherever it is written. */
   | { k: "object"; fields: { name: string; value: DraftValue }[]; layout: string; type: TypeExpr }
   /**
@@ -497,6 +497,10 @@ function isBigint(value: DraftValue): boolean {
     case "binary":
     case "unary":
     case "conditional":
+      return value.bigint === true;
+    case "field":
+      // A field the layout holds a whole number in holds a whole number: the
+      // layout is what says the kind of the value.
       return value.bigint === true;
     case "call":
       // What a call hands back is what the callee declared it returns. Without
@@ -3002,12 +3006,18 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: write the field an object holds, or read one the layout states`,
           );
         }
+        const fieldType = parseType(found.type);
+        // A field the layout holds a whole number in is a whole number: the
+        // layout is what says the kind of the value, and the two kinds print
+        // differently.
+        const whole = fieldType.kind === "primitive" && fieldType.name === BIGINT_TYPE;
         return {
           k: "field",
           object: base,
           layout: laid as string,
           field: value.field,
-          type: parseType(found.type),
+          type: fieldType,
+          ...(whole ? { bigint: true as const } : {}),
         };
       }
       case "object": {
@@ -4012,6 +4022,12 @@ class ProgramResolver {
 interface LoopTarget {
   header: string;
   exit: string;
+  /**
+   * True when a `break` inside the loop leaves it. A loop whose condition is
+   * always true does not end by its condition, and the code after it runs only
+   * if the body leaves it.
+   */
+  left?: boolean;
 }
 
 /** One block being written, what it owns, and the loop whose body it is. */
@@ -4516,18 +4532,24 @@ class ProgramLowering {
       }
       case "while": {
         const condition = this.value(statement.condition, null, statement.line);
-        const loop = { kind: "while" as const, condition, ...this.loop(statement.body) };
+        const { target, ...info } = this.loop(statement.body);
+        const loop = { kind: "while" as const, condition, ...info };
         const cond = statement.condition as { k?: string; value?: boolean; text?: string };
         const isConstantTrue =
           (cond.k === "boolean" && cond.value === true) ||
           (cond.k === "literal" && (cond.text === "true" || cond.text === "1"));
-        if (isConstantTrue) (loop as { neverExits?: boolean }).neverExits = true;
+        // A loop whose condition is always true does not end by its condition,
+        // and the code after it runs only where the body leaves it. A body that
+        // leaves the loop may or may not do so, and a body that does not leaves
+        // it never.
+        const neverExits = isConstantTrue && target.left !== true;
+        if (neverExits) (loop as { neverExits?: boolean }).neverExits = true;
         this.statement({
           k: "loop",
           loop,
           line: statement.line,
         });
-        if (isConstantTrue) {
+        if (neverExits) {
           if (this.frame().block.terminator.k === "next") {
             this.frame().block.terminator = { k: "unreachable" };
           }
@@ -4538,7 +4560,7 @@ class ProgramLowering {
         const condition = this.value(statement.condition, null, statement.line);
         this.statement({
           k: "loop",
-          loop: { kind: "doWhile", condition, ...this.loop(statement.body) },
+          loop: { kind: "doWhile", condition, ...this.loopInfo(statement.body) },
           line: statement.line,
         });
         return;
@@ -4559,7 +4581,7 @@ class ProgramLowering {
             inclusive: statement.inclusive,
             down: statement.down,
             step,
-            ...this.loop(statement.body),
+            ...this.loopInfo(statement.body),
           },
           line: statement.line,
         });
@@ -4577,7 +4599,7 @@ class ProgramLowering {
             elementType: statement.type,
             of: statement.of,
             length,
-            ...this.loop(statement.body),
+            ...this.loopInfo(statement.body),
           },
           line: statement.line,
         });
@@ -4605,12 +4627,23 @@ class ProgramLowering {
    * before the body is written, and control resumes in the block the loop was
    * written in, which is the one the loop statement is in.
    */
-  private loop(body: readonly DraftStatement[]): { header: string; exit: string; body: SemanticBlock } {
+  private loop(
+    body: readonly DraftStatement[],
+  ): { header: string; exit: string; body: SemanticBlock; target: LoopTarget } {
     const header = this.blockId();
     // Control resumes in the block the loop was written in, which is the one
     // the loop statement is in, and never in a block of its own.
     const target: LoopTarget = { header, exit: this.frame().block.id };
-    return { header, exit: target.exit, body: this.arm(body, target, true) };
+    return { header, exit: target.exit, body: this.arm(body, target, true), target };
+  }
+
+  /**
+   * The loop a body runs in, without the target the loop itself holds: the
+   * target says whether the loop is left, and only the loop itself asks.
+   */
+  private loopInfo(body: readonly DraftStatement[]): { header: string; exit: string; body: SemanticBlock } {
+    const { target, ...info } = this.loop(body);
+    return info;
   }
 
   /**
@@ -4623,6 +4656,9 @@ class ProgramLowering {
     const frame = this.frame();
     const target = frame.loop;
     if (target === null) return;
+    // A loop that is left does not hold the code after it: the loop may end
+    // by its `break` and the code after it runs.
+    if (leaving) target.left = true;
     const names: string[] = [];
     for (let index = this.frames.length - 1; index >= 0; index -= 1) {
       const left = this.frames[index];
