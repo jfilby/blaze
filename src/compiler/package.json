@@ -13,7 +13,7 @@
   "scripts": {
     "aic": "node cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-reporter=./test/reporter.ts test/*.test.ts"
+    "test": "node test/run.ts --test-reporter=./test/reporter.ts test/*.test.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.65",
