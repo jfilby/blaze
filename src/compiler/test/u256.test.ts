@@ -22,11 +22,14 @@ import { foldSemanticValue } from "../semantics/optimize-ir.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { run } from "../core/process.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildObject as buildMachineObject } from "../toolchain/ir-machine.ts";
 import { moduleBytes } from "../toolchain/ir-wasm.ts";
+import { moduleServices } from "../toolchain/wasm.ts";
+import { hostRuntimeSource } from "../toolchain/wasm-host-runtime.ts";
 import { Encoder, RDI, RSI, RDX, R8, R9, R10, R11, mem } from "../toolchain/x86.ts";
 
 /** The four general registers a wide operation is carried out in. */
@@ -1450,7 +1453,7 @@ test("a shift by a whole number is refused rather than answered", async () => {
   );
 });
 
-test("the backends write a whole number as the same limbs in the same order", () => {
+test("the backends write a whole number as the same limbs in the same order", async () => {
   // The IR says a wide number is four limbs least significant first, and says so
   // once, because it is the order the runtime reads a value it is handed a
   // pointer to in. A backend is free to carry the number however it likes — in
@@ -1463,10 +1466,10 @@ test("the backends write a whole number as the same limbs in the same order", ()
   const left = "fedcba98765432100123456789abcdeffedcba98765432100123456789abcdef";
   assert.equal(limbsOf("u256"), 4, "a u256 is four limbs, and the count is the IR's");
   const expected = "fedcba9876543210" + "0123456789abcdef" + "fedcba9876543210" + "0123456789abcdef";
-  assert.equal(wasmBackendAnswer("add", left, "0".repeat(64)), expected, "the WebAssembly backend writes the limbs least significant first");
+  assert.equal(await wasmBackendAnswer("add", left, "0".repeat(64)), expected, "the WebAssembly backend writes the limbs least significant first");
 });
 
-test("a wide shift count of the width or more answers zero rather than walking off the number", () => {
+test("a wide shift count of the width or more answers zero rather than walking off the number", async () => {
   // The C runtime answers a count of the width or more with a whole number of
   // zero limbs, and the language agrees: nothing of the number survives a move
   // past its own width. The WebAssembly backend walked a padded copy of the
@@ -1477,7 +1480,7 @@ test("a wide shift count of the width or more answers zero rather than walking o
   const value = BigInt(`0x${left}`);
   for (const op of ["shl", "shr"] as const) {
     for (const count of [0, 63, 64, 65, 255, 256, 257, 320, 1000]) {
-      const answer = wasmAnswerOf({
+      const answer = await wasmAnswerOf({
         k: "arith",
         type: U256,
         op,
@@ -1579,7 +1582,7 @@ test("the C, machine and WebAssembly backends answer one vector set the same way
       // answered is asserted below, so an operation leaving that set is visible.
       let answered: string | null = null;
       try {
-        answered = wasmBackendAnswer(op, leftText, rightText);
+        answered = await wasmBackendAnswer(op, leftText, rightText);
       } catch (error) {
         if (!(error instanceof Error) || !error.message.includes("has not written")) throw error;
         wasmRefused.add(op);
@@ -1595,14 +1598,13 @@ test("the C, machine and WebAssembly backends answer one vector set the same way
   // losing one is a failing test rather than a line that quietly vanished.
   assert.deepEqual(
     [...wasmAnswered].sort(),
-    ["add", "and", "or", "shl", "shr", "sub", "xor"],
+    ["add", "and", "div", "mod", "mul", "or", "shl", "shr", "sub", "xor"],
     "the operations the WebAssembly backend answers of this vector set",
   );
-  // Division and the remainder are refused by name there, not answered and not
-  // silently lowered to nothing.
-  assert.ok(wasmRefused.has("div"), "the WebAssembly backend refuses a wide div");
-  assert.ok(wasmRefused.has("mod"), "the WebAssembly backend refuses a wide mod");
-  assert.ok(!wasmAnswered.has("div") && !wasmAnswered.has("mod"), "the WebAssembly backend never answered a div or a mod");
+  // A division and a remainder are the kernel's, and the module calls it the
+  // way the other two backends do.
+  assert.ok(!wasmRefused.has("div"), "the WebAssembly backend answers a wide div");
+  assert.ok(!wasmRefused.has("mod"), "the WebAssembly backend answers a wide mod");
 });
 
 test("a wide division by a literal zero is refused by name, and not constant-folded", () => {
@@ -1749,8 +1751,8 @@ const wasmRefused = new Set<DifferentialOp>();
  * the module returns. An operation this backend has not written raises, which is
  * how the caller learns it is not answered.
  */
-function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): string {
-  return wasmAnswerOf({
+async function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {
+  return await wasmAnswerOf({
     k: "arith",
     type: U256,
     op: op as ArithOp,
@@ -1768,7 +1770,7 @@ function wasmBackendAnswer(op: DifferentialOp, leftText: string, rightText: stri
  * the module returns. An operation this backend has not written raises, which is
  * how the caller learns it is not answered.
  */
-function wasmAnswerOf(value: SemanticValue): string {
+async function wasmAnswerOf(value: SemanticValue): Promise<string> {
   const memory = new engine.Memory({ initial: 1 });
   const bytes = moduleBytes(
     {
@@ -1803,7 +1805,7 @@ function wasmAnswerOf(value: SemanticValue): string {
       definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
     },
   );
-  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
+  const instance = new engine.Instance(new engine.Module(bytes), await wasmImports(bytes, memory));
   const address = (instance.exports as { subject: () => number }).subject();
   const view = new Uint8Array(memory.buffer);
   let limbs = "";
@@ -1811,6 +1813,27 @@ function wasmAnswerOf(value: SemanticValue): string {
     for (let at = 7; at >= 0; at -= 1) limbs += view[address + limb * 8 + at].toString(16).padStart(2, "0");
   }
   return limbs;
+}
+
+/**
+ * The imports a module needs, which are the services of the host ABI.
+ *
+ * The runtime the host carries is the same one the module calls into, so the
+ * test writes it out and imports it: the wide arithmetic a module answers is
+ * the host's own kernel, and a test that answered it with another copy of the
+ * kernel would be testing the copy.
+ */
+async function wasmImports(bytes: Uint8Array, memory: { buffer: ArrayBuffer }): Promise<Record<string, unknown>> {
+  const services = moduleServices(bytes);
+  if (services.length === 0) return { env: { memory, pow: Math.pow } };
+  const directory = await scratch("blaze-u256-runtime-");
+  const path = join(directory, "runtime.mjs");
+  await writeFile(path, hostRuntimeSource(services), "utf8");
+  const runtime = (await import(pathToFileURL(path).href)) as Record<string, unknown>;
+  (runtime["setMemory"] as (value: unknown) => void)(memory);
+  const env: Record<string, unknown> = { memory, pow: Math.pow };
+  for (const service of services) env[service] = runtime[service];
+  return { env };
 }
 
 async function machineBackendAnswer(op: DifferentialOp, leftText: string, rightText: string): Promise<string> {

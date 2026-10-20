@@ -46,7 +46,7 @@ async function compute(
   });
   const result = run("node", [built.hostPath, built.modulePath], { input: vectors, timeoutMs: 60_000 });
   assert.equal(result.stdout, expected, result.stderr);
-  return { stdout: result.stdout, stderr: result.stderr, code: result.code };
+  return { stdout: result.stdout, stderr: result.stderr, code: result.code ?? 0 };
 }
 
 /** The module of a function, as the bytes the build emits. */

@@ -949,7 +949,7 @@ class FunctionEmitter {
     const written = this.raw(value, depth);
     const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
     if (asAny) {
-      if (isTextType(value.type) || (value.k === "const" && typeof (value as any).text === "string") || value.k === "text") {
+      if (isTextType(value.type) || value.k === "text") {
         return `${RUNTIME_NAME}_box_string(${written})`;
       }
       if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;

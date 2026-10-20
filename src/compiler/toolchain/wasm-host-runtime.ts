@@ -232,7 +232,13 @@ const commandLine = process.argv;
 
 /* A raise is the runtime's own way of stopping a program, and it is not a
    fault: the host catches it and reports it the way the C runtime does. */
-class BlazeError extends Error {}
+export class BlazeError extends Error {}
+
+/* The memory the module and the host share. The host creates it and hands it
+   over; a reader of the runtime that is not the host sets it itself. */
+export function setMemory(value) {
+  memory = value;
+}
 
 
 function view() {
@@ -413,7 +419,7 @@ const RUNTIME_SERVICES: readonly RuntimePart[] = [
   {
     service: "blaze_rt_allocate",
     source: `
-function blaze_rt_allocate(bytes) {
+export function blaze_rt_allocate(bytes) {
   return block(Number(bytes), ALIGNMENT, true);
 }
 `,
@@ -421,7 +427,7 @@ function blaze_rt_allocate(bytes) {
   {
     service: "blaze_rt_allocate_uninitialized",
     source: `
-function blaze_rt_allocate_uninitialized(bytes) {
+export function blaze_rt_allocate_uninitialized(bytes) {
   return block(Number(bytes), ALIGNMENT, false);
 }
 `,
@@ -429,7 +435,7 @@ function blaze_rt_allocate_uninitialized(bytes) {
   {
     service: "blaze_rt_reallocate",
     source: `
-function blaze_rt_reallocate(pointer, bytes) {
+export function blaze_rt_reallocate(pointer, bytes) {
   const size = Number(bytes);
   if (pointer === 0) return block(size, ALIGNMENT, true);
   const header = readHeader(pointer);
@@ -456,7 +462,7 @@ function blaze_rt_reallocate(pointer, bytes) {
   {
     service: "blaze_rt_retain",
     source: `
-function blaze_rt_retain(pointer) {
+export function blaze_rt_retain(pointer) {
   if (pointer === 0) return 0;
   const header = readHeader(pointer);
   writeHeader(pointer, header.length, header.alignment, header.references + 1, header.capacity);
@@ -467,7 +473,7 @@ function blaze_rt_retain(pointer) {
   {
     service: "blaze_rt_release",
     source: `
-function blaze_rt_release(pointer) {
+export function blaze_rt_release(pointer) {
   if (pointer === 0) return;
   const header = readHeader(pointer);
   if (header.references > 1) {
@@ -486,7 +492,7 @@ function blaze_rt_release(pointer) {
   {
     service: "blaze_rt_string_new",
     source: `
-function blaze_rt_string_new(bytes, length) {
+export function blaze_rt_string_new(bytes, length) {
   const count = Number(length);
   const source = bytes === 0 ? new Uint8Array(0) : new Uint8Array(memory.buffer, bytes, count);
   return makeText(source);
@@ -496,7 +502,7 @@ function blaze_rt_string_new(bytes, length) {
   {
     service: "blaze_rt_string_append",
     source: `
-function blaze_rt_string_append(left, right) {
+export function blaze_rt_string_append(left, right) {
   const one = textBytes(left);
   const two = textBytes(right);
   const joined = new Uint8Array(one.length + two.length);
@@ -509,7 +515,7 @@ function blaze_rt_string_append(left, right) {
   {
     service: "blaze_rt_string_clone",
     source: `
-function blaze_rt_string_clone(text) {
+export function blaze_rt_string_clone(text) {
   return makeText(textBytes(text));
 }
 `,
@@ -517,7 +523,7 @@ function blaze_rt_string_clone(text) {
   {
     service: "blaze_rt_string_length",
     source: `
-function blaze_rt_string_length(text) {
+export function blaze_rt_string_length(text) {
   if (text === 0) return 0n;
   return BigInt(readHeader(text).length - 1);
 }
@@ -526,7 +532,7 @@ function blaze_rt_string_length(text) {
   {
     service: "blaze_rt_text_length",
     source: `
-function blaze_rt_text_length(text) {
+export function blaze_rt_text_length(text) {
   return BigInt(textBytes(text).length);
 }
 `,
@@ -534,7 +540,7 @@ function blaze_rt_text_length(text) {
   {
     service: "blaze_rt_array_new",
     source: `
-function blaze_rt_array_new(count, elementSize) {
+export function blaze_rt_array_new(count, elementSize) {
   const elements = Number(count);
   const width = Number(elementSize);
   const pointer = block(elements * width, ALIGNMENT, true);
@@ -548,7 +554,7 @@ function blaze_rt_array_new(count, elementSize) {
   {
     service: "blaze_rt_array_resize",
     source: `
-function blaze_rt_array_resize(pointer, count, elementSize) {
+export function blaze_rt_array_resize(pointer, count, elementSize) {
   return blaze_rt_reallocate(pointer, Number(count) * Number(elementSize));
 }
 `,
@@ -556,7 +562,7 @@ function blaze_rt_array_resize(pointer, count, elementSize) {
   {
     service: "blaze_rt_object_new",
     source: `
-function blaze_rt_object_new(bytes, alignment) {
+export function blaze_rt_object_new(bytes, alignment) {
   const at = Number(alignment) === 0 ? ALIGNMENT : Number(alignment);
   return block(Number(bytes), at, true);
 }
@@ -565,7 +571,7 @@ function blaze_rt_object_new(bytes, alignment) {
   {
     service: "blaze_rt_object_size",
     source: `
-function blaze_rt_object_size(pointer) {
+export function blaze_rt_object_size(pointer) {
   if (pointer === 0) return 0n;
   return BigInt(readHeader(pointer).length);
 }
@@ -574,7 +580,7 @@ function blaze_rt_object_size(pointer) {
   {
     service: "blaze_rt_print_text",
     source: `
-function blaze_rt_print_text(text) {
+export function blaze_rt_print_text(text) {
   writeOut(textBytes(text));
 }
 `,
@@ -582,7 +588,7 @@ function blaze_rt_print_text(text) {
   {
     service: "blaze_rt_print_text_n",
     source: `
-function blaze_rt_print_text_n(text, length) {
+export function blaze_rt_print_text_n(text, length) {
   const count = Number(length);
   if (text === 0) return;
   writeOut(new Uint8Array(memory.buffer, text, count));
@@ -592,7 +598,7 @@ function blaze_rt_print_text_n(text, length) {
   {
     service: "blaze_rt_print_number",
     source: `
-function blaze_rt_print_number(value) {
+export function blaze_rt_print_number(value) {
   if (value === 0 && Object.is(value, -0)) {
     writeOut(new TextEncoder().encode(textStyle === 1 ? "-0.0" : "-0"));
     return;
@@ -604,7 +610,7 @@ function blaze_rt_print_number(value) {
   {
     service: "blaze_rt_print_whole",
     source: `
-function blaze_rt_print_whole(value, bigint) {
+export function blaze_rt_print_whole(value, bigint) {
   const magnitude = value < 0n ? -value : value;
   let written = magnitude.toString();
   if (value < 0n) written = "-" + written;
@@ -616,7 +622,7 @@ function blaze_rt_print_whole(value, bigint) {
   {
     service: "blaze_rt_print_newline",
     source: `
-function blaze_rt_print_newline() {
+export function blaze_rt_print_newline() {
   process.stdout.write("\\n");
 }
 `,
@@ -624,7 +630,7 @@ function blaze_rt_print_newline() {
   {
     service: "blaze_rt_raise",
     source: `
-function blaze_rt_raise(message) {
+export function blaze_rt_raise(message) {
   lastError = new TextDecoder().decode(textBytes(message));
   throw new BlazeError(lastError);
 }
@@ -633,7 +639,7 @@ function blaze_rt_raise(message) {
   {
     service: "blaze_rt_to_text",
     source: `
-function blaze_rt_to_text(value) {
+export function blaze_rt_to_text(value) {
   const boxed = dynLookup(value);
   if (boxed === null) return makeText(formatNumber(value));
   if (boxed.kind === "number") return makeText(formatNumber(boxed.number));
@@ -656,7 +662,7 @@ function blaze_rt_to_text(value) {
   {
     service: "blaze_rt_to_number",
     source: `
-function blaze_rt_to_number(value) {
+export function blaze_rt_to_number(value) {
   const boxed = dynLookup(value);
   if (boxed === null) return value;
   if (boxed.kind === "number" || boxed.kind === "bool") return boxed.number;
@@ -668,7 +674,7 @@ function blaze_rt_to_number(value) {
   {
     service: "blaze_rt_format_number",
     source: `
-function blaze_rt_format_number(value, buffer, size) {
+export function blaze_rt_format_number(value, buffer, size) {
   return writeNumber(formatNumber(value), buffer, size);
 }
 `,
@@ -676,7 +682,7 @@ function blaze_rt_format_number(value, buffer, size) {
   {
     service: "blaze_rt_format_number_fixed",
     source: `
-function blaze_rt_format_number_fixed(value, digits, buffer, size) {
+export function blaze_rt_format_number_fixed(value, digits, buffer, size) {
   return writeNumber(formatNumberFixed(value, digits), buffer, size);
 }
 `,
@@ -684,7 +690,7 @@ function blaze_rt_format_number_fixed(value, digits, buffer, size) {
   {
     service: "blaze_rt_random",
     source: `
-function blaze_rt_random() {
+export function blaze_rt_random() {
   return Math.random();
 }
 `,
@@ -692,7 +698,7 @@ function blaze_rt_random() {
   {
     service: "blaze_rt_monotonic_ms",
     source: `
-function blaze_rt_monotonic_ms() {
+export function blaze_rt_monotonic_ms() {
   return Number(process.hrtime.bigint()) / 1000000;
 }
 `,
@@ -700,7 +706,7 @@ function blaze_rt_monotonic_ms() {
   {
     service: "blaze_rt_argv_count",
     source: `
-function blaze_rt_argv_count() {
+export function blaze_rt_argv_count() {
   return BigInt(commandLine.length);
 }
 `,
@@ -708,7 +714,7 @@ function blaze_rt_argv_count() {
   {
     service: "blaze_rt_argv",
     source: `
-function blaze_rt_argv(index) {
+export function blaze_rt_argv(index) {
   const at = Number(index);
   if (at < 2 || at >= commandLine.length) return NaN;
   const value = Number(commandLine[at]);
@@ -719,7 +725,7 @@ function blaze_rt_argv(index) {
   {
     service: "blaze_rt_json_parse",
     source: `
-function blaze_rt_json_parse(text) {
+export function blaze_rt_json_parse(text) {
   const source = new TextDecoder().decode(textBytes(text));
   try {
     return dynRegister({ kind: "value", value: JSON.parse(source) });
@@ -733,7 +739,7 @@ function blaze_rt_json_parse(text) {
   {
     service: "blaze_rt_json_stringify",
     source: `
-function blaze_rt_json_stringify(value) {
+export function blaze_rt_json_stringify(value) {
   const boxed = dynLookup(value);
   return dynRegister({ kind: "text", text: JSON.stringify(boxed === null ? value : boxed.value) });
 }
@@ -742,7 +748,7 @@ function blaze_rt_json_stringify(value) {
   {
     service: "blaze_rt_json_get",
     source: `
-function blaze_rt_json_get(value, field) {
+export function blaze_rt_json_get(value, field) {
   const boxed = dynLookup(value);
   const name = new TextDecoder().decode(textBytes(field));
   const inner = boxed === null ? null : boxed.value;
@@ -755,7 +761,7 @@ function blaze_rt_json_get(value, field) {
   {
     service: "blaze_rt_dyn_array_new",
     source: `
-function blaze_rt_dyn_array_new() {
+export function blaze_rt_dyn_array_new() {
   return dynRegister({ kind: "array", items: [] });
 }
 `,
@@ -763,7 +769,7 @@ function blaze_rt_dyn_array_new() {
   {
     service: "blaze_rt_box_number",
     source: `
-function blaze_rt_box_number(value) {
+export function blaze_rt_box_number(value) {
   return dynRegister({ kind: "number", number: value });
 }
 `,
@@ -771,7 +777,7 @@ function blaze_rt_box_number(value) {
   {
     service: "blaze_rt_box_string",
     source: `
-function blaze_rt_box_string(value) {
+export function blaze_rt_box_string(value) {
   return dynRegister({ kind: "text", text: new TextDecoder().decode(textBytes(value)) });
 }
 `,
@@ -779,7 +785,7 @@ function blaze_rt_box_string(value) {
   {
     service: "blaze_rt_box_null",
     source: `
-function blaze_rt_box_null() {
+export function blaze_rt_box_null() {
   return dynRegister({ kind: "null" });
 }
 `,
@@ -787,7 +793,7 @@ function blaze_rt_box_null() {
   {
     service: "blaze_rt_array_push",
     source: `
-function blaze_rt_array_push(array, value) {
+export function blaze_rt_array_push(array, value) {
   const boxed = dynLookup(array);
   if (boxed === null || boxed.kind !== "array") {
     const fresh = dynRegister({ kind: "array", items: [] });
@@ -802,7 +808,7 @@ function blaze_rt_array_push(array, value) {
   {
     service: "blaze_rt_array_get",
     source: `
-function blaze_rt_array_get(array, index) {
+export function blaze_rt_array_get(array, index) {
   const boxed = dynLookup(array);
   if (boxed === null || boxed.kind !== "array") return 0;
   const at = Number(index);
@@ -814,7 +820,7 @@ function blaze_rt_array_get(array, index) {
   {
     service: "blaze_rt_array_set",
     source: `
-function blaze_rt_array_set(array, index, value) {
+export function blaze_rt_array_set(array, index, value) {
   const boxed = dynLookup(array);
   if (boxed === null || boxed.kind !== "array") return;
   const at = Number(index);
@@ -826,7 +832,7 @@ function blaze_rt_array_set(array, index, value) {
   {
     service: "blaze_rt_array_length",
     source: `
-function blaze_rt_array_length(array) {
+export function blaze_rt_array_length(array) {
   const boxed = dynLookup(array);
   if (boxed === null) return 0;
   if (boxed.kind === "object") return boxed.fields.length / 2;
@@ -838,7 +844,7 @@ function blaze_rt_array_length(array) {
   {
     service: "blaze_rt_md5_create",
     source: `
-function blaze_rt_md5_create() {
+export function blaze_rt_md5_create() {
   return dynRegister({ kind: "hasher", chunks: [] });
 }
 `,
@@ -846,7 +852,7 @@ function blaze_rt_md5_create() {
   {
     service: "blaze_rt_md5_update",
     source: `
-function blaze_rt_md5_update(hasher, text) {
+export function blaze_rt_md5_update(hasher, text) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return hasher;
   boxed.chunks.push(new TextDecoder().decode(textBytes(text)));
@@ -857,7 +863,7 @@ function blaze_rt_md5_update(hasher, text) {
   {
     service: "blaze_rt_md5_digest",
     source: `
-function blaze_rt_md5_digest(hasher) {
+export function blaze_rt_md5_digest(hasher) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return dynRegister({ kind: "text", text: "" });
   return dynRegister({ kind: "text", text: md5(boxed.chunks.join("")) });
@@ -867,7 +873,7 @@ function blaze_rt_md5_digest(hasher) {
   {
     service: "blaze_rt_file_read",
     source: `
-function blaze_rt_file_read(path, mode) {
+export function blaze_rt_file_read(path, mode) {
   const name = new TextDecoder().decode(textBytes(path));
   try {
     return dynRegister({ kind: "text", text: readFileSync(name, "utf8") });
@@ -881,7 +887,7 @@ function blaze_rt_file_read(path, mode) {
   {
     service: "blaze_rt_u256_from_u64",
     source: `
-function blaze_rt_u256_from_u64(out, value) {
+export function blaze_rt_u256_from_u64(out, value) {
   writeWide(out, [BigInt.asUintN(64, value), 0n, 0n, 0n]);
 }
 `,
@@ -889,7 +895,7 @@ function blaze_rt_u256_from_u64(out, value) {
   {
     service: "blaze_rt_u256_from_u64x2",
     source: `
-function blaze_rt_u256_from_u64x2(out, low, high) {
+export function blaze_rt_u256_from_u64x2(out, low, high) {
   writeWide(out, [BigInt.asUintN(64, low), BigInt.asUintN(64, high), 0n, 0n]);
 }
 `,
@@ -897,7 +903,7 @@ function blaze_rt_u256_from_u64x2(out, low, high) {
   {
     service: "blaze_rt_u256_from_u64x4",
     source: `
-function blaze_rt_u256_from_u64x4(out, l0, l1, l2, l3) {
+export function blaze_rt_u256_from_u64x4(out, l0, l1, l2, l3) {
   writeWide(out, [BigInt.asUintN(64, l0), BigInt.asUintN(64, l1), BigInt.asUintN(64, l2), BigInt.asUintN(64, l3)]);
 }
 `,
@@ -905,7 +911,7 @@ function blaze_rt_u256_from_u64x4(out, l0, l1, l2, l3) {
   {
     service: "blaze_rt_u256_mul",
     source: `
-function blaze_rt_u256_mul(out, left, right) {
+export function blaze_rt_u256_mul(out, left, right) {
   writeWide(out, wideMul(readWide(left), readWide(right)));
 }
 `,
@@ -913,7 +919,7 @@ function blaze_rt_u256_mul(out, left, right) {
   {
     service: "blaze_rt_u256_div",
     source: `
-function blaze_rt_u256_div(out, left, right) {
+export function blaze_rt_u256_div(out, left, right) {
   const divisor = readWide(right);
   if (divisor.every((limb) => limb === 0n)) blaze_rt_raise("division by zero");
   writeWide(out, wideDiv(readWide(left), divisor));
@@ -923,7 +929,7 @@ function blaze_rt_u256_div(out, left, right) {
   {
     service: "blaze_rt_u256_mod",
     source: `
-function blaze_rt_u256_mod(out, left, right) {
+export function blaze_rt_u256_mod(out, left, right) {
   const divisor = readWide(right);
   if (divisor.every((limb) => limb === 0n)) blaze_rt_raise("division by zero");
   writeWide(out, wideMod(readWide(left), divisor));
@@ -933,7 +939,7 @@ function blaze_rt_u256_mod(out, left, right) {
   {
     service: "blaze_rt_u256_add_mod",
     source: `
-function blaze_rt_u256_add_mod(out, left, right, mod) {
+export function blaze_rt_u256_add_mod(out, left, right, mod) {
   const divisor = readWide(mod);
   if (divisor.every((limb) => limb === 0n)) blaze_rt_raise("division by zero");
   writeWide(out, wideMod(wideAdd(readWide(left), readWide(right)), divisor));
@@ -943,7 +949,7 @@ function blaze_rt_u256_add_mod(out, left, right, mod) {
   {
     service: "blaze_rt_u256_sub_mod",
     source: `
-function blaze_rt_u256_sub_mod(out, left, right, mod) {
+export function blaze_rt_u256_sub_mod(out, left, right, mod) {
   const divisor = readWide(mod);
   if (divisor.every((limb) => limb === 0n)) blaze_rt_raise("division by zero");
   const difference = wideSub(readWide(left), readWide(right));
@@ -954,7 +960,7 @@ function blaze_rt_u256_sub_mod(out, left, right, mod) {
   {
     service: "blaze_rt_u256_mul_mod",
     source: `
-function blaze_rt_u256_mul_mod(out, left, right, mod) {
+export function blaze_rt_u256_mul_mod(out, left, right, mod) {
   const divisor = readWide(mod);
   if (divisor.every((limb) => limb === 0n)) blaze_rt_raise("division by zero");
   writeWide(out, wideMod(wideMul(readWide(left), readWide(right)), divisor));
@@ -964,7 +970,7 @@ function blaze_rt_u256_mul_mod(out, left, right, mod) {
   {
     service: "blaze_rt_u256_less",
     source: `
-function blaze_rt_u256_less(left, right) {
+export function blaze_rt_u256_less(left, right) {
   return wideLess(readWide(left), readWide(right)) ? 1 : 0;
 }
 `,
@@ -972,7 +978,7 @@ function blaze_rt_u256_less(left, right) {
   {
     service: "blaze_rt_u256_equal",
     source: `
-function blaze_rt_u256_equal(left, right) {
+export function blaze_rt_u256_equal(left, right) {
   const one = readWide(left);
   const two = readWide(right);
   for (let limb = 0; limb < 4; limb += 1) if (one[limb] !== two[limb]) return 0;
@@ -983,7 +989,7 @@ function blaze_rt_u256_equal(left, right) {
   {
     service: "blaze_rt_print_u256",
     source: `
-function blaze_rt_print_u256(value) {
+export function blaze_rt_print_u256(value) {
   writeOut(new TextEncoder().encode(wideText(readWide(value))));
 }
 `,
