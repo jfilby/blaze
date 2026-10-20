@@ -32,6 +32,7 @@ import { isFloatType, parseType, typeToString } from "./contract.ts";
 import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { CompilerError } from "../core/errors.ts";
 import { typeScriptFrontend } from "./typescript.ts";
+import { pythonFrontend } from "./python.ts";
 import type { Frontend, ModuleImport } from "./module.ts";
 import type { Expression, Statement } from "../core/ir.ts";
 import type { TypeExpr } from "../core/types.ts";
@@ -850,7 +851,8 @@ export function frontendFor(language: string): Frontend {
   const name = language.toLowerCase();
   if (name === "nim") return nimFrontend;
   if (name === "typescript" || name === "ts") return typeScriptFrontend;
-  throw frontendError(`unsupported language "${language}"`, "supported languages: nim, typescript");
+  if (name === "python" || name === "py") return pythonFrontend;
+  throw frontendError(`unsupported language "${language}"`, "supported languages: nim, typescript, python");
 }
 
 /* -------------------------------------------------------------------------- */

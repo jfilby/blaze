@@ -1570,7 +1570,7 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
 /* -------------------------------------------------------------------------- */
 
 /** What a whole number may be combined with, and how. */
-type Arithmetic = "add" | "sub" | "mul" | "div" | "mod" | "shl" | "shr" | "ushr" | "sar" | "and" | "or" | "xor";
+type Arithmetic = "add" | "sub" | "mul" | "div" | "floorDiv" | "floorMod" | "mod" | "shl" | "shr" | "ushr" | "sar" | "and" | "or" | "xor";
 
 /**
  * A loop whose turns are run on a team of threads: the two kinds that count.
@@ -5299,6 +5299,16 @@ class Machine {
         if (operation === "mod") this.code.movRegReg(RAX, RDX);
         return;
       }
+      case "floorDiv":
+      case "floorMod":
+        // A floor division and a floored remainder are the operations of a
+        // language whose division rounds towards zero and whose remainder
+        // takes the sign of its left side, and this backend has not written
+        // them: the division it has is the truncating one.
+        throw machineError(
+          `${this.fn.symbol} performs ${operation}, which this backend has not written`,
+          "a floor division and a floored remainder are written by the C backend; build this program as C output, or write the operation as the truncating one it is",
+        );
       default:
         throw machineError(`${this.fn.symbol} performs ${operation}, which is not an operation of a number`);
     }

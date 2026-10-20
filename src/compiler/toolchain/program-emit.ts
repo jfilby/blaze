@@ -22,6 +22,7 @@ import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import type { FunctionSignature, TypeExpr } from "../core/types.ts";
 import { contractText } from "../semantics/contract.ts";
+import { rulesFor, type TextStyle } from "../semantics/language.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
 import { isWideType } from "../core/semantic-ir.ts";
 import {
@@ -236,7 +237,13 @@ export interface ProgramTarget {
    * language writes an `n` after, and it is a word rather than a type because
    * the value is the same whole number either way.
    */
-  print(value: string, type: SemanticType | null, kind: ValueKind, bigint: boolean): string[];
+  print(
+    value: string,
+    type: SemanticType | null,
+    kind: ValueKind,
+    bigint: boolean,
+    style: TextStyle,
+  ): string[];
   /** The newline that ends a line of output. */
   newline(): string;
   /** A call of a function the program compiled, and one the compiler provides. */
@@ -276,13 +283,28 @@ export interface ProgramTarget {
    * of digits the source asked for or as the language writes it where it asked
    * for none.
    */
-  toText(expression: string, type: SemanticType, digits: number | null): string;
+  /**
+   * A value written as text, which is the way the language writes it: a number
+   * at its shortest decimal, a boolean and a null as the words the language
+   * has for them.
+   */
+  toText(expression: string, type: SemanticType, digits: number | null, style: TextStyle): string;
   /** The line that tests a value against nothing. */
   isNull(value: string, negate: boolean): string;
   /** The text of a value that is nothing. */
   nullLiteral(): string;
   /** The remainder of a division, as C truncates it. */
   modulo(left: string, right: string): string;
+  /**
+   * A division whose answer is moved down one when the remainder is not zero
+   * and the two sides have different signs, which is what a floor division is.
+   */
+  floorDivide(left: string, right: string, type: SemanticType): string;
+  /**
+   * A remainder that takes the sign of its divisor rather than the sign of its
+   * left side, which is what a floored remainder is.
+   */
+  floorModulo(left: string, right: string, type: SemanticType): string;
   /** One number raised to another, which C and Nim spell differently. */
   power(left: string, right: string): string;
   /** The line that inverts a number bit by bit. */
@@ -381,7 +403,15 @@ class ProgramEmitter {
     collectPrototypes(declared);
     collectPrototypes(extra);
     const body = this.entry();
-    const opened = this.target.openProgram().map((line) => indent(1, line));
+    // The style a value is written as text in is a state of the runtime, and
+    // it is set once, when the program starts: the way the language writes a
+    // number is the language's, and every place the runtime writes a value as
+    // text writes it in the style that is set.
+    const style = rulesFor(this.program.language).style;
+    const opened = [
+      ...this.target.openProgram().map((line) => indent(1, line)),
+      indent(1, `${RUNTIME_NAME}_set_text_style(${style === "python" ? 1 : 0});`),
+    ];
     const closed = this.target
       .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.names.read(name))))
       .map((line) => indent(1, line));
@@ -396,6 +426,11 @@ class ProgramEmitter {
       ...this.target.epilogue(),
       "",
     ].join("\n");
+  }
+
+  /** The style a value is written as text in, which is the language's. */
+  private style(): TextStyle {
+    return rulesFor(this.program.language).style;
   }
 
   /** One function the program declared, as the target writes a function. */
@@ -664,7 +699,13 @@ class ProgramEmitter {
         this.write(this.target.update(this.names.read(statement.name), statement.op, statement.prefix));
         return;
       case "printText":
-        for (const line of this.target.print(this.expression(statement.value), statement.value.type, valueKind(statement.value), false)) {
+        for (const line of this.target.print(
+          this.expression(statement.value),
+          statement.value.type,
+          valueKind(statement.value),
+          false,
+          this.style(),
+        )) {
           this.write(line);
         }
         return;
@@ -674,6 +715,7 @@ class ProgramEmitter {
           statement.value.type,
           valueKind(statement.value),
           statement.bigint,
+          this.style(),
         )) {
           this.write(line);
         }
@@ -1105,7 +1147,7 @@ class ProgramEmitter {
         // A string carried into a string is the string itself: a driver builds
         // text out of pointers, and a number is the one thing it converts.
         if (isTextType(value.of.type)) return this.expression(value.of);
-        return this.target.toText(this.expression(value.of), value.of.type, value.digits);
+        return this.target.toText(this.expression(value.of), value.of.type, value.digits, this.style());
       case "argv":
         return value.index === null ? this.target.argvCount() : this.target.argv(this.expression(value.index));
       case "compare":
@@ -1250,6 +1292,18 @@ class ProgramEmitter {
           return this.target.wideBinary(value.op, this.expression(value.left, value.type), this.expression(value.right, value.type), value.type);
         }
         return this.target.modulo(this.expression(value.left, value.type), this.expression(value.right, value.type));
+      case "floorDiv":
+        return this.target.floorDivide(
+          this.expression(value.left, value.type),
+          this.expression(value.right, value.type),
+          value.type,
+        );
+      case "floorMod":
+        return this.target.floorModulo(
+          this.expression(value.left, value.type),
+          this.expression(value.right, value.type),
+          value.type,
+        );
       case "pow":
         // A power is floating point even over whole numbers, and Nim spells one
         // with the operator that xors two whole numbers.

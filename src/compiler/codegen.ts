@@ -714,7 +714,7 @@ async function materialize(
   // A build that links the C runtime runs the candidate in a C harness. A
   // hosted build has no such object: the host program is what runs it.
   if (runtime?.objectPath !== undefined) {
-    await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? ""), "utf8");
+    await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? "", request.program.language), "utf8");
     link({
       // The link carries the objective and the target because `-flto` makes
       // this command the one that decides the code: gcc rebuilds every object
@@ -1024,7 +1024,7 @@ async function probeCandidate(
     return { called: false, reason: "the build links no runtime for the probe to call into", stderr: "" };
   }
 
-  await writeFile(paths.probeHarness, generateProbeHarness(request.contract, plan), "utf8");
+  await writeFile(paths.probeHarness, generateProbeHarness(request.contract, plan, request.program.language), "utf8");
   link({
     objective: request.contract.optimize.primary,
     target: request.target,

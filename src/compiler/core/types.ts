@@ -63,6 +63,12 @@ export type TypeExpr =
    * inferred, and `name` is the object it points at once the layouts are known.
    */
   | { kind: "ref"; of: TypeExpr | null; name?: string }
+  /**
+   * A string. The contract language spells it `text`, and the IR holds it as a
+   * pointer to the bytes of it, so a parameter of this type is a `const char*`
+   * on the C side.
+   */
+  | { kind: "text" }
   /** A function that returns nothing. */
   | { kind: "void" };
 

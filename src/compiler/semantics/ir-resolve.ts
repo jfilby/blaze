@@ -74,6 +74,7 @@ import type {
 import type { CallEdge, Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
 import type { Expression, Statement } from "../core/ir.ts";
 import { ARGV, ARGV_LENGTH, SHARED, builtinFor } from "./builtins.ts";
+import { rulesFor } from "./language.ts";
 import {
   BOOLEAN,
   NUMERIC,
@@ -810,7 +811,7 @@ function sideType(value: DraftValue, result: TypeExpr | null): TypeExpr | null {
 const ARRAY_FORMS: ReadonlySet<string> = new Set(["buffer", "sized", "view"]);
 
 /** The operators only whole numbers have. */
-const WHOLE_OPERATORS: readonly ProgramBinaryOp[] = ["%", "<<", ">>", "&", "|", "^"];
+const WHOLE_OPERATORS: readonly ProgramBinaryOp[] = ["//", "%", "<<", ">>", "&", "|", "^"];
 /**
  * The operators the language converts rather than refuses: `>>>` reads both of
  * its sides as the unsigned 32 bit numbers JavaScript reads them as, whatever
@@ -832,6 +833,7 @@ const COMPOUND_BINARY: Record<Exclude<ProgramAssignOp, "=">, ProgramBinaryOp> = 
   "-=": "-",
   "*=": "*",
   "/=": "/",
+  "//=": "//",
   "%=": "%",
   "&=": "&",
   "|=": "|",
@@ -851,6 +853,7 @@ const ARITHMETIC: Record<ProgramBinaryOp, ArithOp | null> = {
   "-": "sub",
   "*": "mul",
   "/": "div",
+  "//": "floorDiv",
   "%": "mod",
   "**": "pow",
   "<<": "shl",
@@ -877,6 +880,7 @@ const COMPARISONS: Record<ProgramBinaryOp, CompareOp | null> = {
   "-": null,
   "*": null,
   "/": null,
+  "//": null,
   "%": null,
   "**": null,
   "<<": null,
@@ -956,7 +960,7 @@ function callsInValue(value: ProgramValue, called: string[]): void {
     case "name":
     case "length":
     case "number":
-    case "bigint":
+    case "whole":
     case "boolean":
     case "null":
     case "buffer":
@@ -1220,7 +1224,7 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         value(one.value);
         return;
       case "number":
-      case "bigint":
+      case "whole":
       case "boolean":
       case "null":
       case "buffer":
@@ -1552,6 +1556,12 @@ class ProgramResolver {
    * handlers of an HTTP server, by their symbols.
    */
   private readonly httpHandlers: string[] = [];
+  /**
+   * The language the program was written in, whose rules are asked of the
+   * language: a division of two whole numbers is a whole division in one
+   * language and a true division in another.
+   */
+  private readonly language: string;
 
   constructor(
     body: ProgramBody,
@@ -1560,6 +1570,7 @@ class ProgramResolver {
     functions: ProgramFunctions,
     objectLayoutNames: Map<string, string> = new Map(),
     literalKeys: LiteralKeys = new Map(),
+    language: string = "typescript",
   ) {
     this.body = body;
     this.contracts = contracts;
@@ -1567,6 +1578,7 @@ class ProgramResolver {
     this.functions = functions;
     this.objectLayoutNames = objectLayoutNames;
     this.literalKeys = literalKeys;
+    this.language = language;
   }
 
   resolve(): DraftProgram {
@@ -2618,7 +2630,7 @@ class ProgramResolver {
    */
   private bigintWritten(value: ProgramValue, line: number): boolean {
     switch (value.k) {
-      case "bigint":
+      case "whole":
         return true;
       case "name": {
         if (this.functions.table.has(value.name)) return false;
@@ -2670,7 +2682,7 @@ class ProgramResolver {
         if (expect !== null && primitive(expect) !== null) this.expectNumber(expect, held, line);
         return { k: "literal", held };
       }
-      case "bigint": {
+      case "whole": {
         // A bigint is a whole number, and a whole number here is an `i64`. A
         // literal outside that range is not a value the program can hold: it
         // was written out as the low sixty-four bits of itself, so
@@ -3153,7 +3165,7 @@ class ProgramResolver {
       // of it, so the literal this reads is one past the top of the range. The
       // sign is folded in here, where the value it makes is in range, rather
       // than refused as a literal no `i64` holds.
-      if (value.op === "-" && value.operand.k === "bigint") {
+      if (value.op === "-" && value.operand.k === "whole") {
         const literal = integerLiteral(value.operand.text);
         if (literal !== null && literal === -I64_MIN) {
           return {
@@ -3393,9 +3405,17 @@ class ProgramResolver {
     // A comparison holds or it does not. A whole operator needs whole numbers
     // and yields one, whatever the literals it was written with: `7 % 3` is 1.
     const whole = WHOLE_OPERATORS.includes(op);
+    // The rules of the language the program was written in are asked of the
+    // language: a division of two whole numbers is a whole division in one
+    // language and a true division in another, and the answer of a true
+    // division is a fraction however whole its sides were.
+    const rules = rulesFor(this.language);
+    const trueDivision = op === "/" && rules.division === "true";
     const type = COMPARISONS[op] !== null
       ? numeric("bool")
-      : // A wide number beside a bigint keeps its own width: the `i64` a bigint
+      : trueDivision
+        ? numeric("f64")
+        : // A wide number beside a bigint keeps its own width: the `i64` a bigint
         // is computed in would drop the three limbs above the first before a
         // backend is handed the value, which is the same reason `wholeResult`
         // and `numericResult` ask about a wide number before anything else.
@@ -3406,7 +3426,9 @@ class ProgramResolver {
           : whole
             ? numeric(wholeResult(leftName, wholeRightName))
             : numeric(numericResult(leftName, wholeRightName, op === "/"));
-    return leftBig ? { k: "binary", op, left, right, type, bigint: true } : { k: "binary", op, left, right, type };
+    return leftBig && !trueDivision
+      ? { k: "binary", op, left, right, type, bigint: true }
+      : { k: "binary", op, left, right, type };
   }
 
   private equality(
@@ -3702,7 +3724,7 @@ class ProgramResolver {
   private kindOf(value: ProgramValue, line: number): "text" | "number" | "other" {
     switch (value.k) {
       case "number":
-      case "bigint":
+      case "whole":
         return "number";
       case "text":
       case "fixed":
@@ -4018,9 +4040,17 @@ class ProgramLowering {
   private counters: Record<"t" | "a" | "i", number> = { t: 0, a: 0, i: 0 };
   private blockCount = 0;
 
-  constructor(used: Set<string>, boxedTexts?: Set<string>) {
+  /**
+   * The language the program was written in, whose rules are asked of the
+   * language: a remainder takes the sign of its left side in one and of its
+   * divisor in the other.
+   */
+  private readonly language: string;
+
+  constructor(used: Set<string>, boxedTexts?: Set<string>, language: string = "typescript") {
     this.used = used;
     this.boxedTexts = boxedTexts ?? new Set();
+    this.language = language;
   }
 
   lower(program: DraftProgram): SemanticProgram {
@@ -4120,6 +4150,7 @@ class ProgramLowering {
     if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
     return {
       file: program.file,
+      language: this.language,
       entry,
       functions: [...program.functions, ...settled.map((draft) => draft.signature)],
       bodies,
@@ -4155,7 +4186,7 @@ class ProgramLowering {
     });
     // The body is lowered on its own: its own entry block, its own names, and
     // a value of its own for each parameter it is given.
-    const inner = new ProgramLowering(new Set(this.used), this.boxedTexts);
+    const inner = new ProgramLowering(new Set(this.used), this.boxedTexts, this.language);
     const entry = inner.body(draft.compiled as DraftProgram);
     const allocates = entry.releases.length > 0;
     return {
@@ -4961,14 +4992,23 @@ class ProgramLowering {
     // A wide number keeps the width its two whole sides are computed at, and a
     // bigint operation is computed at sixty-four bits. Both are already stated
     // by the draft, so only fall back to the arithmetic rule when neither.
-    const type = value.bigint && !isWideType(left.type) && !isWideType(right.type)
-      ? numeric(BIGINT_TYPE)
-      : CONVERTING_OPERATORS.includes(op)
-        ? value.type
-        : WHOLE_OPERATORS.includes(op)
-          ? numeric(wholeResult(leftPrim, rightPrim))
-          : numeric(numericResult(leftPrim, rightPrim, op === "/"));
-    return { k: "arith", type, op: ARITHMETIC[op] as ArithOp, left, right };
+    // The rules of the language the program was written in are asked of the
+    // language: a division of two whole numbers is a whole division in one
+    // language and a true division in another, and a remainder takes the sign
+    // of its left side in one and of its divisor in the other.
+    const rules = rulesFor(this.language);
+    const trueDivision = op === "/" && rules.division === "true";
+    const type = trueDivision
+      ? numeric("f64")
+      : value.bigint && !isWideType(left.type) && !isWideType(right.type)
+        ? numeric(BIGINT_TYPE)
+        : CONVERTING_OPERATORS.includes(op)
+          ? value.type
+          : WHOLE_OPERATORS.includes(op)
+            ? numeric(wholeResult(leftPrim, rightPrim))
+            : numeric(numericResult(leftPrim, rightPrim, op === "/"));
+    const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
+    return { k: "arith", type, op: arithmetic, left, right };
   }
 
   /** A call, or the one builtin that is an operation rather than a call. */
@@ -5134,8 +5174,9 @@ export function resolveProgram(
       },
       new Map(Object.entries(objectNames)),
       objectKeys,
+      program.language,
     );
-    resolved = new ProgramLowering(resolver.taken()).lower(resolver.resolve());
+    resolved = new ProgramLowering(resolver.taken(), undefined, program.language).lower(resolver.resolve());
     if (!observed.changed) break;
   }
   return resolved as SemanticProgram;

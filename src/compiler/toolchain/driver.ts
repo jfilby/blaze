@@ -13,6 +13,7 @@
 
 import { writeFile } from "node:fs/promises";
 import { parseType, typeToString } from "../semantics/contract.ts";
+import { rulesFor, type TextStyle } from "../semantics/language.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
@@ -349,9 +350,17 @@ class CDriver implements ProgramTarget {
    * call a function `send`, and the C library has one of that name.
    */
   private own = new Set<string>();
-  constructor(includeHttpHeader: boolean = false, lowering: BackendKind = "c") {
+  /** The style a value is written as text in, which is the language's. */
+  private readonly style: TextStyle;
+
+  constructor(
+    includeHttpHeader: boolean = false,
+    lowering: BackendKind = "c",
+    style: TextStyle = "javascript",
+  ) {
     this.includeHttpHeader = includeHttpHeader;
     this.lowering = lowering;
+    this.style = style;
   }
   prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
@@ -779,10 +788,22 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     return `${expression};`;
   }
 
-  print(value: string, type: SemanticType | null, kind: ValueKind, bigint: boolean): string[] {
+  print(
+    value: string,
+    type: SemanticType | null,
+    kind: ValueKind,
+    bigint: boolean,
+    style: TextStyle,
+  ): string[] {
     if (kind === "text") return [`program_print_string(${value});`];
-    if (kind === "null") return [`program_print_string("null");`];
-    if (kind === "boolean") return [`fputs((${value}) ? "true" : "false", stdout);`];
+    // A null and a boolean are written the way the language writes them, and
+    // the language is what says which.
+    if (kind === "null") return [`program_print_string("${style === "python" ? "None" : "null"}");`];
+    if (kind === "boolean") {
+      const yes = style === "python" ? "True" : "true";
+      const no = style === "python" ? "False" : "false";
+      return [`fputs((${value}) ? "${yes}" : "${no}", stdout);`];
+    }
     // A wide number is four limbs and no machine register, so it is never cast
     // to a scalar: `printf("%llu", (unsigned long long)(a_u256))` is C the
     // compiler rejects as "aggregate value used where an integer was
@@ -802,8 +823,13 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     }
     // A bigint is written with the `n` after it that says which of the two it is,
     // and it is the same sixty-four bit whole number either way — so the format
-    // is the whole number's and the suffix is part of it.
-    if (bigint) return [`printf("%lldn", (long long)(${value}));`];
+    // is the whole number's and the suffix is part of it. The marker is the
+    // word one language prints and the other has no word for.
+    if (bigint) {
+      return style === "python"
+        ? [`printf("%lld", (long long)(${value}));`]
+        : [`printf("%lldn", (long long)(${value}));`];
+    }
     if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number((double)(${value}));`];
     const format = type !== null && isUnsigned(type) ? "%llu" : "%lld";
     const cast = type !== null && isUnsigned(type) ? "unsigned long long" : "long long";
@@ -984,7 +1010,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
            is not a handle the runtime knows. */
         const bodyPtr = (body.type.kind === "ptr" || body.type.kind === "text")
           ? bodyExpr
-          : this.toText(bodyExpr, body.type, null);
+          : this.toText(bodyExpr, body.type, null, this.style);
         /* Hold the body pointer in a temporary so it is evaluated once: it is
            both passed to blaze_http_resp_body and measured with strlen, and a
            complex expression (such as program_number_text) would otherwise be
@@ -1056,7 +1082,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
         // as the language writes it rather than read as a handle.
         const text = (arg.k === "text" || arg.k === "const" || isTextType(arg.type))
           ? argument(0)
-          : this.toText(argument(0), arg.type, null);
+          : this.toText(argument(0), arg.type, null, this.style);
         return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
       }
       case "require":
@@ -1216,7 +1242,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     // A value the runtime holds is rendered by the runtime, and a number the
     // program holds is written as the language writes it: the runtime's
     // handles are small numbers, and a number the program holds is one of them.
-    return this.toText(text, value.type, null);
+    return this.toText(text, value.type, null, this.style);
   }
 
   /** One header line an options object named, as `name: value`. */
@@ -1242,7 +1268,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       if (value.k === "text" || (value.k === "const" && isTextType(value.type)) || isTextType(value.type)) {
         text = expression(value, value.type);
       } else if (isNumber(value.type)) {
-        text = this.toText(expression(value, value.type), value.type, null);
+        text = this.toText(expression(value, value.type), value.type, null, this.style);
       } else {
         throw driverError(
           `the field "${field.name}" of an object stringify is not a number or a string on its own`,
@@ -1293,8 +1319,11 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
 
   argvCount(): string {
     // The runtime already counts where the program runs and the file it runs,
-    // so this is the length of process.argv as node reports it.
-    return `${RUNTIME_NAME}_argv_count()`;
+    // so this is the length of process.argv as node reports it. Python counts
+    // the file alone, so the length of its command line is one less.
+    return this.style === "python"
+      ? `(${RUNTIME_NAME}_argv_count() - 1)`
+      : `${RUNTIME_NAME}_argv_count()`;
   }
 
   argv(index: string): string {
@@ -1329,7 +1358,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     return `program_string_compare(${left}, ${right})`;
   }
 
-  toText(value: string, type: SemanticType, digits: number | null): string {
+  toText(value: string, type: SemanticType, digits: number | null, style: TextStyle): string {
     // A string is the text it is: it is already the bytes it names, and the
     // runtime is not asked to render it again.
     if (isTextType(type)) return value;
@@ -1340,7 +1369,7 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       // Nothing has no number of its own, and the word for it is what the
       // language prints: casting it to a number hands out the zero the source
       // never printed.
-      return '"null"';
+      return `"${style === "python" ? "None" : "null"}"`;
     }
     if (type.kind === "ref" && type.of === null && type.name === undefined) {
       return `${RUNTIME_NAME}_to_text(${value})`;
@@ -1348,7 +1377,13 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
     if (type.kind === "ref" && type.of === null) {
       return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;
     }
-    if (isBoolean(type)) return `(${value} ? "true" : "false")`;
+    if (isBoolean(type)) {
+      // A boolean is written the way the language writes it, and the language
+      // is what says which.
+      const yes = style === "python" ? "True" : "true";
+      const no = style === "python" ? "False" : "false";
+      return `(${value} ? "${yes}" : "${no}")`;
+    }
     // A number written at a fixed number of digits is written at them whatever
     // it is: `(-0.0004).toFixed(2)` is `-0.00` and not the zero the shortest
     // writing gives it.
@@ -1376,6 +1411,29 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
 
   modulo(left: string, right: string): string {
     return `((${left}) % (${right}))`;
+  }
+
+  floorDivide(left: string, right: string, type: SemanticType): string {
+    if (isFloat(type)) return `floor((${left}) / (${right}))`;
+    // The two sides are bound first: an operand may be a call, and one written
+    // into the argument list would run once per mention rather than once per
+    // operation.
+    const name = this.type(type);
+    return (
+      `(({ ${name} l = (${left}); ${name} r = (${right}); ` +
+      `${name} q = l / r; ${name} m = l % r; ` +
+      `(m != 0 && ((m < 0) != (r < 0))) ? q - 1 : q; }))`
+    );
+  }
+
+  floorModulo(left: string, right: string, type: SemanticType): string {
+    if (isFloat(type)) return `((${left}) - floor((${left}) / (${right})) * (${right}))`;
+    const name = this.type(type);
+    return (
+      `(({ ${name} l = (${left}); ${name} r = (${right}); ` +
+      `${name} m = l % r; ` +
+      `(m != 0 && ((m < 0) != (r < 0))) ? m + r : m; }))`
+    );
   }
 
   power(left: string, right: string): string {
@@ -1520,7 +1578,7 @@ export function generateProgramDriver(
   includeHttpHeader: boolean = false,
   lowering: BackendKind = "c",
 ): string {
-  return generateProgramSource(program, new CDriver(includeHttpHeader, lowering));
+  return generateProgramSource(program, new CDriver(includeHttpHeader, lowering, rulesFor(program.language).style));
 }
 
 export interface ProgramDriverRequest {

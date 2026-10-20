@@ -455,7 +455,8 @@ export function elementOf(value: Inferred): TypeExpr {
 }
 
 function elementOfType(type: TypeExpr): TypeExpr {
-  return type.kind === "primitive" || type.kind === "ref" || type.kind === "void" ? F64 : type.of ?? F64;
+  if (type.kind === "primitive" || type.kind === "ref" || type.kind === "void" || type.kind === "text") return F64;
+  return type.of ?? F64;
 }
 
 /**

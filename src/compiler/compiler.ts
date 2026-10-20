@@ -801,6 +801,7 @@ function functionContext(phase: { program: ProgramContract; objectNames: Record<
   return {
     objectNames: phase.objectNames,
     functions: Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions))),
+    language: phase.program.language,
   };
 }
 
@@ -836,6 +837,7 @@ function semanticFunctions(
   const context: FunctionContext = {
     objectNames,
     functions: Object.fromEntries(program.files.flatMap((file) => Object.entries(file.functions))),
+    language: program.language,
   };
   const resolved: Record<string, SemanticFunction> = {};
   for (const file of program.files) {
@@ -1006,9 +1008,14 @@ async function programSource(
   id: string,
   project: ProjectInput,
   body: ProgramBody,
+  language: string,
 ): Promise<{ path: string }> {
   if (body.file !== INLINE_MODULE) return { path: resolve(project.directory, body.file) };
-  const path = `${base}/${id}.program.ts`;
+  // The source is written under the name its own toolchain runs it by: a
+  // Python source is run by python3, which reads a file of any name, and the
+  // name is what says what the source is.
+  const extension = language.toLowerCase() === "python" ? "py" : "ts";
+  const path = `${base}/${id}.program.${extension}`;
   await writeFile(path, project.entry.source, "utf8");
   return { path };
 }
@@ -1680,7 +1687,7 @@ export async function runBuild(
       validateSemanticProgram(driver, undefined, new Map(driver.bodies.map((fn) => [fn.name, fn])));
       reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
     }
-    const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body);
+    const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body, input.language);
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
     const programBinary = `program${EXECUTABLE_SUFFIX}`;

@@ -1175,6 +1175,10 @@ class FunctionEmitter {
     switch (value.op) {
       case "pow":
         return `pow(${left}, ${right})`;
+      case "floorDiv":
+        return this.floorDivide(left, right, value.type);
+      case "floorMod":
+        return this.floorModulo(left, right, value.type);
       case "min":
       case "max": {
         // Each arm answers twice, so both are bound: a value the IR calls is a
@@ -1215,6 +1219,42 @@ class FunctionEmitter {
       default:
         return `(${left} ${cOperator(ARITHMETIC_OPERATORS[value.op])} ${right})`;
     }
+  }
+
+  /**
+   * A division whose answer is moved down one when the remainder is not zero
+   * and the two sides have different signs, which is what a floor division is.
+   *
+   * The two sides are bound first: an operand may be a call, and one written
+   * into the argument list would run once per mention rather than once per
+   * operation.
+   */
+  private floorDivide(left: string, right: string, type: SemanticType): string {
+    if (isFloat(type)) {
+      return `floor((${left}) / (${right}))`;
+    }
+    const name = declaredType(type);
+    return (
+      `(({ ${name} l = (${left}); ${name} r = (${right}); ` +
+      `${name} q = l / r; ${name} m = l % r; ` +
+      `(m != 0 && ((m < 0) != (r < 0))) ? q - 1 : q; }))`
+    );
+  }
+
+  /**
+   * A remainder that takes the sign of its divisor rather than the sign of
+   * its left side, which is what a floored remainder is.
+   */
+  private floorModulo(left: string, right: string, type: SemanticType): string {
+    if (isFloat(type)) {
+      return `((${left}) - floor((${left}) / (${right})) * (${right}))`;
+    }
+    const name = declaredType(type);
+    return (
+      `(({ ${name} l = (${left}); ${name} r = (${right}); ` +
+      `${name} m = l % r; ` +
+      `(m != 0 && ((m < 0) != (r < 0))) ? m + r : m; }))`
+    );
   }
 
   /**

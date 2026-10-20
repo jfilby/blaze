@@ -52,7 +52,7 @@ function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred
       return { kind: "type", type: F64 };
     case "boolean":
       return { kind: "type", type: BOOL };
-    case "bigint": {
+    case "whole": {
       const trimmed = value.text.trim();
       let literal: bigint | null = null;
       try { literal = BigInt(trimmed); } catch { literal = null; }

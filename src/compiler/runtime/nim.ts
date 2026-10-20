@@ -756,10 +756,22 @@ proc blaze_rt_print_text_n*(text: cstring, length: csize_t) {.exportc, cdecl.} =
 ## it is written as the language writes it, and a zero of either sign is written
 ## as 0: the language writes a negative zero the same way it writes a positive
 ## one, and only a test for the sign of a zero can tell them apart.
+## The style a value is written as text in: the way the language writes it.
+## It is set once, when the program starts, and every value the runtime writes
+## as text is written in the style that is set.
+var blazeTextStyle = 0
+
+proc blaze_rt_set_text_style*(style: cint) {.exportc, cdecl.} =
+  blazeTextStyle = style.int
+
 proc blazeShortest(value: float64): string =
-  if classify(value) == fcNan: return "NaN"
-  if classify(value) in {fcInf, fcNegInf}: return if value < 0.0: "-Infinity" else: "Infinity"
-  if value == 0.0: return "0"
+  let python = blazeTextStyle == 1
+  if classify(value) == fcNan: return (if python: "nan" else: "NaN")
+  if classify(value) in {fcInf, fcNegInf}:
+    return (if python: (if value < 0.0: "-inf" else: "inf") else: (if value < 0.0: "-Infinity" else: "Infinity"))
+  if value == 0.0:
+    if python: return (if signbit(value): "-0.0" else: "0.0")
+    return "0"
   let negative = value < 0.0
   let magnitude = if negative: -value else: value
 
@@ -779,18 +791,30 @@ proc blazeShortest(value: float64): string =
   let point = exponent + 1
 
   var body = ""
-  if point >= -5 and point <= 21:
+  # The range a number is written in full is the language's own: one writes it
+  # in full from 1e-6 up to 1e21 and the other from 1e-4 up to 1e16.
+  let lowest = (if python: -3 else: -5)
+  let highest = (if python: 16 else: 21)
+  if point >= lowest and point <= highest:
     if point <= 0:
       body = "0." & repeat('0', -point) & digits
     elif point >= digits.len:
       body = digits & repeat('0', point - digits.len)
+      # A whole number written as a fraction keeps its point: the language
+      # writes 8.0 and not 8, because the two are two numbers.
+      if python: body = body & ".0"
     else:
       body = digits[0 ..< point] & "." & digits[point .. ^1]
   else:
     body = digits[0 .. 0]
     if digits.len > 1: body = body & "." & digits[1 .. ^1]
     let power = point - 1
-    body = body & "e" & (if power < 0: "-" else: "+") & $abs(power)
+    var scale = $abs(power)
+    # The exponent of one language is written with a zero in front of a single
+    # digit, and the other's is not: 1e-05 and 1e-5 are two spellings of one
+    # number and only one of them is the language's.
+    if python and scale.len < 2: scale = "0" & scale
+    body = body & "e" & (if power < 0: "-" else: "+") & scale
   (if negative: "-" else: "") & body
 
 proc blaze_rt_print_number*(value: float64) {.exportc, cdecl.} =
@@ -798,6 +822,11 @@ proc blaze_rt_print_number*(value: float64) {.exportc, cdecl.} =
   ## and that host writes a negative zero with its sign. Only an interpolation
   ## reads one as the plain zero the language makes of it.
   if value == 0.0 and classify(value) == fcNegZero:
+    # A negative zero is written with its sign, and the way it is written is
+    # the language's: one writes -0 and the other writes -0.0.
+    if blazeTextStyle == 1:
+      stdout.write("-0.0")
+      return
     stdout.write("-0")
     return
   stdout.write(blazeShortest(value))
@@ -824,7 +853,9 @@ proc blaze_rt_print_whole*(value: int64, bigint: cint) {.exportc, cdecl.} =
   while count > 0:
     dec count
     stdout.write(digits[count])
-  if bigint != 0:
+  # The marker is the word one language prints after the digits of a whole
+  # number and the other has no word for.
+  if bigint != 0 and blazeTextStyle != 1:
     stdout.write('n')
 
 proc blaze_rt_format_number*(value: float64, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =

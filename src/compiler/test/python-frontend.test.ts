@@ -1,0 +1,222 @@
+/**
+ * The Python frontend: what it reads, what it refuses, and what it contracts.
+ *
+ * A frontend is a parser and an analysis, so what is tested here is what a
+ * Python file is read as: the functions it declares, the types it gives them,
+ * the contract each function carries, and the constructs that are outside the
+ * subset and are refused with the line they were written on.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { diagnostic, phaseOf } from "./phase.ts";
+import { pythonFrontend } from "../semantics/python.ts";
+import { mapPythonType } from "../semantics/python.ts";
+import { generateHarness } from "../toolchain/linker.ts";
+
+/** The contract of a one file Python module. */
+function contractOf(source: string, name = "f"): {
+  ensures: string[];
+  requires: string[];
+  params: { name: string; type: string }[];
+  returns: string;
+} {
+  const phase = phaseOf("python", { "main.py": source }, "main.py");
+  const contract = phase.program.files[0].functions[name];
+  assert.ok(contract !== undefined, `the module declares ${name}`);
+  return {
+    ensures: contract.ensures,
+    requires: contract.requires,
+    params: contract.function.params,
+    returns: contract.function.returns,
+  };
+}
+
+test("a function of a Python module is contracted with the reduction its loop states", () => {
+  const source = [
+    "def dot(a: list[float], b: list[float]) -> float:",
+    "    total: float = 0.0",
+    "    for i in range(len(a)):",
+    "        total += a[i] * b[i]",
+    "    return total",
+    "",
+  ].join("\n");
+  const contract = contractOf(source, "dot");
+  assert.deepEqual(contract.ensures, ["result == sum(i = 0..<len(a), (a[i] * b[i]))"]);
+  assert.deepEqual(contract.params, [
+    { name: "a", type: "slice<f64>" },
+    { name: "b", type: "slice<f64>" },
+  ]);
+  assert.equal(contract.returns, "f64");
+});
+
+test("the types of Python are the types of the contract", () => {
+  assert.deepEqual(mapPythonType("int", "here"), { kind: "primitive", name: "i64" });
+  assert.deepEqual(mapPythonType("float", "here"), { kind: "primitive", name: "f64" });
+  assert.deepEqual(mapPythonType("bool", "here"), { kind: "primitive", name: "bool" });
+  assert.deepEqual(mapPythonType("str", "here"), { kind: "text" });
+  assert.deepEqual(mapPythonType("list[float]", "here"), { kind: "slice", of: { kind: "primitive", name: "f64" } });
+  assert.deepEqual(mapPythonType("list[int]", "here"), { kind: "slice", of: { kind: "primitive", name: "i64" } });
+  assert.deepEqual(mapPythonType("None", "here"), { kind: "void" });
+});
+
+test("a type the subset does not have is refused with the types it has", () => {
+  const refused = diagnostic(() => mapPythonType("complex", "line 3 of main.py"));
+  assert.match(refused, /unsupported Python type "complex"/);
+  assert.match(refused, /int, float, bool, str/);
+});
+
+test("an annotation is required on every parameter and on the result", () => {
+  const noParameter = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a) -> int:\n    return a\n" }, "main.py"),
+  );
+  assert.match(noParameter, /every parameter declares its type/);
+  const noResult = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: int):\n    return a\n" }, "main.py"),
+  );
+  assert.match(noResult, /every function declares what it returns/);
+});
+
+test("a file with a statement of its own is a program, and a file without is a library", () => {
+  const program = phaseOf("python", { "main.py": "x = 1\n" }, "main.py");
+  assert.equal(program.body?.statements.length, 1);
+  const library = phaseOf("python", { "main.py": "def f(a: int) -> int:\n    return a\n" }, "main.py");
+  assert.equal(library.body, undefined);
+});
+
+test("the guard that names the entry module runs nowhere else", () => {
+  const source = ['if __name__ == "__main__":', "    f()", ""].join("\n");
+  const analysis = pythonFrontend.analyze(source, "helpers.py");
+  assert.equal(analysis.entryGuard, true);
+  // A module the program merely imports runs nothing: the guard names the
+  // entry module, and a file that holds nothing else is a library of
+  // functions.
+  const phase = phaseOf(
+    "python",
+    {
+      "main.py": "from helpers import f\n\ndef g(a: int) -> int:\n    return a\n",
+      "helpers.py": "def f(a: int) -> int:\n    return a\n\n" + source,
+    },
+    "main.py",
+  );
+  assert.equal(phase.body, undefined);
+  // The entry module itself runs its statements, the guard among them.
+  const entry = phaseOf("python", { "main.py": source }, "main.py");
+  assert.equal(entry.body?.statements.length, 1);
+});
+
+test("a module imports the functions of another file of the project", () => {
+  const phase = phaseOf(
+    "python",
+    {
+      "main.py": "from helpers import dot\n\ndef f(a: int) -> int:\n    return a\n",
+      "helpers.py": "def dot(a: int) -> int:\n    return a\n",
+    },
+    "main.py",
+  );
+  assert.deepEqual(phase.program.edges, [
+    { from: "main.py", to: "helpers.py", symbols: ["dot"] },
+  ]);
+});
+
+test("an import of a module that is not a file of the project is refused", () => {
+  const dotted = diagnostic(() => pythonFrontend.resolveImport("os.path"));
+  assert.match(dotted, /a module of the project is a file beside the entry file/);
+  const relative = diagnostic(() => pythonFrontend.resolveImport("./helpers"));
+  assert.match(relative, /a module of the project is a file beside the entry file/);
+  assert.deepEqual(pythonFrontend.resolveImport("helpers"), ["helpers.py"]);
+});
+
+test("the constructs outside the subset are refused with what to write instead", () => {
+  const cases: [string, RegExp][] = [
+    ["class C:\n    pass\n", /an object written where it is made/],
+    ["def f() -> int:\n    yield 1\n", /a value the function hands back with return/],
+    ["def f() -> int:\n    async def g() -> int:\n        return 1\n", /a compiled program has nothing to wait for/],
+    ["def f() -> int:\n    with open('x') as g:\n        pass\n", /a plain block/],
+    ["def f() -> int:\n    g = lambda: 1\n    return g\n", /a function written with def/],
+    ["def f(a: int) -> bool:\n    return a is None\n", /the comparison `==`/],
+    ["def f(a: list[int]) -> bool:\n    return 1 in a\n", /a loop that looks for the value/],
+    ["def f(a: list[int]) -> list[int]:\n    return [x for x in a]\n", /a comprehension is not part of the subset/],
+    ["def f() -> int:\n    global x\n    return 1\n", /a name is bound in the scope it is written in/],
+    ["def f() -> int:\n    del x\n    return 1\n", /a name is bound for the whole of the scope/],
+    ["def f() -> int:\n    assert True\n    return 1\n", /a line written out with print/],
+    ["def f(a: int) -> int:\n    match a:\n        case 1:\n            return 1\n    return 0\n", /a chain of if \/ elif/],
+    ["def f(a: int = 1) -> int:\n    return a\n", /a parameter has no default value/],
+    ["def f() -> int:\n    if (n := 1) > 0:\n        return n\n    return 0\n", /a walrus is not part of the subset/],
+    ["def f(x: float) -> float:\n    return round(x)\n", /it rounds half to even/],
+    ["def f(a: int, *rest: int) -> int:\n    return a\n", /a function takes a fixed list of parameters/],
+  ];
+  for (const [source, expected] of cases) {
+    const refused = diagnostic(() => phaseOf("python", { "main.py": source }, "main.py"));
+    assert.match(refused, expected, `the refusal of ${JSON.stringify(source)}`);
+  }
+});
+
+test("every construct outside the subset of one file is reported at once", () => {
+  const source = ["class C:", "    pass", "", "def f() -> int:", "    yield 1", ""].join("\n");
+  const refused = diagnostic(() => phaseOf("python", { "main.py": source }, "main.py"));
+  assert.match(refused, /constructs of main\.py are outside the subset/);
+  assert.match(refused, /line 1:/);
+  assert.match(refused, /line 5:/);
+});
+
+test("a loop walks a range, and a list is walked by its own index", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    for x in a:\n        pass\n    return 0\n" }, "main.py"),
+  );
+  assert.match(refused, /a loop walks a range/);
+});
+
+test("a slice and a negative index are outside the subset", () => {
+  const slice = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3]\n" }, "main.py"),
+  );
+  assert.match(slice, /a slice is not part of the subset/);
+  const negative = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[-1]\n" }, "main.py"),
+  );
+  assert.match(negative, /a negative index is not part of the subset/);
+});
+
+test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
+  const source = [
+    "def first(a: list[float]) -> float:",
+    "    return a[0]",
+    "",
+  ].join("\n");
+  const contract = contractOf(source, "first");
+  assert.deepEqual(contract.requires, ["a != null", "len(a) >= (0 + 1)"]);
+});
+
+test("a print of a program is written with a space between its values", () => {
+  const phase = phaseOf("python", { "main.py": 'print("a", 1)\n' }, "main.py");
+  const statement = phase.body?.statements[0];
+  assert.ok(statement !== undefined);
+  assert.equal(statement.kind, "print");
+});
+
+test("printing a list or a dict is refused, because the two styles do not cover one", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "print([1, 2])\n" }, "main.py"),
+  );
+  assert.match(refused, /a list or a dict is not written the way Python writes it/);
+});
+
+test("the harness of a function build sets the style of the text it writes", () => {
+  const phase = phaseOf("python", { "main.py": "def twice(x: int) -> int:\n    return x * 2\n" }, "main.py");
+  const contract = phase.program.files[0].functions["twice"];
+  assert.ok(contract !== undefined);
+  const harness = generateHarness(contract, "", "python");
+  assert.match(harness, /blaze_rt_set_text_style\(1\)/);
+});
+
+test("the name of the module a program runs is the one the guard reads", () => {
+  const phase = phaseOf("python", { "main.py": 'if __name__ == "__main__":\n    f()\n' }, "main.py");
+  const statement = phase.body?.statements[0];
+  assert.ok(statement !== undefined && statement.kind === "if");
+  const condition = statement.condition;
+  assert.equal(condition.k, "binary");
+  assert.equal(condition.op, "==");
+  assert.deepEqual(condition.left, { k: "text", parts: [{ k: "text", value: "__main__" }] });
+  assert.deepEqual(condition.right, { k: "text", parts: [{ k: "text", value: "__main__" }] });
+});

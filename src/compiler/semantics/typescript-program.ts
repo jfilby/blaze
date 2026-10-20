@@ -1114,7 +1114,7 @@ class ProgramParser {
     }
     if (token.kind === "bigint") {
       this.next();
-      return { k: "bigint", text: token.text };
+      return { k: "whole", text: token.text };
     }
     if (token.kind === "string") {
       this.next();

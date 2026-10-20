@@ -336,6 +336,10 @@ function resolveBody(records: ModuleRecord[], entryPath: string): ProgramBody | 
   for (const record of records) {
     if (record.analysis.body.length === 0) continue;
     if (record.path !== entryPath) {
+      // The guard that names the entry module runs nowhere else, so a module
+      // the program merely imports holds nothing that runs: it is a library of
+      // functions whatever its guard says.
+      if (record.analysis.entryGuard === true) continue;
       throw contractPhaseError(
         `${record.path} runs code at the top level`,
         `line ${record.analysis.body[0].line}: only the entry module ${entryPath} runs; a file the program imports is a library of functions`,
