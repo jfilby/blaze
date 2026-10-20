@@ -223,6 +223,7 @@ matter are the ones a Python program is most likely to write:
 | `len(a)` where `a` is a list parameter | a list reaches a function as a pointer to its first element and no length arrives with it: the length is a parameter of its own |
 | a tuple, `(1, 2)` | a list is written in square brackets, as in `[1.0, 2.0]` |
 | a set, `{1, 2}` | a dict is written with named keys, as in `{"a": 1}` |
+| `a.append(x)` | a list is a buffer, and a buffer is fixed: the list a program uses is the one it wrote out |
 
 ## The types
 
@@ -672,8 +673,10 @@ a new section and needs nothing else.
 
 - **Should a Python program's list be a buffer or a dynamic array?** A buffer
   is fixed and a dynamic array grows, and Python's list does both. The
-  program model has both, and the subset picks the buffer for a literal and
-  the dynamic array for a list that is appended to.
+  program model has both, and the subset picks the buffer for a literal: the
+  list a program uses is the one it wrote out, and `a.append(x)` is not in the
+  subset. A list that a loop fills is a question the subset does not answer
+  yet, and a dynamic array is what would answer it.
 - **Should the contract language grow a `%` and a `//`?** A Python function
   that returns a remainder states no postcondition today, and the contract
   language is what a postcondition is written in. The operators it has are
