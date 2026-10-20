@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { assertMachineTarget, buildObject } from "../toolchain/ir-machine.ts";
+import { assertMachineTarget, buildObject, machineRefusal } from "../toolchain/ir-machine.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
@@ -170,6 +170,19 @@ const floorCall = (argument: SemanticValue): SemanticCall => ({
   callee: "Math.floor",
   builtin: true,
   signature: { name: "Math.floor", symbol: "Math.floor", params: [{ name: "v", type: "f64" }], returns: "f64" },
+  args: [argument],
+  argTypes: [F64],
+  returns: F64,
+  effects: [],
+  ownership: "none",
+  retain: false,
+});
+
+/** A call of the compiler's own that this backend has no instruction for. */
+const ceilCall = (argument: SemanticValue): SemanticCall => ({
+  callee: "Math.ceil",
+  builtin: true,
+  signature: { name: "Math.ceil", symbol: "Math.ceil", params: [{ name: "v", type: "f64" }], returns: "f64" },
   args: [argument],
   argTypes: [F64],
   returns: F64,
@@ -1753,6 +1766,29 @@ test("a target this backend does not encode for is refused rather than answered 
   // is the instruction set every x86-64 processor runs.
   assertMachineTarget({ arch: "x86_64", os: "linux", abi: "sysv", cpu: "znver1", features: [] });
   assertMachineTarget(TARGET);
+});
+
+test("the backend says whether it can lower a function, and what it said when it cannot", () => {
+  // A function the backend can lower is one it says nothing about: the answer
+  // is what a build asks before it generates anything, and a refusal is what
+  // makes it lower the program with the C backend instead.
+  const lowerable = subject(F64, handsBack(local("v")), NUMBERS);
+  assert.equal(
+    machineRefusal({ fn: lowerable, contract: contracted(lowerable), callable: new Set(["subject"]), target: TARGET }),
+    null,
+  );
+
+  // A call it has no instruction for is a refusal, and the refusal names the
+  // call: a build that falls back to the C backend says what the machine
+  // backend would not lower.
+  const refused = subject(F64, handsBack({ k: "call", type: F64, call: ceilCall(local("v")) }), NUMBERS);
+  const refusal = machineRefusal({
+    fn: refused,
+    contract: contracted(refused),
+    callable: new Set(["subject"]),
+    target: TARGET,
+  });
+  assert.match(refusal?.reason ?? "", /calls Math\.ceil, which this backend does not lower/);
 });
 
 test("a name the build pinned into a register is read as an element index", async () => {

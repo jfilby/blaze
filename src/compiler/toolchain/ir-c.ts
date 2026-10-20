@@ -177,6 +177,11 @@ const COMPARE_OPERATORS: Record<string, string> = {
  * The maths builtin each source name lowers to. `Math.round` is a half rounded
  * up, and a value that rounds to zero from below keeps its sign, which is what
  * the source language does and what a C `round` rounds away.
+ *
+ * Every maths builtin the language names is here, so that this backend can
+ * lower what the machine backend refuses: a build that falls back to it asks
+ * it for a function the machine backend would not write, and a builtin it does
+ * not know is a function the fallback cannot lower either.
  */
 function builtinExpression(name: string, args: string[]): string {
   switch (name) {
@@ -188,6 +193,12 @@ function builtinExpression(name: string, args: string[]): string {
       return `floor(${args[0]})`;
     case "Math.trunc":
       return `trunc(${args[0]})`;
+    case "Math.ceil":
+      return `ceil(${args[0]})`;
+    case "Math.random":
+      // The runtime's own random is what a program body is given, so a module
+      // function and a program body answer the same call the same way.
+      return `${RUNTIME_NAME}_random()`;
     case "Math.round":
       // The argument is read twice, so it is bound: a value the IR calls is a
       // call that would otherwise run twice.

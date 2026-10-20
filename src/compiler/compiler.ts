@@ -43,12 +43,13 @@ import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type 
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
-import { contractsByName } from "./semantics/calls.ts";
+import { contractsByName, type ContractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
 import type { SemanticFunction, SemanticProgram } from "./core/semantic-ir.ts";
 import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
+import { machineRefusal } from "./toolchain/ir-machine.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
@@ -891,6 +892,44 @@ function compilationUnits(program: ProgramContract, isProgram: boolean): Compila
 }
 
 /**
+ * The machine backend's answer about a program: whether it can lower every
+ * function of it, and what it said about the one it cannot.
+ *
+ * The question is asked of the whole program because the lowering of a program
+ * is one thing: the objects of its functions are linked into one binary and the
+ * driver that calls them is written in C, so a program with a machine object
+ * beside a C one is a program with two conventions in it. A function the
+ * machine backend refuses is therefore a reason for the whole program to be
+ * lowered by the C backend.
+ *
+ * The IR asked about is the IR a candidate starts from: the function the
+ * compiler resolved, folded the way a candidate is folded. A model may write
+ * another candidate of it, and a candidate the machine backend refuses is a
+ * candidate the build rejects as any other.
+ */
+function machineRefusalOf(
+  units: readonly CompilationUnit[],
+  semantics: Readonly<Record<string, SemanticFunction>>,
+  contracts: ContractsByName,
+  target: TargetSpec,
+): { function: string; reason: string; detail: string | undefined } | null {
+  const callees = new Map(Object.entries(semantics));
+  for (const unit of units) {
+    const name = unit.contract.function.name;
+    const fn = semantics[name];
+    if (fn === undefined) continue;
+    const refusal = machineRefusal({
+      fn: optimizeSemanticFunction(structuredClone(fn), callees),
+      contract: unit.contract,
+      callable: callableSymbols(unit.contract, contracts),
+      target,
+    });
+    if (refusal !== null) return { function: name, reason: refusal.reason, detail: refusal.detail };
+  }
+  return null;
+}
+
+/**
  * A program is linked from native objects, so the one kind that produces no
  * object cannot build one. Every other kind answers in the IR and the compiler
  * writes the target code, so the driver links beside the others exactly as it
@@ -1249,7 +1288,6 @@ export async function runBuild(
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
     await store.write(paths.contract, program);
-    await writeBuildRecord(store, paths, build);
     reporter.stage(
       "contract",
       "ok",
@@ -1257,6 +1295,31 @@ export async function runBuild(
         ? `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(program.entry.function)} in ${program.entry.file}`
         : `Program contract: ${program.files.length} file(s), ${units.length} compiled function(s), program ${program.entry.file}`,
     );
+    // The machine backend is asked whether it can lower this program before
+    // anything is generated. The lowering of a program is one thing: the
+    // objects of its functions are linked into one binary and the driver that
+    // calls them is written in C, so a program with a machine object beside a
+    // C one is a program with two conventions in it. A program the machine
+    // backend refuses is therefore lowered by the C backend, and the build says
+    // so rather than leaving a reader to wonder why the objects are not the
+    // ones the project asked for.
+    if (backendKind === "machine") {
+      const refusal = machineRefusalOf(units, semantics, contractsByName(program.files), target);
+      if (refusal !== null) {
+        reporter.stage(
+          "assemble",
+          "info",
+          `The machine backend refused to lower ${refusal.function} (${refusal.reason}); the C backend is used instead`,
+        );
+        if (refusal.detail !== undefined && refusal.detail.trim() !== "") {
+          reporter.stage("assemble", "info", refusal.detail.trim());
+        }
+        backendKind = "c";
+        build.backend = "c";
+        build.backendFallback = { function: refusal.function, reason: refusal.reason };
+      }
+    }
+    await writeBuildRecord(store, paths, build);
 
     assertAssemblerSupportsArch(target);
     if (phase.body !== undefined) assertProgramOutput(outputKind);

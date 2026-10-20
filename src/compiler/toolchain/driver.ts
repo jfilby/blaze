@@ -831,6 +831,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
         return `sqrt(${argument(0)})`;
       case "Math.floor":
         return `floor(${argument(0)})`;
+      case "Math.ceil":
+        return `ceil(${argument(0)})`;
       case "Math.round":
         return `program_round(${argument(0)})`;
       case "Math.trunc":

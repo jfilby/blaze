@@ -18,7 +18,7 @@
  */
 
 import { stat, writeFile } from "node:fs/promises";
-import { CompilerError } from "../core/errors.ts";
+import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
 import type { Condition } from "./x86.ts";
@@ -585,6 +585,53 @@ export function assertMachineTarget(target: TargetSpec): void {
     message: `the machine backend cannot build for ${target.arch}-${target.os}-${target.abi}`,
     detail: "it writes x86-64 System V code itself; build with --backend c for another target",
   });
+}
+
+/**
+ * What the machine backend said when it refused to lower a function.
+ */
+export interface MachineRefusal {
+  /** What it said. */
+  readonly reason: string;
+  /** What it said about it, when it said more. */
+  readonly detail: string | undefined;
+}
+
+/**
+ * Whether the machine backend can lower a function, and what it said when it
+ * could not.
+ *
+ * A build asks this before it generates anything. The lowering of a program is
+ * one thing: the objects of its functions are linked into one binary and the
+ * driver that calls them is written in C, so a program with a machine object
+ * beside a C one is a program with two conventions in it — a reference is an
+ * address in one and a number in the other. A function the machine backend
+ * refuses is therefore a reason for the whole program to be lowered by the C
+ * backend, and the build says so when it does.
+ *
+ * The object is not written: what a lowering refuses is the same whether it
+ * was written out or not, and a build that asks this question has not decided
+ * to build anything yet.
+ */
+export function machineRefusal(
+  request: Omit<MachineRequest, "objectPath" | "candidate">,
+): MachineRefusal | null {
+  try {
+    assertMachineTarget(request.target);
+    const functionName = symbolOf(request.contract);
+    lowerFunction(
+      request.fn,
+      request.contract,
+      functionName,
+      request.callable,
+      request.target,
+      request.powerOfTwoParams,
+    );
+    return null;
+  } catch (cause) {
+    const error = toCompilerError(cause, { category: "AssemblyError", stage: "assemble" });
+    return { reason: error.message, detail: error.detail };
+  }
 }
 
 /**

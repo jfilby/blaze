@@ -103,6 +103,75 @@ test("a build names the backend it used, and one that names none gets the output
   assert.equal((await inspectProject("input", implied)).backend, "machine");
 });
 
+/**
+ * A module whose function the machine backend refuses: `Math.ceil` is a maths
+ * builtin the machine backend has no instruction for, and the C backend lowers
+ * it to the C library's `ceil`.
+ */
+const CEIL_MODULE = [
+  "export function raised(value: number): number {",
+  "  return Math.ceil(value);",
+  "}",
+  "",
+].join("\n");
+
+const CEIL_ENTRY = ['import { raised } from "./lib.ts";', "", "console.log(raised(2.5));", ""].join("\n");
+
+test("a program the machine backend refuses is lowered by the C backend, and the build says so", async (t) => {
+  // The environment must not name a model: the build under test asks for
+  // nothing, and the IR the compiler resolved is the candidate it lowered.
+  const previous = process.env.AI_MODEL;
+  delete process.env.AI_MODEL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AI_MODEL;
+    else process.env.AI_MODEL = previous;
+  });
+
+  const directory = await scratch("blaze-machine-refused-");
+  await writeFile(join(directory, "lib.ts"), CEIL_MODULE, "utf8");
+  await writeFile(join(directory, "main.ts"), CEIL_ENTRY, "utf8");
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    output: "machine",
+    backend: "machine",
+    runtime: "none",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+
+  const log: string[] = [];
+  const outcome = await runBuild(
+    "input.toml",
+    { cwd: directory, reuse: false },
+    { stage: (_stage, _status, message) => log.push(message) },
+    "build",
+  );
+
+  // The notice names the function and what the machine backend said: a build
+  // that delivers something other than what the project asked for says so
+  // rather than leaving a reader to find out from the objects.
+  assert.ok(
+    log.some((message) => /The machine backend refused to lower raised \(.*Math\.ceil/.test(message)),
+    log.join("\n"),
+  );
+  // And the backend that wrote the objects is the one the record names.
+  assert.equal(outcome.build.backend, "c");
+  const recorded = await inspectProject("input", directory);
+  assert.equal(recorded.backend, "c");
+  // The record says why, so a build whose numbers are not the ones the project
+  // asked for can be told apart from one that asked for them.
+  assert.equal(recorded.backendFallback?.function, "raised");
+  assert.match(recorded.backendFallback?.reason ?? "", /Math\.ceil/);
+
+  // The program is what is checked, so the fallback is a program and not a
+  // refusal: it prints what the source prints.
+  assert.equal(outcome.build.status, "success");
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  assert.equal(execution.stdout, "3\n");
+});
+
 test("a mode nobody has heard of is refused by name", async () => {
   const directory = await workspace("mode-unknown", { ...INPUT, mode: "turbo" as never });
   await assert.rejects(

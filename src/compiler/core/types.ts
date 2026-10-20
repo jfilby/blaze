@@ -624,6 +624,14 @@ export interface BuildStatus {
   outputKind: OutputKind;
   /** What lowered the IR for this build. */
   backend: BackendKind;
+  /**
+   * The function the machine backend refused, and what it said about it, when
+   * the build lowered the program with the C backend instead. A build that
+   * lowered a program with another backend is a build whose numbers are not the
+   * ones the project asked for, so the record says which function was refused
+   * and why.
+   */
+  backendFallback?: { function: string; reason: string };
   /** How the toolchain built this. */
   mode: BuildMode;
   /** The runtime this build links against. */

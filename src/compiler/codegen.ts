@@ -733,7 +733,6 @@ async function materialize(
     // a loop it refused to give a team is written in order and asks for nothing.
     if (lowered.threads) threads = ["pthread"];
   } else {
-    console.error("CODEGEN CALL compileFunctionC");
     lowered = await compileFunctionC({
       fn,
       contract: request.contract,
