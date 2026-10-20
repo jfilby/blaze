@@ -506,7 +506,9 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   // A wasm build writes the module and no assembly at all, so naming the
   // assembly here asked for a file that was never written and the object half
   // of the cache was unreachable for that backend for the life of the project.
-  assert.deepEqual(names("wasm", false, true, "wasm"), [".wasm", ".ir"]);
+  // The host that runs the module is delivered beside it and is a file the
+  // build consumes — it is what the vectors run against — so it is named too.
+  assert.deepEqual(names("wasm", false, true, "wasm"), [".wasm", ".host.mjs", ".ir"]);
   // A backend that writes the object itself delivers that object, which is also
   // what a program build links, so the two questions name the same file twice
   // and the list is still one list.
@@ -526,7 +528,7 @@ test("every file a build consumes from a reused candidate is one it asked for", 
   assert.deepEqual(names("machine", true, false), [".ir", ".s", ".o"]);
   assert.deepEqual(names("asm", true, false), [".ir", ".s", ".o"]);
   // A wasm build links no object at all, whatever the program around it does.
-  assert.deepEqual(names("wasm", true, true, "wasm"), [".wasm", ".ir"]);
+  assert.deepEqual(names("wasm", true, true, "wasm"), [".wasm", ".host.mjs", ".ir"]);
 });
 
 test("two projects whose names share a prefix each read their own record", async () => {

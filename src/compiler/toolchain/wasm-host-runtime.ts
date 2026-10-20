@@ -82,6 +82,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_string_clone",
   "blaze_rt_string_length",
   "blaze_rt_text_length",
+  "blaze_rt_text_compare",
   "blaze_rt_array_new",
   "blaze_rt_array_resize",
   "blaze_rt_object_new",
@@ -138,6 +139,21 @@ const WIDE_SERVICES: readonly HostService[] = [
 ];
 
 /**
+ * The services whose WebAssembly signature is not the C one with its types
+ * replaced.
+ *
+ * The C ABI carries a text into the dynamic side as a double: the pointer is
+ * put in a double because everything on that side of the wall is a double, and
+ * the runtime reads the pointer back out of it. The WebAssembly ABI has a
+ * pointer of its own — an offset into the shared memory — and every other
+ * service of the table that takes a text takes it that way. So this one
+ * service takes the offset itself, and the host reads the text at it.
+ */
+const SIGNATURE_OVERRIDES: Record<string, { params: readonly string[]; result: string | null }> = {
+  blaze_rt_json_parse: { params: ["i32"], result: "f64" },
+};
+
+/**
  * The services of the host ABI, by the name they are imported under.
  *
  * The table is the runtime ABI with the C types replaced by the WebAssembly
@@ -145,16 +161,20 @@ const WIDE_SERVICES: readonly HostService[] = [
  * a call carries over unchanged.
  */
 export const HOST_SERVICES: readonly HostService[] = [
-  ...RUNTIME_ABI.filter((entry) => EXPOSED_SERVICES.includes(entry.symbol)).map((entry) => ({
-    symbol: entry.symbol,
-    params: entry.params.map(([, type]) => {
-      const mapped = WASM_OF_C[type];
-      if (mapped === undefined) throw new Error(`the host ABI has no WebAssembly type for the C type "${type}"`);
-      return mapped;
-    }),
-    result: entry.returns === "void" ? null : (WASM_OF_C[entry.returns] as string),
-    ...(entry.noreturn === true ? { noreturn: true } : {}),
-  })),
+  ...RUNTIME_ABI.filter((entry) => EXPOSED_SERVICES.includes(entry.symbol)).map((entry) => {
+    const signature = SIGNATURE_OVERRIDES[entry.symbol];
+    if (signature !== undefined) return { symbol: entry.symbol, ...signature };
+    return {
+      symbol: entry.symbol,
+      params: entry.params.map(([, type]) => {
+        const mapped = WASM_OF_C[type];
+        if (mapped === undefined) throw new Error(`the host ABI has no WebAssembly type for the C type "${type}"`);
+        return mapped;
+      }),
+      result: entry.returns === "void" ? null : (WASM_OF_C[entry.returns] as string),
+      ...(entry.noreturn === true ? { noreturn: true } : {}),
+    };
+  }),
   ...WIDE_SERVICES,
 ];
 
@@ -538,6 +558,31 @@ export function blaze_rt_text_length(text) {
 `,
   },
   {
+    service: "blaze_rt_text_compare",
+    source: `
+export function blaze_rt_text_compare(left, right) {
+  /* Two texts are compared by what they say and not by where they are: a text
+     built at run time and one written out are two addresses that can say the
+     same thing. A text that is nothing is the smaller of the two, so two
+     texts that are nothing are the same thing. The bytes are compared as the
+     C library compares them: one byte at a time, the first difference
+     deciding, and a byte read as the unsigned number it is. */
+  if (left === 0 || right === 0) {
+    if (left === right) return 0;
+    return left === 0 ? -1 : 1;
+  }
+  const one = textBytes(left);
+  const two = textBytes(right);
+  const shared = Math.min(one.length, two.length);
+  for (let at = 0; at < shared; at += 1) {
+    if (one[at] !== two[at]) return one[at] < two[at] ? -1 : 1;
+  }
+  if (one.length === two.length) return 0;
+  return one.length < two.length ? -1 : 1;
+}
+`,
+  },
+  {
     service: "blaze_rt_array_new",
     source: `
 export function blaze_rt_array_new(count, elementSize) {
@@ -655,6 +700,7 @@ export function blaze_rt_to_text(value) {
     return makeText("[" + parts.join(",") + "]");
   }
   if (boxed.kind === "object") return makeText(jsonText(value));
+  if (boxed.kind === "value") return makeText(jsonText(value));
   return makeText("null");
 }
 `,
@@ -666,7 +712,13 @@ export function blaze_rt_to_number(value) {
   const boxed = dynLookup(value);
   if (boxed === null) return value;
   if (boxed.kind === "number" || boxed.kind === "bool") return boxed.number;
-  if (boxed.kind === "text") return Number(boxed.text);
+  if (boxed.kind === "text") {
+    /* The number the text states, and zero where it states none: the C
+       runtime reads it with atof, which reads the digits it finds and stops
+       there, and answers zero for a text that holds no digits at all. */
+    const parsed = Number.parseFloat(boxed.text);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
   return value;
 }
 `,

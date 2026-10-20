@@ -240,8 +240,37 @@ test("a whole number that is not a float is printed from the integer itself", as
   await compute("n: number", ["  let x = 9007199254740993;", "  console.log(x);", "  return n;"], "run\n0\n\n", "9007199254740992\nRESULT 0\n");
 });
 
-test("the listing names every instruction of the code section", async () => {
-  const bytes = await moduleOf("a: Float64Array, n: number", ["  let total = 0;", "  for (let i = 0; i < n; i++) { total += a[i]; }", "  return total;"]);
+test("two texts are compared by what they say and not by where they are", async () => {
+  // A text built at run time and one written out are two addresses that can
+  // say the same thing, and the addresses compared as if the texts did: the
+  // module answered "not equal" for two texts that say the same thing. The
+  // comparison is the runtime's own, and the runtime owns the texts.
+  const library = [
+    "def r() -> int:",
+    "    a = 'hello' + 'x'",
+    "    b = 'hellox'",
+    "    if a == b:",
+    "        return 1",
+    "    return 0",
+    "",
+  ].join("\n");
+  const files = { "main.py": "from lib import r\nr()\n", "lib.py": library };
+  const { program, semantics } = programWithSemantics("python", files, "main.py");
+  const contract = program.files.find((file) => file.path === "lib.py")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const directory = await scratch("blaze-wasm-text-compare-");
+  const built = await buildModule({
+    fn: semantics.r as SemanticFunction,
+    contract,
+    modulePath: join(directory, "candidate.wasm"),
+    hostPath: join(directory, "host.mjs"),
+  });
+  const result = run("node", [built.hostPath, built.modulePath], { input: "run\n\n", timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "RESULT 1\n");
+});
+
+test("the listing names every instruction of the code section", async () => {  const bytes = await moduleOf("a: Float64Array, n: number", ["  let total = 0;", "  for (let i = 0; i < n; i++) { total += a[i]; }", "  return total;"]);
   const listing = describeModule(bytes);
   assert.match(listing, /types:/, "the listing names the types");
   assert.match(listing, /imports:/, "the listing names the imports");

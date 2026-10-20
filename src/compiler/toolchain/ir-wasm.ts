@@ -1236,9 +1236,12 @@ class Body {
       case "element": {
         const of = value.of.type;
         if (of.kind === "ref" && of.of === null && of.name === undefined) {
-          // An element of a dynamic array is the runtime's to answer.
+          // An element of a dynamic array is the runtime's to answer. The
+          // index is a count and the runtime carries a count as a double, so
+          // it is written as one: a count written as a whole number is a
+          // module the engine refuses, because the service takes a double.
           this.value(value.of, DYNAMIC_TYPE);
-          this.value(value.index, { kind: "primitive", name: "usize" });
+          this.value(value.index, F64_TYPE);
           this.callService("blaze_rt_array_get");
           this.convert(value.type, at);
           return;
@@ -1518,6 +1521,22 @@ class Body {
           this.wideBinary(value.op, value.left, value.right);
           return;
         }
+        // Two texts are compared by what they say and not by where they are: a
+        // text built at run time and one written out are two addresses that
+        // can say the same thing, and the addresses compared as if the texts
+        // did. The runtime owns the texts, so the comparison is the runtime's
+        // own, and the answer is a number below zero, zero or a number above
+        // zero: the comparison the source wrote is one of the six ways of
+        // asking about that.
+        if (value.k === "compare" && isTextType(compared)) {
+          this.value(value.left, TEXT);
+          this.value(value.right, TEXT);
+          this.callService("blaze_rt_text_compare");
+          this.i32(0);
+          this.op(BINARY[I32][value.op] as number);
+          this.convert({ kind: "primitive", name: "i32" }, at);
+          return;
+        }
         // A compound assignment and an arith of `pow` both have no
         // instruction and no runtime here. Refuse it by name rather than emit
         // a byte that does not decode, or nothing at all.
@@ -1584,6 +1603,14 @@ class Body {
         const kernel = WIDE_BUILTINS[value.call.callee];
         if (kernel !== undefined) {
           this.wideKernel(kernel, value.call);
+          return;
+        }
+        // The dynamic values and the dynamic arrays are the runtime's own
+        // representation, and the runtime is the host: these calls are calls
+        // of the services of the host ABI.
+        const answered = this.dynamicCall(value.call);
+        if (answered !== null) {
+          this.convert(answered, at);
           return;
         }
         for (const [position, argument] of value.call.args.entries()) {
@@ -2717,6 +2744,14 @@ class Body {
         if (builtinFor(statement.call.callee) === null) {
           unreachable(`call ${statement.call.callee}`, this.contract, this.candidate);
         }
+        // The dynamic values and the dynamic arrays are the runtime's own, and
+        // the runtime is the host.
+        if (this.dynamicCall(statement.call) !== null) {
+          // Nothing reads the answer, so it is dropped rather than left for
+          // the statement after it to take as one of its own operands.
+          this.op(0x1a);
+          return;
+        }
         for (const [position, argument] of statement.call.args.entries()) {
           this.value(argument, statement.call.argTypes[position] ?? argument.type);
         }
@@ -3115,6 +3150,150 @@ class Body {
       function: symbolOf(this.contract),
       candidate: this.candidate,
     });
+  }
+
+  /**
+   * The calls the runtime answers, which are the dynamic values and the
+   * dynamic arrays.
+   *
+   * A dynamic value is the runtime's own representation, carried in a handle,
+   * and the runtime is the host: every one of these calls is a call of a
+   * service of the host ABI. The arguments go down in the order the service
+   * takes them, and the answer is what the service answers it in.
+   *
+   * The answer is the type the service answers in and not the type the call
+   * was written at: the runtime answers a count as a double, and a use that
+   * reads it as a whole number narrows it where it reads it.
+   *
+   * @returns the type the call answers, or null where the call is not one of
+   * the runtime's own.
+   */
+  private dynamicCall(call: SemanticCall): SemanticType | null {
+    const argument = (position: number): SemanticValue => call.args[position] as SemanticValue;
+    switch (call.callee) {
+      case "array.new":
+        // An empty dynamic array, which is the runtime's own and is carried in
+        // the handle it answers.
+        this.callService("blaze_rt_dyn_array_new");
+        return DYNAMIC_TYPE;
+      case "array.push":
+        this.dynamicValue(argument(0));
+        this.dynamicValue(argument(1));
+        this.callService("blaze_rt_array_push");
+        return DYNAMIC_TYPE;
+      case "array.get":
+        this.dynamicValue(argument(0));
+        this.dynamicValue(argument(1));
+        this.callService("blaze_rt_array_get");
+        return F64_TYPE;
+      case "array.length":
+        this.dynamicValue(argument(0));
+        this.callService("blaze_rt_array_length");
+        return F64_TYPE;
+      case "JSON.parse": {
+        // The text is the offset of its bytes, which is what the service
+        // reads. The C ABI carries it as a double because everything on that
+        // side of the wall is a double; this ABI has a pointer of its own,
+        // and every other service of the table that takes a text takes it
+        // that way.
+        const text = argument(0);
+        if (!isTextType(text.type)) {
+          unreachable("parse JSON of something that is not a text", this.contract, this.candidate);
+        }
+        this.value(text, TEXT);
+        this.callService("blaze_rt_json_parse");
+        return DYNAMIC_TYPE;
+      }
+      case "JSON.stringify":
+        this.dynamicValue(argument(0));
+        this.callService("blaze_rt_json_stringify");
+        return DYNAMIC_TYPE;
+      case "crypto.createHash":
+        this.callService("blaze_rt_md5_create");
+        return DYNAMIC_TYPE;
+      case "hasher.update": {
+        // The hasher is the runtime's own, and the text it is fed is the text
+        // the value holds: a text is itself, and anything else is what the
+        // runtime renders it as.
+        this.dynamicValue(argument(0));
+        const text = argument(1);
+        if (isTextType(text.type)) {
+          this.value(text, TEXT);
+        } else {
+          this.dynamicValue(text);
+          this.callService("blaze_rt_to_text");
+        }
+        this.callService("blaze_rt_md5_update");
+        return DYNAMIC_TYPE;
+      }
+      case "hasher.update.digest":
+        this.dynamicValue(argument(0));
+        this.callService("blaze_rt_md5_digest");
+        return DYNAMIC_TYPE;
+      case "fs.readFileSync":
+        // The path and the mode are texts, and the runtime reads them at the
+        // offsets they are.
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_file_read");
+        return DYNAMIC_TYPE;
+      case "Number":
+      case "parseInt": {
+        // The number a value is written at: a text is the number its text
+        // states, and the runtime reads it out of the box it makes of it.
+        const value = argument(0);
+        if (isTextType(value.type)) {
+          this.value(value, TEXT);
+          this.callService("blaze_rt_box_string");
+        } else {
+          this.dynamicValue(value);
+        }
+        this.callService("blaze_rt_to_number");
+        return F64_TYPE;
+      }
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * A value the runtime holds, as the double the runtime carries it in.
+   *
+   * A number is a number and a value the runtime already holds is the handle
+   * it is held in. A text is a text the runtime owns: the runtime boxes it,
+   * because the boxing is what makes a text a dynamic value, and it is the
+   * runtime's own work rather than the module's.
+   */
+  private dynamicValue(value: SemanticValue): void {
+    const type = value.type;
+    if (type.kind === "ref" && type.of === null && type.name === undefined) {
+      this.value(value, DYNAMIC_TYPE);
+      return;
+    }
+    if (isTextType(type)) {
+      this.value(value, TEXT);
+      this.callService("blaze_rt_box_string");
+      return;
+    }
+    this.value(value, F64_TYPE);
+  }
+
+  /**
+   * A text the runtime is handed, as the offset of its bytes.
+   *
+   * A text is the offset of its bytes in the memory, and a text that is
+   * nothing is no offset at all: the runtime reads an empty text at it.
+   */
+  private textArgument(value: SemanticValue): void {
+    if (isTextType(value.type)) {
+      this.value(value, TEXT);
+      return;
+    }
+    if (value.k === "nothing") {
+      this.i32(0);
+      return;
+    }
+    unreachable("hand the runtime a text where a text is wanted", this.contract, this.candidate);
   }
 
   /**
