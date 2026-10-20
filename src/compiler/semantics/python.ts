@@ -229,6 +229,7 @@ export function tokenizePython(source: string, path: string): PyToken[] {
       const string = readString(source, index, "", line, path);
       tokens.push({ kind: "string", text: string.text, line, prefix: "" });
       index = string.end;
+      line = string.line;
       continue;
     }
     if (/[A-Za-z_]/.test(character)) {
@@ -239,6 +240,7 @@ export function tokenizePython(source: string, path: string): PyToken[] {
         const string = readString(source, after, prefix, line, path);
         tokens.push({ kind: "string", text: string.text, line, prefix });
         index = string.end;
+        line = string.line;
         continue;
       }
       const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(source.slice(index)) as RegExpExecArray;
@@ -305,6 +307,9 @@ function indentationWidth(source: string, index: number, column: number): number
 /**
  * A string, from its opening quote to its closing one, with the escapes it
  * carries resolved.
+ *
+ * A string of three quotes is a string of three quotes: it may hold the line
+ * breaks a string of one may not, and it is how a docstring is written.
  */
 function readString(
   source: string,
@@ -312,10 +317,12 @@ function readString(
   prefix: string,
   line: number,
   path: string,
-): { text: string; end: number } {
+): { text: string; end: number; line: number } {
   const quote = source[start];
   const raw = prefix.includes("r");
-  let index = start + 1;
+  // A string of three quotes ends at three quotes, and one of one ends at one.
+  const closing = source.startsWith(quote.repeat(3), start) ? quote.repeat(3) : quote;
+  let index = start + closing.length;
   let text = "";
   for (;;) {
     if (index >= source.length) {
@@ -349,8 +356,8 @@ function readString(
       index += 2;
       continue;
     }
-    if (character === quote) {
-      return { text, end: index + 1 };
+    if (source.startsWith(closing, index)) {
+      return { text, end: index + closing.length, line };
     }
     if (character === "\n") line += 1;
     text += character;
@@ -1049,6 +1056,12 @@ class PythonParser {
       }
       return { k: "print", values: value.args, line: token.line };
     }
+    // A string written as a statement of its own says nothing: it is the
+    // docstring of a function or of a module, and Python reads it and throws
+    // its value away.
+    if (value.k === "text") {
+      return { k: "pass", line: token.line };
+    }
     if (value.k !== "call") {
       this.report(
         "a statement of a program is a call or a binding",
@@ -1513,6 +1526,18 @@ class PythonParser {
     }
     if (token.kind === "op" && token.text === "(") {
       const inner = this.expression();
+      // A tuple is a list in brackets of its own, and the subset has no
+      // tuple: a value in brackets is one value.
+      if (this.at(",")) {
+        this.report(
+          "a tuple is not part of the subset",
+          "a list is written in square brackets, as in [1.0, 2.0]",
+          this.peek(),
+        );
+        while (!this.at(")") && this.peek().kind !== "end") this.next();
+        this.expect(")");
+        return { k: "number", text: "0", whole: true };
+      }
       this.expect(")");
       return inner;
     }
@@ -1546,7 +1571,13 @@ class PythonParser {
           const key = this.next();
           const name = key.kind === "name" || key.kind === "string" ? key.text : null;
           if (name === null) {
-            this.report("a field of a dict is named", `near "${key.text}"`, key);
+            // A set is a dict of nothing, and the subset has no set: the keys
+            // of a dict are names.
+            this.report(
+              "a set is not part of the subset",
+              `near "${key.text}"; a dict is written with named keys, as in {"a": 1}`,
+              key,
+            );
           } else {
             this.expect(":");
             entries.push({ name, value: this.expression() });

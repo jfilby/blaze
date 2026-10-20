@@ -201,6 +201,21 @@ test("a function of a module reads no command line", () => {
   assert.match(refused, /reads the command line, which a module may not/);
 });
 
+test("a docstring says nothing, and a string of three quotes is read", () => {
+  const source = ["'''one", "two'''", "def f(a: int) -> int:", '    """the doc"""', "    return a", ""].join("\n");
+  const phase = phaseOf("python", { "main.py": source }, "main.py");
+  // The docstring is a statement of nothing: the function it documents is the
+  // one the module declares.
+  assert.equal(phase.program.files[0].functions["f"] !== undefined, true);
+});
+
+test("a tuple and a set are not part of the subset", () => {
+  const tuple = diagnostic(() => phaseOf("python", { "main.py": "t = (1, 2)\n" }, "main.py"));
+  assert.match(tuple, /a tuple is not part of the subset/);
+  const set = diagnostic(() => phaseOf("python", { "main.py": "s = {1, 2}\n" }, "main.py"));
+  assert.match(set, /a set is not part of the subset/);
+});
+
 test("the constructs outside the subset are refused with what to write instead", () => {
   const cases: [string, RegExp][] = [
     ["class C:\n    pass\n", /an object written where it is made/],
