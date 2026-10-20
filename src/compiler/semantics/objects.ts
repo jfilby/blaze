@@ -280,7 +280,10 @@ class BodyTypes {
               `${this.path}: ${this.functionName} calls it with ${expression.args.length}`,
             );
           }
-          return { kind: "type", type: builtin.returns };
+          // A string is a reference the contract language does not spell, so
+          // what a use infers of it is the same as what it infers of any other
+          // reference.
+          return { kind: "type", type: builtin.returns.kind === "text" ? ANY_REF : builtin.returns };
         }
         const returns = this.callees.get(expression.name);
         if (returns === undefined) {

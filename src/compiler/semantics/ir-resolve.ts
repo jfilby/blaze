@@ -190,7 +190,7 @@ interface DraftCall {
   name: string;
   signature: FunctionSignature;
   args: DraftValue[];
-  returns: TypeExpr;
+  returns: SemanticType;
   /** What the call does beyond computing its result. */
   effects: Effect[];
   /** A function the compiler itself provides, as `Math.abs` is. */
@@ -261,8 +261,13 @@ type DraftValue =
   | { k: "field"; object: DraftValue; layout: string; field: string; type: TypeExpr }
   /** An object literal, resolved so it is allocated wherever it is written. */
   | { k: "object"; fields: { name: string; value: DraftValue }[]; layout: string; type: TypeExpr }
-  /** A reference to a program function, as a function pointer. */
-  | { k: "function"; name: string; captures: string[] };
+  /**
+   * A reference to a program function, as a function pointer. `symbol` is the
+   * symbol of a function of another file of the program: it is compiled on its
+   * own and linked beside the program, and the program hands the runtime its
+   * address.
+   */
+  | { k: "function"; name: string; captures: string[]; symbol?: string };
 
 /** A statement the program runs, before it is written down as blocks. */
 type DraftStatement =
@@ -323,6 +328,11 @@ interface DraftProgram {
   /** The functions the program declares, with the body each of them runs. */
   declared: ProgramFunctionDraft[];
   objects: Record<string, ObjectLayout>;
+  /**
+   * The functions of other files of the program that are registered as the
+   * handlers of an HTTP server, by their symbols.
+   */
+  httpHandlers: string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -348,7 +358,7 @@ function programError(message: string, body: ProgramBody, line: number, detail?:
   });
 }
 
-function primitive(type: TypeExpr | null): PrimitiveTypeName | null {
+function primitive(type: SemanticType | null): PrimitiveTypeName | null {
   return type !== null && type.kind === "primitive" ? type.name : null;
 }
 
@@ -686,7 +696,9 @@ function draftType(value: DraftValue): TypeExpr | null {
     case "object":
       return value.type;
     case "call":
-      return value.call.returns;
+      // A call that hands back a string is a string, and a string is a value
+      // the type of a draft does not spell.
+      return value.call.returns.kind === "text" ? null : value.call.returns;
     case "length":
     case "stringLength":
     case "element":
@@ -1469,7 +1481,7 @@ function returnsIn(statements: readonly DraftStatement[]): (DraftStatement & { k
 }
 
 /** The type a number is, as the semantic IR states a type rather than as text. */
-function isNumberType(type: TypeExpr): boolean {
+function isNumberType(type: SemanticType): boolean {
   const name = primitive(type);
   return name !== null && NUMERIC.includes(name);
 }
@@ -1535,6 +1547,11 @@ class ProgramResolver {
   private loops = 0;
   /** The functions the program declares, and what they share. */
   private readonly functions: ProgramFunctions;
+  /**
+   * The functions of other files of the program that are registered as the
+   * handlers of an HTTP server, by their symbols.
+   */
+  private readonly httpHandlers: string[] = [];
 
   constructor(
     body: ProgramBody,
@@ -1564,6 +1581,7 @@ class ProgramResolver {
       functions: [...this.contracts.values()].map((contract) => contract.signature),
       declared: [...this.functions.table.values()],
       objects: this.objects,
+      httpHandlers: [...this.httpHandlers],
     };
   }
 
@@ -1855,6 +1873,7 @@ class ProgramResolver {
       functions: [...this.contracts.values()].map((contract) => contract.signature),
       declared: [],
       objects: this.objects,
+      httpHandlers: [],
     };
   }
 
@@ -2268,7 +2287,7 @@ class ProgramResolver {
           return declare({ kind: "object", mutable, type: value.call.returns });
         }
         throw programError(
-          `${value.call.name} returns ${typeToString(value.call.returns)}`,
+          `${value.call.name} returns ${contractText(value.call.returns)}`,
           this.body,
           statement.line,
           `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
@@ -2821,6 +2840,13 @@ class ProgramResolver {
           }) ?? [];
           return { k: "function", name: value.name, captures };
         }
+        // A function of another file of the program is handed over by name as
+        // well: the runtime calls it, and what calls it is the driver, which
+        // links the object the function was compiled into.
+        const contract = this.contracts.get(value.name);
+        if (contract !== undefined) {
+          return { k: "function", name: value.name, captures: [], symbol: contract.signature.symbol };
+        }
         // An array is used at one element type, whichever name it is passed by.
         const held = this.held(value.name, line);
         if (held.kind === "array" && expect !== null) this.expectArray(expect, held, line);
@@ -3082,8 +3108,8 @@ class ProgramResolver {
       signature: {
         name: SHARED,
         symbol: SHARED,
-        params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) })),
-        returns: typeToString(builtin.returns),
+        params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+        returns: contractText(builtin.returns),
       },
       args: [count],
       returns: builtin.returns,
@@ -3470,6 +3496,14 @@ class ProgramResolver {
   private call(value: ProgramValue & { k: "call" }, line: number): DraftCall {
     const builtin = builtinFor(value.function);
     if (builtin !== null) {
+      if (builtin.moduleOnly === true) {
+        throw programError(
+          `${value.function} is the HTTP API of a module function`,
+          this.body,
+          line,
+          "a program body reads the request with req.path, req.method and req.text(), and answers it with res.writeHead, res.setHeader and res.end",
+        );
+      }
       const counts = builtin.arities ?? [builtin.arity ?? builtin.params.length];
       if (!counts.includes(value.args.length)) {
         throw programError(
@@ -3478,7 +3512,9 @@ class ProgramResolver {
           line,
         );
       }
-      const args = value.args.map((argument, position) => this.value(argument, builtin.params[position], line));
+      const args = value.args.map((argument, position) =>
+        this.value(argument, builtin.params[position].kind === "text" ? null : builtin.params[position], line),
+      );
       // The handler a server is given is called by the runtime, which passes
       // it the request and the response and nothing else. The names the
       // handler captured are not among them, so the handler is marked here and
@@ -3488,7 +3524,14 @@ class ProgramResolver {
         const handler = args[0];
         if (handler !== undefined && handler.k === "function" && typeof handler.name === "string") {
           const draft = this.functions.table.get(handler.name);
-          if (draft !== undefined) draft.serverHandler = true;
+          if (draft !== undefined) {
+            draft.serverHandler = true;
+          } else if (handler.symbol !== undefined) {
+            // A handler of another file of the program is compiled on its own
+            // and linked beside the program, and the driver writes the bridge
+            // between the runtime and it.
+            this.httpHandlers.push(handler.symbol);
+          }
         }
       }
       return {
@@ -3496,8 +3539,8 @@ class ProgramResolver {
         signature: {
           name: value.function,
           symbol: value.function,
-          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) })),
-          returns: typeToString(builtin.returns),
+          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          returns: contractText(builtin.returns),
         },
         args,
         returns: builtin.returns,
@@ -3949,7 +3992,7 @@ function draftHasCall(value: DraftValue): boolean {
 }
 
 /** Who owns what a call of a type hands back. */
-function ownership(returns: TypeExpr): "none" | "borrowed" | "owned" {
+function ownership(returns: SemanticType): "none" | "borrowed" | "owned" {
   if (returns.kind === "ref") return "owned";
   if (returns.kind === "ptr") return "borrowed";
   return "none";
@@ -4082,6 +4125,7 @@ class ProgramLowering {
       bodies,
       objects: program.objects,
       extraFunctions: [...trampolines, ...callbacks],
+      httpHandlers: [...program.httpHandlers],
     };
   }
 
@@ -4606,7 +4650,13 @@ class ProgramLowering {
       case "null":
         return { k: "nothing", type: value.type ?? VOID };
       case "function":
-        return { k: "functionRef", type: VOID, name: value.name, captures: value.captures };
+        return {
+          k: "functionRef",
+          type: VOID,
+          name: value.name,
+          captures: value.captures,
+          ...(value.symbol === undefined ? {} : { symbol: value.symbol }),
+        };
       case "field": {
         // The base is written down first: it is a name of an object slot, or
         // the field of one the resolver has already read, and both answer as

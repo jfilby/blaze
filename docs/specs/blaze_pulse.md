@@ -220,10 +220,11 @@ here because they are the shape of what a Blaze program can be today.
 
 - **A program is written as C.** The driver of a program is C, and the
   functions a program declares are written out as C beside it. The machine
-  backend lowers the functions of a *module*, and the HTTP API is not
-  available to a module. A program that serves HTTP is therefore a C program
-  today, and the machine backend is exercised by the benchmarks under
-  `src/benchmarks/`.
+  backend lowers the functions of a *module*. A module may answer HTTP
+  requests — see `docs/specs/http_module.md` — but the handler of this
+  program is one of the program's own functions, so this program is a C
+  program today. A program whose handler is a module is served by either
+  backend: `src/programs/http-module/` is one.
 
 - **A number is not a pointer.** The runtime renders a value the program
   holds as a number and a value the runtime holds as its text, and the two
@@ -290,12 +291,15 @@ The gaps, written down so that nobody has to find them the hard way.
 
 ### The backends
 
-- **The program is a C program.** A program that serves HTTP is written as C
-  today, because the HTTP API is not available to the functions of a module,
-  which are the ones the machine backend lowers. The comparison of the C
-  backend and the machine backend over the same workload, which this program's
-  own `AGENTS.md` asks for, cannot be made with this program: the machine
-  backend is exercised by the benchmarks under `src/benchmarks/`.
+- **The program is a C program.** The handler of this program is one of the
+  program's own functions, and a program is written as C. The HTTP API is
+  available to the functions of a module now — see
+  `docs/specs/http_module.md` — so a program whose handler is a module is
+  served by either backend (`src/programs/http-module/` is one). The
+  comparison of the C backend and the machine backend over the same workload,
+  which this program's own `AGENTS.md` asks for, cannot be made with *this*
+  program: moving the handler of this program into a module is the work that
+  would make it.
 
 - **No benchmark of the program is recorded.** The program measures the server
   it serves, and nothing measures the program. A reproducible configuration

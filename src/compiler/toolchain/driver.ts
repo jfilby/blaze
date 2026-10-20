@@ -32,7 +32,7 @@ import {
   type SemanticValue,
   type ValueKind,
 } from "../core/semantic-ir.ts";
-import type { BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
+import type { BackendKind, BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
 import { cTargetOptions, linkOptions, threadingOptions, type Threading } from "../core/target.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
@@ -333,14 +333,25 @@ class CDriver implements ProgramTarget {
   /** True when the program uses the HTTP runtime, so the driver includes its header. */
   private readonly includeHttpHeader: boolean;
   /**
+   * The backend the functions of the program were lowered by.
+   *
+   * A handler the runtime calls is handed the request and the response as two
+   * addresses, and a function of the program is handed them the way the
+   * backend that compiled it carries a reference: as the address itself, or as
+   * the double a program holds one in. The bridge between the two is written
+   * here, and which of the two it is depends on this.
+   */
+  private readonly lowering: BackendKind;
+  /**
    * The symbols of the functions the program declares for itself. They are
    * written as functions of the driver's own file, so a name the source gave
    * one of them is a name nothing else in the program can hold: a program may
    * call a function `send`, and the C library has one of that name.
    */
   private own = new Set<string>();
-  constructor(includeHttpHeader: boolean = false) {
+  constructor(includeHttpHeader: boolean = false, lowering: BackendKind = "c") {
     this.includeHttpHeader = includeHttpHeader;
+    this.lowering = lowering;
   }
   prelude(program: SemanticProgram): string {
     const objects = cObjectDeclarations(program.objects);
@@ -354,8 +365,62 @@ class CDriver implements ProgramTarget {
       .join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
+    const bridges = this.bridges(program);
     return `${DRIVER_PRELUDE}
-${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations}`;
+${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations}${bridges === "" ? "" : `\n${bridges}`}`;
+  }
+
+  /**
+   * The bridge between the runtime and a handler the program registered.
+   *
+   * The runtime calls a handler with the request and the response and nothing
+   * else, and a handler of another file of the program is compiled on its own:
+   * the driver links it and hands the runtime its address. The two are
+   * written in different ways, so the bridge is written here: it takes the
+   * two addresses the runtime has and hands them over the way the backend
+   * that compiled the handler carries a reference.
+   */
+  private bridges(program: SemanticProgram): string {
+    const handlers = program.httpHandlers ?? [];
+    if (handlers.length === 0) return "";
+    const lines: string[] = [];
+    for (const symbol of handlers) {
+      const signature = program.functions.find((one) => one.symbol === symbol);
+      if (signature === undefined) continue;
+      if (signature.params.length !== 2) {
+        throw driverError(
+          `${symbol} is registered as an HTTP handler`,
+          `a handler is called with the request and the response, and ${symbol} takes ${signature.params.length} argument(s)`,
+        );
+      }
+      for (const param of signature.params) {
+        const type = parseType(param.type);
+        if (type.kind !== "ref") {
+          throw driverError(
+            `${symbol} is registered as an HTTP handler`,
+            `a handler is given the request and the response as references, and ${param.name} is a ${typeToString(type)}`,
+          );
+        }
+      }
+      const name = this.bridgeName(symbol);
+      // A reference is the address itself in the machine backend, and the
+      // double a program holds one in in the C backend.
+      const request = this.lowering === "machine" ? "request" : "(double)(uintptr_t)request";
+      const response = this.lowering === "machine" ? "response" : "(double)(uintptr_t)response";
+      lines.push(
+        `/* The bridge between the runtime and ${symbol}, which is called with the request and the response. */`,
+        `static void ${name}(void *request, void *response) {`,
+        `  ${cSymbolName(symbol)}(${request}, ${response});`,
+        `}`,
+        "",
+      );
+    }
+    return lines.join("\n");
+  }
+
+  /** The name the bridge to a handler of another file is written under. */
+  private bridgeName(symbol: string): string {
+    return `blaze_http_bridge_${cSymbolName(symbol)}`;
   }
 
   /** A function a program calls, declared as the driver links it. */
@@ -840,7 +905,12 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
       case "http.createServer": {
         const cb = call.args[0];
         let trampoline = "0.0";
-        if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string") {
+        if (cb !== undefined && cb.k === "functionRef" && cb.symbol !== undefined) {
+          // A handler of another file of the program: the driver links it and
+          // hands the runtime the bridge it wrote for it, which is what the
+          // runtime calls.
+          trampoline = `(double)(uintptr_t) ${this.bridgeName(cb.symbol)}`;
+        } else if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string") {
           // A handler the program wrote where the call is made is an arrow, and
           // one it named is called through a trampoline of its own: what calls
           // it is not a program, and passes it two values.
@@ -1445,8 +1515,12 @@ ${httpHeader}${httpDefault}${objects === "" ? "" : `${objects}\n`}${declarations
 }
 
 /** Emits the C driver for a program. The driver is compiler code. */
-export function generateProgramDriver(program: SemanticProgram, includeHttpHeader: boolean = false): string {
-  return generateProgramSource(program, new CDriver(includeHttpHeader));
+export function generateProgramDriver(
+  program: SemanticProgram,
+  includeHttpHeader: boolean = false,
+  lowering: BackendKind = "c",
+): string {
+  return generateProgramSource(program, new CDriver(includeHttpHeader, lowering));
 }
 
 export interface ProgramDriverRequest {
@@ -1477,13 +1551,23 @@ export interface ProgramDriverRequest {
   threads?: readonly Threading[];
   /** True when the program uses the HTTP runtime, so the driver includes its header. */
   includeHttpHeader?: boolean;
+  /**
+   * The backend the functions of the program were lowered by. The driver
+   * writes the bridge between the runtime and a handler the program
+   * registered, and how a reference is carried is what the backend decides.
+   */
+  lowering?: BackendKind;
   outputPath: string;
 }
 
 /** Writes and links the C driver. What it links is what the build verified. */
 export async function buildProgramDriver(request: ProgramDriverRequest): Promise<Runner> {
   const driverPath = `${request.workDirectory}/program.c`;
-  await writeFile(driverPath, generateProgramDriver(request.program, request.includeHttpHeader ?? false), "utf8");
+  await writeFile(
+    driverPath,
+    generateProgramDriver(request.program, request.includeHttpHeader ?? false, request.lowering ?? "c"),
+    "utf8",
+  );
   const inputs = [driverPath, ...request.objectPaths];
   if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
   // A program computes with the maths library, so the driver links it.

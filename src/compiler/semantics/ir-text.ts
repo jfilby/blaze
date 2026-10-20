@@ -793,8 +793,8 @@ class ContractBinder {
   private lookup(name: string): BoundCall | null {
     const builtin = builtinFor(name);
     if (builtin !== null) {
-      const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: typeToString(type) }));
-      return { signature: { name, symbol: name, params, returns: typeToString(builtin.returns) }, effects: [], builtin: true };
+      const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) }));
+      return { signature: { name, symbol: name, params, returns: contractText(builtin.returns) }, effects: [], builtin: true };
     }
     const own = this.declared.get(name);
     if (own !== undefined) return own;

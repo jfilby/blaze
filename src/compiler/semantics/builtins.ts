@@ -7,10 +7,12 @@
  */
 
 import type { Effect, TypeExpr } from "../core/types.ts";
+import type { SemanticType } from "../core/semantic-ir.ts";
+import { TEXT } from "../core/semantic-ir.ts";
 
 export interface BuiltinSignature {
-  params: TypeExpr[];
-  returns: TypeExpr;
+  params: SemanticType[];
+  returns: SemanticType;
   /** How many arguments the call must have, when the count is fixed. */
   arity?: number;
   /** Every count the call may have, when more than one form lowers. Argument
@@ -23,6 +25,15 @@ export interface BuiltinSignature {
    * effect on is stated here.
    */
   effects?: readonly Effect[];
+  /**
+   * True when only a module function may call it.
+   *
+   * The HTTP API of a module function is one: a module function holds the
+   * request and the response in references, and a program body holds them in
+   * dynamic values, and the two are not the same thing. A program body reads
+   * the request with `req.path` and answers it with `res.end`.
+   */
+  moduleOnly?: boolean;
 }
 
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
@@ -165,6 +176,45 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "http.ssePublish": { params: [ANY], returns: F64, arity: 1 },
   /** `http.sseCount()` answers how many event streams are open. */
   "http.sseCount": { params: [], returns: F64, arity: 0 },
+
+  /* ---------------------------------------------------------------------- */
+  /* The HTTP API a module function may use                                  */
+  /* ---------------------------------------------------------------------- */
+
+  /*
+   * The calls below are the HTTP API a *module* function has. A program body
+   * has its own spelling of the same things (`req.path`, `res.end(body)`), and
+   * the two are separate because the two carry their handles differently: a
+   * program body holds a handle in a dynamic value, and a module function
+   * holds it in a reference. What a call *does* is the same in both, and the
+   * name here is the one the compiler binds, not the one a source writes.
+   *
+   * The request and the response are borrowed: they are the runtime's own, and
+   * they are valid for as long as the request is being served.
+   */
+
+  /** The path the request was sent to, as text. */
+  "http.requestPath": { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true },
+  /** The method the request was sent with, as text. */
+  "http.requestMethod": { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true },
+  /**
+   * The value of a header of the request, as text. A header the request does
+   * not carry is an empty string, which is what a program reads it as.
+   */
+  "http.requestHeader": { params: [ANY, ANY], returns: TEXT, arity: 2, moduleOnly: true },
+  /** The body of the request, as text. */
+  "http.requestBody": { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true },
+  /** Sets the status the response is answered with. */
+  "http.responseStatus": { params: [ANY, ANY], returns: { kind: "void" }, arity: 2, moduleOnly: true },
+  /** Sets a header of the response. It is written before the body is sent. */
+  "http.responseHeader": { params: [ANY, ANY, ANY], returns: { kind: "void" }, arity: 3, moduleOnly: true },
+  /** Sets the body of the response, as text. */
+  "http.responseBody": { params: [ANY, ANY], returns: { kind: "void" }, arity: 2, moduleOnly: true },
+  /**
+   * Sends the response and ends the request. It is written with a body and
+   * without one: the body is set and then the response is sent.
+   */
+  "http.responseEnd": { params: [ANY, ANY], returns: { kind: "void" }, arities: [1, 2], moduleOnly: true },
   /** `performance.now()` is the milliseconds on a monotonic clock: the time a
    *  duration is measured over, which a clock that can be moved is no good
    *  for. It reads the clock, so it is not a value the optimizer may compute

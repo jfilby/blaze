@@ -32,6 +32,13 @@ export interface FacilRuntime {
 export const FACIL_IO_VERSION = "facil.io@git-master";
 
 /**
+ * The libraries a link that carries the HTTP runtime needs. facil.io speaks
+ * TLS, and TLS is OpenSSL, so a program that serves HTTP links the libraries
+ * of OpenSSL in beside it.
+ */
+export const FACIL_IO_LIBRARIES: readonly string[] = ["-lssl", "-lcrypto"];
+
+/**
  * How long facil.io's event loop waits for an event, in milliseconds.
  *
  * The loop is stopped from another thread, and the thread that waits for an
@@ -98,7 +105,6 @@ export function facilAdapterSource(): string {
 #include <fiobj_str.h>
 
 #define BLAZE_HTTP_MAX_ROUTES 16
-#define BLAZE_HTTP_HEADER_BUF 2048
 
 /* -------------------------------------------------------------------------- */
 /* The server the program most recently created.                            */
@@ -164,8 +170,47 @@ typedef struct blaze_http_request_s {
   http_s *h;                      /* the facil.io request/response handle */
   char *method_copy;              /* NUL-terminated copy of the method */
   char *path_copy;                /* NUL-terminated copy of the path */
-  char header_buf[BLAZE_HTTP_HEADER_BUF]; /* scratch for one header value */
+  /* Everything else the request hands the handler to read is copied here and
+     freed with the request, so a value the handler holds is still there when
+     it reads it and is not there once the request is answered. */
+  struct blaze_http_owned_s *owned;
 } blaze_http_request_t;
+
+/* One block of memory a request owns, linked to the ones before it. */
+typedef struct blaze_http_owned_s {
+  struct blaze_http_owned_s *next;
+  char *bytes;
+} blaze_http_owned_t;
+
+/* Copies what a handler is given to read into the request's own memory, and
+   hands back the copy. The copy is NUL-terminated, so it is a C string as well
+   as the bytes it is, and it is freed when the request is answered. */
+static const char *blaze_http_owned_add(blaze_http_request_t *req, const char *bytes, size_t length) {
+  blaze_http_owned_t *block = (blaze_http_owned_t *)malloc(sizeof(blaze_http_owned_t));
+  if (!block) return "";
+  block->bytes = (char *)malloc(length + 1);
+  if (!block->bytes) {
+    free(block);
+    return "";
+  }
+  if (length) memcpy(block->bytes, bytes, length);
+  block->bytes[length] = '\\0';
+  block->next = req->owned;
+  req->owned = block;
+  return block->bytes;
+}
+
+/* Frees everything a request owns. */
+static void blaze_http_owned_free(blaze_http_request_t *req) {
+  blaze_http_owned_t *block = req->owned;
+  while (block) {
+    blaze_http_owned_t *next = block->next;
+    free(block->bytes);
+    free(block);
+    block = next;
+  }
+  req->owned = NULL;
+}
 
 /* A response, built by the handler and sent by the adapter on completion. */
 typedef struct blaze_http_response_s {
@@ -197,24 +242,25 @@ const char *blaze_http_req_header(blaze_http_request *request, const char *name)
   FIOBJ value = fiobj_hash_get(req->h->headers, key);
   fiobj_free(key);
   if (!value) return "";
+  /* The value is copied into the request's own memory: a handler that reads
+     two headers holds both of them, and the value of the first is still there
+     when it reads the second. */
   fio_str_info_s vs = fiobj_obj2cstr(value);
-  if (vs.len >= BLAZE_HTTP_HEADER_BUF) vs.len = BLAZE_HTTP_HEADER_BUF - 1;
-  memcpy(req->header_buf, vs.data, vs.len);
-  req->header_buf[vs.len] = '\\0';
-  return req->header_buf;
+  return blaze_http_owned_add(req, vs.data, vs.len);
 }
 
 const char *blaze_http_req_body(blaze_http_request *request, size_t *length) {
   blaze_http_request_t *req = (blaze_http_request_t *)request;
-  if (!req || !req->h || !length) {
+  if (!req || !req->h) {
     if (length) *length = 0;
     return "";
   }
-  /* The body is borrowed: valid for the request's lifetime. Its length, not a
-     terminator, is what a reader uses. */
+  /* The body is copied into the request's own memory, so it is there for as
+     long as the request is being served and is gone once it is answered. Its
+     length, not a terminator, is what a reader uses. */
   fio_str_info_s body = fiobj_obj2cstr(req->h->body);
-  *length = body.len;
-  return body.data;
+  if (length) *length = body.len;
+  return blaze_http_owned_add(req, body.data, body.len);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -415,6 +461,7 @@ static void blaze_http_on_request(http_s *h) {
     http_send_error(h, 404);
   }
 
+  blaze_http_owned_free(&req);
   free(req.method_copy);
   free(req.path_copy);
   free(resp.body_copy);

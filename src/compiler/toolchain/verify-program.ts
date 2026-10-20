@@ -37,7 +37,28 @@ const TOOLCHAIN: Record<string, string> = { typescript: "node", ts: "node" };
  * are given the same arguments whichever host wrote the source.
  */
 const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.slice(2)}";
-const HTTP_PRELUDE = "data:text/javascript,globalThis.http=Object.assign({}, await import('node:http')); globalThis.http.serve=function(){}; globalThis.http.createServer=function(){return{listen:function(){}}}; globalThis.http.serveSettings=function(){}; globalThis.http.serveTls=function(){};";
+/**
+ * The prelude a program that serves HTTP runs under with: the HTTP API of
+ * node, the calls the compiler provides beside it, and the HTTP API of a
+ * module function, which the program body does not use but the module beside
+ * it may.
+ */
+const HTTP_PRELUDE = [
+  "globalThis.http=Object.assign({}, await import('node:http'));",
+  "globalThis.http.serve=function(){};",
+  "globalThis.http.createServer=function(){return{listen:function(){}}};",
+  "globalThis.http.serveSettings=function(){};",
+  "globalThis.http.serveTls=function(){};",
+  "globalThis.http.requestPath=function(){return '';};",
+  "globalThis.http.requestMethod=function(){return '';};",
+  "globalThis.http.requestHeader=function(){return '';};",
+  "globalThis.http.requestBody=function(){return '';};",
+  "globalThis.http.responseStatus=function(){};",
+  "globalThis.http.responseHeader=function(){};",
+  "globalThis.http.responseBody=function(){};",
+  "globalThis.http.responseEnd=function(){};",
+].join("");
+const HTTP_PRELUDE_URL = `data:text/javascript,${HTTP_PRELUDE}`;
 
 /** Whether a source reads the command line the way a Deno program does. */
 function readsDenoArgs(source: string): boolean {
@@ -150,7 +171,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   const before = [];
   before.push("--experimental-transform-types");
   if (readsDenoArgs(deno)) before.push("--import", DENO_PRELUDE);
-  if (httpSource) before.push("--import", HTTP_PRELUDE);
+  if (httpSource) before.push("--import", HTTP_PRELUDE_URL);
   const source = run(toolchain, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({

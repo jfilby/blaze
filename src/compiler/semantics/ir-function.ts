@@ -55,9 +55,9 @@
  * would be a different model, and this is not it.
  */
 
-import { parseType, typeToString } from "./contract.ts";
+import { contractText, parseType } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
-import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
+import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
 import { isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
@@ -1118,7 +1118,7 @@ class FunctionBody {
   private call(expression: Expression & { k: "call" }, line: number): Typed {
     const builtin = builtinFor(expression.name);
     if (builtin !== null) {
-      this.arity(expression.name, builtin.params.length, expression.args.length, line);
+      this.builtinArity(expression.name, builtin, expression.args.length, line);
       const args = expression.args.map((argument, at) => this.typed(argument, asType(builtin.params[at]), line));
       const returns = builtin.returns;
       const extreme = EXTREMES[expression.name];
@@ -1145,13 +1145,14 @@ class FunctionBody {
             {
               name: expression.name,
               symbol: expression.name,
-              params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: typeToString(type) })),
-              returns: typeToString(returns),
+              params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+              returns: contractText(returns),
             },
             args.map((argument) => argument.value),
             returns,
             [],
             true,
+            builtin.params,
           ),
         },
         inferred: asType(returns),
@@ -1180,21 +1181,36 @@ class FunctionBody {
     callee: string,
     signature: FunctionSignature,
     args: readonly SemanticValue[],
-    returns: TypeExpr,
+    returns: SemanticType,
     effects: readonly Effect[],
     builtin: boolean,
+    argTypes?: readonly SemanticType[],
   ): SemanticCall {
     return {
       callee,
       signature,
       args: [...args],
-      argTypes: signature.params.map((param) => parseType(param.type)),
+      argTypes: argTypes === undefined
+        ? signature.params.map((param) => parseType(param.type))
+        : [...argTypes],
       returns,
       effects: [...effects],
       ownership: ownership(returns),
       retain: false,
       builtin,
     };
+  }
+
+  /**
+   * The number of arguments a call of this name must have. A builtin that is
+   * written in more than one form states the counts it may be written with, and
+   * a call of it is one of them.
+   */
+  private builtinArity(name: string, builtin: BuiltinSignature, written: number, line: number): void {
+    const expected = builtin.arities ?? [builtin.params.length];
+    if (expected.includes(written)) return;
+    const counts = expected.map((count) => `${count} argument${count === 1 ? "" : "s"}`).join(" or ");
+    throw this.error(`${name} takes ${counts}, not ${written}`, line);
   }
 
   private arity(name: string, expected: number, written: number, line: number): void {
@@ -1626,7 +1642,11 @@ function sourceNames(list: readonly Statement[], into: Set<string>): Set<string>
 }
 
 /** An inferred value as the type the layout pass gives it. */
-function asType(type: TypeExpr): Inferred {
+function asType(type: SemanticType): Inferred {
+  // A text is a string, and a string is a reference the contract language does
+  // not spell: what a use infers of it is the same as what it infers of any
+  // other reference, and the value keeps the text it is.
+  if (type.kind === "text") return { kind: "type", type: ANY_REF };
   return { kind: "type", type };
 }
 
@@ -1637,7 +1657,7 @@ function bound(inferred: Inferred, annotation: Inferred | null): Inferred {
 }
 
 /** Who owns what a call of a type hands back. */
-function ownership(returns: TypeExpr): Ownership {
+function ownership(returns: SemanticType): Ownership {
   if (returns.kind === "ref") return "owned";
   if (returns.kind === "ptr") return "borrowed";
   return "none";

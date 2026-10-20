@@ -1726,6 +1726,7 @@ export async function runBuild(
               objectPaths,
               ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
               includeHttpHeader: runtimeKind === "facil",
+              lowering: backendKind,
               threads,
               outputPath: programPath,
             })

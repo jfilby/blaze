@@ -66,7 +66,7 @@ import type {
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
 import { cMemberName } from "../toolchain/c-names.ts";
-import { parseType, typeToString } from "./contract.ts";
+import { contractText, parseType } from "./contract.ts";
 import { NO_CALLEES, reductionsFor, refusalFor, type Callees } from "./parallel.ts";
 import { refusalFor as regionRefusalFor } from "./region.ts";
 
@@ -1492,9 +1492,9 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
 
   const params: string[] =
     builtin !== null
-      ? builtin.params.map((type) => typeToString(type))
+      ? builtin.params.map((type) => contractText(type))
       : (signature?.params ?? []).map((param) => param.type);
-  const returns = builtin !== null ? typeToString(builtin.returns) : (signature?.returns ?? "void");
+  const returns = builtin !== null ? contractText(builtin.returns) : (signature?.returns ?? "void");
 
   if (call.signature.params.length !== params.length) {
     problems.push(`${prefix}${call.callee} is called against a signature of ${call.signature.params.length} parameters`);

@@ -54,6 +54,25 @@ const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 const TEXT = { kind: "text" } as const;
 
+/**
+ * The HTTP adapter's entry points, as the C that calls them declares them.
+ *
+ * The adapter is the runtime's own, and it is linked beside the program: a
+ * function of a module that serves HTTP calls into it, and the declarations
+ * are written here rather than read from a header, because the header is the
+ * runtime's and this is the compiler's.
+ */
+const HTTP_EXTERNS: Record<string, string> = {
+  blaze_http_req_path: "const char *blaze_http_req_path(void *)",
+  blaze_http_req_method: "const char *blaze_http_req_method(void *)",
+  blaze_http_req_header: "const char *blaze_http_req_header(void *, const char *)",
+  blaze_http_req_body: "const char *blaze_http_req_body(void *, size_t *)",
+  blaze_http_resp_status: "void blaze_http_resp_status(void *, uint16_t)",
+  blaze_http_resp_header: "void blaze_http_resp_header(void *, const char *, const char *)",
+  blaze_http_resp_body: "void blaze_http_resp_body(void *, const unsigned char *, size_t)",
+  blaze_http_resp_complete: "void blaze_http_resp_complete(void *)",
+};
+
 /** The C a value of this type is declared as. A string is a C string. */
 function declaredType(type: SemanticType | null): string {
   if (type === null || isTextType(type)) return "const char*";
@@ -686,6 +705,12 @@ class FunctionEmitter {
   }
 
   private call(call: SemanticCall, depth: number): string {
+    // The HTTP calls carry their handles and their text in their own way, so
+    // they are written before the arguments are placed: an argument of the
+    // HTTP ABI is a C string and not a dynamic value, and the boxing the
+    // generic path does would be a copy the call does not want.
+    const http = this.httpCall(call, depth);
+    if (http !== null) return http;
     const args = call.args.map((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;
       const targetType = builtin !== null ? builtin.params[index] : (call.argTypes[index] ?? argument.type);
@@ -716,6 +741,73 @@ class FunctionEmitter {
       return `({ const char *blaze_http_req_body = ${bodyText}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); })`;
     }
     return builtinExpression(call.callee, args);
+  }
+
+  /**
+   * The HTTP calls a module function may make.
+   *
+   * The request and the response are the runtime's own, and a reference is
+   * carried as a double by this backend: the address is read out of the double
+   * the handle is held in. The text a call hands back is borrowed from the
+   * request, and it is there for as long as the request is being served.
+   */
+  private httpCall(call: SemanticCall, depth: number): string | null {
+    const handle = (at: number): string => `(void*)(uintptr_t)(${this.raw(call.args[at], depth)})`;
+    const text = (at: number): string => this.raw(call.args[at], depth);
+    switch (call.callee) {
+      case "http.requestPath":
+        this.httpExtern("blaze_http_req_path");
+        return `blaze_http_req_path(${handle(0)})`;
+      case "http.requestMethod":
+        this.httpExtern("blaze_http_req_method");
+        return `blaze_http_req_method(${handle(0)})`;
+      case "http.requestHeader":
+        this.httpExtern("blaze_http_req_header");
+        return `blaze_http_req_header(${handle(0)}, ${text(1)})`;
+      case "http.requestBody":
+        this.httpExtern("blaze_http_req_body");
+        return `blaze_http_req_body(${handle(0)}, NULL)`;
+      case "http.responseStatus":
+        this.httpExtern("blaze_http_resp_status");
+        return `blaze_http_resp_status(${handle(0)}, (uint16_t)(${text(1)}))`;
+      case "http.responseHeader":
+        this.httpExtern("blaze_http_resp_header");
+        return `blaze_http_resp_header(${handle(0)}, ${text(1)}, ${text(2)})`;
+      case "http.responseBody": {
+        this.httpExtern("blaze_http_resp_body");
+        /* The body is held in a temporary: it is passed to the runtime and
+           measured there, and a value that is computed twice is computed
+           twice. */
+        return `({ const char *blaze_http_body_text = (const char *) ${text(1)};` +
+          ` blaze_http_resp_body(${handle(0)}, (const unsigned char *) blaze_http_body_text, ${RUNTIME_NAME}_text_length(blaze_http_body_text)); })`;
+      }
+      case "http.responseEnd": {
+        this.httpExtern("blaze_http_resp_body");
+        this.httpExtern("blaze_http_resp_complete");
+        /* The body is written before the response is completed, and the
+           response is completed by the call that ends it: a handler that ends
+           a response with a body sends that body. */
+        if (call.args.length < 2) return `blaze_http_resp_complete(${handle(0)})`;
+        return `({ const char *blaze_http_body_text = (const char *) ${text(1)};` +
+          ` blaze_http_resp_body(${handle(0)}, (const unsigned char *) blaze_http_body_text, ${RUNTIME_NAME}_text_length(blaze_http_body_text));` +
+          ` blaze_http_resp_complete(${handle(0)}); })`;
+      }
+      default:
+        return null;
+    }
+  }
+
+  /** A declaration of the HTTP adapter, linked with the program. */
+  private httpExtern(symbol: string): void {
+    if (this.externs.has(symbol)) return;
+    const declaration = HTTP_EXTERNS[symbol];
+    if (declaration === undefined) {
+      throw backendError(`the HTTP adapter has no ${symbol}`, "the HTTP ABI is the one runtime/http.ts states");
+    }
+    this.externs.set(
+      symbol,
+      `/* defined by the HTTP adapter, linked with the program */\nextern ${declaration};`,
+    );
   }
 
   /** A declaration of another function of this program, so the C can call it. */

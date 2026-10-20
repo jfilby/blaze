@@ -182,6 +182,17 @@ export class Diagnostics {
 /** A value that is a reference to an object, before its fields are known. */
 const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
 
+/**
+ * The namespaces a compiled function may call into. A call of a namespace is a
+ * call of the name the namespace and the member spell together, so `Math.floor`
+ * is the call the compiler knows and `http.requestPath` is the HTTP call of
+ * that name.
+ *
+ * A namespace is a namespace and not a value: nothing reads one, and a call of
+ * one is the only thing that may be written of it.
+ */
+const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http"]);
+
 
 /** Statements the parser reads to the end of the statement and reports. */
 /**
@@ -1369,8 +1380,11 @@ class TypeScriptParser {
         continue;
       }
       if (this.at("(")) {
-        if (base.k === "member" && base.base.k === "ident" && base.base.name === "Math") {
-          base = { k: "ident", name: `Math.${base.field}` };
+        if (base.k === "member" && base.base.k === "ident" && NAMESPACES.has(base.base.name)) {
+          // A call of a namespace is a call of the name the namespace and the
+          // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
+          // `http.requestPath(req)` is the HTTP call of that name.
+          base = { k: "ident", name: `${base.base.name}.${base.field}` };
         }
         if (base.k !== "ident") return this.missing("only a named function is called", this.peek());
         this.next();

@@ -418,8 +418,15 @@ export type SemanticValue =
   | { k: "toText"; type: TextType; of: SemanticValue; digits: number | null }
   /** `process.argv`, or one of its arguments. */
   | { k: "argv"; type: SemanticType; index: SemanticValue | null }
-  /** A reference to a program function, as a function pointer. */
-  | { k: "functionRef"; type: SemanticType; name: string; captures: string[] };
+  /**
+   * A reference to a program function, as a function pointer.
+   *
+   * `symbol` is the symbol of a function of *another* file of the program: it
+   * is compiled on its own and linked beside the program, and the program
+   * hands the runtime its address. A function the program declares has no
+   * symbol here, because the program writes it out in its own file.
+   */
+  | { k: "functionRef"; type: SemanticType; name: string; captures: string[]; symbol?: string };
 
 /** What a value is, as printing and truth read it. */
 export type ValueKind = "text" | "number" | "boolean" | "null" | "reference";
@@ -1067,4 +1074,14 @@ export interface SemanticProgram {
    * program functions, to adapt callbacks to runtime signatures.
    */
   extraFunctions?: SemanticExtraFunction[];
+  /**
+   * The functions of other files of the program that are registered as the
+   * handlers of an HTTP server, by their symbols.
+   *
+   * The runtime calls a handler with the request and the response and nothing
+   * else, and the handler is a function of another file: it is compiled on its
+   * own and linked beside the program. The driver writes the bridge between
+   * the two, and this is what says which functions it is to write one for.
+   */
+  httpHandlers?: readonly string[];
 }

@@ -647,6 +647,8 @@ export interface LinkRequest {
    */
   threads?: readonly Threading[];
   functionName: string;
+  /** The libraries the runtime's own object needs, as the linker is told. */
+  libraries?: readonly string[];
 }
 
 export function link(request: LinkRequest): void {
@@ -663,7 +665,8 @@ export function link(request: LinkRequest): void {
   // options of this command, so the program that comes out is built the way
   // this line asks and not the way the objects were compiled.
   const target = request.target === undefined ? [] : cTargetOptions(request.target);
-  const result = run("gcc", [...linkOptions(request.mode, request.objective), ...target, ...includes, ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm"], { timeoutMs: 120_000 });
+  const libraries = request.libraries ?? [];
+  const result = run("gcc", [...linkOptions(request.mode, request.objective), ...target, ...includes, ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...libraries], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

@@ -32,7 +32,7 @@ import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.
 import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
-import { buildFacilRuntime } from "./runtime/facil.ts";
+import { buildFacilRuntime, FACIL_IO_LIBRARIES } from "./runtime/facil.ts";
 import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
 import type { Review } from "./core/proposal.ts";
 
@@ -48,6 +48,12 @@ export interface PreparedRuntime {
   headerPath: string;
   /** Absent for a hosted build: the host program links, so there is no C object. */
   objectPath?: string;
+  /**
+   * The libraries the runtime's own object needs at the link. The HTTP
+   * runtime carries facil.io, and facil.io carries TLS, so a link that has
+   * the HTTP runtime in it has the libraries of TLS in it too.
+   */
+  libraries?: readonly string[];
 }
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -485,7 +491,7 @@ export function runtimePreparer(request: {
       if (request.runtime === "none") return buildStandaloneRuntime(request.workspace.workDirectory, request.mode, request.target);
       if (request.runtime === "facil") {
         const runtime = await buildFacilRuntime(request.workspace.workDirectory, request.mode, request.target);
-        return { headerPath: runtime.headerPath, objectPath: runtime.objectPath };
+        return { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: FACIL_IO_LIBRARIES };
       }
       return { headerPath: await writeRuntimeHeader(request.workspace.workDirectory) };
     })();
@@ -726,6 +732,7 @@ async function materialize(
       includeDirectories: [dirname(runtime.headerPath)],
       outputPath: paths.executable,
       functionName: request.contract.function.name,
+      ...(runtime.libraries === undefined ? {} : { libraries: runtime.libraries }),
     });
     return {
       runner: { command: paths.executable, args: [] },
@@ -1029,6 +1036,7 @@ async function probeCandidate(
     includeDirectories: [dirname(runtime.headerPath)],
     outputPath: paths.probeExecutable,
     functionName: request.contract.function.name,
+    ...(runtime.libraries === undefined ? {} : { libraries: runtime.libraries }),
   });
 
   const result = await run(paths.probeExecutable, [], {

@@ -130,6 +130,9 @@ const I64: SemanticType = { kind: "primitive", name: "i64" };
 const U64: SemanticType = { kind: "primitive", name: "u64" };
 const TEXT = { kind: "text" } as const;
 const POINTER: SemanticType = { kind: "primitive", name: "usize" };
+const VOID_TYPE: SemanticType = { kind: "void" };
+/** A reference the source left unshaped: a pointer to whatever it points at. */
+const ANY_TYPE: SemanticType = { kind: "ref", of: null };
 
 /**
  * The type a walk's index is held at. The IR does not name one: counting over
@@ -7695,6 +7698,11 @@ class Machine {
    * A call the compiler itself provides. Each is what the C library has by the
    */
   private builtin(call: SemanticCall): void {
+    // The HTTP calls carry their handles and their text in the runtime's own
+    // way, so they are written before the generic path: a handle is a pointer
+    // and a text is a pointer to the bytes, and neither is a number the
+    // convention would carry in a vector register.
+    if (this.httpBuiltin(call)) return;
     const argument = call.args[0];
     if (call.callee === ARGV_LENGTH) {
       this.runtime("_argv_count");
@@ -7946,6 +7954,104 @@ class Machine {
     this.code.call(symbol);
     if (slots > 0) this.code.aluImm("add", RSP, slots * 8);
     if (returns.kind !== "void" && !isFloatType(returns)) this.normalize(returns);
+  }
+
+  /**
+   * The HTTP calls a module function may make.
+   *
+   * The request and the response are the runtime's own, and a reference is a
+   * pointer: it is handed over as it is. The text a call is given is a pointer
+   * to the bytes, and the text a call hands back is borrowed from the request:
+   * it is there for as long as the request is being served.
+   *
+   * Every argument is written down before the call is made, because a value
+   * that is read may be a call of its own, and a call takes the registers the
+   * arguments of this one are waiting in.
+   */
+  private httpBuiltin(call: SemanticCall): boolean {
+    switch (call.callee) {
+      case "http.requestPath":
+      case "http.requestMethod":
+      case "http.requestHeader":
+      case "http.requestBody":
+      case "http.responseStatus":
+      case "http.responseHeader":
+      case "http.responseBody":
+      case "http.responseEnd":
+        break;
+      default:
+        return false;
+    }
+    const handle = this.httpArgument(call, 0, ANY_TYPE);
+    switch (call.callee) {
+      case "http.requestPath":
+        this.callSymbol("blaze_http_req_path", [handle], TEXT);
+        return true;
+      case "http.requestMethod":
+        this.callSymbol("blaze_http_req_method", [handle], TEXT);
+        return true;
+      case "http.requestHeader": {
+        const name = this.httpArgument(call, 1, TEXT);
+        this.callSymbol("blaze_http_req_header", [handle, name], TEXT);
+        return true;
+      }
+      case "http.requestBody": {
+        /* The length of the body is not asked for: the body is a text, and a
+           text is what a reader reads it as. */
+        const length = this.holdSlot(POINTER, "blaze_http_length");
+        this.code.movRegImm(RAX, 0n);
+        this.store(length);
+        this.callSymbol("blaze_http_req_body", [handle, length], TEXT);
+        return true;
+      }
+      case "http.responseStatus": {
+        const status = this.httpArgument(call, 1, USIZE);
+        this.callSymbol("blaze_http_resp_status", [handle, status], VOID_TYPE);
+        return true;
+      }
+      case "http.responseHeader": {
+        const name = this.httpArgument(call, 1, TEXT);
+        const value = this.httpArgument(call, 2, TEXT);
+        this.callSymbol("blaze_http_resp_header", [handle, name, value], VOID_TYPE);
+        return true;
+      }
+      case "http.responseBody": {
+        const body = this.httpArgument(call, 1, TEXT);
+        const length = this.httpLength(body);
+        this.callSymbol("blaze_http_resp_body", [handle, body, length], VOID_TYPE);
+        return true;
+      }
+      case "http.responseEnd": {
+        if (call.args.length < 2) {
+          this.callSymbol("blaze_http_resp_complete", [handle], VOID_TYPE);
+          return true;
+        }
+        const body = this.httpArgument(call, 1, TEXT);
+        const length = this.httpLength(body);
+        this.callSymbol("blaze_http_resp_body", [handle, body, length], VOID_TYPE);
+        this.callSymbol("blaze_http_resp_complete", [handle], VOID_TYPE);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** One argument of an HTTP call, written down before the call is made. */
+  private httpArgument(call: SemanticCall, at: number, type: SemanticType): Held {
+    this.at(call.args[at], type);
+    const held = this.hold(type, "blaze_http_argument");
+    this.store(held);
+    return held;
+  }
+
+  /** The length of a text, as the runtime measures it. */
+  private httpLength(body: Held): Held {
+    this.load(body);
+    this.code.movRegReg(RDI, RAX);
+    this.runtime("_text_length");
+    const length = this.holdSlot(POINTER, "blaze_http_length");
+    this.store(length);
+    return length;
   }
 
   /** A call the body makes for what it does, with nothing of its own to pass. */
