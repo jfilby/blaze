@@ -23,23 +23,29 @@
 import { stat, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { boundaryProblems, DATA_BASE_EXPORT, generateWasmHost, wasmValueType } from "./wasm.ts";
+import { boundaryProblems, bodyOf, DATA_BASE_EXPORT, generateWasmHost, moduleServices, readVaruint, wasmValueType } from "./wasm.ts";
+import { HOST_SERVICE_BY_SYMBOL } from "./wasm-host-runtime.ts";
 import type { Runner } from "../core/types.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
+import { rulesFor } from "../semantics/language.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   isWide,
+  isTextType,
   type SemanticBlock,
+  type SemanticCall,
   type SemanticFunction,
   type SemanticLoop,
   type SemanticStatement,
   type SemanticTerminator,
   type CompareOp,
+  type SemanticTextPart,
   type SemanticValue,
   elementTypeOf,
   slotType,
   type SemanticType,
+  TEXT,
 } from "../core/semantic-ir.ts";
 
 /** What a built module is, and what runs it. */
@@ -57,6 +63,12 @@ export interface ModuleRequest {
   modulePath: string;
   hostPath: string;
   candidate?: string;
+  /**
+   * The language the program was written in, which says how a value is written
+   * as text: one language writes a whole number with a marker the other has no
+   * word for, and a truth as `true` where the other writes `True`.
+   */
+  language?: string;
 }
 
 /**
@@ -70,9 +82,8 @@ function unreachable(what: string, contract: FunctionContract, candidate?: strin
     stage: "compile",
     message: `a WebAssembly module cannot ${what}, in ${symbolOf(contract)}`,
     detail:
-      "a wasm module imports the host's linear memory and nothing else, so it reaches no runtime service. " +
-      "A function that prints, allocates, builds a string, reads the command line, raises, or calls another " +
-      "function of the program is built by the c, asm or machine output kind instead",
+      "the host ABI of a wasm module carries the runtime services the module imports, and this construct " +
+      "needs one the ABI does not have. The c, asm and machine output kinds reach the whole runtime",
     function: symbolOf(contract),
     candidate,
   });
@@ -288,6 +299,22 @@ interface TypeFacts {
 /** The limb operations of the three that do not carry, by the IR's name. */
 const WIDE_BITWISE: Record<string, number> = { and: 0x83, or: 0x84, xor: 0x85 };
 
+/**
+ * The wide builtins, by the name the IR calls them under, and the service of
+ * the host ABI that answers them.
+ *
+ * The kernel writes its answer into a block of its own and answers with the
+ * address of it, which is how a wide number is carried.
+ */
+const WIDE_BUILTINS: Record<string, string> = {
+  "u256_from_u64x2": "blaze_rt_u256_from_u64x2",
+  "u256_from_u64x4": "blaze_rt_u256_from_u64x4",
+  "u256_add_mod": "blaze_rt_u256_add_mod",
+  "u256_sub_mod": "blaze_rt_u256_sub_mod",
+  "u256_mul_mod": "blaze_rt_u256_mul_mod",
+  "u256_div": "blaze_rt_u256_div",
+};
+
 /** The width one element of a buffer takes, which is the width the host lays it out at. */
 const WIDTHS: Record<string, number> = {
   bool: 1, i8: 1, u8: 1, i16: 2, u16: 2, i32: 4, u32: 4, f32: 4, i64: 8, u64: 8, usize: 8, isize: 8, f64: 8,
@@ -333,6 +360,23 @@ const REFERENCE: TypeFacts = {
   shift: 3,
   load: { code: 0x28, align: 2 },
   store: { code: 0x36, align: 2 },
+};
+
+/**
+ * A dynamic value is the runtime's own representation, carried in a `f64` the
+ * way the C backend carries it.
+ *
+ * A dynamic value is not a pointer into the memory: it is a handle the runtime
+ * keeps, and the runtime's own ABI carries it as a `double`. A reference to an
+ * object the program laid out is a pointer, and stays one.
+ */
+const DYNAMIC: TypeFacts = {
+  held: F64,
+  unsigned: false,
+  size: 8,
+  shift: 3,
+  load: { code: 0x2b, align: 3 },
+  store: { code: 0x39, align: 3 },
 };
 
 /**
@@ -412,6 +456,9 @@ function facts(type: SemanticType): TypeFacts {
   // Refusing keeps that unreachable: nothing below has to know what a wide
   // number is, because no value of one ever arrives.
   if (type.kind === "primitive" && isWide(type.name)) return WIDE;
+  // A dynamic value is the runtime's own handle rather than a pointer into the
+  // memory, and the runtime carries it as a double.
+  if (type.kind === "ref" && type.of === null && type.name === undefined) return DYNAMIC;
   if (type.kind !== "primitive") return REFERENCE;
   const known = FACTS.get(type.name);
   if (known !== undefined) return known;
@@ -539,6 +586,20 @@ const ADDRESS = { kind: "primitive", name: "u32" } as const;
  */
 const TRUTH: SemanticType = { kind: "primitive", name: "bool" };
 
+/** The type a number is written in when the format reads it as a double. */
+const F64_TYPE: SemanticType = { kind: "primitive", name: "f64" };
+
+/** The type a whole number is widened to when it is handed to the runtime. */
+const I64_TYPE: SemanticType = { kind: "primitive", name: "i64" };
+
+/** The type a dynamic value is carried in, which is the runtime's own handle. */
+const DYNAMIC_TYPE: SemanticType = { kind: "ref", of: null };
+
+/** Whether a primitive type is a whole number rather than a floating one. */
+function isWholeNumber(name: string): boolean {
+  return name !== "f32" && name !== "f64";
+}
+
 /**
  * The eight bytes a float constant is written out of, kept for the whole
  * module rather than made per constant. A constant is read back one byte at a
@@ -647,6 +708,12 @@ class Body {
   private readonly contract: FunctionContract;
   private readonly returns: SemanticType;
   private readonly candidate: string | undefined;
+  /**
+   * The style a value is written as text in, which is the language's own: one
+   * language writes a whole number with a marker the other has no word for, and
+   * a truth as `true` where the other writes `True`.
+   */
+  private readonly style: number;
   /** How many labels the body has opened that the IR does not name. */
   private anonymous = 0;
   /** The local the instruction at the end of the body read, or -1 for another. */
@@ -665,14 +732,35 @@ class Body {
    */
   readonly pooledWides: number[][] = [];
 
+  /**
+   * The texts the body pooled, as the bytes of each one with its terminator.
+   *
+   * A text the program wrote out is laid down in the module's own data and
+   * read at the address it was given, the same way a pooled float is read out
+   * of a global rather than written out again at every place it appears.
+   */
+  readonly pooledTexts: number[][] = [];
+
+  /**
+   * The services of the host ABI the body reached for, and the index of the
+   * import each one is.
+   *
+   * The index is the order the body first reached for the service in: the
+   * import section lists them in that order, and a call names the index of
+   * the import it calls. The power is the first import of every module, so the
+   * services start at one.
+   */
+  private readonly services = new Map<string, number>();
+
   /** How far through the scratch below the constants the arithmetic has come. */
   private wideInFlight = 0;
 
-  constructor(fn: SemanticFunction, contract: FunctionContract, returns: SemanticType, candidate: string | undefined) {
+  constructor(fn: SemanticFunction, contract: FunctionContract, returns: SemanticType, candidate: string | undefined, style = 0) {
     this.fn = fn;
     this.contract = contract;
     this.returns = returns;
     this.candidate = candidate;
+    this.style = style;
     // A parameter is a local the module numbers before any other, because the
     // function's type is written in that order, and it is never handed back
     // to the pool: the host filled it before the body ran and every `local`
@@ -773,6 +861,26 @@ class Body {
     this.code.varuint(at);
     this.readLocal = at;
     this.readAt = this.code.length - this.varuintLength(at) - 1;
+  }
+
+  /**
+   * A call of a service of the host ABI.
+   *
+   * The service is imported the first time the body reaches for it and the
+   * import is named by its index, so the index is handed out here and the
+   * import section writes the services in the order the body reached for them.
+   */
+  private callService(symbol: string): void {
+    const known = this.services.get(symbol);
+    const index = known ?? this.services.size + 1;
+    if (known === undefined) this.services.set(symbol, index);
+    this.op(0x10);
+    this.code.varuint(index);
+  }
+
+  /** The services the body reached for, in the order it reached for them. */
+  serviceList(): string[] {
+    return [...this.services.keys()];
   }
 
   /**
@@ -1098,9 +1206,21 @@ class Body {
         // A module is handed a pointer to the elements of a buffer and no
         // length beside it, so the host writes the count in the word the
         // pointer sits one before, and the count is read from there. The
-        // length of a string is the runtime's to answer, and a module reaches
-        // no runtime.
+        // length of a text and the length of a dynamic array are the
+        // runtime's to answer.
         const held = value.of.type;
+        if (isTextType(held)) {
+          this.value(value.of, TEXT);
+          this.callService("blaze_rt_text_length");
+          this.convert(value.type, at);
+          return;
+        }
+        if (held.kind === "ref" && held.of === null && held.name === undefined) {
+          this.value(value.of, DYNAMIC_TYPE);
+          this.callService("blaze_rt_array_length");
+          this.convert(value.type, at);
+          return;
+        }
         if (held.kind !== "slice" && held.kind !== "array" && held.kind !== "ptr") {
           unreachable("take the length of a value that is not a buffer", this.contract, this.candidate);
         }
@@ -1114,6 +1234,15 @@ class Body {
         return;
       }
       case "element": {
+        const of = value.of.type;
+        if (of.kind === "ref" && of.of === null && of.name === undefined) {
+          // An element of a dynamic array is the runtime's to answer.
+          this.value(value.of, DYNAMIC_TYPE);
+          this.value(value.index, { kind: "primitive", name: "usize" });
+          this.callService("blaze_rt_array_get");
+          this.convert(value.type, at);
+          return;
+        }
         this.address(value.of, value.index, value.type);
         const load = facts(value.type).load;
         this.op(load.code);
@@ -1134,6 +1263,77 @@ class Body {
         this.code.varuint(load.align);
         this.code.varuint(field.offset);
         this.convert(value.type, at);
+        return;
+      }
+      case "buffer": {
+        // A typed array is a block the runtime lays out, and the count of its
+        // elements is the word the offset sits one before: a module reads the
+        // length of a buffer from there.
+        if (value.view !== null) {
+          unreachable("take a view of a block of bytes", this.contract, this.candidate);
+        }
+        const element = value.element;
+        const size = facts(element).size;
+        if (value.count !== null) {
+          this.value(value.count, ADDRESS);
+          this.op(0xad); // `i64.extend_i32_u`
+          this.i64(BigInt(size));
+          this.callService("blaze_rt_array_new");
+          return;
+        }
+        // The elements written out are laid down one at a time, at the address
+        // the index names.
+        const total = value.values.length;
+        this.i64(BigInt(total));
+        this.i64(BigInt(size));
+        this.callService("blaze_rt_array_new");
+        const pointer = this.borrow(I32);
+        this.keep(pointer);
+        for (let index = 0; index < total; index += 1) {
+          this.localAt(pointer);
+          this.i32(index);
+          const shift = facts(element).shift;
+          if (shift > 0) {
+            this.i32(shift);
+            this.op(0x74); // `i32.shl`
+          }
+          this.op(BINARY[I32].add as number);
+          this.value(value.values[index] as SemanticValue, element);
+          const store = facts(element).store;
+          this.op(store.code);
+          this.code.varuint(store.align);
+          this.code.varuint(0);
+        }
+        this.localAt(pointer);
+        this.release(I32, pointer);
+        return;
+      }
+      case "newObject": {
+        const layout = this.fn.objects[value.layout];
+        if (layout === undefined) {
+          unreachable(`build an object of the layout "${value.layout}"`, this.contract, this.candidate);
+        }
+        // The object is a block the runtime lays out, and its fields are
+        // written at the offsets the layout gives them.
+        this.i64(BigInt(layout.size));
+        this.i64(BigInt(layout.align));
+        this.callService("blaze_rt_object_new");
+        const pointer = this.borrow(I32);
+        this.keep(pointer);
+        for (const field of value.fields) {
+          const entry = layout.fields.find((each) => each.name === field.name);
+          if (entry === undefined) {
+            unreachable(`write the field "${field.name}" of the layout "${value.layout}"`, this.contract, this.candidate);
+          }
+          this.localAt(pointer);
+          this.value(field.value, field.value.type);
+          const store = facts(field.value.type).store;
+          this.op(store.code);
+          this.code.varuint(store.align);
+          this.code.varuint(entry.offset);
+        }
+        this.localAt(pointer);
+        this.release(I32, pointer);
         return;
       }
       case "unary": {
@@ -1325,6 +1525,15 @@ class Body {
           // `pow` is the one arithmetic operation with no instruction of its
           // own; the host provides it through the `env.pow` import.
         }
+        // Two texts are joined by the runtime, which owns the result: the join
+        // is a service of the host ABI rather than an instruction.
+        if (value.op === "concat") {
+          this.value(value.left, TEXT);
+          this.value(value.right, TEXT);
+          this.callService("blaze_rt_string_append");
+          this.convert(TEXT, at);
+          return;
+        }
         const held = facts(compared).held;
         this.value(value.left, compared);
         this.value(value.right, compared);
@@ -1370,19 +1579,12 @@ class Body {
         if (builtinFor(value.call.callee) === null) {
           unreachable(`call ${value.call.callee}`, this.contract, this.candidate);
         }
-        if (value.call.callee === "u256_from_u64x2") {
-          unreachable(
-            `call ${value.call.callee} is not yet lowered by the WebAssembly backend: a u256 is four 64 bit limbs and the module has no instruction that carries one; build as c, asm or machine output instead`,
-            this.contract,
-            this.candidate,
-          );
-        }
-        if (value.call.callee === "u256_from_u64x4") {
-          unreachable(
-            `call ${value.call.callee} is not yet lowered by the WebAssembly backend: a u256 is four 64 bit limbs and the module has no instruction that carries one; build as c, asm or machine output instead`,
-            this.contract,
-            this.candidate,
-          );
+        // The wide arithmetic is the kernel beside the runtime, and a module
+        // calls it the same way the other two backends do.
+        const kernel = WIDE_BUILTINS[value.call.callee];
+        if (kernel !== undefined) {
+          this.wideKernel(kernel, value.call);
+          return;
         }
         for (const [position, argument] of value.call.args.entries()) {
           this.value(argument, value.call.argTypes[position] ?? argument.type);
@@ -1391,33 +1593,31 @@ class Body {
         this.convert(value.type, at);
         return;
       }
-      case "argv":
+      case "argv": {
         // `process.argv.length` and `process.argv(n)` are the same read of the
-        // command line, and a module is handed the vectors and no process.
-        this.noCommandLine();
+        // command line, and the host the module runs under is a process of its
+        // own: the arguments it reads are the ones the host was given.
+        if (value.index === null) {
+          this.callService("blaze_rt_argv_count");
+          this.convert({ kind: "primitive", name: "usize" }, at);
+          return;
+        }
+        this.value(value.index, { kind: "primitive", name: "usize" });
+        this.callService("blaze_rt_argv");
+        this.convert(F64_TYPE, at);
+        return;
+      }
+      case "text":
+        this.text(value);
+        this.convert(TEXT, at);
+        return;
+      case "toText":
+        this.asText(value.of, value.digits);
+        this.convert(TEXT, at);
         return;
       default:
         unreachable(`hold a value the IR keeps as "${value.k}"`, this.contract, this.candidate);
     }
-  }
-
-  /**
-   * The refusal a read of the command line gets. The host a module runs under
-   * is handed the test vectors on standard input and starts no process, so
-   * `process.argv` is nothing the module can reach.
-   */
-  private noCommandLine(): never {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: `a WebAssembly module cannot read the command line, in ${symbolOf(this.contract)}`,
-      detail:
-        "the host a module runs under is handed the test vectors on standard input and starts no process, so " +
-        "process.argv is nothing the module can reach. Build this function as the c, asm or machine output " +
-        "kind to read the command line",
-      function: symbolOf(this.contract),
-      candidate: this.candidate,
-    });
   }
 
   /**
@@ -1444,6 +1644,12 @@ class Body {
     // rather than written out again at every place it appears.
     if (type.kind === "primitive" && isWide(type.name)) {
       this.wideConstant(BigInt(text));
+      return;
+    }
+    // A text constant is the text itself and not a number: it is laid down in
+    // the module's own data and every use is its address.
+    if (isTextType(type)) {
+      this.i32(this.poolText(text));
       return;
     }
     const held = facts(type).held;
@@ -1828,6 +2034,25 @@ class Body {
   }
 
   /**
+  /**
+   * A call of the wide kernel, which writes its answer into a block of its
+   * own.
+   *
+   * The block is the scratch the module keeps for the values in flight, and the
+   * answer is that block's address: a wide number is four limbs in the memory,
+   * and the module holds it as the address of them.
+   */
+  private wideKernel(symbol: string, call: SemanticCall): void {
+    const out = this.wideScratch();
+    this.i32(out);
+    for (const [position, argument] of call.args.entries()) {
+      this.value(argument, call.argTypes[position] ?? argument.type);
+    }
+    this.callService(symbol);
+    this.i32(out);
+  }
+
+  /**
    * One wide operation, written out as arithmetic on the four limbs.
    *
    * There is no instruction for a two hundred and fifty six bit add and there
@@ -1849,6 +2074,19 @@ class Body {
     // addresses of limbs.
     if (op === "shl" || op === "shr") {
       this.wideShift(op, left, right);
+      return;
+    }
+    // A multiply, a division and a remainder are the operations the format has
+    // no instruction for and the kernel beside the runtime is there for: the
+    // module calls it, the same way the C and the machine backends do, so the
+    // answer is one answer rather than three.
+    if (op === "mul" || op === "div" || op === "mod") {
+      const out = this.wideScratch();
+      this.i32(out);
+      this.value(left, left.type);
+      this.value(right, right.type);
+      this.callService(`blaze_rt_u256_${op}`);
+      this.i32(out);
       return;
     }
     const leftAt = this.borrow(I32);
@@ -2046,13 +2284,234 @@ class Body {
     // a name two blocks both give is a different local in each of them.
     this.open(block);
     for (const statement of block.statements) this.statement(statement);
+    for (const name of block.releases) this.releaseName(name);
     this.terminator(block.terminator);
     this.close();
     if (label !== null) this.pop();
   }
 
+  /**
+   * A text the program wrote out, laid down in the module's own data.
+   *
+   * A text is a byte offset into the memory, and a text written out in the
+   * source is a constant: it is laid down once, beside the wide constants the
+   * body pooled, and every use of it is the address it was given. The bytes
+   * carry a terminator, because the runtime writes a text as far as its
+   * terminator.
+   */
+  private poolText(text: string): number {
+    const bytes = [...new TextEncoder().encode(text), 0];
+    const at =
+      WIDE_DATA_BASE +
+      this.pooledWides.reduce((whole, each) => whole + each.length, 0) +
+      this.pooledTexts.reduce((whole, each) => whole + each.length, 0);
+    this.pooledTexts.push(bytes);
+    return at;
+  }
+
+  /**
+   * A text, as the offset of its bytes in the memory.
+   *
+   * A text the program wrote out is laid down in the module's data and read at
+   * the address it was given. A text built at run time is joined by the
+   * runtime, which owns the result: the parts go down one at a time and the
+   * runtime joins each onto the one before it.
+   */
+  private text(value: SemanticValue): void {
+    if (value.k === "text") {
+      if (value.parts.every((part) => part.k === "text")) {
+        this.i32(this.poolText(value.parts.map((part) => (part as { k: "text"; value: string }).value).join("")));
+        return;
+      }
+      this.joinedText(value.parts);
+      return;
+    }
+    if (value.k === "toText") {
+      this.asText(value.of, value.digits);
+      return;
+    }
+    if (value.k === "const" && isTextType(value.type)) {
+      this.i32(this.poolText(value.text));
+      return;
+    }
+    if (value.k === "nothing") {
+      // Nothing is the absence of a text, which is the zero the runtime reads
+      // as nothing.
+      this.i32(0);
+      return;
+    }
+    this.value(value, TEXT);
+  }
+
+  /**
+   * A text built at run time, joined by the runtime one part at a time.
+   *
+   * The first part is the text the join starts from and every part after it is
+   * joined onto the result so far, which is what the runtime's own join does.
+   */
+  private joinedText(parts: readonly SemanticTextPart[]): void {
+    const answer = this.borrow(I32);
+    let started = false;
+    for (const part of parts) {
+      if (!started) {
+        if (part.k === "text") this.i32(this.poolText(part.value));
+        else this.asText(part.value, null);
+        started = true;
+        continue;
+      }
+      this.localAt(answer);
+      if (part.k === "text") this.i32(this.poolText(part.value));
+      else this.asText(part.value, null);
+      this.callService("blaze_rt_string_append");
+    }
+    if (!started) this.i32(this.poolText(""));
+    this.keep(answer);
+    this.release(I32, answer);
+  }
+
+  /**
+   * A value written as text, as the managed text the runtime owns.
+   *
+   * A text is already a text. A number is written by the runtime's own
+   * formatter, into a block the module asks for and the runtime fills, and the
+   * bytes are then copied into a text the runtime owns: a text the module
+   * joins with another one has to be a text the runtime can measure and copy.
+   */
+  private asText(value: SemanticValue, digits: number | null): void {
+    const type = value.type;
+    if (isTextType(type)) {
+      this.text(value);
+      return;
+    }
+    if (type.kind === "primitive" && type.name === "bool") {
+      // A truth is written as the word the language writes it in, and which of
+      // the two words it is depends on the value, so the two are chosen
+      // between rather than picked at build time.
+      const truth = this.borrow(I32);
+      this.condition(value);
+      this.keep(truth);
+      this.i32(this.poolText(this.style === 1 ? "True" : "true"));
+      this.i32(this.poolText(this.style === 1 ? "False" : "false"));
+      this.localAt(truth);
+      this.op(0x1b); // `select`
+      this.release(I32, truth);
+      return;
+    }
+    if (type.kind === "ref" && type.of === null && type.name === undefined) {
+      // A dynamic value is written by the runtime, which knows what it holds.
+      this.value(value, DYNAMIC_TYPE);
+      this.callService("blaze_rt_to_text");
+      return;
+    }
+    if (type.kind === "primitive" && isWide(type.name)) {
+      // A wide number is written by the runtime's own formatter.
+      this.value(value, type);
+      this.callService("blaze_rt_print_u256");
+      return;
+    }
+    if (value.k === "nothing") {
+      this.i32(this.poolText(this.style === 1 ? "None" : "null"));
+      return;
+    }
+    // A number is written by the runtime's formatter into a block of its own,
+    // and the bytes are then copied into a text the runtime owns.
+    const scratch = this.borrow(I32);
+    this.i64(64n);
+    this.callService("blaze_rt_allocate");
+    this.keep(scratch);
+    const length = this.borrow(I64);
+    this.value(value, F64_TYPE);
+    this.localAt(scratch);
+    if (digits === null) {
+      this.i64(64n);
+      this.callService("blaze_rt_format_number");
+    } else {
+      this.i32(digits);
+      this.i64(64n);
+      this.callService("blaze_rt_format_number_fixed");
+    }
+    this.keep(length);
+    this.localAt(scratch);
+    this.localAt(length);
+    this.callService("blaze_rt_string_new");
+    this.localAt(scratch);
+    this.callService("blaze_rt_release");
+    this.release(I64, length);
+    this.release(I32, scratch);
+  }
+
+  /**
+   * Writes text to the output, the way the runtime writes it.
+   *
+   * A text the program wrote out is written as it stands. A text built at run
+   * time is written in the parts it was built from, which is what the runtime
+   * does with one: a part written out is written as it stands, and a value
+   * interpolated into it is written as the runtime writes that value.
+   */
+  private printText(value: SemanticValue): void {
+    if (value.k === "text" && !value.parts.every((part) => part.k === "text")) {
+      for (const part of value.parts) {
+        if (part.k === "text") {
+          this.i32(this.poolText(part.value));
+          this.callService("blaze_rt_print_text");
+          continue;
+        }
+        this.asText(part.value, null);
+        this.callService("blaze_rt_print_text");
+      }
+      return;
+    }
+    this.text(value);
+    this.callService("blaze_rt_print_text");
+  }
+
+  /**
+   * Writes a number to the output, the way the runtime writes it.
+   *
+   * A whole number is written from the integer itself, because a double holds
+   * every whole number only up to 2^53 and a larger one lost its last digits
+   * on the way out.
+   */
+  private printNumber(value: SemanticValue, bigint: boolean): void {
+    const type = value.type;
+    if (type.kind === "primitive" && isWide(type.name)) {
+      this.value(value, type);
+      this.callService("blaze_rt_print_u256");
+      return;
+    }
+    if (type.kind === "primitive" && isWholeNumber(type.name)) {
+      this.value(value, type);
+      this.convert(type, I64_TYPE);
+      this.i32(bigint ? 1 : 0);
+      this.callService("blaze_rt_print_whole");
+      return;
+    }
+    this.value(value, F64_TYPE);
+    this.callService("blaze_rt_print_number");
+  }
+
+  /** Keeps a value alive across a release of it, which is the runtime's counting. */
+  private retainValue(value: SemanticValue): void {
+    this.value(value, value.type);
+    this.callService("blaze_rt_retain");
+    this.op(0x1a); // `drop`
+  }
+
+  /** Drops a reference the runtime owns, which is the runtime's own counting. */
+  private releaseName(name: string): void {
+    const local = this.resolve(name);
+    this.localAt(local.index);
+    this.callService("blaze_rt_release");
+  }
+
   private terminator(terminator: SemanticTerminator): void {
     if (terminator.k === "next") return;
+    // A jump leaves the blocks it is written in, and frees what they owned on
+    // the way out. A function allocates no array, and an object it builds
+    // belongs to its caller, so there is normally nothing to free here.
+    if (terminator.k === "jump") {
+      for (const name of terminator.releases) this.releaseName(name);
+    }
     // A block nothing arrives at is the one instruction WebAssembly has for it:
     // `unreachable` traps if control ever gets here, which is the honest answer
     // for a path the program does not take.
@@ -2093,10 +2552,18 @@ class Body {
           return;
         }
         if (statement.op === "**=") {
+          // The power is the host's own, and it takes two doubles and answers
+          // one: the operands are converted to doubles before the call and the
+          // answer is converted back to the slot's own type after it. A slot of
+          // a whole number is otherwise handed to the call at its own width,
+          // and the engine refuses the module for it.
           this.get(statement.name);
+          this.convert(type, F64_TYPE);
           this.value(statement.value, type);
+          this.convert(type, F64_TYPE);
           this.op(0x10);
           this.code.varuint(0);
+          this.convert(F64_TYPE, type);
           this.set(statement.name);
           return;
         }
@@ -2151,8 +2618,20 @@ class Body {
           this.op(old.code);
           this.code.varuint(0);
           this.code.varuint(0);
-          this.value(statement.value, element);
-          this.op(compoundCode(held, element, statement.op));
+          if (statement.op === "**=") {
+            // The power is the host's own, and it takes two doubles: the old
+            // element and the new value are converted to doubles before the
+            // call and the answer is converted back to the element's own width.
+            this.convert(element, F64_TYPE);
+            this.value(statement.value, element);
+            this.convert(element, F64_TYPE);
+            this.op(0x10);
+            this.code.varuint(0);
+            this.convert(F64_TYPE, element);
+          } else {
+            this.value(statement.value, element);
+            this.op(compoundCode(held, element, statement.op));
+          }
           const sum = this.borrow(held);
           this.keep(sum);
           this.read(address);
@@ -2247,15 +2726,92 @@ class Body {
         this.op(0x1a);
         return;
       case "printText":
-        unreachable("print text", this.contract, this.candidate);
+        this.printText(statement.value);
+        return;
       case "printNumber":
-        unreachable("print a number", this.contract, this.candidate);
+        this.printNumber(statement.value, statement.bigint);
+        return;
       case "printNewline":
-        unreachable("end a line", this.contract, this.candidate);
+        this.callService("blaze_rt_print_newline");
+        return;
       case "retain":
-        unreachable("retain a value", this.contract, this.candidate);
-      case "raise":
-        unreachable("raise", this.contract, this.candidate);
+        this.retainValue(statement.value);
+        return;
+      case "raise": {
+        // A raise never comes back: the host throws where the C runtime does
+        // not come back. WebAssembly has no way of saying that a call never
+        // returns — the format has no such annotation on a function type — so
+        // the lowering says it itself: the instruction after the call is an
+        // `unreachable`, the same one the IR's own `unreachable` terminator
+        // emits, which traps if control ever reaches it.
+        this.text(statement.message);
+        this.callService("blaze_rt_raise");
+        this.op(0x00);
+        return;
+      }
+      case "fill": {
+        // Every element of an array written as one value, as `a.fill(x)` is.
+        // The index is a name of the compiler's own, and the count is the
+        // length of the buffer, which is the word the offset sits one before.
+        const buffer = this.resolve(statement.buffer);
+        const element = statement.type;
+        const held = facts(element).held;
+        const index = this.borrow(held);
+        const count = this.borrow(I32);
+        this.localAt(buffer.index);
+        this.i32(8);
+        this.op(BINARY[I32].sub as number);
+        this.op(0x29); // `i64.load`
+        this.code.varuint(3);
+        this.code.varuint(0);
+        this.op(0xa7); // `i32.wrap_i64`
+        this.keep(count);
+        this.i32(0);
+        this.keep(index);
+        // The walk is a block around a loop, which is the shape every loop in
+        // this backend is: the block is the exit and the loop is the header.
+        this.op(0x02); // `block`
+        this.code.byte(0x40);
+        this.push(null);
+        this.op(0x03); // `loop`
+        this.code.byte(0x40);
+        this.push(null);
+        // The turn is done when the index has reached the count.
+        this.localAt(index);
+        this.localAt(count);
+        this.op(UNSIGNED_BINARY[I32].ge as number);
+        this.op(0x0d); // `br_if`
+        this.code.varuint(1);
+        // The element is written at the address the index names.
+        this.localAt(buffer.index);
+        this.localAt(index);
+        const shift = facts(element).shift;
+        if (shift > 0) {
+          this.i32(shift);
+          this.op(0x74); // `i32.shl`
+        }
+        this.op(BINARY[I32].add as number);
+        this.value(statement.value, element);
+        const store = facts(element).store;
+        this.op(store.code);
+        this.code.varuint(store.align);
+        this.code.varuint(0);
+        // The index moves on, at the head of the turn rather than at its foot,
+        // so a `continue` does not skip it.
+        this.localAt(index);
+        this.i32(1);
+        this.op(BINARY[I32].add as number);
+        this.keep(index);
+        this.op(0x0c); // `br`
+        this.code.varuint(0);
+        this.op(0x0b); // `end`
+        this.pop();
+        this.op(0x0b); // `end`
+        this.pop();
+        this.release(I32, count);
+        this.release(held, index);
+        return;
+      }
     }
   }
 
@@ -2474,7 +3030,61 @@ class Body {
       this.op(code);
       return;
     }
-    if (ARGV_NAMES[callee] === true) this.noCommandLine();
+    if (ARGV_NAMES[callee] === true) {
+      // The command line is the host's own, and the host is a process: the
+      // count of it and the arguments on it are the runtime's to answer.
+      if (callee === ARGV_LENGTH) {
+        this.callService("blaze_rt_argv_count");
+        return;
+      }
+      this.callService("blaze_rt_argv");
+      return;
+    }
+    if (callee === "Math.random") {
+      // The random source is the runtime's, and the runtime is the host.
+      this.callService("blaze_rt_random");
+      return;
+    }
+    if (callee === "whole.abs") {
+      // The magnitude of a whole number, which is a whole number: the value
+      // turned over when it is below zero. The value is read twice, so it is
+      // kept in a local first.
+      const at = this.borrow(I64);
+      this.keep(at);
+      this.i64(0n);
+      this.localAt(at);
+      this.op(BINARY[I64].sub as number);
+      this.localAt(at);
+      this.localAt(at);
+      this.op(BINARY[I64].lt as number);
+      this.op(0x1b); // `select`
+      this.release(I64, at);
+      return;
+    }
+    if (callee === "whole.min" || callee === "whole.max") {
+      // The smaller or the larger of two whole numbers, which is a whole
+      // number: the two are chosen between rather than compared into a truth.
+      const left = this.borrow(I64);
+      const right = this.borrow(I64);
+      this.keep(left);
+      this.keep(right);
+      this.localAt(left);
+      this.localAt(right);
+      this.localAt(left);
+      this.localAt(right);
+      this.op(BINARY[I64][callee === "whole.min" ? "lt" : "gt"] as number);
+      this.op(0x1b); // `select`
+      this.release(I64, right);
+      this.release(I64, left);
+      return;
+    }
+    if (callee === "whole.floor" || callee === "whole.ceil" || callee === "whole.trunc") {
+      // The three roundings that answer a whole number: the fraction one is
+      // rounded and then narrowed, which is what the answer is.
+      this.op(callee === "whole.floor" ? 0x9c : callee === "whole.ceil" ? 0x9b : 0x9d);
+      this.op(0xb0); // `i64.trunc_f64_s`
+      return;
+    }
     if (callee === "Math.round") {
       // `Math.round` rounds a half away from zero, and the module has no
       // instruction that does. The two halves are computed with the
@@ -2575,13 +3185,17 @@ class Body {
 
 const MODULE_HEADER = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
+/** The byte a WebAssembly value type is written as in a type section. */
+const TYPE_CODES: Record<string, number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+
 export function moduleBytes(
   fn: SemanticFunction,
   contract: FunctionContract,
   candidate?: string,
+  style = 0,
 ): Uint8Array {
   const returns = parseType(contract.function.returns);
-  const body = new Body(fn, contract, returns, candidate);
+  const body = new Body(fn, contract, returns, candidate, style);
   const parameters = fn.params.map((param) => facts(slotType(param)).held);
   const result = returns.kind === "void" ? undefined : facts(returns).held;
   // The body is emitted into a buffer of its own, because a statement that
@@ -2607,10 +3221,28 @@ export function moduleBytes(
   code.absorb(body.bytes());
   code.byte(0x0b);
 
+  // The services the body reached for are the ones the module imports, and the
+  // import section writes them in the order the body reached for them, which is
+  // the order the calls name them in.
+  const services = body.serviceList();
+  const signatures = services.map((symbol) => {
+    const service = HOST_SERVICE_BY_SYMBOL.get(symbol);
+    if (service === undefined) {
+      throw new CompilerError({
+        category: "TargetError",
+        stage: "compile",
+        message: `"${symbol}" is not a service of the host ABI`,
+        function: symbolOf(contract),
+        candidate,
+      });
+    }
+    return service;
+  });
+
   const module = new Bytes();
   module.raw(MODULE_HEADER);
   module.section(1, (types) =>
-    types.counted(2, (one) => {
+    types.counted(2 + signatures.length, (one) => {
       one.byte(0x60);
       one.counted(parameters.length, (values) => parameters.forEach((type) => values.byte(type)));
       one.counted(result === undefined ? 0 : 1, (results) => {
@@ -2619,10 +3251,19 @@ export function moduleBytes(
       one.byte(0x60);
       one.counted(2, (values) => { values.byte(0x7c); values.byte(0x7c); });
       one.counted(1, (results) => results.byte(0x7c));
+      for (const service of signatures) {
+        one.byte(0x60);
+        one.counted(service.params.length, (values) =>
+          service.params.forEach((type) => values.byte(TYPE_CODES[type] as number)),
+        );
+        one.counted(service.result === null ? 0 : 1, (results) => {
+          if (service.result !== null) results.byte(TYPE_CODES[service.result] as number);
+        });
+      }
     }),
   );
   module.section(2, (imports) =>
-    imports.counted(2, (one) => {
+    imports.counted(2 + services.length, (one) => {
       one.name("env");
       one.name("memory");
       one.byte(0x02);
@@ -2632,6 +3273,14 @@ export function moduleBytes(
       one.name("pow");
       one.byte(0x00);
       one.varuint(1);
+      for (const [position, symbol] of services.entries()) {
+        one.name("env");
+        one.name(symbol);
+        one.byte(0x00);
+        // The type of a service is the one after the function's own type and
+        // the power's, in the order the services are listed in.
+        one.varuint(2 + position);
+      }
     }),
   );
   module.section(3, (functions) => functions.counted(1, (one) => one.byte(0)));
@@ -2665,7 +3314,7 @@ export function moduleBytes(
       each.byte(I32);
       each.byte(0x00);
       each.byte(0x41);
-      each.varuint(WIDE_DATA_BASE + body.pooledWides.reduce((whole, bytes) => whole + bytes.length, 0));
+      each.varuint(dataBase(body));
       each.byte(0x0b);
     }),
   );
@@ -2673,7 +3322,9 @@ export function moduleBytes(
     exports.counted(2, (each) => {
       each.name(symbolOf(contract));
       each.byte(0x00);
-      each.varuint(1);
+      // The function is the first one the module defines, and the imports come
+      // before it: the power and the services the body reached for.
+      each.varuint(1 + services.length);
       // The global the host reads to learn where it may allocate from. `0x03`
       // is a global export; the index is past every pooled float.
       each.name(DATA_BASE_EXPORT);
@@ -2687,12 +3338,14 @@ export function moduleBytes(
       one.absorb(code);
     }),
   );
-  // The wide constants the body pooled, laid down once by the host when the
-  // module is instantiated. The segment starts above the scratch the arithmetic
-  // writes into, because a data segment is not a thing a module may write to
-  // and a wide number in flight is. Its offset is a constant expression rather
-  // than an address the body reads, which is what the format requires.
-  if (body.pooledWides.length > 0) {
+  // The wide constants and the texts the body pooled, laid down once by the
+  // host when the module is instantiated. The segment starts above the scratch
+  // the arithmetic writes into, because a data segment is not a thing a module
+  // may write to and a wide number in flight is. Its offset is a constant
+  // expression rather than an address the body reads, which is what the format
+  // requires.
+  const pooled = [...body.pooledWides, ...body.pooledTexts];
+  if (pooled.length > 0) {
     module.section(11, (data) =>
       data.counted(1, (one) => {
         // An active segment in memory zero, written at a constant expression.
@@ -2700,13 +3353,24 @@ export function moduleBytes(
         one.byte(0x41);
         one.varbig(BigInt(WIDE_DATA_BASE));
         one.byte(0x0b);
-        const bytes = body.pooledWides.flat();
+        const bytes = pooled.flat();
         one.varuint(bytes.length);
         for (const byte of bytes) one.byte(byte);
       }),
     );
   }
   return module.build();
+}
+
+/**
+ * The first address above everything the module owns: its scratch is below the
+ * constants, and the constants are the wide numbers and the texts the body
+ * pooled, in that order.
+ */
+function dataBase(body: Body): number {
+  const wide = body.pooledWides.reduce((whole, bytes) => whole + bytes.length, 0);
+  const texts = body.pooledTexts.reduce((whole, bytes) => whole + bytes.length, 0);
+  return WIDE_DATA_BASE + wide + texts;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2729,24 +3393,6 @@ const SECTIONS: Record<number, string> = {
   11: "data",
   12: "data count",
 };
-
-/** Reads the unsigned integer the format writes in `bits` at `at`. */
-function readVaruint(bytes: Uint8Array, at: number, bits: number): { value: number; next: number } {
-  let value = 0;
-  let shift = 0;
-  for (let index = at; index < bytes.length && shift < bits; index += 1) {
-    const byte = bytes[index] ?? 0;
-    value |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) return { value: value >>> 0, next: index + 1 };
-    shift += 7;
-  }
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "compile",
-    message: "the module ends in the middle of a length",
-    detail: "the bytes read back are not a module the compiler emitted",
-  });
-}
 
 /**
  * What a module holds, as a reader is told it. A module is binary, so a review
@@ -2776,11 +3422,6 @@ export function describeModule(bytes: Uint8Array): string {
   return lines.join("\n");
 }
 
-/** The bytes of one section, which is where its own lengths are counted from. */
-function bodyOf(bytes: Uint8Array, size: { value: number; next: number }): Uint8Array {
-  return bytes.subarray(size.next, size.next + size.value);
-}
-
 /** The exports of a module, as one `name (kind)` line each. */
 function readExports(body: Uint8Array): string[] {
   const count = readVaruint(body, 0, 32);
@@ -2807,7 +3448,8 @@ function readExports(body: Uint8Array): string[] {
  */
 export async function buildModule(request: ModuleRequest): Promise<ModuleResult> {
   const functionName = symbolOf(request.contract);
-  const bytes = moduleBytes(request.fn, request.contract, request.candidate);
+  const style = rulesFor(request.language).style === "python" ? 1 : 0;
+  const bytes = moduleBytes(request.fn, request.contract, request.candidate, style);
   const detail = await inspect(request.modulePath, functionName, bytes);
   if (detail !== null) {
     throw new CompilerError({
@@ -2820,7 +3462,13 @@ export async function buildModule(request: ModuleRequest): Promise<ModuleResult>
     });
   }
   await writeFile(request.modulePath, bytes);
-  await writeFile(request.hostPath, generateWasmHost(request.contract), "utf8");
+  // The host is the runtime: it carries the implementations of the services the
+  // module reached for, and nothing else, over the memory the module reads.
+  await writeFile(
+    request.hostPath,
+    generateWasmHost(request.contract, { services: moduleServices(bytes), style }),
+    "utf8",
+  );
   return {
     runner: { command: process.execPath, args: [request.hostPath, request.modulePath] },
     modulePath: request.modulePath,

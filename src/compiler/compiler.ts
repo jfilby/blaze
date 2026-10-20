@@ -222,6 +222,7 @@ export interface ProjectPaths {
   outputSource: string;
   outputIr: string;
   outputModule: string;
+  outputHost: string;
   outputObject: string;
   outputProgram: string;
 }
@@ -430,6 +431,7 @@ function projectPaths(id: string, storeId: string): ProjectPaths {
     outputSource: `${root}/output/${id}.c`,
     outputIr: `${root}/output/${id}.ir`,
     outputModule: `${root}/output/${id}.wasm`,
+    outputHost: `${root}/output/${id}.host.mjs`,
     outputObject: `${root}/output/${id}.o`,
     outputProgram: `${root}/output/${id}.program`,
   };
@@ -1973,6 +1975,9 @@ export async function runBuild(
         await deliver(`${functionName}/${winner}.ir`, paths.outputIr);
         if (outputKind === "wasm") {
           await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
+          // The host is the runtime a module runs under, and a module nobody
+          // can run is not a deliverable: the host is delivered beside it.
+          await deliver(`${functionName}/${winner}.host.mjs`, paths.outputHost);
           outputPath = store.resolve(paths.outputModule);
         } else if (outputKind === "ir") {
           if (standalone) {

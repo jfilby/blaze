@@ -19,6 +19,14 @@ import { bufferElement, isSignedIntegerType, parseType, symbolOf, typeToString }
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, PrimitiveTypeName, Runner, TypeExpr } from "../core/types.ts";
+import {
+  HOST_SERVICE_BY_SYMBOL,
+  HOST_SERVICES,
+  IMPLEMENTED_SERVICES,
+  MEMORY_IMPORT,
+  POW_IMPORT,
+  hostRuntimeSource,
+} from "./wasm-host-runtime.ts";
 
 /** The bytes a reference takes in the memory the host provides: one pointer. */
 const POINTER_SIZE = 8;
@@ -166,19 +174,92 @@ async function inspectInChild(path: string, expected: string): Promise<string[]>
 }
 
 /**
+ * Reads the unsigned integer the format writes in `bits` at `at`.
+ *
+ * A length in the format is a LEB128, and a reader that reads one has to know
+ * where it ended: the bytes of a section are counted from the start of the
+ * section, so every length in it is read against the section's own bytes.
+ */
+export function readVaruint(bytes: Uint8Array, at: number, bits: number): { value: number; next: number } {
+  let value = 0;
+  let shift = 0;
+  for (let index = at; index < bytes.length && shift < bits; index += 1) {
+    const byte = bytes[index] ?? 0;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value: value >>> 0, next: index + 1 };
+    shift += 7;
+  }
+  throw new CompilerError({
+    category: "TargetError",
+    stage: "compile",
+    message: "the module ends in the middle of a length",
+    detail: "the bytes read back are not a module the compiler emitted",
+  });
+}
+
+/** The bytes of one section, which is where its own lengths are counted from. */
+export function bodyOf(bytes: Uint8Array, size: { value: number; next: number }): Uint8Array {
+  return bytes.subarray(size.next, size.next + size.value);
+}
+
+/**
+ * The services a module imports, by the names the host ABI knows them by.
+ *
+ * The host implements the services the module reached for and nothing else, so
+ * the host is written from what the module asks for rather than from what the
+ * table could offer.
+ */
+export function moduleServices(bytes: Uint8Array): string[] {
+  const services: string[] = [];
+  let at = 8;
+  while (at < bytes.length) {
+    const id = bytes[at] ?? 0;
+    const size = readVaruint(bytes, at + 1, 32);
+    if (id === 2) {
+      const body = bodyOf(bytes, size);
+      const count = readVaruint(body, 0, 32);
+      let cursor = count.next;
+      for (let index = 0; index < count.value && cursor < body.length; index += 1) {
+        const module = readVaruint(body, cursor, 32);
+        // The field's name is counted from after the module's own name, which
+        // is the bytes the module's length states.
+        const field = readVaruint(body, module.next + module.value, 32);
+        const kind = body[field.next + field.value] ?? 0;
+        const name = new TextDecoder().decode(bodyOf(body, field));
+        cursor = field.next + field.value + 1;
+        if (kind === 0x00) {
+          const type = readVaruint(body, cursor, 32);
+          cursor = type.next;
+          if (name !== POW_IMPORT) services.push(name);
+          continue;
+        }
+        if (kind === 0x02) {
+          // A memory: the limits are a flag byte and a length.
+          const flags = body[cursor] ?? 0;
+          cursor += 1;
+          const minimum = readVaruint(body, cursor, 32);
+          cursor = minimum.next;
+          if ((flags & 0x01) !== 0) cursor = readVaruint(body, cursor, 32).next;
+          continue;
+        }
+        // A table or a global: neither is a service and neither is read here.
+        break;
+      }
+    }
+    at = size.next + size.value;
+  }
+  return services;
+}
+
+/**
  * What a module reaches for and offers that the boundary does not allow, as
  * one line each, and nothing where it keeps to it.
  *
- * The module boundary is the host's linear memory and the contracted export
- * and nothing else, so the questions are the ones `INSPECT_MODULE` asks of a
- * candidate: it imports the memory alone, it offers no export the host
- * provides itself, and it exports the function the contract named. This asks
- * them here rather than in a child process, on the very bytes the build
- * emitted, because `WebAssembly.Module` is the same reader either way and a
- * spawned Node is a second interpreter started to ask a question this process
- * can answer — which on a build that emits a module per candidate is a process
- * per candidate. The child is still there for a build run where this process
- * has no WebAssembly of its own.
+ * The boundary is the host's linear memory, the services of the host ABI, and
+ * the contracted export. The memory is the one the host provides, the services
+ * are the ones the host implements, and nothing else is reachable: a module
+ * that imports a function the table does not name is a module that reaches for
+ * a system interface, and it is refused before it can.
  */
 export function boundaryProblems(bytes: Uint8Array, expected: string): string[] | null {
   const engine = engineHere();
@@ -188,12 +269,23 @@ export function boundaryProblems(bytes: Uint8Array, expected: string): string[] 
   const problems: string[] = [];
   const imports = engine.Module.imports(module);
   const memoryImports = imports.filter((entry) => entry.kind === "memory");
-  const powImports = imports.filter((entry) => entry.kind === "function" && entry.module === "env" && entry.name === "pow");
-  if (memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== "memory" || imports.length !== 2 || powImports.length !== 1) {
-    problems.push('the module must import one memory and one pow: (import "env" "memory" ...) and (import "env" "pow" ...)');
+  if (memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== MEMORY_IMPORT) {
+    problems.push(`the module must import one memory: (import "env" "${MEMORY_IMPORT}" ...)`);
   }
-  if (imports.some((entry) => entry.kind !== "memory" && !(entry.kind === "function" && entry.module === "env" && entry.name === "pow"))) {
-    problems.push("the module must not import anything but the memory and pow");
+  for (const entry of imports) {
+    if (entry.kind === "memory") continue;
+    if (entry.kind !== "function") {
+      problems.push(`the module must not import the ${entry.kind} "${entry.name}"; it reaches the host through the services of the host ABI`);
+      continue;
+    }
+    if (entry.module !== "env") {
+      problems.push(`the module must import its services from "env", not from "${entry.module}"`);
+      continue;
+    }
+    if (entry.name === POW_IMPORT) continue;
+    if (!HOST_SERVICE_BY_SYMBOL.has(entry.name)) {
+      problems.push(`the module must not import "${entry.name}"; it is not a service of the host ABI`);
+    }
   }
   const exports = engine.Module.exports(module).map((entry) => entry.name);
   if (exports.includes("memory") || exports.includes("_start")) {
@@ -245,11 +337,15 @@ const module = new WebAssembly.Module(bytes);
 const problems = [];
 const imports = WebAssembly.Module.imports(module);
 const memoryImports = imports.filter((entry) => entry.kind === "memory");
-if (imports.length !== 1 || memoryImports.length !== 1 || memoryImports[0].module !== "env" || memoryImports[0].name !== "memory") {
+if (memoryImports.length !== 1 || memoryImports[0].module !== "env" || memoryImports[0].name !== "memory") {
   problems.push('the module must import exactly one memory: (import "env" "memory" ...)');
 }
-if (imports.some((entry) => entry.kind !== "memory")) {
-  problems.push("the module must not import functions, tables or globals");
+const services = ${JSON.stringify(HOST_SERVICES.map((service) => service.symbol))};
+for (const entry of imports) {
+  if (entry.kind === "memory") continue;
+  if (entry.kind !== "function" || entry.module !== "env" || (entry.name !== "pow" && !services.includes(entry.name))) {
+    problems.push('the module must not import "' + entry.name + '"; it is not a service of the host ABI');
+  }
 }
 const exports = WebAssembly.Module.exports(module).map((entry) => entry.name);
 if (exports.includes("memory") || exports.includes("_start")) {
@@ -290,23 +386,66 @@ function elementSize(type: TypeExpr): number {
 }
 
 /**
+ * What the host the build generates has to carry for the module it runs.
+ */
+export interface WasmHostOptions {
+  /**
+   * The services the module imported, which are the ones the host implements.
+   *
+   * A service the module did not import is not implemented and not paid for:
+   * the host is generated, so it carries the implementations of what the
+   * module reaches for and nothing else.
+   */
+  readonly services?: readonly string[];
+  /**
+   * The style a value is written as text in, which is the language's own: one
+   * language writes a whole number with a marker the other has no word for.
+   */
+  readonly style?: number;
+}
+
+/**
  * The host: reads the vector protocol on stdin, places buffers in the module's
  * linear memory, calls the contracted function and prints results in the same
  * format as the native harness.
+ *
+ * The host is also the runtime. A module reaches the runtime through the
+ * services of the host ABI, and the implementations of the ones it imported
+ * are carried here, in JavaScript, over the same linear memory the module
+ * reads and writes.
  */
-export function generateWasmHost(contract: FunctionContract): string {
+export function generateWasmHost(contract: FunctionContract, options: WasmHostOptions = {}): string {
   const functionName = symbolOf(contract);
   const returns = parseType(contract.function.returns);
   if (returns.kind !== "primitive") {
     throw wasmError(`return type ${typeToString(returns)} is not supported for wasm`, undefined, functionName);
   }
-
+  const services = options.services ?? [];
+  for (const service of services) {
+    if (!HOST_SERVICE_BY_SYMBOL.has(service)) {
+      throw wasmError(`"${service}" is not a service of the host ABI`, undefined, functionName);
+    }
+    if (!IMPLEMENTED_SERVICES.includes(service)) {
+      throw wasmError(`the host carries no implementation of "${service}"`, undefined, functionName);
+    }
+  }
+  const style = options.style ?? 0;
 
   const headerReads = contract.function.params
     .map((param, index) => {
       const type = parseType(param.type);
       if (type.kind === "primitive") {
         return `  const ${param.name} = ${scalarRead(type, `header[${index}]`)};`;
+      }
+      if (type.kind === "text") {
+        // A text parameter is refused by name rather than by the buffer reader
+        // it is not: the vector protocol carries a buffer as a count and its
+        // elements, and a text is neither.
+        throw wasmError(
+          `the parameter "${param.name}" is a text, which the vector protocol does not carry`,
+          "a wasm parameter is a number or a buffer; a text parameter is not built by the c, asm or machine output kinds either",
+          functionName,
+        );
       }
       return [
         `  let ${param.name} = 0;`,
@@ -326,14 +465,14 @@ export function generateWasmHost(contract: FunctionContract): string {
       if (type.kind === "primitive") return "";
       const size = elementSize(bufferElement(type));
       return `  {
-    storage_${param.name} = allocate(${POINTER_SIZE} + count_${param.name} * ${size});
+    storage_${param.name} = block(count_${param.name} * ${size}, 16, true);
     // A module is handed a pointer to the elements and no length beside it, so
     // the count is written in the word the pointer sits one before: a module
     // reads a length as the count at (pointer - ${POINTER_SIZE}). The word is
     // written for an empty buffer too, or a module asked to walk one would
     // read a length from below the memory the host gave it.
-    view().setBigUint64(storage_${param.name}, BigInt(count_${param.name}), true);
-    ${param.name} = storage_${param.name} + ${POINTER_SIZE};
+    writeCount(storage_${param.name}, count_${param.name});
+    ${param.name} = storage_${param.name};
   }
   if (count_${param.name} !== 0) {
     const elements = nextTokens();
@@ -364,21 +503,29 @@ export function generateWasmHost(contract: FunctionContract): string {
           ? "String(value >>> 0)"
           : 'typeof value === "bigint" ? value.toString() : String(value)';
 
+  const serviceImports = services.map((service) => `imports.env[${JSON.stringify(service)}] = ${service};`).join("\n");
+  const hashes = services.some((service) => service.startsWith("blaze_rt_md5_"));
+
   return `/* Generated by the blaze compiler from a function contract. Do not edit. */
 import { readFileSync } from "node:fs";
+${hashes ? 'import { createHash } from "node:crypto";' : ""}
+
+${hostRuntimeSource(services)}
 
 const [modulePath] = process.argv.slice(2);
 const functionName = ${JSON.stringify(functionName)};
-const PAGE = 65536;
 
 function fail(message) {
   process.stderr.write("wasm-host: " + message + "\\n");
   process.exit(2);
 }
 
+memory = new WebAssembly.Memory({ initial: 4 });
+textStyle = ${style};
 const module = new WebAssembly.Module(readFileSync(modulePath));
-const memory = new WebAssembly.Memory({ initial: 4 });
-const instance = new WebAssembly.Instance(module, { env: { memory, pow: Math.pow } });
+const imports = { env: { memory, pow: Math.pow } };
+${serviceImports}
+const instance = new WebAssembly.Instance(module, imports);
 const entry = instance.exports[functionName];
 if (typeof entry !== "function") fail("the module does not export " + functionName);
 
@@ -389,34 +536,20 @@ if (typeof entry !== "function") fail("the module does not export " + functionNa
 // hand-written candidate) is given a page of its own, which is past anything
 // the lowering reserves.
 const published = instance.exports[${JSON.stringify(DATA_BASE_EXPORT)}];
-let breakOffset = typeof published === "object" && published !== null && typeof published.value === "number"
+cursor = typeof published === "object" && published !== null && typeof published.value === "number"
   ? published.value
   : 65536;
 let sink = 0;
-
-function allocate(bytes) {
-  const offset = breakOffset;
-  const end = offset + bytes;
-  if (end > memory.buffer.byteLength) {
-    memory.grow(Math.ceil((end - memory.buffer.byteLength) / PAGE) + 1);
-  }
-  breakOffset = (end + 15) & ~15;
-  return offset;
-}
-
-function view() {
-  return new DataView(memory.buffer);
-}
 
 const lines = readFileSync(0, "utf8").split("\\n");
 // A line is what the native harness reads with getline: the text before a
 // newline, so the empty text after the last one is not a line of its own.
 if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-let cursor = 0;
+let line = 0;
 function nextTokens() {
-  while (cursor < lines.length) {
-    const line = lines[cursor++].trim();
-    if (line !== "") return line.split(/\\s+/);
+  while (line < lines.length) {
+    const text = lines[line++].trim();
+    if (text !== "") return text.split(/\\s+/);
   }
   return null;
 }
@@ -425,9 +558,26 @@ function nextTokens() {
    that takes nothing is an empty line, and skipping it would eat the vectors
    after it. Only a line with arguments on it to read is one to skip. */
 function nextHeader() {
-  if (cursor >= lines.length) return null;
-  const line = lines[cursor++].trim();
-  return line === "" ? [] : line.split(/\\s+/);
+  if (line >= lines.length) return null;
+  const text = lines[line++].trim();
+  return text === "" ? [] : text.split(/\\s+/);
+}
+
+/* The call itself. A raise is the runtime's own way of stopping a program and
+   is not a fault, so it is caught here and reported the way the C runtime
+   reports it: the message on the error stream and the exit code of a program
+   that stopped. */
+let argumentsOfCall = [];
+function call() {
+  try {
+    return entry(...argumentsOfCall);
+  } catch (error) {
+    if (error instanceof BlazeError) {
+      process.stderr.write("blaze: " + error.message + "\\n");
+      process.exit(2);
+    }
+    throw error;
+  }
 }
 
 const first = nextTokens();
@@ -449,9 +599,10 @@ for (;;) {
 
 ${headerReads}
 ${dataReads}
+  argumentsOfCall = [${callArguments}];
 
   if (mode === "run") {
-    const value = entry(${callArguments});
+    const value = call();
     process.stdout.write("RESULT " + (${resultFormat}) + "\\n");
     calls += 1;
     continue;
@@ -459,7 +610,7 @@ ${dataReads}
 
   const start = process.hrtime.bigint();
   for (let iteration = 0; iteration < iterations; iteration += 1) {
-    sink += Number(entry(${callArguments}));
+    sink += Number(call());
   }
   const elapsed = Number(process.hrtime.bigint() - start);
   process.stdout.write("BENCH " + elapsed + " " + sink + "\\n");

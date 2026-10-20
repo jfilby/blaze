@@ -619,7 +619,11 @@ test("a compound division of a whole number above the signed range is unsigned",
   assert.equal(result.stdout, "RESULT 1500000000\n");
 });
 
-test("a construct the module boundary cannot reach is refused by name", async () => {
+test("a number the program prints is written by the host", async () => {
+  // A module reaches the runtime through the services of the host ABI, and
+  // printing a number is one of them: the module calls the runtime's own
+  // formatter and the host writes what it answers. The refusal this test
+  // replaced was the module reaching no runtime at all.
   const files = {
     "main.ts": 'import { r } from "./lib.ts";\nr(0);\n',
     "lib.ts": "export function r(n: number): number {\n  console.log(n);\n  return n;\n}\n",
@@ -628,16 +632,15 @@ test("a construct the module boundary cannot reach is refused by name", async ()
   const contract: FunctionContract | undefined = program.files.find((f) => f.path === "lib.ts")?.functions.r;
   assert.ok(contract !== undefined, "the entry program imports the function under test");
   const directory = await scratch("blaze-wasm-print-");
-  await assert.rejects(
-    buildModule({
-      fn: semantics.r as SemanticFunction,
-      contract,
-      modulePath: join(directory, "candidate.wasm"),
-      hostPath: join(directory, "host.mjs"),
-    }),
-    /cannot print a number/,
-    "a module reaches no runtime service, so printing is refused rather than emitted",
-  );
+  const built = await buildModule({
+    fn: semantics.r as SemanticFunction,
+    contract,
+    modulePath: join(directory, "candidate.wasm"),
+    hostPath: join(directory, "host.mjs"),
+  });
+  const result = run("node", [built.hostPath, built.modulePath], { input: "run\n2.5\n\n", timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "2.5\nRESULT 2.5\n");
 });
 
 /**
@@ -778,15 +781,11 @@ test("a clamp is the two instructions the module has for it", async () => {
   await compute("n: number", clamp, "run\n40\n", "RESULT 10\n");
 });
 
-test("the command line is refused by what it is, not by what rounds", async () => {
-  // Every builtin with no instruction behind it was reported as `Math.round`,
-  // so a read of `process.argv` was refused for a rounding the source never
-  // asked for.
-  await assert.rejects(
-    compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", ""),
-    /cannot read the command line/,
-    "a module is handed the vectors and no process, so the command line is named as what it is",
-  );
+test("the command line is the one the host was given", async () => {
+  // A module is handed the vectors and no process of its own, so the command
+  // line it reads is the one the host was started with: the host is the
+  // process, and the arguments are its own.
+  await compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", "RESULT 4\n");
 });
 
 test("a module whose code is larger than one buffer is written whole", async () => {

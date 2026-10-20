@@ -293,8 +293,9 @@ export function reusableFiles(
   // The wasm backend writes the module and no assembly: naming the assembly here
   // asked for a file that is never written, so the list could never be complete
   // and a stored candidate was rebuilt on every build for the life of the
-  // project. The module is what it delivers.
-  if (lowering === "wasm") return [paths.module, paths.implementation];
+  // project. The module is what it delivers, and the host that runs it is
+  // delivered beside it: a module nobody can run is not a deliverable.
+  if (lowering === "wasm") return [paths.module, paths.host, paths.implementation];
   // A candidate that links on its own delivers the executable that links, and
   // one that does not has none: `materialize` below returns before the harness
   // link for a candidate that calls another function of the program, because the
@@ -698,6 +699,7 @@ async function materialize(
       modulePath: paths.module,
       hostPath: paths.host,
       candidate: candidate.id,
+      language: request.program.language,
     });
     return {
       runner: module.runner,
