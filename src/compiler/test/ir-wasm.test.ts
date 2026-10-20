@@ -1346,3 +1346,35 @@ test("the folded module answers the same as the unfolded one, and is smaller", a
   assert.equal(answers[0], answers[1], "the folded module answers what the unfolded one answers");
   assert.ok((sizes[1] as number) < (sizes[0] as number), "the folded module is smaller than the unfolded one");
 });
+
+test("a text and a wide number are laid down beside each other and not on top of each other", async () => {
+  // The constants a module pools are one list: a text written out and a wide
+  // number are laid down one after another, and each is at the address the ones
+  // before it leave free. Two lists put the text and the wide number at the
+  // same address when the text was pooled first, and the wide number was read
+  // as the text — the text printed as the limbs of the number and the number
+  // printed as the text.
+  const library = [
+    "export function r(n: number): number {",
+    "  console.log(`hello`);",
+    "  let w: u256 = 340282366920938463463374607431768211455n;",
+    "  console.log(w);",
+    "  return n;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
+  const contract = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const directory = await scratch("blaze-wasm-pooled-");
+  const built = await buildModule({
+    fn: semantics.r as SemanticFunction,
+    contract,
+    modulePath: join(directory, "candidate.wasm"),
+    hostPath: join(directory, "host.mjs"),
+  });
+  const result = run("node", [built.hostPath, built.modulePath], { input: "run\n1\n\n", timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "hello\n340282366920938463463374607431768211455\nRESULT 1\n");
+});

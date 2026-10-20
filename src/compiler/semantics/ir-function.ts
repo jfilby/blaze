@@ -68,6 +68,11 @@ import type { PrimitiveTypeName } from "../core/types.ts";
    one is expected. */
 const U64_MAX = 18446744073709551615n;
 const U64: TypeExpr = { kind: "primitive", name: "u64" };
+/** The range an `i64` holds, so a bigint outside it is a wide number. */
+const I64_MAX = 9223372036854775807n;
+const I64_MIN = -9223372036854775808n;
+/** The wide number a bigint that does not fit in sixty-four bits is. */
+const U256: TypeExpr = { kind: "primitive", name: "u256" };
 import type { AssignOperator, BinaryOp, Expression, Statement, UnaryOp as SourceUnaryOp } from "../core/ir.ts";
 import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
 import {
@@ -899,18 +904,25 @@ class FunctionBody {
         // another width, and a whole literal is still a double.
         return { value: { k: "const", type: numberAt(expect) ?? F64, text: expression.text }, inferred: DOUBLE };
       }
-      case "bigint":
+      case "bigint": {
+        // A bigint is a whole number, and a whole number here is an `i64`. A
+        // literal that does not fit in one is a wide number, and it is typed as
+        // one: a literal typed as an `i64` and holding more than that is
+        // answered as the low sixty-four bits of itself, which is a number the
+        // source never wrote. The program resolver types it the same way.
+        let literal: bigint | null = null;
+        try { literal = BigInt(expression.text); } catch { /* not a valid bigint */ }
         // When a `u64` is expected and the value fits in 64 unsigned bits, type
         // it as `u64` so it can be passed to `u256_from_u64x2` or
         // `u256_from_u64x4` without first being widened to `u256`.
-        if (expect !== null && expect.kind === "type" && expect.type.kind === "primitive" && expect.type.name === "u64") {
-          let literal: bigint | null = null;
-          try { literal = BigInt(expression.text); } catch { /* not a valid bigint */ }
-          if (literal !== null && literal >= 0n && literal <= U64_MAX) {
-            return { value: { k: "const", type: U64, text: expression.text }, inferred: asType(U64) };
-          }
+        if (expect !== null && expect.kind === "type" && expect.type.kind === "primitive" && expect.type.name === "u64" && literal !== null && literal >= 0n && literal <= U64_MAX) {
+          return { value: { k: "const", type: U64, text: expression.text }, inferred: asType(U64) };
+        }
+        if (literal !== null && (literal > I64_MAX || literal < I64_MIN)) {
+          return { value: { k: "const", type: U256, text: expression.text }, inferred: asType(U256) };
         }
         return { value: { k: "const", type: I64, text: expression.text }, inferred: asType(I64) };
+      }
       case "ident": {
         const held = this.read(expression.name, line);
         return { value: { k: "local", type: slotType(held.slot), name: held.name }, inferred: held.inferred };

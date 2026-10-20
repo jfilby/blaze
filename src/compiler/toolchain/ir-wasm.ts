@@ -734,20 +734,24 @@ class Body {
   readonly pooledFloats: { type: number; opcode: number; bytes: number[] }[] = [];
 
   /**
-   * The wide constants the body pooled, thirty-two bytes each, lowest limb
-   * first. They are laid down in one data segment by {@link buildWasmModule}
-   * once every address in the body is known.
+   * The wide constants the body pooled, and the address of each one.
+   *
+   * The key is the number the constant holds, so a number the source wrote out
+   * twice is laid down once. The constants themselves are laid down in one
+   * data segment by {@link buildWasmModule} once every address in the body is
+   * known.
    */
-  readonly pooledWides: number[][] = [];
+  readonly wideConstants = new Map<string, number>();
 
   /**
-   * The texts the body pooled, as the bytes of each one with its terminator.
+   * The constants the module lays down in its own data: the wide numbers and
+   * the texts, in the order they were pooled.
    *
    * A text the program wrote out is laid down in the module's own data and
    * read at the address it was given, the same way a pooled float is read out
    * of a global rather than written out again at every place it appears.
    */
-  readonly pooledTexts: number[][] = [];
+  readonly pooledData: number[][] = [];
 
   /**
    * The services of the host ABI the body reached for, and the index of the
@@ -1723,7 +1727,7 @@ class Body {
    */
   private wideConstant(value: bigint): void {
     const key = `u256:${value & WIDE_MASK}`;
-    const known = this.pooled.get(key);
+    const known = this.wideConstants.get(key);
     if (known !== undefined) {
       this.i32(known);
       return;
@@ -1731,9 +1735,9 @@ class Body {
     const bytes: number[] = [];
     const limbs = byteViewOf(value);
     for (const limb of limbs) for (let at = 0; at < 8; at += 1) bytes.push(Number((limb >> BigInt(at * 8)) & 0xffn));
-    this.pooled.set(key, WIDE_DATA_BASE + this.pooledWides.reduce((whole, bytes) => whole + bytes.length, 0));
-    this.pooledWides.push(bytes);
-    this.i32(this.pooled.get(key) as number);
+    const at = this.poolData(bytes);
+    this.wideConstants.set(key, at);
+    this.i32(at);
   }
 
   /**
@@ -2352,11 +2356,21 @@ class Body {
    */
   private poolText(text: string): number {
     const bytes = [...new TextEncoder().encode(text), 0];
-    const at =
-      WIDE_DATA_BASE +
-      this.pooledWides.reduce((whole, each) => whole + each.length, 0) +
-      this.pooledTexts.reduce((whole, each) => whole + each.length, 0);
-    this.pooledTexts.push(bytes);
+    return this.poolData(bytes);
+  }
+
+  /**
+   * The address of a constant laid down in the module's own data.
+   *
+   * The constants a body pools are one list: a wide number and a text are
+   * laid down one after another, and each is at the address the ones before it
+   * leave free. Two lists would put a text and a wide number on top of each
+   * other when the text was pooled first, and the wide number would be read as
+   * the text — or the other way round.
+   */
+  private poolData(bytes: number[]): number {
+    const at = WIDE_DATA_BASE + this.pooledData.reduce((whole, each) => whole + each.length, 0);
+    this.pooledData.push(bytes);
     return at;
   }
 
@@ -3648,7 +3662,7 @@ export function moduleBytes(
   // may write to and a wide number in flight is. Its offset is a constant
   // expression rather than an address the body reads, which is what the format
   // requires.
-  const pooled = [...body.pooledWides, ...body.pooledTexts];
+  const pooled = body.pooledData;
   if (pooled.length > 0) {
     module.section(11, (data) =>
       data.counted(1, (one) => {
@@ -3672,9 +3686,8 @@ export function moduleBytes(
  * pooled, in that order.
  */
 function dataBase(body: Body): number {
-  const wide = body.pooledWides.reduce((whole, bytes) => whole + bytes.length, 0);
-  const texts = body.pooledTexts.reduce((whole, bytes) => whole + bytes.length, 0);
-  return WIDE_DATA_BASE + wide + texts;
+  const pooled = body.pooledData.reduce((whole, bytes) => whole + bytes.length, 0);
+  return WIDE_DATA_BASE + pooled;
 }
 
 /* -------------------------------------------------------------------------- */

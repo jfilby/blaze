@@ -10,13 +10,14 @@ text form — and delivers it beside the IR it was built from.
 | Part | Where | What it is |
 |---|---|---|
 | the lowering | `src/compiler/toolchain/ir-wasm.ts` | semantic IR → module bytes |
-| the ABI and the host | `src/compiler/toolchain/wasm.ts` | the boundary, the argument mapping, the host that runs the module |
+| the host ABI | `src/compiler/toolchain/wasm-host-runtime.ts` | the table of imports, and the runtime the host carries |
+| the host and the boundary | `src/compiler/toolchain/wasm.ts` | the argument mapping, the boundary check, the host that runs the module |
 | the legacy path | `toolchain/wasm.ts: buildWasm` | WAT text through `wat2wasm`; a build no longer takes it |
 
 The module boundary is narrow, and deliberately so. A module:
 
-- imports `env.memory` (the host's linear memory) and `env.pow`, and nothing
-  else;
+- imports `env.memory` (the host's linear memory), `env.pow`, and the
+  services of the host ABI its body reached for, and nothing else;
 - exports the contracted symbol and `__blaze_data_base`, the first address
   above everything the module owns;
 - exports no `memory` and no `_start`.
@@ -29,18 +30,24 @@ The argument mapping is the ABI:
 | `i64`, `u64`, `usize`, `isize` | `i64` |
 | `f32`, `f64` | themselves |
 | a buffer, a slice, an array, a reference | `i32`, a byte offset into the imported memory |
-| a text | refused — the host generator asks for a buffer element and fails |
+| a text | refused by name — the vector protocol carries a buffer and not a text |
 
 The count of a buffer is the 8-byte word at `pointer - 8`; the host writes it
 before it calls the module, because a module is handed a pointer to the
 elements and no length beside it.
 
-The host (`generateWasmHost`, `toolchain/wasm.ts:297`) is a generated `.mjs`
+The host (`generateWasmHost`, `toolchain/wasm.ts`) is a generated `.mjs`
 that reads the same vector protocol on standard input as the native C harness,
 places the buffers in the module's memory, calls the export, and prints
 `RESULT …` and `BENCH …` in the same format. Because the protocol is the
 same, `toolchain/verifier.ts` and `toolchain/benchmark.ts` work on a wasm
 build without knowing there is one.
+
+The host is also the runtime: it carries the implementations of the services
+the module reached for, in JavaScript, over the same linear memory the module
+reads and writes. The managed representation is the one the C runtime uses — a
+forty-eight byte header, a payload, a reference count — so a value the module
+holds and a value the host holds are the same kind of thing.
 
 What it is not: a second compiler for a different machine. It is the same IR,
 the same contract, the same vectors, and the same proofs, carried into a
@@ -63,18 +70,18 @@ not "the same instructions" — it is six things:
    objects, arrays, exceptions, the clock, the random source.
 3. **The program.** A program has several functions, a body, and a driver that
    calls them. A wasm build of a program has to produce one module that holds
-   them all and an entry that runs the body.
+   them all and an entry that runs the body. **Not done.**
 4. **The module's own functions.** A function that calls another function of
    the program has to be lowered into a call of that function, in the same
-   module.
+   module. **Not done.**
 5. **The review artifact.** The machine backend hands a review a listing of
    the object (`describeMachineObject`, `toolchain/ir-machine.ts:8239`). A
-   review of a wasm module gets the shape of it (`describeModule`,
-   `toolchain/ir-wasm.ts:2758`) — the section sizes and the exports — which
-   is not enough to read a module by.
+   review of a wasm module gets a listing of it (`describeModule`,
+   `toolchain/ir-wasm.ts`): the sections, the types, the imports, the exports,
+   the globals, and the code section decoded into instructions with their
+   immediates read back.
 6. **The proof.** Verification against the vectors, the liveness probe for a
-   definition contract, and the benchmark. All three run on a wasm build
-   today, except the probe, which is skipped.
+   definition contract, and the benchmark. All three run on a wasm build.
 
 ## Where the wasm backend stands
 
@@ -85,26 +92,30 @@ not "the same instructions" — it is six things:
 | shifts, bitwise operators | yes | yes | yes |
 | floor division and floored remainder | yes | yes | **refused** |
 | a power (`**`) | yes (`pow`) | yes | yes, over `f64` (`env.pow`) |
-| a compound power (`**=`) | yes | yes | over `f64` only; an element refuses (`ir-wasm.ts:574`) |
-| whole-number builtins (`whole.abs`, `whole.min`, …) | yes | yes | **refused** |
-| `Math.random` | yes | yes | **refused** |
+| a compound power (`**=`) | yes | yes | yes, over `f64`; the answer is converted to the slot's type |
+| whole-number builtins (`whole.abs`, `whole.min`, …) | yes | yes | yes |
+| `Math.random` | yes | yes | yes |
 | a 256-bit whole number: add, subtract, bitwise, shift | yes | yes | yes |
-| a 256-bit whole number: multiply, divide, remainder | yes | yes | **refused** |
-| a 256-bit whole number: ordered comparison | yes | yes | **equality only** |
-| `u256_from_u64x2`, `u256_from_u64x4` | yes | yes | **refused** |
-| text, string concatenation | yes | yes | **refused** |
-| printing | yes | yes | **refused** |
-| allocation, arrays, objects | yes | yes | **refused** |
-| exceptions (`raise`, `retain`, `release`) | yes | yes | **refused** |
-| the command line (`process.argv`) | yes | yes | **refused** |
+| a 256-bit whole number: multiply, divide, remainder | yes | yes | yes, as calls of the kernel |
+| a 256-bit whole number: ordered comparison | yes | yes | yes |
+| `u256_from_u64x2`, `u256_from_u64x4` | yes | yes | yes, as calls of the kernel |
+| text, string concatenation | yes | yes | yes |
+| the comparison of two texts | yes (`strcmp`) | yes (`strcmp`) | yes, as a call of the runtime's own |
+| printing | yes | yes | yes |
+| allocation, arrays, objects | yes | yes | yes |
+| dynamic values and dynamic arrays (`array.new`, `JSON.parse`, …) | yes, in a program | yes, in a program | yes |
+| hashing and reading a file | yes, in a program | yes, in a program | yes |
+| exceptions (`raise`, `retain`, `release`) | yes | yes | yes |
+| the command line (`process.argv`) | yes | yes | yes |
 | a call of another function of the program | yes | yes | **refused** |
 | a loop marked parallel | OpenMP | a team of threads | **runs in order** |
 | a program (several functions and a body) | yes | yes, or the C backend takes it | **refused** |
 | HTTP (`http.requestPath` and the rest) | yes | yes | **refused** |
 | SQLite | yes | yes | **refused** |
-| JSON, files, hashing, `fetch` | yes | yes | **refused** |
-| the liveness probe of a definition contract | yes | yes | **skipped** |
-| the artifact a review reads | the C, or the assembly | a listing of the object | the shape of the module |
+| JSON, files, hashing, `fetch` | yes | yes | `fetch` is **refused**; the rest are yes |
+| the liveness probe of a definition contract | yes | yes | yes |
+| the artifact a review reads | the C, or the assembly | a listing of the object | a listing of the module |
+| the folds the backend knows are safe | the C compiler's | the backend's own | the backend's own |
 
 ## The gaps
 
@@ -117,31 +128,28 @@ the C or the machine backend builds:
 
 | Refused | Where |
 |---|---|
-| printing text, a number, a newline | `ir-wasm.ts:2250`–`2258` |
-| retaining a value, raising | `ir-wasm.ts:2256`–`2258` |
-| a call of another function of the program | `ir-wasm.ts:1371`, `ir-wasm.ts:2239` |
-| a text value, `toText`, a string concatenation | `ir-wasm.ts:1400` (the default arm of the value switch) |
-| an allocated buffer, a dynamic array, a new object | `ir-wasm.ts:1400` |
-| the command line | `ir-wasm.ts:1397`, `ir-wasm.ts:1409` |
-| a floor division, a floored remainder | `ir-wasm.ts:1348` |
-| a whole-number builtin (`whole.abs` and the rest) | `ir-wasm.ts:2504` |
-| `Math.random` | `ir-wasm.ts:2504` |
-| `u256_from_u64x2`, `u256_from_u64x4` | `ir-wasm.ts:1374`, `ir-wasm.ts:1381` |
-| `u256_add_mod`, `u256_sub_mod`, `u256_mul_mod`, `u256_div` | `ir-wasm.ts:2504` |
-| a wide multiply, a wide division, a wide remainder | `ir-wasm.ts:1878` |
-| a wide ordered comparison | `ir-wasm.ts:1514` |
-| the length of something that is not a buffer | `ir-wasm.ts:1105` |
-| a field of a layout the module does not know | `ir-wasm.ts:1129`, `ir-wasm.ts:2175` |
-| an element of something that is not a buffer | `ir-wasm.ts:2132` |
+| a call of another function of the program | `ir-wasm.ts:1626`, `ir-wasm.ts:2782` |
+| a floor division, a floored remainder | `ir-wasm.ts:1603` |
+| a conversion between two carriers the format has no instruction for | `ir-wasm.ts:1102` |
+| the length of something that is not a buffer | `ir-wasm.ts:1252` |
+| a field of a layout the module does not know | `ir-wasm.ts:1288`, `ir-wasm.ts:2718` |
+| a new object of a layout the module does not know | `ir-wasm.ts:1344`, `ir-wasm.ts:1356` |
+| an element of something that is not a buffer | `ir-wasm.ts:2663` |
+| a view of a block of bytes | `ir-wasm.ts:1303` |
+| a JSON of something that is not a text | `ir-wasm.ts:3262` |
 
 Three more refusals live outside the module: a wasm build may not link a
 runtime (`compiler.ts:325`), may not use SQLite (`compiler.ts:1119`), and a
 program may not be built as wasm at all (`compiler.ts:940`).
 
-### What is wrong today rather than refused
+The HTTP calls, `fetch` and `process.exit` are refused as well: they are calls
+of a host process rather than services of the runtime, and the host ABI is the
+runtime's.
 
-These are not gaps in reach; they are answers that are wrong, and they are
-worse than a refusal.
+### What was wrong rather than refused, and is not now
+
+These were not gaps in reach; they were answers that are wrong, and they were
+worse than a refusal. Each of them is fixed, and each of them has a test.
 
 1. **A `fill` statement is dropped by every backend.** The statement switch
    of the C backend (`ir-c.ts:398`), of the machine backend (`ir-machine.ts:3263`)
@@ -155,7 +163,8 @@ worse than a refusal.
    writes one produces a candidate that is accepted, validated, and silently
    does nothing. The fix belongs in the IR rather than in one backend: the
    validator should refuse a statement no backend lowers, or all three should
-   lower it.
+   lower it. The wasm backend writes it out as the walk it is, and the C
+   backend refuses it by name rather than dropping it.
 
 2. **`**=` on a slot that is not a float is an invalid module.** The `set`
    arm writes the old value, the new value, and then calls `env.pow`, which
@@ -166,7 +175,7 @@ worse than a refusal.
    (`pow(x, v)` in `ir-c.ts:428`), so the two backends answer differently: one
    a number, one a module the engine refuses. The fix is to convert both
    operands to `f64` before the call and to convert the answer back to the
-   slot's type after it.
+   slot's type after it. It is done.
 
 3. **A text parameter fails the host generator rather than being refused.**
    `generateWasmHost` asks `bufferElement` for the element type of every
@@ -175,7 +184,8 @@ worse than a refusal.
    contract with a text parameter is a legal contract, and the wasm build of
    it stops with an error about a buffer rather than a refusal that names the
    parameter. (A text *return* is refused cleanly, with "return type text is
-   not supported for wasm"; it is the parameter that is not.)
+   not supported for wasm"; it is the parameter that is not.) The parameter is
+   refused by name now.
 
 4. **A float that does not fit the whole number it is written into traps.**
    WebAssembly's `i32.trunc_f64_s` traps on a value outside the range; C's
@@ -190,10 +200,12 @@ worse than a refusal.
 The C backend emits calls of `blaze_rt_*` and the runtime is linked beside
 the object. The machine backend emits calls of the same symbols and the
 runtime is linked beside its object. The wasm backend emits a module that
-reaches no runtime at all: `env.memory` and `env.pow` are the whole of it.
+reaches the runtime through the host ABI, and the host carries the runtime:
+the services a module reaches for are the ones the host implements, over the
+same linear memory the module reads and writes.
 
-That is the single largest gap, and everything else that refuses a runtime
-service is a consequence of it. The runtime ABI (`runtime/abi.ts:77`) is
+That was the single largest gap, and everything else that refused a runtime
+service was a consequence of it. The runtime ABI (`runtime/abi.ts:77`) is
 fifty-nine entries; the ones a wasm module needs to be as useful as a C
 object are:
 
@@ -204,6 +216,7 @@ object are:
 | `raise` | the exception |
 | `to_text`, `to_number`, `format_number`, `format_number_fixed` | text and numbers |
 | `string_new`, `string_append`, `string_length`, `text_length` | text |
+| `text_compare` | the comparison of two texts |
 | `array_new`, `array_push`, `array_get`, `array_set`, `array_length` | dynamic arrays |
 | `object_new`, `object_size` | objects |
 | `random`, `monotonic_ms` | the clock and the random source |
@@ -228,11 +241,41 @@ makes easier than a native binary. What is missing is the plumbing:
 ### The calls between the functions of a program
 
 A function that calls another function of the program is refused
-(`ir-wasm.ts:1371`). The IR of every function of the program is already in
+(`ir-wasm.ts:1626`). The IR of every function of the program is already in
 the build (`CodegenRequest.functions`), and a module can hold every function
 and call them with a `call` instruction — there is no linker and no symbol
 table. So this is not a hard problem; it is a question of what a module holds
 and how a call names the function it names.
+
+What a module that holds several functions needs is written down here, because
+it is the part of the design that is not in the code yet:
+
+- **The state a module shares.** The pooled constants (the floats that are read
+  out of a global, the wide numbers and the texts that are laid down in the
+  data segment) and the services the module imports are the module's, not a
+  function's: two functions of one module read the same global and the same
+  text. The body that writes a function owns today (`pooledFloats`,
+  `pooledWides`, `pooledTexts`, `services`) is the state of the module, and
+  the state of a function is what is left (its own bytes, its own locals, its
+  own labels).
+
+- **The scratch of the wide numbers.** The limbs of a wide number in flight
+  are scratch, and the scratch of one function cannot be the scratch of
+  another: a function that computes a wide number and then calls a function
+  that computes one as well would have the second one write over the first.
+  The scratch is therefore a region of its own per function, and the constants
+  are laid down above every one of them.
+
+- **The constants are one list.** The wide numbers and the texts are laid down
+  one after another, and each is at the address the ones before it leave free.
+  Two lists put a text and a wide number at the same address when the text
+  was pooled first, which is a bug the backend had and does not have now.
+
+- **The index of a call.** The module numbers its functions after the imports
+  it has, and a call of another function of the program is a `call` of that
+  index. The IR of the call carries the signature of the callee, so the
+  arguments are converted to the types the callee takes and the answer is
+  converted back to the type the call was written at.
 
 ### The review artifact
 
@@ -247,28 +290,18 @@ a review of a module worth asking for.
 ### The proof
 
 The verifier and the benchmark work on a wasm build: the host speaks the same
-protocol. Two things do not:
+protocol. The liveness probe works as well: a definition-contract candidate is
+called once through the host (`toolchain/probe.ts`), so a candidate that traps
+on every input is refused as a candidate.
 
-- **The liveness probe.** A definition contract states what a function does
-  rather than what it returns, so it has no vector, and the candidate is
-  called once on an input built from the contract to find out whether it can
-  be executed at all (`toolchain/probe.ts:166`). A wasm candidate is skipped
-  (`codegen.ts:1061`), so a wasm candidate that traps on every input is
-  selected as a valid one.
-- **The delivered host.** A wasm build delivers the module
-  (`compiler.ts:1975`) and the IR, but not the `.mjs` host that runs it, and
-  the host is not in the list of files a candidate reuses (`codegen.ts:297`).
-  The C backend delivers text a person can compile; the machine backend
-  delivers an object and an executable; a wasm build delivers a module nobody
-  can run.
+The host is delivered beside the module, and the reuse list names it: a module
+nobody can run is not a deliverable.
 
 ### The output quality
 
 The C backend compiles with the C compiler's optimisation; the machine backend
-writes optimized x86-64. The wasm backend writes the module and stops: there
-is no pass over it, so the module carries the locals it borrowed for its
-temporaries, the frames every arm and every loop needed, and the constants it
-pooled, with nothing folded away.
+writes optimized x86-64. The wasm backend folds what it writes, with the folds
+it knows are safe, and the folds are named under "Stage 8" below.
 
 ## The design
 
@@ -279,11 +312,11 @@ one the name of a runtime service and its WebAssembly signature. The module
 imports the services its body uses and nothing else, so a module of arithmetic
 still imports only the memory.
 
-The table lives beside the ABI it mirrors, in `toolchain/wasm.ts`. It is the
-runtime ABI (`runtime/abi.ts:77`) with the C types replaced by the WebAssembly
-ones: a pointer is an `i32` offset into the shared memory, a `size_t` is an
-`i64`, a `double` is an `f64`, and a `const char*` is an `i32` offset of the
-bytes of the text.
+The table lives beside the ABI it mirrors, in `toolchain/wasm-host-runtime.ts`.
+It is the runtime ABI (`runtime/abi.ts:77`) with the C types replaced by the
+WebAssembly ones: a pointer is an `i32` offset into the shared memory, a
+`size_t` is an `i64`, a `double` is an `f64`, and a `const char*` is an `i32`
+offset of the bytes of the text.
 
 ```
 env.memory                                  the linear memory
@@ -301,20 +334,22 @@ env.blaze_rt_print_newline                  () -> ()
 env.blaze_rt_raise                          (i32) -> ()      the host throws
 env.blaze_rt_to_text                        (f64) -> i32
 env.blaze_rt_to_number                      (f64) -> f64
-env.blaze_rt_format_number                  (f64, i32, i64) -> i32
+env.blaze_rt_format_number                  (f64, i32, i64) -> i64
+env.blaze_rt_format_number_fixed            (f64, i32, i32, i64) -> i64
 env.blaze_rt_string_new                     (i32, i64) -> i32
 env.blaze_rt_string_append                  (i32, i32) -> i32
 env.blaze_rt_string_clone                   (i32) -> i32
 env.blaze_rt_string_length                  (i32) -> i64
 env.blaze_rt_text_length                    (i32) -> i64
+env.blaze_rt_text_compare                   (i32, i32) -> i32
 env.blaze_rt_object_new                     (i64, i64) -> i32
 env.blaze_rt_object_size                    (i32) -> i64
 env.blaze_rt_array_new                      (i64, i64) -> i32
 env.blaze_rt_array_resize                   (i32, i64, i64) -> i32
 env.blaze_rt_array_push                     (f64, f64) -> f64
-env.blaze_rt_array_get                      (f64, i64) -> f64
-env.blaze_rt_array_set                      (f64, i64, f64) -> ()
-env.blaze_rt_array_length                   (f64) -> i64
+env.blaze_rt_array_get                      (f64, f64) -> f64
+env.blaze_rt_array_set                      (f64, f64, f64) -> ()
+env.blaze_rt_array_length                   (f64) -> f64
 env.blaze_rt_dyn_array_new                  () -> f64
 env.blaze_rt_box_number                     (f64) -> f64
 env.blaze_rt_box_string                     (i32) -> f64
@@ -323,13 +358,25 @@ env.blaze_rt_random                         () -> f64
 env.blaze_rt_monotonic_ms                   () -> f64
 env.blaze_rt_argv_count                     () -> i64
 env.blaze_rt_argv                           (i64) -> f64
-env.blaze_rt_json_parse                     (i32, i64) -> f64
+env.blaze_rt_json_parse                     (i32) -> f64
 env.blaze_rt_json_stringify                 (f64) -> f64
 env.blaze_rt_json_get                       (f64, i32) -> f64
 env.blaze_rt_md5_create                     () -> f64
 env.blaze_rt_md5_update                     (f64, i32) -> f64
 env.blaze_rt_md5_digest                     (f64) -> f64
 env.blaze_rt_file_read                      (i32, i32) -> f64
+env.blaze_rt_u256_from_u64                  (i32, i64) -> ()
+env.blaze_rt_u256_from_u64x2                (i32, i64, i64) -> ()
+env.blaze_rt_u256_from_u64x4                (i32, i64, i64, i64, i64) -> ()
+env.blaze_rt_u256_mul                       (i32, i32, i32) -> ()
+env.blaze_rt_u256_div                       (i32, i32, i32) -> ()
+env.blaze_rt_u256_mod                       (i32, i32, i32) -> ()
+env.blaze_rt_u256_add_mod                   (i32, i32, i32, i32) -> ()
+env.blaze_rt_u256_sub_mod                   (i32, i32, i32, i32) -> ()
+env.blaze_rt_u256_mul_mod                   (i32, i32, i32, i32) -> ()
+env.blaze_rt_u256_less                      (i32, i32) -> i32
+env.blaze_rt_u256_equal                     (i32, i32) -> i32
+env.blaze_rt_print_u256                     (i32) -> ()
 ```
 
 The names are the runtime's own, so the mapping from the runtime ABI is one to
@@ -337,6 +384,17 @@ one and the machine backend's spelling of a call carries over unchanged.
 `blaze_rt_raise` is the one the ABI already marks as never returning
 (`runtime/abi.ts`), and the host throws where the C runtime does not come
 back.
+
+The `u256_*` services are not the runtime ABI but the kernel beside it: a
+module has no instruction that carries a two hundred and fifty six bit number,
+so it calls the kernel the other two backends call.
+
+Two services are not the C signature with its types replaced, and both are
+because the C ABI carries a pointer through a double where the WebAssembly ABI
+has a pointer of its own. `blaze_rt_json_parse` takes the text as the offset
+of its bytes, and the counts of `blaze_rt_array_get`, `blaze_rt_array_set` and
+`blaze_rt_array_length` are doubles, because the runtime carries a count as a
+double on the side of the wall the dynamic values live on.
 
 Three rules hold the boundary together:
 
@@ -481,7 +539,7 @@ is the same protocol with one vector and no comparison.
 ### Optimization
 
 The C backend gets the C compiler's optimizer and the machine backend writes
-optimized code itself. The wasm backend writes the module and stops.
+optimized code itself. The wasm backend folds what it writes.
 
 Two ways to close that, and the second is the one that fits the compiler:
 
@@ -506,6 +564,9 @@ Each stage is a change that can be proved on its own. The order is the order
 of dependency: the boundary first, because everything else is a service
 behind it.
 
+Seven of the eight are done. The eighth — the program — is not, and what it
+still needs is written down below.
+
 ### Stage 1 — the boundary, and what is wrong today
 
 - `**=` converts its operands and its answer to the slot's type
@@ -525,8 +586,8 @@ behind it.
 
 ### Stage 2 — the host ABI
 
-- the table of imports, in `toolchain/wasm.ts`, with the signatures of the
-  services;
+- the table of imports, in `toolchain/wasm-host-runtime.ts`, with the
+  signatures of the services;
 - the host implements them, in JavaScript, as the wasm counterpart of the
   runtime ABI;
 - the module emits a call of a service where the C backend emits a call of
@@ -540,7 +601,13 @@ behind it.
 - `toText` and the formatting of a number are host calls;
 - an object is allocated by the host and its fields written at their offsets;
 - a dynamic array and a dynamic value are the runtime's own representation in
-  a handle.
+  a handle: `array.new`, `array.push`, `array.get`, `array.length`,
+  `JSON.parse`, `JSON.stringify`, `crypto.createHash`, `hasher.update`,
+  `hasher.update.digest`, `fs.readFileSync`, `Number` and `parseInt` are all
+  calls of the host ABI now;
+- two texts are compared by what they say and not by where they are: the
+  comparison is a call of the runtime's own `blaze_rt_text_compare`, which the
+  C backend calls as well.
 
 ### Stage 4 — the 256-bit whole numbers
 
@@ -550,6 +617,9 @@ behind it.
 - `u256_from_u64x2` and `u256_from_u64x4`.
 
 ### Stage 5 — the program, and the calls between functions
+
+**Not done.** What it needs is written down under "The program and the calls
+between functions" above, and the three pieces of it are these:
 
 - the module holds every function of the program, and a call of another
   function is a call of an index;
@@ -571,7 +641,27 @@ behind it.
 
 - the folds the backend knows are safe, over the code section it wrote.
 
+The folds that are done are these, and each of them is a shape the backend
+itself wrote:
+
+- a body that always answers leaves nothing behind for a path that never
+  reaches it, so the value a body that falls out of its own end leaves behind
+  is not written;
+- a counter that is moved and then tested is written once and read on the
+  stack, which is a `local.tee` where it was a write and a read;
+- a number the source wrote out is read where it is used rather than kept in a
+  local of its own, which is the loop's own start and step.
+
+The unfolded module is still written, so that a fold can be compared with what
+it folded: the two answer the same and the folded one is smaller.
+
 ## What is not done
+
+- **A program.** A wasm build of a program is refused (`compiler.ts:940`).
+  Everything a program needs is in place except the module that holds it: the
+  host runs a module and the module runs its own functions, but a module holds
+  one function today, and a program has several. What it takes is written down
+  under "The program and the calls between functions" above.
 
 - **Threads.** A module marked parallel runs its turns in order today, and
   the mark says the turns do not depend on each other rather than that they
@@ -603,8 +693,9 @@ The suites that exist today and what they cover:
 
 | Suite | What it covers |
 |---|---|
-| `test/ir-wasm.test.ts` | the lowering: loops, arms, buffers, the wide arithmetic, the boundary refusals |
-| `test/wasm.test.ts` | the ABI, the host, the boundary check |
+| `test/ir-wasm.test.ts` | the lowering: loops, arms, buffers, the wide arithmetic, the boundary refusals, the folds |
+| `test/wasm.test.ts`, `test/wasm-host.test.ts` | the ABI, the host, the boundary check |
+| `test/wasm-dynamic.test.ts` | the dynamic values, the dynamic arrays, the JSON, the hasher and the file |
 | `test/u256.test.ts` | the wide numbers across the backends, and what the wasm backend refuses |
 | `test/build.test.ts`, `test/incremental.test.ts`, `test/runtime.test.ts` | the build rules around the wasm backend |
 
@@ -614,7 +705,7 @@ What each stage adds:
 |---|---|
 | 1 | a `**=` on a `u64` slot answers what the C backend answers; a text parameter is refused by name; the boundary check accepts a module that imports a service of the table and refuses one that imports anything else; the host is delivered beside the module; a `fill` in the IR is refused rather than dropped |
 | 2 | each service of the table is called by a module that uses it, and the answer is the answer the C backend gives for the same program; the module of arithmetic still imports only the memory and `pow` |
-| 3 | a text is built, concatenated and printed; a number is formatted as text; an object is allocated and its fields read back; an array is pushed to and read from |
+| 3 | a text is built, concatenated and printed; a number is formatted as text; an object is allocated and its fields read back; an array is pushed to and read from; a dynamic array, a JSON, a hasher and a file are the runtime's own; two texts are compared by what they say |
 | 4 | a wide multiply, a wide division and a wide remainder answer what the C backend answers; an ordered comparison of two wide numbers answers the same as the C backend; `u256_from_u64x2` and `u256_from_u64x4` build the number they name |
 | 5 | a program of three functions builds as one module and runs; a function that calls another function of the program answers what it answers natively; the body of the program runs when the entry is called |
 | 6 | the listing names every instruction of the code section, and a review of a module is given the listing |
