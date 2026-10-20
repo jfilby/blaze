@@ -88,9 +88,10 @@ async function linked(
 async function deliver(
   source: string,
   files: Record<string, string> = { "main.py": source },
+  arguments_: readonly string[] = [],
 ): Promise<{ binary: string; original: string }> {
   const { directory, binary } = await linked(source, files);
-  const original = run("python3", ["main.py"], { cwd: directory, timeoutMs: 60_000 });
+  const original = run("python3", ["main.py", ...arguments_], { cwd: directory, timeoutMs: 60_000 });
   assert.equal(original.code, 0, original.stderr);
   return { binary, original: original.stdout };
 }
@@ -172,8 +173,18 @@ test("a dict is read by its key", async () => {
   assert.equal(delivered.stdout, "1\n2\n");
 });
 
-test("a program calls a function of another file of the project", async () => {
-  // The program is the shape a Python program is written in: a `main` of its
+test("the command line of a program is the one it was given", async () => {
+  // The length of the command line is the file and the arguments, and the
+  // arguments are numbers, so a program reads one with `int`.
+  const source = ["import sys", "", "print(len(sys.argv))", "print(int(sys.argv[1]))", ""].join("\n");
+  const { binary, original } = await deliver(source, { "main.py": source }, ["42"]);
+  const delivered = run(binary, ["42"], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "2\n42\n");
+});
+
+test("a program calls a function of another file of the project", async () => {  // The program is the shape a Python program is written in: a `main` of its
   // own, a guard that names the entry module, and a function of another file
   // that does the work.
   const main = [

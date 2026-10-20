@@ -110,9 +110,10 @@ not "the same instructions" — it is six things:
 
 ### The language surface refused today
 
-Every one of these is a refusal by name, raised through `unreachable` in
-`toolchain/ir-wasm.ts`, and every one of them is a program the C or the
-machine backend builds:
+Every one of these is a refusal by name, raised in `toolchain/ir-wasm.ts` —
+through `unreachable` for most of them, and through the lowering's own errors
+for the builtins and the wide arithmetic — and every one of them is a program
+the C or the machine backend builds:
 
 | Refused | Where |
 |---|---|
@@ -133,7 +134,7 @@ machine backend builds:
 | a field of a layout the module does not know | `ir-wasm.ts:1129`, `ir-wasm.ts:2175` |
 | an element of something that is not a buffer | `ir-wasm.ts:2132` |
 
-Two more refusals live outside the module: a wasm build may not link a
+Three more refusals live outside the module: a wasm build may not link a
 runtime (`compiler.ts:325`), may not use SQLite (`compiler.ts:1119`), and a
 program may not be built as wasm at all (`compiler.ts:940`).
 
@@ -160,18 +161,21 @@ worse than a refusal.
    arm writes the old value, the new value, and then calls `env.pow`, which
    takes two `f64` and hands back an `f64` (`ir-wasm.ts:2095`). The values on
    the stack are the slot's own type, so a `u64` slot calls `env.pow` with two
-   `i64` and the module does not validate. The C backend truncates the answer
-   into the slot (`pow(x, v)` in `ir-c.ts:428`), so the two backends answer
-   differently: one a number, one a module the engine refuses. The fix is to
-   convert both operands to `f64` before the call and to convert the answer
-   back to the slot's type after it.
+   `i64`, and the engine refuses the module: "call[0] expected type f64, found
+   local.get of type i64". The C backend truncates the answer into the slot
+   (`pow(x, v)` in `ir-c.ts:428`), so the two backends answer differently: one
+   a number, one a module the engine refuses. The fix is to convert both
+   operands to `f64` before the call and to convert the answer back to the
+   slot's type after it.
 
-3. **A text parameter crashes the host generator rather than being refused.**
+3. **A text parameter fails the host generator rather than being refused.**
    `generateWasmHost` asks `bufferElement` for the element type of every
    non-primitive parameter (`toolchain/wasm.ts:327`), and `bufferElement`
-   throws "not a buffer" for a text (`semantics/contract.ts:200`). A contract
-   with a text parameter is a legal contract, and the wasm build of it stops
-   with an error about a buffer rather than a refusal that names the parameter.
+   throws "text is not a buffer" for a text (`semantics/contract.ts:200`). A
+   contract with a text parameter is a legal contract, and the wasm build of
+   it stops with an error about a buffer rather than a refusal that names the
+   parameter. (A text *return* is refused cleanly, with "return type text is
+   not supported for wasm"; it is the parameter that is not.)
 
 4. **A float that does not fit the whole number it is written into traps.**
    WebAssembly's `i32.trunc_f64_s` traps on a value outside the range; C's
@@ -190,7 +194,7 @@ reaches no runtime at all: `env.memory` and `env.pow` are the whole of it.
 
 That is the single largest gap, and everything else that refuses a runtime
 service is a consequence of it. The runtime ABI (`runtime/abi.ts:77`) is
-about ninety entries; the ones a wasm module needs to be as useful as a C
+fifty-nine entries; the ones a wasm module needs to be as useful as a C
 object are:
 
 | Service | What it is |
@@ -262,10 +266,9 @@ protocol. Two things do not:
 
 The C backend compiles with the C compiler's optimisation; the machine backend
 writes optimized x86-64. The wasm backend writes the module and stops: there
-is no pass over it, so the module carries every `local.set`/`local.get` pair,
-every borrow and release of a temporary, and every `block`/`loop` frame the
-body needed, with nothing folded. Two answers are the same program and the
-wasm one is several times larger.
+is no pass over it, so the module carries the locals it borrowed for its
+temporaries, the frames every arm and every loop needed, and the constants it
+pooled, with nothing folded away.
 
 ## The design
 
@@ -276,42 +279,64 @@ one the name of a runtime service and its WebAssembly signature. The module
 imports the services its body uses and nothing else, so a module of arithmetic
 still imports only the memory.
 
-The table lives beside the ABI it mirrors, in `toolchain/wasm.ts`:
+The table lives beside the ABI it mirrors, in `toolchain/wasm.ts`. It is the
+runtime ABI (`runtime/abi.ts:77`) with the C types replaced by the WebAssembly
+ones: a pointer is an `i32` offset into the shared memory, a `size_t` is an
+`i64`, a `double` is an `f64`, and a `const char*` is an `i32` offset of the
+bytes of the text.
 
 ```
 env.memory                                  the linear memory
 env.pow                                    (f64, f64) -> f64
 env.blaze_rt_allocate                       (i64) -> i32
 env.blaze_rt_allocate_uninitialized         (i64) -> i32
-env.blaze_rt_release                        (i32) -> ()
+env.blaze_rt_reallocate                     (i32, i64) -> i32
 env.blaze_rt_retain                         (i32) -> i32
+env.blaze_rt_release                        (i32) -> ()
 env.blaze_rt_print_text                     (i32) -> ()
-env.blaze_rt_print_text_n                   (i32, i32) -> ()
+env.blaze_rt_print_text_n                   (i32, i64) -> ()
 env.blaze_rt_print_number                   (f64) -> ()
 env.blaze_rt_print_whole                    (i64, i32) -> ()
 env.blaze_rt_print_newline                  () -> ()
-env.blaze_rt_raise                          (i32) -> ()
+env.blaze_rt_raise                          (i32) -> ()      the host throws
 env.blaze_rt_to_text                        (f64) -> i32
 env.blaze_rt_to_number                      (f64) -> f64
-env.blaze_rt_format_number                  (f64, i32) -> i32
-env.blaze_rt_string_new                     (i32, i32) -> i32
+env.blaze_rt_format_number                  (f64, i32, i64) -> i32
+env.blaze_rt_string_new                     (i32, i64) -> i32
 env.blaze_rt_string_append                  (i32, i32) -> i32
+env.blaze_rt_string_clone                   (i32) -> i32
 env.blaze_rt_string_length                  (i32) -> i64
 env.blaze_rt_text_length                    (i32) -> i64
-env.blaze_rt_object_new                     (i64) -> i32
-env.blaze_rt_array_new                      () -> f64
+env.blaze_rt_object_new                     (i64, i64) -> i32
+env.blaze_rt_object_size                    (i32) -> i64
+env.blaze_rt_array_new                      (i64, i64) -> i32
+env.blaze_rt_array_resize                   (i32, i64, i64) -> i32
 env.blaze_rt_array_push                     (f64, f64) -> f64
 env.blaze_rt_array_get                      (f64, i64) -> f64
 env.blaze_rt_array_set                      (f64, i64, f64) -> ()
 env.blaze_rt_array_length                   (f64) -> i64
+env.blaze_rt_dyn_array_new                  () -> f64
+env.blaze_rt_box_number                     (f64) -> f64
+env.blaze_rt_box_string                     (i32) -> f64
+env.blaze_rt_box_null                       () -> f64
 env.blaze_rt_random                         () -> f64
 env.blaze_rt_monotonic_ms                   () -> f64
 env.blaze_rt_argv_count                     () -> i64
-env.blaze_rt_argv                           (i64) -> i32
+env.blaze_rt_argv                           (i64) -> f64
+env.blaze_rt_json_parse                     (i32, i64) -> f64
+env.blaze_rt_json_stringify                 (f64) -> f64
+env.blaze_rt_json_get                       (f64, i32) -> f64
+env.blaze_rt_md5_create                     () -> f64
+env.blaze_rt_md5_update                     (f64, i32) -> f64
+env.blaze_rt_md5_digest                     (f64) -> f64
+env.blaze_rt_file_read                      (i32, i32) -> f64
 ```
 
 The names are the runtime's own, so the mapping from the runtime ABI is one to
 one and the machine backend's spelling of a call carries over unchanged.
+`blaze_rt_raise` is the one the ABI already marks as never returning
+(`runtime/abi.ts`), and the host throws where the C runtime does not come
+back.
 
 Three rules hold the boundary together:
 
@@ -372,13 +397,16 @@ backend emits the same calls as imports.
 
 ### Exceptions
 
-`raise` is a host call that does not return. In WebAssembly a call that does
-not return has to be a call to something the engine knows does not return —
-otherwise the code after it is still reachable and the module's validation
-fails. The module therefore declares `blaze_rt_raise` as one that never
-returns (the format's own "no return" annotation on the import), and the host
-implements it by throwing. A trap in the module and an exception in the host
-are then the same thing to the caller.
+`raise` is a host call, and the host implements it by throwing — which unwinds
+the whole module, so the call does not come back. WebAssembly has no way of
+saying that a call never returns: the format has no such annotation on a
+function type, and the text format's `noreturn` is not in the binary one. So
+the lowering says it itself: the instruction after the call is an
+`unreachable`, the same one the IR's own `unreachable` terminator emits, which
+traps if control ever reaches it. The module stays valid either way — the
+engine does not know the call does not come back, so the code after the raise
+is reachable as far as it is concerned, and whatever that code needs on the
+stack has to be there.
 
 `retain` and `release` are host calls like any other. The reference counts
 live in the host's memory, so the counting is the runtime's counting.
@@ -480,15 +508,20 @@ behind it.
 
 ### Stage 1 — the boundary, and what is wrong today
 
-- `fill` is written, not dropped (`ir-wasm.ts:2073`).
 - `**=` converts its operands and its answer to the slot's type
-  (`ir-wasm.ts:2095`).
-- a text parameter is refused by name rather than crashing the host generator
-  (`toolchain/wasm.ts:327`).
+  (`ir-wasm.ts:2095`). Today a `u64` slot calls `env.pow` with two `i64` and
+  the engine refuses the module ("call[0] expected type f64, found local.get
+  of type i64"), where the C backend truncates the answer into the slot.
+- a text parameter is refused by name rather than failing the host generator
+  with "text is not a buffer" (`toolchain/wasm.ts:327`).
 - the boundary check reads the host ABI table instead of counting two
   imports, and the table starts with the memory and `pow` alone, so the
   behaviour of a module of arithmetic is unchanged.
 - the host is delivered beside the module, and the reuse list names it.
+- the IR's `fill` statement is refused by the validator instead of being
+  dropped by three backends at once. That fix is in the IR rather than in
+  this backend, and it is named here because the wasm backend is one of the
+  three that drops it.
 
 ### Stage 2 — the host ABI
 
@@ -554,10 +587,11 @@ behind it.
   compiled to WebAssembly and its calls would have to be a host ABI of their
   own, and that is a project of its own rather than a gap in this backend.
 
-- **`fs`, `crypto`, `fetch` and `process.exit`.** These are not runtime
-  services in the sense the runtime ABI uses; they are calls of a host that
-  the language reaches for. Each of them is one host ABI entry, and each of
-  them is a decision about what a module is allowed to do, not a lowering
+- **`fetch` and `process.exit`.** The runtime ABI has services for reading a
+  file and for hashing one, and the host implements those the way it
+  implements the rest. `fetch` and `process.exit` are not runtime services at
+  all: they are calls of a host process, and a module reaching one is a
+  decision about what a module is allowed to do rather than a lowering
   problem. They are named here and left out.
 
 - **A text form.** The module is written as bytes and there is no `wat2wasm`
@@ -578,7 +612,7 @@ What each stage adds:
 
 | Stage | Tests |
 |---|---|
-| 1 | a `fill` is written (the element is written, the length is unchanged); a `**=` on a `u64` slot answers what the C backend answers; a text parameter is refused by name; the boundary check accepts a module that imports a service of the table and refuses one that imports anything else; the host is delivered beside the module |
+| 1 | a `**=` on a `u64` slot answers what the C backend answers; a text parameter is refused by name; the boundary check accepts a module that imports a service of the table and refuses one that imports anything else; the host is delivered beside the module; a `fill` in the IR is refused rather than dropped |
 | 2 | each service of the table is called by a module that uses it, and the answer is the answer the C backend gives for the same program; the module of arithmetic still imports only the memory and `pow` |
 | 3 | a text is built, concatenated and printed; a number is formatted as text; an object is allocated and its fields read back; an array is pushed to and read from |
 | 4 | a wide multiply, a wide division and a wide remainder answer what the C backend answers; an ordered comparison of two wide numbers answers the same as the C backend; `u256_from_u64x2` and `u256_from_u64x4` build the number they name |

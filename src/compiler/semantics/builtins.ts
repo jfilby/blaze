@@ -97,7 +97,13 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "whole.trunc": { params: [F64], returns: I64, arity: 1 },
   [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
   [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
-  [ARGV]: { params: [USIZE], returns: ANY, arity: 1 },
+  /**
+   * `argv(n)` is the nth argument the program was given, read as the number
+   * it states: the runtime reads each argument once, before the program runs,
+   * and the answer is the number the language gives — 0b101 is five and " 10 "
+   * is ten. The argument the program was not given is NaN.
+   */
+  [ARGV]: { params: [USIZE], returns: F64, arity: 1 },
   /** `u256_from_u64x2(low, high)` builds a `u256` from two 64-bit halves, so a
    *  value that fits in 128 bits can be constructed from its low and high limbs
    *  and the upper limbs are zero. */

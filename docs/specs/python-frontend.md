@@ -445,8 +445,10 @@ numbers: `blaze_rt_argv` answers the number an argument states
   `argv_count` less one — the count of the arguments the program was given is
   the count of the compiler's, less the program and the file.
 - An argument is a number, as it is in every other language the compiler
-  reads. A program that wants an argument as a text has no way to ask for one
-  in this version, and the message says so.
+  reads, and so is the file: the file is not a number, and the slot it holds
+  answers NaN. A program that wants an argument as a text has no way to ask
+  for one in this version, and the message says so. A program that reads one
+  as a number reads the number it states, as in `int(sys.argv[1])`.
 - A file that reads the command line writes `import sys` as Python does. The
   command line is read by the program and not by a function of a module: a
   module is a library of functions, and a library reads no command line.
@@ -501,7 +503,7 @@ to give each run a directory of its own.
 | `core/types.ts` | the contract's type language has a `text`, which is the type of a string |
 | `core/ir.ts` | the IR has a `//`, which is a floor division |
 | `core/semantic-ir.ts` | two new operations: `floorDiv` and `floorMod` |
-| `semantics/builtins.ts` | the whole numbers: `whole.abs`, `whole.min`, `whole.max`, `whole.floor`, `whole.ceil` and `whole.trunc` |
+| `semantics/builtins.ts` | the whole numbers: `whole.abs`, `whole.min`, `whole.max`, `whole.floor`, `whole.ceil` and `whole.trunc`, and an argument of the command line is a number |
 | `semantics/contract-build.ts` | a function named `main` is compiled under another symbol: `main` is the entry point of a C program, and a Python program is written with a `main` of its own |
 | `semantics/ir-resolve.ts`, `semantics/ir-function.ts` | the arithmetic rules of the source language: a division of two whole numbers is a true division in Python, a remainder takes the sign of its divisor, a whole number beside a fraction is a fraction, and the answer of a call keeps the kind of the number it was given |
 | `semantics/module.ts` | the whole-number kind of the program model is named for what it is, and a module says whether its body is the entry guard |
