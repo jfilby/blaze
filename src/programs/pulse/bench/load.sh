@@ -65,7 +65,10 @@ echo "blaze pulse: ${tool} is loading ${base}/ping for ${duration} with ${connec
 status=0
 case "${tool}" in
 oha)
-	output="$(oha --output json -c "${connections}" -z "${duration}" "${base}/ping" 2>/dev/null)" || status=$?
+	# The JSON is asked for with --output-format: --output names the file the
+	# results are written to, and a file named "json" is not what a dashboard
+	# wants.
+	output="$(oha --output-format json -c "${connections}" -z "${duration}" "${base}/ping" 2>/dev/null)" || status=$?
 	;;
 wrk)
 	output="$(wrk -t4 -c "${connections}" -d "${duration}" --latency "${base}/ping" 2>/dev/null)" || status=$?
@@ -90,15 +93,19 @@ if [ "${tool}" = "oha" ]; then
 		curl -fsS -X POST "${base}/api/bench/stop" >/dev/null || true
 		exit 1
 	fi
+	# What oha measures is read out of the "metrics" it writes, which are the
+	# statistics meant for a machine: the rate, and the latency in
+	# milliseconds. The count of the requests is the sum of the counts of the
+	# status codes, and the errors are what never got an answer at all.
 	report="$(printf '%s' "${output}" | jq -c '{
 		tool: "oha",
-		rps: (.summary.requestsPerSecond // .summary.rps.mean // 0),
-		total: (.summary.total // 0),
-		errors: (.summary.total - .summary.successRate * .summary.total // 0),
-		mean: (.summary.latency.average // 0),
-		p50: (.summary.latency.percentiles.p50 // 0),
-		p95: (.summary.latency.percentiles.p95 // 0),
-		p99: (.summary.latency.percentiles.p99 // 0),
+		rps: (.metrics.requests_per_sec // .summary.requestsPerSec // .rps.mean // 0),
+		total: (([.statusCodeDistribution[]?] | add) // 0),
+		errors: (([.errorDistribution[]?] | add) // 0),
+		mean: (.metrics.latency_ms.mean // 0),
+		p50: (.metrics.latency_ms.p50 // 0),
+		p95: (.metrics.latency_ms.p95 // 0),
+		p99: (.metrics.latency_ms.p99 // 0),
 		durationMs: '"${duration_ms}"'
 	}')"
 else
