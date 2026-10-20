@@ -158,6 +158,8 @@ the module subset's statements and, in addition:
   `math.sqrt(x)` answers a fraction;
 - `if ... elif ... else`, `while`, `for ... in range(...)`, `try` / `except` /
   `finally`, `def`, `return`, `break`, `continue`, `pass`;
+- a conditional expression (`a if c else b`), which Python writes with the
+  value first and the condition after it;
 - a list literal (`[1.0, 2.0]`), a dict literal (`{"a": 1}`), an f-string
   (`f"{x} items"`), and the indexing and the field access of both.
 

@@ -1269,12 +1269,19 @@ class PythonParser {
     return this.conditionalExpression();
   }
 
-  /** `a if c else b`, the loosest operator an expression has. */
+  /**
+   * `a if c else b`, the loosest operator an expression has.
+   *
+   * Python writes the value first and the condition after it, which is the
+   * other way round from the language the compiler read before: the value is
+   * there when the condition holds, and the other one is there when it does
+   * not.
+   */
   private conditionalExpression(): PyValue {
-    const condition = this.comparison();
-    if (!this.at("if")) return condition;
+    const then = this.comparison();
+    if (!this.at("if")) return then;
     this.next();
-    const then = this.expression();
+    const condition = this.comparison();
     this.expect("else");
     const otherwise = this.expression();
     return { k: "conditional", condition, then, otherwise };

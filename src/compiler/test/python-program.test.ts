@@ -164,6 +164,16 @@ test("a conversion answers a whole number", async () => {
   assert.equal(delivered.stdout, "3\n3\n4\n");
 });
 
+test("a conditional expression answers the arm the condition holds", async () => {
+  // Python writes the value first and the condition after it.
+  const source = ["x = 1", "print('yes' if x == 1 else 'no')", "print(1 if x > 2 else 2)", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "yes\n2\n");
+});
+
 test("a dict is read by its key", async () => {
   const source = ["d = {'left': 1, 'right': 2}", "print(d['left'])", 'print(f"{d[\'right\']}")', ""].join("\n");
   const { binary, original } = await deliver(source);
