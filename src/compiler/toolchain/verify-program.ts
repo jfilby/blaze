@@ -27,8 +27,20 @@ import { CompilerError } from "../core/errors.ts";
 import { usesSqliteSource } from "../runtime/sqlite.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
 
-/** The language a source is checked against. */
-const TOOLCHAIN: Record<string, string> = { typescript: "node", ts: "node" };
+/**
+ * The language a source is checked against: the command that runs it and the
+ * flags it is run with.
+ *
+ * The flags are the toolchain's, not the source's: a TypeScript source is run
+ * by node with the flags node needs to run TypeScript at all, and a Python
+ * source is run by python3 with none.
+ */
+const TOOLCHAIN: Record<string, { command: string; flags: string[] }> = {
+  typescript: { command: "node", flags: ["--experimental-transform-types"] },
+  ts: { command: "node", flags: ["--experimental-transform-types"] },
+  python: { command: "python3", flags: [] },
+  py: { command: "python3", flags: [] },
+};
 
 /**
  * The command line Deno hands a program, for a source written for Deno and run
@@ -321,22 +333,26 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   const arguments_ = [...(request.arguments ?? [])];
   // A source written for Deno is run with the command line Deno hands a
   // program, so that the oracle is the source as it was written rather than a
-  // source that cannot run at all.
+  // source that cannot run at all. The preludes are the ones a TypeScript
+  // source needs: a source of another language is run as it is.
   const deno = readFileSync(request.sourcePath, "utf8");
   const httpSource = /\bhttp\b/.test(deno);
   const sqliteSource = usesSqliteSource(deno);
-  const before = [];
-  before.push("--experimental-transform-types");
-  if (readsDenoArgs(deno)) before.push("--import", DENO_PRELUDE);
-  if (httpSource) before.push("--import", HTTP_PRELUDE_URL);
-  if (sqliteSource) before.push("--import", await sqlitePreludePath());
-  const source = run(toolchain, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
+  // The preludes are the ones node needs, and a source of another language is
+  // run as it is.
+  const before = [...toolchain.flags];
+  if (toolchain.command === "node") {
+    if (readsDenoArgs(deno)) before.push("--import", DENO_PRELUDE);
+    if (httpSource) before.push("--import", HTTP_PRELUDE_URL);
+    if (sqliteSource) before.push("--import", await sqlitePreludePath());
+  }
+  const source = run(toolchain.command, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
     throw new CompilerError({
       category: "VerificationError",
       stage: "verify",
-      message: `${toolchain} is not available, so the program cannot be checked`,
-      detail: `${source.spawnError}\ninstall ${toolchain}, or build this project as a function entry`,
+      message: `${toolchain.command} is not available, so the program cannot be checked`,
+      detail: `${source.spawnError}\ninstall ${toolchain.command}, or build this project as a function entry`,
     });
   }
   if (source.code !== 0) {
@@ -344,7 +360,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
       category: "VerificationError",
       stage: "verify",
       message: "the program source does not run",
-      detail: `${formatCommand(toolchain, [...before, request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`,
+      detail: `${formatCommand(toolchain.command, [...before, request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`,
     });
   }
 

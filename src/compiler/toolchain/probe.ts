@@ -125,6 +125,7 @@ function buildValue(
   if (type.kind === "ref") return type.name === undefined ? "NULL" : `(struct ${type.name}*)NULL`;
   if (type.kind === "primitive") return defaultScalar(type);
   if (type.kind === "void") return "NULL";
+  if (type.kind === "text") return "NULL";
   // A buffer is built as a real one, of the length the contract states, and
   // not as a null pointer. The preconditions are read against a buffer that
   // is there — `probeValue` reports an empty buffer as a buffer, not as a null

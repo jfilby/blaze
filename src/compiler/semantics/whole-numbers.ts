@@ -110,6 +110,8 @@ const SHRINKING_WHOLE_OPERATIONS: Record<ArithOp, boolean> = {
   sub: false,
   mul: false,
   div: false,
+  floorDiv: false,
+  floorMod: false,
   mod: false,
   pow: false,
   min: false,

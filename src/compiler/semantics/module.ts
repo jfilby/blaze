@@ -52,8 +52,13 @@ export interface DeclaredFunction {
 export type ProgramValue =
   /** A number, exactly as the source wrote it. */
   | { k: "number"; text: string }
-  /** A whole number too large for a double, as `1n` is written. */
-  | { k: "bigint"; text: string }
+  /**
+   * A whole number, which is the `i64` a whole number is. The name is the one
+   * the program model has always used, and it was a TypeScript spelling that
+   * says the opposite of what it means in a language whose whole numbers are
+   * whole.
+   */
+  | { k: "whole"; text: string }
   | { k: "boolean"; value: boolean }
   | { k: "null" }
   /** A string, with the values a template string interpolates. */
@@ -101,6 +106,8 @@ export type ProgramBinaryOp =
   | "-"
   | "*"
   | "/"
+  /** A floor division, as Python writes it. */
+  | "//"
   | "%"
   | "**"
   | "<<"
@@ -124,7 +131,7 @@ export type ProgramBinaryOp =
 export type ProgramUnaryOp = "-" | "+" | "!" | "~";
 
 /** What an assignment does to what it is written on. */
-export type ProgramAssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
+export type ProgramAssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 
 /** One piece of a string: text as written, or a value interpolated into it. */
 export type ProgramText = { k: "text"; value: string } | { k: "value"; value: ProgramValue };
@@ -205,6 +212,14 @@ export interface ModuleAnalysis {
    * functions, and code in it would never run.
    */
   body: ProgramStatement[];
+  /**
+   * True when the body is only the language's entry guard, which names the
+   * entry module and runs nowhere else. Python writes
+   * `if __name__ == "__main__":` at the top of a file, and a module the
+   * program merely imports runs nothing: the guard is the entry module's
+   * alone, and a file that holds nothing else is a library of functions.
+   */
+  entryGuard?: boolean;
 }
 
 export interface Frontend {

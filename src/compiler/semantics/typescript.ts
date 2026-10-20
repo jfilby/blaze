@@ -46,7 +46,8 @@ import { ARGV, ARGV_LENGTH } from "./builtins.ts";
 
 export { ARGV, ARGV_LENGTH };
 import { assembleContract, type AccessRange } from "./contract-build.ts";
-import { CompilerError, isCompilerError } from "../core/errors.ts";
+import { isCompilerError } from "../core/errors.ts";
+import { Diagnostics, frontendError, type Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
 import { desugar } from "./typescript-desugar.ts";
@@ -64,23 +65,8 @@ import { COMPOUND_OPERATORS } from "../core/ir.ts";
 export { COMPOUND_OPERATORS };
 export type { AssignOperator, BinaryOp, Expression, Statement, TextPart, UnaryOp };
 
-export function frontendError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
-}
-
-/* -------------------------------------------------------------------------- */
-/* Diagnostics                                                                 */
-/* -------------------------------------------------------------------------- */
-
-/** One construct the parser could not read, and where it was written. */
-export interface Diagnostic {
-  line: number;
-  message: string;
-  detail: string;
-}
-
-/** How many constructs one file may be reported to have before the list is cut. */
-const MAXIMUM_DIAGNOSTICS = 24;
+export { Diagnostics, frontendError };
+export type { Diagnostic };
 
 // `$` is here so that `\${` writes the literal `${` a template needs to show,
 // rather than the backslash and the pair.
@@ -145,34 +131,6 @@ export function nextInterpolation(text: string): number {
     if (backslashes % 2 === 0) return open;
   }
   return -1;
-}
-
-/**
- * Every construct of one file that is outside the subset, gathered as the
- * parser reads on. A file is fixed in one pass, so a build says everything
- * that is wrong with it at once rather than one construct per run.
- */
-export class Diagnostics {
-  readonly entries: Diagnostic[] = [];
-  private dropped = 0;
-
-  report(message: string, detail: string, line: number): void {
-    if (this.entries.length < MAXIMUM_DIAGNOSTICS) {
-      this.entries.push({ line, message, detail });
-      return;
-    }
-    this.dropped += 1;
-  }
-
-  throwIfAny(path: string): void {
-    if (this.entries.length === 0) return;
-    const found = this.entries.map((entry) => `  line ${entry.line}: ${entry.message}\n    ${entry.detail}`);
-    if (this.dropped > 0) found.push(`  and ${this.dropped} more`);
-    throw frontendError(
-      `${this.entries.length + this.dropped} construct${this.entries.length + this.dropped === 1 ? "" : "s"} of ${path} ${this.entries.length + this.dropped === 1 ? "is" : "are"} outside the subset the compiler reads`,
-      found.join("\n"),
-    );
-  }
 }
 
 /* -------------------------------------------------------------------------- */

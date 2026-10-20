@@ -1,0 +1,2547 @@
+/**
+ * Frontend: Python module -> module analysis and function contracts.
+ *
+ * The contract is language neutral, so a frontend is a parser and an analysis
+ * and nothing more. This one reads the subset of Python a compiled function
+ * and a compiled program are written in:
+ *
+ *   from helpers import dot
+ *
+ *   def dot(a: list[float], b: list[float]) -> float:
+ *       total: float = 0.0
+ *       for i in range(len(a)):
+ *           total += a[i] * b[i]
+ *       return total
+ *
+ *   - a module: `from name import a, b`, which binds the functions of another
+ *     file of the project, and `def name(a: int, b: float) -> float:`, which
+ *     declares a function whose parameters and whose result are typed by
+ *     annotation
+ *   - statements: a binding (`x = value`), a compound assignment, a counted
+ *     `for` over `range(...)`, a `while`, an `if` / `elif` / `else`, a
+ *     `return`, a `break`, a `continue`, a `pass`, a `print` and a call
+ *   - expressions: whole and fractional numbers, text and f-strings, `True`,
+ *     `False`, `None`, names, calls, indexing, field reads, list and dict
+ *     literals, and the arithmetic, the comparison and the logical operators
+ *   - types: `int`, `float`, `bool`, `str`, `list[float]`, `list[int]` and
+ *     `None`
+ *
+ * Everything else — a class, a generator, a comprehension, a context manager,
+ * a pattern match, a decorator, a lambda — is refused with the line it was
+ * written on and what to write instead, and the rest of the file is still
+ * read, so one program says everything that is wrong with it at once.
+ *
+ * The rules that differ between the languages are asked of the language
+ * (`language.ts`): a division of two whole numbers is a true division in
+ * Python, a remainder takes the sign of its divisor, and a value is written
+ * as text the way Python writes it.
+ */
+
+import { assembleContract, type AccessRange } from "./contract-build.ts";
+import { isCompilerError } from "../core/errors.ts";
+import { Diagnostics, frontendError } from "./diagnostics.ts";
+import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import { lowerProgramBody } from "./python-program.ts";
+import type { TypeExpr } from "../core/types.ts";
+import type { AssignOperator, BinaryOp, Expression, Statement, TextPart, UnaryOp } from "../core/ir.ts";
+
+export { Diagnostics };
+
+/* -------------------------------------------------------------------------- */
+/* The tokenizer                                                               */
+/* -------------------------------------------------------------------------- */
+
+export type PyTokenKind = "name" | "number" | "string" | "op" | "newline" | "indent" | "dedent" | "end";
+
+export interface PyToken {
+  kind: PyTokenKind;
+  text: string;
+  line: number;
+  /** The prefix a string was written with: `f`, `r`, `b`, `u`, and the pairs. */
+  prefix?: string;
+  /** Set on a number that is a whole number rather than a fraction. */
+  whole?: boolean;
+}
+
+/**
+ * The operators of Python, longest first, so that `**` is read as a power and
+ * not as two products, and `//` as a floor division and not as two slashes.
+ */
+const OPERATORS: readonly string[] = [
+  "**=",
+  "//=",
+  "<<=",
+  ">>=",
+  "...",
+  "**",
+  "//",
+  "<<",
+  ">>",
+  "<=",
+  ">=",
+  "==",
+  "!=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "&=",
+  "|=",
+  "^=",
+  ":=",
+  "->",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "@",
+  "&",
+  "|",
+  "^",
+  "~",
+  "<",
+  ">",
+  "=",
+  ".",
+  ",",
+  ":",
+  ";",
+  "(",
+  ")",
+  "[",
+  "]",
+  "{",
+  "}",
+];
+
+/** The prefixes a string may be written with. */
+const STRING_PREFIXES: ReadonlySet<string> = new Set(["", "r", "b", "f", "u", "rb", "br", "fr", "rf"]);
+
+/**
+ * The escapes a string carries, and what each one writes. An escape the
+ * language does not have is written as it is, which is what Python does with
+ * it too: `\q` is a backslash and a `q`.
+ */
+const ESCAPES: Record<string, string> = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  b: "\b",
+  f: "\f",
+  v: "\v",
+  a: "\x07",
+  "0": "\0",
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+  "\n": "",
+};
+
+/** A number as Python writes one: whole, fractional, or in another base. */
+const NUMBER = /^(?:0[xX](?:_?[0-9a-fA-F])+|0[oO](?:_?[0-7])+|0[bB](?:_?[01])+|(?:[0-9](?:_?[0-9])*)(?:\.(?:[0-9](?:_?[0-9])*)?)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?|\.(?:[0-9](?:_?[0-9])*)(?:[eE][+-]?[0-9](?:_?[0-9])*)?)/;
+
+/**
+ * The tokens of a Python file.
+ *
+ * Python's blocks are written by indentation rather than by brackets, so the
+ * tokenizer carries a stack of the widths the blocks are written at and answers
+ * an `indent` and a `dedent` where the width changes. A line of nothing and a
+ * line of a comment are not lines of the program at all, and a line that
+ * continues the one before it — a backslash at its end — is not the end of a
+ * statement.
+ */
+export function tokenizePython(source: string, path: string): PyToken[] {
+  const tokens: PyToken[] = [];
+  const indents: number[] = [0];
+  let index = 0;
+  let line = 1;
+  /** How many brackets are open, which is how a line is continued. */
+  let depth = 0;
+  let startOfLine = true;
+
+  while (index < source.length) {
+    if (startOfLine && depth === 0) {
+      const column = indentationEnd(source, index);
+      const width = indentationWidth(source, index, column);
+      const end = source.indexOf("\n", column);
+      const body = source.slice(column, end < 0 ? source.length : end);
+      // A line of nothing, and a line that holds nothing but a comment, are
+      // not lines of the program: they say nothing about what runs, and a line
+      // of a comment at a lesser indentation does not close a block.
+      if (body.trim() === "" || body.trimStart().startsWith("#")) {
+        index = end < 0 ? source.length : end + 1;
+        if (end >= 0) line += 1;
+        continue;
+      }
+      const top = indents[indents.length - 1];
+      if (width > top) {
+        indents.push(width);
+        tokens.push({ kind: "indent", text: "", line });
+      } else if (width < top) {
+        while (indents.length > 1 && indents[indents.length - 1] > width) {
+          indents.pop();
+          tokens.push({ kind: "dedent", text: "", line });
+        }
+        if (indents[indents.length - 1] !== width) {
+          throw frontendError(
+            `the indentation of line ${line} matches no block`,
+            `line ${line}: a block is written by indenting it, and every line of it is indented the same`,
+          );
+        }
+      }
+      index = column;
+      startOfLine = false;
+      continue;
+    }
+
+    const character = source[index];
+    if (character === "\n") {
+      line += 1;
+      index += 1;
+      if (depth === 0) {
+        tokens.push({ kind: "newline", text: "\n", line: line - 1 });
+        startOfLine = true;
+      }
+      continue;
+    }
+    if (character === " " || character === "\t" || character === "\r") {
+      index += 1;
+      continue;
+    }
+    // A backslash at the end of a line continues it: the line after it is part
+    // of the same statement, and it is not read as the start of a block.
+    if (character === "\\") {
+      const continuation = /^[ \t]*\r?\n/.exec(source.slice(index + 1));
+      if (continuation !== null) {
+        index += 1 + continuation[0].length;
+        line += 1;
+        continue;
+      }
+    }
+    if (character === "#") {
+      const end = source.indexOf("\n", index);
+      index = end < 0 ? source.length : end;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      const string = readString(source, index, "", line, path);
+      tokens.push({ kind: "string", text: string.text, line, prefix: "" });
+      index = string.end;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(character)) {
+      const letters = /^[A-Za-z]+/.exec(source.slice(index));
+      const prefix = letters === null ? "" : letters[0].toLowerCase();
+      const after = index + (letters === null ? 0 : letters[0].length);
+      if (letters !== null && STRING_PREFIXES.has(prefix) && (source[after] === '"' || source[after] === "'")) {
+        const string = readString(source, after, prefix, line, path);
+        tokens.push({ kind: "string", text: string.text, line, prefix });
+        index = string.end;
+        continue;
+      }
+      const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(source.slice(index)) as RegExpExecArray;
+      tokens.push({ kind: "name", text: name[0], line });
+      index += name[0].length;
+      continue;
+    }
+    if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(source[index + 1] ?? ""))) {
+      const match = NUMBER.exec(source.slice(index));
+      if (match === null) {
+        throw frontendError(`malformed number on line ${line}`, `line ${line} of ${path}`);
+      }
+      const text = match[0].replace(/_/g, "");
+      tokens.push({
+        kind: "number",
+        text,
+        line,
+        whole: !/[.eE]/.test(text),
+      });
+      index += match[0].length;
+      continue;
+    }
+    const operator = OPERATORS.find((candidate) => source.startsWith(candidate, index));
+    if (operator === undefined) {
+      throw frontendError(`unsupported character "${character}" on line ${line}`, `line ${line} of ${path}`);
+    }
+    if (operator === "(" || operator === "[" || operator === "{") depth += 1;
+    else if (operator === ")" || operator === "]" || operator === "}") depth -= 1;
+    tokens.push({ kind: "op", text: operator, line });
+    index += operator.length;
+  }
+
+  if (depth !== 0) {
+    throw frontendError(`a bracket of ${path} is never closed`, `line ${line} of ${path}`);
+  }
+  const last = tokens[tokens.length - 1];
+  if (last === undefined || last.kind !== "newline") {
+    tokens.push({ kind: "newline", text: "\n", line });
+  }
+  while (indents.length > 1) {
+    indents.pop();
+    tokens.push({ kind: "dedent", text: "", line });
+  }
+  tokens.push({ kind: "end", text: "", line });
+  return tokens;
+}
+
+/** Where the indentation of a line ends. */
+function indentationEnd(source: string, index: number): number {
+  let column = index;
+  while (column < source.length && (source[column] === " " || source[column] === "\t")) column += 1;
+  return column;
+}
+
+/** How wide the indentation of a line is. A tab is eight columns to the next stop. */
+function indentationWidth(source: string, index: number, column: number): number {
+  let width = 0;
+  for (let at = index; at < column; at += 1) {
+    width += source[at] === "\t" ? 8 - (width % 8) : 1;
+  }
+  return width;
+}
+
+/**
+ * A string, from its opening quote to its closing one, with the escapes it
+ * carries resolved.
+ */
+function readString(
+  source: string,
+  start: number,
+  prefix: string,
+  line: number,
+  path: string,
+): { text: string; end: number } {
+  const quote = source[start];
+  const raw = prefix.includes("r");
+  let index = start + 1;
+  let text = "";
+  for (;;) {
+    if (index >= source.length) {
+      throw frontendError(`a string of ${path} is never closed`, `line ${line} of ${path}`);
+    }
+    const character = source[index];
+    if (character === "\\") {
+      const escape = source[index + 1];
+      if (escape === undefined) {
+        throw frontendError(`a string of ${path} ends in a backslash`, `line ${line} of ${path}`);
+      }
+      if (raw) {
+        text += `\\${escape}`;
+        index += 2;
+        continue;
+      }
+      if (escape === "x" || escape === "u" || escape === "U") {
+        const width = escape === "x" ? 2 : escape === "u" ? 4 : 8;
+        const digits = source.slice(index + 2, index + 2 + width);
+        if (!new RegExp(`^[0-9a-fA-F]{${width}}$`).test(digits)) {
+          throw frontendError(`the escape "\\${escape}" of ${path} is not a number`, `line ${line} of ${path}`);
+        }
+        text += String.fromCodePoint(Number.parseInt(digits, 16));
+        index += 2 + width;
+        continue;
+      }
+      const resolved = ESCAPES[escape];
+      // An escape the language does not have is written as it is: a backslash
+      // and the letter, which is what Python does with it too.
+      text += resolved ?? `\\${escape}`;
+      index += 2;
+      continue;
+    }
+    if (character === quote) {
+      return { text, end: index + 1 };
+    }
+    if (character === "\n") line += 1;
+    text += character;
+    index += 1;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The tree a Python file is                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** One piece of a string: text as written, or a value interpolated into it. */
+export type PyTextPart = { k: "text"; value: string } | { k: "value"; value: PyValue };
+
+/** A value a Python expression holds. */
+export type PyValue =
+  /** A number, whole or fractional. */
+  | { k: "number"; text: string; whole: boolean }
+  /** A string, and the values an f-string interpolates into it. */
+  | { k: "text"; parts: PyTextPart[] }
+  | { k: "boolean"; value: boolean }
+  /** `None`, which is a value of its own. */
+  | { k: "none" }
+  | { k: "name"; name: string }
+  /** A call, of a name the project declares or of a builtin. */
+  | { k: "call"; name: string; args: PyValue[] }
+  | { k: "index"; base: PyValue; index: PyValue }
+  | { k: "field"; base: PyValue; field: string }
+  /** A list written out where it is made. */
+  | { k: "list"; items: PyValue[] }
+  /** A dict written out where it is made. */
+  | { k: "dict"; entries: { name: string; value: PyValue }[] }
+  | { k: "binary"; op: string; left: PyValue; right: PyValue }
+  | { k: "unary"; op: string; operand: PyValue }
+  | { k: "conditional"; condition: PyValue; then: PyValue; otherwise: PyValue };
+
+/** A parameter of a function, and the type it was given. */
+export interface PyParam {
+  name: string;
+  type: TypeExpr;
+}
+
+/** A statement a Python body runs. */
+export type PyStatement =
+  | { k: "declare"; name: string; type: TypeExpr | null; value: PyValue; line: number }
+  | { k: "assign"; name: string; op: string; value: PyValue; line: number }
+  | { k: "return"; value: PyValue | null; line: number }
+  | { k: "if"; condition: PyValue; then: PyStatement[]; otherwise: PyStatement[]; line: number }
+  | { k: "while"; condition: PyValue; body: PyStatement[]; line: number }
+  | {
+      k: "for";
+      variable: string;
+      from: PyValue;
+      to: PyValue;
+      step: PyValue | null;
+      body: PyStatement[];
+      line: number;
+    }
+  | { k: "break"; line: number }
+  | { k: "continue"; line: number }
+  | { k: "pass"; line: number }
+  | { k: "print"; values: PyValue[]; line: number }
+  | { k: "try"; body: PyStatement[]; catchBody: PyStatement[] | null; finallyBody: PyStatement[] | null; line: number }
+  | { k: "call"; value: PyValue; line: number }
+  | { k: "function"; name: string; params: PyParam[]; returns: TypeExpr | null; body: PyStatement[]; line: number };
+
+/** A function a Python file declares. */
+export interface PyFunction {
+  name: string;
+  params: PyParam[];
+  returns: TypeExpr;
+  body: PyStatement[];
+  line: number;
+}
+
+/** A Python file, read. */
+export interface PyModule {
+  functions: PyFunction[];
+  imports: ModuleImport[];
+  /** The statements the file runs, in the order they run. */
+  body: PyStatement[];
+  /**
+   * True when every statement the file runs is the guard that names the entry
+   * module, which runs nowhere else.
+   */
+  entryGuard: boolean;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The keywords the subset does not read                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The keywords the subset does not read, and what a source writes instead of
+ * each one. They are named here rather than left to the parser reading past
+ * them: a construct refused by a shape error is reported as whatever token
+ * happened to be next, so `class` said "expected a statement" and named
+ * nothing of what was written.
+ */
+export const REFUSED_KEYWORDS: Record<string, string> = {
+  round: "it rounds half to even and the compiler rounds half up, so write the rounding out",
+  class: "an object written where it is made, as in {\"left\": None, \"right\": None}",
+  yield: "a value the function hands back with return",
+  async: "a straight line: a compiled program has nothing to wait for",
+  await: "a straight line: a compiled program has nothing to wait for",
+  lambda: "a function written with def",
+  with: "a plain block, as in a function that opens nothing",
+  global: "a name is bound in the scope it is written in",
+  nonlocal: "a name is bound in the scope it is written in",
+  del: "a name is bound for the whole of the scope it is written in",
+  assert: "a line written out with print, and a failure as one",
+  raise: "a line written out with print, and a failure as one",
+  match: "a chain of if / elif",
+  case: "a chain of if / elif",
+  import: "a module of the project is named by `from name import f`",
+  is: "the comparison `==`, and `!=` for what is not there",
+  in: "a loop that looks for the value",
+  not: "the comparison `!=`, and `not` before a value that is not there",
+};
+
+/* -------------------------------------------------------------------------- */
+/* The types of Python                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** The types a Python annotation may name. */
+const PYTHON_TYPES: Record<string, TypeExpr> = {
+  int: { kind: "primitive", name: "i64" },
+  float: { kind: "primitive", name: "f64" },
+  bool: { kind: "primitive", name: "bool" },
+  str: { kind: "text" },
+  None: { kind: "void" },
+};
+
+/** The lists a Python annotation may name, and the type of what they hold. */
+const PYTHON_LISTS: Record<string, TypeExpr> = {
+  "list[float]": { kind: "slice", of: { kind: "primitive", name: "f64" } },
+  "list[int]": { kind: "slice", of: { kind: "primitive", name: "i64" } },
+};
+
+/**
+ * A Python annotation, as the contract's type.
+ *
+ * An annotation is required on every parameter and on the result of every
+ * function: the contract has no way to say "whatever it is" for anything but a
+ * reference, and a parameter with no type is a reference to nothing.
+ */
+export function mapPythonType(text: string, position: string): TypeExpr {
+  const source = text.trim();
+  if (source in PYTHON_TYPES) return PYTHON_TYPES[source];
+  if (source in PYTHON_LISTS) return PYTHON_LISTS[source];
+  throw frontendError(
+    `unsupported Python type "${source}"`,
+    `at ${position}; supported: ${Object.keys(PYTHON_TYPES).join(", ")}, ${Object.keys(PYTHON_LISTS).join(", ")}`,
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* The parser                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The keywords the subset reads in its own way, and so are not refused where
+ * they are met: `is` and `in` are comparisons the subset does not have, `not`
+ * is the negation of a value, and `import` is a declaration of the module.
+ */
+const KEYWORDS_WITH_THEIR_OWN_READING: ReadonlySet<string> = new Set(["is", "in", "not", "import"]);
+
+/** The range of a whole number, which is sixty-four bits. */
+const WHOLE_MINIMUM = -(2n ** 63n);
+const WHOLE_MAXIMUM = 2n ** 63n - 1n;
+
+/**
+ * Whether a whole number is outside the range a whole number has, or null
+ * when it is inside it. A literal written in another base is read as one.
+ */
+function wholeRange(text: string): string | null {
+  let value: bigint;
+  try {
+    value = BigInt(text);
+  } catch {
+    return null;
+  }
+  return value < WHOLE_MINIMUM || value > WHOLE_MAXIMUM ? text : null;
+}
+
+/** The operators a comparison may be written with. */
+const COMPARISONS: readonly string[] = ["<", "<=", ">", ">=", "==", "!="];
+
+/** The compound assignments a name may be given. */
+const COMPOUND: Record<string, string> = {
+  "+=": "+",
+  "-=": "-",
+  "*=": "*",
+  "/=": "/",
+  "//=": "//",
+  "%=": "%",
+};
+
+/**
+ * The name a builtin of Python is called by in the compiler.
+ *
+ * The compiler's builtins are named as the language that has them spells them,
+ * and Python spells a few of them differently: `abs` is `Math.abs` here, and
+ * `math.floor` is the `Math.floor` of the compiler. A name the compiler does
+ * not know is a function of the project, and it is called by the name it was
+ * declared with.
+ */
+export function builtinName(name: string): string {
+  switch (name) {
+    case "abs":
+      return "Math.abs";
+    case "min":
+      return "Math.min";
+    case "max":
+      return "Math.max";
+    case "int":
+      return "Math.trunc";
+    case "float":
+      return "Number";
+    case "math.floor":
+      return "Math.floor";
+    case "math.ceil":
+      return "Math.ceil";
+    case "math.sqrt":
+      return "Math.sqrt";
+    case "math.trunc":
+      return "Math.trunc";
+    default:
+      return name;
+  }
+}
+
+/** The names a Python program may call that are not functions of the project. */
+export const PROGRAM_ONLY_CALLS: readonly string[] = ["int", "float", "str", "print"];
+
+/** The builtins a Python program may call, and what each of them answers. */
+export const PYTHON_BUILTINS: readonly string[] = [
+  "len",
+  "range",
+  "abs",
+  "min",
+  "max",
+  "int",
+  "float",
+  "str",
+  "print",
+];
+
+class PythonParser {
+  private readonly tokens: PyToken[];
+  private readonly path: string;
+  private readonly diagnostics: Diagnostics;
+  private position = 0;
+  /** How many loops the statement being read is written in. */
+  private loops = 0;
+
+  constructor(tokens: PyToken[], path: string, diagnostics: Diagnostics) {
+    this.tokens = tokens;
+    this.path = path;
+    this.diagnostics = diagnostics;
+  }
+
+  private peek(offset = 0): PyToken {
+    return this.tokens[Math.min(this.position + offset, this.tokens.length - 1)];
+  }
+
+  private next(): PyToken {
+    return this.tokens[this.position++];
+  }
+
+  private at(text: string): boolean {
+    return this.peek().text === text;
+  }
+
+  /**
+   * Whether the next token is of a kind, which is how a newline and the
+   * markers of a block are read: they carry no text of their own.
+   */
+  private atKind(kind: PyTokenKind): boolean {
+    return this.peek().kind === kind;
+  }
+
+  /** Reads past the newline that ends a statement, where there is one. */
+  private skipNewline(): void {
+    if (this.atKind("newline")) this.next();
+  }
+
+  private accept(text: string): boolean {
+    if (!this.at(text)) return false;
+    this.position += 1;
+    return true;
+  }
+
+  private expect(text: string): boolean {
+    if (this.accept(text)) return true;
+    const token = this.peek();
+    this.report(`expected "${text}"`, `near "${token.text}"`, token);
+    return false;
+  }
+
+  private report(message: string, detail: string, token: PyToken = this.peek()): void {
+    this.diagnostics.report(message, detail, token.line);
+  }
+
+  /** A value standing in for one the parser could not read. */
+  private hole(): PyValue {
+    return { k: "number", text: "0", whole: true };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* The module                                                              */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * A file: the functions it declares, the files it imports, and the
+   * statements it runs.
+   */
+  parseModule(): PyModule {
+    const functions: PyFunction[] = [];
+    const imports: ModuleImport[] = [];
+    const body: PyStatement[] = [];
+    let entryGuard = true;
+    while (this.peek().kind !== "end") {
+      const token = this.peek();
+      if (token.kind === "name" && token.text === "def") {
+        const parsed = this.functionDefinition();
+        if (parsed !== null) functions.push(parsed);
+        continue;
+      }
+      if (token.kind === "name" && token.text === "from") {
+        imports.push(this.importStatement());
+        continue;
+      }
+      const statement = this.statement();
+      if (statement === null) continue;
+      // The guard that names the entry module is the one statement a module
+      // that is not the entry module may still carry: it runs nowhere else.
+      if (!isEntryGuard(statement)) entryGuard = false;
+      body.push(statement);
+    }
+    return { functions, imports, body, entryGuard };
+  }
+
+  /** `from helpers import dot, cross`: the functions of another file. */
+  private importStatement(): ModuleImport {
+    const start = this.next();
+    const module = this.peek();
+    if (module.kind !== "name") {
+      this.report("expected the name of the module", `near "${module.text}"`, module);
+      return { specifier: "", names: [], default: false, line: start.line };
+    }
+    this.next();
+    if (!this.at("import")) {
+      this.report('expected "import" after the name of the module', `near "${this.peek().text}"`, this.peek());
+      return { specifier: module.text, names: [], default: false, line: start.line };
+    }
+    this.next();
+    const names: string[] = [];
+    for (;;) {
+      const name = this.peek();
+      if (name.kind !== "name") {
+        this.report("expected the name of an imported function", `near "${name.text}"`, name);
+        break;
+      }
+      this.next();
+      if (name.text === "as") {
+        this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
+        const alias = this.peek();
+        if (alias.kind === "name") this.next();
+      }
+      names.push(name.text);
+      if (!this.accept(",")) break;
+    }
+    this.skipNewline();
+    return { specifier: module.text, names, default: false, line: start.line };
+  }
+
+  /** `def name(a: int, b: float) -> float:` and the body it holds. */
+  private functionDefinition(): PyFunction | null {
+    const start = this.next();
+    const name = this.peek();
+    if (name.kind !== "name") {
+      this.report("expected the name of a function", `near "${name.text}"`, name);
+      this.skipBlock();
+      return null;
+    }
+    this.next();
+    if (!this.accept("(")) {
+      this.report("expected the parameters of the function", `near "${this.peek().text}"`, this.peek());
+      this.skipBlock();
+      return null;
+    }
+    const params: PyParam[] = [];
+    if (!this.at(")")) {
+      for (;;) {
+        const parameter = this.peek();
+        if (this.at("*") || this.at("**")) {
+          this.report(
+            "a function takes a fixed list of parameters",
+            "as in def f(a: int, b: int) -> int",
+            this.peek(),
+          );
+          break;
+        }
+        if (parameter.kind !== "name") {
+          this.report("expected the name of a parameter", `near "${parameter.text}"`, parameter);
+          break;
+        }
+        this.next();
+        if (parameter.text === "self" || parameter.text === "cls") {
+          this.report(
+            "a method is not part of the subset",
+            "a function of a module takes what it is given, as in def dot(a: list[float]) -> float",
+            parameter,
+          );
+          break;
+        }
+        if (!this.at(":")) {
+          this.report(
+            "every parameter declares its type",
+            `as in def f(${parameter.text}: int) -> int:`,
+            parameter,
+          );
+          break;
+        }
+        this.next();
+        const annotation = this.annotation();
+        // A parameter with a default value is a parameter the caller may leave
+        // out, and the contract has no way to say what it is then.
+        if (this.at("=")) {
+          this.report(
+            "a parameter has no default value",
+            "every parameter is given, as in def f(a: int, b: int) -> int:",
+            this.peek(),
+          );
+          this.next();
+          this.expression();
+        }
+        if (annotation === null) break;
+        params.push({ name: parameter.text, type: annotation });
+        if (this.accept(",")) continue;
+        break;
+      }
+    }
+    this.expect(")");
+    if (!this.accept("->")) {
+      this.report(
+        "every function declares what it returns",
+        `as in def ${name.text}(a: int) -> int:`,
+        name,
+      );
+      this.skipBlock();
+      return null;
+    }
+    const returns = this.annotation();
+    if (returns === null) {
+      this.skipBlock();
+      return null;
+    }
+    if (!this.expect(":")) {
+      this.skipBlock();
+      return null;
+    }
+    const body = this.block();
+    return { name: name.text, params, returns, body, line: start.line };
+  }
+
+  /**
+   * A type, as the contract's type. The types of the subset are named with
+   * one word, or with a word and a word in brackets.
+   */
+  private annotation(): TypeExpr | null {
+    const token = this.peek();
+    if (token.kind !== "name") {
+      this.report("expected a type", `near "${token.text}"`, token);
+      return null;
+    }
+    this.next();
+    let text = token.text;
+    if (this.at("[")) {
+      this.next();
+      const element = this.peek();
+      if (element.kind !== "name") {
+        this.report("expected the type of what the list holds", `near "${element.text}"`, element);
+        return null;
+      }
+      this.next();
+      text += `[${element.text}]`;
+      if (!this.accept("]")) return null;
+    }
+    try {
+      return mapPythonType(text, `line ${token.line} of ${this.path}`);
+    } catch (error) {
+      if (!isCompilerError(error)) throw error;
+      this.report(error.message, error.detail ?? "", token);
+      return null;
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Statements                                                              */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The statements of a block: everything indented under the header that
+   * opened it.
+   */
+  private block(): PyStatement[] {
+    if (!this.atKind("newline")) {
+      // A block written on the line of its header, as in `if x: return 1`.
+      const statement = this.statement();
+      return statement === null ? [] : [statement];
+    }
+    this.next();
+    if (!this.atKind("indent")) {
+      this.report("a block is written by indenting it", "every line of it is indented the same", this.peek());
+      return [];
+    }
+    this.next();
+    const body: PyStatement[] = [];
+    while (this.peek().kind !== "dedent" && this.peek().kind !== "end") {
+      const statement = this.statement();
+      if (statement !== null) body.push(statement);
+    }
+    if (this.atKind("dedent")) this.next();
+    return body;
+  }
+
+  /** Reads past a block the parser could not read. */
+  private skipBlock(): void {
+    while (this.peek().kind !== "end" && this.peek().kind !== "newline") this.next();
+    this.skipNewline();
+    if (this.atKind("indent")) {
+      let depth = 0;
+      do {
+        const token = this.next();
+        if (token.kind === "indent") depth += 1;
+        else if (token.kind === "dedent") depth -= 1;
+      } while (depth > 0 && this.peek().kind !== "end");
+    }
+  }
+
+  private statement(): PyStatement | null {
+    const token = this.peek();
+    if (token.kind === "name") {
+      switch (token.text) {
+        case "def":
+          return this.nestedFunction();
+        case "if":
+          return this.conditional();
+        case "while":
+          return this.whileLoop();
+        case "for":
+          return this.countedLoop();
+        case "try":
+          return this.tryStatement();
+        case "return":
+          return this.returnStatement();
+        case "break":
+          this.next();
+          this.skipNewline();
+          if (this.loops === 0) {
+            this.report('"break" is not within a loop', "a function leaves a loop with break", token);
+            return null;
+          }
+          return { k: "break", line: token.line };
+        case "continue":
+          this.next();
+          this.skipNewline();
+          if (this.loops === 0) {
+            this.report('"continue" is not within a loop', "a function goes on with continue", token);
+            return null;
+          }
+          return { k: "continue", line: token.line };
+        case "pass":
+          this.next();
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        default:
+          break;
+      }
+      const refused = REFUSED_KEYWORDS[token.text];
+      if (refused !== undefined && !this.at("(")) {
+        this.report(`"${token.text}" is not supported`, refused, token);
+        this.skipStatement();
+        return null;
+      }
+    }
+    if (token.kind === "op" && token.text === ":=") {
+      this.report(
+        "a walrus is not part of the subset",
+        "a name bound by a statement, as in x = 1",
+        token,
+      );
+      this.skipStatement();
+      return null;
+    }
+    if (token.kind === "op" && token.text === "@") {
+      this.report(
+        "a decorator is not supported",
+        "a function is called where it is written, and the decorator is not run",
+        token,
+      );
+      this.skipStatement();
+      return null;
+    }
+    const assigned = this.assignment();
+    if (assigned !== null) return assigned;
+    const value = this.expression();
+    this.skipNewline();
+    // `print(a, b)` is what a program writes, and the compiler has a
+    // statement of its own for it.
+    if (value.k === "call" && value.name === "print") {
+      // A list and a dict are written their own ways, and the two styles do
+      // not cover them: the runtime writes an array as `[1,2]` and Python
+      // writes `[1, 2]`, and the runtime writes an object as JSON and Python
+      // writes `{'a': 1}`.
+      for (const argument of value.args) {
+        if (argument.k !== "list" && argument.k !== "dict") continue;
+        this.report(
+          "a list or a dict is not written the way Python writes it",
+          "the two styles do not cover one: write the elements it holds, one to a line",
+          token,
+        );
+      }
+      return { k: "print", values: value.args, line: token.line };
+    }
+    if (value.k !== "call") {
+      this.report(
+        "a statement of a program is a call or a binding",
+        `near "${describeValue(value)}"; write the value into a name`,
+        token,
+      );
+      return null;
+    }
+    return { k: "call", value, line: token.line };
+  }
+
+  /** Reads past a statement the parser refused. */
+  private skipStatement(): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind === "newline" && depth <= 0) break;
+      if (token.kind !== "op") continue;
+      if (token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
+      else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+    }
+    // The block that follows the statement, if there is one, is read past as
+    // well: the statements after it are read from the start of the next one,
+    // and not from the middle of a block the parser never read.
+    if (this.atKind("indent")) {
+      let level = 0;
+      do {
+        const token = this.next();
+        if (token.kind === "indent") level += 1;
+        else if (token.kind === "dedent") level -= 1;
+      } while (level > 0 && this.peek().kind !== "end");
+    }
+  }
+
+  /** A binding, and the compound assignments of one. */
+  private assignment(): PyStatement | null {
+    const name = this.peek();
+    if (name.kind !== "name") return null;
+    const after = this.peek(1);
+    if (after.kind === "op" && after.text === ":") {
+      // A name with a type: `total: float = 0.0`.
+      this.next();
+      this.next();
+      const type = this.annotation();
+      if (type === null) {
+        this.skipStatement();
+        return null;
+      }
+      if (!this.expect("=")) {
+        this.skipStatement();
+        return null;
+      }
+      const value = this.expression();
+      this.skipNewline();
+      return { k: "declare", name: name.text, type, value, line: name.line };
+    }
+    if (after.kind !== "op") return null;
+    if (after.text === "=") {
+      this.next();
+      this.next();
+      const value = this.expression();
+      this.skipNewline();
+      return { k: "declare", name: name.text, type: null, value, line: name.line };
+    }
+    const operator = COMPOUND[after.text];
+    if (operator === undefined) return null;
+    this.next();
+    this.next();
+    const value = this.expression();
+    this.skipNewline();
+    return { k: "assign", name: name.text, op: after.text, value, line: name.line };
+  }
+
+  /** `if cond:` and the branches it holds. */
+  private conditional(): PyStatement {
+    const start = this.next();
+    const condition = this.expression();
+    this.expect(":");
+    const then = this.block();
+    const otherwise: PyStatement[] = [];
+    if (this.at("elif")) {
+      otherwise.push(this.conditional());
+      return { k: "if", condition, then, otherwise, line: start.line };
+    }
+    if (this.accept("else")) {
+      this.expect(":");
+      otherwise.push(...this.block());
+    }
+    return { k: "if", condition, then, otherwise, line: start.line };
+  }
+
+  /** `while cond:` and the body it holds. */
+  private whileLoop(): PyStatement {
+    const start = this.next();
+    const condition = this.expression();
+    this.expect(":");
+    this.loops += 1;
+    const body = this.block();
+    this.loops -= 1;
+    return { k: "while", condition, body, line: start.line };
+  }
+
+  /**
+   * `for i in range(n):` and the body it holds. A loop walks a range: a list
+   * is walked by its own index, as in `for i in range(len(a))`.
+   */
+  private countedLoop(): PyStatement {
+    const start = this.next();
+    const variable = this.peek();
+    if (variable.kind !== "name") {
+      this.report("expected the name of the loop variable", `near "${variable.text}"`, variable);
+      this.skipStatement();
+      return { k: "pass", line: start.line };
+    }
+    this.next();
+    if (!this.accept("in")) {
+      this.report('expected "in" after the name of the loop variable', `near "${this.peek().text}"`, this.peek());
+      this.skipStatement();
+      return { k: "pass", line: start.line };
+    }
+    const walked = this.expression();
+    if (walked.k !== "call" || walked.name !== "range") {
+      this.report(
+        "a loop walks a range",
+        "as in for i in range(len(a)):",
+        this.peek(),
+      );
+      this.skipStatement();
+      return { k: "pass", line: start.line };
+    }
+    const bounds = walked.args;
+    if (bounds.length < 1 || bounds.length > 3) {
+      this.report("range takes one, two or three bounds", `near "${this.peek().text}"`, this.peek());
+      this.skipStatement();
+      return { k: "pass", line: start.line };
+    }
+    const from = bounds.length === 1 ? ({ k: "number", text: "0", whole: true } as PyValue) : bounds[0];
+    const to = bounds.length === 1 ? bounds[0] : bounds[1];
+    const step = bounds.length === 3 ? bounds[2] : null;
+    this.expect(":");
+    this.loops += 1;
+    const body = this.block();
+    this.loops -= 1;
+    return { k: "for", variable: variable.text, from, to, step, body, line: start.line };
+  }
+
+  /** `try:` and the blocks that follow it. */
+  private tryStatement(): PyStatement {
+    const start = this.next();
+    this.expect(":");
+    const body = this.block();
+    let catchBody: PyStatement[] | null = null;
+    let finallyBody: PyStatement[] | null = null;
+    if (this.at("except")) {
+      this.next();
+      // `except Exception as e:` binds a name the block may read. A compiled
+      // program cannot raise, so there is nothing to catch: the block is read
+      // and the name is not bound.
+      if (this.at("Exception") || this.at("BaseException")) this.next();
+      if (this.accept("as")) {
+        const name = this.peek();
+        if (name.kind === "name") this.next();
+      }
+      this.expect(":");
+      catchBody = this.block();
+    }
+    if (this.at("finally")) {
+      this.next();
+      this.expect(":");
+      finallyBody = this.block();
+    }
+    return { k: "try", body, catchBody, finallyBody, line: start.line };
+  }
+
+  /** `return value:` and the value it hands back. */
+  private returnStatement(): PyStatement {
+    const start = this.next();
+    if (this.atKind("newline")) {
+      this.next();
+      return { k: "return", value: null, line: start.line };
+    }
+    const value = this.expression();
+    this.skipNewline();
+    return { k: "return", value, line: start.line };
+  }
+
+  /** A function written inside another one. */
+  private nestedFunction(): PyStatement {
+    const start = this.peek();
+    this.report(
+      "a function may not be declared inside a function",
+      "declare it in the module",
+      start,
+    );
+    this.next();
+    this.skipBlock();
+    return { k: "pass", line: start.line };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Values                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  private expression(): PyValue {
+    return this.conditionalExpression();
+  }
+
+  /** `a if c else b`, the loosest operator an expression has. */
+  private conditionalExpression(): PyValue {
+    const condition = this.comparison();
+    if (!this.at("if")) return condition;
+    this.next();
+    const then = this.expression();
+    this.expect("else");
+    const otherwise = this.expression();
+    return { k: "conditional", condition, then, otherwise };
+  }
+
+  /** The operators a value may use, loosest binding first. */
+  private static readonly LEVELS: readonly (readonly string[])[] = [
+    ["or"],
+    ["and"],
+    ["|"],
+    ["^"],
+    ["&"],
+    ["<<", ">>"],
+    ["+", "-"],
+    ["*", "/", "//", "%"],
+  ];
+
+  private binary(level: number): PyValue {
+    if (level >= PythonParser.LEVELS.length) return this.unary();
+    const operators = PythonParser.LEVELS[level];
+    let left = this.binary(level + 1);
+    for (;;) {
+      const token = this.peek();
+      if (token.kind === "op" && operators.includes(token.text)) {
+        this.next();
+        left = { k: "binary", op: token.text, left, right: this.binary(level + 1) };
+        continue;
+      }
+      if (token.kind === "name" && token.text === "or" && operators.includes("or")) {
+        this.next();
+        left = { k: "binary", op: "or", left, right: this.binary(level + 1) };
+        continue;
+      }
+      if (token.kind === "name" && token.text === "and" && operators.includes("and")) {
+        this.next();
+        left = { k: "binary", op: "and", left, right: this.binary(level + 1) };
+        continue;
+      }
+      return left;
+    }
+  }
+
+  /**
+   * A comparison, which is one operator and no more: Python writes one
+   * comparison at a time, and a chained one is refused.
+   */
+  private comparison(): PyValue {
+    const left = this.binary(0);
+    const token = this.peek();
+    if (token.kind === "op" && COMPARISONS.includes(token.text)) {
+      this.next();
+      const right = this.binary(0);
+      return { k: "binary", op: token.text, left, right };
+    }
+    if (token.kind === "name" && (token.text === "is" || token.text === "in")) {
+      this.report(
+        `"${token.text}" is not supported`,
+        token.text === "is"
+          ? REFUSED_KEYWORDS.is
+          : REFUSED_KEYWORDS.in,
+        token,
+      );
+      this.next();
+      this.binary(0);
+      return left;
+    }
+    if (token.kind === "name" && token.text === "not" && this.peek(1).text === "in") {
+      this.report('"not in" is not supported', REFUSED_KEYWORDS.in, token);
+      this.next();
+      this.next();
+      this.binary(0);
+      return left;
+    }
+    return left;
+  }
+
+  private unary(): PyValue {
+    const token = this.peek();
+    if (token.kind === "op" && (token.text === "-" || token.text === "+")) {
+      this.next();
+      return { k: "unary", op: token.text, operand: this.unary() };
+    }
+    if (token.kind === "op" && token.text === "~") {
+      this.next();
+      return { k: "unary", op: "~", operand: this.unary() };
+    }
+    if (token.kind === "name" && token.text === "not") {
+      this.next();
+      return { k: "unary", op: "not", operand: this.unary() };
+    }
+    return this.power();
+  }
+
+  /** `a ** b`: a power, which binds tighter than a sign on its left. */
+  private power(): PyValue {
+    const base = this.postfix();
+    if (!this.at("**")) return base;
+    this.next();
+    const exponent = this.unary();
+    return { k: "binary", op: "**", left: base, right: exponent };
+  }
+
+  /** What is written after a value: a call, an element, a field. */
+  private postfix(): PyValue {
+    let value = this.primary();
+    for (;;) {
+      if (this.at("(")) {
+        this.next();
+        const args: PyValue[] = [];
+        if (!this.at(")")) {
+          for (;;) {
+            const argument = this.expression();
+            // A named argument is a keyword the compiler does not read: the
+            // ones a program writes are `sep` and `end`, and a plain print is
+            // what it writes.
+            if (this.at("=")) {
+              this.report(
+                "a named argument is not part of the subset",
+                "a program prints with a plain print, as in print(a, b)",
+                this.peek(),
+              );
+              this.next();
+              this.expression();
+            } else {
+              args.push(argument);
+            }
+            if (this.accept(",")) continue;
+            break;
+          }
+        }
+        this.expect(")");
+        if (value.k !== "name" && value.k !== "field") {
+          this.report("only a named function is called", `near "${describeValue(value)}"`, this.peek());
+          value = { k: "call", name: "", args: [] };
+          continue;
+        }
+        const name = value.k === "name" ? value.name : `${value.base.k === "name" ? value.base.name : ""}.${value.field}`;
+        value = { k: "call", name, args };
+        continue;
+      }
+      if (this.at("[")) {
+        this.next();
+        const index = this.expression();
+        // A slice is a range of a list, and a range is not an index.
+        if (this.at(":")) {
+          this.report(
+            "a slice is not part of the subset",
+            "an index, as in a[i]",
+            this.peek(),
+          );
+          while (!this.at("]") && this.peek().kind !== "end") this.next();
+        }
+        // A negative index counts from the end of the list, and the compiler
+        // reads an index as a count from the start of it.
+        if (index.k === "unary" && index.op === "-") {
+          this.report(
+            "a negative index is not part of the subset",
+            "an index that counts from the start of the list, as in a[i]",
+            this.peek(),
+          );
+        }
+        this.expect("]");
+        value = { k: "index", base: value, index };
+        continue;
+      }
+      if (this.at(".")) {
+        this.next();
+        const field = this.peek();
+        if (field.kind !== "name") {
+          this.report("expected the name of a field", `near "${field.text}"`, field);
+          return value;
+        }
+        this.next();
+        value = { k: "field", base: value, field: field.text };
+        continue;
+      }
+      return value;
+    }
+  }
+
+  /** A value on its own. */
+  private primary(): PyValue {
+    const token = this.next();
+    if (token.kind === "number") {
+      // A whole number is sixty-four bits, and a literal outside that range is
+      // refused where it was written: the number it is and the range it has to
+      // be in are both named.
+      if (token.whole === true) {
+        const range = wholeRange(token.text);
+        if (range !== null) {
+          this.report(
+            `the whole number ${token.text} does not fit in sixty-four bits`,
+            `line ${token.line} of ${this.path}: a whole number is between ${WHOLE_MINIMUM} and ${WHOLE_MAXIMUM}`,
+            token,
+          );
+        }
+      }
+      return { k: "number", text: token.text, whole: token.whole === true };
+    }
+    if (token.kind === "string") {
+      if (token.prefix === "f" || token.prefix === "fr" || token.prefix === "rf") {
+        return { k: "text", parts: this.fString(token) };
+      }
+      if (token.prefix !== undefined && token.prefix !== "") {
+        this.report(
+          `a ${token.prefix} string is not part of the subset`,
+          "a string is written as it is, as in \"hello\"",
+          token,
+        );
+        return this.hole();
+      }
+      return { k: "text", parts: [{ k: "text", value: token.text }] };
+    }
+    if (token.kind === "name") {
+      if (token.text === "True") return { k: "boolean", value: true };
+      if (token.text === "False") return { k: "boolean", value: false };
+      if (token.text === "None") return { k: "none" };
+      // A keyword the subset does not read is refused where it was written,
+      // and the rest of the expression is read past: the statement after it is
+      // read from the start of the next one.
+      const refused = REFUSED_KEYWORDS[token.text];
+      if (refused !== undefined && !KEYWORDS_WITH_THEIR_OWN_READING.has(token.text)) {
+        this.report(`"${token.text}" is not supported`, refused, token);
+        let depth = 0;
+        while (this.peek().kind !== "end") {
+          const next = this.next();
+          if (next.kind === "newline" && depth <= 0) break;
+          if (next.kind !== "op") continue;
+          if (next.text === "(" || next.text === "[" || next.text === "{") depth += 1;
+          else if (next.text === ")" || next.text === "]" || next.text === "}") depth -= 1;
+        }
+        return this.hole();
+      }
+      if (token.text === "__name__") {
+        // The name of the module the program runs. It is the entry module that
+        // runs, so it is `__main__` there, and it is what the guard every
+        // Python program is written with reads.
+        return { k: "text", parts: [{ k: "text", value: "__main__" }] };
+      }
+      return { k: "name", name: token.text };
+    }
+    if (token.kind === "op" && token.text === "(") {
+      const inner = this.expression();
+      this.expect(")");
+      return inner;
+    }
+    if (token.kind === "op" && token.text === "[") {
+      const items: PyValue[] = [];
+      if (!this.at("]")) {
+        for (;;) {
+          items.push(this.expression());
+          // A comprehension is a list written by a loop, and the subset reads
+          // the loop itself.
+          if (this.at("for")) {
+            this.report(
+              "a comprehension is not part of the subset",
+              "a loop that fills a list, written out",
+              this.peek(),
+            );
+            while (!this.at("]") && this.peek().kind !== "end") this.next();
+            break;
+          }
+          if (this.accept(",")) continue;
+          break;
+        }
+      }
+      this.expect("]");
+      return { k: "list", items };
+    }
+    if (token.kind === "op" && token.text === "{") {
+      const entries: { name: string; value: PyValue }[] = [];
+      if (!this.at("}")) {
+        for (;;) {
+          const key = this.next();
+          const name = key.kind === "name" || key.kind === "string" ? key.text : null;
+          if (name === null) {
+            this.report("a field of a dict is named", `near "${key.text}"`, key);
+          } else {
+            this.expect(":");
+            entries.push({ name, value: this.expression() });
+          }
+          if (this.accept(",")) continue;
+          break;
+        }
+      }
+      this.expect("}");
+      return { k: "dict", entries };
+    }
+    this.report(`unexpected "${token.text}"`, "a value is written here", token);
+    return this.hole();
+  }
+
+  /**
+   * The parts of an f-string: the text as written, and the values it
+   * interpolates.
+   */
+  private fString(token: PyToken): PyTextPart[] {
+    const parts: PyTextPart[] = [];
+    let rest = token.text;
+    while (rest.length > 0) {
+      const open = rest.indexOf("{");
+      if (open < 0) {
+        parts.push({ k: "text", value: rest });
+        break;
+      }
+      if (open > 0) parts.push({ k: "text", value: rest.slice(0, open) });
+      const close = closingBrace(rest, open);
+      if (close < 0) {
+        this.report("an f-string interpolates nothing", `near "${rest.slice(open)}"`, token);
+        break;
+      }
+      const inner = rest.slice(open + 1, close);
+      rest = rest.slice(close + 1);
+      if (inner.includes(":")) {
+        this.report(
+          "a format of a value is not part of the subset",
+          "write the value into a name and print it",
+          token,
+        );
+        continue;
+      }
+      const parser = new PythonParser(tokenizePython(inner, this.path), this.path, this.diagnostics);
+      const value = parser.expression();
+      parts.push({ k: "value", value });
+    }
+    return parts;
+  }
+}
+
+/**
+ * Whether a statement is the guard that names the entry module:
+ * `if __name__ == "__main__":`.
+ *
+ * The guard is the one statement a module that the program merely imports may
+ * carry: it runs nowhere else, because only the entry module runs.
+ */
+function isEntryGuard(statement: PyStatement): boolean {
+  if (statement.k !== "if") return false;
+  const condition = statement.condition;
+  if (condition.k !== "binary" || condition.op !== "==") return false;
+  return isMainText(condition.left) && isMainText(condition.right);
+}
+
+/** Whether a value is the text `__main__`. */
+function isMainText(value: PyValue): boolean {
+  return (
+    value.k === "text" &&
+    value.parts.length === 1 &&
+    value.parts[0].k === "text" &&
+    value.parts[0].value === "__main__"
+  );
+}
+
+/** Where the `}` that closes an interpolation sits, or -1. */
+function closingBrace(text: string, open: number): number {  let depth = 0;
+  for (let index = open; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** How a value is named in a message. */
+export function describeValue(value: PyValue): string {
+  switch (value.k) {
+    case "number":
+      return value.text;
+    case "text":
+      return "a string";
+    case "boolean":
+      return value.value ? "True" : "False";
+    case "none":
+      return "None";
+    case "name":
+      return `"${value.name}"`;
+    case "call":
+      return `"${value.name}(...)"`;
+    case "index":
+      return `${describeValue(value.base)}[...]`;
+    case "field":
+      return `${describeValue(value.base)}.${value.field}`;
+    case "list":
+      return "a list";
+    case "dict":
+      return "a dict";
+    case "binary":
+      return `${describeValue(value.left)} ${value.op} ${describeValue(value.right)}`;
+    case "unary":
+      return `${value.op}${describeValue(value.operand)}`;
+    case "conditional":
+      return "a conditional";
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading a file                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A Python file, read into what it declares, imports and runs.
+ */
+export function parsePython(source: string, path: string, diagnostics: Diagnostics): PyModule {
+  const parser = new PythonParser(tokenizePython(source, path), path, diagnostics);
+  return parser.parseModule();
+}
+
+/* -------------------------------------------------------------------------- */
+/* The compiler's view of a Python type                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a Python value is, as far as the frontend can tell. It is what the
+ * conditions and the divisions are settled by, and it is a guess where the
+ * frontend cannot know: a name of a function the project declares is one the
+ * frontend does not read.
+ */
+export type PyType = "int" | "float" | "bool" | "text" | "list" | "dict" | "none" | "unknown";
+
+/** The type of a value, as far as the frontend can tell. */
+export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType {
+  switch (value.k) {
+    case "number":
+      return value.whole ? "int" : "float";
+    case "text":
+      return "text";
+    case "boolean":
+      return "bool";
+    case "none":
+      return "none";
+    case "name": {
+      const known = names.get(value.name);
+      return known ?? "unknown";
+    }
+    case "call": {
+      if (value.name === "len" || value.name === "range") return "int";
+      if (value.name === "int") return "int";
+      if (value.name === "float") return "float";
+      if (value.name === "str") return "text";
+      if (value.name === "abs" || value.name === "min" || value.name === "max") {
+        const first = value.args[0];
+        return first === undefined ? "unknown" : typeOfValue(first, names);
+      }
+      if (value.name === "math.floor" || value.name === "math.ceil" || value.name === "math.trunc") return "int";
+      if (value.name === "math.sqrt") return "float";
+      return "unknown";
+    }
+    case "index":
+      return "unknown";
+    case "field":
+      return "unknown";
+    case "list":
+      return "list";
+    case "dict":
+      return "dict";
+    case "unary":
+      return value.op === "not" ? "bool" : typeOfValue(value.operand, names);
+    case "binary": {
+      if (COMPARISONS.includes(value.op)) return "bool";
+      const left = typeOfValue(value.left, names);
+      const right = typeOfValue(value.right, names);
+      if (left === "float" || right === "float") return "float";
+      if (left === "int" && right === "int") return "int";
+      if (left === "bool" && right === "bool") return "bool";
+      return "unknown";
+    }
+    case "conditional": {
+      const then = typeOfValue(value.then, names);
+      const otherwise = typeOfValue(value.otherwise, names);
+      return then === otherwise ? then : "unknown";
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Lowering a body into the compiler's IR                                      */
+/* -------------------------------------------------------------------------- */
+
+/** The operators of the compiler's IR that a Python operator lowers to. */
+const IR_OPERATORS: Record<string, BinaryOp> = {
+  "+": "+",
+  "-": "-",
+  "*": "*",
+  "/": "/",
+  "//": "//",
+  "%": "%",
+  "==": "==",
+  "!=": "!=",
+  "<": "<",
+  "<=": "<=",
+  ">": ">",
+  ">=": ">=",
+  "and": "&&",
+  "or": "||",
+};
+
+/** The operators of the compiler's IR that a Python unary lowers to. */
+const IR_UNARY: Record<string, UnaryOp> = {
+  "-": "-",
+  "+": "+",
+  "~": "~",
+  not: "!",
+};
+
+/**
+ * A Python value, as the compiler's IR writes it.
+ *
+ * The IR is language neutral, so the operators of Python that the compiler
+ * has no spelling for are spelled here: `//` is a floor division, which the
+ * IR carries as itself, and `and` and `or` are the logical operators the IR
+ * has.
+ */
+export function lowerValue(value: PyValue): Expression {
+  switch (value.k) {
+    case "number":
+      return { k: "literal", text: value.text };
+    case "text":
+      return { k: "text", parts: value.parts.map((part) => (part.k === "text" ? part : { k: "value", value: lowerValue(part.value) })) };
+    case "boolean":
+      return { k: "literal", text: value.value ? "1" : "0" };
+    case "none":
+      return { k: "null" };
+    case "name":
+      return { k: "ident", name: value.name };
+    case "call": {
+      // `len(x)` is the length of the list or of the text `x` holds, and the
+      // compiler reads a length off the name it is written by.
+      if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name") {
+        return { k: "length", buffer: value.args[0].name };
+      }
+      return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
+    }
+    case "index":
+      return { k: "index", base: lowerValue(value.base), index: lowerValue(value.index) };
+    case "field":
+      return { k: "member", base: lowerValue(value.base), field: value.field };
+    case "list": {
+      // A list written out is a buffer of the numbers it holds, and the
+      // element is the width of what it holds.
+      const whole = value.items.every((item) => item.k === "number" && item.whole);
+      return { k: "buffer", element: whole ? "i64" : "f64", values: value.items.map(lowerValue) };
+    }
+    case "dict":
+      return { k: "object", fields: value.entries.map((entry) => ({ name: entry.name, value: lowerValue(entry.value) })) };
+    case "binary": {
+      const operator = IR_OPERATORS[value.op];
+      if (operator === undefined) {
+        throw frontendError(`"${value.op}" is not an operator the compiler has`, "the body is refused where it is written");
+      }
+      return { k: "binary", op: operator, left: lowerValue(value.left), right: lowerValue(value.right) };
+    }
+    case "unary": {
+      const operator = IR_UNARY[value.op];
+      if (operator === undefined) {
+        throw frontendError(`"${value.op}" is not an operator the compiler has`, "the body is refused where it is written");
+      }
+      return { k: "unary", op: operator, operand: lowerValue(value.operand) };
+    }
+    case "conditional":
+      return {
+        k: "conditional",
+        condition: lowerValue(value.condition),
+        then: lowerValue(value.then),
+        otherwise: lowerValue(value.otherwise),
+      };
+  }
+}
+
+/** A Python statement, as the compiler's IR writes it. */
+export function lowerStatement(statement: PyStatement): Statement {
+  switch (statement.k) {
+    case "declare":
+      return { kind: "declare", name: statement.name, type: statement.type, init: lowerValue(statement.value), line: statement.line };
+    case "assign":
+      return {
+        kind: "assign",
+        target: statement.name,
+        op: statement.op as AssignOperator,
+        value: lowerValue(statement.value),
+        line: statement.line,
+      };
+    case "return":
+      return { kind: "result", value: lowerValue(statement.value ?? { k: "none" }), line: statement.line };
+    case "if":
+      conditionIsBoolean(statement.condition, statement.line);
+      return {
+        kind: "if",
+        condition: lowerValue(statement.condition),
+        then: statement.then.map(lowerStatement),
+        otherwise: statement.otherwise.map(lowerStatement),
+        line: statement.line,
+      };
+    case "while":
+      conditionIsBoolean(statement.condition, statement.line);
+      return { kind: "while", condition: lowerValue(statement.condition), body: statement.body.map(lowerStatement), line: statement.line };
+    case "for":
+      return {
+        kind: "loop",
+        variable: statement.variable,
+        from: lowerValue(statement.from),
+        to: lowerValue(statement.to),
+        inclusive: false,
+        step: statement.step === null ? null : lowerValue(statement.step),
+        down: false,
+        body: statement.body.map(lowerStatement),
+        line: statement.line,
+      };
+    case "break":
+      return { kind: "break", line: statement.line };
+    case "continue":
+      return { kind: "continue", line: statement.line };
+    case "pass":
+      return { kind: "expression", value: { k: "literal", text: "0" }, line: statement.line };
+    case "print": {
+      // A print writes its values with a space between them, and then the
+      // line the console ends it with.
+      const parts: TextPart[] = [];
+      statement.values.forEach((value, position) => {
+        if (position > 0) parts.push({ k: "text", value: " " });
+        parts.push({ k: "value", value: lowerValue(value) });
+      });
+      return { kind: "print", value: { k: "text", parts }, line: statement.line };
+    }
+    case "try":
+      return {
+        kind: "try",
+        body: statement.body.map(lowerStatement),
+        catchParam: null,
+        catchBody: statement.catchBody === null ? null : statement.catchBody.map(lowerStatement),
+        finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map(lowerStatement),
+        line: statement.line,
+      };
+    case "call":
+      return { kind: "expression", value: lowerValue(statement.value), line: statement.line };
+    case "function":
+      throw frontendError(
+        "a function may not be declared inside a function",
+        `line ${statement.line}: declare it in the module`,
+      );
+  }
+}
+
+/**
+ * A condition is a boolean, which is what a Python condition has to be.
+ *
+ * Python's truth is wider than a boolean: a list of nothing is false and a
+ * number that is not a number is true. The compiler's truth is narrower in the
+ * ways that matter, so a condition that is not a boolean is refused rather
+ * than answered differently.
+ */
+export function conditionIsBoolean(value: PyValue, line: number): void {
+  if (isBooleanCondition(value)) return;
+  throw frontendError(
+    "a condition must be a boolean",
+    `line ${line}: write the comparison it is, as in x > 0, or a name that holds one`,
+  );
+}
+
+/** Whether a value is a boolean, as a condition reads it. */
+export function isBooleanCondition(value: PyValue): boolean {
+  switch (value.k) {
+    case "boolean":
+    case "name":
+    case "call":
+      return true;
+    case "unary":
+      return value.op === "not";
+    case "binary":
+      return COMPARISONS.includes(value.op);
+    case "number":
+    case "text":
+    case "none":
+    case "index":
+    case "field":
+    case "list":
+    case "dict":
+    case "conditional":
+      return false;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The contract of a Python function                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A body the contract cannot state as one expression. It is not an error: the
+ * contract of such a function carries what the function does instead.
+ */
+class Uncontractable extends Error {
+  readonly detail: string;
+
+  constructor(message: string, detail: string) {
+    super(message);
+    this.name = "Uncontractable";
+    this.detail = detail;
+  }
+}
+
+/**
+ * The operators the contract language states a result with. A Python body
+ * that uses one the contract language has not states no postcondition.
+ */
+const CONTRACT_OPERATORS: readonly string[] = ["+", "-", "*", "==", "!=", "<", "<=", ">", ">="];
+
+/**
+ * The expression the result must equal, or null when the body has none: a
+ * function that branches, recurses, allocates, calls or prints is contracted
+ * by what it does, which `definitionContract` carries.
+ */
+class BodyAnalysis {
+  private readonly declaration: PyFunction;
+  private readonly bindings = new Map<string, string>();
+  private readonly accesses: AccessRange[] = [];
+  private result: string | null = null;
+  /** The type each name holds, as far as the body says. */
+  private readonly types = new Map<string, PyType>();
+
+  constructor(declaration: PyFunction) {
+    this.declaration = declaration;
+    for (const param of declaration.params) {
+      this.bindings.set(param.name, param.name);
+      this.types.set(param.name, pythonTypeOf(param.type));
+    }
+  }
+
+  run(): { result: string | null; accesses: AccessRange[] } {
+    try {
+      for (const statement of this.declaration.body) this.execute(statement, null);
+    } catch (error) {
+      if (!(error instanceof Uncontractable)) throw error;
+      return { result: null, accesses: this.accesses };
+    }
+    if (this.result === null && this.declaration.returns.kind !== "void") {
+      throw frontendError(
+        `${this.declaration.name} never returns a value`,
+        "the contract needs an expression the result must equal",
+      );
+    }
+    return { result: this.result, accesses: this.accesses };
+  }
+
+  private uncontractable(construct: string, line: number, remedy: string): never {
+    throw new Uncontractable(
+      `${this.declaration.name} cannot be contracted: it ${construct} (line ${line})`,
+      remedy,
+    );
+  }
+
+  private execute(statement: PyStatement, loop: LoopContext | null): void {
+    switch (statement.k) {
+      case "declare": {
+        const value = this.serialize(statement.value, loop, statement.line);
+        this.bindings.set(statement.name, value);
+        if (statement.type !== null) this.types.set(statement.name, pythonTypeOf(statement.type));
+        else this.types.set(statement.name, typeOfValue(statement.value, this.types));
+        return;
+      }
+      case "assign": {
+        const value = this.serialize(statement.value, loop, statement.line);
+        const current = this.bindings.get(statement.name);
+        if (current === undefined) {
+          throw frontendError(`assignment to undeclared "${statement.name}"`, `line ${statement.line}`);
+        }
+        const operator = statement.op === "=" ? statement.op : statement.op.slice(0, -1);
+        if (statement.op !== "=" && !CONTRACT_OPERATORS.includes(operator)) {
+          this.uncontractable(
+            `applies "${statement.op}" to "${statement.name}"`,
+            statement.line,
+            "a contract is one expression the result must equal, and the contract language states + - * and the comparisons",
+          );
+        }
+        this.bindings.set(
+          statement.name,
+          statement.op === "=" ? value : `(${current} ${operator} ${value})`,
+        );
+        return;
+      }
+      case "return":
+        this.result = this.serialize(statement.value ?? { k: "none" }, loop, statement.line);
+        return;
+      case "for":
+        this.executeLoop(statement);
+        return;
+      case "while":
+        this.uncontractable("loops while a condition holds", statement.line, LOOP_REMEDY);
+      case "if":
+        this.uncontractable("branches", statement.line, LOOP_REMEDY);
+      case "break":
+        this.uncontractable("leaves a loop", statement.line, LOOP_REMEDY);
+      case "continue":
+        this.uncontractable("skips the rest of a loop body", statement.line, LOOP_REMEDY);
+      case "try":
+        this.uncontractable("uses try/except", statement.line, LOOP_REMEDY);
+      case "print":
+        this.uncontractable("prints", statement.line, "a contracted function returns a value and prints nothing");
+      case "pass":
+        return;
+      case "call":
+        this.uncontractable(`calls ${describeValue(statement.value)}`, statement.line, "a contracted function is computed from its parameters alone");
+      case "function":
+        this.uncontractable("declares a function", statement.line, LOOP_REMEDY);
+    }
+  }
+
+  private executeLoop(statement: PyStatement & { k: "for" }): void {
+    if (statement.step !== null) {
+      this.uncontractable(
+        "counts by something other than one",
+        statement.line,
+        "a reduction describes the range it sums over, so the index moves by one",
+      );
+    }
+    if (statement.body.length !== 1) {
+      this.uncontractable(
+        "has a loop body of more than one statement",
+        statement.line,
+        "a reduction describes a loop that accumulates into one variable",
+      );
+    }
+    const inner = statement.body[0];
+    if (inner.k !== "assign" || (inner.op !== "+=" && inner.op !== "*=")) {
+      this.uncontractable(
+        "has a loop body that does not accumulate",
+        statement.line,
+        "a reduction describes a loop that accumulates into one variable, as in `total += a[i]`",
+      );
+    }
+    const from = this.serialize(statement.from, null, statement.line);
+    const to = this.serialize(statement.to, null, statement.line);
+    const context: LoopContext = { variable: statement.variable, lo: from, hiExclusive: to };
+    const body = this.serialize(inner.value, context, inner.line);
+    const operator = inner.op === "*=" ? "product" : "sum";
+    const reduce = `${operator}(${statement.variable} = ${from}..<${to}, ${body})`;
+    const current = this.bindings.get(inner.name);
+    if (current === undefined) {
+      throw frontendError(`loop accumulates into undeclared "${inner.name}"`, `line ${inner.line}`);
+    }
+    this.bindings.set(inner.name, this.withInitial(current, reduce, operator));
+  }
+
+  /**
+   * Folds an accumulator's initial value into its reduction. A neutral
+   * initialiser is dropped so the contract stays readable; anything else is
+   * composed, which is what makes a second loop over the same accumulator
+   * expressible at all.
+   */
+  private withInitial(initial: string | null, reduce: string, operator: "sum" | "product"): string {
+    if (initial === null) return reduce;
+    const neutral = operator === "sum" ? ["0", "0.0"] : ["1", "1.0"];
+    if (neutral.includes(initial)) return reduce;
+    return `(${initial} ${operator === "sum" ? "+" : "*"} ${reduce})`;
+  }
+
+  /** The contract text of a value, or null when a contract cannot state it. */
+  private serialize(value: PyValue, loop: LoopContext | null, line: number): string {
+    switch (value.k) {
+      case "number":
+        return value.text;
+      case "boolean":
+        return value.value ? "true" : "false";
+      case "none":
+        return "null";
+      case "text":
+        // The contract language has no string, so a body that hands one back
+        // states no postcondition.
+        this.uncontractable("returns text", line, "a contract states what a function returns, which is a number");
+      case "name": {
+        if (loop !== null && value.name === loop.variable) return value.name;
+        const bound = this.bindings.get(value.name);
+        if (bound === undefined) {
+          throw frontendError(`unknown identifier "${value.name}"`, `line ${line}: declare it with an initialiser`);
+        }
+        return bound;
+      }
+      case "unary": {
+        if (value.op !== "-" && value.op !== "+") {
+          this.uncontractable(
+            `applies "${value.op}" to a value`,
+            line,
+            "a contract states what a function returns, which is a number",
+          );
+        }
+        return `(${value.op}${this.serialize(value.operand, loop, line)})`;
+      }
+      case "binary": {
+        if (!CONTRACT_OPERATORS.includes(value.op)) {
+          this.uncontractable(
+            `computes with ${value.op}, which a contract cannot state`,
+            line,
+            "the body states no postcondition, which is what a function that branches or calls has",
+          );
+        }
+        return `(${this.serialize(value.left, loop, line)} ${value.op} ${this.serialize(value.right, loop, line)})`;
+      }
+      case "index": {
+        if (value.base.k !== "name") {
+          throw frontendError("only single level indexing is supported", `line ${line}`);
+        }
+        const base = value.base;
+        const parameter = this.declaration.params.find((param) => param.name === base.name);
+        if (parameter === undefined) {
+          throw frontendError(`indexing unknown parameter "${base.name}"`, `line ${line}`);
+        }
+        const index = this.serialize(value.index, loop, line);
+        if (loop !== null && dependsOn(value.index, loop.variable)) {
+          this.accesses.push({ parameter: parameter.name, lo: loop.lo, hi: loop.hiExclusive });
+        } else {
+          this.accesses.push({ parameter: parameter.name, lo: index, hi: `(${index} + 1)` });
+        }
+        return `${parameter.name}[${index}]`;
+      }
+      case "call": {
+        // The contract language has one function of its own: `len(x)`, which
+        // is the length of the buffer or of the text `x` holds.
+        const argument = value.args.length === 1 ? value.args[0] : null;
+        if (value.name === "len" && argument !== null && argument.k === "name") {
+          const parameter = this.declaration.params.find((param) => param.name === argument.name);
+          if (parameter === undefined) {
+            throw frontendError(`the length of unknown "${argument.name}"`, `line ${line}`);
+          }
+          return `len(${parameter.name})`;
+        }
+        this.uncontractable(
+          `calls ${describeValue(value)}`,
+          line,
+          "a contracted function is computed from its parameters alone",
+        );
+      }
+      default:
+        this.uncontractable(
+          "uses a value a contract cannot state",
+          line,
+          "the body states no postcondition, which is what a function that branches or calls has",
+        );
+    }
+  }
+}
+
+/** The range a loop index stands for, which its body reads through. */
+interface LoopContext {
+  variable: string;
+  lo: string;
+  hiExclusive: string;
+}
+
+/**
+ * A loop a reduction cannot state. A counted loop over a range is one the
+ * contract can say; every other loop leaves the body to the definition.
+ */
+const LOOP_REMEDY =
+  "a postcondition is one expression the result must equal, so this body states none: the contract carries the statements themselves";
+
+/** Whether an expression reads a name. */
+function dependsOn(value: PyValue, name: string): boolean {
+  switch (value.k) {
+    case "name":
+      return value.name === name;
+    case "number":
+    case "text":
+    case "boolean":
+    case "none":
+      return false;
+    case "unary":
+      return dependsOn(value.operand, name);
+    case "binary":
+      return dependsOn(value.left, name) || dependsOn(value.right, name);
+    case "index":
+      return dependsOn(value.base, name) || dependsOn(value.index, name);
+    case "field":
+      return dependsOn(value.base, name);
+    case "call":
+      return value.args.some((argument) => dependsOn(argument, name));
+    case "list":
+      return value.items.some((item) => dependsOn(item, name));
+    case "dict":
+      return value.entries.some((entry) => dependsOn(entry.value, name));
+    case "conditional":
+      return (
+        dependsOn(value.condition, name) ||
+        dependsOn(value.then, name) ||
+        dependsOn(value.otherwise, name)
+      );
+  }
+}
+
+/** The Python type a contract type is. */
+function pythonTypeOf(type: TypeExpr): PyType {
+  if (type.kind === "void") return "none";
+  if (type.kind === "text") return "text";
+  if (type.kind === "primitive") {
+    if (type.name === "bool") return "bool";
+    if (type.name === "f64" || type.name === "f32") return "float";
+    return "int";
+  }
+  if (type.kind === "slice" || type.kind === "array") return "list";
+  return "unknown";
+}
+
+/* -------------------------------------------------------------------------- */
+/* What a body does                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a body does: whether it allocates, prints or reads the command line,
+ * and the buffer ranges it reads.
+ */
+function usageOf(declaration: PyFunction): {
+  allocates: boolean;
+  prints: boolean;
+  readsArgv: boolean;
+  accesses: AccessRange[];
+} {
+  const parameters = new Set(declaration.params.map((param) => param.name));
+  const accesses: AccessRange[] = [];
+  /** The range a loop index stands for, which its body reads through. */
+  const loops = new Map<string, { lo: string; hi: string }>();
+  let allocates = false;
+  let prints = false;
+  let readsArgv = false;
+
+  /** One access, stated once however many times the body reads it. */
+  const access = (parameter: string, lo: string, hi: string): void => {
+    const seen = accesses.some((entry) => entry.parameter === parameter && entry.lo === lo && entry.hi === hi);
+    if (!seen) accesses.push({ parameter, lo, hi });
+  };
+
+  const expression = (value: PyValue): void => {
+    switch (value.k) {
+      case "list":
+      case "dict":
+        allocates = true;
+        for (const item of value.k === "list" ? value.items : value.entries.map((entry) => entry.value)) {
+          expression(item);
+        }
+        return;
+      case "call":
+        for (const argument of value.args) expression(argument);
+        return;
+      case "binary":
+        expression(value.left);
+        expression(value.right);
+        return;
+      case "unary":
+        expression(value.operand);
+        return;
+      case "conditional":
+        expression(value.condition);
+        expression(value.then);
+        expression(value.otherwise);
+        return;
+      case "index": {
+        if (value.base.k === "name" && parameters.has(value.base.name)) {
+          // A buffer the body indexes is a buffer it reads, at a position the
+          // contract states as a number. An index the contract language cannot
+          // name leaves the position unknown.
+          const loop = value.index.k === "name" ? loops.get(value.index.name) : undefined;
+          if (loop !== undefined) access(value.base.name, loop.lo, loop.hi);
+          else {
+            const at = contractTextOf(value.index);
+            if (at !== null) access(value.base.name, at, `(${at} + 1)`);
+          }
+        }
+        expression(value.base);
+        expression(value.index);
+        return;
+      }
+      case "field":
+        expression(value.base);
+        return;
+      case "text":
+        for (const part of value.parts) {
+          if (part.k === "value") expression(part.value);
+        }
+        return;
+      case "number":
+      case "boolean":
+      case "none":
+      case "name":
+        return;
+    }
+  };
+
+  const statement = (one: PyStatement): void => {
+    switch (one.k) {
+      case "declare":
+      case "assign":
+        expression(one.value);
+        return;
+      case "return":
+        if (one.value !== null) expression(one.value);
+        return;
+      case "print":
+        prints = true;
+        for (const value of one.values) expression(value);
+        return;
+      case "if":
+        expression(one.condition);
+        one.then.forEach(statement);
+        one.otherwise.forEach(statement);
+        return;
+      case "while":
+        expression(one.condition);
+        one.body.forEach(statement);
+        return;
+      case "for": {
+        expression(one.from);
+        expression(one.to);
+        if (one.step !== null) expression(one.step);
+        // The index of a counted loop stands for the whole range the loop
+        // walks, so a buffer its body reads is read over that range.
+        const from = contractTextOf(one.from);
+        const to = contractTextOf(one.to);
+        const outer = loops.get(one.variable);
+        if (from !== null && to !== null) loops.set(one.variable, { lo: from, hi: to });
+        one.body.forEach(statement);
+        if (outer === undefined) loops.delete(one.variable);
+        else loops.set(one.variable, outer);
+        return;
+      }
+      case "try":
+        one.body.forEach(statement);
+        if (one.catchBody !== null) one.catchBody.forEach(statement);
+        if (one.finallyBody !== null) one.finallyBody.forEach(statement);
+        return;
+      case "call":
+        expression(one.value);
+        return;
+      case "break":
+      case "continue":
+      case "pass":
+      case "function":
+        return;
+    }
+  };
+
+  declaration.body.forEach(statement);
+  return { allocates, prints, readsArgv, accesses };
+}
+
+/** The contract text of a value, or null when a contract cannot state it. */
+function contractTextOf(value: PyValue): string | null {
+  switch (value.k) {
+    case "number":
+      return value.text;
+    case "name":
+      return value.name;
+    case "call":
+      // The contract language has one function of its own: `len(x)`.
+      if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name") {
+        return `len(${value.args[0].name})`;
+      }
+      return null;
+    case "unary":
+      if (value.op !== "-" && value.op !== "+") return null;
+      const operand = contractTextOf(value.operand);
+      return operand === null ? null : `(${value.op}${operand})`;
+    case "binary": {
+      if (!CONTRACT_OPERATORS.includes(value.op)) return null;
+      const left = contractTextOf(value.left);
+      const right = contractTextOf(value.right);
+      return left === null || right === null ? null : `(${left} ${value.op} ${right})`;
+    }
+    default:
+      return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The frontend                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The first conversion a body holds, or null when it holds none. A conversion
+ * is a program of its own: `int(x)` answers a whole number and `str(x)` a
+ * text, and a module of functions has neither.
+ */
+function conversionIn(body: readonly PyStatement[]): string | null {
+  for (const statement of body) {
+    const found = conversionInStatement(statement);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function conversionInStatement(statement: PyStatement): string | null {
+  switch (statement.k) {
+    case "declare":
+    case "assign":
+      return conversionInValue(statement.value);
+    case "return":
+      return statement.value === null ? null : conversionInValue(statement.value);
+    case "if":
+      return (
+        conversionInValue(statement.condition) ??
+        conversionIn(statement.then) ??
+        conversionIn(statement.otherwise)
+      );
+    case "while":
+      return conversionInValue(statement.condition) ?? conversionIn(statement.body);
+    case "for":
+      return (
+        conversionInValue(statement.from) ??
+        conversionInValue(statement.to) ??
+        conversionIn(statement.body)
+      );
+    case "print":
+      return statement.values.map(conversionInValue).find((found) => found !== null) ?? null;
+    case "try":
+      return (
+        conversionIn(statement.body) ??
+        (statement.catchBody === null ? null : conversionIn(statement.catchBody)) ??
+        (statement.finallyBody === null ? null : conversionIn(statement.finallyBody))
+      );
+    case "call":
+      return conversionInValue(statement.value);
+    case "break":
+    case "continue":
+    case "pass":
+    case "function":
+      return null;
+  }
+}
+
+function conversionInValue(value: PyValue): string | null {
+  switch (value.k) {
+    case "call": {
+      if (value.name === "int" || value.name === "float" || value.name === "str") return value.name;
+      return value.args.map(conversionInValue).find((found) => found !== null) ?? null;
+    }
+    case "binary":
+      return conversionInValue(value.left) ?? conversionInValue(value.right);
+    case "unary":
+      return conversionInValue(value.operand);
+    case "conditional":
+      return (
+        conversionInValue(value.condition) ??
+        conversionInValue(value.then) ??
+        conversionInValue(value.otherwise)
+      );
+    case "index":
+      return conversionInValue(value.base) ?? conversionInValue(value.index);
+    case "field":
+      return conversionInValue(value.base);
+    case "list":
+      return value.items.map(conversionInValue).find((found) => found !== null) ?? null;
+    case "dict":
+      return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
+    case "text":
+      return value.parts
+        .filter((part): part is { k: "value"; value: PyValue } => part.k === "value")
+        .map((part) => conversionInValue(part.value))
+        .find((found) => found !== null) ?? null;
+    case "number":
+    case "boolean":
+    case "none":
+    case "name":
+      return null;
+  }
+}
+
+/**
+ * The Python frontend.
+ *
+ * A module is a library of functions, and the entry module of a program may
+ * also carry the statements the program runs. Python writes both the same way,
+ * so the split is the one the contract phase already makes: a file is a
+ * program when it has a top level statement that is not a definition.
+ */
+export const pythonFrontend: Frontend = {
+  analyze(source, path): ModuleAnalysis {
+    if (typeof source !== "string" || source.trim() === "") {
+      throw frontendError(`module ${path} is empty`);
+    }
+    const diagnostics = new Diagnostics();
+    const parsed = parsePython(source, path, diagnostics);
+    diagnostics.throwIfAny(path);
+    const functions: DeclaredFunction[] = parsed.functions.map((declaration) => ({
+      name: declaration.name,
+      // Every function of a Python module is part of its interface: a name
+      // that starts with an underscore is a convention, not a rule the
+      // compiler reads.
+      exported: true,
+      params: declaration.params.map((param) => ({ name: param.name, type: param.type })),
+      returns: declaration.returns,
+      handle: declaration,
+    }));
+    // A file is a program when it has a top level statement that is not a
+    // definition: the statements the entry module runs are the program, and
+    // everything else the file declares is a library of functions.
+    const body = parsed.body.length === 0 ? [] : lowerProgramBody(parsed.body);
+    return {
+      path,
+      imports: parsed.imports,
+      functions,
+      default: null,
+      body,
+      entryGuard: parsed.entryGuard && parsed.body.length > 0,
+    };
+  },
+
+  contractFor(analysis, declared, input) {
+    const declaration = declared.handle as PyFunction;
+    // A conversion is a program of its own: `int(x)` answers a whole number
+    // and `str(x)` a text, and a module of functions has neither.
+    if (analysis.body.length === 0) {
+      const conversion = conversionIn(declaration.body);
+      if (conversion !== null) {
+        throw frontendError(
+          `"${conversion}" is not part of a module`,
+          `line ${declaration.line} of ${analysis.path}: a module is a library of functions, and a conversion is a program of its own`,
+        );
+      }
+    }
+    const body = new BodyAnalysis(declaration).run();
+    const usage = usageOf(declaration);
+    return assembleContract({
+      name: declaration.name,
+      params: declaration.params.map((param) => ({ name: param.name, type: param.type })),
+      returns: declaration.returns,
+      result: body.result,
+      accesses: usage.accesses,
+      definition: {
+        statements: declaration.body.map(lowerStatement),
+        allocates: usage.allocates,
+        prints: usage.prints,
+        readsArgv: usage.readsArgv,
+      },
+      input,
+    });
+  },
+
+  resolveImport(specifier) {
+    if (specifier === "") {
+      throw frontendError("cannot import nothing", "a module imports the functions of another file of the project");
+    }
+    if (specifier.includes(".")) {
+      throw frontendError(
+        `cannot import "${specifier}"`,
+        "a module of the project is a file beside the entry file, named without its extension, as in `from helpers import dot`",
+      );
+    }
+    if (specifier.startsWith(".") || specifier.startsWith("/")) {
+      throw frontendError(
+        `cannot import "${specifier}"`,
+        "a module of the project is a file beside the entry file, named without its extension, as in `from helpers import dot`",
+      );
+    }
+    return [`${specifier}.py`];
+  },
+};

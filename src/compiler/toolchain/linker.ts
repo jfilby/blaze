@@ -26,6 +26,7 @@
  */
 
 import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
+import { rulesFor } from "../semantics/language.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, FunctionParam, Objective, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
@@ -409,12 +410,12 @@ function cStringLiteral(text: string): string {
 }
 
 /** Emits the C harness for a contract. The harness is compiler code. */
-export function generateHarness(contract: FunctionContract, demoRequest: string): string {
+export function generateHarness(contract: FunctionContract, demoRequest: string, language: string = "typescript"): string {
   const name = symbolOf(contract);
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
     throw linkError("the contract function name is not a valid C identifier", undefined, name);
   }
-  if (contract.ensures.length === 0) return generateDefinitionHarness(contract);
+  if (contract.ensures.length === 0) return generateDefinitionHarness(contract, language);
   // A parameter of a reference type is something the protocol does not carry,
   // so there is no vector to hand this function and nothing for it to be
   // called with. `planVectors` says the same thing and plans none, so the
@@ -423,7 +424,7 @@ export function generateHarness(contract: FunctionContract, demoRequest: string)
   // such a vector raised `ref<any> is not a buffer` out of the harness the
   // compiler wrote for a call it was never going to make.
   if (contract.function.params.some((param) => parseType(param.type).kind === "ref")) {
-    return generateDefinitionHarness(contract);
+    return generateDefinitionHarness(contract, language);
   }
   const returns = parseType(contract.function.returns);
   if (isBuffer(returns)) throw linkError("a pointer return type cannot be called from the harness", undefined, name);
@@ -480,6 +481,9 @@ int main(void) {
   }
   /* The harness is the host program: the runtime lives for the whole run. */
   blaze_rt_initialize();
+  /* The style a value is written as text in is the language's, and it is set
+     once, when the program starts. */
+  blaze_rt_set_text_style(${rulesFor(language).style === "python" ? 1 : 0});
   if (getline(&input_line, &input_capacity, input) <= 0) fail("empty input");
   char* mode_cursor = input_line;
   char* mode = next_token(&mode_cursor);
@@ -531,7 +535,7 @@ int main(void) {
  * harness exists so the object is assembled and linked against the same ABI the
  * program links, and the program is what says whether the two agree.
  */
-function generateDefinitionHarness(contract: FunctionContract): string {
+function generateDefinitionHarness(contract: FunctionContract, language: string = "typescript"): string {
   const name = symbolOf(contract);
   const objects = contract.definition.objects;
   // The names appear only in the extern declaration, so all they have to be is
@@ -558,6 +562,7 @@ extern ${cDeclarationType(parseType(contract.function.returns))} ${cSymbolName(n
 
 int main(void) {
   blaze_rt_initialize();
+  blaze_rt_set_text_style(${rulesFor(language).style === "python" ? 1 : 0});
   blaze_rt_finalize();
   return 0;
 }
@@ -576,7 +581,11 @@ int main(void) {
  * the one defect that would otherwise cost a whole round of the program to find
  * and a regeneration of every function in it.
  */
-export function generateProbeHarness(contract: FunctionContract, plan: ProbePlan & { kind: "call" }): string {
+export function generateProbeHarness(
+  contract: FunctionContract,
+  plan: ProbePlan & { kind: "call" },
+  language: string = "typescript",
+): string {
   const name = symbolOf(contract);
   const objects = contract.definition.objects;
   const parameters = contract.function.params
@@ -606,6 +615,7 @@ extern ${returns} ${cSymbolName(name)}(${parameters || "void"})${cSymbolLabel(na
 
 int main(void) {
   ${RUNTIME_NAME}_initialize();
+  ${RUNTIME_NAME}_set_text_style(${rulesFor(language).style === "python" ? 1 : 0});
 ${plan.statements.map((statement) => `  ${statement}`).join("\n")}
 ${result}
   ${RUNTIME_NAME}_finalize();

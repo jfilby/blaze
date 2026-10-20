@@ -58,6 +58,7 @@
 import { contractText, parseType } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
+import { rulesFor } from "./language.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
 import { isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
@@ -104,6 +105,13 @@ export interface FunctionContext {
   objectNames: Record<string, string>;
   /** Every function the program compiles, by name: a call is bound against one of these. */
   functions: Record<string, FunctionContract>;
+  /**
+   * The language the source was written in, whose rules are asked of the
+   * language: a division of two whole numbers is a whole division in one and
+   * a true division in another. Absent means TypeScript, which is what the
+   * compiler read before the rules of a language were asked of it.
+   */
+  language?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -161,7 +169,7 @@ const WHOLE: Inferred = { kind: "type", type: USIZE };
 /* -------------------------------------------------------------------------- */
 
 /** The operators that are operations on whole numbers and yield one. */
-const WHOLE_OPERATORS: Record<string, true> = { "%": true, "<<": true, ">>": true, "&": true, "|": true, "^": true };
+const WHOLE_OPERATORS: Record<string, true> = { "//": true, "%": true, "<<": true, ">>": true, "&": true, "|": true, "^": true };
 
 /**
  * The whole number a whole operator yields: the one both operands already are,
@@ -193,6 +201,7 @@ const ARITHMETIC: Record<BinaryOp, ArithOp | null> = {
   "-": "sub",
   "*": "mul",
   "/": "div",
+  "//": "floorDiv",
   "%": "mod",
   "**": "pow",
   "<<": "shl",
@@ -220,6 +229,7 @@ const COMPARISONS: Record<BinaryOp, CompareOp | null> = {
   "-": null,
   "*": null,
   "/": null,
+  "//": null,
   "%": null,
   "**": null,
   "<<": null,
@@ -250,6 +260,7 @@ const COMPOUND: Record<Exclude<AssignOperator, "=">, ArithOp> = {
   "-=": "sub",
   "*=": "mul",
   "/=": "div",
+  "//=": "floorDiv",
   "%=": "mod",
   "&=": "and",
   "|=": "or",
@@ -1310,9 +1321,20 @@ class FunctionBody {
     // `%`, a shift and a bitwise operator are operations on whole numbers
     // whatever the literals were written as: `1 << 4` is 16, not a shift of
     // two doubles, and a target has no shift of anything else.
-    const type = WHOLE_OPERATORS[op] === true ? wholeResult(left.inferred, right.inferred) : numeric(left.inferred, right.inferred);
+    //
+    // The rules of the language the source was written in are asked of the
+    // language: a division of two whole numbers is a whole division in one
+    // language and a true division in another, and a remainder takes the sign
+    // of its left side in one and of its divisor in the other.
+    const rules = rulesFor(this.context.language);
+    const type = op === "/" && rules.division === "true"
+      ? F64
+      : WHOLE_OPERATORS[op] === true
+        ? wholeResult(left.inferred, right.inferred)
+        : numeric(left.inferred, right.inferred);
+    const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
     return {
-      value: { k: "arith", type, op: ARITHMETIC[op] as ArithOp, left: left.value, right: right.value },
+      value: { k: "arith", type, op: arithmetic, left: left.value, right: right.value },
       inferred: asType(type),
     };
   }
@@ -1723,14 +1745,13 @@ function holds(declared: string, use: Inferred): boolean {
   // An object is a pointer, so it is written into a field that holds a
   // reference whatever the source wrote it as.
   if (use.kind === "object") return isReference(parseType(declared));
-  if (isText(use.type)) {
-    // A string is stored as the number a string is stored as, so a numeric
-    // field is a field a string may be written into.
-    return parseType(declared).kind === "primitive";
-  }
   const type = parseType(declared);
-  if (isText(type)) return false;
-  if (use.type.kind === "primitive") return type.kind === "primitive";
+  // A string is stored as the number a string is stored as, so a text field is
+  // a field a number may be written into, and a string may be written into it
+  // as well.
+  const numeric = type.kind === "primitive" || isText(type);
+  if (isText(use.type)) return numeric;
+  if (use.type.kind === "primitive") return numeric;
   return type.kind === use.type.kind;
 }
 

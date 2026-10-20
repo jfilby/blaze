@@ -108,7 +108,7 @@ export function parsePrimitiveName(name: string): PrimitiveTypeName {
 
 export function parseType(text: string): TypeExpr {
   const source = text.trim();
-  if (source === "text") return { kind: "primitive", name: "usize" };
+  if (source === "text") return { kind: "text" };
   if (source === "void") return { kind: "void" };
   const composite = /^([A-Za-z_][A-Za-z0-9_]*)\s*<(.+)>$/.exec(source);
   if (composite === null) {
@@ -161,6 +161,8 @@ export function typeToString(type: TypeExpr): string {
     case "ref":
       if (type.name !== undefined) return `ref<${type.name}>`;
       return type.of === null ? "ref<any>" : `ref<${typeToString(type.of)}>`;
+    case "text":
+      return "text";
     case "void":
       return "void";
   }
@@ -520,7 +522,10 @@ export function signatureTypeEnv(contract: FunctionContract): TypeEnv {
   for (const param of contract.function.params) {
     env.set(param.name, param.type === "text" ? { kind: "primitive", name: "usize" } : parseType(param.type));
   }
-  env.set("result", parseType(contract.function.returns));
+  // The contract expression language has no string: a text is a number the
+  // contract cannot say anything about, so it is the number a string is stored
+  // as.
+  env.set("result", contract.function.returns === "text" ? { kind: "primitive", name: "usize" } : parseType(contract.function.returns));
   return env;
 }
 

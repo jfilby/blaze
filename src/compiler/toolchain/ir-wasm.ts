@@ -1340,6 +1340,17 @@ class Body {
         const unsignedOp = facts(compared).unsigned ? UNSIGNED_BINARY[held][value.op] : undefined;
         const op = unsignedOp ?? BINARY[held][value.op];
         if (op === undefined) {
+          if (value.op === "floorDiv" || value.op === "floorMod") {
+            // A floor division and a floored remainder are the operations of a
+            // language whose division rounds towards zero and whose remainder
+            // takes the sign of its left side, and this backend has not written
+            // them: the division it has is the truncating one.
+            unreachable(
+              `compute ${value.op}: this backend has not written a floor division or a floored remainder`,
+              this.contract,
+              this.candidate,
+            );
+          }
           unreachable(`compute ${value.op}`, this.contract, this.candidate);
         }
         this.op(op);

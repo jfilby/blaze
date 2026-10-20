@@ -13,7 +13,7 @@ import { CompilerError } from "../core/errors.ts";
 import { entryContract, runContractPhase, type ContractPhase } from "../semantics/program.ts";
 import type { FunctionContract, ProgramContract, SourceInput } from "../core/types.ts";
 
-const ENTRY_PATH: Record<string, string> = { nim: "module.nim", typescript: "module.ts" };
+const ENTRY_PATH: Record<string, string> = { nim: "module.nim", typescript: "module.ts", python: "module.py" };
 
 /**
  * Contracts a program of named files and returns the whole phase, so a test
@@ -88,6 +88,7 @@ export function semanticsOf(phase: Pick<ContractPhase, "program" | "objectNames"
   const context: FunctionContext = {
     objectNames: phase.objectNames,
     functions: Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions))),
+    language: phase.program.language,
   };
   const resolved: Record<string, SemanticFunction> = {};
   for (const file of phase.program.files) {

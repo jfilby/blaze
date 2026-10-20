@@ -337,6 +337,16 @@ export type ArithOp =
   | "sub"
   | "mul"
   | "div"
+  /**
+   * A division whose answer is moved down one when the remainder is not zero
+   * and the two sides have different signs, which is what a floor division is.
+   */
+  | "floorDiv"
+  /**
+   * A remainder that takes the sign of its divisor rather than the sign of its
+   * left side, which is what a floored remainder is.
+   */
+  | "floorMod"
   | "mod"
   | "pow"
   | "min"
@@ -882,7 +892,7 @@ export interface SemanticReduction {
 }
 
 /** The operators `op=` accepts. */
-export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
+export type SemanticAssignOp = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 
 /** What each compound assignment states as the one operation it applies. */
 export const COMPOUND_ARITH: Record<Exclude<SemanticAssignOp, "=">, ArithOp> = {
@@ -890,6 +900,7 @@ export const COMPOUND_ARITH: Record<Exclude<SemanticAssignOp, "=">, ArithOp> = {
   "-=": "sub",
   "*=": "mul",
   "/=": "div",
+  "//=": "floorDiv",
   "%=": "mod",
   "&=": "and",
   "|=": "or",
@@ -1057,6 +1068,13 @@ export interface SemanticExtraFunction {
 export interface SemanticProgram {
   /** The source file the program was written in, relative to the project. */
   file: string;
+  /**
+   * The language the program was written in, whose rules are asked of the
+   * language: the way it writes a value as text is one of them. Absent means
+   * TypeScript, which is what the compiler read before the rules of a
+   * language were asked of it.
+   */
+  language?: string;
   /** The body of the program, as the block the run starts in. */
   entry: SemanticBlock;
   /** Every function the program calls, in the order the contract declares them. */

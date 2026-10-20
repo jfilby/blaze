@@ -319,6 +319,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["output"] },
   ),
   entry(
+    "blaze_rt_set_text_style",
+    "void",
+    [["style", "int"]],
+    "Sets the style a value is written as text in.",
+    "The style is set once, when the program starts, and every value the runtime writes as text is written in it: the way the language writes a number, and whether a whole number carries the marker that says which of the two kinds it is.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_print_number",
     "void",
     [["value", "double"]],
@@ -2417,6 +2425,17 @@ double blaze_rt_argv(size_t index) {
   return blaze_rt_arguments[argument];
 }
 
+/* The style a value is written as text in: the way the language writes it.
+   The style is a state of the runtime, set once when the program starts, and
+   every place the runtime writes a value as text writes it in the style that
+   is set. Two languages place a number differently, and one of them writes a
+   whole number with a marker the other has no word for. */
+static int blaze_rt_text_style = 0;
+
+void blaze_rt_set_text_style(int style) {
+  blaze_rt_text_style = style;
+}
+
 void blaze_rt_print_text(const char* text) {
 ${guarded ? "  if (text == NULL) return;" : ""}
   /* fputs rather than a write of a known length: a caller may hand this a
@@ -2461,9 +2480,18 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
      language writes a negative zero the same way it writes a positive one, and
      only a test for the sign of a zero can tell them apart. */
   const char* fixed = NULL;
-  if (isnan(value)) fixed = "NaN";
-  else if (isinf(value)) fixed = signbit(value) ? "-Infinity" : "Infinity";
-  else if (value == 0.0) fixed = "0";
+  /* A language writes a value that is not a number its own way, and so does a
+     zero of either sign: one language writes "-0.0" and the other writes "0".
+     The style is what says which, and it is set once when the program starts. */
+  if (blaze_rt_text_style == 1) {
+    if (isnan(value)) fixed = "nan";
+    else if (isinf(value)) fixed = signbit(value) ? "-inf" : "inf";
+    else if (value == 0.0) fixed = signbit(value) ? "-0.0" : "0.0";
+  } else {
+    if (isnan(value)) fixed = "NaN";
+    else if (isinf(value)) fixed = signbit(value) ? "-Infinity" : "Infinity";
+    else if (value == 0.0) fixed = "0";
+  }
   if (fixed != NULL) {
     return blaze_rt_write_number(fixed, strlen(fixed), buffer, size);
   }
@@ -2497,6 +2525,12 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
       const char swap = written[negative ? left + 1 : left];
       written[negative ? left + 1 : left] = written[negative ? right + 1 : right];
       written[negative ? right + 1 : right] = swap;
+    }
+    /* A whole number written as a fraction keeps its point: the language
+       writes 1.0 and not 1, because the two are two numbers. */
+    if (blaze_rt_text_style == 1) {
+      written[used++] = '.';
+      written[used++] = '0';
     }
     written[used] = '\\0';
     return blaze_rt_write_number(written, (size_t)used, buffer, size);
@@ -2549,7 +2583,13 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
   char written[64];
   int used = 0;
   if (negative) written[used++] = '-';
-  if (point >= -5 && point <= 21) {
+  /* The range a number is written in full, which is the language's own: one
+     writes it in full from 1e-6 up to 1e21 and the other from 1e-4 up to
+     1e16, and outside that range both write it in exponential form. */
+  const int python = blaze_rt_text_style == 1;
+  const int lowest = python ? -3 : -5;
+  const int highest = python ? 16 : 21;
+  if (point >= lowest && point <= highest) {
     if (point <= 0) {
       written[used++] = '0';
       written[used++] = '.';
@@ -2560,6 +2600,12 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
       memcpy(written + used, digits, (size_t)count);
       used += count;
       for (int index = 0; index < point - count; index += 1) written[used++] = '0';
+      /* A whole number written as a fraction keeps its point: the language
+         writes 8.0 and not 8, because the two are two numbers. */
+      if (python) {
+        written[used++] = '.';
+        written[used++] = '0';
+      }
     } else {
       memcpy(written + used, digits, (size_t)point);
       used += point;
@@ -2591,6 +2637,13 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
       scale_text[scale_count++] = (char)('0' + scale % 10);
       scale /= 10;
     } while (scale > 0);
+    /* The exponent of one language is written with a zero in front of a single
+       digit, and the other's is not: 1e-05 and 1e-5 are two spellings of one
+       number and only one of them is the language's. */
+    if (python && scale_count < 2) {
+      scale_text[scale_count] = '0';
+      scale_count += 1;
+    }
     while (scale_count > 0) written[used++] = scale_text[--scale_count];
     written[used] = '\\0';
   }
@@ -2700,6 +2753,12 @@ void blaze_rt_print_number(double value) {
      reads one as the plain zero the language makes of it, which is what
      blaze_rt_format_number answers and what this would answer without this. */
   if (value == 0.0 && signbit(value)) {
+    /* A negative zero is written with its sign, and the way it is written is
+       the language's: one writes -0 and the other writes -0.0. */
+    if (blaze_rt_text_style == 1) {
+      fwrite("-0.0", 1, 4, stdout);
+      return;
+    }
     fwrite("-0", 1, 2, stdout);
     return;
   }
@@ -2725,7 +2784,9 @@ void blaze_rt_print_whole(long long value, int bigint) {
   } while (magnitude > 0);
   if (value < 0) fputc('-', stdout);
   while (count > 0) fputc(digits[--count], stdout);
-  if (bigint) fputc('n', stdout);
+  /* The marker is the word one language prints after the digits of a whole
+     number and the other has no word for. */
+  if (bigint && blaze_rt_text_style != 1) fputc('n', stdout);
 }
 void blaze_rt_print_newline(void) {
   fputc('\\n', stdout);
@@ -2843,13 +2904,21 @@ const char* blaze_rt_to_text(double value) {
     return blaze_dyn_strdup(buf);
   }
   if (d->kind == BLAZE_DYN_NUMBER) {
+    /* The number is written the way the language writes it, which is the
+       shortest decimal that reads back as it. */
     char* buf = malloc(64);
-    snprintf(buf, 64, "%.17g", d->number);
+    size_t written = blaze_rt_format_number(d->number, (unsigned char*)buf, 64);
+    buf[written] = '\0';
     return buf;
   }
-  if (d->kind == BLAZE_DYN_BOOL) return d->number ? "true" : "false";
+  /* A boolean and a null are written the way the language writes them, and the
+     style is what says which. */
+  if (d->kind == BLAZE_DYN_BOOL) {
+    if (blaze_rt_text_style == 1) return d->number ? "True" : "False";
+    return d->number ? "true" : "false";
+  }
   if (d->kind == BLAZE_DYN_TEXT) return d->text ? d->text : "";
-  if (d->kind == BLAZE_DYN_NULL) return "null";
+  if (d->kind == BLAZE_DYN_NULL) return blaze_rt_text_style == 1 ? "None" : "null";
   if (d->kind == BLAZE_DYN_ARRAY) {
     size_t cap = 64, len = 0;
     char* out = malloc(cap);

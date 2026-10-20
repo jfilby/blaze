@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
+import { pythonFrontend } from "../semantics/python.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { contractOf, diagnostic, phaseOf, programOf } from "./phase.ts";
@@ -386,13 +387,17 @@ test("arithmetic a contract cannot state is a definition, not a refused build", 
 test("the language is selected by name", () => {
   assert.equal(frontendFor("typescript"), typescript);
   assert.equal(frontendFor("ts"), typescript);
+  // Python is a language the compiler reads, and it is read by its own name
+  // and by the short one.
+  assert.equal(frontendFor("python"), pythonFrontend);
+  assert.equal(frontendFor("py"), pythonFrontend);
   let diagnostic = "";
   try {
-    frontendFor("python");
+    frontendFor("cobol");
   } catch (error) {
     diagnostic = error instanceof CompilerError ? `${error.message}\n${error.detail ?? ""}` : String(error);
   }
-  assert.match(diagnostic, /supported languages: nim, typescript/);
+  assert.match(diagnostic, /supported languages: nim, typescript, python/);
 });
 
 test("a string that is never closed is reported instead of read again and again", () => {

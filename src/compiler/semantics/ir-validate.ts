@@ -114,6 +114,8 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** The operations that are on whole numbers and yield one. */
 const WHOLE_OPERATIONS: Record<string, true> = {
   mod: true,
+  floorDiv: true,
+  floorMod: true,
   shl: true,
   shr: true,
   ushr: true,

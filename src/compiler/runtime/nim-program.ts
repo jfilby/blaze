@@ -13,6 +13,7 @@
 import { writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { bufferElement, parseType, typeToString } from "../semantics/contract.ts";
+import type { TextStyle } from "../semantics/language.ts";
 import { run } from "../core/process.ts";
 import { nimOptimizationOptions } from "../core/target.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
@@ -682,13 +683,30 @@ ${anchor}
     return returnsNothing ? expression : `discard ${expression}`;
   }
 
-  print(value: string, type: SemanticType | null, kind: ValueKind, bigint: boolean): string[] {
+  print(
+    value: string,
+    type: SemanticType | null,
+    kind: ValueKind,
+    bigint: boolean,
+    style: TextStyle,
+  ): string[] {
     if (kind === "text") return [`stdout.write(${value})`];
-    if (kind === "null") return [`stdout.write("null")`];
-    if (kind === "boolean") return [`stdout.write(if ${value}: "true" else: "false")`];
+    // A null and a boolean are written the way the language writes them, and
+    // the language is what says which.
+    if (kind === "null") return [`stdout.write("${style === "python" ? "None" : "null"}")`];
+    if (kind === "boolean") {
+      const yes = style === "python" ? "True" : "true";
+      const no = style === "python" ? "False" : "false";
+      return [`stdout.write(if ${value}: "${yes}" else: "${no}")`];
+    }
     // A bigint is written with the `n` after it that says which of the two it is,
-    // and it is the same sixty-four bit whole number either way.
-    if (bigint) return [`stdout.write($(${value}) & "n")`];
+    // and it is the same sixty-four bit whole number either way. The marker is
+    // the word one language prints and the other has no word for.
+    if (bigint) {
+      return style === "python"
+        ? [`stdout.write($(${value}))`]
+        : [`stdout.write($(${value}) & "n")`];
+    }
     if (type !== null && isFloat(type)) return [`${RUNTIME_NAME}_print_number(${value})`];
     return [`stdout.write($(${value}))`];
   }
@@ -767,11 +785,17 @@ ${anchor}
     return `cmp(${left}, ${right})`;
   }
 
-  toText(value: string, type: SemanticType, digits: number | null): string {
+  toText(value: string, type: SemanticType, digits: number | null, style: TextStyle): string {
     // Nothing prints as the word for it, as the language does: `$(nil)` is the
     // empty string, which the source never printed.
     if (type.kind === "void" || (type.kind === "ref" && type.of === null)) return '"null"';
-    if (isBoolean(type)) return `(if ${value}: "true" else: "false")`;
+    if (isBoolean(type)) {
+      // A boolean is written the way the language writes it, and the language
+      // is what says which.
+      const yes = style === "python" ? "True" : "true";
+      const no = style === "python" ? "False" : "false";
+      return `(if ${value}: "${yes}" else: "${no}")`
+    }
     // A number written at a fixed number of digits is written at them whatever
     // it is, and not at the digits the shortest writing would choose.
     if (digits !== null) return `programFixed((${value}).float64, ${digits})`;
@@ -822,6 +846,20 @@ ${anchor}
 
   modulo(left: string, right: string): string {
     return `((${left}) - ((${left}) div (${right})) * (${right}))`;
+  }
+
+  floorDivide(left: string, right: string, type: SemanticType): string {
+    // Nim's `div` is a floor division already: it moves the answer down one
+    // when the remainder is not zero and the two sides have different signs.
+    if (isFloat(type)) return `floor((${left}) / (${right}))`;
+    return `((${left}) div (${right}))`;
+  }
+
+  floorModulo(left: string, right: string, type: SemanticType): string {
+    // Nim's `mod` takes the sign of its divisor, which is what a floored
+    // remainder is.
+    if (isFloat(type)) return `((${left}) - floor((${left}) / (${right})) * (${right}))`;
+    return `((${left}) mod (${right}))`;
   }
 
   power(left: string, right: string): string {
