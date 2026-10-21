@@ -1732,7 +1732,8 @@ class Machine {
   /** A float already laid down, so one constant is written to the object once. */
   private readonly floatLabels = new Map<string, string>();
   /** The labels of the numbers laid down in both halves of a pair. */
-  private readonly floatPairs = new Map<string, string>();  readonly labels: DataLabel[] = [];
+  private readonly floatPairs = new Map<string, string>();
+  readonly labels: DataLabel[] = [];
   /** The symbols the code calls or reads that this object does not define. */
   readonly externals: string[] = [];
   /** The target the function is lowered for, which decides whether BMI2
@@ -3813,9 +3814,11 @@ class Machine {
     const type = parseType(found.type);
     // An object the build gave a register of its own is written through that
     // register: the address of the field is one `lea` against it, where the
-    // general form copies the object into the accumulator first.
+    // general form copies the object into the accumulator first. The address is
+    // taken before the value is written, and the value does not take the
+    // scratch, so nothing moves it in between.
     const held = object.k === "local" ? this.slot(object.name) : null;
-    const register = held !== null && held.register !== null ? held.register : null;
+    const register = held !== null && held.register !== null && isReference(held.type) ? held.register : null;
     if (register !== null && this.keepsScratch(value)) {
       // Neither side writes the scratch, so the address is taken first and the
       // value is written straight through it. The other order has to write the
@@ -3843,11 +3846,10 @@ class Machine {
     // The address of the field is one `lea` rather than a copy of the object
     // and an addition to it: the offset of a field is a displacement the
     // machine computes for itself, not an arithmetic the lowering writes out.
-    if (register !== null) this.code.lea(RCX, mem(register, found.offset));
-    else {
-      this.value(object);
-      this.code.lea(RCX, mem(RAX, found.offset));
-    }
+    // The object is read here and not before the value was written, because a
+    // value that calls something may have taken the register it was in.
+    this.value(object);
+    this.code.lea(RCX, mem(RAX, found.offset));
     this.load(written);
     this.storeInto(written.type, RCX);
   }
@@ -5356,7 +5358,7 @@ class Machine {
         const object = value.object;
         if (object.k === "local") {
           const held = this.slot(object.name);
-          if (held.register !== null) {
+          if (held.register !== null && isReference(held.type)) {
             this.readFrom(value.type, mem(held.register, offset));
             return;
           }
