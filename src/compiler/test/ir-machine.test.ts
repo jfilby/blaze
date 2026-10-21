@@ -3046,13 +3046,13 @@ test("a compound assignment is written in the register the name has", async () =
   // The name is read and written often enough to be given a register, which is
   // what puts it in one: a name the census does not weigh is left in the frame
   // and the general form is what is written for it.
-  const cases: { name: string; op: SemanticAssignOp; type: SemanticType; start: string; value: string; expected: string }[] = [
-    { name: "a float added", op: "+=", type: F64, start: "10", value: "3", expected: "25" },
-    { name: "a float taken away", op: "-=", type: F64, start: "10", value: "3", expected: "-5" },
-    { name: "a float multiplied", op: "*=", type: F64, start: "10", value: "3", expected: "2430" },
-    { name: "a whole number added", op: "+=", type: I64, start: "10", value: "3", expected: "25" },
-    { name: "a whole number taken away", op: "-=", type: I64, start: "10", value: "3", expected: "-5" },
-    { name: "a whole number multiplied", op: "*=", type: I64, start: "10", value: "3", expected: "2430" },
+  const cases: { name: string; op: SemanticAssignOp; type: SemanticType; start: string; value: string; expected: string; written: RegExp }[] = [
+    { name: "a float added", op: "+=", type: F64, start: "10", value: "3", expected: "25", written: /addsd\s+%xmm0,%xmm\d+/ },
+    { name: "a float taken away", op: "-=", type: F64, start: "10", value: "3", expected: "-5", written: /subsd\s+%xmm0,%xmm\d+/ },
+    { name: "a float multiplied", op: "*=", type: F64, start: "10", value: "3", expected: "2430", written: /mulsd\s+%xmm0,%xmm\d+/ },
+    { name: "a whole number added", op: "+=", type: I64, start: "10", value: "3", expected: "25", written: /add\s+(\$0x3|%rax),%r[a-z0-9]+/ },
+    { name: "a whole number taken away", op: "-=", type: I64, start: "10", value: "3", expected: "-5", written: /sub\s+(\$0x3|%rax),%r[a-z0-9]+/ },
+    { name: "a whole number multiplied", op: "*=", type: I64, start: "10", value: "3", expected: "2430", written: /imul\s+(\$0x3|%rax),%r[a-z0-9]+/ },
   ];
   for (const entry of cases) {
     // Five turns of the loop, so the name is written five times and read once:
@@ -3087,9 +3087,10 @@ test("a compound assignment is written in the register the name has", async () =
     );
     const printed = await lowered(fn, (name) => `printf("%lld", (long long)${name}());`);
     assert.equal(printed, entry.expected, entry.name);
+    const code = await instructions(fn);
+    assert.match(code, entry.written, `${entry.name} is written at the register the name has`);
   }
 });
-
 test("a compound assignment in a register is the one instruction that writes it", async () => {
   // The compound assignment of a name that has a register of its own is written
   // as the instruction that writes that register from the accumulator. The

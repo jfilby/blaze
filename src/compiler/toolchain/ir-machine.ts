@@ -3666,6 +3666,23 @@ class Machine {
       return;
     }
     const operation = COMPOUND[op.slice(0, -1)];
+    // A number written out, added to a name that has a register of its own, is
+    // the one instruction that carries the number: the value does not have to
+    // be built in the accumulator first.
+    if (target.register !== null && value.k === "const" && isInteger(target.type) && !isWideType(target.type)) {
+      const whole = integerText(value.text);
+      const carried =
+        whole >= -0x8000_0000n &&
+        whole <= 0x7fff_ffffn &&
+        (operation === "add" || operation === "sub" || operation === "mul");
+      if (carried) {
+        const wide = operationWidth(target.type) === 8;
+        if (operation === "mul") this.code.imulImm(target.register, Number(whole), wide);
+        else this.code.aluImm(operation, target.register, Number(whole), wide);
+        if (!this.writtenWhole(whole, target.type)) this.normalizeArithmetic(target.type, target.register);
+        return;
+      }
+    }
     this.at(value, target.type);
     // A name the build gave a register of its own is written in that register:
     // the value the name is given is in the accumulator and the name's own value
