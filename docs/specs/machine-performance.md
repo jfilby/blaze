@@ -7,8 +7,10 @@ and writes the object itself (`src/compiler/toolchain/ir-machine.ts`). This
 is what it does for speed, what it costs, and what is left.
 
 The measurements are the ones `src/benchmarks/bench.sh` takes, plus three
-programs written for this work (`/tmp` is not where they live; they are
-`loopbench`, `arrbench` and `hotbench`):
+programs written for this work. They are not in the repository, and they are
+here so that they can be written again: `loopbench` is a scalar loop, `arrbench`
+is an array of doubles summed and multiplied, and `hotbench` is the scalar
+loop over an array, ten million times.
 
 | Program | What it is | Before | After | The C compiler |
 |---|---|---|---|---|

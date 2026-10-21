@@ -3180,6 +3180,42 @@ test("a counter the loop reads as a number is kept in a register", async () => {
   assert.match(code, /addsd\s+0x[0-9a-f]+\(%rip\),%xmm\d+/, "the counter is stepped in a register");
 });
 
+test("a compound assignment of a name to itself is the number twice", async () => {
+  // The value the name is given is the name itself, so the operation reads the
+  // name and writes it: the answer is the number twice. The register the name
+  // has holds the number, and the accumulator holds a copy of it, and the
+  // operation writes the register from the accumulator.
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [{ k: "set", name: "total", op: "+=", value: local("total"), line: 2 }],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("3"), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted", variable: "i", type: I64,
+            from: number("0", I64), to: number("4", I64), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [],
+  );
+  // Three doubled four times over: 3, 6, 12, 24, 48.
+  assert.equal(await lowered(fn, (name) => `printf("%g", ${name}());`), "48", "the name is added to itself");
+});
+
 test("a conversion does not wait for what the register held", async () => {
   // The instruction that converts a whole number to a double writes the low
   // half of the register it writes into and leaves the half above it as it was,
