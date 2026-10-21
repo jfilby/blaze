@@ -7841,7 +7841,7 @@ class Machine {
       const cb = call.args[0];
       if (cb.k === "functionRef") {
         const captures = Array.isArray(cb.captures) ? cb.captures : [];
-        const args = captures.map((name) => this.slot(name));
+        const args = captures.map((capture) => this.slot(capture.name));
         this.external(cb.name);
         this.callSymbol(cb.name, args, { kind: "void" });
       }

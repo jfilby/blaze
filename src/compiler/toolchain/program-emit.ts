@@ -1058,8 +1058,8 @@ class ProgramEmitter {
     let changed = false;
     const args = call.args.map((argument) => {
       if (argument.k !== "functionRef") return argument;
-      const captures = argument.captures.map((name) => this.names.read(name));
-      if (captures.every((name, index) => name === argument.captures[index])) return argument;
+      const captures = argument.captures.map((capture) => ({ ...capture, name: this.names.read(capture.name) }));
+      if (captures.every((capture, index) => capture.name === argument.captures[index].name)) return argument;
       changed = true;
       return { ...argument, captures };
     });

@@ -148,6 +148,7 @@
 import { CompilerError } from "../core/errors.ts";
 import {
   type ArithOp,
+  type CaptureRef,
   type CompareOp,
   TEXT,
   VOID,
@@ -365,6 +366,15 @@ function partText(part: SemanticTextPart): string {
 }
 
 /**
+ * One value a callback captured, as the name it is held under and the type it
+ * is read at. The type is what tells a number from a reference, and that is
+ * what decides how the value is carried to the callback.
+ */
+function captureText(capture: CaptureRef): string {
+  return `${capture.name}[${typeText(capture.type)}]`;
+}
+
+/**
  * A call as its callee, its arguments, and who owns what it hands back. The
  * signature and the effects are not written: they are the contract's to state,
  * and a call the text names is bound to the contract that declares it.
@@ -389,7 +399,7 @@ export function printSemanticValue(value: SemanticValue): string {
     case "nothing":
       return `nothing[${typeText(value.type)}]`;
     case "functionRef":
-      return `functionRef[${value.name}${value.captures.length ? ":" + value.captures.join(",") : ""}]`;
+      return `functionRef[${value.name}${value.captures.length ? ":" + value.captures.map(captureText).join(",") : ""}]`;
     case "local":
       return `local[${typeText(value.type)}] ${value.name}`;
     case "length":
@@ -1242,12 +1252,18 @@ class IrScanner {
       case "functionRef": {
         this.expect("[");
         const name = this.word();
-        const captures: string[] = [];
+        const captures: CaptureRef[] = [];
         if (this.peek() === ":") {
           this.at += 1;
           // captures are comma-separated names until "]"
           while (this.peek() !== "]") {
-            captures.push(this.word());
+            const captured = this.word();
+            // The type of a capture is what tells a number from a reference,
+            // and it is written in the brackets a type is written in. A capture
+            // written without one is read as a number, which is what a capture
+            // of a number is.
+            const type = this.peek() === "[" ? this.typed() : { kind: "primitive" as const, name: "f64" as const };
+            captures.push({ name: captured, type });
             if (this.peek() === ",") this.at += 1;
             else break;
           }

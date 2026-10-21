@@ -436,7 +436,36 @@ export type SemanticValue =
    * hands the runtime its address. A function the program declares has no
    * symbol here, because the program writes it out in its own file.
    */
-  | { k: "functionRef"; type: SemanticType; name: string; captures: string[]; symbol?: string };
+  | { k: "functionRef"; type: SemanticType; name: string; captures: CaptureRef[]; symbol?: string };
+
+/**
+ * One value a callback captured: the name it is held under, and the type it is
+ * read at.
+ *
+ * The type is what tells a number from a reference, and that is what decides
+ * how the value is carried to the callback: a number travels as the number it
+ * is, and a reference as the address of it. A number carried as an address
+ * would be rounded to a whole number on the way, so a callback that captured
+ * `1.5` was given `1`.
+ */
+export interface CaptureRef {
+  name: string;
+  /** The type the capture is read at. */
+  type: SemanticType;
+}
+
+/**
+ * Whether a value of a type is carried as an address rather than as a number.
+ *
+ * A string is the address of its bytes and a buffer is the address of its
+ * first element, so both are carried as the address of them. Everything else
+ * is carried as a number: a number is a number, and a reference the C backend
+ * holds is a number too.
+ */
+export function isCarriedAsAddress(type: SemanticType): boolean {
+  if (type.kind === "text") return true;
+  return type.kind === "ptr" || type.kind === "slice" || type.kind === "array";
+}
 
 /** What a value is, as printing and truth read it. */
 export type ValueKind = "text" | "number" | "boolean" | "null" | "reference";

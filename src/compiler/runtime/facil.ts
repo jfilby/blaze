@@ -1261,9 +1261,9 @@ typedef struct blaze_http_client_handle_s {
      and calls it with the handle and the values the program captured when it
      registered the handler. */
   void *resp_tramp;
-  void **resp_caps;
+  void *resp_caps;
   void *error_tramp;
-  void **error_caps;
+  void *error_caps;
 } blaze_http_client_handle_t;
 
 /* The first void* a bound callback receives is the handle the response came
@@ -1307,17 +1307,19 @@ void blaze_http_client_header(void *handle, const char *line) {
   t[len + add + 2] = '\\0';
 }
 
-void blaze_http_client_watch(void *handle, int what, void *trampoline, void **captured, size_t captured_count) {
+void blaze_http_client_watch(void *handle, int what, void *trampoline, void *captured, size_t captured_bytes) {
   blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
   if (!h) return;
   /* The values the program captured are copied: the array the compiler wrote
      out lives in the statement it registered the handler in, and the handler
-     runs later than that, when the request is sent. */
-  void **caps = NULL;
-  if (captured != NULL && captured_count > 0) {
-    caps = (void **)malloc(captured_count * sizeof(void *));
+     runs later than that, when the request is sent. What the values are is
+     the compiler's own business — the adapter carries them as the bytes they
+     are and hands them to the trampoline as they are. */
+  void *caps = NULL;
+  if (captured != NULL && captured_bytes > 0) {
+    caps = malloc(captured_bytes);
     if (caps == NULL) return;
-    memcpy(caps, captured, captured_count * sizeof(void *));
+    memcpy(caps, captured, captured_bytes);
   }
   if (what == BLAZE_HTTP_ON_ERROR) {
     h->error_tramp = trampoline;

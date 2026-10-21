@@ -284,7 +284,7 @@ test("a name a function captures is read, so the write that gave it its value st
     statements: [
       { k: "let", slot: { kind: "value", name: "x", mutable: true, type: F64 }, value: constOf("0"), line: 1 },
       { k: "set", name: "x", op: "=", value: constOf("5"), line: 2 },
-      { k: "let", slot: { kind: "value", name: "g", mutable: false, type: F64 }, value: { k: "functionRef", type: F64, name: "nested", captures: ["x"] }, line: 3 },
+      { k: "let", slot: { kind: "value", name: "g", mutable: false, type: F64 }, value: { k: "functionRef", type: F64, name: "nested", captures: [{ name: "x", type: F64 }] }, line: 3 },
     ],
     terminator: { k: "return", value: { k: "local", type: F64, name: "g" } },
   });

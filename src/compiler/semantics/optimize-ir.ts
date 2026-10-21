@@ -676,7 +676,7 @@ function capturedNames(body: Body): Set<string> {
     valuesOf(block, (value) => {
       walkSemanticValue(value, (one) => {
         if (one.k !== "functionRef") return;
-        for (const capture of one.captures) names.add(capture);
+        for (const capture of one.captures) names.add(capture.name);
       });
     });
   }
@@ -696,7 +696,7 @@ function capturedNames(body: Body): Set<string> {
  */
 function namesOfNode(one: SemanticValue): readonly string[] {
   if (one.k === "local") return [one.name];
-  if (one.k === "functionRef") return one.captures;
+  if (one.k === "functionRef") return one.captures.map((capture) => capture.name);
   return [];
 }
 

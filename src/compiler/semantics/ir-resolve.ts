@@ -61,6 +61,7 @@ import { isWholeNumberText } from "./objects.ts";
 import type { LiteralKeys } from "./program-objects.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { CompilerError } from "../core/errors.ts";
+import type { CaptureRef } from "../core/semantic-ir.ts";
 import { mapTypeScriptType, PROGRAM_ENTRY_SYMBOL } from "./typescript.ts";
 import type {
   ProgramAssignOp,
@@ -82,6 +83,7 @@ import {
   VOID,
   commonNumber,
   isBoolean,
+  isCarriedAsAddress,
   isFloat,
   isReference,
   isWide,
@@ -268,7 +270,7 @@ type DraftValue =
    * own and linked beside the program, and the program hands the runtime its
    * address.
    */
-  | { k: "function"; name: string; captures: string[]; symbol?: string };
+  | { k: "function"; name: string; captures: CaptureRef[]; symbol?: string };
 
 /** A statement the program runs, before it is written down as blocks. */
 type DraftStatement =
@@ -1382,12 +1384,16 @@ function callbackValue(type: string, value: string): string {
 /**
  * One value a callback captured, read out of the bundle it was carried in.
  *
- * The bundle is an array of the addresses of the values, one entry for each of
- * them and in the order the program captured them, so the trampoline reads the
- * one it wants out of it by the place it holds.
+ * The bundle holds a number as the number it is and a reference as the
+ * address of it, so the field the value is read out of is the one its type
+ * says. A number read out of the address field was rounded to a whole number
+ * on the way, so a callback that captured `1.5` was given `1`.
  */
-function captureValue(type: string, index: number): string {
-  return callbackValue(type, `((void **)p1)[${index}]`);
+function captureValue(param: string, capture: SemanticType, bundle: string): string {
+  if (param === "text") return `(const char *)(uintptr_t)(${bundle}.pointer)`;
+  if (param === "boxedtext") return `(char **)(uintptr_t)(${bundle}.pointer)`;
+  if (isCarriedAsAddress(capture)) return `(void*)(uintptr_t)(${bundle}.pointer)`;
+  return `(${bundle}.number)`;
 }
 
 /**
@@ -1415,8 +1421,9 @@ function serverHandlerTrampoline(
 ): { name: string; body: string }[] {
   /* The holders are declared above the trampoline that reads them, and in a
      unit of their own: a unit that opens a block is a definition, and the
-     prototypes the file carries are taken from those. */
-  const declarations = holders.map((holder) => `static void *${holder} = 0;`).join("\n");
+     prototypes the file carries are taken from those. A holder holds a value
+     as it was captured, so a number it holds is the number it is. */
+  const declarations = holders.map((holder) => `static blaze_capture_t ${holder};`).join("\n");
   return [
     { name: `${trampolineName}_captures`, body: declarations },
     {
@@ -2794,8 +2801,8 @@ class ProgramResolver {
           // A number the program wrote out is the number it was written as,
           // wherever it is read; a number it computed is read by the name it
           // was declared under.
-          if (held.kind === "number" && !held.mutable && held.text !== "") return held.text;
-          return held.name;
+          const name = held.kind === "number" && !held.mutable && held.text !== "" ? held.text : held.name;
+          return { name, type: capture.type };
         }) ?? [];
         return { k: "function", name, captures };
       }      case "shared": {
@@ -2896,8 +2903,8 @@ class ProgramResolver {
             // A number the program wrote out is the number it was written as,
             // wherever it is read; a number it computed is read by the name it
             // was declared under.
-            if (held.kind === "number" && !held.mutable && held.text !== "") return held.text;
-            return held.name;
+            const name = held.kind === "number" && !held.mutable && held.text !== "" ? held.text : held.name;
+            return { name, type: capture.type };
           }) ?? [];
           return { k: "function", name: value.name, captures };
         }
@@ -4195,7 +4202,9 @@ class ProgramLowering {
           const captured = draft.signature.params.slice(draft.params.length);
           const args = [
             ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
-            ...captured.map((param, index) => callbackValue(param.type, holders[index] ?? "0")),
+            ...captured.map((param, index) =>
+              captureValue(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
+            ),
           ].join(", ");
           const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
           return serverHandlerTrampoline(trampolineName, draft, holders, call);
@@ -4210,7 +4219,11 @@ class ProgramLowering {
           .map((param, index) =>
             index < draft.params.length
               ? callbackValue(param.type, index === 0 ? "p0" : "0")
-              : captureValue(param.type, index - draft.params.length),
+              : captureValue(
+                  param.type,
+                  draft.captured[index - draft.params.length]?.type ?? param.type,
+                  `((blaze_capture_t *)p1)[${index - draft.params.length}]`,
+                ),
           )
           .join(", ");
         const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
@@ -4233,7 +4246,9 @@ class ProgramLowering {
           const captured = draft.signature.params.slice(draft.params.length);
           const args = [
             ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
-            ...captured.map((param, index) => callbackValue(param.type, holders[index] ?? "0")),
+            ...captured.map((param, index) =>
+              captureValue(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
+            ),
           ].join(", ");
           const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
           return serverHandlerTrampoline(trampolineName, draft, holders, call);

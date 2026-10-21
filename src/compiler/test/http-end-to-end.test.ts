@@ -245,17 +245,17 @@ test("every value a client callback captured is carried to the callback", () => 
   const written = generateProgramDriver(resolved(capturingClientSource(18088)), true);
   assert.match(
     written,
-    /blaze_http_caps\[2\] = \{ \(void \*\)\(uintptr_t\)\(\w+\), \(void \*\)\(uintptr_t\)\(\w+\) \};/,
+    /blaze_capture_t blaze_http_caps\[2\] = \{ \(blaze_capture_t\)\{ \.pointer = \(void \*\)\(uintptr_t\)\(\w+\), \.number = 0\.0 \}, \(blaze_capture_t\)\{ \.pointer = \(void \*\)\(uintptr_t\)\(\w+\), \.number = 0\.0 \} \};/,
     "the values the callback captured are written out as a bundle of two",
   );
   assert.match(
     written,
-    /blaze_http_client_watch\(blaze_http_req, 0, \(void \*\)__arrow_trampoline_\d+, blaze_http_caps, 2\);/,
+    /blaze_http_client_watch\(blaze_http_req, 0, \(void \*\)__arrow_trampoline_\d+, blaze_http_caps, sizeof\(blaze_http_caps\)\);/,
     "the request carries the whole bundle of them to the adapter",
   );
   assert.match(
     written,
-    /__arrow_trampoline_\d+\(void \*p0, void \*p1\) \{\n {2}__arrow_\d+\([^;]*\(\(void \*\*\)p1\)\[0\][^;]*\(\(void \*\*\)p1\)\[1\]/,
+    /__arrow_trampoline_\d+\(void \*p0, void \*p1\) \{\n {2}__arrow_\d+\([^;]*\(\(blaze_capture_t \*\)p1\)\[0\]\.pointer[^;]*\(\(blaze_capture_t \*\)p1\)\[1\]\.pointer/,
     "the trampoline reads both of them out of the bundle",
   );
 });
@@ -269,6 +269,48 @@ test("C backend answers a request made by a callback that captured two values", 
     const answered = run(client, [], { timeoutMs: 30_000 });
     assert.equal(answered.code, 0, answered.stderr);
     assert.equal(answered.stdout.trim(), "got: !", "the callback read both of the values it captured");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+/** A client whose callback captured a number that is not a whole number. */
+function numberCapturingClientSource(port: number): string {
+  return `const port = ${port};\n` +
+    `const scale = 1.5;\n` +
+    `const req = http.request(\`http://127.0.0.1:\${port}/\`, { method: "GET" }, (res) => {\n` +
+    `  console.log(scale);\n` +
+    `});\n` +
+    `req.end();\n`;
+}
+
+test("a number a callback captured is carried to it as the number it is", () => {
+  // A capture used to be carried to the callback as a pointer, and a number
+  // carried as a pointer is rounded to a whole number on the way: a callback
+  // that captured 1.5 was given 1.
+  const written = generateProgramDriver(resolved(numberCapturingClientSource(18093)), true);
+  assert.match(
+    written,
+    /blaze_capture_t blaze_http_caps\[1\] = \{ \(blaze_capture_t\)\{ \.pointer = NULL, \.number = \(double\)\(1\.5\) \} \};/,
+    "the number is carried as the number it is",
+  );
+  assert.match(
+    written,
+    /__arrow_trampoline_\d+\(void \*p0, void \*p1\) \{\n {2}__arrow_\d+\([^;]*\(\(blaze_capture_t \*\)p1\)\[0\]\.number/,
+    "the trampoline reads the number out of the bundle",
+  );
+});
+
+test("C backend answers a request made by a callback that captured a number", async () => {
+  const port = 18094;
+  const server = await buildHttpBinary("c", createServerSource(port));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("c", numberCapturingClientSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.equal(answered.stdout.trim(), "1.5", "the callback read the number it captured as it was written");
   } finally {
     running.kill();
     await new Promise((r) => setTimeout(r, 300));

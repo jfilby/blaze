@@ -21,12 +21,14 @@ import { generateProgramSource, type ProgramTarget } from "./program-emit.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import {
   isBoolean,
+  isCarriedAsAddress,
   isFloat,
   isNumber,
   isReference,
   isTextType,
   isUnsigned,
   isWideType,
+  type CaptureRef,
   type SemanticCall,
   type SemanticReduction,
   type SemanticType,
@@ -42,7 +44,16 @@ import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cS
 /** The operator C spells for the one the source used. */
 
 /** The helpers a program needs that the runtime does not provide. */
-const DRIVER_HELPERS = `/* A string the program built, held as a NUL terminated managed value. */
+const DRIVER_HELPERS = `/* One value a callback captured, carried to it as it was captured: a
+   reference or a string as the address of it, and a number as the number it
+   is. A number carried as an address was rounded to a whole number on the
+   way, so a callback that captured 1.5 was given 1. */
+typedef struct blaze_capture_s {
+  void* pointer;
+  double number;
+} blaze_capture_t;
+
+/* A string the program built, held as a NUL terminated managed value. */
 static const char* program_string(const char* text, size_t length) {
   const char* copy = (const char*)${RUNTIME_NAME}_string_new((const unsigned char*)text, length);
   if (copy == NULL) program_fail("out of memory");
@@ -994,7 +1005,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
           const captures = Array.isArray(cb.captures) ? cb.captures : [];
           if (captures.length > 0) {
             const held = captures.map(
-              (capture, index) => `blaze_capture_${cb.name}_${index} = (void *)(uintptr_t)(${capture})`,
+              (capture, index) => `blaze_capture_${cb.name}_${index} = ${this.captureEntry(capture)}`,
             );
             trampoline = `(${held.join(", ")}, ${trampoline})`;
           }
@@ -1138,7 +1149,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
         const cb = call.args[3];
         let invoke = `${argument(3)}()`;
         if (cb !== undefined && cb.k === "functionRef" && Array.isArray(cb.captures) && cb.captures.length > 0) {
-          invoke = `${argument(3)}(${cb.captures.join(", ")})`;
+          invoke = `${argument(3)}(${cb.captures.map((capture) => capture.name).join(", ")})`;
         }
         const handler = `((void(*)(void*, void*)) (uintptr_t) ${argument(0)})`;
         /* blaze_http_server_new binds the listening socket before it returns, so
@@ -1154,7 +1165,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
         if (cb !== undefined && cb.k === "functionRef") {
           const name = cb.name;
           const captures = Array.isArray(cb.captures) ? cb.captures : [];
-          invoke = `${name}(${captures.join(", ")})`;
+          invoke = `${name}(${captures.map((capture) => capture.name).join(", ")})`;
         }
         return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
       }
@@ -1215,7 +1226,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
            fires here. */
         if (eventName === "error") {
           const bound = this.callbackRef(call.args[2], "an event the request carries a listener for");
-          return `({ ${bound.bundle.declaration} blaze_http_client_watch((void *)(uintptr_t)${owner}, 1, ${bound.trampoline}, ${bound.bundle.name}, ${bound.count}); 1.0; })`;
+          return `({ ${bound.bundle.declaration} blaze_http_client_watch((void *)(uintptr_t)${owner}, 1, ${bound.trampoline}, ${bound.bundle.name}, ${bound.bundle.bytes}); 1.0; })`;
         }
         const cb = call.args[2];
         let invoke = "0.0";
@@ -1333,7 +1344,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
     }
     const bound = this.callbackRef(call.args[2], "a response, the one the callback of the request it opens reads");
     lines.push(`${bound.bundle.declaration}`);
-    lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.bundle.name}, ${bound.count});`);
+    lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.bundle.name}, ${bound.bundle.bytes});`);
     lines.push("(double)(uintptr_t)blaze_http_req;");
     return `({ ${lines.join(" ")} })`;
   }
@@ -1407,7 +1418,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
   private callbackRef(
     value: SemanticValue,
     what: string,
-  ): { trampoline: string; bundle: { declaration: string; name: string }; count: number } {
+  ): { trampoline: string; bundle: { declaration: string; name: string; bytes: string } } {
     if (value === undefined || value.k !== "functionRef" || typeof value.name !== "string" || !value.name.startsWith("__arrow_")) {
       throw driverError(
         `http requests hand ${what} an arrow written where the call is made`,
@@ -1417,22 +1428,37 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
     const trampoline = `__arrow_trampoline_${value.name.slice("__arrow_".length)}`;
     const captures = Array.isArray(value.captures) ? value.captures : [];
     const bundle = this.captureBundle(captures);
-    return { trampoline: `(void *)${trampoline}`, bundle, count: captures.length };
+    return { trampoline: `(void *)${trampoline}`, bundle };
   }
 
   /**
-   * The bundle of the values a callback captured: an array of the addresses of
-   * them, one entry for each of them and in the order the program captured
-   * them. The trampoline the callback is called through reads them out of it,
-   * so a callback that captured nothing is given no bundle at all.
+   * The bundle of the values a callback captured: an array of them, one entry
+   * for each and in the order the program captured them. The trampoline the
+   * callback is called through reads them out of it, so a callback that
+   * captured nothing is given no bundle at all.
    */
-  private captureBundle(captures: readonly string[]): { declaration: string; name: string } {
-    if (captures.length === 0) return { declaration: "", name: "NULL" };
-    const entries = captures.map((capture) => `(void *)(uintptr_t)(${capture})`).join(", ");
+  private captureBundle(captures: readonly CaptureRef[]): { declaration: string; name: string; bytes: string } {
+    if (captures.length === 0) return { declaration: "", name: "NULL", bytes: "0" };
+    const entries = captures.map((capture) => this.captureEntry(capture)).join(", ");
     return {
-      declaration: `void *blaze_http_caps[${captures.length}] = { ${entries} };`,
+      declaration: `blaze_capture_t blaze_http_caps[${captures.length}] = { ${entries} };`,
       name: "blaze_http_caps",
+      bytes: "sizeof(blaze_http_caps)",
     };
+  }
+
+  /**
+   * One captured value, as it is written into the bundle it is carried in.
+   *
+   * A number is carried as the number it is and a reference as the address of
+   * it, so a number that is not a whole number arrives as it was written. A
+   * number carried as an address was rounded to a whole number on the way.
+   */
+  private captureEntry(capture: CaptureRef): string {
+    if (isCarriedAsAddress(capture.type)) {
+      return `(blaze_capture_t){ .pointer = (void *)(uintptr_t)(${capture.name}), .number = 0.0 }`;
+    }
+    return `(blaze_capture_t){ .pointer = NULL, .number = (double)(${capture.name}) }`;
   }
 
   argument(type: SemanticType, expression: string): string {

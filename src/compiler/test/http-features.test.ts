@@ -232,3 +232,37 @@ const server = http.createServer((req: any, res: any) => {
   assert.match(written, /blaze_capture_/, "the names the handler captured are held for it");
   assert.match(written, /state/, "the state is the program's own");
 });
+
+test("a number a handler captured is held for it as the number it is", () => {
+  // The names a handler captured are held where the handler reads them, and a
+  // number used to be held as an address — which is rounded to a whole number
+  // on the way: a handler that captured 1.5 was given 1.
+  const source = `
+const scale = 1.5;
+
+const server = http.createServer((req: any, res: any) => {
+	console.log(scale);
+	res.writeHead(200);
+	res.end("counted");
+});
+`;
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const resolved = resolveProgram(
+    phase.body as never,
+    phase.program,
+    phase.objectNames,
+    phase.objectLayouts,
+    phase.objectKeys,
+  );
+  const written = generateProgramDriver(resolved, true);
+  assert.match(
+    written,
+    /blaze_capture_\w+ = \(blaze_capture_t\)\{ \.pointer = NULL, \.number = \(double\)\(1\.5\) \}/,
+    "the number is held as the number it is",
+  );
+  assert.match(
+    written,
+    /\(blaze_capture_\w+\.number\)/,
+    "the handler is given the number out of the holder",
+  );
+});
