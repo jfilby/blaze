@@ -1149,13 +1149,18 @@ class FunctionEmitter {
         );
       }
       case "select": {
-        const thenExpr = (value.then.k === "text" || (value.then.k === "const" && typeof (value.then as any).text === "string"))
-          ? `${RUNTIME_NAME}_box_string(${this.raw(value.then, depth)})`
-          : this.expression(value.then, value.type, depth);
-        const otherwiseExpr = (value.otherwise.k === "text" || (value.otherwise.k === "const" && typeof (value.otherwise as any).text === "string"))
-          ? `${RUNTIME_NAME}_box_string(${this.raw(value.otherwise, depth)})`
-          : this.expression(value.otherwise, value.type, depth);
-        return `((${this.condition(value.condition, depth)}) ? ${thenExpr} : ${otherwiseExpr})`;
+        // A text arm of a choice is a text the runtime holds, so it is boxed
+        // where the choice is a value of its own. A choice of texts is a text
+        // itself, and a wide number is a number, so neither is boxed: a wide
+        // number boxed as a string is a pointer the compiler wrote where four
+        // limbs belong.
+        const arm = (one: SemanticValue): string => {
+          if (!isTextType(value.type) && (isTextType(one.type) || one.k === "text")) {
+            return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;
+          }
+          return this.expression(one, value.type, depth);
+        };
+        return `((${this.condition(value.condition, depth)}) ? ${arm(value.then)} : ${arm(value.otherwise)})`;
       }
 
       case "buffer":
