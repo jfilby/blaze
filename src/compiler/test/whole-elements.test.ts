@@ -350,6 +350,102 @@ test("the C the pass leaves a loop in computes the same numbers", () => {
   assert.match(written(FRACTION, "addMod"), /floor\(/);
 });
 
+test("a magnitude is not the value it is the magnitude of", async () => {
+  // The whole-number form of a magnitude is the magnitude of the whole number,
+  // and the whole number is the value only where the value is not below zero.
+  // Nothing says that it is not: a buffer holds whatever was written into it,
+  // and a negative one is a number the program wrote.
+  const source = [
+    "function magnitudes(o: Float64Array, a: Float64Array): void {",
+    "  let carry = 0;",
+    "  for (let i = 0; i < 4; i += 1) {",
+    "    const v = Math.abs(a[i]);",
+    "    o[i] = v + carry;",
+    "    carry = v;",
+    "  }",
+    "}",
+    "",
+    "const A = new Float64Array(4);",
+    "const O = new Float64Array(4);",
+    "for (let i = 0; i < 4; i += 1) A[i] = -5 - i;",
+    "magnitudes(O, A);",
+    "for (let i = 0; i < 4; i += 1) console.log(O[i]);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await linked(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 120_000 });
+  const delivered = run(binary, [], { timeoutMs: 120_000 });
+
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["5", "11", "13", "15"]);
+});
+
+test("an element is read where it is read, and not above the write before it", async () => {
+  // A value the whole-number form reads out of an element is the element as it
+  // is where it is read. Written above the body it was the element as it was
+  // before the write above it, which is another number.
+  const source = [
+    "function chained(o: Float64Array, a: Float64Array, b: Float64Array): void {",
+    "  for (let i = 0; i < 4; i += 1) {",
+    "    o[i] = a[i] + b[i];",
+    "    const t = o[i] + b[i];",
+    "    o[i] = t;",
+    "  }",
+    "}",
+    "",
+    "const A = new Float64Array(4);",
+    "const B = new Float64Array(4);",
+    "const O = new Float64Array(4);",
+    "for (let i = 0; i < 4; i += 1) { A[i] = 100 + i; B[i] = 7; }",
+    "chained(O, A, B);",
+    "for (let i = 0; i < 4; i += 1) console.log(O[i]);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await linked(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 120_000 });
+  const delivered = run(binary, [], { timeoutMs: 120_000 });
+
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["114", "115", "116", "117"]);
+});
+
+test("a name that held a fraction holds it still", async () => {
+  // A name the loop writes as a whole number is re-typed so that every read of
+  // it is a whole number, and it may only be re-typed where it held a whole
+  // number before the loop: a name that held a fraction holds it still, and a
+  // fraction read as a whole number is a number the program never wrote.
+  const source = [
+    "function carried(o: Float64Array, a: Float64Array): void {",
+    "  let x = 0.5;",
+    "  console.log(x);",
+    "  for (let i = 0; i < 4; i += 1) {",
+    "    const sum = a[i] + 1;",
+    "    o[i] = sum;",
+    "    x = sum;",
+    "  }",
+    "  console.log(x);",
+    "}",
+    "",
+    "const A = new Float64Array(4);",
+    "const O = new Float64Array(4);",
+    "for (let i = 0; i < 4; i += 1) A[i] = 9000000 + i;",
+    "carried(O, A);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await linked(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 120_000 });
+  const delivered = run(binary, [], { timeoutMs: 120_000 });
+
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["0.5", "9000004"]);
+});
+
 test("a function the checker runs with vectors is left as the source wrote it", () => {
   // The checker builds inputs of the declared types and asks whether the
   // function answers what its contract says, and a vector is not the program's

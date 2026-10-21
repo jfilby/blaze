@@ -985,6 +985,49 @@ export function compoundAsBinary(
 }
 
 /**
+ * The bound of a counted loop, rounded to the whole number the comparison
+ * against it answers the same.
+ *
+ * The counter of a counted loop is a whole number and the bound it stops at
+ * may be a fraction, and the language compares the two as the numbers they
+ * are: `for (let i = 0; i < 5.5; i++)` counts six turns, because five is below
+ * the bound and six is above it. A whole counter compared against a bound read
+ * at its own width as a whole number would stop at five and count five turns,
+ * which is a number the program never wrote.
+ *
+ * So the bound is rounded to the whole number the comparison against it
+ * answers the same: the ceiling of it for a counter that counts up to a bound
+ * it does not reach, and the floor of it for one that counts down. The
+ * rounding is done once, before the loop, and the loop itself counts in whole
+ * numbers as it was written to.
+ *
+ * The ceiling is written as the floor of the negated bound, negated again: a
+ * floor is what every backend writes and a ceiling is not.
+ */
+export function roundedBound(bound: SemanticValue, ceiling: boolean): SemanticValue {
+  const number: SemanticType = { kind: "primitive", name: "f64" };
+  const type = bound.type;
+  // A ceiling is the floor of the negated bound, negated again: `-floor(-x)`.
+  const argument: SemanticValue = ceiling ? { k: "unary", type, op: "neg", operand: bound } : bound;
+  const floor: SemanticValue = {
+    k: "call",
+    type: number,
+    call: {
+      callee: "Math.floor",
+      signature: { name: "Math.floor", symbol: "Math.floor", params: [{ name: "argument0", type: "f64" }], returns: "f64" },
+      args: [argument],
+      argTypes: [number],
+      returns: number,
+      effects: [],
+      ownership: "none",
+      retain: false,
+      builtin: true,
+    },
+  };
+  return ceiling ? { k: "unary", type, op: "neg", operand: floor } : floor;
+}
+
+/**
  * The line of the source a statement was written on, for one that states
  * none. A statement carries that line so a diagnostic can name the place in
  * the program it came from, and nothing is computed from it: the frontend

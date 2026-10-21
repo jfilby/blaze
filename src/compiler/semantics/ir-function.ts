@@ -60,7 +60,7 @@ import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor } from "./language.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
-import { isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
+import { isInteger, isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 
@@ -73,6 +73,11 @@ const I64_MAX = 9223372036854775807n;
 const I64_MIN = -9223372036854775808n;
 /** The wide number a bigint that does not fit in sixty-four bits is. */
 const U256: TypeExpr = { kind: "primitive", name: "u256" };
+/**
+ * The width `>>>` reads both of its sides at: the unsigned 32 bit numbers the
+ * language reads them as, whatever they are.
+ */
+const U32: TypeExpr = { kind: "primitive", name: "u32" };
 import type { AssignOperator, BinaryOp, Expression, Statement, UnaryOp as SourceUnaryOp } from "../core/ir.ts";
 import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
 import {
@@ -82,6 +87,7 @@ import {
   commonNumber,
   hasCall,
   isReference,
+  roundedBound,
   slotType,
   typeText,
   valueKind,
@@ -259,6 +265,13 @@ const COMPARISONS: Record<BinaryOp, CompareOp | null> = {
 /** The comparisons that ask whether two values are the same one. */
 const EQUALITY: readonly BinaryOp[] = ["===", "!==", "==", "!="];
 
+/**
+ * The compound assignments that need whole numbers, because the operator they
+ * apply rounds its target to a whole number. The program path refuses the
+ * same writes the same way (semantics/ir-resolve.ts).
+ */
+const WHOLE_ASSIGNMENTS: readonly AssignOperator[] = ["%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="];
+
 /** What each `op=` writes, as the one operation the IR states it as. */
 const COMPOUND: Record<Exclude<AssignOperator, "=">, ArithOp> = {
   "+=": "add",
@@ -295,6 +308,13 @@ const UNARY: Record<SourceUnaryOp, UnaryOp> = {
 interface LoopTarget {
   header: string;
   exit: string;
+  /** True once a `break` has left the loop, which is what says the loop may end. */
+  left: boolean;
+}
+
+/** Whether a block ends by leaving it, which is what an `if` arm that leaves does. */
+function leaves(block: SemanticBlock): boolean {
+  return block.terminator.k !== "next";
 }
 
 /** One block being written, and the loop whose body it is. */
@@ -334,6 +354,14 @@ class FunctionBody {
   private readonly layouts = new Map<string, string>();
   /** What a value hoisted, to be written before the statement it is used in. */
   private pending: SemanticStatement[] = [];
+  /**
+   * The `finally` blocks a leave has to run before it leaves, innermost last.
+   *
+   * A finally runs whether or not the body it belongs to left the block early,
+   * so the body is written with its finally here and every leave it makes runs
+   * the finally first.
+   */
+  private readonly finallys: Statement[][] = [];
   private counters: Record<"t" | "i", number> = { t: 0, i: 0 };
   private blockCount = 0;
 
@@ -425,6 +453,30 @@ class FunctionBody {
   }
 
   /**
+   * The `finally` blocks a leave has to run before it leaves, written where
+   * the leave is written.
+   *
+   * The innermost finally runs first: it is the one the body is inside, and
+   * the one the outer finally surrounds. Each is written with the ones inside
+   * it pending, so a leave inside a finally runs that finally's own finally —
+   * which the language does not do, and which is why the finally's own body is
+   * written with the pending ones popped.
+   */
+  private finallysWritten(): void {
+    if (this.finallys.length === 0) return;
+    const bodies = this.finallys.filter((body) => body.length > 0);
+    if (bodies.length === 0) return;
+    const pending = this.finallys.splice(0, this.finallys.length);
+    for (const body of pending) {
+      if (body.length === 0) continue;
+      this.finallys.push(body);
+      this.statements(body);
+      this.finallys.pop();
+    }
+    this.finallys.push(...pending);
+  }
+
+  /**
    * A name the compiler gives a value, from the counter of its kind. A name the
    * source declared is never rewritten, so a generated name that would be one
    * of them is the next one along.
@@ -501,10 +553,10 @@ class FunctionBody {
    * before the body is written, and control resumes in the block the loop was
    * written in, which is the one the loop statement is in.
    */
-  private loop(body: readonly Statement[]): { header: string; exit: string; body: SemanticBlock } {
+  private loop(body: readonly Statement[]): { header: string; exit: string; body: SemanticBlock; target: LoopTarget } {
     const header = this.blockId();
-    const target: LoopTarget = { header, exit: this.frame().block.id };
-    return { header, exit: target.exit, body: this.arm(body, target, true) };
+    const target: LoopTarget = { header, exit: this.frame().block.id, left: false };
+    return { header, exit: target.exit, body: this.arm(body, target, true), target };
   }
 
   /**
@@ -531,6 +583,9 @@ class FunctionBody {
       // what says where the walk over the blocks it leaves stops.
       if (left.body) break;
     }
+    // A loop that is left does not hold the code after it: the loop may end by
+    // its `break` and the code after it runs.
+    if (leaving) target.left = true;
     frame.block.terminator = { k: "jump", target: leaving ? target.exit : target.header, releases: names };
   }
 
@@ -542,9 +597,11 @@ class FunctionBody {
     for (const statement of list) {
       // A block that ends by returning or by leaving for another one runs
       // nothing after what ended it, and neither does the source it was
-      // written from.
+      // written from. A block that ends where nothing arrives ends there too:
+      // an `if` whose every arm leaves and a loop that never ends are both
+      // statements nothing after them can be reached from.
       const end = this.frame().block.terminator.k;
-      if (end === "jump" || end === "return") break;
+      if (end === "jump" || end === "return" || end === "unreachable") break;
       this.statement(statement);
     }
   }
@@ -557,6 +614,20 @@ class FunctionBody {
         // The name is written as the type it is read at, so `x += 1` adds a
         // number of that type to a number of that type.
         const held = this.read(statement.target, statement.line);
+        // A compound assignment writes its operator down on the type of the
+        // name, so `%=` on a double is a target no compiler accepts: the C
+        // backend writes `x %= 3.0`, which is not C at all. The operator
+        // decides what the name may be, as it does in a binary expression,
+        // where a whole operator needs whole numbers. The program path refuses
+        // the same write the same way (semantics/ir-resolve.ts).
+        if (WHOLE_ASSIGNMENTS.includes(statement.op) && !isInteger(slotType(held.slot))) {
+          const name = typeText(slotType(held.slot));
+          throw this.error(
+            `"${statement.op.slice(0, -1)}" needs whole numbers`,
+            statement.line,
+            `"${statement.target}" is a ${name}, and "${statement.op}" rounds it to a whole number`,
+          );
+        }
         // The count of a shift is a machine word, whatever the number being
         // shifted is — the same rule the binary form follows, over the name
         // rather than over a literal.
@@ -618,6 +689,19 @@ class FunctionBody {
         // Whatever the value hoisted is written before the block ends, and what
         // it hoisted into is what the function hands back.
         this.flush();
+        // A finally runs before the function returns, and the value the return
+        // hands back is computed before the finally runs: the language reads
+        // the value of a `return` and then runs the finally and then returns
+        // it. The value is therefore bound to a name of its own and the finally
+        // is written between the binding and the return.
+        if (this.finallys.length > 0 && this.finallys.some((body) => body.length > 0)) {
+          const name = this.generated("t");
+          const slot: SemanticSlot = { kind: "value", name, mutable: false, type: value.type };
+          this.write({ k: "let", slot, value, line: statement.line });
+          this.finallysWritten();
+          this.frame().block.terminator = { k: "return", value: { k: "local", type: value.type, name } };
+          return;
+        }
         this.frame().block.terminator = { k: "return", value };
         return;
       }
@@ -626,6 +710,14 @@ class FunctionBody {
         const then = this.arm(statement.then, this.frame().loop);
         const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop);
         this.write({ k: "if", condition, then, otherwise, line: statement.line });
+        // An `if` with an arm on each side, each of which leaves, is a statement
+        // nothing after it can be reached from. The block says so, rather than
+        // falling out of itself into a return of nothing: a function declared to
+        // return a number does not end by handing back whatever the register
+        // held, and a function that returns from every path returns.
+        if (otherwise !== null && this.frame().block.terminator.k === "next" && leaves(then) && leaves(otherwise)) {
+          this.frame().block.terminator = { k: "unreachable" };
+        }
         return;
       }
       case "try": {
@@ -646,12 +738,23 @@ class FunctionBody {
         // Run the protected body. It may leave the block early (return / jump),
         // in which case there is nothing to catch and the check below is not
         // reached.
+        //
+        // A finally runs whether or not the body left the block early, so the
+        // body is written with the finally pending: every leave it makes runs
+        // the finally first. A leave is written as a statement of the block it
+        // is written in, so the finally's own statements are written before it
+        // and run before it.
+        this.finallys.push(statement.finallyBody ?? []);
         this.statements(statement.body);
+        this.finallys.pop();
         // If the body fell through, an error is pending and there is a catch
         // arm, run it. The catch parameter is bound to `blaze_last_error()` so
         // a `catch (e)` can inspect the error, and it is declared inside the
         // catch arm so it is only initialized when there actually is an error.
+        // The arm is written with the finally pending as well: a return out of
+        // the arm runs the finally before it returns.
         if (statement.catchBody !== null) {
+          this.finallys.push(statement.finallyBody ?? []);
           const catchBody: Statement[] =
             statement.catchParam === null
               ? statement.catchBody
@@ -671,6 +774,7 @@ class FunctionBody {
             statement.line,
           ).value;
           const catchBlock = this.arm(catchBody, this.frame().loop);
+          this.finallys.pop();
           this.write({ k: "if", condition: hadError, then: catchBlock, otherwise: null, line: statement.line });
         }
         // Finally runs whether or not the catch arm ran.
@@ -679,12 +783,19 @@ class FunctionBody {
       }
       case "while": {
         const condition = this.typed(statement.condition, null, statement.line).value;
-        this.write({ k: "loop", loop: { kind: "while", condition, ...this.loop(statement.body) }, line: statement.line });
+        const { target, ...info } = this.loop(statement.body);
         // `while (true)` never leaves its body through the loop's exit, so
-        // nothing written after it is reachable; mark the block accordingly,
-        // the way an `if` whose every arm leaves is marked.
+        // nothing written after it is reachable — unless the body leaves the
+        // loop with a `break`, which is the one way out of it. A loop that may
+        // be left is not a loop that never ends, and the code after it runs.
         const conditionText = (statement.condition as { text?: string; name?: string }).text ?? (statement.condition as { name?: string }).name;
-        if (conditionText === "true" || conditionText === "1") {
+        const neverExits = (conditionText === "true" || conditionText === "1") && !target.left;
+        this.write({
+          k: "loop",
+          loop: { kind: "while", condition, ...info, ...(neverExits ? { neverExits: true } : {}) },
+          line: statement.line,
+        });
+        if (neverExits) {
           this.frame().block.terminator = { k: "unreachable" };
         }
         return;
@@ -718,6 +829,10 @@ class FunctionBody {
       }
       case "break":
       case "continue":
+        // A finally runs before the body leaves, and a break or a continue is
+        // a leave: the finally's statements are written before the jump and
+        // run before it.
+        this.finallysWritten();
         this.jump(statement.kind === "break", statement.line);
         return;
       case "print":
@@ -829,7 +944,23 @@ class FunctionBody {
     // A number written as the start is counted in the type the loop counts in.
     const starts: SemanticValue =
       from.value.k === "const" && counted.kind === "primitive" ? { ...from.value, type: counted } : from.value;
-    const bound = this.typed(statement.to, type, statement.line).value;
+    // The bound is where the loop stops, and the comparison that stops it is
+    // between the counter and the bound. A counter that counts in whole
+    // numbers and a bound that is a fraction are compared as the numbers they
+    // are: `for (let i = 0; i < 5.5; i++)` counts six turns. A bound read at
+    // the counter's width would stop the loop at five, so a bound that is not
+    // a whole number is rounded to the whole number the comparison against it
+    // answers the same — the ceiling of it for a counter that counts up to a
+    // bound it does not reach, and the floor of it for one that counts down. A
+    // counter that counts in fractions is compared against the bound as it is,
+    // and the bound is left alone.
+    const natural = this.typed(statement.to, null, statement.line);
+    const wholeCounter = counted.kind === "primitive" && isWhole(counted.name);
+    const bound: SemanticValue = wholeCounter && !countsWholeNumber(statement.to, natural.inferred)
+      ? roundedBound(natural.value, statement.down === statement.inclusive)
+      : natural.value.k === "const" && counted.kind === "primitive"
+        ? { ...natural.value, type: counted }
+        : natural.value;
     // A number written as the step is counted in the type the loop counts in,
     // for the same reason the start is: the IR states the loop in one width.
     const moves: SemanticValue | null =
@@ -1269,15 +1400,24 @@ class FunctionBody {
         inferred: held,
       };
     }
-    const left = this.typed(expression.left, null, line);
+    // `>>>` is the operator the language converts rather than refuses: both of
+    // its sides are read as the unsigned 32 bit numbers the language reads
+    // them as, whatever they are, and what it answers is one of those. The
+    // program path states it the same way (semantics/ir-resolve.ts), so a
+    // function and a program body answer the same question the same way. A
+    // shift of a double is a shift no target has: the C backend writes
+    // `double >> double`, which is not C at all.
+    const converting = op === ">>>";
+    const left = this.typed(expression.left, converting ? asType(U32) : null, line);
     // The count of a shift is a machine word, whatever the number being shifted
     // is: the kernel every backend shifts with takes one word of count, and a
     // count typed at the width of a wide number is the low half of the number
     // being shifted rather than the number of bits to move. `wholeResult` types
     // both sides at the width of the wide one, which is the value's width and
-    // not the count's.
-    const counted = op === "<<" || op === ">>" || op === ">>>";
-    const right = this.typed(expression.right, counted ? asType(USIZE) : null, line);
+    // not the count's. The count of a `>>>` is one of the 32 bit numbers the
+    // language reads its sides as, so it is read as one of those.
+    const counted = op === "<<" || op === ">>";
+    const right = this.typed(expression.right, counted ? asType(USIZE) : converting ? asType(U32) : null, line);
     // Asking whether a value is there is a different question from comparing
     // two of them, and one the IR states on its own.
     if (EQUALITY.includes(op) && (expression.left.k === "null" || expression.right.k === "null")) {
@@ -1340,9 +1480,11 @@ class FunctionBody {
     const rules = rulesFor(this.context.language);
     const type = op === "/" && rules.division === "true"
       ? F64
-      : WHOLE_OPERATORS[op] === true
-        ? wholeResult(left.inferred, right.inferred)
-        : numeric(left.inferred, right.inferred);
+      : converting
+        ? U32
+        : WHOLE_OPERATORS[op] === true
+          ? wholeResult(left.inferred, right.inferred)
+          : numeric(left.inferred, right.inferred);
     const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
     return {
       value: { k: "arith", type, op: arithmetic, left: left.value, right: right.value },

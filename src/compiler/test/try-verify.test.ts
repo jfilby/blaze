@@ -80,6 +80,34 @@ test("try/catch/finally lowers finally after the check", () => {
   assert.match(ir, /blaze_had_error/);
 });
 
+test("a finally runs before the body returns", () => {
+  // A finally runs whether or not the body left the block early, and the IR
+  // states a return as the end of a block: the value the return hands back is
+  // therefore bound to a name of its own, the finally's statements are written
+  // between the binding and the return, and the return hands back the name.
+  const source = [
+    "export function g(x: number): number {",
+    "  try {",
+    "    return x + 1;",
+    "  } finally {",
+    "    const z = 9;",
+    "  }",
+    "}",
+  ].join("\n");
+  const ir = functionIr(source, "g");
+
+  // The value the return hands back is computed before the finally runs, which
+  // is what the language does, and the finally's own statements are written
+  // between the binding and the return.
+  const bound = /let value\[f64\] (t\d+) immutable = \[add\[f64\]/.exec(ir);
+  assert.ok(bound !== null, `the return's value is bound to a name of its own: ${ir}`);
+  const name = bound[1];
+  const binding = ir.indexOf(`let value[f64] ${name} immutable`);
+  const finallyAt = ir.indexOf("let value[f64] z mutable");
+  const returnAt = ir.indexOf(`return local[f64] ${name}`);
+  assert.ok(binding < finallyAt && finallyAt < returnAt, `the finally runs before the return: ${ir}`);
+});
+
 test("catch (e) binds e to blaze_last_error", () => {
   const source = [
     "export function h(x: number): void {",

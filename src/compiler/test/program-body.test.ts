@@ -16,6 +16,7 @@ import { run } from "../core/process.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import type { ProgramValue } from "../semantics/module.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { resolveFunction } from "../semantics/ir-function.ts";
 import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-validate.ts";
 import { typeText, type SemanticFunction, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
@@ -1679,6 +1680,170 @@ test("`>>>` is the shift the language defines, and `toFixed` writes at the digit
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, "2147483647\n14\n9\n1.414213562\n0.3333\n-0.00\n1e+21\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("`>>>` by nothing still converts the value it shifts", async () => {
+  // A shift by nothing moves no bit, but `>>>` is a conversion as well as a
+  // shift: the value is read as one of the unsigned 32 bit numbers the
+  // language reads them as, so `-1 >>> 0` is 4294967295 and not -1. The
+  // rewrite that folded the shift away folded the conversion with it.
+  const source = [
+    "console.log(-1 >>> 0);",
+    "console.log(5000000000 >>> 0);",
+    "let x = -1;",
+    "console.log(x >>> 0);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "4294967295\n705032704\n4294967295\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("`>>>` in a function body is the shift the language defines", async () => {
+  // `>>>` reads both of its sides as the unsigned 32 bit numbers the language
+  // reads them as, and a function body is read by the other resolver, which
+  // typed the shift as the type of the two sides: a shift of a double, which
+  // the C backend wrote as `double >> double` — not C at all, so the build
+  // failed where the language has an answer.
+  const source = [
+    "function shift(x: number): number {",
+    "  return x >>> 1;",
+    "}",
+    "console.log(shift(-1));",
+    "console.log(shift(56 >>> 2));",
+    "console.log(shift(7 * 8) >>> 2);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "2147483647\n7\n7\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("a compound assignment a whole operator needs is refused on a double in a function body", () => {
+  // A compound assignment writes its operator down on the type of the name, so
+  // `%=` on a double is a target no compiler accepts: the C backend wrote
+  // `x %= 3.0`, which is not C at all. The program path refuses the same
+  // write by name, and a function body refuses it the same way.
+  const refused = diagnostic(() => {
+    const phase = phaseOf(
+      "typescript",
+      { "main.ts": "export function f(): number {\n  let x = 7;\n  x %= 3;\n  return x;\n}\nconsole.log(f());\n" },
+      "main.ts",
+    );
+    const contracts = phase.program.files.flatMap((file) => Object.entries(file.functions));
+    const context = {
+      objectNames: phase.objectNames,
+      functions: Object.fromEntries(contracts),
+      language: phase.program.language,
+    };
+    resolveFunction(contracts[0][1], context);
+  });
+  assert.match(refused, /"%" needs whole numbers/);
+  assert.match(refused, /"x" is a f64/);
+});
+
+test("the body of a loop is a scope of its own", () => {
+  // A name a loop body declares is a name of that body: a name outside it may
+  // be declared again inside it, and a name it declares is not a name outside
+  // it. The body of a loop was resolved in the scope around it, so a name it
+  // declared was a name of that scope and a read of it after the loop was a
+  // read of a name nothing declares.
+  const shadowed = resolved({
+    "main.ts": ["let i = 0;", "while (i < 3) {", "  let i = 10;", "  console.log(i);", "}", ""].join("\n"),
+  });
+  assert.deepEqual(semanticIrProblems(shadowed), []);
+
+  const leaked = diagnostic(() =>
+    resolved({
+      "main.ts": ["let j = 0;", "while (j < 3) {", "  let k = 5;", "  j += 1;", "}", "console.log(k);", ""].join("\n"),
+    }),
+  );
+  assert.match(leaked, /"k" is not declared/);
+});
+
+test("a loop that never ends ends the block it is written in", () => {
+  // `while (true)` without a break never ends, so what the source wrote after
+  // it is dead. The block says so, and the statements after it are written
+  // nowhere: a block that claims nothing arrives and then holds the statements
+  // that follow it is a block the validator refuses.
+  const program = resolved({
+    "main.ts": ["let i = 0;", "while (true) { i += 1; }", "console.log(i);", ""].join("\n"),
+  });
+  assert.deepEqual(semanticIrProblems(program), []);
+});
+
+test("the left arm of a logical operator that calls is written once", () => {
+  // The left arm of a logical operator decides first, and the source form of
+  // these operators writes that arm out twice, so a call in it is written under
+  // a name. The length of a buffer is asked of the runtime, and an arm that
+  // asks is an arm that cannot be written twice.
+  const program = resolved({
+    "main.ts": ["const a = new Float64Array(3);", "if (a.length > 0 && a.length < 5) { console.log('yes'); }", ""].join("\n"),
+  });
+  assert.deepEqual(semanticIrProblems(program), []);
+});
+
+test("a loop that stops at a fraction stops where the language stops it", async () => {
+  // The counter of a loop is a whole number and the bound it stops at may be a
+  // fraction, and the language compares the two as the numbers they are:
+  // `for (let i = 0; i < 5.5; i++)` counts six turns, because five is below
+  // the bound and six is above it. A bound read at the counter's width stopped
+  // the loop at five and counted five turns, which is a number the program
+  // never wrote.
+  const source = [
+    "let c = 0;",
+    "for (let i = 0; i < 5.5; i++) { c += 1; }",
+    "console.log(c);",
+    "let d = 0;",
+    "for (let i = 0; i <= 5.5; i++) { d += 1; }",
+    "console.log(d);",
+    "let e = 0;",
+    "for (let i = 10; i > 5.5; i--) { e += 1; }",
+    "console.log(e);",
+    "const n = 5.5;",
+    "let f = 0;",
+    "for (let i = 0; i < n; i++) { f += 1; }",
+    "console.log(f);",
+    "let g = 0;",
+    "for (let i = 0; i < 5; i++) { g += 1; }",
+    "console.log(g);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "6\n6\n5\n6\n5\n");
+  assert.equal(delivered.stdout, sourceRun.stdout);
+});
+
+test("a loop that counts in fractions stops at the fraction it was written with", async () => {
+  // A counter that counts in fractions is compared against the bound as it is:
+  // the bound of this loop is half a number and the loop stops there, which is
+  // five turns and not the ten a whole counter against a rounded bound would
+  // have counted.
+  const source = [
+    "let count = 0;",
+    "for (let k = 0.0; k < 0.5; k += 0.1) { count += 1; }",
+    "console.log(count);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(sourceRun.code, 0, sourceRun.stderr);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "5\n");
   assert.equal(delivered.stdout, sourceRun.stdout);
 });
 

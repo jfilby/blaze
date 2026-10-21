@@ -299,6 +299,9 @@ interface Known {
 /** What nothing in the program states about a value. */
 const unknown: Known = { whole: false, reach: UNBOUNDED, reduced: null };
 
+/** A slot that holds a number, which is the one this pass re-types. */
+type ValueSlot = Extract<SemanticSlot, { kind: "value" }>;
+
 /** What the analysis knows about the name a value reads, and the buffers beside it. */
 interface Where {
   /** What each name the body has declared holds, in the order it declared them. */
@@ -994,6 +997,15 @@ function rewriteLoop(
   fresh: () => string,
 ): void {
   const body = loop.body;
+  // A counter this pass reads as a whole number has to hold whole numbers: a
+  // loop that counts in fractions — `for (let i = 0.5; i < n; i++)` — holds a
+  // counter that is not a whole number, and reading it as one answered with a
+  // number the program never wrote. What the counter holds is what the value
+  // it starts at and the value it moves by say, and not the width it is
+  // declared at: a counter a program counts in fractions with is a double and
+  // holds whole numbers all the same.
+  if (!knownOf(loop.from, where).whole) return;
+  if (loop.step !== null && !knownOf(loop.step, where).whole) return;
   // A name the body declares is one binding here, and a name the blocks above it
   // declared is one this pass would have to write the whole-number form of on
   // the far side of a boundary — so a loop over a name it shadows is left alone.
@@ -1015,11 +1027,19 @@ function rewriteLoop(
   // the next turn be read as a whole number in the turn that produces it — the
   // name is only whole once the body has said so.
   if (!wholeNumbersOf(body, inside, whole, slots)) return;
-  const bindings: SemanticStatement[] = [];
   const introduced: SemanticSlot[] = [];
-  if (!rewriteChain(body, inside, whole, slots, fresh, bindings, introduced)) return;
+  // The facts the names held before the loop, which is what a name the loop
+  // writes has to have held for the loop to write it in whole numbers: a slot
+  // that held a fraction holds it still, and reading it as a whole number is a
+  // number the program never wrote.
+  const before = new Map(where.locals);
+  // The slots the loop writes as whole numbers, which are re-typed once the
+  // whole loop has been rewritten: a loop that could not be rewritten leaves
+  // every slot as it was.
+  const retype: ValueSlot[] = [];
+  if (!rewriteChain(body, inside, whole, slots, fresh, before, introduced, retype)) return;
 
-  body.statements = [...bindings, ...body.statements];
+  for (const slot of retype) slot.type = WHOLE;
   for (const slot of introduced) if (!slots.has(slot.name)) slots.set(slot.name, slot);
 }
 
@@ -1029,9 +1049,14 @@ function rewriteLoop(
  * statement this pass has no whole-number form for leaves the chain alone and
  * answers false.
  *
- * The bindings the forms introduce are collected rather than written where they
- * are read, because a value the whole-number form reads out of an element is
- * bound above the statement that reads it.
+ * The bindings the forms introduce are written where they are read, and not
+ * above the body: a value the whole-number form reads out of an element is
+ * the element as it is where it is read, and a write above it would change
+ * what it reads.
+ *
+ * Nothing is written until the whole chain has been rewritten: a chain that
+ * cannot be rewritten leaves the body as it was, and a body half rewritten is
+ * a body that reads a name nothing declares.
  */
 function rewriteChain(
   body: SemanticBlock,
@@ -1039,17 +1064,25 @@ function rewriteChain(
   whole: ReadonlySet<string>,
   slots: Map<string, SemanticSlot>,
   fresh: () => string,
-  bindings: SemanticStatement[],
+  before: ReadonlyMap<string, Known>,
   introduced: SemanticSlot[],
+  retype: ValueSlot[],
 ): boolean {
+  const rewritten: SemanticStatement[] = [];
   for (const statement of body.statements) {
+    // The bindings one statement's whole form needs, which are written where
+    // that statement reads them.
+    const bindings: SemanticStatement[] = [];
     switch (statement.k) {
       case "let": {
         const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
         if (form === null) return false;
-        statement.slot = { kind: "value", name: statement.slot.name, mutable: statement.slot.mutable, type: WHOLE };
-        statement.value = form;
-        break;
+        rewritten.push(...bindings, {
+          ...statement,
+          slot: { kind: "value", name: statement.slot.name, mutable: statement.slot.mutable, type: WHOLE },
+          value: form,
+        });
+        continue;
       }
       case "set": {
         const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
@@ -1058,29 +1091,41 @@ function rewriteChain(
         // makes every read of the name anywhere in the function a whole number —
         // which the IR keeps, because a whole number read as a double is every
         // value the slot holds said as the wider of the two.
+        //
+        // It may only be re-typed when the name held a whole number before the
+        // loop: a slot that held a fraction holds it still, and a slot read as
+        // a whole number is a number the program never wrote.
         const slot = slots.get(statement.name);
         if (slot === undefined || slot.kind !== "value") return false;
-        slot.type = WHOLE;
-        statement.value = form;
-        break;
+        const held = before.get(statement.name);
+        if (held === undefined || !held.whole) return false;
+        retype.push(slot);
+        rewritten.push(...bindings, { ...statement, value: form });
+        continue;
       }
       case "setElement": {
         const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
         if (form === null) return false;
-        statement.value = form;
-        break;
+        rewritten.push(...bindings, { ...statement, value: form });
+        continue;
       }
       case "if": {
         if (reductionOf(statement) === null) return false;
-        for (const arm of blocksOf(statement)) {
-          if (!rewriteChain(arm, inside, whole, slots, fresh, bindings, introduced)) return false;
+        const then = { ...statement.then, statements: [...statement.then.statements] };
+        const otherwise =
+          statement.otherwise === null ? null : { ...statement.otherwise, statements: [...statement.otherwise.statements] };
+        if (!rewriteChain(then, inside, whole, slots, fresh, before, introduced, retype)) return false;
+        if (otherwise !== null && !rewriteChain(otherwise, inside, whole, slots, fresh, before, introduced, retype)) {
+          return false;
         }
-        break;
+        rewritten.push(...bindings, { ...statement, then, otherwise });
+        continue;
       }
       default:
         return false;
     }
   }
+  body.statements = rewritten;
   return true;
 }
 
@@ -1174,7 +1219,12 @@ function wholeForm(
       }
       const argument = value.call.args[0];
       if (argument === undefined) return null;
-      if (value.call.callee === "Math.abs") return wholeForm(argument, where, whole, fresh, bindings, introduced);
+      // The magnitude of a value is the value itself only where the value is
+      // not below zero, and nothing here says that it is not: a buffer holds
+      // whatever was written into it, and a negative one is a number the
+      // program wrote. The whole-number form of a magnitude is therefore not
+      // the magnitude of the whole number, and the call is left as it was.
+      if (value.call.callee === "Math.abs") return null;
       // The one rewriting that changes an operation: a whole number divided by a
       // power of two and floored is that whole number shifted down, because the
       // floor of a quotient and the shift down agree for every whole number and

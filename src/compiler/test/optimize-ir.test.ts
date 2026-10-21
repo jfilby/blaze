@@ -100,6 +100,53 @@ function countedLoop(bound: SemanticValue): SemanticBlock["statements"][number] 
   };
 }
 
+test("a right shift by nothing keeps the conversion it is as well", () => {
+  // `>>>` reads both of its sides as the unsigned 32 bit numbers the language
+  // reads them as, so the shift is a conversion as well as a shift: `x >>> 0`
+  // is `x` as one of those and not `x` as it is. The fold that answered with
+  // the value it was asked about dropped the conversion with the shift, and
+  // `-1 >>> 0` is 4294967295 rather than -1.
+  const converted = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("ushr", paramI("x"), constOf("0", U32), U32) },
+    statements: [],
+  }, U32, [{ kind: "value", name: "x", mutable: false, type: I32 }]);
+  assert.match(printed(converted), /ushr\[u32\]/);
+
+  // Where the conversion is nothing the fold still holds: a side that is
+  // already at the width the answer is at is the answer.
+  const same = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("ushr", { k: "local", type: U32, name: "x" }, constOf("0", U32), U32) },
+    statements: [],
+  }, U32, [{ kind: "value", name: "x", mutable: false, type: U32 }]);
+  assert.doesNotMatch(printed(same), /ushr\[u32\]/);
+});
+
+test("a binding whose value has an effect is not dropped", () => {
+  // A name nothing reads is a name nothing looks at, and dropping the binding
+  // is what lets the other rules run more than once. A binding whose value has
+  // an effect is not that: the effect is what the statement is there for, and
+  // dropping the binding took the effect out of the program.
+  const fn = fnOf({
+    id: "entry", releases: [], terminator: { k: "return", value: constOf("2") },
+    statements: [{
+      k: "let",
+      slot: { kind: "value", name: "y", mutable: false, type: F64 },
+      value: {
+        k: "call", type: F64,
+        call: {
+          callee: "side", builtin: false,
+          signature: { name: "side", symbol: "side", params: [], returns: "f64" },
+          args: [], argTypes: [], returns: F64, effects: ["io"], ownership: "none", retain: false,
+        },
+      },
+      line: 1,
+    }],
+  });
+  assert.match(printed(fn), /side/);
+});
+
 test("a number written out of two numbers written out is one number", () => {
   // `2 * scale + 8` with every operand a literal is a literal, and the
   // backends then have nothing to compute at run time.

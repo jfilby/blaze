@@ -40,7 +40,7 @@ import type {
   SemanticType,
   SemanticValue,
 } from "../core/semantic-ir.ts";
-import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
+import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, typeEquals, walkValues } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { restructureHotFunction } from "./restructure.ts";
@@ -413,7 +413,18 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // is. The three were written together and only the left one was
         // written down, so `x >> 0` and `x >>> 0` reached a backend as a
         // shift on every turn of whatever loop counted with them.
-        if ((value.op === "shr" || value.op === "ushr") && right === 0) return value.left;
+        //
+        // The shift moves no bit, but it is a conversion as well as a shift
+        // when the two are not the same width: `>>>` reads its sides as the
+        // unsigned 32 bit numbers the language reads them as, so `x >>> 0` is
+        // `x` as one of those and not `x` as it is. `-1 >>> 0` is 4294967295
+        // and `2.5 >>> 0` is 2, and folding the shift away answered with the
+        // value it was asked about rather than with the number the language
+        // reads it as. The fold is taken where the conversion is nothing:
+        // where the side is already at the width the answer is.
+        if ((value.op === "shr" || value.op === "ushr") && right === 0 && typeEquals(value.left.type, value.type)) {
+          return value.left;
+        }
         // A whole number divided by one is itself and a whole number
         // remaindered by one is zero, and neither is a fault: one is never
         // zero, so the divide the backend would run is one it does not have to.
@@ -949,6 +960,11 @@ function dropUnread(body: Body): boolean {
     block.statements = block.statements.filter((statement) => {
       if (statement.k === "let") {
         if (keep(statement.slot.name, block.releases.includes(statement.slot.name))) return true;
+        // A binding whose value is not a value — a call that has an effect, a
+        // read of memory, a division that may fault — is not dropped: the
+        // effect is what the statement is there for, and dropping the binding
+        // takes it out of the program.
+        if (!isSafeToCompute(statement.value)) return true;
         changed = true;
         return false;
       }

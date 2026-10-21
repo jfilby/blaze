@@ -284,6 +284,12 @@ function formOf(
         const left = formOf(value.left, reach, parameters, bindings);
         const right = formOf(value.right, reach, parameters, bindings);
         if (left === null || right === null) return null;
+        // The operand has to be a number a double holds exactly: the
+        // whole-number form shifts a whole number and the double form shifts
+        // the double it holds, and a value above 2^53 is a different number in
+        // the two. The bound of the operand is what says how large it is, and a
+        // bound that is not under 2^53 is a value this pass may not shift.
+        if (left.bound >= EXACT) return null;
         const bits = WHOLE_BITS[value.type.name];
         if (bits === undefined) return null;
         // The answer is a whole number of the type the operation is written at,

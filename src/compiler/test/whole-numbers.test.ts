@@ -118,6 +118,29 @@ test("a function every caller hands whole numbers to computes in whole numbers",
   assert.match(arm, /common\w+ = \(x \+ y\);/);
 });
 
+test("a shift of a value a double does not hold exactly is not computed in whole numbers", () => {
+  // The whole-number form shifts a whole number and the form the source wrote
+  // shifts the double it holds, and a value above 2^53 is a different number in
+  // the two. The reach an arm is written for is the widest one whose every
+  // intermediate is exact, and the product of two parameters and two millions
+  // is above 2^53 at the widest of them: the arm is written for a narrower one,
+  // where the shift moves a number both forms hold the same.
+  const source = programOf(
+    [
+      "  function big(x: number, y: number): number {",
+      "    return (x * y * 1000000 * 1000000 >>> 1) * 2;",
+      "  }",
+      "  for (let i = 0; i < reach; i += 1) console.log(big(i, i));",
+    ].join("\n"),
+  );
+  const c = written(source);
+
+  assert.doesNotMatch(c, /\+ 33554432ULL\) <= 67108864ULL/);
+  // The narrower reach the arm is written for is there, and the product of the
+  // two parameters and the two millions is under 2^53 at it.
+  assert.match(c, /\+ 64ULL\) <= 128ULL/);
+});
+
 test("a function one caller hands a double to is left as the source wrote it", () => {
   // One caller that passes a fraction is one whose parameter may not be read as
   // a whole number: truncating it would answer for a value the program never

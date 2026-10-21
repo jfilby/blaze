@@ -103,6 +103,7 @@ import {
   type SemanticValue,
   type UnaryOp,
   compoundAsBinary,
+  roundedBound,
 } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -2149,20 +2150,31 @@ class ProgramResolver {
           line: statement.line,
         };
 
-      case "while":
+      case "while": {
+        // The body of a loop is a scope of its own, as the body of every other
+        // block is: a name it declares is not a name outside it, and a name
+        // outside it may be declared again inside it.
+        this.open();
+        const body = this.looped(statement.body);
+        this.close();
         return {
           kind: "while",
           condition: this.condition(statement.condition, statement.line),
-          body: this.looped(statement.body),
+          body,
           line: statement.line,
         };
-      case "doWhile":
+      }
+      case "doWhile": {
+        this.open();
+        const body = this.looped(statement.body);
+        this.close();
         return {
           kind: "doWhile",
           condition: this.condition(statement.condition, statement.line),
-          body: this.looped(statement.body),
+          body,
           line: statement.line,
         };
+      }
       case "for":
         return this.counted(statement);
       case "forOf":
@@ -2594,7 +2606,14 @@ class ProgramResolver {
     const counted = whole ? (widths.length === 0 ? "i64" : programWholeOf(widths[0], widths[1] ?? widths[0])) : "f64";
     const type = numeric(statement.down && counted.startsWith("u") ? "i64" : counted);
     const from = this.value(statement.from, type, statement.line);
-    const to = this.value(statement.to, type, statement.line);
+    // The bound is drafted at the width the loop counts in, unless the loop
+    // counts in whole numbers and the bound is not one: a fraction read at a
+    // whole width is a number the program never wrote, and the loop compares
+    // against it as the fraction it is.
+    const wholeCounter = primitive(type) !== null && isWhole(primitive(type) as PrimitiveTypeName);
+    const to = wholeCounter && !countsWhole(bound)
+      ? this.value(statement.to, null, statement.line)
+      : this.value(statement.to, type, statement.line);
     const step = written === null ? null : this.value(statement.step as ProgramValue, type, statement.line);
     this.open();
     // A counter written as a bigint is one: `for (let i = 0n; ...)` counts in
@@ -4076,7 +4095,14 @@ interface BlockFrame {
   body: boolean;
 }
 
-/** True when writing a value twice would run it twice. */
+/**
+ * True when writing a value twice would run it twice.
+ *
+ * The rule is the one the validator holds a value to (see `hasCall` in
+ * `core/semantic-ir.ts`), and the two have to agree: the resolver hoists what
+ * the validator will not accept written twice, and a value the resolver says
+ * nothing runs in and the validator says runs in is written twice.
+ */
 function draftHasCall(value: DraftValue): boolean {
   switch (value.k) {
     case "call":
@@ -4084,33 +4110,53 @@ function draftHasCall(value: DraftValue): boolean {
     case "fill":
     case "sized":
     case "view":
-      return true;
+    // A buffer is laid out at run time, a length is asked of the runtime and
+    // an object is built at run time: all three are calls.
     case "buffer":
+    case "length":
+    case "stringLength":
+    case "object":
+      return true;
     case "literal":
     case "boolean":
     case "function":
     case "null":
-    case "length":
     case "reference":
       return false;
     case "element":
       return draftHasCall(value.index);
-    case "stringLength":
-      return draftHasCall(value.of);
     case "text":
-      return value.parts.some((part) => part.k === "value" && draftHasCall(part.value));
+      // A string written out in the source is laid down in the object beside
+      // the code; one with anything computed in it is built at run time.
+      return value.parts.some((part) => part.k === "value");
     case "compare":
+      // A comparison of two texts is the runtime's own.
+      if (value.how === "string") return true;
       return draftHasCall(value.left) || draftHasCall(value.right);
     case "isNull":
       return draftHasCall(value.operand);
     case "unary":
       return draftHasCall(value.operand);
-    case "binary":
+    case "binary": {
+      // A power is `pow`, and two texts put together are a string built at run
+      // time: the runtime measures the two, allocates the answer and copies
+      // the parts into it.
+      if (value.op === "**") return true;
+      if (value.op === "+" && value.type !== null && value.type.kind === "text") return true;
+      // A product and a quotient of a whole number wider than a machine word
+      // are the runtime kernel, for the same reason a power is.
+      if (
+        (value.op === "*" || value.op === "/" || value.op === "%") &&
+        value.type !== null &&
+        value.type.kind === "primitive" &&
+        (value.type.name === "u256" || value.type.name === "i256")
+      ) {
+        return true;
+      }
       return draftHasCall(value.left) || draftHasCall(value.right);
+    }
     case "conditional":
       return draftHasCall(value.condition) || draftHasCall(value.then) || draftHasCall(value.otherwise);
-    case "object":
-      return value.fields.some((field) => draftHasCall(field.value));
     case "field":
       return draftHasCall(value.object);
   }
@@ -4449,9 +4495,12 @@ class ProgramLowering {
       // block is the one the program runs next time round.
       // A `break` or a `continue` leaves the block, and a `return` ends the
       // function, so what the source wrote after either is dead and is written
-      // nowhere.
+      // nowhere. A block that ends where nothing arrives ends there too: an
+      // `if` whose every arm leaves and a loop that never ends are both
+      // statements nothing after them can be reached from, and what the source
+      // wrote after them is dead as well.
       const end = this.frame().block.terminator.k;
-      if (end === "jump" || end === "return") break;
+      if (end === "jump" || end === "return" || end === "unreachable") break;
       this.draft(statement);
     }
   }
@@ -4619,7 +4668,20 @@ class ProgramLowering {
       case "for": {
         const type = statement.type;
         const from = this.value(statement.from, type, statement.line);
-        const to = this.value(statement.to, type, statement.line);
+        // The bound is where the loop stops, and the comparison that stops it
+        // is between the counter and the bound. A counter that counts in whole
+        // numbers and a bound that is a fraction are compared as the numbers
+        // they are: `for (let i = 0; i < 5.5; i++)` counts six turns. A bound
+        // read at the counter's width would stop the loop at five, so a bound
+        // that is not a whole number is rounded to the whole number the
+        // comparison against it answers the same — the ceiling of it for a
+        // counter that counts up to a bound it does not reach, and the floor of
+        // it for one that counts down. A counter that counts in fractions is
+        // compared against the bound as it is, and the bound is left alone.
+        const wholeCounter = primitive(type) !== null && isWhole(primitive(type) as PrimitiveTypeName);
+        const to = wholeCounter && !countsWhole(statement.to)
+          ? roundedBound(this.value(statement.to, null, statement.line), statement.down === statement.inclusive)
+          : this.value(statement.to, type, statement.line);
         const step = statement.step === null ? null : this.value(statement.step, type, statement.line);
         this.statement({
           k: "loop",
