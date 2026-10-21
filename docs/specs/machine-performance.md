@@ -10,12 +10,17 @@ The measurements are the ones `src/benchmarks/bench.sh` takes, plus three
 programs written for this work (`/tmp` is not where they live; they are
 `loopbench`, `arrbench` and `hotbench`):
 
-| Program | What it is | Before | After |
-|---|---|---|---|
-| `loopbench` | a scalar loop: `for (i = 0; i < n; i++) sum += i * 2 + 1` | 7.2 ms | 2.5 ms |
-| `hotbench` | the same loop over an array, ten million times | 37.0 ms | 17.0 ms |
-| `arrbench` | an array of two million doubles, summed and multiplied | 36.5 ms | 21.4 ms |
-| `binarytrees` | the benchmark program: recursion and allocation | 113.5 ms | 111.9 ms |
+| Program | What it is | Before | After | The C compiler |
+|---|---|---|---|---|
+| `loopbench` | a scalar loop: `for (i = 0; i < n; i++) sum += i * 2 + 1` | 7.0 ms | 2.4 ms | 2.2 ms |
+| `hotbench` | the same loop over an array, ten million times | 35.9 ms | 16.7 ms | 16.4 ms |
+| `arrbench` | an array of two million doubles, summed and multiplied | 35.7 ms | 20.9 ms | 20.6 ms |
+| `binarytrees` | the benchmark program: recursion and allocation | 108.4 ms | 103.5 ms | — |
+
+The last column is `gcc -O2` on the same program, which is what the C
+backend's code is compiled by. The machine backend is at parity with it on the
+three programs that are arithmetic, and the arithmetic is what the backend
+writes.
 
 `binarytrees` is the one that barely moved, and the reason is worth stating
 before anything else: **two thirds of it is the runtime's allocator**, not the
@@ -94,6 +99,19 @@ form copies the object into the accumulator first. The copy is on every field
 of every object the program walks, and the tree a checksum walks is nothing
 but fields.
 
+### A constant in both halves of a pair is read in one instruction
+
+The instruction that puts a number in both halves of a vector register is a
+second one — the load and the interleave — and a loop that multiplies by the
+same number on every turn pays for it on every turn. The number is laid down
+in both halves of a pair in the read-only data instead, and read from there in
+one instruction. The pair the loop counts on is moved on by a number that is
+the same on every turn, so it is read out of the data the same way.
+
+The data section is aligned on sixteen bytes and the pair is given an offset
+that is a multiple of sixteen, because the vector arithmetic of the legacy
+instruction set reads its operand aligned and has no unaligned form.
+
 ### The register an object is filled in
 
 The register an object literal is filled in is one the convention asks a
@@ -102,6 +120,16 @@ and the slot the object was kept in is read only where a field's value
 allocates: where none does, the slot was written and never read.
 
 ## What is left
+
+### The strength reduction the C compiler does
+
+`sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
+the C compiler keeps the progression in a register and adds it. The backend
+converts the counter on every turn and multiplies it. The conversion is now
+free of the dependency that made it expensive, and the multiplication is one
+instruction, so what is left is the two instructions of the arithmetic that a
+progression would have replaced — and the loop is at parity with the C
+compiler's, so the two instructions are what the C compiler spends too.
 
 ### A loop that counts in whole numbers
 
@@ -125,14 +153,12 @@ loop that counts elements and indexes with the counter is a body of whole
 numbers for the purpose of the counter's width even where its arithmetic is
 not.
 
-### The strength reduction the C compiler does
-
-`sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
-the C compiler keeps the progression in a register and adds it. The backend
-converts the counter on every turn and multiplies it. The conversion is now
-free of the dependency that made it expensive, and the multiplication is one
-instruction, so what is left is the two instructions of the arithmetic that a
-progression would have replaced.
+Written and measured, and it was two instructions fewer on every turn of the
+loop and no faster: the loop is bound by the chain of the accumulation, not
+by the instructions around it. It is not in the compiler, because the test
+suite says the counter of a loop the checker runs with vectors is left as the
+source wrote it, and that is a decision about the IR that is not the
+backend's to make.
 
 ### The bound of a loop in a register
 
@@ -145,7 +171,9 @@ instructions where one would do.
 
 A bound in a register of its own would fix it, and the register it wants is
 one of the ones the expressions of the body are held in: the body needs one
-at a time and the loop needs one for as long as it runs.
+at a time and the loop needs one for as long as it runs. It is not in the
+compiler either: the load of the bound is off the chain the loop carries its
+counter along, and a loop that is bound by that chain does not wait for it.
 
 ## The measurements
 
