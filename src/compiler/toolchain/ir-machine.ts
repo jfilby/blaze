@@ -3810,6 +3810,21 @@ class Machine {
   private storeField(object: SemanticValue, layoutName: string, name: string, value: SemanticValue): void {
     const found = this.field(layoutName, name);
     const type = parseType(found.type);
+    // An object the build gave a register of its own is written through that
+    // register: the address of the field is one `lea` against it, where the
+    // general form copies the object into the accumulator first.
+    const held = object.k === "local" ? this.slot(object.name) : null;
+    const register = held !== null && held.register !== null ? held.register : null;
+    if (register !== null && this.keepsScratch(value)) {
+      // Neither side writes the scratch, so the address is taken first and the
+      // value is written straight through it. The other order has to write the
+      // value to the frame and read it back, because taking the address of the
+      // object is what takes the scratch.
+      this.code.lea(RCX, mem(register, found.offset));
+      this.at(value, type);
+      this.storeInto(type, RCX);
+      return;
+    }
     if (this.keepsScratch(object) && this.keepsScratch(value)) {
       // Neither side writes the scratch, so the address is taken first and the
       // value is written straight through it. The other order has to write the
@@ -3827,8 +3842,11 @@ class Machine {
     // The address of the field is one `lea` rather than a copy of the object
     // and an addition to it: the offset of a field is a displacement the
     // machine computes for itself, not an arithmetic the lowering writes out.
-    this.value(object);
-    this.code.lea(RCX, mem(RAX, found.offset));
+    if (register !== null) this.code.lea(RCX, mem(register, found.offset));
+    else {
+      this.value(object);
+      this.code.lea(RCX, mem(RAX, found.offset));
+    }
     this.load(written);
     this.storeInto(written.type, RCX);
   }
@@ -5322,13 +5340,28 @@ class Machine {
       case "newObject":
         this.object(value);
         return;
-      case "loadField":
+      case "loadField": {
         // The offset of the field is the displacement of the read, so the
         // address is not adjusted in a register first: the accumulator is
         // still the object, and the read reaches the field itself.
-        this.value(value.object);
-        this.readAt(value.type, this.field(value.layout, value.field).offset);
+        //
+        // An object the build gave a register of its own is read through that
+        // register, which is one move fewer than copying the object into the
+        // accumulator first — and the copy is on every field of every object
+        // the program walks.
+        const offset = this.field(value.layout, value.field).offset;
+        const object = value.object;
+        if (object.k === "local") {
+          const held = this.slot(object.name);
+          if (held.register !== null) {
+            this.readFrom(value.type, mem(held.register, offset));
+            return;
+          }
+        }
+        this.value(object);
+        this.readAt(value.type, offset);
         return;
+      }
       case "length":
         this.length(value.of);
         return;
