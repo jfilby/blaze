@@ -5650,15 +5650,19 @@ class Machine {
         this.floatBranch(op, single, whenTrue, label, left, XMM0);
         return;
       }
-      // The comparison names the side it reads where it lies, so a left side
-      // that is in a register of its own is compared there and not copied into
+      // The comparison names the side it reads where it lies, so a side the
+      // build gave a register of its own is compared there and not copied into
       // the accumulator first. The accumulator is where a value is read and
       // written through, and a counter of a loop that has a register of its own
       // is read on every turn of it.
+      //
+      // The scratch is where a side of the frame is brought to, and a side that
+      // is already in a register is one move fewer.
+      let where = XMM1;
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
-      else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
+      else if (right.register !== null) where = right.register;
       else this.code.movsLoad(XMM1, frame(right.offset), single);
-      this.floatBranch(op, single, whenTrue, label, left, XMM1);
+      this.floatBranch(op, single, whenTrue, label, left, where);
       return;
     }
     const width = operationWidth(type);
@@ -7759,10 +7763,15 @@ class Machine {
     // allocated holding whatever the allocation before it had put there: `r.x`
     // answered 30 where the source says 100.
     const register = this.objectRegister;
-    const object = this.hold(POINTER, "blaze_object");
-    this.store(object);
+    // The slot the object is kept in is read only where a field's value takes the
+    // register the object is filled in, and a value that allocates nothing
+    // leaves that register alone: the slot is then written and never read, which
+    // is a store for nothing.
+    const keeps = register !== null && value.fields.some((written) => allocates(written.value));
+    const object = keeps || register === null ? this.hold(POINTER, "blaze_object") : null;
+    if (object !== null) this.store(object);
     if (register !== null) this.code.movRegReg(register, RAX);
-    else this.code.movRegMem(RCX, frame(object.offset));
+    else this.code.movRegMem(RCX, frame((object as Held).offset));
     for (const written of value.fields) {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
@@ -7778,8 +7787,8 @@ class Machine {
       // there is no register of its own: the scratch holds the address there,
       // and a value written into the field takes the scratch as it does every
       // other value.
-      if (register === null) this.code.movRegMem(RCX, frame(object.offset));
-      else if (allocates(written.value)) this.code.movRegMem(register, frame(object.offset));
+      if (register === null) this.code.movRegMem(RCX, frame((object as Held).offset));
+      else if (allocates(written.value)) this.code.movRegMem(register, frame((object as Held).offset));
       this.storeInto(type, register ?? RCX, field.offset);
     }
     if (register !== null) this.code.movRegReg(RAX, register);

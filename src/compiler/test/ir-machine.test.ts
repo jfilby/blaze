@@ -20,7 +20,7 @@ import { parseType, symbolOf } from "../semantics/contract.ts";
 import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
-import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticAssignOp, SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 import { scratch } from "./scratch.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
@@ -272,6 +272,30 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
   const result = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(result.code, 0, `the machine code must run:\n${result.stderr}`);
   return result.stdout;
+}
+
+/**
+ * The instructions a function is written as, which is what a change to the shape
+ * of the code is checked against.
+ *
+ * The object is the one the backend writes, so what is listed here is what a
+ * processor reads. The addresses are the ones the object carries and the calls
+ * are the ones the linker is to fill in, so what the listing shows is the
+ * sequence of instructions and not where they are.
+ */
+async function instructions(fn: SemanticFunction, target: TargetSpec = TARGET): Promise<string> {
+  const directory = await scratch("blaze-machine-code-");
+  const object = join(directory, `${fn.symbol}.o`);
+  await buildObject({
+    fn,
+    contract: contracted(fn),
+    target,
+    callable: new Set(["f", "g", "h9", "two", "mix"]),
+    objectPath: object,
+  });
+  const listed = run("objdump", ["-d", "--no-show-raw-insn", object], { timeoutMs: 60_000 });
+  assert.equal(listed.code, 0, `the object must be readable:\n${listed.stderr}`);
+  return listed.stdout;
 }
 
 test("a value the IR calls is run once, whichever form writes it down", async () => {
@@ -3009,4 +3033,163 @@ test("a counter of a loop over buffers keeps its register away from the buffers"
     "140",
     "five arrays of eight elements each",
   );
+});
+
+test("a compound assignment is written in the register the name has", async () => {
+  // A name the build gave a register of its own is written in that register:
+  // the value the name is given is in the accumulator and the name's own value
+  // is in the register, so the operation is the one instruction that writes the
+  // register from the accumulator. A difference is not commutative — the name
+  // has to be on the left of it, and writing the other way round answers the
+  // difference the other way about.
+  //
+  // The name is read and written often enough to be given a register, which is
+  // what puts it in one: a name the census does not weigh is left in the frame
+  // and the general form is what is written for it.
+  const cases: { name: string; op: SemanticAssignOp; type: SemanticType; start: string; value: string; expected: string }[] = [
+    { name: "a float added", op: "+=", type: F64, start: "10", value: "3", expected: "25" },
+    { name: "a float taken away", op: "-=", type: F64, start: "10", value: "3", expected: "-5" },
+    { name: "a float multiplied", op: "*=", type: F64, start: "10", value: "3", expected: "2430" },
+    { name: "a whole number added", op: "+=", type: I64, start: "10", value: "3", expected: "25" },
+    { name: "a whole number taken away", op: "-=", type: I64, start: "10", value: "3", expected: "-5" },
+    { name: "a whole number multiplied", op: "*=", type: I64, start: "10", value: "3", expected: "2430" },
+  ];
+  for (const entry of cases) {
+    // Five turns of the loop, so the name is written five times and read once:
+    // the census weighs a write in a loop above a write on a straight line, and
+    // that is what gives the name a register.
+    const body: SemanticBlock = {
+      id: "body",
+      releases: [],
+      terminator: { k: "next" },
+      statements: [{ k: "set", name: "total", op: entry.op, value: number(entry.value, entry.type), line: 2 }],
+    };
+    const fn = subject(
+      entry.type,
+      {
+        id: "entry",
+        releases: [],
+        statements: [
+          { k: "let", slot: { kind: "value", name: "total", mutable: true, type: entry.type }, value: number(entry.start, entry.type), line: 1 },
+          {
+            k: "loop",
+            line: 2,
+            loop: {
+              kind: "counted", variable: "i", type: I64,
+              from: number("0", I64), to: number("5", I64), inclusive: false, down: false, step: null,
+              header: "b1", exit: "entry", body,
+            },
+          },
+        ],
+        terminator: { k: "return", value: local("total", entry.type) },
+      },
+      [],
+    );
+    const printed = await lowered(fn, (name) => `printf("%lld", (long long)${name}());`);
+    assert.equal(printed, entry.expected, entry.name);
+  }
+});
+
+test("a compound assignment in a register is the one instruction that writes it", async () => {
+  // The compound assignment of a name that has a register of its own is written
+  // as the instruction that writes that register from the accumulator. The
+  // general form writes the value down, reads the name out and reads the value
+  // back out again, and the difference is four instructions against one on every
+  // turn of every loop that accumulates.
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [{ k: "set", name: "total", op: "+=", value: local("v"), line: 2 }],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted", variable: "i", type: I64,
+            from: number("0", I64), to: number("5", I64), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [{ kind: "value", name: "v", mutable: false, type: F64 }],
+  );
+  const code = await instructions(fn);
+  // The name is in a register of its own, so the addition is written at that
+  // register with the accumulator as its operand: the general form writes the
+  // accumulator into the register afterwards, and reads the name into the
+  // scratch before it.
+  assert.match(code, /addsd\s+%xmm0,%xmm\d+/, "the addition is written at a register");
+  assert.doesNotMatch(code, /addsd\s+%xmm\d+,%xmm0/, "the addition is not written at the accumulator");
+});
+
+test("a counter the loop reads as a number is kept in a register", async () => {
+  // A counter the body reaches only as an index is counted in whole numbers,
+  // and where the loop cannot be counted that way the double is the counter the
+  // test compares — which the test reads on every turn. The counter is then
+  // given a register of its own: in the frame it is a load and a store on every
+  // turn, and the load is on the path the loop carries its counter along.
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [
+      { k: "set", name: "total", op: "+=", value: number("1"), line: 2 },
+      { k: "setElement", buffer: "values", index: local("i", F64), op: "=", value: number("1"), line: 2 },
+    ],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted", variable: "i", type: F64,
+            from: number("0"), to: local("n"), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [{ kind: "value", name: "values", mutable: false, type: { kind: "array", of: F64, length: 8 } }, { kind: "value", name: "n", mutable: false, type: F64 }],
+  );
+  assert.equal(
+    await lowered(fn, (name) => `{ double a[8]={0,0,0,0,0,0,0,0}; printf("%g", ${name}(a, 8.0)); }`),
+    "8",
+    "the loop turns as many times as its bound says",
+  );
+  const code = await instructions(fn);
+  // The counter is stepped where it lies, so the turn adds to a register rather
+  // than to a double read out of the frame.
+  assert.match(code, /addsd\s+0x[0-9a-f]+\(%rip\),%xmm\d+/, "the counter is stepped in a register");
+});
+
+test("a conversion does not wait for what the register held", async () => {
+  // The instruction that converts a whole number to a double writes the low
+  // half of the register it writes into and leaves the half above it as it was,
+  // so it waits for whatever last wrote there. In a loop that is the arithmetic
+  // of the turn before, and the loop runs at a third of the speed it could.
+  // Clearing the register first says the answer does not depend on what was
+  // there.
+  const fn = subject(F64, handsBack({ k: "arith", type: F64, op: "mul", left: local("v", I64), right: number("2") }), [
+    { kind: "value", name: "v", mutable: false, type: I64 },
+  ]);
+  const code = await instructions(fn);
+  assert.match(code, /pxor\s+%xmm\d+,%xmm\d+/, "the register is cleared before the conversion");
+  assert.match(code, /cvtsi2sd\s+%rax,%xmm\d+/, "the conversion is written");
 });
