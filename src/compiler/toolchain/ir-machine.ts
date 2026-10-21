@@ -1540,6 +1540,46 @@ function writesCounter(body: SemanticBlock, name: string): boolean {
 }
 
 /**
+ * Whether a counted loop is written with a whole-number counter and no double
+ * beside it.
+ * A counter the body reaches only as an index is counted in whole numbers
+ * where the loop's own numbers are whole numbers: the whole-number copy the
+ * index is read out of is the counter, and the double the source wrote is never
+ * written at all.
+ *
+ * Where the loop cannot be counted that way — its bound is a number the program
+ * wrote rather than a literal, or its step is not a whole number — the double
+ * is the counter the test compares, and it is read on every turn of the loop.
+ * That is what makes the two cases different for the register the counter is
+ * given: a double nothing ever reads is not worth a register of its own, and a
+ * double the test reads on every turn is.
+ */
+function countsWholly(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
+  if (!wholeCountable(loop)) return false;
+  if (readsCounterAsValue(loop.body, loop.variable)) return false;
+  if (writesCounter(loop.body, loop.variable)) return false;
+  return true;
+}
+
+/**
+ * Whether a value allocates an object or an array of its own, which is what
+ * takes the register an object is filled in.
+ *
+ * The register is one the convention asks a callee to leave alone, so a call
+ * does not take it and a value that computes nothing does not either. An
+ * allocation is written into it, because the allocation answers in the
+ * accumulator and the register is where the thing allocated is kept while its
+ * fields are written.
+ */
+function allocates(value: SemanticValue): boolean {
+  let found = false;
+  walkValues(value, (one) => {
+    if (one.k === "newObject" || one.k === "buffer") found = true;
+  });
+  return found;
+}
+
+/**
  * Whether a target runs the rounding instruction, which is where a value rounded
  * to a whole number stops being a call into the C library.
  *
@@ -2442,12 +2482,12 @@ class Machine {
     // they are written one after the other too — the first counter is dead
     // before the second is bound — so one register serves both and each turn of
     // each loop steps it where it lies.
-    const counters = new Map<string, { depth: number; type: SemanticType; asIndex: boolean }>();
+    const counters = new Map<string, { depth: number; type: SemanticType; asIndex: boolean; wholly: boolean }>();
     const declarations = new Map<string, number>();
     const shared = new Set<string>();
     const walkCounters = (block: SemanticBlock, depth: number, enclosing: ReadonlySet<string>): void => {
       for (const statement of block.statements) {
-        const declare = (name: string, type: SemanticType, asIndex = false): void => {
+        const declare = (name: string, type: SemanticType, asIndex = false, wholly = false): void => {
           declarations.set(name, (declarations.get(name) ?? 0) + 1);
           // A counter inside a loop of the same name is stepped while the
           // outer one is still counting, so the two cannot have one register.
@@ -2459,9 +2499,12 @@ class Machine {
           // A name one loop counts as a whole number and another counts as a
           // value is two different counters under one spelling.
           if (found !== undefined && found.asIndex !== asIndex) shared.add(name);
+          // Nor can two of which only one is counted in whole numbers: the one
+          // that is has no double beside it and the other has.
+          if (found !== undefined && found.wholly !== wholly) shared.add(name);
           // The inner loop of a nested pair turns the most, so depth is what
           // says which counter is worth a register first.
-          counters.set(name, { depth: Math.max(found?.depth ?? 0, depth), type, asIndex });
+          counters.set(name, { depth: Math.max(found?.depth ?? 0, depth), type, asIndex, wholly });
         };
         if (statement.k !== "loop") {
           // A loop in an arm of an `if` is a loop like any other, and the
@@ -2477,7 +2520,18 @@ class Machine {
           // numbers, which is what `counted` writes it as, so giving it a vector
           // register would be a register for a double nothing reads — and a
           // preserved one costs the function a push and a pop for it.
-          declare(loop.variable, loop.type, isFloatType(loop.type) && !readsCounterAsValue(loop.body, loop.variable));
+          //
+          // Where the loop cannot be counted that way the double is the counter
+          // the test compares, and the test reads it on every turn of the loop.
+          // That is a value the loop reads as often as anything else, and the
+          // frame round trip of keeping it there is a load and a store on every
+          // turn of it.
+          declare(
+            loop.variable,
+            loop.type,
+            isFloatType(loop.type) && !readsCounterAsValue(loop.body, loop.variable),
+            countsWholly(loop),
+          );
           inside = new Set(enclosing).add(loop.variable);
         } else if (loop.kind === "each") {
           declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
@@ -2500,13 +2554,21 @@ class Machine {
     const ordered = [...counters.entries()]
       .filter(([name]) => !shared.has(name) && declarationCount.get(name) === declarations.get(name))
       .sort((left, right) => right[1].depth - left[1].depth);
-    // A counter nothing reads as a value is not pinned. It is written into the
-    // whole-number register the loop's index is read out of, so the vector
-    // register the general form would give it would hold a double nothing ever
-    // reads — and a preserved one costs the function a push and a pop and two
-    // memory operands on the way in and out.
+    // A counter nothing reads as a value is not pinned, where the loop is
+    // counted in whole numbers. It is written into the whole-number register the
+    // loop's index is read out of, so the vector register the general form would
+    // give it would hold a double nothing ever reads — and a preserved one costs
+    // the function a push and a pop and two memory operands on the way in and
+    // out.
+    //
+    // Where the loop cannot be counted in whole numbers the double is the
+    // counter the test compares, and the test reads it on every turn of the
+    // loop. A counter the loop reads on every turn is worth a register for the
+    // same reason any other is: the frame round trip of keeping it there is a
+    // load and a store on every turn, and the load is on the path the loop
+    // carries its counter along.
     for (const [name, counter] of ordered) {
-      if (counter.asIndex) continue;
+      if (counter.asIndex && counter.wholly) continue;
       assign(name, counter.type);
     }
     // The register an object is filled in is claimed after every name that could
@@ -2965,9 +3027,20 @@ class Machine {
     }
     if (isFloatType(held.type)) {
       this.code.movsStore(frame(held.offset), XMM0, widthOf(held.type) === 4);
-      return;
+    } else {
+      this.code.movMemRegSized(frame(held.offset), RAX, widthOf(held.type));
     }
-    this.code.movMemRegSized(frame(held.offset), RAX, widthOf(held.type));
+    // Writing the accumulator down does not take it away, so what it holds is
+    // still what it held — which is what lets the load of that same slot after
+    // it be answered rather than written.
+    //
+    // The note is only left where the slot holds the whole of what the
+    // accumulator has. A slot narrower than the accumulator holds the low half
+    // of it, and reading it back would widen it again, so the accumulator after
+    // the read is not the accumulator before it.
+    if (widthOf(held.type) === 8 && !isWideType(held.type)) {
+      this.accumulator = { id: held.id, at: this.code.written };
+    }
   }
 
   /**
@@ -3588,12 +3661,28 @@ class Machine {
         this.store(target);
         return;
       }
-      this.scratchFrom(target);
-      this.apply(operation, target.type);
+      // A name the build gave a register of its own is the other side of the
+      // operation where it lies, so the instruction names that register and the
+      // copy into the scratch is left out. The two sides of a sum and of a
+      // product are the same pair either way round, so the value in the
+      // accumulator and the name in its register answer the same number.
+      if (target.register !== null && this.operatesOnRegister(operation, target.type)) {
+        this.applyAtRegister(operation, target.type, target.register);
+      } else {
+        this.scratchFrom(target);
+        this.apply(operation, target.type);
+      }
       this.normalizeArithmetic(target.type);
       this.store(target);
       return;
     }
+    // A name the build gave a register of its own is written in that register:
+    // the value the name is given is in the accumulator and the name's own value
+    // is where it lies, so the operation is the register the name has against
+    // the accumulator. The general form below writes the value down, reads the
+    // name out and reads the value back out again — four instructions where
+    // this is two.
+    if (this.compoundInRegister(operation, target)) return;
     // Anything else needs the name on the left, and the accumulator holds the
     // value rather than the name. The value is written down before the name is
     // read rather than after, so an expression that writes the name as a side
@@ -3608,6 +3697,86 @@ class Machine {
     this.apply(operation, target.type);
     this.normalizeArithmetic(target.type);
     this.store(target);
+  }
+
+  /**
+   * Whether an operation may name a register as its other side rather than
+   * taking it in the scratch.
+   *
+   * The operations that may are the ones whose instruction takes its second
+   * operand wherever it is: a sum, a difference, a product and the three bitwise
+   * operations. A division and a remainder need the divisor in the scratch and
+   * the dividend in the accumulator, because the machine divides the accumulator
+   * widened to twice its width; a shift takes its count in the scratch, because
+   * the count of a shift is read out of the low half of that register.
+   */
+  private operatesOnRegister(operation: Arithmetic, type: SemanticType): boolean {
+    if (isFloatType(type)) return operation === "add" || operation === "sub" || operation === "mul";
+    if (isWideType(type)) return false;
+    return (
+      operation === "add" ||
+      operation === "sub" ||
+      operation === "mul" ||
+      operation === "and" ||
+      operation === "or" ||
+      operation === "xor"
+    );
+  }
+
+  /**
+   * An operation whose other side is in a register of its own, written with that
+   * register as the operand.
+   *
+   * The accumulator holds the value and the register holds the other side, so
+   * the instruction is the one that takes its operand where it is rather than
+   * the pair that copies it into the scratch first.
+   */
+  private applyAtRegister(operation: Arithmetic, type: SemanticType, register: number): void {
+    if (isFloatType(type)) {
+      this.code.sse(operation as "add" | "sub" | "mul", XMM0, register, widthOf(type) === 4);
+      return;
+    }
+    this.applyRegister(operation as "add" | "sub" | "mul" | "and" | "or" | "xor", type, register);
+  }
+
+  /**
+   * A compound assignment whose name has a register of its own, written in that
+   * register.
+   *
+   * The value the name is given is in the accumulator and the name's own value
+   * is where it lies, so the operation is the register the name has against the
+   * accumulator, and the answer is left in the register the name has. The
+   * accumulator is given the answer too, because that is where the rest of the
+   * lowering reads the value of a statement from.
+   *
+   * It answers whether it did: an operation whose instruction names no register
+   * of its own — a division, a remainder, a shift — is left to the general form,
+   * which brings the value into the accumulator and the other side into the
+   * scratch where those instructions expect them.
+   */
+  private compoundInRegister(operation: Arithmetic, target: Held): boolean {
+    const register = target.register;
+    if (register === null) return false;
+    const type = target.type;
+    if (!this.operatesOnRegister(operation, type)) return false;
+    // A difference and the bitwise operations are not commutative: the name has
+    // to be on the left. The name's own value is in its register, so the value
+    // the name is given is moved into the scratch and the operation is written
+    // at the register.
+    if (isFloatType(type)) {
+      this.code.movsMove(XMM1, XMM0, widthOf(type) === 4);
+      this.code.sse(operation as "sub", register, XMM1, widthOf(type) === 4);
+    } else {
+      this.code.movRegReg(RCX, RAX);
+      this.applyRegisterInto(operation as "sub" | "and" | "or" | "xor", type, register, RCX);
+    }
+    this.normalizeArithmetic(type, register);
+    // The accumulator is given the answer as well, because that is where the
+    // value of a statement is read from.
+    if (isFloatType(type)) this.code.movsMove(XMM0, register, widthOf(type) === 4);
+    else this.code.movRegReg(RAX, register);
+    this.accumulator = { id: target.id, at: this.code.written };
+    return true;
   }
 
   /**
@@ -5505,11 +5674,15 @@ class Machine {
         this.floatBranch(op, single, whenTrue, label, left, XMM0);
         return;
       }
-      if (left !== XMM0) this.code.movsMove(XMM0, left, single);
+      // The comparison names the side it reads where it lies, so a left side
+      // that is in a register of its own is compared there and not copied into
+      // the accumulator first. The accumulator is where a value is read and
+      // written through, and a counter of a loop that has a register of its own
+      // is read on every turn of it.
       if (typeof right === "number") this.code.movsLoadLabel(XMM1, this.floatLiteral(floatBits(right, single)), single);
       else if (right.register !== null) this.code.movsMove(XMM1, right.register, single);
       else this.code.movsLoad(XMM1, frame(right.offset), single);
-      this.floatBranch(op, single, whenTrue, label, XMM0, XMM1);
+      this.floatBranch(op, single, whenTrue, label, left, XMM1);
       return;
     }
     const width = operationWidth(type);
@@ -6077,12 +6250,31 @@ class Machine {
    * of them that names its other side rather than reading it.
    */
   private applyRegister(operation: Extract<Arithmetic, "add" | "sub" | "mul" | "and" | "or" | "xor">, type: SemanticType, source: number): void {
+    this.applyRegisterInto(operation, type, RAX, source);
+  }
+
+  /**
+   * The same operation, written at a register of its own rather than at the
+   * accumulator.
+   *
+   * The accumulator is where a value is read and written through, so an
+   * operation over a value the build gave a register of its own was a move into
+   * the accumulator, the operation there and a move back out again. The
+   * instruction takes its operand wherever it is, so naming the register is the
+   * same number without the two moves.
+   */
+  private applyRegisterInto(
+    operation: Extract<Arithmetic, "add" | "sub" | "mul" | "and" | "or" | "xor">,
+    type: SemanticType,
+    destination: number,
+    source: number,
+  ): void {
     const wide = operationWidth(type) === 8;
     if (operation === "mul") {
-      this.code.imul(RAX, source, wide);
+      this.code.imul(destination, source, wide);
       return;
     }
-    this.code.alu(operation, RAX, source, wide);
+    this.code.alu(operation, destination, source, wide);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -7599,8 +7791,19 @@ class Machine {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
       this.at(written.value, type);
-      if (register !== null) this.code.movRegMem(register, frame(object.offset));
-      else this.code.movRegMem(RCX, frame(object.offset));
+      // The register the object is filled in is read back out of the frame only
+      // where the value written into the field takes it. A value that allocates
+      // an object or an array of its own does, because the allocation is written
+      // into the same register; one that does not leaves the object where it is,
+      // and a call does not take it either — the convention asks a callee to
+      // leave that register alone.
+      //
+      // The address the object is written through is a different matter where
+      // there is no register of its own: the scratch holds the address there,
+      // and a value written into the field takes the scratch as it does every
+      // other value.
+      if (register === null) this.code.movRegMem(RCX, frame(object.offset));
+      else if (allocates(written.value)) this.code.movRegMem(register, frame(object.offset));
       this.storeInto(type, register ?? RCX, field.offset);
     }
     if (register !== null) this.code.movRegReg(RAX, register);
