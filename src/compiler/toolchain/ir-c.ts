@@ -199,6 +199,15 @@ function builtinExpression(name: string, args: string[]): string {
       // The runtime's own random is what a program body is given, so a module
       // function and a program body answer the same call the same way.
       return `${RUNTIME_NAME}_random()`;
+    // The pending failure of a call, which a `try` block reads: the failure is
+    // cleared before the body runs, and the arm runs when one is pending.
+    case "blaze_error_clear":
+      return `(blaze_error_clear(), 0.0)`;
+    case "blaze_had_error":
+      return `(blaze_had_error())`;
+    case "blaze_last_error":
+      // The message of the failure is a text, and a reference is a pointer.
+      return `((void*)blaze_last_error())`;
     // The whole numbers: a magnitude, a smaller, a larger, and the three
     // roundings that answer a whole number. The `Math` builtins above answer a
     // fraction, and a whole number is written as one, so each of these is the

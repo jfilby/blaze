@@ -357,18 +357,7 @@ class ProgramParser {
     }
     const token = this.peek();
     if (this.at("try")) {
-      this.next();
-      const body = this.at("{") ? this.braces() : [];
-      while (this.at("catch") || this.at("finally")) {
-        this.next();
-        if (this.at("(")) {
-          this.next();
-          while (!this.at(")") && this.peek().kind !== "end") this.next();
-          this.accept(")");
-        }
-        if (this.at("{")) this.braces();
-      }
-      return { kind: "block", body, line };
+      return this.tryStatement();
     }
     const refusedKeyword = REFUSED_KEYWORDS[token.text];
     if (refusedKeyword !== undefined) {
@@ -420,6 +409,68 @@ class ProgramParser {
     }
     this.expect("}");
     return body;
+  }
+
+  /**
+   * `try { ... } catch (e) { ... } finally { ... }`: a body that runs, an arm
+   * that runs when the call it made failed, and a body that runs either way.
+   *
+   * A compiled program cannot raise, so what the catch arm catches is the
+   * failure of a call that was awaited: the runtime keeps the failure pending
+   * until the next call is made, and the arm reads it there. The statements
+   * are written as the ones the source means: the pending failure is cleared
+   * before the body runs, the arm runs when a failure is pending, and the
+   * finally body runs after both of them.
+   */
+  private tryStatement(): ProgramStatement {
+    const line = this.peek().line;
+    this.next();
+    const body = this.at("{") ? this.braces() : [];
+    let caught: ProgramStatement[] | null = null;
+    let parameter: string | null = null;
+    let finallyBody: ProgramStatement[] = [];
+    while (this.at("catch") || this.at("finally")) {
+      const keyword = this.next().text;
+      if (keyword === "catch") {
+        if (this.at("(")) {
+          this.next();
+          parameter = this.identifier("the name of the error");
+          this.accept(")");
+        }
+        caught = this.at("{") ? this.braces() : [];
+        continue;
+      }
+      finallyBody = this.at("{") ? this.braces() : [];
+    }
+    const statements: ProgramStatement[] = [
+      { kind: "invoke", function: "blaze_error_clear", args: [], line },
+      ...body,
+    ];
+    if (caught !== null) {
+      const arm: ProgramStatement[] =
+        parameter === null
+          ? caught
+          : [
+              {
+                kind: "declare",
+                name: parameter,
+                mutable: false,
+                type: null,
+                value: { k: "call", function: "blaze_last_error", args: [] },
+                line,
+              },
+              ...caught,
+            ];
+      statements.push({
+        kind: "if",
+        condition: { k: "call", function: "blaze_had_error", args: [] },
+        then: arm,
+        otherwise: [],
+        line,
+      });
+    }
+    statements.push(...finallyBody);
+    return { kind: "block", body: statements, line };
   }
 
   /** `const a = 1`: a name, what it holds, and whether it may change. */

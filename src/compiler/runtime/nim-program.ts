@@ -734,6 +734,16 @@ ${anchor}
         return `trunc(${argument(0)})`;
       case "sharedBlock":
         return `cast[pointer](${RUNTIME_NAME}_allocate((${argument(0)}).csize_t))`;
+      // The pending failure of a call, which a `try` block reads: the failure
+      // is cleared before the body runs, and the arm runs when one is pending.
+      case "blaze_error_clear":
+        return `blaze_error_clear()`;
+      case "blaze_had_error":
+        return `blaze_had_error()`;
+      case "blaze_last_error":
+        // The message of the failure is a text, and a program holds a text as
+        // the pointer to it.
+        return `cast[pointer](blaze_last_error())`;
       default:
         throw hostError(`the driver cannot write down ${call.callee}`);
     }
