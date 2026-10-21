@@ -158,7 +158,9 @@ test("the width of a view is a number a program reads", () => {
 test("Deno names the command line node names", () => {
   // Deno hands a program the arguments alone, where node counts the program
   // and the file it runs before them, so `Deno.args[0]` is the argument
-  // `process.argv[2]` is and not the one `process.argv[0]` would be.
+  // `process.argv[2]` is and not the one `process.argv[0]` would be. The
+  // value carries the index it is read at and the offset the arguments begin
+  // at, and the offset is what tells the two apart.
   assert.deepEqual(bodyOf("const n = Deno.args[0];\n"), [
     {
       kind: "declare",
@@ -166,9 +168,24 @@ test("Deno names the command line node names", () => {
       mutable: false,
       type: null,
       value: {
-        k: "call",
-        function: "argv",
-        args: [{ k: "binary", op: "+", left: { k: "number", text: "2" }, right: { k: "number", text: "0" } }],
+        k: "argv",
+        index: { k: "number", text: "0" },
+        offset: 2,
+      },
+      line: 1,
+    },
+  ]);
+  // The arguments node counts begin at the third, so nothing is offset there.
+  assert.deepEqual(bodyOf("const n = process.argv[2];\n"), [
+    {
+      kind: "declare",
+      name: "n",
+      mutable: false,
+      type: null,
+      value: {
+        k: "argv",
+        index: { k: "number", text: "2" },
+        offset: 0,
       },
       line: 1,
     },
@@ -221,12 +238,20 @@ test("an array written out is the array a typed array of its values would be", (
       "",
     ].join("\n"),
   });
-  // The IR holds each list as a block of the values written, and the empty one
-  // as a block of no elements: both carry a length the program goes on to read.
+  // The IR holds a list of numbers as a block of the values written, and it
+  // carries the length the program goes on to read. An empty list is a
+  // dynamic array instead: it holds no number, so there is no type to fix it
+  // at, and the runtime holds it and answers its length.
   const lengths = program.entry.statements.flatMap((statement) =>
     statement.k === "let" && statement.value.k === "buffer" ? [statement.value.length] : [],
   );
-  assert.deepEqual(lengths, [3, 0]);
+  assert.deepEqual(lengths, [3]);
+  // The empty list is the dynamic array the runtime holds, and it is the only
+  // name in the program that is one.
+  const dynamic = program.entry.statements.flatMap((statement) =>
+    statement.k === "let" && statement.slot.kind === "object" ? [statement.slot.name] : [],
+  );
+  assert.deepEqual(dynamic, ["b"]);
 });
 
 test("a list of values holds numbers, and a text among them is refused", () => {
@@ -251,15 +276,77 @@ test("a construct outside the subset is named, with what to write instead", () =
   }
 });
 
-test("try, catch and finally are read past in a program body", () => {
-  // A compiled program cannot raise, so there is nothing to catch: a `try`
-  // and its handlers are skipped where they are written. The body still ends
-  // at the statements that follow them.
-  const body = bodyOf("try { }\ncatch (e) { }\nfinally { }\nconst x = 1;\nmain();\n");
-  assert.equal(body.length, 2);
-  assert.equal(body[0].kind, "declare");
-  assert.equal(body[0].name, "x");
-  assert.equal(body[1].kind, "invoke");
+test("try, catch and finally are the statements the source means", () => {
+  // A compiled program cannot raise, so what a catch arm catches is the
+  // failure of a call that was awaited: the runtime keeps the failure pending
+  // until the next call is made, and the arm reads it there. The statements
+  // are the ones the source means: the failure is cleared before the body
+  // runs, the arm runs when one is pending, and the finally body runs after
+  // both of them.
+  const body = bodyOf("try { console.log(1); }\ncatch (e) { console.log(2); }\nfinally { console.log(3); }\nconst x = 1;\nmain();\n");
+  assert.equal(body.length, 3);
+  const block = body[0];
+  assert.equal(block.kind, "block");
+  if (block.kind !== "block") return;
+  assert.deepEqual(
+    block.body.map((statement) => statement.kind),
+    ["invoke", "print", "if", "print"],
+  );
+  // The failure is cleared before the body runs, so a failure an earlier call
+  // left behind is not mistaken for one of this body's own.
+  const cleared = block.body[0];
+  assert.equal(cleared.kind, "invoke");
+  if (cleared.kind === "invoke") assert.equal(cleared.function, "blaze_error_clear");
+  // The arm runs when a failure is pending, and the name it binds is the
+  // message of that failure.
+  const arm = block.body[2];
+  assert.equal(arm.kind, "if");
+  if (arm.kind === "if") {
+    assert.deepEqual(arm.condition, { k: "call", function: "blaze_had_error", args: [] });
+    assert.deepEqual(arm.then[0], {
+      kind: "declare",
+      name: "e",
+      mutable: false,
+      type: null,
+      value: { k: "call", function: "blaze_last_error", args: [] },
+      line: 1,
+    });
+  }
+  // The body still ends at the statements that follow the try.
+  assert.equal(body[1].kind, "declare");
+  assert.equal(body[2].kind, "invoke");
+});
+
+test("a try block runs what it holds, and its finally runs after it", async () => {
+  // The body of a try runs, and the finally runs after it: the compiled
+  // program prints what the source prints.
+  const source = ["try { console.log(1); }", "catch (e) { console.log(`caught ${e}`); }", "finally { console.log(3); }", ""].join("\n");
+  const { directory, binary } = await program(source);
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  // The catch arm does not run: nothing failed.
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["1", "3"]);
+});
+
+test("a try block runs in the Nim driver too", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // The failure a catch arm reads is the runtime's own, and the Nim runtime
+  // keeps it the way the C runtime does.
+  const source = ["try { console.log(1); }", "catch (e) { console.log(`caught ${e}`); }", "finally { console.log(3); }", ""].join("\n");
+  const { directory, binary } = await program(source, "nim");
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
 });
 
 test("an awaited call in a program body is read as a promise await", () => {

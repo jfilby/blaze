@@ -65,9 +65,16 @@ test("the C driver declares the objects, takes the arguments and calls the progr
   const { resolved } = await trees();
   const driver = generateProgramDriver(resolved);
 
-  assert.match(driver, /struct Object1 \{\n {2}void\* left; \/\* \+0 \*\/\n {2}void\* right; \/\* \+8 \*\/\n\}; \/\* 16 bytes, align 8 \*\//);
-  assert.match(driver, /extern void blaze_main\(void\);/);
-  assert.match(driver, /extern struct Object1\* createTree\(double depth\);/);
+  // A field that holds a reference is a handle the runtime passes around, and
+  // a handle is a double: the field is one, and the object is the same size
+  // everywhere it is declared.
+  assert.match(driver, /struct Object1 \{\n {2}double left; \/\* \+0 \*\/\n {2}double right; \/\* \+8 \*\/\n\}; \/\* 16 bytes, align 8 \*\//);
+  // The declaration of a function the driver links names the type it hands
+  // back and leaves the parameters out: a parameter the source wrote no type
+  // for is carried as a double or as a pointer, and the driver has to guess
+  // which, so the call is left to the definition.
+  assert.match(driver, /extern void blaze_main\(\);/);
+  assert.match(driver, /extern struct Object1\* createTree\(\);/);
   // The arguments of the run reach the program the way the source reads them.
   assert.match(driver, /int main\(int argc, char\*\* argv\)/);
   assert.match(driver, new RegExp(`${RUNTIME_NAME}_arguments_set\\(arguments`));
@@ -398,7 +405,11 @@ test("a function named after a C keyword is declared under another name and boun
     read: () => null,
   });
   const driver = generateProgramDriver(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
-  assert.match(driver, /extern double short_\(double n\) __asm__\("short"\);/);
+  // The declaration is written under a name C takes and carries the symbol
+  // beside it, and it leaves the parameters out: a parameter the source wrote
+  // no type for is carried as a double or as a pointer, and the driver has to
+  // guess which, so the call is left to the definition.
+  assert.match(driver, /extern double short_\(\) __asm__\("short"\);/);
   // Nothing anywhere in the driver calls it under the name C cannot spell: the
   // declaration is the only place the symbol is written, and it writes the name
   // the declaration took.
