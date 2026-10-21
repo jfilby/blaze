@@ -7853,9 +7853,10 @@ class Machine {
     // is a store for nothing.
     const keeps = register !== null && value.fields.some((written) => allocates(written.value));
     const object = keeps || register === null ? this.hold(POINTER, "blaze_object") : null;
+    const where = object === null ? 0 : object.offset;
     if (object !== null) this.store(object);
     if (register !== null) this.code.movRegReg(register, RAX);
-    else this.code.movRegMem(RCX, frame((object as Held).offset));
+    else this.code.movRegMem(RCX, frame(where));
     for (const written of value.fields) {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
@@ -7871,8 +7872,8 @@ class Machine {
       // there is no register of its own: the scratch holds the address there,
       // and a value written into the field takes the scratch as it does every
       // other value.
-      if (register === null) this.code.movRegMem(RCX, frame((object as Held).offset));
-      else if (allocates(written.value)) this.code.movRegMem(register, frame((object as Held).offset));
+      if (register === null) this.code.movRegMem(RCX, frame(where));
+      else if (allocates(written.value)) this.code.movRegMem(register, frame(where));
       this.storeInto(type, register ?? RCX, field.offset);
     }
     if (register !== null) this.code.movRegReg(RAX, register);

@@ -1492,7 +1492,8 @@ export class Encoder {
   }
 
   /** A float kept in a register, which is a move of the whole register. */
-  movsMove(destination: number, source: number, single: boolean): void {    this.precision(single);
+  movsMove(destination: number, source: number, single: boolean): void {
+    this.precision(single);
     this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(0x10);
