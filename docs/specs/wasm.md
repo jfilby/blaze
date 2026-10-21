@@ -70,10 +70,10 @@ not "the same instructions" — it is six things:
    objects, arrays, exceptions, the clock, the random source.
 3. **The program.** A program has several functions, a body, and a driver that
    calls them. A wasm build of a program has to produce one module that holds
-   them all and an entry that runs the body. **Not done.**
+   them all and an entry that runs the body. **Done.**
 4. **The module's own functions.** A function that calls another function of
    the program has to be lowered into a call of that function, in the same
-   module. **Not done.**
+   module. **Done.**
 5. **The review artifact.** The machine backend hands a review a listing of
    the object (`describeMachineObject`, `toolchain/ir-machine.ts:8239`). A
    review of a wasm module gets a listing of it (`describeModule`,
@@ -107,9 +107,9 @@ not "the same instructions" — it is six things:
 | hashing and reading a file | yes, in a program | yes, in a program | yes |
 | exceptions (`raise`, `retain`, `release`) | yes | yes | yes |
 | the command line (`process.argv`) | yes | yes | yes |
-| a call of another function of the program | yes | yes | **refused** |
+| a call of another function of the program | yes | yes | yes, as a call of an index |
 | a loop marked parallel | OpenMP | a team of threads | **runs in order** |
-| a program (several functions and a body) | yes | yes, or the C backend takes it | **refused** |
+| a program (several functions and a body) | yes | yes, or the C backend takes it | yes, as one module |
 | HTTP (`http.requestPath` and the rest) | yes | yes | **refused** |
 | SQLite | yes | yes | **refused** |
 | JSON, files, hashing, `fetch` | yes | yes | `fetch` is **refused**; the rest are yes |
@@ -128,19 +128,20 @@ the C or the machine backend builds:
 
 | Refused | Where |
 |---|---|
-| a call of another function of the program | `ir-wasm.ts:1626`, `ir-wasm.ts:2782` |
-| a floor division, a floored remainder | `ir-wasm.ts:1603` |
-| a conversion between two carriers the format has no instruction for | `ir-wasm.ts:1102` |
-| the length of something that is not a buffer | `ir-wasm.ts:1252` |
-| a field of a layout the module does not know | `ir-wasm.ts:1288`, `ir-wasm.ts:2718` |
-| a new object of a layout the module does not know | `ir-wasm.ts:1344`, `ir-wasm.ts:1356` |
-| an element of something that is not a buffer | `ir-wasm.ts:2663` |
-| a view of a block of bytes | `ir-wasm.ts:1303` |
-| a JSON of something that is not a text | `ir-wasm.ts:3262` |
+| a floor division, a floored remainder | `ir-wasm.ts` |
+| a conversion between two carriers the format has no instruction for | `ir-wasm.ts` |
+| the length of something that is not a buffer | `ir-wasm.ts` |
+| a field of a layout the module does not know | `ir-wasm.ts` |
+| a new object of a layout the module does not know | `ir-wasm.ts` |
+| an element of something that is not a buffer | `ir-wasm.ts` |
+| a view of a block of bytes | `ir-wasm.ts` |
+| a JSON of something that is not a text | `ir-wasm.ts` |
+| a call of a function the module does not hold | `ir-wasm.ts` |
 
-Three more refusals live outside the module: a wasm build may not link a
-runtime (`compiler.ts:325`), may not use SQLite (`compiler.ts:1119`), and a
-program may not be built as wasm at all (`compiler.ts:940`).
+Two more refusals live outside the module: a wasm build may not link a
+runtime (`compiler.ts`) and may not use SQLite (`compiler.ts`). A program built
+as wasm may not serve HTTP requests: a server is not a service of the host ABI
+(`compiler.ts`).
 
 The HTTP calls, `fetch` and `process.exit` are refused as well: they are calls
 of a host process rather than services of the runtime, and the host ABI is the
@@ -226,38 +227,39 @@ object are:
 
 ### The program
 
-A program is refused (`compiler.ts:940`) because a program is linked from
-native objects. A wasm program is not linked from anything: a module holds
-its own functions and calls them directly, which is the one thing the format
-makes easier than a native binary. What is missing is the plumbing:
+A program is one module: every function of the program is in it, the body of
+the program is its entry, and the host runs the entry. A wasm program is not
+linked from anything, and a module holds its own functions and calls them
+directly, which is the one thing the format makes easier than a native binary.
+
+The plumbing is in place:
 
 - `compilationUnits` compiles one unit per function for a program and the
-  build links them; a wasm build has to lower them into **one** module.
-- the body of a program is a sequence of statements, not a function; it has to
-  become the module's entry.
+  build links them; a wasm build lowers them into **one** module. The module
+  is written from the implementation that was chosen for each function, so it
+  is what the program round proved.
+- the body of a program is a sequence of statements, not a function; it becomes
+  the module's entry, a function of no arguments that answers nothing.
 - the driver the C backend writes (`toolchain/program-emit.ts`, the linker) is
-  a C program; the wasm one is the host.
+  a C program; the wasm one is the host, which calls the entry of the module
+  and lets the program print.
 
 ### The calls between the functions of a program
 
-A function that calls another function of the program is refused
-(`ir-wasm.ts:1626`). The IR of every function of the program is already in
-the build (`CodegenRequest.functions`), and a module can hold every function
-and call them with a `call` instruction — there is no linker and no symbol
-table. So this is not a hard problem; it is a question of what a module holds
-and how a call names the function it names.
+A function that calls another function of the program is a `call` of the index
+that function has in the module: there is no linker and no symbol table, so the
+index is a lookup in the table the module holds.
 
 What a module that holds several functions needs is written down here, because
-it is the part of the design that is not in the code yet:
+it is the part of the design that is not obvious from the code:
 
 - **The state a module shares.** The pooled constants (the floats that are read
   out of a global, the wide numbers and the texts that are laid down in the
   data segment) and the services the module imports are the module's, not a
   function's: two functions of one module read the same global and the same
-  text. The body that writes a function owns today (`pooledFloats`,
-  `pooledWides`, `pooledTexts`, `services`) is the state of the module, and
-  the state of a function is what is left (its own bytes, its own locals, its
-  own labels).
+  text. The state the module owns (`floats`, `wideConstants`, `data`,
+  `services`) is the state of the module, and the state of a function is what
+  is left (its own bytes, its own locals, its own labels).
 
 - **The scratch of the wide numbers.** The limbs of a wide number in flight
   are scratch, and the scratch of one function cannot be the scratch of
@@ -276,6 +278,14 @@ it is the part of the design that is not in the code yet:
   index. The IR of the call carries the signature of the callee, so the
   arguments are converted to the types the callee takes and the answer is
   converted back to the type the call was written at.
+
+- **The module is written twice.** The count of the imports is not known
+  until every function has been lowered — a service is imported the first time
+  a function reaches for it — and the index of a function is past the imports.
+  So the module is lowered once to find out what it imports and how much
+  scratch each of its functions needs, and once to write the calls at the
+  indexes the imports leave. The two passes are the same lowering over the same
+  input, so they agree by construction.
 
 ### The review artifact
 
@@ -501,8 +511,8 @@ calls as well.
 
 ### The program and the calls between functions
 
-**This is the design of what is not done.** A wasm build of a program lowers
-**one module** holding every function of the program. The lowering changes:
+**This is done.** A wasm build of a program lowers **one module** holding every
+function of the program. The lowering changes:
 
 - the module holds a function per contracted function of the program, each
   with its own type entry, and the contracted symbol of each is exported;
@@ -512,15 +522,28 @@ calls as well.
 - the body of the program becomes the module's entry, a function of no
   arguments that runs the statements of the body and returns nothing.
 
-The host calls the entry the way it calls the contracted symbol today, and
-the driver the C backend writes is not needed: the module's entry *is* the
-driver. `assertProgramOutput` (`compiler.ts:940`) is then replaced by the
-refusal that remains true: a program whose body needs a service the host ABI
-does not have.
+The host calls the entry, and the driver the C backend writes is not needed:
+the module's entry *is* the driver. `assertProgramOutput` is then the refusal
+that remains true: a program that serves HTTP requests is refused, because a
+server is not a service of the host ABI. Every other refusal is the lowering's
+own, and it names the construct it cannot carry.
 
 A module that is not a program — a project with one exported function — is
 what the backend builds today, and it stays: one function, one export, and
-the host calls it.
+the host calls it. A function of a program that calls another function of the
+program is built into a module that holds the functions it calls, because the
+call is a call of an index and the index is of a function that has to be
+there.
+
+The arguments a program reads are the ones the host was given, past the host
+itself and the module it runs. The count the runtime answers is the length of
+`process.argv`: the program, the file it runs, and the arguments it was
+given — which is what the C runtime answers, and what the host of a function
+build answers as well (a function build reads no arguments: the vectors carry
+what the function is called with). An argument is read as the number the
+language reads it as: the spaces around it are not part of it, a base written
+before the digits is read in that base, and an argument that is not a number
+at all is NaN rather than a zero the source never wrote.
 
 ### The listing
 
@@ -568,8 +591,7 @@ Each stage is a change that can be proved on its own. The order is the order
 of dependency: the boundary first, because everything else is a service
 behind it.
 
-Seven of the eight are done. The eighth — the program — is not, and what it
-still needs is written down below.
+All eight are done. What each of them added is written down below.
 
 ### Stage 1 — the boundary, and what is wrong today
 
@@ -618,17 +640,33 @@ still needs is written down below.
 - a wide multiply, a wide division and a wide remainder, as host calls of the
   runtime's own kernels;
 - an ordered comparison of two wide numbers;
-- `u256_from_u64x2` and `u256_from_u64x4`.
+- `u256_from_u64x2` and `u256_from_u64x4`;
+- a whole number handed to a use that reads a wide number is widened by the
+  kernel that builds a wide number out of one word, and the answer is the same
+  number: the low limb holds the word and the three above it are nothing. A
+  wide number is four limbs in the memory and the address of them, so a
+  number cannot be converted into one where it stands — the kernel is what
+  does it.
 
 ### Stage 5 — the program, and the calls between functions
 
-**Not done.** What it needs is written down under "The program and the calls
-between functions" above, and the three pieces of it are these:
-
 - the module holds every function of the program, and a call of another
   function is a call of an index;
-- the body of the program is the entry of the module;
-- `assertProgramOutput` is replaced by the refusal that remains true.
+- the body of the program is the entry of the module, and the host runs it;
+- the module is written twice: once to find out what it imports and how much
+  scratch each of its functions needs, and once to write the calls at the
+  indexes the imports leave;
+- the scratch of the wide numbers in flight is a region of its own per
+  function, so a function that computes one and then calls a function that
+  computes one as well does not write over the first;
+- a function of a program is built into a module that holds the functions it
+  calls, so the call has an index to name;
+- `assertProgramOutput` is replaced by the refusal that remains true: a
+  program that serves HTTP requests is refused, because a server is not a
+  service of the host ABI;
+- the arguments a program reads are the ones the host was given, and the count
+  the runtime answers is the length of `process.argv` — which is what the C
+  runtime answers and what the host of a function build answers as well.
 
 ### Stage 6 — the listing, and the review that reads it
 
@@ -660,12 +698,6 @@ The unfolded module is still written, so that a fold can be compared with what
 it folded: the two answer the same and the folded one is smaller.
 
 ## What is not done
-
-- **A program.** A wasm build of a program is refused (`compiler.ts:940`).
-  Everything a program needs is in place except the module that holds it: the
-  host runs a module and the module runs its own functions, but a module holds
-  one function today, and a program has several. What it takes is written down
-  under "The program and the calls between functions" above.
 
 - **Threads.** A module marked parallel runs its turns in order today, and
   the mark says the turns do not depend on each other rather than that they
@@ -700,6 +732,7 @@ The suites that exist today and what they cover:
 | `test/ir-wasm.test.ts` | the lowering: loops, arms, buffers, the wide arithmetic, the boundary refusals, the folds |
 | `test/wasm.test.ts`, `test/wasm-host.test.ts` | the ABI, the host, the boundary check |
 | `test/wasm-dynamic.test.ts` | the dynamic values, the dynamic arrays, the JSON, the hasher and the file |
+| `test/wasm-program.test.ts` | the program: one module, the calls between its functions, the entry, the command line |
 | `test/u256.test.ts` | the wide numbers across the backends, and what the wasm backend refuses |
 | `test/build.test.ts`, `test/incremental.test.ts`, `test/runtime.test.ts` | the build rules around the wasm backend |
 
@@ -710,8 +743,8 @@ What each stage adds:
 | 1 | a `**=` on a `u64` slot answers what the C backend answers; a text parameter is refused by name; the boundary check accepts a module that imports a service of the table and refuses one that imports anything else; the host is delivered beside the module; a `fill` in the IR is refused rather than dropped |
 | 2 | each service of the table is called by a module that uses it, and the answer is the answer the C backend gives for the same program; the module of arithmetic still imports only the memory and `pow` |
 | 3 | a text is built, concatenated and printed; a number is formatted as text; an object is allocated and its fields read back; an array is pushed to and read from; a dynamic array, a JSON, a hasher and a file are the runtime's own; two texts are compared by what they say |
-| 4 | a wide multiply, a wide division and a wide remainder answer what the C backend answers; an ordered comparison of two wide numbers answers the same as the C backend; `u256_from_u64x2` and `u256_from_u64x4` build the number they name |
-| 5 | a program of three functions builds as one module and runs; a function that calls another function of the program answers what it answers natively; the body of the program runs when the entry is called |
+| 4 | a wide multiply, a wide division and a wide remainder answer what the C backend answers; an ordered comparison of two wide numbers answers the same as the C backend; `u256_from_u64x2` and `u256_from_u64x4` build the number they name; a whole number handed to a use that reads a wide number is widened by the kernel |
+| 5 | a program of three functions builds as one module and runs, and prints what its source prints; a function that calls another function of the program answers what it answers natively; the body of the program runs when the entry is called; a call of a function the module does not hold is refused by name; a program reads the command line it was given, and an argument is read as the number the language reads it as |
 | 6 | the listing names every instruction of the code section, and a review of a module is given the listing |
 | 7 | a definition-contract candidate that traps on every input is refused as a candidate |
 | 8 | the folded module answers the same as the unfolded one, and is smaller |

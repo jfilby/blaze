@@ -23,15 +23,16 @@
 import { stat, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { boundaryProblems, bodyOf, DATA_BASE_EXPORT, generateWasmHost, moduleServices, readVaruint, wasmValueType } from "./wasm.ts";
+import { boundaryProblems, bodyOf, DATA_BASE_EXPORT, generateWasmHost, generateWasmProgramHost, INSPECT_MODULE, moduleServices, readVaruint, wasmValueType } from "./wasm.ts";
 import { HOST_SERVICE_BY_SYMBOL } from "./wasm-host-runtime.ts";
 import type { Runner } from "../core/types.ts";
-import { parseType, symbolOf } from "../semantics/contract.ts";
+import { symbolOf } from "../semantics/contract.ts";
 import { rulesFor } from "../semantics/language.ts";
 import type { FunctionContract } from "../core/types.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   isWide,
+  isWideType,
   isTextType,
   type SemanticBlock,
   type SemanticCall,
@@ -60,6 +61,16 @@ export interface ModuleRequest {
   /** The function as the IR holds it, already validated against its contract. */
   fn: SemanticFunction;
   contract: FunctionContract;
+  /**
+   * The other functions of the program, which the module holds beside this one.
+   *
+   * A module holds every function of the program and calls them by the index
+   * each of them has in it, so a function that calls another function of the
+   * program needs that function in its module: there is no linker to find it
+   * beside. A build that compiles one function on its own has nothing to hold
+   * beside it.
+   */
+  functions?: readonly SemanticFunction[];
   modulePath: string;
   hostPath: string;
   candidate?: string;
@@ -83,16 +94,19 @@ export interface ModuleRequest {
  * A construct the module boundary cannot carry. A lowering that emitted one
  * would build a module the host cannot instantiate, so it is refused here,
  * where the build can say what is missing and which kind builds it instead.
+ *
+ * The name is the symbol of the function the construct was reached in, so the
+ * refusal says which function it was and not only what it is.
  */
-function unreachable(what: string, contract: FunctionContract, candidate?: string): never {
+function unreachable(what: string, name: string, candidate?: string): never {
   throw new CompilerError({
     category: "TargetError",
     stage: "compile",
-    message: `a WebAssembly module cannot ${what}, in ${symbolOf(contract)}`,
+    message: `a WebAssembly module cannot ${what}, in ${name}`,
     detail:
       "the host ABI of a wasm module carries the runtime services the module imports, and this construct " +
       "needs one the ABI does not have. The c, asm and machine output kinds reach the whole runtime",
-    function: symbolOf(contract),
+    function: name,
     candidate,
   });
 }
@@ -429,6 +443,17 @@ const WIDE: TypeFacts = {
 const WIDE_DATA_BASE = 4096;
 
 /**
+ * The most scratch a module may have for the whole numbers in flight.
+ *
+ * A page is the most the host's memory holds below the constants, and the
+ * scratch is below the constants, so a module that needs more than this has
+ * more values in flight at once than there is room for. The scratch of each
+ * function is a region of its own within it, so a program of several functions
+ * shares the limit between them.
+ */
+const SCRATCH_LIMIT = 65536;
+
+/**
  * Two hundred and fifty six low bits set, which is a whole number wrapping
  * around at its own width.
  *
@@ -678,6 +703,172 @@ interface Scope {
 }
 
 /**
+ * One function the module holds, and what a call of it has to know.
+ *
+ * The parameters are the types the module declares the function with and the
+ * result is what it answers: a call converts its arguments to the parameter
+ * types, and converts the answer back to the type the call was written at.
+ */
+interface HeldFunction {
+  /** The IR of the function. */
+  readonly fn: SemanticFunction;
+  /** The name the module exports it by, which is the symbol the program calls it by. */
+  readonly export: string;
+  /** The types of the parameters, as the module declares them. */
+  readonly params: readonly SemanticType[];
+  /** What the function answers, or null where it answers nothing. */
+  readonly result: SemanticType | null;
+}
+
+/**
+ * What a module owns, as opposed to what one of its functions owns.
+ *
+ * The pooled constants, the data the module lays down and the services it
+ * imports are the module's: two functions of one module read the same global
+ * and the same text, and a service is imported once however many of the
+ * functions reach for it. What a function owns is what is left — its own bytes,
+ * its own locals, its own labels — and the scratch of the wide numbers in
+ * flight, which is a region of its own, so that a function that computes one
+ * and then calls a function that computes one as well does not write over the
+ * first.
+ */
+class Module {
+  /** Every float constant the module laid down, in the order the globals are numbered. */
+  readonly floats: { type: number; opcode: number; bytes: number[] }[] = [];
+  /** A float constant already laid down in a global, by the number and its precision. */
+  private readonly pooled = new Map<string, number>();
+  /**
+   * The wide constants the module pooled, and the address of each one.
+   *
+   * The key is the number the constant holds, so a number the source wrote out
+   * twice is laid down once.
+   */
+  readonly wideConstants = new Map<string, number>();
+  /**
+   * The constants the module lays down in its own data: the wide numbers and
+   * the texts, in the order they were pooled.
+   *
+   * A text the program wrote out is laid down in the module's own data and
+   * read at the address it was given, the same way a pooled float is read out
+   * of a global rather than written out again at every place it appears.
+   */
+  readonly data: number[][] = [];
+  /**
+   * The services of the host ABI the module reached for, and the index of the
+   * import each one is.
+   */
+  private readonly services = new Map<string, number>();
+  /** The functions the module holds, in the order they are numbered in. */
+  readonly held: HeldFunction[] = [];
+  /**
+   * The index the module's own functions start at, which is past every import.
+   *
+   * The format numbers the imported functions first, so a call of a function of
+   * the module names the index the function has after them. The count of the
+   * imports is not known until every function has been lowered — a service is
+   * imported the first time a function reaches for it — so the module is
+   * lowered twice: once to find out what it imports, and once to write the
+   * calls at the indexes the imports leave.
+   */
+  base = 0;
+  /** Where the module's own data begins: above the scratch of every function. */
+  offset = WIDE_DATA_BASE;
+
+  /** The services the module reached for, in the order it reached for them. */
+  serviceList(): string[] {
+    return [...this.services.keys()];
+  }
+
+  /**
+   * The index of the import a service is, handed out the first time the module
+   * reaches for it: the import section writes the services in that order and a
+   * call names the index of the import it calls. The power is the first import
+   * of every module, so the services start at one.
+   */
+  service(symbol: string): number {
+    const known = this.services.get(symbol);
+    if (known !== undefined) return known;
+    const index = this.services.size + 1;
+    this.services.set(symbol, index);
+    return index;
+  }
+
+  /**
+   * The global a float constant is read out of, laid down the first time the
+   * module reaches for it.
+   *
+   * `f64.const` carries eight raw bytes, so a constant used k times costs 9k
+   * bytes and materialises those eight bytes every time the instruction runs.
+   * The machine backend writes such a constant once into the read-only data and
+   * loads it at each use, which is what a `global` is here as well: the first
+   * use lays the number down in a global of its own and every use reads it.
+   *
+   * The type of the global is the precision the literal was written at, so a
+   * `f32` and an `f64` of the same number are two globals and not one.
+   */
+  float(value: number, wide: boolean): number {
+    const key = `${wide ? "f64" : "f32"}:${value}`;
+    const known = this.pooled.get(key);
+    if (known !== undefined) return known;
+    if (wide) FLOAT_BYTES.setFloat64(0, value, true);
+    else FLOAT_BYTES.setFloat32(0, value, true);
+    const size = wide ? 8 : 4;
+    const bytes: number[] = [];
+    for (let at = 0; at < size; at += 1) bytes.push(FLOAT_BYTES.getUint8(at));
+    this.pooled.set(key, this.floats.length);
+    this.floats.push({ type: wide ? F64 : F32, opcode: wide ? 0x44 : 0x43, bytes });
+    return this.floats.length - 1;
+  }
+
+  /** The address of a wide constant, laid down the first time it is reached for. */
+  wide(value: bigint): number {
+    const key = `u256:${value & WIDE_MASK}`;
+    const known = this.wideConstants.get(key);
+    if (known !== undefined) return known;
+    const bytes: number[] = [];
+    for (const limb of byteViewOf(value)) {
+      for (let at = 0; at < 8; at += 1) bytes.push(Number((limb >> BigInt(at * 8)) & 0xffn));
+    }
+    const at = this.dataBytes(bytes);
+    this.wideConstants.set(key, at);
+    return at;
+  }
+
+  /** The address of a text, laid down in the module's own data. */
+  text(value: string): number {
+    // The bytes of a text are laid down with a zero at the end of them, which
+    // is what a text the runtime reads as a C string is.
+    return this.dataBytes([...new TextEncoder().encode(value), 0]);
+  }
+
+  /**
+   * The address of a block of bytes in the module's own data, which is where
+   * the constant goes and the next one after it.
+   */
+  dataBytes(bytes: number[]): number {
+    const at = this.offset + this.data.reduce((whole, each) => whole + each.length, 0);
+    this.data.push(bytes);
+    return at;
+  }
+
+  /** The function a symbol names, or null where the module holds no such function. */
+  function(symbol: string): HeldFunction | null {
+    for (const held of this.held) {
+      if (held.export === symbol) return held;
+    }
+    return null;
+  }
+
+  /** The index of the function a symbol names, or -1 where the module holds no such function. */
+  functionIndex(symbol: string): number {
+    for (let index = 0; index < this.held.length; index += 1) {
+      if ((this.held[index] as HeldFunction).export === symbol) return this.base + index;
+    }
+    return -1;
+  }
+}
+
+/**
  * Compiles one function's IR to the body of one wasm function.
  *
  * Every value in the IR is a tree, so each one is emitted where it is used and
@@ -713,7 +904,8 @@ class Body {
   private readonly frames: string[] = [];
   private readonly labelAt = new Map<string, number>();
   private readonly fn: SemanticFunction;
-  private readonly contract: FunctionContract;
+  /** The symbol of the function the body is, which a refusal names. */
+  private readonly name: string;
   private readonly returns: SemanticType;
   private readonly candidate: string | undefined;
   /**
@@ -728,44 +920,18 @@ class Body {
   private readLocal = -1;
   /** Where in the body that read began. */
   private readAt = -1;
-  /** A float constant already laid down in a global, by the number and its precision. */
-  private readonly pooled = new Map<string, number>();
-  /** Every float constant the body laid down, in the order the globals are numbered. */
-  readonly pooledFloats: { type: number; opcode: number; bytes: number[] }[] = [];
-
+  /** The module the body is one function of. */
+  private readonly module: Module;
   /**
-   * The wide constants the body pooled, and the address of each one.
+   * Where the scratch of the wide numbers in flight begins.
    *
-   * The key is the number the constant holds, so a number the source wrote out
-   * twice is laid down once. The constants themselves are laid down in one
-   * data segment by {@link buildWasmModule} once every address in the body is
-   * known.
+   * The scratch is a region of the function's own: a function that computes a
+   * wide number and then calls a function that computes one as well would find
+   * the second one written over the first if the two shared a region.
    */
-  readonly wideConstants = new Map<string, number>();
-
-  /**
-   * The constants the module lays down in its own data: the wide numbers and
-   * the texts, in the order they were pooled.
-   *
-   * A text the program wrote out is laid down in the module's own data and
-   * read at the address it was given, the same way a pooled float is read out
-   * of a global rather than written out again at every place it appears.
-   */
-  readonly pooledData: number[][] = [];
-
-  /**
-   * The services of the host ABI the body reached for, and the index of the
-   * import each one is.
-   *
-   * The index is the order the body first reached for the service in: the
-   * import section lists them in that order, and a call names the index of
-   * the import it calls. The power is the first import of every module, so the
-   * services start at one.
-   */
-  private readonly services = new Map<string, number>();
-
-  /** How far through the scratch below the constants the arithmetic has come. */
-  private wideInFlight = 0;
+  private readonly scratchBase: number;
+  /** How far through that region the arithmetic has come. */
+  private scratchTaken = 0;
   /**
    * Whether the folds the backend knows are safe are applied.
    *
@@ -776,19 +942,23 @@ class Body {
   private readonly optimize: boolean;
 
   constructor(
+    module: Module,
     fn: SemanticFunction,
-    contract: FunctionContract,
+    name: string,
     returns: SemanticType,
     candidate: string | undefined,
     style = 0,
     optimize = true,
+    scratch = 0,
   ) {
+    this.module = module;
     this.fn = fn;
-    this.contract = contract;
+    this.name = name;
     this.returns = returns;
     this.candidate = candidate;
     this.style = style;
     this.optimize = optimize;
+    this.scratchBase = scratch;
     // A parameter is a local the module numbers before any other, because the
     // function's type is written in that order, and it is never handed back
     // to the pool: the host filled it before the body ran and every `local`
@@ -895,20 +1065,46 @@ class Body {
    * A call of a service of the host ABI.
    *
    * The service is imported the first time the body reaches for it and the
-   * import is named by its index, so the index is handed out here and the
-   * import section writes the services in the order the body reached for them.
+   * import is named by its index, so the index is handed out by the module and
+   * the import section writes the services in the order the body reached for
+   * them.
    */
   private callService(symbol: string): void {
-    const known = this.services.get(symbol);
-    const index = known ?? this.services.size + 1;
-    if (known === undefined) this.services.set(symbol, index);
     this.op(0x10);
-    this.code.varuint(index);
+    this.code.varuint(this.module.service(symbol));
   }
 
-  /** The services the body reached for, in the order it reached for them. */
-  serviceList(): string[] {
-    return [...this.services.keys()];
+  /**
+   * A call of another function of the program.
+   *
+   * A module holds every function of the program and calls them by the index
+   * each of them has in it: there is no linker and no symbol table, so the
+   * index is a lookup in the table the module holds. The arguments are the
+   * callee's own types — the IR of the call carries the signature of the
+   * callee, and the callee's own body declares what it takes — and the answer
+   * comes back in the callee's own type and is converted to the type the call
+   * was written at.
+   *
+   * @param at the type the answer is wanted in, or null where the call is
+   * written for its effect and nothing reads the answer.
+   */
+  private programCall(call: SemanticCall, callee: HeldFunction, at: SemanticType | null): void {
+    for (const [position, argument] of call.args.entries()) {
+      const given = call.argTypes[position] ?? argument.type;
+      this.value(argument, given);
+      const wanted = callee.params[position];
+      // The signature the call was written against and the body the module
+      // holds are the same function, so the types agree; where they do not,
+      // the argument is converted into the one the callee takes.
+      if (wanted !== undefined) this.convert(given, wanted);
+    }
+    this.op(0x10);
+    this.code.varuint(this.module.functionIndex(call.callee));
+    if (at === null) return;
+    if (callee.result === null) {
+      unreachable(`call ${call.callee} for its value`, this.name, this.candidate);
+    }
+    this.convert(callee.result, at);
   }
 
   /**
@@ -972,24 +1168,9 @@ class Body {
    * `f32` and an `f64` of the same number are two globals and not one.
    */
   private float(value: number, wide: boolean): void {
-    const key = `${wide ? "f64" : "f32"}:${value}`;
-    const known = this.pooled.get(key);
-    if (known !== undefined) {
-      this.op(0x23);
-      this.code.varuint(known);
-      return;
-    }
-    if (wide) FLOAT_BYTES.setFloat64(0, value, true);
-    else FLOAT_BYTES.setFloat32(0, value, true);
-    const size = wide ? 8 : 4;
-    const bytes: number[] = [];
-    for (let at = 0; at < size; at += 1) bytes.push(FLOAT_BYTES.getUint8(at));
-    this.pooled.set(key, this.pooledFloats.length);
-    this.pooledFloats.push({ type: wide ? F64 : F32, opcode: wide ? 0x44 : 0x43, bytes });
-    // A global read is the first use of the number laid down; the number itself
-    // is written once, into the global section, and nowhere in the body.
+    const index = this.module.float(value, wide);
     this.op(0x23);
-    this.code.varuint(this.pooledFloats.length - 1);
+    this.code.varuint(index);
   }
 
   /**
@@ -1005,7 +1186,7 @@ class Body {
     throw new CompilerError({
       category: "SemanticIrError",
       stage: "semantic-ir",
-      message: `the body of ${symbolOf(this.contract)} reads "${name}", which it declares nowhere`,
+      message: `the body of ${this.name} reads "${name}", which it declares nowhere`,
     });
   }
 
@@ -1100,7 +1281,7 @@ class Body {
     const table = whole ? TO_FLOAT : TO_WHOLE;
     const pair = table[held]?.[wanted];
     if (pair === undefined) {
-      unreachable("convert between carriers", this.contract, this.candidate);
+      unreachable("convert between carriers", this.name, this.candidate);
     }
     this.op(whole ? (facts(from).unsigned ? pair.unsigned : pair.signed) : facts(to).unsigned ? pair.unsigned : pair.signed);
   }
@@ -1210,8 +1391,41 @@ class Body {
     this.op(BINARY[I32].add as number);
   }
 
+  /**
+   * A whole number widened into a wide number, which the kernel beside the
+   * runtime does.
+   *
+   * The kernel writes the answer into a block of its own and answers with the
+   * address of it, which is how a wide number is carried: four limbs in the
+   * memory, and the address of them.
+   */
+  private widen(value: SemanticValue): void {
+    if (value.type.kind !== "primitive" || !isWholeNumber(value.type.name)) {
+      unreachable("widen something that is not a whole number into a wide number", this.name, this.candidate);
+    }
+    const out = this.wideScratch();
+    // The kernel writes its answer into a block of its own and is given the
+    // address of it first, the way every kernel call is.
+    this.i32(out);
+    // The kernel takes one machine word, so the number is widened to that
+    // width first: a 32 bit whole number is read as a 64 bit one.
+    this.value(value, I64_TYPE);
+    this.callService("blaze_rt_u256_from_u64");
+    this.i32(out);
+  }
+
   /** One value, as the operations that produce it. */
   private value(value: SemanticValue, at: SemanticType): void {
+    // A whole number read as a wide number is widened by the kernel that
+    // builds a wide number out of one word, and the answer is the same number:
+    // the low limb holds the word it was written as and the three above it are
+    // nothing. A wide number is four limbs in the memory and the address of
+    // them, so a number cannot be converted into one where it stands — the
+    // kernel is what does it.
+    if (isWideType(at) && !isWideType(value.type)) {
+      this.widen(value);
+      return;
+    }
     switch (value.k) {
       case "const":
         this.constant(value.text, value.type, at);
@@ -1250,7 +1464,7 @@ class Body {
           return;
         }
         if (held.kind !== "slice" && held.kind !== "array" && held.kind !== "ptr") {
-          unreachable("take the length of a value that is not a buffer", this.contract, this.candidate);
+          unreachable("take the length of a value that is not a buffer", this.name, this.candidate);
         }
         this.value(value.of, ADDRESS);
         this.i32(8);
@@ -1286,7 +1500,7 @@ class Body {
         const layout = this.fn.objects[value.layout];
         const field = layout?.fields.find((entry) => entry.name === value.field);
         if (field === undefined) {
-          unreachable(`read the field "${value.field}" of the layout "${value.layout}"`, this.contract, this.candidate);
+          unreachable(`read the field "${value.field}" of the layout "${value.layout}"`, this.name, this.candidate);
         }
         this.value(value.object, ADDRESS);
         const load = facts(value.type).load;
@@ -1301,7 +1515,7 @@ class Body {
         // elements is the word the offset sits one before: a module reads the
         // length of a buffer from there.
         if (value.view !== null) {
-          unreachable("take a view of a block of bytes", this.contract, this.candidate);
+          unreachable("take a view of a block of bytes", this.name, this.candidate);
         }
         const element = value.element;
         const size = facts(element).size;
@@ -1342,7 +1556,7 @@ class Body {
       case "newObject": {
         const layout = this.fn.objects[value.layout];
         if (layout === undefined) {
-          unreachable(`build an object of the layout "${value.layout}"`, this.contract, this.candidate);
+          unreachable(`build an object of the layout "${value.layout}"`, this.name, this.candidate);
         }
         // The object is a block the runtime lays out, and its fields are
         // written at the offsets the layout gives them.
@@ -1354,7 +1568,7 @@ class Body {
         for (const field of value.fields) {
           const entry = layout.fields.find((each) => each.name === field.name);
           if (entry === undefined) {
-            unreachable(`write the field "${field.name}" of the layout "${value.layout}"`, this.contract, this.candidate);
+            unreachable(`write the field "${field.name}" of the layout "${value.layout}"`, this.name, this.candidate);
           }
           this.localAt(pointer);
           this.value(field.value, field.value.type);
@@ -1603,11 +1817,11 @@ class Body {
             // them: the division it has is the truncating one.
             unreachable(
               `compute ${value.op}: this backend has not written a floor division or a floored remainder`,
-              this.contract,
+              this.name,
               this.candidate,
             );
           }
-          unreachable(`compute ${value.op}`, this.contract, this.candidate);
+          unreachable(`compute ${value.op}`, this.name, this.candidate);
         }
         this.op(op);
         if (value.k === "compare") {
@@ -1618,13 +1832,13 @@ class Body {
         return;
       }
       case "call": {
-        // A module reaches no other function of the program, so the only call
-        // it can lower is a maths builtin, and that is an instruction over the
-        // argument rather than a call. Every argument goes down first, in the
-        // order the call passes them, and the instruction takes the last one
-        // off the top.
-        if (builtinFor(value.call.callee) === null) {
-          unreachable(`call ${value.call.callee}`, this.contract, this.candidate);
+        // The only call a module can lower is a maths builtin, which is an
+        // instruction over the argument rather than a call, or a call of another
+        // function of the program, which is a call of the index that function
+        // has in the module. Every argument goes down first, in the order the
+        // call passes them, and the instruction takes the last one off the top.
+        if (builtinFor(value.call.callee) === null && this.module.function(value.call.callee) === null) {
+          unreachable(`call ${value.call.callee}`, this.name, this.candidate);
         }
         // The wide arithmetic is the kernel beside the runtime, and a module
         // calls it the same way the other two backends do.
@@ -1639,6 +1853,14 @@ class Body {
         const answered = this.dynamicCall(value.call);
         if (answered !== null) {
           this.convert(answered, at);
+          return;
+        }
+        // A call of another function of the program is a call of the index that
+        // function has in this module: there is no linker and no symbol table,
+        // so the index is a lookup in the table the module holds.
+        const callee = this.module.function(value.call.callee);
+        if (callee !== null) {
+          this.programCall(value.call, callee, at);
           return;
         }
         for (const [position, argument] of value.call.args.entries()) {
@@ -1671,7 +1893,7 @@ class Body {
         this.convert(TEXT, at);
         return;
       default:
-        unreachable(`hold a value the IR keeps as "${value.k}"`, this.contract, this.candidate);
+        unreachable(`hold a value the IR keeps as "${value.k}"`, this.name, this.candidate);
     }
   }
 
@@ -1726,18 +1948,7 @@ class Body {
    * two's complement over 256 bits rather than a negative number of limbs.
    */
   private wideConstant(value: bigint): void {
-    const key = `u256:${value & WIDE_MASK}`;
-    const known = this.wideConstants.get(key);
-    if (known !== undefined) {
-      this.i32(known);
-      return;
-    }
-    const bytes: number[] = [];
-    const limbs = byteViewOf(value);
-    for (const limb of limbs) for (let at = 0; at < 8; at += 1) bytes.push(Number((limb >> BigInt(at * 8)) & 0xffn));
-    const at = this.poolData(bytes);
-    this.wideConstants.set(key, at);
-    this.i32(at);
+    this.i32(this.module.wide(value));
   }
 
   /**
@@ -2075,14 +2286,14 @@ class Body {
 
   /** The same, for a region that is not one whole number wide. */
   private wideScratchOf(bytes: number): number {
-    const at = this.wideInFlight;
-    this.wideInFlight += bytes;
-    if (at + bytes > WIDE_DATA_BASE) {
+    const at = this.scratchBase + this.scratchTaken;
+    this.scratchTaken += bytes;
+    if (this.scratchTaken > SCRATCH_LIMIT) {
       throw new CompilerError({
         category: "AssemblyError",
         stage: "wasm",
         message: "this function keeps more wide numbers in flight than the module has scratch for",
-        detail: `every value an operation is computing on is thirty-two bytes and they live below the module's constants, of which there are ${(WIDE_DATA_BASE / 32) | 0}; split the expression`,
+        detail: `every value an operation is computing on is thirty-two bytes and they live in a region of their own below the module's constants, of which there are ${(SCRATCH_LIMIT / 32) | 0}; split the expression`,
       });
     }
     return at;
@@ -2355,23 +2566,7 @@ class Body {
    * terminator.
    */
   private poolText(text: string): number {
-    const bytes = [...new TextEncoder().encode(text), 0];
-    return this.poolData(bytes);
-  }
-
-  /**
-   * The address of a constant laid down in the module's own data.
-   *
-   * The constants a body pools are one list: a wide number and a text are
-   * laid down one after another, and each is at the address the ones before it
-   * leave free. Two lists would put a text and a wide number on top of each
-   * other when the text was pooled first, and the wide number would be read as
-   * the text — or the other way round.
-   */
-  private poolData(bytes: number[]): number {
-    const at = WIDE_DATA_BASE + this.pooledData.reduce((whole, each) => whole + each.length, 0);
-    this.pooledData.push(bytes);
-    return at;
+    return this.module.text(text);
   }
 
   /**
@@ -2661,7 +2856,7 @@ class Body {
         const buffer = this.resolve(statement.buffer);
         const element = elementTypeOf(buffer.type);
         if (element === null) {
-          unreachable(`write an element of "${statement.buffer}"`, this.contract, this.candidate);
+          unreachable(`write an element of "${statement.buffer}"`, this.name, this.candidate);
         }
         this.address({ k: "local", type: buffer.type, name: statement.buffer }, statement.index, element);
         // A compound operator takes the old element and the new value, while
@@ -2716,7 +2911,7 @@ class Body {
         const layout = this.fn.objects[statement.layout];
         const field = layout?.fields.find((entry) => entry.name === statement.field);
         if (field === undefined) {
-          unreachable(`write the field "${statement.field}" of the layout "${statement.layout}"`, this.contract, this.candidate);
+          unreachable(`write the field "${statement.field}" of the layout "${statement.layout}"`, this.name, this.candidate);
         }
         // The address is the only thing narrowed to the 32 bits the format
         // indexes memory with; the value goes down at the width of its own
@@ -2779,8 +2974,8 @@ class Body {
         // for its value, so it takes the same arguments off the stack: a maths
         // builtin is an instruction over its argument, and emitted without one
         // it is an instruction that pops a value nobody pushed.
-        if (builtinFor(statement.call.callee) === null) {
-          unreachable(`call ${statement.call.callee}`, this.contract, this.candidate);
+        if (builtinFor(statement.call.callee) === null && this.module.function(statement.call.callee) === null) {
+          unreachable(`call ${statement.call.callee}`, this.name, this.candidate);
         }
         // The dynamic values and the dynamic arrays are the runtime's own, and
         // the runtime is the host.
@@ -2788,6 +2983,16 @@ class Body {
           // Nothing reads the answer, so it is dropped rather than left for
           // the statement after it to take as one of its own operands.
           this.op(0x1a);
+          return;
+        }
+        // A call of another function of the program is a call of the index that
+        // function has in this module.
+        const callee = this.module.function(statement.call.callee);
+        if (callee !== null) {
+          this.programCall(statement.call, callee, null);
+          // Nothing reads the answer, so it is dropped rather than left for the
+          // statement after it to take as one of its own operands.
+          if (callee.result !== null) this.op(0x1a);
           return;
         }
         for (const [position, argument] of statement.call.args.entries()) {
@@ -3207,9 +3412,9 @@ class Body {
     throw new CompilerError({
       category: "TargetError",
       stage: "compile",
-      message: `a WebAssembly module cannot call ${callee}, in ${symbolOf(this.contract)}`,
+      message: `a WebAssembly module cannot call ${callee}, in ${this.name}`,
       detail: "this backend has no instruction for it",
-      function: symbolOf(this.contract),
+      function: this.name,
       candidate: this.candidate,
     });
   }
@@ -3260,7 +3465,7 @@ class Body {
         // that way.
         const text = argument(0);
         if (!isTextType(text.type)) {
-          unreachable("parse JSON of something that is not a text", this.contract, this.candidate);
+          unreachable("parse JSON of something that is not a text", this.name, this.candidate);
         }
         this.value(text, TEXT);
         this.callService("blaze_rt_json_parse");
@@ -3355,7 +3560,7 @@ class Body {
       this.i32(0);
       return;
     }
-    unreachable("hand the runtime a text where a text is wanted", this.contract, this.candidate);
+    unreachable("hand the runtime a text where a text is wanted", this.name, this.candidate);
   }
 
   /**
@@ -3416,6 +3621,17 @@ class Body {
    */
   bytes(): Bytes {
     return this.code;
+  }
+
+  /**
+   * How much of the function's own scratch the arithmetic has taken.
+   *
+   * The module asks for it once the body has been lowered, because the scratch
+   * of a function is a region of its own and the regions are laid out one after
+   * another above the constants.
+   */
+  scratchUsed(): number {
+    return this.scratchTaken;
   }
 }
 
@@ -3493,6 +3709,95 @@ function blocksOf(block: SemanticBlock): SemanticBlock[] {
 }
 
 /**
+ * One function the module holds.
+ */
+export interface ModuleFunction {
+  /** The IR of the function, already validated against its contract. */
+  readonly fn: SemanticFunction;
+  /**
+   * The contract the function is called by.
+   *
+   * The contract says what the function takes and what it answers, and the
+   * module declares the function with the types the IR holds.
+   */
+  readonly contract?: FunctionContract;
+  /**
+   * The name the module exports it by.
+   *
+   * It is the symbol the program calls the function by, which is the symbol
+   * the IR holds unless the caller says otherwise.
+   */
+  readonly export?: string;
+}
+
+/**
+ * The module of a program: every function of the program, and the body it runs.
+ */
+export interface ProgramModule {
+  /** The functions the module holds, in the order they are numbered in. */
+  readonly functions: readonly ModuleFunction[];
+  /**
+   * The body of the program, as the entry of the module.
+   *
+   * The entry is a function of no arguments that runs the statements of the
+   * body and answers nothing: it is the driver the C backend writes in C,
+   * written here as the module's own function.
+   */
+  readonly entry?: SemanticBlock;
+}
+
+/** What a module is written with. */
+export interface ModuleOptions {
+  /** The candidate the module was written from, which a refusal names. */
+  readonly candidate?: string;
+  /** The style a value is written as text in, which is the language's own. */
+  readonly style?: number;
+  /**
+   * Whether the folds the backend knows are safe are applied.
+   *
+   * A build folds. The flag is here so that the folded module and the
+   * unfolded one can be compared, which is the only way to say that a fold
+   * changed nothing but the size.
+   */
+  readonly optimize?: boolean;
+}
+
+/**
+ * The name the module exports the entry of a program by.
+ *
+ * The entry is the body of the program, and the host calls it the way it calls
+ * the contracted symbol of a function: it is the driver the C backend writes
+ * in C, written here as the module's own function.
+ */
+export const ENTRY_EXPORT = "__blaze_entry";
+
+/**
+ * What the module of a program is written from.
+ */
+export interface ProgramModuleRequest {
+  /** The functions the module holds, in the order they are numbered in. */
+  readonly functions: readonly ModuleFunction[];
+  /**
+   * The body of the program, as the entry of the module.
+   *
+   * The entry is a function of no arguments that runs the statements of the
+   * body and answers nothing: it is the driver the C backend writes in C,
+   * written here as the module's own function.
+   */
+  readonly entry?: SemanticBlock;
+  /** Where the module is written. */
+  readonly modulePath: string;
+  /** Where the host that runs it is written. */
+  readonly hostPath: string;
+  /** The candidate the module was written from, which a refusal names. */
+  readonly candidate?: string;
+  /** The language the program was written in. */
+  readonly language?: string;
+  /** Whether the folds the backend knows are safe are applied. */
+  readonly optimize?: boolean;
+}
+
+/**
  * The function's own body as the module writes it, and the bytes of the code
  * section it is written into.
  *
@@ -3507,42 +3812,98 @@ export function moduleBytes(
   style = 0,
   options: { optimize?: boolean } = {},
 ): Uint8Array {
-  const returns = parseType(contract.function.returns);
-  const optimize = options.optimize ?? true;
-  const body = new Body(fn, contract, returns, candidate, style, optimize);
-  const parameters = fn.params.map((param) => facts(slotType(param)).held);
-  const result = returns.kind === "void" ? undefined : facts(returns).held;
-  // The body is emitted into a buffer of its own, because a statement that
-  // needs a value twice borrows a local for it, and a local borrowed while the
-  // body was emitted was not declared yet. So the body's own bytes are taken
-  // first and the declaration they are numbered against is written in front of
-  // them afterwards.
-  body.block(fn.entry, null);
-  // The value a body that falls out of its own end leaves behind is written
-  // before the body's bytes are taken, because `answer` appends to the buffer
-  // the body is written into: an `answer` after they were read appends to a
-  // buffer nothing reads again, and the `end` that closes the function is left
-  // with an empty stack under a type section that declares a result.
-  //
-  // A body that always answers does not fall out of its own end, so the value
-  // is written where nothing reaches it: the module carries it and nothing
-  // reads it.
-  if (result !== undefined && !(optimize && alwaysReturns(fn))) body.answer();
-  // The locals are declared in front of the body rather than after it, because
-  // a statement that needs a value twice borrows a local for it, and a local
-  // borrowed while the body was emitted was not declared yet. Both are written
-  // into one buffer, which the code section then takes whole: the body's bytes
-  // are never copied out and back in on the way to the module.
-  const groups = body.localGroups();
-  const code = new Bytes();
-  code.counted(groups.length / 2, (locals) => groups.forEach((value) => locals.varuint(value)));
-  code.absorb(body.bytes());
-  code.byte(0x0b);
+  return programModuleBytes(
+    { functions: [{ fn, contract }] },
+    { candidate, style, optimize: options.optimize ?? true },
+  );
+}
 
-  // The services the body reached for are the ones the module imports, and the
-  // import section writes them in the order the body reached for them, which is
-  // the order the calls name them in.
-  const services = body.serviceList();
+/**
+ * The module of a program, as the bytes of it.
+ *
+ * A module holds every function of the program and calls them by the index
+ * each of them has in it, and the body of the program is the entry of the
+ * module: there is no linker and no symbol table, so a call is a lookup in the
+ * table the module holds and the driver the C backend writes in C is the
+ * module's own function.
+ *
+ * The module is written twice. The first pass finds out what the module
+ * imports — a service is imported the first time a function reaches for it, so
+ * the count of the imports is not known until every function has been lowered —
+ * and how much scratch each function needs for the whole numbers in flight.
+ * The second pass writes the module with the indexes the imports leave and the
+ * scratch the first pass measured.
+ */
+export function programModuleBytes(program: ProgramModule, options: ModuleOptions = {}): Uint8Array {
+  const optimize = options.optimize ?? true;
+  const style = options.style ?? 0;
+  const candidate = options.candidate;
+
+  /** The functions the module holds, with the entry among them. */
+  const functions: { fn: SemanticFunction; name: string; export: string }[] = [];
+  for (const one of program.functions) {
+    const named = one.export ?? one.fn.symbol;
+    functions.push({ fn: one.fn, name: named, export: named });
+  }
+  if (program.entry !== undefined) {
+    // The entry is the body of the program, and a refusal in it names the body
+    // rather than the symbol the module exports it by.
+    functions.push({ fn: entryFunction(program.entry), name: "the body of the program", export: ENTRY_EXPORT });
+  }
+  if (functions.length === 0) {
+    throw new CompilerError({
+      category: "TargetError",
+      stage: "compile",
+      message: "a WebAssembly module holds no function",
+      detail: "the module of a program holds every function of the program and the body it runs",
+      candidate,
+    });
+  }
+
+  // The first pass: what the module imports, and how much scratch each of its
+  // functions needs for the whole numbers in flight.
+  const probe = new Module();
+  for (const one of functions) probe.held.push(heldOf(one.fn, one.export));
+  const scratch: number[] = [];
+  for (const one of functions) {
+    scratch.push(lower(probe, one, 0, candidate, style, optimize).scratch);
+  }
+
+  // The imports are known now, so the functions of the module are numbered
+  // after them: the power is the first function the module imports, the
+  // services the module reached for follow it, and the module's own functions
+  // come after those. The memory is not a function and takes no index.
+  const services = probe.serviceList();
+  const base = 1 + services.length;
+  // The scratch of each function is a region of its own, and the constants are
+  // laid down above every one of them.
+  const regions: number[] = [];
+  let used = 0;
+  for (const size of scratch) {
+    regions.push(used);
+    used += size;
+  }
+  if (used > SCRATCH_LIMIT) {
+    throw new CompilerError({
+      category: "AssemblyError",
+      stage: "wasm",
+      message: "the module keeps more wide numbers in flight than it has scratch for",
+      detail: `every value an operation is computing on is thirty-two bytes and they live in a region below the module's constants, of which there are ${(SCRATCH_LIMIT / 32) | 0}`,
+      candidate,
+    });
+  }
+  const offset = Math.max(WIDE_DATA_BASE, used);
+
+  // The second pass: the module itself, with the indexes the imports leave.
+  const module = new Module();
+  module.base = base;
+  module.offset = offset;
+  for (const one of functions) module.held.push(heldOf(one.fn, one.export));
+  const codes: Bytes[] = [];
+  for (const [index, one] of functions.entries()) {
+    codes.push(lower(module, one, regions[index] as number, candidate, style, optimize).code);
+  }
+
   const signatures = services.map((symbol) => {
     const service = HOST_SERVICE_BY_SYMBOL.get(symbol);
     if (service === undefined) {
@@ -3550,37 +3911,33 @@ export function moduleBytes(
         category: "TargetError",
         stage: "compile",
         message: `"${symbol}" is not a service of the host ABI`,
-        function: symbolOf(contract),
         candidate,
       });
     }
     return service;
   });
 
-  const module = new Bytes();
-  module.raw(MODULE_HEADER);
-  module.section(1, (types) =>
-    types.counted(2 + signatures.length, (one) => {
-      one.byte(0x60);
-      one.counted(parameters.length, (values) => parameters.forEach((type) => values.byte(type)));
-      one.counted(result === undefined ? 0 : 1, (results) => {
-        if (result !== undefined) results.byte(result);
-      });
+  const out = new Bytes();
+  out.raw(MODULE_HEADER);
+  // The types are the module's own functions first, then the power, then the
+  // services: the import section names the power's type and the services' types
+  // by their index, and the function section names each function's type.
+  const functionTypes = functions.map((one) => signatureOf(one.fn));
+  out.section(1, (types) =>
+    types.counted(1 + functionTypes.length + signatures.length, (one) => {
+      for (const type of functionTypes) writeType(one, type);
       one.byte(0x60);
       one.counted(2, (values) => { values.byte(0x7c); values.byte(0x7c); });
       one.counted(1, (results) => results.byte(0x7c));
       for (const service of signatures) {
-        one.byte(0x60);
-        one.counted(service.params.length, (values) =>
-          service.params.forEach((type) => values.byte(TYPE_CODES[type] as number)),
-        );
-        one.counted(service.result === null ? 0 : 1, (results) => {
-          if (service.result !== null) results.byte(TYPE_CODES[service.result] as number);
+        writeType(one, {
+          parameters: service.params.map((type) => TYPE_CODES[type] as number),
+          result: service.result === null ? undefined : (TYPE_CODES[service.result] as number),
         });
       }
     }),
   );
-  module.section(2, (imports) =>
+  out.section(2, (imports) =>
     imports.counted(2 + services.length, (one) => {
       one.name("env");
       one.name("memory");
@@ -3590,18 +3947,25 @@ export function moduleBytes(
       one.name("env");
       one.name("pow");
       one.byte(0x00);
-      one.varuint(1);
+      one.varuint(functionTypes.length);
       for (const [position, symbol] of services.entries()) {
         one.name("env");
         one.name(symbol);
         one.byte(0x00);
-        // The type of a service is the one after the function's own type and
+        // The type of a service is the one after the functions' own types and
         // the power's, in the order the services are listed in.
-        one.varuint(2 + position);
+        one.varuint(1 + functionTypes.length + position);
       }
     }),
   );
-  module.section(3, (functions) => functions.counted(1, (one) => one.byte(0)));
+  out.section(3, (functions2) => {
+    // Every function of the module has a type of its own, in the order the
+    // functions are numbered in, so the type of the nth is the nth.
+    const body = new Bytes();
+    for (let index = 0; index < functions.length; index += 1) body.byte(index);
+    functions2.varuint(functions.length);
+    functions2.absorb(body);
+  });
   // The constants the body pooled, one global each. The section sits between
   // the function section and the export section because the format numbers the
   // sections in order, and a global is read by the index the body handed it out
@@ -3617,9 +3981,9 @@ export function moduleBytes(
   // binary. The module is the only thing that knows where its own memory ends,
   // so it says so, and a host that allocated below it would write a vector over
   // the limbs of a wide number in flight.
-  module.section(6, (globals) =>
-    globals.counted(body.pooledFloats.length + 1, (each) => {
-      for (const pooled of body.pooledFloats) {
+  out.section(6, (globals) =>
+    globals.counted(module.floats.length + 1, (each) => {
+      for (const pooled of module.floats) {
         // A global is its value type, a mutability byte and a constant expression
         // that initialises it. The expression is the constant itself followed by
         // `end`, and the mutability is immutable because nothing here can write one.
@@ -3632,62 +3996,167 @@ export function moduleBytes(
       each.byte(I32);
       each.byte(0x00);
       each.byte(0x41);
-      each.varuint(dataBase(body));
+      each.varuint(dataBase(module));
       each.byte(0x0b);
     }),
   );
-  module.section(7, (exports) =>
-    exports.counted(2, (each) => {
-      each.name(symbolOf(contract));
-      each.byte(0x00);
-      // The function is the first one the module defines, and the imports come
-      // before it: the power and the services the body reached for.
-      each.varuint(1 + services.length);
-      // The global the host reads to learn where it may allocate from. `0x03`
-      // is a global export; the index is past every pooled float.
-      each.name(DATA_BASE_EXPORT);
-      each.byte(0x03);
-      each.varuint(body.pooledFloats.length);
-    }),
-  );
-  module.section(10, (bodies) =>
-    bodies.counted(1, (one) => {
-      one.varuint(code.length);
-      one.absorb(code);
-    }),
-  );
+  out.section(7, (exports) => {
+    const body = new Bytes();
+    for (const [index, one] of functions.entries()) {
+      body.name(one.export);
+      body.byte(0x00);
+      // The functions of the module come after the imports: the power and the
+      // services the module reached for.
+      body.varuint(base + index);
+    }
+    // The global the host reads to learn where it may allocate from. `0x03`
+    // is a global export; the index is past every pooled float.
+    body.name(DATA_BASE_EXPORT);
+    body.byte(0x03);
+    body.varuint(module.floats.length);
+    exports.varuint(functions.length + 1);
+    exports.absorb(body);
+  });
+  out.section(10, (bodies) => {
+    const body = new Bytes();
+    for (const code of codes) {
+      body.varuint(code.length);
+      body.absorb(code);
+    }
+    bodies.varuint(codes.length);
+    bodies.absorb(body);
+  });
   // The wide constants and the texts the body pooled, laid down once by the
   // host when the module is instantiated. The segment starts above the scratch
   // the arithmetic writes into, because a data segment is not a thing a module
   // may write to and a wide number in flight is. Its offset is a constant
   // expression rather than an address the body reads, which is what the format
   // requires.
-  const pooled = body.pooledData;
-  if (pooled.length > 0) {
-    module.section(11, (data) =>
+  if (module.data.length > 0) {
+    out.section(11, (data) =>
       data.counted(1, (one) => {
         // An active segment in memory zero, written at a constant expression.
         one.varuint(0);
         one.byte(0x41);
-        one.varbig(BigInt(WIDE_DATA_BASE));
+        one.varbig(BigInt(offset));
         one.byte(0x0b);
-        const bytes = pooled.flat();
+        const bytes = module.data.flat();
         one.varuint(bytes.length);
         for (const byte of bytes) one.byte(byte);
       }),
     );
   }
-  return module.build();
+  return out.build();
+}
+
+/**
+ * The type a function is declared with: the carriers of its parameters and the
+ * carrier of what it answers.
+ */
+function signatureOf(fn: SemanticFunction): { parameters: number[]; result: number | undefined } {
+  const parameters = fn.params.map((param) => facts(slotType(param)).held);
+  const result = fn.returns.kind === "void" ? undefined : facts(fn.returns).held;
+  return { parameters, result };
+}
+
+/** Writes one type into the type section. */
+function writeType(
+  one: Bytes,
+  type: { parameters: number[]; result: number | undefined },
+): void {
+  one.byte(0x60);
+  one.counted(type.parameters.length, (values) => type.parameters.forEach((code) => values.byte(code)));
+  one.counted(type.result === undefined ? 0 : 1, (results) => {
+    if (type.result !== undefined) results.byte(type.result);
+  });
+}
+
+/** What the module holds of one function, and what a call of it needs to know. */
+function heldOf(fn: SemanticFunction, named: string): HeldFunction {
+  return {
+    fn,
+    export: named,
+    params: fn.params.map((param) => slotType(param)),
+    result: fn.returns.kind === "void" ? null : fn.returns,
+  };
+}
+
+/**
+ * The body of a program, as the function the module runs it by.
+ *
+ * The body is a sequence of statements rather than a function, and the module
+ * runs it as one: a function of no arguments that answers nothing.
+ */
+function entryFunction(block: SemanticBlock): SemanticFunction {
+  return {
+    name: ENTRY_EXPORT,
+    symbol: ENTRY_EXPORT,
+    params: [],
+    returns: { kind: "void" },
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: block,
+  };
+}
+
+/**
+ * Lowers one function of the module and returns the bytes of its body.
+ *
+ * The body is emitted into a buffer of its own, because a statement that
+ * needs a value twice borrows a local for it, and a local borrowed while the
+ * body was emitted was not declared yet. So the body's own bytes are taken
+ * first and the declaration they are numbered against is written in front of
+ * them afterwards.
+ */
+function lower(
+  module: Module,
+  one: { fn: SemanticFunction; name: string; export: string },
+  scratch: number,
+  candidate: string | undefined,
+  style: number,
+  optimize: boolean,
+): { code: Bytes; scratch: number } {
+  const fn = one.fn;
+  const body = new Body(module, fn, one.name, fn.returns, candidate, style, optimize, scratch);
+  const signature = signatureOf(fn);
+  body.block(fn.entry, null);
+  // The value a body that falls out of its own end leaves behind is written
+  // before the body's bytes are taken, because `answer` appends to the buffer
+  // the body is written into: an `answer` after they were read appends to a
+  // buffer nothing reads again, and the `end` that closes the function is left
+  // with an empty stack under a type section that declares a result.
+  //
+  // A body that always answers does not fall out of its own end, so the value
+  // is written where nothing reaches it: the module carries it and nothing
+  // reads it.
+  if (signature.result !== undefined && !(optimize && alwaysReturns(fn))) body.answer();
+  // The locals are declared in front of the body rather than after it, because
+  // a statement that needs a value twice borrows a local for it, and a local
+  // borrowed while the body was emitted was not declared yet. Both are written
+  // into one buffer, which the code section then takes whole: the body's bytes
+  // are never copied out and back in on the way to the module.
+  const groups = body.localGroups();
+  const code = new Bytes();
+  code.counted(groups.length / 2, (locals) => groups.forEach((value) => locals.varuint(value)));
+  code.absorb(body.bytes());
+  code.byte(0x0b);
+  return { code, scratch: body.scratchUsed() };
 }
 
 /**
  * The first address above everything the module owns: its scratch is below the
- * constants, and the constants are the wide numbers and the texts the body
+ * constants, and the constants are the wide numbers and the texts the module
  * pooled, in that order.
  */
-function dataBase(body: Body): number {
-  const pooled = body.pooledData.reduce((whole, bytes) => whole + bytes.length, 0);
-  return WIDE_DATA_BASE + pooled;
+function dataBase(module: Module): number {
+  const pooled = module.data.reduce((whole, bytes) => whole + bytes.length, 0);
+  return module.offset + pooled;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -3771,6 +4240,10 @@ export function describeModule(bytes: Uint8Array): string {
 
   const code = sections.get(10);
   if (code !== undefined) {
+    // The code section holds the functions the module defines, and the format
+    // numbers the imported ones first: the nth function of the code section is
+    // the function at the index past the imports.
+    const imported = imports.filter((entry) => / \(function \d+\)$/.test(entry)).length;
     const names = new Map<number, string>();
     for (const entry of exports) {
       const match = /^(\S+) \(function (\d+)\)$/.exec(entry);
@@ -3778,7 +4251,8 @@ export function describeModule(bytes: Uint8Array): string {
     }
     lines.push("code:");
     for (const [index, body] of readCode(code).entries()) {
-      lines.push(`  function ${index}${names.has(index) ? ` (${names.get(index)})` : ""}:`);
+      const at = imported + index;
+      lines.push(`  function ${at}${names.has(at) ? ` (${names.get(at)})` : ""}:`);
       for (const instruction of body) lines.push(`    ${instruction}`);
     }
     lines.push("");
@@ -4245,7 +4719,15 @@ const INSTRUCTIONS: Record<number, [string, string]> = {
 export async function buildModule(request: ModuleRequest): Promise<ModuleResult> {
   const functionName = symbolOf(request.contract);
   const style = rulesFor(request.language).style === "python" ? 1 : 0;
-  const bytes = moduleBytes(request.fn, request.contract, request.candidate, style, { optimize: request.optimize ?? true });
+  const bytes = programModuleBytes(
+    {
+      functions: [
+        { fn: request.fn, contract: request.contract },
+        ...(request.functions ?? []).map((fn) => ({ fn })),
+      ],
+    },
+    { candidate: request.candidate, style, optimize: request.optimize ?? true },
+  );
   const detail = await inspect(request.modulePath, functionName, bytes);
   if (detail !== null) {
     throw new CompilerError({
@@ -4274,6 +4756,46 @@ export async function buildModule(request: ModuleRequest): Promise<ModuleResult>
 }
 
 /**
+ * Emits the module of a program, checks the boundary it has to keep, and writes
+ * the host that runs it.
+ *
+ * The module holds every function of the program and the body it runs, and the
+ * host calls the entry: the driver the C backend writes in C is the module's
+ * own function here.
+ */
+export async function buildProgramModule(request: ProgramModuleRequest): Promise<ModuleResult> {
+  const style = rulesFor(request.language).style === "python" ? 1 : 0;
+  const bytes = programModuleBytes(
+    { functions: request.functions, entry: request.entry },
+    { candidate: request.candidate, style, optimize: request.optimize ?? true },
+  );
+  const detail = await inspect(request.modulePath, request.entry === undefined ? undefined : ENTRY_EXPORT, bytes);
+  if (detail !== null) {
+    throw new CompilerError({
+      category: "TargetError",
+      stage: "compile",
+      message: "the WebAssembly module of the program violates the contract",
+      detail: detail.slice(0, 2000),
+      candidate: request.candidate,
+    });
+  }
+  await writeFile(request.modulePath, bytes);
+  // The host is the runtime: it carries the implementations of the services the
+  // module reached for, and nothing else, over the memory the module reads.
+  await writeFile(
+    request.hostPath,
+    generateWasmProgramHost({ services: moduleServices(bytes), style, entry: ENTRY_EXPORT }),
+    "utf8",
+  );
+  return {
+    runner: { command: process.execPath, args: [request.hostPath, request.modulePath] },
+    modulePath: request.modulePath,
+    hostPath: request.hostPath,
+    moduleSizeBytes: (await stat(request.modulePath)).size,
+  };
+}
+
+/**
  * Why a module reaches outside the memory the host provides, or null where it
  * keeps to the boundary.
  *
@@ -4284,11 +4806,11 @@ export async function buildModule(request: ModuleRequest): Promise<ModuleResult>
  * process has no WebAssembly of its own there is nothing to ask, and the child
  * reads the written module and answers there.
  */
-async function inspect(path: string, expected: string, bytes: Uint8Array): Promise<string | null> {
+async function inspect(path: string, expected: string | undefined, bytes: Uint8Array): Promise<string | null> {
   const problems = boundaryProblems(bytes, expected);
   if (problems === null) {
     await writeFile(path, bytes);
-    const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, path, expected], { timeoutMs: 60_000 });
+    const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, path, expected ?? ""], { timeoutMs: 60_000 });
     if (inspection.code === 0) return null;
     return (inspection.stderr.trim() || inspection.stdout.trim()).slice(0, 2000);
   }
@@ -4302,35 +4824,3 @@ async function inspect(path: string, expected: string, bytes: Uint8Array): Promi
   return problems.join("\n");
 }
 
-/** Rejects a module that reaches outside the memory the host provides. */
-const INSPECT_MODULE = `
-import { readFileSync } from "node:fs";
-const [path, expected] = process.argv.slice(1);
-const bytes = readFileSync(path);
-if (!WebAssembly.validate(bytes)) {
-  process.stderr.write("the module is not valid WebAssembly\\n");
-  process.exit(1);
-}
-const module = new WebAssembly.Module(bytes);
-const problems = [];
-const imports = WebAssembly.Module.imports(module);
-const memoryImports = imports.filter((entry) => entry.kind === "memory");
-const powImports = imports.filter((entry) => entry.kind === "function" && entry.module === "env" && entry.name === "pow");
-if (memoryImports.length !== 1 || memoryImports[0].module !== "env" || memoryImports[0].name !== "memory" || imports.length !== 2 || powImports.length !== 1) {
-  problems.push('the module must import one memory and one pow');
-}
-if (imports.some((entry) => entry.kind !== "memory" && !(entry.kind === "function" && entry.module === "env" && entry.name === "pow"))) {
-  problems.push("the module must not import anything but the memory and pow");
-}
-const exports = WebAssembly.Module.exports(module).map((entry) => entry.name);
-if (exports.includes("memory") || exports.includes("_start")) {
-  problems.push("the module must not export memory or _start; the host provides both");
-}
-if (!exports.includes(expected)) {
-  problems.push('the module must export the contracted function "' + expected + '"');
-}
-if (problems.length > 0) {
-  process.stderr.write(problems.join("\\n") + "\\n");
-  process.exit(1);
-}
-`;

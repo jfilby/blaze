@@ -464,6 +464,16 @@ export interface CandidateEvaluationRequest {
    * resolve.
    */
   functions: Readonly<Record<string, SemanticFunction>>;
+  /**
+   * The functions of the program, for a build that is a program.
+   *
+   * A program is one module: every function of it is in the module and is
+   * called by the index it has there, so a function that calls another
+   * function of the program needs that function in its module — there is no
+   * linker to find it beside. A build that compiles one function on its own
+   * has nothing to hold beside it, and carries none.
+   */
+  programFunctions?: readonly SemanticFunction[];
   output: OutputKind;
   /**
    * What lowered the IR. Named for the lowering rather than the model
@@ -696,6 +706,10 @@ async function materialize(
     const module = await buildModule({
       fn,
       contract: request.contract,
+      // A program is one module, so the functions a candidate calls are in the
+      // module beside it: the module calls them by the index they have in it,
+      // and there is no linker to find them anywhere else.
+      functions: (request.programFunctions ?? []).filter((one) => one.symbol !== fn.symbol),
       modulePath: paths.module,
       hostPath: paths.host,
       candidate: candidate.id,

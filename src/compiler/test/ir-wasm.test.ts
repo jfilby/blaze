@@ -903,8 +903,11 @@ test("a clamp is the two instructions the module has for it", async () => {
 test("the command line is the one the host was given", async () => {
   // A module is handed the vectors and no process of its own, so the command
   // line it reads is the one the host was started with: the host is the
-  // process, and the arguments are its own.
-  await compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", "RESULT 4\n");
+  // process, and the arguments are its own. A function build reads no
+  // arguments, so the count is the length of process.argv with none: the
+  // program, the file it runs, and nothing else. The C backend answers the
+  // same, because its harness sets no arguments either.
+  await compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", "RESULT 3\n");
 });
 
 test("a module whose code is larger than one buffer is written whole", async () => {

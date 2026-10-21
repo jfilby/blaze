@@ -246,9 +246,66 @@ let lastError = "";
 const freeBlocks = new Map();
 const dynValues = [];
 
-/* The command line the host itself was given. A module has no process of its
-   own, so the arguments it reads are the ones the host was started with. */
-const commandLine = process.argv;
+/* The arguments the program was given. A module has no process of its own, so
+   the arguments it reads are the ones the host was started with. */
+let programArguments = [];
+
+/* One command line argument as the number the source reads it as. The source
+   reads an argument the way the language reads a string as a number: the
+   spaces around it are not part of it, a base written before the digits is
+   read in that base, and an argument that is not a number at all is NaN
+   rather than a zero the source never wrote. */
+function programNumberOf(text) {
+  const trimmed = String(text).trim();
+  if (trimmed === "") return 0;
+  /* A base written before the digits is read in that base, one digit at a
+     time: 0b101 is five, 0o17 is fifteen, and a prefix with no digits behind
+     it is not a number. */
+  const base = trimmed.length > 2 && trimmed[0] === "0"
+    ? trimmed[1] === "x" || trimmed[1] === "X" ? 16
+      : trimmed[1] === "o" || trimmed[1] === "O" ? 8
+      : trimmed[1] === "b" || trimmed[1] === "B" ? 2
+      : 0
+    : 0;
+  if (base !== 0) {
+    let value = 0;
+    for (const digit of trimmed.slice(2)) {
+      const letter = digit.codePointAt(0);
+      const place = letter >= 48 && letter <= 57 ? letter - 48
+        : letter >= 97 && letter <= 122 ? letter - 97 + 10
+        : letter >= 65 && letter <= 90 ? letter - 65 + 10
+        : -1;
+      if (place < 0 || place >= base) return NaN;
+      value = value * base + place;
+    }
+    return value;
+  }
+  /* What is left is a decimal, which is the one form a sign is written in front
+     of, and the one word a decimal may spell. */
+  let body = trimmed;
+  let negative = false;
+  if (body.startsWith("+") || body.startsWith("-")) {
+    negative = body.startsWith("-");
+    body = body.slice(1);
+  }
+  if (body === "") return NaN;
+  if (body === "Infinity") return negative ? -Infinity : Infinity;
+  /* A base is never written behind a sign, and a base with no digits behind it
+     is not a number: neither is anything the language does not read as one. */
+  if (!/^[0-9.]/.test(body)) return NaN;
+  if (body[0] === "0" && "xXoObB".includes(body[1] ?? "")) return NaN;
+  const value = Number(body);
+  if (Number.isNaN(value)) return NaN;
+  return negative ? -value : value;
+}
+
+/* The host tells the runtime what the program was given, the way the driver of
+   a native program tells it. The count the runtime answers is the length of
+   process.argv: the program, the file it runs, and the arguments it was
+   given, so the first argument is at the index two. */
+export function setArguments(values) {
+  programArguments = values.map((value) => programNumberOf(value));
+}
 
 /* A raise is the runtime's own way of stopping a program, and it is not a
    fault: the host catches it and reports it the way the C runtime does. */
@@ -759,7 +816,7 @@ export function blaze_rt_monotonic_ms() {
     service: "blaze_rt_argv_count",
     source: `
 export function blaze_rt_argv_count() {
-  return BigInt(commandLine.length);
+  return BigInt(programArguments.length + 2);
 }
 `,
   },
@@ -768,9 +825,10 @@ export function blaze_rt_argv_count() {
     source: `
 export function blaze_rt_argv(index) {
   const at = Number(index);
-  if (at < 2 || at >= commandLine.length) return NaN;
-  const value = Number(commandLine[at]);
-  return Number.isNaN(value) ? NaN : value;
+  if (at < 2) return NaN;
+  const argument = at - 2;
+  if (argument >= programArguments.length) return NaN;
+  return programArguments[argument];
 }
 `,
   },
