@@ -101,7 +101,12 @@ const SECTION_LAYOUT = [
   // program spent its time in spread over more of those windows than they would
   // be otherwise, which is worth a few percent on a benchmark that is one loop.
   { key: "text", name: ".text", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, align: 32, entrySize: 0 },
-  { key: "data", name: ".rodata", type: SHT_PROGBITS, flags: SHF_ALLOC, align: 8, entrySize: 0 },
+  // The data is aligned on sixteen bytes and not on eight, because a pair of
+  // doubles is laid down in it and the instruction that reads a pair out of
+  // memory reads it aligned: the vector arithmetic of the legacy instruction
+  // set has no unaligned form, and a pair read out of a place that is not
+  // aligned on sixteen bytes faults.
+  { key: "data", name: ".rodata", type: SHT_PROGBITS, flags: SHF_ALLOC, align: 16, entrySize: 0 },
   { key: "relocations", name: ".rela.text", type: SHT_RELA, flags: 0, align: 8, entrySize: RELOCATION_SIZE },
   { key: "symbols", name: ".symtab", type: SHT_SYMTAB, flags: 0, align: 8, entrySize: SYMBOL_SIZE },
   { key: "strings", name: ".strtab", type: SHT_STRTAB, flags: 0, align: 1, entrySize: 0 },
@@ -216,7 +221,7 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
 
   const relocationSize = request.relocations.length * RELOCATION_SIZE;
   const textOffset = align(ELF_HEADER_SIZE, 32);
-  const dataOffset = align(textOffset + request.text.length, 8);
+  const dataOffset = align(textOffset + request.text.length, 16);
   const relocationOffset = align(dataOffset + request.rodata.length, 8);
   const symbolOffset = align(relocationOffset + relocationSize, 8);
   const stringOffset = symbolOffset + symbols.length * SYMBOL_SIZE;

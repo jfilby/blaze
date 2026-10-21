@@ -1731,7 +1731,8 @@ class Machine {
   private readonly literals = new Map<string, string>();
   /** A float already laid down, so one constant is written to the object once. */
   private readonly floatLabels = new Map<string, string>();
-  readonly labels: DataLabel[] = [];
+  /** The labels of the numbers laid down in both halves of a pair. */
+  private readonly floatPairs = new Map<string, string>();  readonly labels: DataLabel[] = [];
   /** The symbols the code calls or reads that this object does not define. */
   readonly externals: string[] = [];
   /** The target the function is lowered for, which decides whether BMI2
@@ -4400,10 +4401,10 @@ class Machine {
     this.code.sse("add", total, XMM0, false);
     // The pair moves on by the two counters one pair of turns stands for, in
     // both lanes: the low one is the turn the pair starts at and the high one is
-    // the turn after it, so moving both by two leaves them a turn apart.
-    this.code.movsLoadLabel(third, this.floatLiteral(floatBits(2, false)), false);
-    this.code.unpackLow(third, third);
-    this.code.packed("add", counter, third);
+    // the turn after it, so moving both by two leaves them a turn apart. The
+    // two are laid down in the read-only data, so the instruction that moves
+    // them on reads them from there.
+    this.code.packedMemLabel("add", counter, this.floatPair(floatBits(2, false)));
     this.code.aluImm("add", cursor, 16, true);
     this.code.jmp(labels.header);
     this.code.bind(paired);
@@ -4461,8 +4462,10 @@ class Machine {
   ): void {
     switch (value.k) {
       case "const": {
-        this.code.movsLoadLabel(into, this.floatLiteral(floatBits(Number(decimalText(value.text)), false)), false);
-        this.code.unpackLow(into, into);
+        // The number in both halves is read out of the read-only data in one
+        // instruction, where the general form loads it and then interleaves it
+        // with itself — two instructions on every turn of the loop.
+        this.code.packedLoadLabel(into, this.floatPair(floatBits(Number(decimalText(value.text)), false)));
         return;
       }
       case "local": {
@@ -7531,6 +7534,35 @@ class Machine {
       this.rodata.push(Number((bits >> BigInt(index * 8)) & 0xffn));
     }
     this.floatLabels.set(bits.toString(), label);
+    return label;
+  }
+
+  /**
+   * A float laid down in both halves of a pair, which is what a vector operation
+   * wants a constant in.
+   *
+   * The instruction that puts a number in both halves of a register is a second
+   * one — the load and the interleave — and a loop that multiplies by the same
+   * number on every turn pays for it on every turn. The number written out in
+   * both halves is one load instead, and a loop that adds the same pair to
+   * something on every turn is one instruction that reads it from memory.
+   */
+  private floatPair(bits: bigint): string {
+    const held = this.floatPairs.get(bits.toString());
+    if (held !== undefined) return held;
+    // The pair is laid down on a sixteen byte boundary, because the instruction
+    // that reads a pair out of memory reads it aligned and the vector arithmetic
+    // of the legacy instruction set has no unaligned form.
+    while (this.rodata.length % 16 !== 0) this.rodata.push(0);
+    const label = this.code.label("Lpair");
+    this.labels.push({ name: label, offset: this.rodata.length });
+    for (let index = 0; index < 8; index += 1) {
+      this.rodata.push(Number((bits >> BigInt(index * 8)) & 0xffn));
+    }
+    for (let index = 0; index < 8; index += 1) {
+      this.rodata.push(Number((bits >> BigInt(index * 8)) & 0xffn));
+    }
+    this.floatPairs.set(bits.toString(), label);
     return label;
   }
 

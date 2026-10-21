@@ -1450,9 +1450,49 @@ export class Encoder {
     this.word(0);
   }
 
+  /**
+   * A pair of doubles read out of the read-only data at once, which is what a
+   * vector operation wants a constant in.
+   *
+   * The number a program wrote out is the same number every time it is written,
+   * so it is laid down once beside the code and read from there. A pair of them
+   * is laid down in both halves of the pair, which is what a vector operation
+   * wants: the instruction that puts a number in both halves of a register is a
+   * second one, and a loop that multiplies by the same number on every turn pays
+   * for it on every turn.
+   *
+   * The load is the aligned one, so the pair is laid down on a sixteen byte
+   * boundary: the data section is aligned on sixteen bytes and the pair is
+   * given an offset that is a multiple of sixteen.
+   */
+  packedLoadLabel(register: number, label: string): void {
+    this.rex(false, register, { base: null, index: null });
+    this.byte(0x0f);
+    this.byte(0x28);
+    // `mod = 00, rm = 101` is the one address that is relative to the
+    // instruction rather than to a register, which is how a literal in
+    // another section is reached through.
+    this.byte(((register & 7) << 3) | 5);
+    this.relocations.push({ offset: this.code.length, symbol: label, kind: "address" });
+    this.word(0);
+  }
+
+  /**
+   * A vector operation with one side in the read-only data, which is the pair of
+   * doubles a number written out is laid down as.
+   */
+  packedMemLabel(operation: Float, destination: number, label: string): void {
+    this.byte(0x66);
+    this.rex(false, destination, { base: null, index: null });
+    this.byte(0x0f);
+    this.byte(FLOAT[operation]);
+    this.byte(((destination & 7) << 3) | 5);
+    this.relocations.push({ offset: this.code.length, symbol: label, kind: "address" });
+    this.word(0);
+  }
+
   /** A float kept in a register, which is a move of the whole register. */
-  movsMove(destination: number, source: number, single: boolean): void {
-    this.precision(single);
+  movsMove(destination: number, source: number, single: boolean): void {    this.precision(single);
     this.rex(false, destination, source);
     this.byte(0x0f);
     this.byte(0x10);
