@@ -2322,6 +2322,11 @@ class ProgramResolver {
       case "binary":
       case "unary":
       case "conditional": {
+        // A string the program built is a string: `+` over two texts is one,
+        // and a name bound to one holds a string rather than the number the
+        // contract type language has no word for. The type of a text is
+        // written as nothing, so the text is found by what the value holds.
+        if (holdsText(value)) return declare({ kind: "text", mutable, value: null });
         const type = value.type;
         if (type === null) return declare({ kind: "number", mutable, type: "f64", text: "" });
         if (type.kind === "ref" || type.kind === "ptr") {
