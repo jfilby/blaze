@@ -366,7 +366,13 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         if (value.op === "add" && right === 0) return value.left;
         if (value.op === "sub" && right === 0) return value.left;
         if (value.op === "mul" && right === 1) return value.left;
-        if (value.op === "mul" && right === 0 && isInteger(value.type)) return value.left;
+        // A product with a zero is a zero, and not the other side: `x * 0` is
+        // zero however large `x` is, so folding it to the other side handed a
+        // program that answered with the value it was asked to multiply rather
+        // than with the product. The bitwise zero two lines below is written
+        // the same way, and this one was the copy of it that answered with the
+        // wrong side.
+        if (value.op === "mul" && right === 0 && isInteger(value.type)) return { k: "const", type: value.type, text: asText(0) };
         if (value.op === "shl" && right === 0) return value.left;
         // A right shift by nothing is the value, as a left shift by nothing
         // is. The three were written together and only the left one was
@@ -399,6 +405,9 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       if (value.left.k === "const" && left !== null) {
         if (value.op === "add" && left === 0) return value.right;
         if (value.op === "mul" && left === 1) return value.right;
+        // A product with a zero on the left is the same zero the same product
+        // with the zero on the right is, so it is folded the same way.
+        if (value.op === "mul" && left === 0 && isInteger(value.type)) return { k: "const", type: value.type, text: asText(0) };
         // `0 - x` is the negation of x, and not x: this returned the right
         // side, so `0 - a.length` printed the length rather than its
         // negation. A whole number negates by the same wrap the subtraction
@@ -489,7 +498,13 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // itself, so `x == x` over a `f64` is a test for a NaN rather than a
         // truth. Folding it to `true` would turn a program that finds its NaNs
         // into one that does not, so only a whole number is folded here.
+        //
+        // The type the fold is decided by is the one the operands are compared
+        // as, which is the type the backends compare them as: a value that is
+        // not written out has no type of its own to read, so the type of the
+        // comparison is the only thing that says whether the answer is obvious.
         if (numberType(value.right) === null) return null;
+        if (!isInteger(value.operand)) return null;
         if (valueKey(value.left) !== valueKey(value.right)) return null;
         if (value.op === "eq" || value.op === "ge" || value.op === "le") {
           return { k: "bool", type: BOOL, value: true };
@@ -668,6 +683,23 @@ function capturedNames(body: Body): Set<string> {
   return names;
 }
 
+/**
+ * The names one node of a value reads: the name itself, and the names it hands
+ * to a function it names.
+ *
+ * A capture is a name written down as text rather than as a value, so a walk
+ * that reads the values alone does not see it: the function reference hands the
+ * nested function the binding's value by name, and the name is read where the
+ * reference is written. Every pass that asks what a body reads has to ask it
+ * this way, or it concludes that a name nothing reads is one nothing reads —
+ * and drops the write that gave the name its value.
+ */
+function namesOfNode(one: SemanticValue): readonly string[] {
+  if (one.k === "local") return [one.name];
+  if (one.k === "functionRef") return one.captures;
+  return [];
+}
+
 /** A block with every value in it folded, and with its nested blocks folded. */
 function foldBlock(block: SemanticBlock): boolean {
   let changed = false;
@@ -778,12 +810,7 @@ function readCounts(body: Body): Map<string, number> {
   const walk = (block: SemanticBlock): void => {
     valuesOf(block, (value) => {
       walkSemanticValue(value, (one) => {
-        if (one.k === "local") count(one.name);
-        // A captured name is a read the program cannot see in the values: the
-        // function reference hands the nested function the binding's value,
-        // and dropping the declaration the capture names leaves the call site
-        // passing a name the block never declared.
-        if (one.k === "functionRef") for (const capture of one.captures) count(capture);
+        for (const name of namesOfNode(one)) count(name);
       });
     });
     for (const statement of block.statements) {
@@ -1563,14 +1590,7 @@ function inlineSingleUses(body: Body): boolean {
   const captured = capturedNames(body);
   for (const block of nestedSemanticBlocks(body.entry)) {
     valuesOf(block, (one) => {
-      if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
-      // A captured name is a read the values do not show: the function
-      // reference hands the nested function the binding's value, and inlining
-      // the binding away leaves the call site naming a name the block never
-      // declared.
-      if (one.k === "functionRef") {
-        for (const capture of one.captures) reads.set(capture, (reads.get(capture) ?? 0) + 1);
-      }
+      for (const name of namesOfNode(one)) reads.set(name, (reads.get(name) ?? 0) + 1);
     });
     // A name a buffer write names is read by that write, and a binding dropped
     // while the write stands leaves the write naming a name the block does not
@@ -1734,7 +1754,7 @@ function dropDeadWrites(body: Body): boolean {
   for (const block of nestedSemanticBlocks(body.entry)) {
     valuesOf(block, (value) => {
       walkSemanticValue(value, (one) => {
-        if (one.k === "local") reads.set(one.name, (reads.get(one.name) ?? 0) + 1);
+        for (const name of namesOfNode(one)) reads.set(name, (reads.get(name) ?? 0) + 1);
       });
     });
   }
@@ -1800,7 +1820,7 @@ function namesReadIn(block: SemanticBlock): Set<string> {
   const walk = (one: SemanticBlock): void => {
     valuesOf(one, (value) => {
       walkSemanticValue(value, (part) => {
-        if (part.k === "local") read.add(part.name);
+        for (const name of namesOfNode(part)) read.add(name);
       });
     });
     for (const statement of one.statements) {
@@ -1825,7 +1845,7 @@ function dropOverwrittenStores(body: Body): boolean {
   const note = (after: Set<string>, value: SemanticValue | null): void => {
     if (value === null) return;
     walkSemanticValue(value, (one) => {
-      if (one.k === "local") after.add(one.name);
+      for (const name of namesOfNode(one)) after.add(name);
     });
   };
   // The names still live once the block has run, which is what the block hands

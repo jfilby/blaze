@@ -132,8 +132,33 @@ test("a division is a true division, and a remainder takes the sign of its divis
   assert.equal(delivered.stdout, "3.5\n3\n1\n");
 });
 
-test("a whole number beside a fraction is a fraction", async () => {
-  // Python has no such a thing as a whole number beside a fraction: the pair
+test("a compound floor division is the floor division it states", async () => {
+  // C has no `//=`, and `//` in C opens a comment: the compound form reached
+  // the C backend as a statement that said nothing at all, and the program
+  // kept the number it had instead of dividing it. The compound is written as
+  // the binary form, which is the same program.
+  const source = ["x = 7", "x //= 2", "print(x)", "y = -7", "y //= 2", "print(y)", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "3\n-4\n");
+});
+
+test("a division by a zero the loop never reaches is not made", async () => {
+  // The division is loop-invariant, so the compiler lifted it above the loop —
+  // and the loop runs no turns, so the source never divided by that zero. The
+  // division faults on a zero divisor, and the program died where the source
+  // printed what it printed.
+  const source = ["n = 0", "d = 0", "for i in range(n):", "    x = 7 // d", "    print(x)", "print('done')", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "done\n");
+});
+
+test("a whole number beside a fraction is a fraction", async () => {  // Python has no such a thing as a whole number beside a fraction: the pair
   // is a fraction there.
   const source = ["print(1 + 2.5)", "print(2.5 + 1)", "x = 3", "print(x * 1.5)", ""].join("\n");
   const { binary, original } = await deliver(source);

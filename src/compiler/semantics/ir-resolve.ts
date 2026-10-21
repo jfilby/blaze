@@ -100,7 +100,7 @@ import {
   type SemanticType,
   type SemanticValue,
   type UnaryOp,
-  compoundOverWide,
+  compoundAsBinary,
 } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -4459,9 +4459,11 @@ class ProgramLowering {
       }
       case "assign": {
         const value = this.value(statement.value, statement.type, statement.line);
-        // A wide number has no compound operator a backend can write, so the
-        // compound is written as the binary form the kernel answers.
-        const wide = compoundOverWide(statement.op, statement.type ?? numeric("f64"), { k: "local", type: statement.type ?? numeric("f64"), name: statement.name }, value);
+        // A wide number has no compound operator a backend can write, and a
+        // floor division has no compound form C has, so the compound is
+        // written as the binary form every backend either writes or refuses
+        // by name.
+        const wide = compoundAsBinary(statement.op, statement.type ?? numeric("f64"), { k: "local", type: statement.type ?? numeric("f64"), name: statement.name }, value);
         this.statement({
           k: "set",
           name: statement.name,
@@ -4476,7 +4478,7 @@ class ProgramLowering {
         const value = this.value(statement.value, statement.type, statement.line);
         // The same rule over one element rather than a slot.
         const element = statement.type ?? numeric("f64");
-        const wide = compoundOverWide(statement.op, element, { k: "element", type: element, of: { k: "local", type: element, name: statement.buffer }, index }, value);
+        const wide = compoundAsBinary(statement.op, element, { k: "element", type: element, of: { k: "local", type: element, name: statement.buffer }, index }, value);
         this.statement({
           k: "setElement",
           buffer: statement.buffer,

@@ -76,6 +76,17 @@ export type ParsedReview = { readonly review: Review } | { readonly unusable: st
 const FENCE = /^\s*```/;
 
 /**
+ * A comment line, which a reply is allowed to carry and which says nothing
+ * about the answer.
+ *
+ * A model that writes its answer with a note beside it writes the note as a
+ * comment, and a reply that carried one was refused as unreadable — which
+ * threw the answer away and asked the question again, and the model answered
+ * the same way and the answer was thrown away again.
+ */
+const COMMENT = /^\s*(?:#|\/\/)/;
+
+/**
  * Reads a review out of a reply.
  *
  * Blank lines, comment lines and the fences around a fenced answer are ignored;
@@ -94,7 +105,7 @@ export function parseReview(text: string): ParsedReview {
   const lines = text
     .split("\n")
     .map((line, at) => ({ line, at: at + 1 }))
-    .filter((entry) => entry.line.trim() !== "" && !FENCE.test(entry.line));
+    .filter((entry) => entry.line.trim() !== "" && !FENCE.test(entry.line) && !COMMENT.test(entry.line));
   let verdict: Verdict | null = null;
   let verdictAt = 0;
   let reason: string | null = null;

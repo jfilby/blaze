@@ -223,7 +223,13 @@ class Graph {
           this.value(events, statement.condition);
           node = this.make(events);
           const otherwise = statement.otherwise === null ? null : this.block(statement.otherwise, flow);
-          const thenEntry = this.block(statement.then, otherwise ?? flow);
+          // The arm that is taken falls out to the code after the whole `if`,
+          // and not into the other arm: an arm is entered on the turn the
+          // condition decided it, and the other arm runs on a turn this one
+          // does not. Linking the two arms made every name the else arm reads
+          // live across the then arm, which is a register or a spill the
+          // program did not ask for.
+          const thenEntry = this.block(statement.then, flow);
           // The arms are linked in the order they are written, which is what
           // fixes the order the nodes are numbered in below.
           this.link(node, thenEntry);

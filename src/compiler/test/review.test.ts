@@ -96,6 +96,22 @@ test("a review is read out of a fenced answer, and the fence is not part of it",
   assert.equal(proposal?.text, "hoist-invariant b1");
 });
 
+test("a review that carries a comment beside it is read as one", () => {
+  // A model that writes its answer with a note beside it writes the note as a
+  // comment, and a reply that carried one was refused as unreadable: the
+  // answer was thrown away, the question was asked again, and the model
+  // answered the same way.
+  for (const comment of ["# the bound is read on every iteration", "// the bound is read on every iteration"]) {
+    const parsed = parseReview(
+      ["verdict: repaired", comment, "reason: the bound is read on every iteration", "proposal: hoist-invariant b1"].join("\n"),
+    );
+    assert.ok("review" in parsed, `a comment line is not a refusal: ${comment}`);
+    assert.equal(parsed.review.verdict, "repaired", comment);
+    assert.equal(parsed.review.reason, "the bound is read on every iteration", comment);
+    assert.equal(parsed.review.proposals.length, 1, comment);
+  }
+});
+
 test("a proposal carries the arguments its rule takes", () => {
   const parsed = parseReview("verdict: repaired\nreason: inline it\nproposal: inline-call b2 callee=twice");
   assert.ok("review" in parsed);

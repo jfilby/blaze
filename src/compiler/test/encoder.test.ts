@@ -174,10 +174,29 @@ const LOW: readonly Case[] = [
   { name: "write a word of rsi into the frame", build: (e) => e.movMemRegSized(frame(8), RSI, 2), want: "mov %si,0x8(%rsp)" },
 ];
 
+/**
+ * The BMI2 instructions, which are the ones the assembler reads back as
+ * something else entirely when they are written wrong.
+ *
+ * `adcx` and `adox` have no vector form at all: they are written the way they
+ * have always been written, with a prefix in front of the extension and the
+ * 0F38 escape behind it, and a vector encoding of either is a fault on the
+ * processor rather than an instruction. `mulx` is the other way about: it has
+ * no legacy form, and the extension names three registers rather than two.
+ */
+const BMI2_CASES: readonly Case[] = [
+  { name: "add with carry into rax, into r8", build: (e) => e.adcx(R8, RAX), want: "adcx %rax,%r8" },
+  { name: "add with carry into rax, into r9", build: (e) => e.adcx(R9, RAX), want: "adcx %rax,%r9" },
+  { name: "add with overflow carry into rax, into r8", build: (e) => e.adox(R8, RAX), want: "adox %rax,%r8" },
+  { name: "add with overflow carry into rax, into r9", build: (e) => e.adox(R9, RAX), want: "adox %rax,%r9" },
+  { name: "multiply rax into r8 and r9", build: (e) => e.mulx(R9, R8, RAX), want: "mulx %rax,%r9,%r8" },
+];
+
 const CASES: readonly Case[] = [
   ...HIGH.flatMap((register) => wholeNumberCases(register)),
   ...FLOAT_CASES,
   ...LOW,
+  ...BMI2_CASES,
 ];
 
 /**

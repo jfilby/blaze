@@ -92,3 +92,29 @@ for (const backend of ["c", "machine"] as const) {
     assert.equal(delivered.stdout, "7\n");
   });
 }
+
+/**
+ * A program whose captured name is written before the promise is made.
+ *
+ * The name is read by the executor, and the executor is handed the name rather
+ * than the value, so the write that gave the name its value is a write the
+ * program sees. A pass that counts the reads of a body by the values alone
+ * does not see the capture — the name is written down as text and not as a
+ * value — and concludes that nothing reads the name, and drops the write.
+ */
+const SOURCE_WRITTEN = [
+  "let x = 7;",
+  "x = 9;",
+  "const p = new Promise((resolve) => resolve(x));",
+  "console.log(await p);",
+  "",
+].join("\n");
+
+for (const backend of ["c", "machine"] as const) {
+  test(`${backend} backend resolves with a captured name that was written`, async () => {
+    const binary = await buildSource(backend, SOURCE_WRITTEN, `blaze-promise-written-${backend}`);
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, "9\n");
+  });
+}

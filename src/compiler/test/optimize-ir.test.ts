@@ -210,6 +210,107 @@ test("a whole number wraps to the width of the type it is written at", () => {
   assert.match(printed(before), /const\[i32\] 0\b/);
 });
 
+test("a whole number multiplied by a zero is a zero, and not the other side", () => {
+  // `x * 0` is zero however large `x` is, so folding it to `x` handed the
+  // program the value it was asked to multiply rather than the product it was
+  // asked for. The zero was on the right of the product here and on the left of
+  // the one below, and both are the same zero.
+  const parameter: SemanticSlot = { kind: "value", name: "x", mutable: false, type: I32 };
+  const read: SemanticValue = { k: "local", type: I32, name: "x" };
+  const right = printed(fnOf(
+    { id: "entry", releases: [], terminator: { k: "return", value: bin("mul", read, constOf("0", I32), I32) }, statements: [] },
+    I32, [parameter],
+  ));
+  assert.match(right, /const\[i32\] 0\b/, `the zero on the right:\n${right}`);
+  assert.doesNotMatch(right, /local\[i32\] x/, `the zero on the right:\n${right}`);
+  const left = printed(fnOf(
+    { id: "entry", releases: [], terminator: { k: "return", value: bin("mul", constOf("0", I32), read, I32) }, statements: [] },
+    I32, [parameter],
+  ));
+  assert.match(left, /const\[i32\] 0\b/, `the zero on the left:\n${left}`);
+  assert.doesNotMatch(left, /local\[i32\] x/, `the zero on the left:\n${left}`);
+});
+
+test("a float multiplied by a zero is left as it was written", () => {
+  // `x * 0.0` is `-0.0` when `x` is negative and NaN when `x` is an infinity,
+  // so the zero is not the answer the identity gives. A float is not folded
+  // here at all.
+  const parameter: SemanticSlot = { kind: "value", name: "x", mutable: false, type: F64 };
+  const read: SemanticValue = { k: "local", type: F64, name: "x" };
+  const after = printed(fnOf(
+    { id: "entry", releases: [], terminator: { k: "return", value: bin("mul", read, constOf("0"), F64) }, statements: [] },
+    F64, [parameter],
+  ));
+  assert.match(after, /\bmul\b/);
+});
+
+test("a float against itself is left as it was written", () => {
+  // IEEE 754 has every NaN compare unequal to itself, so `x == x` over a
+  // `f64` is a test for a NaN rather than a truth. Folding it to `true` turned
+  // a program that finds its NaNs into one that does not, and the fold was
+  // taken because the type the operands are compared as was never asked: the
+  // comment beside it said that only a whole number is folded here, and the
+  // code folded every number.
+  const parameter: SemanticSlot = { kind: "value", name: "x", mutable: false, type: F64 };
+  const read: SemanticValue = { k: "local", type: F64, name: "x" };
+  for (const op of ["eq", "ne", "lt", "le", "gt", "ge"]) {
+    const after = printed(fnOf(
+      { id: "entry", releases: [], terminator: { k: "return", value: cmp(op, read, read, BOOL) }, statements: [] },
+      BOOL, [parameter],
+    ));
+    assert.match(after, new RegExp(`\\[${op}\\[bool\\]`), `a float against itself, ${op}:\n${after}`);
+    assert.doesNotMatch(after, /bool\[bool\]/, `a float against itself, ${op}:\n${after}`);
+  }
+  // A whole number has no NaN, so the fold is still taken there: that is what
+  // a loop guard and an index bounds check compute.
+  const whole: SemanticSlot = { kind: "value", name: "w", mutable: false, type: I32 };
+  const readWhole: SemanticValue = { k: "local", type: I32, name: "w" };
+  const folded = printed(fnOf(
+    { id: "entry", releases: [], terminator: { k: "return", value: cmp("eq", readWhole, readWhole, BOOL) }, statements: [] },
+    BOOL, [whole],
+  ));
+  assert.match(folded, /bool\[bool\] true/, `a whole number against itself:\n${folded}`);
+});
+
+test("a name a function captures is read, so the write that gave it its value stays", () => {
+  // A capture is a name written down as text rather than as a value: the
+  // function reference hands the nested function the binding's value by name,
+  // so the name is read where the reference is written. A pass that counts the
+  // reads of a body by the values alone does not see it, concludes that
+  // nothing reads the name, and drops the write that gave it its value — which
+  // left the closure with the value it held before the write.
+  const fn = fnOf({
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "x", mutable: true, type: F64 }, value: constOf("0"), line: 1 },
+      { k: "set", name: "x", op: "=", value: constOf("5"), line: 2 },
+      { k: "let", slot: { kind: "value", name: "g", mutable: false, type: F64 }, value: { k: "functionRef", type: F64, name: "nested", captures: ["x"] }, line: 3 },
+    ],
+    terminator: { k: "return", value: { k: "local", type: F64, name: "g" } },
+  });
+  const after = printed(fn);
+  assert.match(after, /set x = const\[f64\] 5/, `the write a capture reads survives:\n${after}`);
+});
+
+test("an object a field is written through is read, so its binding stays", () => {
+  // A field is written through an object, and the object is read to find which
+  // one. A pass that counts the reads of a body by the values alone sees only
+  // the value being written, concludes that nothing reads the object, and
+  // drops its binding — which left the write naming a name the block never
+  // declared, and the validator refused a function the source had written.
+  const POINT: SemanticType = { kind: "ref", of: null, name: "Point" };
+  const fn = fnOf({
+    id: "entry", releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "p", mutable: false, type: POINT }, value: { k: "newObject", type: POINT, layout: "Point", fields: [] }, line: 1 },
+      { k: "storeField", object: { k: "local", type: POINT, name: "p" }, layout: "Point", field: "x", value: constOf("5"), line: 2 },
+    ],
+    terminator: { k: "return", value: null },
+  });
+  const after = printed(fn);
+  assert.match(after, /let value\[ref<Point>\] p/, `the object a field is written through is kept:\n${after}`);
+});
+
 test("a whole number wraps to the width of a type a double cannot hold", () => {
   // A double holds every integer exactly only up to 2^53, and the sums a 64 bit
   // wrap forms reach past that: `7 % 3` folded to zero because the sum rounded
@@ -785,6 +886,11 @@ test("the folded C computes what the unfolded C computes", async () => {
     // still taken there: this is what keeps the identity the backend's own
     // short-circuit already answers.
     { name: "a whole number divided by itself", expression: bin("div", paramI("x"), paramI("x"), I32), parameter: "x", inputs: ["1", "2", "7", "-9"], expected: ["1", "1", "1", "1"] },
+    // A product with a zero is a zero, and the fold has to answer the product
+    // rather than the value it was multiplied by: the folded binary and the
+    // unfolded one are handed the same number and have to print the same one.
+    { name: "a whole number multiplied by a zero", expression: bin("mul", paramI("x"), constOf("0", I32), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["0", "0", "0", "0"] },
+    { name: "a zero multiplied by a whole number", expression: bin("mul", constOf("0", I32), paramI("x"), I32), parameter: "x", inputs: ["-7", "0", "1", "2147483647"], expected: ["0", "0", "0", "0"] },
     // The identities below are only reachable over a value that is not written
     // out, so they are driven from a parameter the C driver supplies rather
     // than from a literal: `x / 1`, `x % 1`, the bitwise identities and a

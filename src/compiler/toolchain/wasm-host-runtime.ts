@@ -945,7 +945,11 @@ export function blaze_rt_array_set(array, index, value) {
 export function blaze_rt_array_length(array) {
   const boxed = dynLookup(array);
   if (boxed === null) return 0;
-  if (boxed.kind === "object") return boxed.fields.length / 2;
+  if (boxed.kind === "object") {
+    const inner = boxed.value;
+    if (inner === null || typeof inner !== "object") return 0;
+    return Object.keys(inner).length;
+  }
   if (boxed.kind !== "array") return 0;
   return boxed.items.length;
 }

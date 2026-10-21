@@ -1136,16 +1136,26 @@ const char *blaze_http_client_request(const char *url, const char *method,
   int req_len = snprintf(reqbuf, sizeof(reqbuf),
     "%s %s HTTP/1.1\\r\\nHost: %s\\r\\nConnection: keep-alive\\r\\n",
     method, path, host);
+  /* snprintf answers the length it would have written, which is longer than
+     the buffer when the request does not fit in it. The length is the length
+     the buffer holds and no more, or the next write would start past the end
+     of it, and a request that does not fit is refused rather than written
+     half. */
+  if (req_len < 0 || (size_t)req_len >= sizeof(reqbuf)) return NULL;
   if (headers && headers[0] != '\\0') {
     /* The headers are written as the lines they are, each of which ends with
        the carriage return and the line feed of a header. A blank line after
        them would end the header block, and the length of the body would be
        read as the body. */
-    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "%s", headers);
+    int written = snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "%s", headers);
+    if (written < 0 || (size_t)written >= sizeof(reqbuf) - req_len) return NULL;
+    req_len += written;
   }
   if (body && body_len > 0) {
-    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len,
+    int written = snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len,
       "Content-Length: %zu\\r\\n\\r\\n", body_len);
+    if (written < 0 || (size_t)written >= sizeof(reqbuf) - req_len) return NULL;
+    req_len += written;
     /* The body is written after the headers, and the two are written in one
        piece when the body fits beside them: a request that arrives in two
        pieces is a request the peer waits for the second piece of. */
@@ -1157,7 +1167,9 @@ const char *blaze_http_client_request(const char *url, const char *method,
       body_len = 0;
     }
   } else {
-    req_len += snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "\\r\\n");
+    int written = snprintf(reqbuf + req_len, sizeof(reqbuf) - req_len, "\\r\\n");
+    if (written < 0 || (size_t)written >= sizeof(reqbuf) - req_len) return NULL;
+    req_len += written;
   }
 
   pthread_mutex_lock(&blaze_http_client_lock);

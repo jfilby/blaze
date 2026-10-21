@@ -573,7 +573,17 @@ function makesCall(value: SemanticValue): boolean {
       // wider than a machine word is the runtime kernel — there is no
       // instruction for thirty-two bytes, so it is a call like any other and
       // clobbers every register a call is free to.
-      return value.op === "pow" || ((value.op === "mul" || value.op === "div") && isWideType(value.type));
+      if (value.op === "pow") return true;
+      // A remainder of a whole number wider than a machine word is the kernel
+      // as well, for the same reason a product and a quotient are.
+      if (value.op === "mod" && isWideType(value.type)) return true;
+      // Two texts put together are a string built at run time: the runtime
+      // measures the two, allocates the answer and copies the parts into it,
+      // and each of those is a call. A body whose only call is a concatenation
+      // is a body that calls, and a frame that does not know it is a frame
+      // whose calls are made off the boundary the convention wants them on.
+      if (value.op === "concat") return true;
+      return (value.op === "mul" || value.op === "div") && isWideType(value.type);
     case "compare":
       return isTextType(value.operand);
     default:
@@ -682,6 +692,11 @@ export function statementBlocksOf(statement: SemanticStatement): readonly Semant
  * because it is not one: a `setElement` names its buffer as a bare string, the
  * way a `set` names what it writes, and a walk over values cannot reach a name
  * that is not written as one.
+ *
+ * A field is written through an object, and the object is read to find which
+ * one: a binding that is read only that way is one a pass that drops unread
+ * bindings would otherwise drop, leaving the write naming a name the block
+ * never declared.
  */
 export function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
   switch (statement.k) {
@@ -689,8 +704,8 @@ export function statementValues(statement: SemanticStatement): readonly Semantic
     case "set":
     case "printText":
     case "printNumber":
-    case "retain":
-    case "storeField": return [statement.value];
+    case "retain": return [statement.value];
+    case "storeField": return [statement.object, statement.value];
     case "step": return [];
     case "fill": return [statement.value];
     case "setElement": return [statement.index, statement.value];
@@ -912,27 +927,31 @@ export const COMPOUND_ARITH: Record<Exclude<SemanticAssignOp, "=">, ArithOp> = {
 };
 
 /**
- * A compound assignment over a wide number, written as the binary form it is.
+ * A compound assignment written as the one operation it states.
  *
- * A wide number has no operator a target can write: `a <<= 2` over a `u256` is
- * `invalid operands to binary << (have 'blaze_u256' and 'blaze_u256')` to
- * gcc, and the machine backend has no instruction over four limbs. The binary
- * form of the same operation is answered by the kernel every backend already
- * calls for it, so the compound form is written as that — which is the same
- * program, because `a <<= v` is `a = a << v` in the language.
+ * A target has no compound form for every operator a language has: C has no
+ * `//=`, and `//` in C opens a comment, so the compound form reached a backend
+ * as a statement that said nothing at all — a program that divided a number by
+ * two and kept the number it had. A wide number has no compound operator a
+ * backend can write either.
+ *
+ * The compound is written as the binary form in both of those cases, which is
+ * the same program: `x //= v` is `x = x // v` in the language, and every
+ * backend either writes the binary form or refuses it by name.
  *
  * An operation the kernel does not have is not excused by this: `>>>=` and
  * `**=` are written as the arithmetic they state, and the validator refuses it
  * by name there, which is the one place a wide number is asked for something
  * it does not have.
  */
-export function compoundOverWide(
+export function compoundAsBinary(
   op: SemanticAssignOp,
   type: SemanticType,
   left: SemanticValue,
   right: SemanticValue,
 ): { op: SemanticAssignOp; value: SemanticValue } | null {
-  if (op === "=" || !isWideType(type)) return null;
+  if (op === "=") return null;
+  if (!isWideType(type) && op !== "//=") return null;
   return { op: "=", value: { k: "arith", type, op: COMPOUND_ARITH[op], left, right } };
 }
 

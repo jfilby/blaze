@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { generateProgramDriver, buildProgramDriver } from "../toolchain/driver.ts";
 import { resolveProgram, type SemanticProgram } from "../semantics/ir-resolve.ts";
@@ -70,6 +71,42 @@ async function deliver(source: string): Promise<{ binary: string; original: stri
   assert.equal(original.code, 0, original.stderr);
   return { binary, original: original.stdout };
 }
+
+test("the length of an object the runtime holds is the number of its fields", async () => {
+  // A JSON object holds its fields in pairs, and the count the runtime keeps is
+  // the number of fields rather than the number of items: the runtime answered
+  // half of what the object held, so an object of three fields said it had one.
+  // The language's own rule is the number of fields, which is what the Nim
+  // adapter answers.
+  const source = [
+    "const o = JSON.parse(`{\"a\":1,\"b\":2,\"c\":3}`);",
+    "console.log(o.length);",
+    "",
+  ].join("\n");
+  const { binary } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "3\n");
+});
+
+test("a file that cannot be sought is read as it is", async () => {
+  // A pipe has no length to ask for, and the runtime asked one anyway: it read
+  // the whole stream into a block of no bytes at all, and wrote the end of it
+  // one byte before the block. The file is read in pieces instead.
+  const fifoDirectory = await scratch("blaze-fifo-");
+  const fifo = join(fifoDirectory, "pipe");
+  const made = run("mkfifo", [fifo], { timeoutMs: 30_000 });
+  assert.equal(made.code, 0, made.stderr);
+  const source = ["console.log(fs.readFileSync('" + fifo + "', 'utf8'));", ""].join("\n");
+  const { binary } = await linked(source);
+  // The writer waits for a reader and the reader waits for a writer, so the
+  // writer is started before the program is run.
+  const writer = spawn("sh", ["-c", `printf 'hello' > ${fifo}`], { stdio: "ignore" });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  writer.kill();
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "hello\n");
+});
 
 test("a compound assignment a whole operator needs is refused on a double", () => {
   const refused = diagnostic(() => resolved("let x = 7;\nx %= 3;\nconsole.log(x);\n"));

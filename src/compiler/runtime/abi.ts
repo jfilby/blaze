@@ -3027,9 +3027,10 @@ double blaze_rt_array_get(double array, double index) {
 double blaze_rt_array_length(double array) {
   blaze_dyn* d = blaze_dyn_lookup(array);
   if (!d) return 0.0;
-  /* An object holds its fields in pairs, so it has half as many of them as
-     it has items. */
-  if (d->kind == BLAZE_DYN_OBJECT) return (double)(d->count / 2);
+  /* An object holds its fields in pairs, and the count is how many fields it
+     has: the pairs are laid out in the items, two of them to a field, and the
+     count is the number of fields rather than the number of items. */
+  if (d->kind == BLAZE_DYN_OBJECT) return (double)d->count;
   if (d->kind != BLAZE_DYN_ARRAY) return 0.0;
   return (double)d->count;
 }
@@ -3044,14 +3045,32 @@ void blaze_rt_array_set(double array, double index, double value) {
 double blaze_rt_file_read(const char* path, const char* mode) {
   FILE* f = fopen(path, "r");
   if (!f) { blaze_rt_raise("file not found"); return 0.0; }
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  char* buf = malloc(sz + 1);
-  fread(buf, 1, sz, f);
-  buf[sz] = 0;
+  /* A file that cannot be sought — a pipe, a terminal — has no length to ask
+     for, and ftell answers -1 for it. Reading it as if it had a length read
+     the whole stream into a block of no bytes at all, so the file is read in
+     pieces instead and the pieces are put beside one another. The answer for a
+     file that can be sought is the same. */
+  size_t cap = 4096, len = 0;
+  char* buf = (char*)malloc(cap);
+  if (!buf) { fclose(f); blaze_rt_raise("out of memory"); return 0.0; }
+  for (;;) {
+    if (len == cap) {
+      size_t grown_cap = cap * 2;
+      char* grown = (char*)realloc(buf, grown_cap);
+      if (!grown) { free(buf); fclose(f); blaze_rt_raise("out of memory"); return 0.0; }
+      buf = grown;
+      cap = grown_cap;
+    }
+    size_t got = fread(buf + len, 1, cap - len, f);
+    len += got;
+    if (got == 0) break;
+    if (feof(f)) break;
+  }
   fclose(f);
-  return blaze_rt_box_string(buf);
+  char* answer = (char*)realloc(buf, len + 1);
+  if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
+  answer[len] = 0;
+  return blaze_rt_box_string(answer);
 }
 
 static void json_skip_ws(const char** p) { while (**p==' '||**p=='\\t'||**p=='\\n'||**p=='\\r') (*p)++; }

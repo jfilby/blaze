@@ -78,7 +78,7 @@ import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, O
 import {
   BOOLEAN,
   TEXT,
-  compoundOverWide,
+  compoundAsBinary,
   commonNumber,
   hasCall,
   isReference,
@@ -569,9 +569,11 @@ class FunctionBody {
           held.slot.kind === "text" && !isText(value.type)
             ? { k: "text" as const, type: TEXT, parts: [{ k: "value" as const, value }] }
             : value;
-        // A wide number has no compound operator a backend can write, so the
-        // compound is written as the binary form the kernel answers.
-        const wide = compoundOverWide(statement.op, slotType(held.slot), { k: "local", type: slotType(held.slot), name: held.name }, written);
+        // A wide number has no compound operator a backend can write, and a
+        // floor division has no compound form C has, so the compound is
+        // written as the binary form every backend either writes or refuses
+        // by name.
+        const wide = compoundAsBinary(statement.op, slotType(held.slot), { k: "local", type: slotType(held.slot), name: held.name }, written);
         this.write({
           k: "set",
           name: held.name,
@@ -591,7 +593,7 @@ class FunctionBody {
         const value = this.typed(statement.value, element, statement.line).value;
         // The same rule as the whole name above, over one element rather than
         // a slot: a wide element has no compound operator a backend writes.
-        const wide = compoundOverWide(statement.op, elementType, { k: "element", type: elementType, of: { k: "local", type: slotType(buffer.slot), name: buffer.name }, index }, value);
+        const wide = compoundAsBinary(statement.op, elementType, { k: "element", type: elementType, of: { k: "local", type: slotType(buffer.slot), name: buffer.name }, index }, value);
         this.write({
           k: "setElement",
           buffer: buffer.name,

@@ -1003,8 +1003,20 @@ export class Encoder {
    * (00001 = the 0F escape map) and R, X, B are the inverted high bits of
    * the register fields. Byte 3: [W][~vvvv][pp][L], where W selects 64 bit,
    * vvvv is an additional source register (inverted), pp is 00 and L is 0.
+   *
+   * `pp` is the prefix the instruction carries: 00 for none, 01 for the 66
+   * prefix, 10 for the F3 prefix and 11 for the F2 prefix, and an instruction
+   * in the 0F38 map names one of them or the other — `adcx` is a 66-prefixed
+   * instruction, `adox` is an F3-prefixed one and `mulx` is an F2-prefixed one.
    */
-  private vex3(w: boolean, vvvv: number, reg: number, rm: number | { base: number | null; index: number | null }, map = 0b00000): void {
+  private vex3(
+    w: boolean,
+    vvvv: number,
+    reg: number,
+    rm: number | { base: number | null; index: number | null },
+    map = 0b00000,
+    pp = 0b00,
+  ): void {
     this.byte(0xc4);
     const rBit = (reg >= 8) ? 0 : 1;
     let xBit = 1;
@@ -1018,21 +1030,24 @@ export class Encoder {
     const byte2 = (rBit << 7) | (xBit << 6) | (bBit << 5) | map;
     this.byte(byte2);
     const vvvvInv = (~vvvv) & 0xf;
-    const byte3 = (w ? 0x80 : 0) | (vvvvInv << 3) | 0;
+    const byte3 = (w ? 0x80 : 0) | (vvvvInv << 3) | pp;
     this.byte(byte3);
   }
 
   /**
    * An unsigned 64×64→128 multiply that does not touch the flags:
-   * `high:low = src * low`, with `src` in VEX.vvvv and `low` also a source.
+   * `high:low = src * low`, with the high half in the extension's own field,
+   * the low half in the register field and the multiplicand in the operand
+   * field.
+   *
    * The high half lands in `high` and the low half in `low`, which is
    * overwritten. Neither operand is read after it is written, so a chain of
    * these can run without the flag dependency that `imul` leaves behind.
    */
   mulx(high: number, low: number, src: number): void {
-    this.vex3(true, high, src, low);
+    this.vex3(true, high, low, src, 0b00010, 0b11);
     this.byte(0xf6);
-    this.modrm(low, src);
+    this.modrm(src, low);
   }
 
   /**
@@ -1040,11 +1055,18 @@ export class Encoder {
    * `dest = dest + src + CF`. The carry it reads and writes lives in CF and
    * is independent of the one `adc` uses, so two add chains can run in
    * parallel without serialising on the flags register.
+   *
+   * The instruction has no vector form: it is written the way it has always
+   * been written, with the 66 prefix in front of the extension and the 0F38
+   * escape behind it.
    */
   adcx(dest: number, src: number): void {
-    this.vex3(true, dest, src, 1);
+    this.byte(0x66);
+    this.rex(true, dest, src);
+    this.byte(0x0f);
+    this.byte(0x38);
     this.byte(0xf6);
-    this.modrm(1, src);
+    this.modrm(src, dest);
   }
 
   /**
@@ -1052,11 +1074,17 @@ export class Encoder {
    * `dest = dest + src + OF`. The carry it reads and writes lives in OF and
    * is independent of both `adc` and `adcx`, so a second carry chain can run
    * alongside the first.
+   *
+   * The instruction has no vector form either: it is written with the F3
+   * prefix in front of the extension and the 0F38 escape behind it.
    */
   adox(dest: number, src: number): void {
-    this.vex3(true, dest, src, 2);
+    this.byte(0xf3);
+    this.rex(true, dest, src);
+    this.byte(0x0f);
+    this.byte(0x38);
     this.byte(0xf6);
-    this.modrm(2, src);
+    this.modrm(src, dest);
   }
 
   /** A division of the accumulator by a register, signed or not. */

@@ -377,6 +377,15 @@ export function isBindable(value: SemanticValue): boolean {
 }
 
 /**
+ * The operations that divide, and so fault over a divisor of zero.
+ *
+ * A floor division and a floored remainder are the truncating pair over a
+ * negative number, and they fault over a zero divisor exactly as the
+ * truncating pair does.
+ */
+const DIVIDING: RegExp = /^(?:div|mod|floorDiv|floorMod)$/;
+
+/**
  * Whether a value can be computed on a turn when the turn that used to compute
  * it did not happen, and on a turn that used to run where this one now runs
  * instead.
@@ -402,6 +411,9 @@ export function isBindable(value: SemanticValue): boolean {
  *   by zero on any target: `idiv` raises `SIGFPE` and `i32.div_s` traps. The
  *   double operation is not this one, and answers an infinity instead of
  *   stopping, so a divisor that is a whole number is what has to be checked.
+ *   A floor division and a floored remainder are the same division and the
+ *   same remainder: they answer differently over a negative number and they
+ *   fault over a zero one, exactly as the truncating pair does.
  *
  * Everything else here is arithmetic on values already in hand, a comparison,
  * or a choice between two of them, and a choice is as lazy as it was.
@@ -413,7 +425,7 @@ export function isSafeToCompute(value: SemanticValue): boolean {
     case "length":
       return false;
     case "arith": {
-      if (value.op !== "div" && value.op !== "mod") return isSafeToCompute(value.left) && isSafeToCompute(value.right);
+      if (!DIVIDING.test(value.op)) return isSafeToCompute(value.left) && isSafeToCompute(value.right);
       // A whole number answers a division by zero with a fault and a double
       // answers it with an infinity, so only the whole number is the hazard. A
       // divisor written out is a divisor whose value is known.
@@ -566,9 +578,11 @@ function statementValues(statement: SemanticStatement): readonly SemanticValue[]
     case "set":
     case "printText":
     case "printNumber":
-    case "retain":
-    case "storeField":
-      return [statement.value];
+    case "retain": return [statement.value];
+    // A field is written through an object, and the object is read to find which
+    // one: a binding that is read only that way is one this would drop, leaving
+    // the write naming a name the block never declared.
+    case "storeField": return [statement.object, statement.value];
     case "setElement":
       return [statement.index, statement.value];
     case "if":

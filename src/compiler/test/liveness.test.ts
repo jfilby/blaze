@@ -204,6 +204,27 @@ test("a name a concatenation reads after its first part is live across that part
   assert.equal(facts.get("v")?.acrossCall, true, "the part behind the first one is read after the first is measured");
 });
 
+test("a name only the other arm of a branch reads is not live across that branch", () => {
+  // The arms of a branch run on turns of their own, so the arm that is not
+  // taken does not reach the other one: a name the else arm reads is not live
+  // where the then arm hands something back to the runtime. Linking the two
+  // arms made every such name live across that hand-back, and a name live
+  // across a call has to be held in a register the convention asks a callee to
+  // preserve — a push and a pop in the prologue and the epilogue for a value
+  // the two arms never share.
+  const entry = block([
+    {
+      k: "if",
+      condition: { k: "bool", type: BOOL, value: true },
+      then: { id: "then", statements: [], releases: ["held"], terminator: { k: "next" } },
+      otherwise: { id: "else", statements: [letOf("there", local("b"))], releases: [], terminator: { k: "next" } },
+      line: 1,
+    },
+  ]);
+  const facts = nameLiveness(entry, ["b"]);
+  assert.equal(facts.get("b")?.acrossCall, false, "the value is read in the other arm, not across the hand-back");
+});
+
 test("a name the left of a minimum names is read before the right one is", () => {
   // Both sides of a minimum are taken and then compared, so a name on the left
   // is read before anything on the right — including a call there.

@@ -1607,6 +1607,238 @@ test("the C, machine and WebAssembly backends answer one vector set the same way
   assert.ok(!wasmRefused.has("mod"), "the WebAssembly backend answers a wide mod");
 });
 
+test("the machine backend's wide shift answers the language's own bigints", async () => {
+  // The machine backend writes a wide shift out of instructions rather than
+  // calling the kernel, so it is the one wide operation whose answer is its
+  // own. Two things it had to get right and did not: a shift of a signed
+  // number keeps the sign of the number, and a count that moves every bit out
+  // moves nothing rather than walking past the number and reading the frame.
+  //
+  // Every count is asked, because the counts that are not a multiple of the
+  // limb width are the ones with their own path through the shift, and the
+  // counts past the width are the ones the walk cannot make.
+  const I256: SemanticType = { kind: "primitive", name: "i256" };
+  const values = [
+    0n,
+    1n,
+    MODULUS,
+    MODULUS - 1n,
+    1n << 64n,
+    1n << 127n,
+    1n << 128n,
+    (1n << 128n) - 1n,
+    1n << 192n,
+    1n << 255n,
+    0xffffffffffffffffn,
+    0x0123456789abcdefn,
+    0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210n,
+  ];
+  const counts = [0, 1, 2, 63, 64, 65, 127, 128, 129, 191, 192, 193, 254, 255, 256, 257, 300, 1000];
+  // The runtime is the same for every count, so it is built once and every
+  // object is linked against it: a build of it is a build of the whole runtime.
+  // The count is a parameter of the function rather than a constant in it, so
+  // one object answers every count.
+  const directory = await scratch("blaze-u256-shift-");
+  const runtime = await buildStandaloneRuntime(directory);
+  let asked = 0;
+  for (const wide of [U256, I256]) {
+    const signed = wide.name === "i256";
+    for (const op of ["shl", "shr"] as const) {
+      const object = join(directory, "subject.o");
+      const contract = singleResultContract(wide);
+      contract.function.params = [{ name: "a", type: wide.name }, { name: "n", type: "usize" }];
+      const lowered = await buildMachineObject({
+        fn: {
+          name: "subject",
+          symbol: "subject",
+          params: [
+            { kind: "value", name: "a", mutable: false, type: wide },
+            { kind: "value", name: "n", mutable: false, type: { kind: "primitive", name: "usize" } },
+          ],
+          returns: wide,
+          requires: [],
+          ensures: [],
+          effects: [],
+          allocates: false,
+          prints: false,
+          readsArgv: false,
+          objects: {},
+          calls: [],
+          entry: {
+            id: "entry",
+            statements: [],
+            releases: [],
+            terminator: {
+              k: "return",
+              value: {
+                k: "arith",
+                type: wide,
+                op,
+                left: { k: "local", type: wide, name: "a" },
+                right: { k: "local", type: { kind: "primitive", name: "usize" }, name: "n" },
+              },
+            },
+          },
+        },
+        contract,
+        target: TARGET,
+        callable: new Set<string>(),
+        objectPath: object,
+      });
+      assert.ok(lowered.textSizeBytes > 0, "the object carries the code");
+      await writeFile(
+        join(directory, "driver.c"),
+        [
+          "#include <stdio.h>",
+          "#include <stdint.h>",
+          "#include <stdlib.h>",
+          `struct blaze_u256 { uint64_t limbs[4]; };`,
+          "extern void subject(struct blaze_u256 *out, struct blaze_u256 a, unsigned long n);",
+          "int main(int argc, char **argv) {",
+          "  struct blaze_u256 in;",
+          '  in.limbs[0] = strtoull(argv[1], NULL, 16); in.limbs[1] = strtoull(argv[2], NULL, 16);',
+          '  in.limbs[2] = strtoull(argv[3], NULL, 16); in.limbs[3] = strtoull(argv[4], NULL, 16);',
+          "  struct blaze_u256 r;",
+          "  subject(&r, in, strtoul(argv[5], NULL, 10));",
+          '  printf("%016llx%016llx%016llx%016llx\\n", (unsigned long long)r.limbs[3], (unsigned long long)r.limbs[2], (unsigned long long)r.limbs[1], (unsigned long long)r.limbs[0]);',
+          "  return 0;",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const binary = join(directory, `subject_${wide.name}_${op}`);
+      const linked = run(
+        "gcc",
+        ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+        { timeoutMs: 180_000 },
+      );
+      assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+      for (const count of counts) {
+        asked += 1;
+        for (const value of values) {
+          // The language's own answer: `BigInt` over the signed or the unsigned
+          // reading of the same number, which is what the kernel answers too.
+          const asSigned = value >= 1n << 255n ? value - (1n << 256n) : value;
+          const expected = (
+            signed
+              ? op === "shl"
+                ? (asSigned << BigInt(count))
+                : (asSigned >> BigInt(count))
+              : op === "shl"
+                ? (value << BigInt(count))
+                : (value >> BigInt(count))
+          ) & MODULUS;
+          const limbs = [0, 1, 2, 3].map((index) => ((value >> BigInt(index * 64)) & 0xffffffffffffffffn).toString(16));
+          const ran = run(binary, [...limbs, String(count)], { timeoutMs: 60_000 });
+          assert.equal(
+            ran.stdout.trim(),
+            expected.toString(16).padStart(64, "0"),
+            `the machine backend's ${wide.name} ${op} by ${count} of ${value.toString(16)}`,
+          );
+        }
+      }
+    }
+  }
+  assert.ok(asked >= 72, `every count of every shift was asked, asked ${String(asked)} times`);
+});
+
+test("the machine backend's wide addition is the same answer with and without BMI2", async () => {
+  // A target that names `bmi2` gets the carry chain written with `adcx`, which
+  // is an instruction with no vector form: it is written the way it has always
+  // been written, and a vector encoding of it is a fault on the processor
+  // rather than an instruction. The two targets have to answer the same, which
+  // is what says the carry chain is right.
+  const directory = await scratch("blaze-u256-bmi2-");
+  const runtime = await buildStandaloneRuntime(directory);
+  const cases: readonly (readonly [string, string])[] = [
+    ["f".repeat(64), "1"],
+    ["0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff", "1"],
+    [
+      "ffffffffffffffff0000000000000000ffffffffffffffff0000000000000000",
+      "ffffffffffffffff0000000000000000ffffffffffffffff0000000000000000",
+    ],
+  ];
+  const answers = new Map<string, string>();
+  for (const [features, tag] of [[[], "plain"], [["bmi2"], "bmi2"]] as const) {
+    for (const [left, right] of cases) {
+      const object = join(directory, "subject.o");
+      const lowered = await buildMachineObject({
+        fn: {
+          name: "subject",
+          symbol: "subject",
+          params: [],
+          returns: U256,
+          requires: [],
+          ensures: [],
+          effects: [],
+          allocates: false,
+          prints: false,
+          readsArgv: false,
+          objects: {},
+          calls: [],
+          entry: {
+            id: "entry",
+            statements: [],
+            releases: [],
+            terminator: {
+              k: "return",
+              value: {
+                k: "arith",
+                type: U256,
+                op: "add",
+                left: { k: "const", type: U256, text: `0x${left}` },
+                right: { k: "const", type: U256, text: `0x${right}` },
+              },
+            },
+          },
+        },
+        contract: singleResultContract(U256),
+        target: { arch: "x86_64", os: "linux", abi: "sysv", cpu: features.length === 0 ? "" : "haswell", features: [...features] },
+        callable: new Set<string>(),
+        objectPath: object,
+      });
+      assert.ok(lowered.textSizeBytes > 0, "the object carries the code");
+      await writeFile(
+        join(directory, "driver.c"),
+        [
+          "#include <stdio.h>",
+          "#include <stdint.h>",
+          "struct blaze_u256 { uint64_t limbs[4]; };",
+          "extern void subject(struct blaze_u256 *out);",
+          "int main(void) {",
+          "  struct blaze_u256 r;",
+          "  subject(&r);",
+          '  printf("%016llx%016llx%016llx%016llx\\n", (unsigned long long)r.limbs[3], (unsigned long long)r.limbs[2], (unsigned long long)r.limbs[1], (unsigned long long)r.limbs[0]);',
+          "  return 0;",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const binary = join(directory, `subject_${tag}`);
+      const linked = run(
+        "gcc",
+        ["-std=c11", "-O2", join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+        { timeoutMs: 180_000 },
+      );
+      assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+      const ran = run(binary, [], { timeoutMs: 60_000 });
+      assert.equal(ran.code, 0, `the machine code must run:\n${ran.stderr}`);
+      const expected = ((BigInt(`0x${left}`) + BigInt(`0x${right}`)) & MODULUS).toString(16).padStart(64, "0");
+      assert.equal(ran.stdout.trim(), expected, `the ${tag} addition of ${left} and ${right}`);
+      answers.set(`${tag}:${left}:${right}`, ran.stdout.trim());
+    }
+  }
+  for (const [left, right] of cases) {
+    assert.equal(
+      answers.get(`plain:${left}:${right}`),
+      answers.get(`bmi2:${left}:${right}`),
+      `the two targets answer the addition of ${left} and ${right} the same`,
+    );
+  }
+});
+
 test("a wide division by a literal zero is refused by name, and not constant-folded", () => {
   // The kernel's zero is a total function the IR validator keeps for the ones
   // it cannot settle, but a divisor the source wrote as zero is a number the

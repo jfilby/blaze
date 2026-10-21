@@ -6520,6 +6520,8 @@ class Machine {
     }
     const type = value.type;
     const limbs = this.limbsOf(type);
+    const signed = type.kind === "primitive" && type.name === "i256";
+    const width = limbs * 64;
     const padding = limbs * LIMB_BYTES;
     const span = padding * 3;
     const region = this.reserve(span);
@@ -6529,6 +6531,19 @@ class Machine {
     this.code.movRegImm(RAX, 0n);
     for (let at = 0; at < span; at += LIMB_BYTES) this.code.movMemRegSized(frame(region + at), RAX, 8);
     this.wideValue(value.left);
+    // A signed number that is being moved down reads the limbs above it, and
+    // those are the sign rather than zeros: a shift right of a negative number
+    // keeps it negative, and a run of zeros above it would answer a positive
+    // number instead. The padding below the number is still zeros, because a
+    // number going left takes its bits from below and a signed number going
+    // left loses the ones it moves past rather than repeating them.
+    if (signed && op === "shr") {
+      this.code.movRegReg(RDI, WIDE_WORK[limbs - 1]);
+      this.code.shiftImm("sar", RDI, 63);
+      for (let at = 0; at < padding; at += LIMB_BYTES) {
+        this.code.movMemRegSized(frame(region + padding + padding + at), RDI, 8);
+      }
+    }
     for (let limb = 0; limb < limbs; limb += 1) {
       this.code.movMemRegSized(this.limbOf(base, limb), WIDE_WORK[limb], 8);
     }
@@ -6536,10 +6551,35 @@ class Machine {
     // shift left, because the limb it wants is below the one being written and
     // an index register can only count up.
     this.at(value.right, USIZE);
+    // A count that moves every bit of the number out is answered rather than
+    // walked: the walk reads the limbs around the number, and a count past the
+    // width would read past the run and answer whatever the frame held there.
+    // The count the walk is given is held below the width, which keeps every
+    // address inside the run, and what the walk made of it is masked away
+    // afterwards.
     this.code.movRegReg(RSI, RAX);
     this.code.movRegReg(RCX, RAX);
-    this.code.aluImm("and", RCX, 63, true);
-    this.code.movRegReg(RDX, RAX);
+    // The width of the number, and the value a count past it is answered with:
+    // a number that is signed and is being moved down answers its own sign,
+    // and every other number answers nothing at all. Both are written before
+    // the comparison, because a zero is written as an exclusive-or and that
+    // would leave the flags saying the count and the width were equal.
+    const answersItsSign = signed && op === "shr";
+    this.code.movRegImm(RDX, BigInt(width));
+    this.code.movRegImm(RAX, answersItsSign ? BigInt(width - 1) : 0n);
+    this.code.alu("cmp", RCX, RDX, true);
+    this.code.movRegReg(RCX, RSI);
+    this.code.cmov("ae", RCX, RAX, true);
+    this.code.movRegReg(RSI, RCX);
+    // The mask the answer is combined with: a count past the width leaves none
+    // of the bits of every number but a signed one being moved down, and that
+    // one has already been given its sign by the bounded count above.
+    if (!answersItsSign) {
+      this.code.movRegImm(RDI, -1n);
+      this.code.movRegReg(RDX, RAX);
+      this.code.cmov("ae", RDI, RDX, true);
+    }
+    this.code.movRegReg(RDX, RSI);
     // The count for a register shift is the scratch register, so six is written
     // there rather than as an immediate: the shift below is by six, not by the
     // bits-within-a-limb the scratch held a moment ago.
@@ -6574,6 +6614,13 @@ class Machine {
       this.code.movRegReg(RCX, RSI);
       this.code.shift(towards, RAX, true);
       this.code.alu("or", WIDE_WORK[limb], RAX, true);
+    }
+    // The mask the answer is combined with, which is what answers a count that
+    // moved every bit out: every number but a signed one being moved down has
+    // no bits left, and a signed one has already been given its sign by the
+    // bounded count above.
+    if (!answersItsSign) {
+      for (let limb = 0; limb < limbs; limb += 1) this.code.alu("and", WIDE_WORK[limb], RDI, true);
     }
   }
 
