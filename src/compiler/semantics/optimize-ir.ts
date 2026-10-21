@@ -36,6 +36,7 @@ import type {
   SemanticProgram,
   SemanticSlot,
   SemanticStatement,
+  SemanticTextPart,
   SemanticType,
   SemanticValue,
 } from "../core/semantic-ir.ts";
@@ -325,6 +326,36 @@ function literalOf(value: SemanticValue): number | null {
 }
 
 /**
+ * The text of a value that is written out in full, or null when it is built
+ * at run time.
+ */
+function literalTextOf(value: SemanticValue): string | null {
+  if (value.k !== "text") return null;
+  let text = "";
+  for (const part of value.parts) {
+    if (part.k !== "text") return null;
+    text += part.value;
+  }
+  return text;
+}
+
+/**
+ * A string added to a string, when both of them are written out.
+ *
+ * Two strings written out are one string written out, and the string is the
+ * same string the program would have built by joining them at run time — it is
+ * only built earlier, and a backend that writes a string out as a literal
+ * writes nothing at all.
+ */
+function foldConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null {
+  const left = literalTextOf(value.left);
+  if (left === null) return null;
+  const right = literalTextOf(value.right);
+  if (right === null) return null;
+  return { k: "text", type: value.type, parts: [{ k: "text", value: left + right }] };
+}
+
+/**
  * The value one node folds to, or null when it stays as it is written.
  *
  * This is the whole of constant folding and the whole of the algebraic
@@ -337,12 +368,16 @@ function literalOf(value: SemanticValue): number | null {
 function foldValue(value: SemanticValue): SemanticValue | null {
   switch (value.k) {
     case "arith": {
+      // A string added to a string is the one operation with no number behind
+      // it, so it is folded before the numbers are: two strings written out are
+      // one string written out, and a string written out is not built at run
+      // time at all.
+      if (value.op === "concat") return foldConcat(value);
       const name = numberType(value);
       if (name === null) return null;
       const left = literalOf(value.left);
       const right = literalOf(value.right);
       if (left !== null && right !== null) {
-        if (value.op === "concat") return null;
         const folded = foldArithmetic(value.op, left, right, name);
         if (folded === null) return null;
         // A whole number the compiler writes back as text is read by a backend
@@ -616,8 +651,56 @@ export function foldSemanticValue(value: SemanticValue): SemanticValue {
   if (folded !== null) return folded;
   const before = valueChildren(value);
   const children = before.map((child) => foldSemanticValue(child));
-  if (children.every((child, index) => child === before[index])) return value;
-  return withChildren(value, children);
+  if (children.every((child, index) => child === before[index])) {
+    return joinTextParts(value);
+  }
+  return joinTextParts(withChildren(value, children));
+}
+
+/**
+ * A string the program builds, with the pieces of it that are written out
+ * joined together.
+ *
+ * Two pieces of text written next to each other are one piece of text, and a
+ * string built out of three written pieces and a value is built out of two
+ * pieces and a value once the three written ones are joined. A piece that is
+ * itself a string written out in full is that string written out, and it is a
+ * piece of text like any other.
+ *
+ * A backend writes a string out by concatenating its parts one at a time, so
+ * joining them here is the difference between one concatenation and four.
+ *
+ * The parts are the same string either way: the text is the text, and the
+ * pieces it is written out of are how it was written rather than what it is.
+ */
+function joinTextParts(value: SemanticValue): SemanticValue {
+  if (value.k !== "text") return value;
+  let changed = false;
+  const parts: SemanticTextPart[] = [];
+  const push = (text: string): void => {
+    const last = parts[parts.length - 1];
+    if (last !== undefined && last.k === "text") {
+      parts[parts.length - 1] = { k: "text", value: last.value + text };
+      changed = true;
+      return;
+    }
+    parts.push({ k: "text", value: text });
+  };
+  for (const part of value.parts) {
+    if (part.k === "text") {
+      push(part.value);
+      continue;
+    }
+    const inner = part.value;
+    if (inner.k === "text" && inner.parts.every((one) => one.k === "text")) {
+      changed = true;
+      for (const one of inner.parts) push((one as { k: "text"; value: string }).value);
+      continue;
+    }
+    parts.push(part);
+  }
+  if (!changed) return value;
+  return { ...value, parts };
 }
 
 /* -------------------------------------------------------------------------- */

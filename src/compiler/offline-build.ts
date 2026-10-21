@@ -41,6 +41,7 @@ import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
 import { buildFacilRuntime } from "./runtime/facil.ts";
+import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
 import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { symbolOf } from "./semantics/contract.ts";
@@ -162,10 +163,13 @@ async function main(): Promise<void> {
 
   // A program that asks for the HTTP runtime links the facil.io adapter beside
   // it, the same way a build does: the source names `http`, so the driver
-  // writes the `blaze_http_*` calls the adapter answers.
+  // writes the `blaze_http_*` calls the adapter answers. The runtime is built
+  // for the program: how many connections its server may hold, and whether it
+  // speaks TLS.
   const isHttp = project.runtime === "facil" || /\bhttp\b/.test(source);
+  const http = httpRuntimeNeeds(phase.body, phase.modules.map((module) => module.source));
   const runtime = isHttp
-    ? await buildFacilRuntime(work, "danger", target)
+    ? await buildFacilRuntime(work, "danger", target, http)
     : await buildStandaloneRuntime(work, "danger", target);
   // A program that uses SQLite links the SQLite library beside the runtime, the
   // same way a build does.
@@ -182,6 +186,7 @@ async function main(): Promise<void> {
     runtimeObjectPath: runtime.objectPath,
     includeHttpHeader: isHttp,
     includeSqliteHeader: isSqlite,
+    tls: http.tls,
     libraryObjectPaths: library === undefined ? [] : [library.objectPath],
     threads: programIsParallel(program.entry, program.bodies) ? ["openmp"] : [],
     outputPath,

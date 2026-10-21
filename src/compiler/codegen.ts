@@ -32,7 +32,8 @@ import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.
 import { planProbe, wasmProbeInput, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
-import { buildFacilRuntime, FACIL_IO_LIBRARIES } from "./runtime/facil.ts";
+import { buildFacilRuntime, facilIoLibraries } from "./runtime/facil.ts";
+import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./runtime/http-needs.ts";
 import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
 import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
 import type { Review } from "./core/proposal.ts";
@@ -516,18 +517,24 @@ export function runtimePreparer(request: {
   workspace: CodegenWorkspace;
   /** The libraries the program links beside the runtime, in link order. */
   libraries?: readonly LibraryKind[];
+  /**
+   * What the HTTP runtime is built for, read from the program it is built
+   * for: how many connections its server may hold, and whether it speaks TLS.
+   */
+  http?: HttpRuntimeNeeds;
 }): () => Promise<PreparedRuntime | undefined> {
   let pending: Promise<PreparedRuntime | undefined> | null = null;
   return () => {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
       if (request.lowering === "wasm") return undefined;
       const workDirectory = request.workspace.workDirectory;
+      const http = request.http ?? defaultHttpRuntimeNeeds();
       let prepared: PreparedRuntime;
       if (request.runtime === "none") {
         prepared = await buildStandaloneRuntime(workDirectory, request.mode, request.target);
       } else if (request.runtime === "facil") {
-        const runtime = await buildFacilRuntime(workDirectory, request.mode, request.target);
-        prepared = { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: FACIL_IO_LIBRARIES };
+        const runtime = await buildFacilRuntime(workDirectory, request.mode, request.target, http);
+        prepared = { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: facilIoLibraries(http.tls) };
       } else {
         prepared = { headerPath: await writeRuntimeHeader(workDirectory) };
       }

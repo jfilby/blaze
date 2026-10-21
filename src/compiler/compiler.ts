@@ -53,6 +53,7 @@ import { buildProgramModule, type ModuleFunction } from "./toolchain/ir-wasm.ts"
 import { machineRefusal } from "./toolchain/ir-machine.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
+import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import type { LiteralKeys } from "./semantics/program-objects.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
@@ -1428,7 +1429,10 @@ export async function runBuild(
         lowering: toolchain.lowering,
       });
     // One runtime for the whole build: every candidate of every function links
-    // the same one, and the driver that runs the program links it too.
+    // the same one, and the driver that runs the program links it too. The
+    // HTTP runtime is built for the program that is being built: how many
+    // connections its server may hold, and whether it speaks TLS.
+    const http = httpRuntimeNeeds(phase.body, phase.modules.map((module) => module.source));
     const prepareRuntime = runtimePreparer({
       lowering: backendKind,
       mode: buildMode,
@@ -1436,6 +1440,7 @@ export async function runBuild(
       target,
       workspace: { workDirectory: base, functionName: program.entry.file },
       libraries: usesSqlite ? ["sqlite"] : [],
+      http,
     });
     // The machine, one measurement at a time however many functions are being
     // generated.
@@ -1884,6 +1889,7 @@ export async function runBuild(
                 includeHttpHeader: runtimeKind === "facil",
                 lowering: backendKind,
                 includeSqliteHeader: usesSqlite,
+                tls: http.tls,
                 libraryObjectPaths: (runtime?.libraryObjects ?? []).map((library) => library.objectPath),
                 threads,
                 outputPath: programPath,
@@ -2230,6 +2236,11 @@ export async function runStored(
     target,
     workspace: { workDirectory: base, functionName: program.entry.file },
     libraries: usesSqliteSource(input.source) ? ["sqlite"] : [],
+    // The runtime is built for the program the stored candidates belong to, so
+    // it is built for the same program the build built it for: the source of
+    // the project is what says what its server holds and whether it speaks
+    // TLS.
+    http: httpRuntimeNeeds(undefined, [input.source]),
   });
   // A stored candidate is given the same symbols the build that stored it was
   // given, which is what its own recorded calls say rather than what the build

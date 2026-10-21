@@ -16,6 +16,7 @@ import { readdir, stat, writeFile } from "node:fs/promises";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { httpHeaderSource, HTTP_NAME } from "./http.ts";
+import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./http-needs.ts";
 import { RUNTIME_NAME, runtimeSourceSource } from "./abi.ts";
 import { writeRuntimeHeader } from "./standalone.ts";
 import { cTargetOptions, optimizationOptions } from "../core/target.ts";
@@ -32,21 +33,49 @@ export interface FacilRuntime {
 export const FACIL_IO_VERSION = "facil.io@git-master";
 
 /**
- * The libraries a link that carries the HTTP runtime needs. facil.io speaks
- * TLS, and TLS is OpenSSL, so a program that serves HTTP links the libraries
- * of OpenSSL in beside it.
+ * The libraries a link that carries the HTTP runtime needs.
+ *
+ * facil.io speaks TLS, and TLS is OpenSSL, so a program that serves TLS links
+ * the libraries of OpenSSL in beside it. A program that serves no TLS links
+ * neither: the library is loaded before the program runs and carried in its
+ * binary, and a program that never speaks TLS pays for both.
  */
-export const FACIL_IO_LIBRARIES: readonly string[] = ["-lssl", "-lcrypto"];
+export function facilIoLibraries(tls: boolean): readonly string[] {
+  return tls ? ["-lssl", "-lcrypto"] : [];
+}
 
 /**
  * How long facil.io's event loop waits for an event, in milliseconds.
  *
  * The loop is stopped from another thread, and the thread that waits for an
  * event is not woken by the request: it notices the request when the wait is
- * over. With the tick facil.io is built with (a second), a server that is
- * closed waits a second for its loop to end.
+ * over. So the tick is the shortest a program waits for its server to end,
+ * and it is paid on every run of a program that starts a server and closes it
+ * again — which is what a program that serves a client of its own does.
+ *
+ * A millisecond is short enough that the wait is shorter than the work that
+ * follows it, and long enough that an idle server does not wake up for every
+ * millisecond of the day. The cost of the shorter tick is a wake of the loop
+ * a thousand times a second while it has nothing to do, which is a thread
+ * that wakes, looks, and sleeps again.
  */
-export const FACIL_IO_POLL_TICK_MS = 10;
+export const FACIL_IO_POLL_TICK_MS = 1;
+
+/**
+ * How many memory blocks facil.io keeps for itself, and how much memory that
+ * is.
+ *
+ * The blocks are the free memory the runtime holds between the things it
+ * allocates, and the allocator takes them a megabyte at a time. A program that
+ * serves a few requests allocates a few blocks, and a pool of eight megabytes
+ * is eight megabytes the program maps and unmaps before it answers its first
+ * request and never fills.
+ *
+ * A megabyte is a pool that is large enough that a server under load does not
+ * ask the system for memory on every connection, and small enough that the
+ * program does not pay for the pool before it has served anything.
+ */
+export const FACIL_IO_MEMORY_BLOCKS = 32;
 
 /** The repository root, used to locate the vendored facil.io source. */
 const compilerDir = dirname(fileURLToPath(import.meta.url));
@@ -602,6 +631,7 @@ void *blaze_http_server_new_settings(uint16_t port,
 }
 
 void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key) {
+#ifdef BLAZE_HTTP_TLS
   blaze_http_server_t *server = blaze_http_server_alloc(port);
   if (!server) return NULL;
   server->cert = cert;
@@ -619,6 +649,17 @@ void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key
   server->bound = 1;
   blaze_http_server_handle = server;
   return server;
+#else
+  /* The runtime was built without TLS, because the program it was built for
+     does not speak it. A program that asks for a server that speaks TLS is a
+     program the runtime was not built for, and saying so is better than
+     serving plain HTTP to a program that asked for another thing. */
+  (void)port;
+  (void)cert;
+  (void)key;
+  fprintf(stderr, "blaze: this program was built without TLS, so it cannot serve HTTPS\\n");
+  return NULL;
+#endif
 }
 
 /* The event loop of a server, with the settings the server was given. It runs
@@ -774,6 +815,81 @@ static void blaze_http_client_init(void) {
   blaze_http_client_ready = 1;
 }
 
+/* The addresses a host was resolved to, and when it was last looked for.
+   A lookup reads the files of the resolver and asks the resolver itself, and
+   a program that opens a connection to the same host again pays for it again.
+   The answers are kept instead, so that the second connection to a host is
+   opened as soon as the first one was.
+
+   The lookup is not remembered when it failed: a host that does not answer
+   yet may answer later, and a program that gives up on it the first time
+   would never reach it at all. */
+typedef struct blaze_http_client_host_s {
+  char host[256];
+  int port;
+  struct addrinfo *addresses;
+  long long used;
+} blaze_http_client_host_t;
+
+/* How many hosts are kept: a program that talks to one server keeps one, and
+   a program that talks to many keeps one each. */
+#define BLAZE_HTTP_CLIENT_MAX_HOSTS 8
+
+static blaze_http_client_host_t blaze_http_client_hosts[BLAZE_HTTP_CLIENT_MAX_HOSTS];
+static long long blaze_http_client_host_clock = 0;
+
+/* The addresses of a host and a port, looked up once and kept. The list
+   belongs to the cache and is freed when the host is pushed out of it. */
+static struct addrinfo *blaze_http_client_resolve(const char *host, int port) {
+  blaze_http_client_host_t *oldest = NULL;
+  for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_HOSTS; index++) {
+    blaze_http_client_host_t *entry = &blaze_http_client_hosts[index];
+    if (entry->addresses == NULL) continue;
+    if (entry->port != port || strcmp(entry->host, host) != 0) continue;
+    entry->used = ++blaze_http_client_host_clock;
+    return entry->addresses;
+  }
+
+  struct addrinfo hints, *found = NULL;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+  if (getaddrinfo(host, port_str, &hints, &found) != 0 || found == NULL) {
+    if (found) freeaddrinfo(found);
+    return NULL;
+  }
+
+  /* The room is made before the answer is put in it, so that the answer is
+     never the one that was pushed out. */
+  for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_HOSTS; index++) {
+    blaze_http_client_host_t *entry = &blaze_http_client_hosts[index];
+    if (entry->addresses != NULL) continue;
+    oldest = entry;
+    break;
+  }
+  if (oldest == NULL) {
+    for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_HOSTS; index++) {
+      blaze_http_client_host_t *entry = &blaze_http_client_hosts[index];
+      if (oldest == NULL || entry->used < oldest->used) oldest = entry;
+    }
+    if (oldest != NULL && oldest->addresses != NULL) {
+      freeaddrinfo(oldest->addresses);
+      oldest->addresses = NULL;
+    }
+  }
+  if (oldest == NULL) {
+    freeaddrinfo(found);
+    return NULL;
+  }
+  snprintf(oldest->host, sizeof(oldest->host), "%s", host);
+  oldest->port = port;
+  oldest->addresses = found;
+  oldest->used = ++blaze_http_client_host_clock;
+  return oldest->addresses;
+}
+
 /* Finds the connection that is open to a host and a port, or NULL when there
    is none. A connection the peer closed while it was idle is not a connection
    any more: it is closed here, and the entry is freed. */
@@ -836,15 +952,12 @@ static void blaze_http_client_uncache(blaze_http_client_conn_t *conn) {
    the first is not always the one that answers: "localhost" names the
    loopback address of IPv6 before the one of IPv4, and a server that listens
    on one of them is not reached through the other. Every address is tried
-   until one of them connects. Returns the socket, or -1. */
+   until one of them connects. The addresses were looked up when the host was
+   first reached, and are looked up again only for a host that is not known.
+   Returns the socket, or -1. */
 static int blaze_http_client_connect(const char *host, int port, int timeout_ms) {
-  struct addrinfo hints, *res = NULL;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  char port_str[16];
-  snprintf(port_str, sizeof(port_str), "%d", port);
-  if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return -1;
+  struct addrinfo *res = blaze_http_client_resolve(host, port);
+  if (res == NULL) return -1;
 
   int sock = -1;
   for (struct addrinfo *candidate = res; candidate != NULL; candidate = candidate->ai_next) {
@@ -873,7 +986,6 @@ static int blaze_http_client_connect(const char *host, int port, int timeout_ms)
     }
     close(attempt);
   }
-  freeaddrinfo(res);
   return sock;
 }
 
@@ -1390,6 +1502,7 @@ export async function buildFacilRuntime(
   workDirectory: string,
   mode: BuildMode = "debug",
   target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] },
+  needs: HttpRuntimeNeeds = defaultHttpRuntimeNeeds(),
 ): Promise<FacilRuntime> {
   const headerPath = await writeHttpHeader(workDirectory);
   /* The driver also includes the core runtime header, so write it beside the
@@ -1418,10 +1531,12 @@ export async function buildFacilRuntime(
   }
 
   /* List facil.io's C translation units needed for an HTTP server.
-     Excluded: cli (command-line parsing), legacy (broken legacy allocator),
-     redis (Redis client), and the missing-stub TLS backend (Blaze enables
-     OpenSSL via fio_tls_openssl.c so HTTPS is available). */
-  const excluded = ["/cli/", "/legacy/", "/redis/", "/tls/fio_tls_missing.c"];
+     Excluded: cli (command-line parsing), legacy (broken legacy allocator) and
+     redis (Redis client). The TLS backend is the one that is chosen rather
+     than excluded: a program that speaks TLS gets the OpenSSL one, and a
+     program that does not gets the missing one, which is the same API with
+     nothing behind it. */
+  const excluded = ["/cli/", "/legacy/", "/redis/"];
   const listed = run(
     "sh",
     ["-c", `find "${sourceDir}" -name "*.c" -type f | sort`],
@@ -1435,10 +1550,13 @@ export async function buildFacilRuntime(
       detail: `${listed.stderr.trim() ?? listed.spawnError ?? ""}`,
     });
   }
+  const tlsBackend = needs.tls ? "/tls/fio_tls_openssl.c" : "/tls/fio_tls_missing.c";
   const facilSources = listed.stdout
     .trim()
     .split("\n")
-    .filter((line) => line.length > 0 && !excluded.some((e) => line.includes(e)));
+    .filter((line) => line.length > 0 && !excluded.some((e) => line.includes(e)))
+    .filter((line) => !line.includes("/tls/fio_tls_openssl.c") && !line.includes("/tls/fio_tls_missing.c"))
+    .concat(`${sourceDir}${tlsBackend}`);
   if (facilSources.length === 0) {
     throw new CompilerError({
       category: "LinkError",
@@ -1467,17 +1585,29 @@ export async function buildFacilRuntime(
     "-std=gnu11",
     "-D_GNU_SOURCE",
     "-D_POSIX_C_SOURCE=200809L",
-    "-DHAVE_OPENSSL",
-    "-DFIO_TLS_FOUND",
+    /* The TLS backend is the one the program needs: a program that speaks TLS
+       gets OpenSSL, and a program that does not gets neither the backend nor
+       the library, so it does not load a TLS library before it runs. */
+    ...(needs.tls ? ["-DHAVE_OPENSSL", "-DFIO_TLS_FOUND"] : []),
+    /* How many connections the event loop may hold at once. facil.io sizes
+       the table of them by the limit the process was given for open files,
+       which on a machine with a generous limit is 131072 entries: about thirty
+       megabytes that the program pays for in a page fault before it answers
+       its first request. The table is as long as the program needs it to be,
+       and a program that says how many connections it wants is given room
+       for them. */
+    `-DFIO_MAX_SOCK_CAPACITY=${needs.maxConnections}`,
+    /* How much memory facil.io keeps for itself between the things it
+       allocates. The pool is mapped and unmapped before the program answers
+       its first request, so a pool of eight megabytes is eight megabytes the
+       program pays for and never fills. */
+    `-DFIO_MEMORY_BLOCKS_PER_ALLOCATION=${FACIL_IO_MEMORY_BLOCKS}`,
     /* How long facil.io's event loop waits for an event before it looks at
        what it was asked to do. The loop is stopped from another thread, and
        the thread that waits for the event is not woken by the request: it
-       notices it when the wait is over. With the tick facil.io is built with
-       (a second), a server that is closed waits a second for the loop to
-       end, and a program that closes the server it started waits a second
-       for nothing. Ten milliseconds is short enough for the wait to be
-       shorter than the work that follows it, and long enough that an idle
-       server does not wake up for every millisecond of the day. */
+       notices it when the wait is over. So the tick is the shortest a program
+       waits for its server to end, and it is paid on every run of a program
+       that starts a server and closes it again. */
     `-DFIO_POLL_TICK=${FACIL_IO_POLL_TICK_MS}`,
     ...optimizationOptions(mode),
     ...cTargetOptions(target),
@@ -1507,10 +1637,12 @@ export async function buildFacilRuntime(
     facilObjects.push(objectPath);
   });
 
-  /* Compile the adapter. */
+  /* Compile the adapter. The adapter is told whether the runtime it is built
+     for speaks TLS, so that the entry point that starts a TLS server is not
+     compiled into a runtime that has no TLS behind it. */
   const compiled = run(
     "gcc",
-    [...cFlags, "-c", "-o", adapterObject, adapterSource],
+    [...cFlags, ...(needs.tls ? ["-DBLAZE_HTTP_TLS=1"] : []), "-c", "-o", adapterObject, adapterSource],
     { timeoutMs: 300_000 },
   );
   if (compiled.spawnError !== undefined || compiled.code !== 0) {

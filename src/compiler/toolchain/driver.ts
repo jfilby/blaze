@@ -319,6 +319,23 @@ function driverError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "LinkError", stage: "link", message, detail });
 }
 
+/**
+ * The text of a value that is written out in full, or null when it is built
+ * at run time.
+ *
+ * A string the program wrote out is a string it knows before it runs, so the
+ * driver may write it out as a literal rather than build it.
+ */
+function writtenTextOf(value: SemanticValue): string | null {
+  if (value.k !== "text") return null;
+  let text = "";
+  for (const part of value.parts) {
+    if (part.k !== "text") return null;
+    text += part.value;
+  }
+  return text;
+}
+
 
 /* The kernel each operation over a wide number is one call of, by the name the
    runtime gives it. The kernel carries four limbs and answers addition,
@@ -1371,7 +1388,14 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
         "an options object carries the headers a request is written with as strings",
       );
     }
-    return this.stringConcat(this.stringLiteral(`${name}: `), expression(value, value.type));
+    const prefix = `${name}: `;
+    // A header whose value is written out is one string, and a string written
+    // out is not built at run time: the name and the value are joined here
+    // rather than by the program, so the request carries a literal rather than
+    // a concatenation of two of them.
+    const written = writtenTextOf(value);
+    if (written !== null) return this.stringLiteral(prefix + written);
+    return this.stringConcat(this.stringLiteral(prefix), expression(value, value.type));
   }
 
   /**
@@ -1765,6 +1789,11 @@ export interface ProgramDriverRequest {
   /** True when the program uses the HTTP runtime, so the driver includes its header. */
   includeHttpHeader?: boolean;
   /**
+   * True when the HTTP runtime the program links speaks TLS, so the driver
+   * links the TLS libraries beside it.
+   */
+  tls?: boolean;
+  /**
    * The backend the functions of the program were lowered by. The driver
    * writes the bridge between the runtime and a handler the program
    * registered, and how a reference is carried is what the backend decides.
@@ -1802,8 +1831,13 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller
   // naming a cpu asked for and what an unnamed one would not get otherwise.
+  //
+  // The TLS libraries are linked only for a runtime that speaks TLS: a
+  // program that serves plain HTTP carries no TLS library, so it neither
+  // loads one before it runs nor carries one in its binary.
+  const tlsLibraries = request.tls === true ? ["-lssl", "-lcrypto"] : [];
 
-  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...(request.runtimeObjectPath !== undefined ? ["-pthread", "-lssl", "-lcrypto"] : [])], { timeoutMs: 120_000 });
+  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...(request.runtimeObjectPath !== undefined ? ["-pthread", ...tlsLibraries] : [])], { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }
