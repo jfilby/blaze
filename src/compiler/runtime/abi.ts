@@ -127,6 +127,30 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   ),
   entry("blaze_rt_to_number", "double", [["value", "double"]], "Converts a dynamic value to a number.", "Returns the number.", { tags: ["object"] }),
   entry(
+    "blaze_error_clear",
+    "void",
+    [],
+    "Clears the failure a call left pending.",
+    "A try block starts without one, so a failure an earlier call left behind is not mistaken for one of its own.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_had_error",
+    "double",
+    [],
+    "Is 1 when a call left a failure pending, and 0 otherwise.",
+    "The answer a catch arm reads: the call it made failed.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_last_error",
+    "const char*",
+    [],
+    "The message of the failure that is pending.",
+    "Borrowed: the message belongs to the runtime and is read at once.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_region_enter",
     "void",
     [],
@@ -3359,7 +3383,7 @@ double blaze_rt_md5_digest(double hasher) {
 
 void blaze_error_clear(void);
 void blaze_error_set(const char* message);
-int blaze_had_error(void);
+double blaze_had_error(void);
 const char* blaze_last_error(void);
 
 /* Minimal promise implementation. */
@@ -3379,7 +3403,7 @@ static int blaze_error_flag = 0;
 static const char* blaze_error_message = NULL;
 void blaze_error_clear(void) { blaze_error_flag = 0; blaze_error_message = NULL; }
 void blaze_error_set(const char* message) { blaze_error_flag = 1; blaze_error_message = message; }
-int blaze_had_error(void) { return blaze_error_flag; }
+double blaze_had_error(void) { return blaze_error_flag ? 1.0 : 0.0; }
 const char* blaze_last_error(void) { return blaze_error_message; }
 
 ${U256_KERNEL}
