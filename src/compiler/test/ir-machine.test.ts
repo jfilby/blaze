@@ -3193,3 +3193,104 @@ test("a conversion does not wait for what the register held", async () => {
   assert.match(code, /pxor\s+%xmm\d+,%xmm\d+/, "the register is cleared before the conversion");
   assert.match(code, /cvtsi2sd\s+%rax,%xmm\d+/, "the conversion is written");
 });
+
+test("a packed loop reads a constant in one instruction", async () => {
+  // The instruction that puts a number in both halves of a vector register is a
+  // second one — the load and the interleave — and a loop that multiplies by
+  // the same number on every turn pays for it on every turn. The number is
+  // laid down in both halves of a pair in the read-only data instead, and read
+  // from there in one instruction.
+  const fn = sumSubject((i) => mul(at("a", i), number("2")));
+  const code = await instructions(fn);
+  assert.match(code, /\bmovaps\b[^\n]*\(%rip\)/, "the pair is read in one instruction");
+  // The one interleave left is the pair of counters the loop counts on, which
+  // is laid out once before the loop; the constant under the multiplication is
+  // read out of the data in both of its halves.
+  assert.equal((code.match(/\bunpcklpd\b/g) ?? []).length, 1, "the constant is not interleaved with itself");
+});
+
+test("a field is read through the register its object is in", async () => {
+  // An object the build gave a register of its own is read through that
+  // register: the address of the field is the register and a displacement,
+  // where the general form copies the object into the accumulator first. The
+  // copy is on every field of every object the program walks.
+  const point: SemanticSlot = { kind: "value", name: "point", mutable: false, type: { kind: "ref", of: null, name: "Point" } };
+  const pointLayout: ObjectLayout = {
+    name: "Point",
+    size: 16,
+    align: 8,
+    fields: [{ name: "x", type: "f64", offset: 0 }, { name: "y", type: "f64", offset: 8 }],
+  };
+  const field = (name: string): SemanticValue => ({
+    k: "loadField",
+    type: F64,
+    object: local("point", { kind: "ref", of: null, name: "Point" }),
+    layout: "Point",
+    field: name,
+  });
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        // The object is read often enough to be given a register of its own,
+        // which is what puts the field's address in that register.
+        { k: "set", name: "total", op: "+=", value: field("x"), line: 1 },
+        { k: "set", name: "total", op: "+=", value: field("x"), line: 2 },
+        { k: "set", name: "total", op: "+=", value: field("x"), line: 3 },
+        { k: "set", name: "total", op: "+=", value: field("x"), line: 4 },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [point],
+    { Point: pointLayout },
+  );
+  const code = await instructions(fn);
+  // The field is read at the register the object is in, and the object is not
+  // copied into the accumulator first.
+  assert.match(code, /movsd\s+-?0x[0-9a-f]*\(%r[a-z0-9]+\),%xmm\d+/, "the field is read through the object's register");
+  assert.doesNotMatch(code, /mov\s+%r[a-z0-9]+,%rax\s*\n\s*mov\s+\(%rax\)/, "the object is not copied into the accumulator first");
+});
+
+test("an object literal is filled in through the register it is kept in", async () => {
+  // The register an object is filled in is one the convention asks a callee to
+  // leave alone, so a call does not take it. Only an allocation does, and the
+  // slot the object was kept in is read only where a field's value allocates:
+  // where none does, the slot was written and never read.
+  const objects: Record<string, ObjectLayout> = {
+    Point: { name: "Point", size: 16, align: 8, fields: [{ name: "x", type: "f64", offset: 0 }, { name: "y", type: "f64", offset: 8 }] },
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        {
+          k: "let",
+          slot: { kind: "value", name: "point", mutable: true, type: { kind: "ref", of: null, name: "Point" } },
+          value: {
+            k: "newObject",
+            type: { kind: "ref", of: null, name: "Point" },
+            layout: "Point",
+            fields: [
+              { name: "x", value: number("1.5") },
+              { name: "y", value: number("2.5") },
+            ],
+          },
+          line: 1,
+        },
+      ],
+      terminator: { k: "return", value: local("point", { kind: "ref", of: null, name: "Point" }) },
+    },
+    [],
+  );
+  fn.objects = objects;
+  const code = await instructions(fn);
+  // The object is kept in a register, and the slot it was kept in is not
+  // written, because nothing reads it: no field of it allocates.
+  assert.match(code, /mov\s+%rax,%r15/, "the object is kept in the register it is filled in");
+  assert.doesNotMatch(code, /mov\s+%rax,0x[0-9a-f]+\(%rsp\)/, "the slot the object was kept in is not written");
+});
