@@ -619,7 +619,11 @@ test("a compound division of a whole number above the signed range is unsigned",
   assert.equal(result.stdout, "RESULT 1500000000\n");
 });
 
-test("a construct the module boundary cannot reach is refused by name", async () => {
+test("a number the program prints is written by the host", async () => {
+  // A module reaches the runtime through the services of the host ABI, and
+  // printing a number is one of them: the module calls the runtime's own
+  // formatter and the host writes what it answers. The refusal this test
+  // replaced was the module reaching no runtime at all.
   const files = {
     "main.ts": 'import { r } from "./lib.ts";\nr(0);\n',
     "lib.ts": "export function r(n: number): number {\n  console.log(n);\n  return n;\n}\n",
@@ -628,16 +632,15 @@ test("a construct the module boundary cannot reach is refused by name", async ()
   const contract: FunctionContract | undefined = program.files.find((f) => f.path === "lib.ts")?.functions.r;
   assert.ok(contract !== undefined, "the entry program imports the function under test");
   const directory = await scratch("blaze-wasm-print-");
-  await assert.rejects(
-    buildModule({
-      fn: semantics.r as SemanticFunction,
-      contract,
-      modulePath: join(directory, "candidate.wasm"),
-      hostPath: join(directory, "host.mjs"),
-    }),
-    /cannot print a number/,
-    "a module reaches no runtime service, so printing is refused rather than emitted",
-  );
+  const built = await buildModule({
+    fn: semantics.r as SemanticFunction,
+    contract,
+    modulePath: join(directory, "candidate.wasm"),
+    hostPath: join(directory, "host.mjs"),
+  });
+  const result = run("node", [built.hostPath, built.modulePath], { input: "run\n2.5\n\n", timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "2.5\nRESULT 2.5\n");
 });
 
 /**
@@ -684,6 +687,125 @@ test("a compound write to an element reads the element it writes over", () => {
     "",
   ].join("\n");
   assert.ok(throughIr(library, text) > 0, "a compound element write is a module the engine takes");
+});
+
+test("a compound power converts its operands and its answer to the slot's type", () => {
+  // The power is the host's own, and it takes two doubles and answers one. The
+  // operands were handed to the call at the slot's own width, so a `u64` slot
+  // called it with two `i64` and the engine refused the module: "call[0]
+  // expected type f64, found local.get of type i64". The C backend truncates
+  // the answer into the slot, so the two backends answered differently: one a
+  // number, one a module the engine refuses.
+  const U64: SemanticType = { kind: "primitive", name: "u64" };
+  const fn: SemanticFunction = {
+    name: "r",
+    symbol: "r",
+    params: [{ kind: "value", name: "a", mutable: true, type: U64 }],
+    returns: U64,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [
+        {
+          k: "let",
+          slot: { kind: "value", name: "b", mutable: true, type: U64 },
+          value: { k: "local", type: U64, name: "a" },
+          line: 1,
+        },
+        { k: "set", name: "b", op: "**=", value: { k: "const", type: U64, text: "3" }, line: 2 },
+      ],
+      releases: [],
+      terminator: { k: "return", value: { k: "local", type: U64, name: "b" } },
+    },
+  };
+  const contract = {
+    version: "1",
+    function: { name: "r", symbol: "r", params: [{ name: "a", type: "u64" }], returns: "u64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  } as FunctionContract;
+  const bytes = moduleBytes(fn, contract);
+  assert.ok(engine !== undefined);
+  assert.ok(engine.validate(bytes), "a compound power over a whole number is a module the engine takes");
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
+  const read = instance.exports.r as (a: bigint) => bigint;
+  assert.equal(read(2n), 8n, "the answer is the power the source wrote");
+});
+
+test("a fill writes every element of the array it names", () => {
+  // A fill is a statement the C, the machine and the WebAssembly backends all
+  // dropped: none of the three had a case for it and none of the three refused
+  // it, so a fill was silently not written. The WebAssembly backend writes it
+  // out as the walk it is.
+  const F64: SemanticType = { kind: "primitive", name: "f64" };
+  const fn: SemanticFunction = {
+    name: "r",
+    symbol: "r",
+    params: [{ kind: "buffer", name: "a", mutable: true, element: F64, length: 3 }],
+    returns: F64,
+    requires: [],
+    ensures: [],
+    effects: [],
+    allocates: false,
+    prints: false,
+    readsArgv: false,
+    objects: {},
+    calls: [],
+    entry: {
+      id: "entry",
+      statements: [
+        { k: "fill", buffer: "a", index: "i", value: { k: "const", type: F64, text: "2.5" }, type: F64, line: 1 },
+      ],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: {
+          k: "arith",
+          type: F64,
+          op: "add",
+          left: { k: "element", type: F64, of: { k: "local", type: { kind: "array", of: F64, length: 3 }, name: "a" }, index: { k: "const", type: { kind: "primitive", name: "usize" }, text: "0" } },
+          right: { k: "element", type: F64, of: { k: "local", type: { kind: "array", of: F64, length: 3 }, name: "a" }, index: { k: "const", type: { kind: "primitive", name: "usize" }, text: "2" } },
+        },
+      },
+    },
+  };
+  const contract = {
+    version: "1",
+    function: { name: "r", symbol: "r", params: [{ name: "a", type: "array<f64,3>" }], returns: "f64" },
+    requires: [],
+    ensures: [],
+    memory: { reads: [], writes: [], aliasing: [] },
+    effects: [],
+    numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+    optimize: { primary: "balanced" },
+    definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+  } as FunctionContract;
+  const bytes = moduleBytes(fn, contract);
+  assert.ok(engine !== undefined);
+  assert.ok(engine.validate(bytes), "a fill is a module the engine takes");
+  const memory = new engine.Memory({ initial: 1 });
+  const instance = new engine.Instance(new engine.Module(bytes), { env: { memory, pow: Math.pow } });
+  const view = new DataView(memory.buffer);
+  // The count of a buffer is the word the offset sits one before, so the three
+  // elements are laid out the way the host lays them out.
+  const base = 1024;
+  view.setBigUint64(base - 8, 3n, true);
+  for (let index = 0; index < 3; index += 1) view.setFloat64(base + index * 8, 0, true);
+  const read = instance.exports.r as (a: number) => number;
+  assert.equal(read(base), 5, "every element of the array was written");
 });
 
 test("a power is lowered through the runtime import", () => {
@@ -778,15 +900,14 @@ test("a clamp is the two instructions the module has for it", async () => {
   await compute("n: number", clamp, "run\n40\n", "RESULT 10\n");
 });
 
-test("the command line is refused by what it is, not by what rounds", async () => {
-  // Every builtin with no instruction behind it was reported as `Math.round`,
-  // so a read of `process.argv` was refused for a rounding the source never
-  // asked for.
-  await assert.rejects(
-    compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", ""),
-    /cannot read the command line/,
-    "a module is handed the vectors and no process, so the command line is named as what it is",
-  );
+test("the command line is the one the host was given", async () => {
+  // A module is handed the vectors and no process of its own, so the command
+  // line it reads is the one the host was started with: the host is the
+  // process, and the arguments are its own. A function build reads no
+  // arguments, so the count is the length of process.argv with none: the
+  // program, the file it runs, and nothing else. The C backend answers the
+  // same, because its harness sets no arguments either.
+  await compute("n: number", ["  return n + process.argv.length;"], "run\n1\n\n", "RESULT 3\n");
 });
 
 test("a module whose code is larger than one buffer is written whole", async () => {
@@ -1190,3 +1311,73 @@ test("a whole number of thirty-two bits moves by a number of bits", () => {
   assert.equal(shifted(scalarShifted(S32, "shr", "-2", "1"), numberContract("i32")), -1);
 });
 
+
+test("the folded module answers the same as the unfolded one, and is smaller", async () => {
+  // The module the backend writes is the folded one: the folds it knows are
+  // safe are applied to what it writes. A fold that changed an answer would be
+  // a fold the backend did not know was safe, so the two are run against the
+  // same vectors and their answers are compared.
+  const library = [
+    "export function r(a: Float64Array, n: number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < n; i++) { total += a[i] * 2.5; }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
+  const contract = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const vectors = "run\n3 2\n1 2 3\n";
+  const answers: string[] = [];
+  const sizes: number[] = [];
+  for (const optimize of [false, true]) {
+    const directory = await scratch("blaze-wasm-fold-");
+    const built = await buildModule({
+      fn: semantics.r as SemanticFunction,
+      contract,
+      modulePath: join(directory, "candidate.wasm"),
+      hostPath: join(directory, "host.mjs"),
+      optimize,
+    });
+    const result = run("node", [built.hostPath, built.modulePath], { input: vectors, timeoutMs: 60_000 });
+    assert.equal(result.code, 0, result.stderr);
+    answers.push(result.stdout);
+    sizes.push(built.moduleSizeBytes);
+  }
+  assert.equal(answers[0], answers[1], "the folded module answers what the unfolded one answers");
+  assert.ok((sizes[1] as number) < (sizes[0] as number), "the folded module is smaller than the unfolded one");
+});
+
+test("a text and a wide number are laid down beside each other and not on top of each other", async () => {
+  // The constants a module pools are one list: a text written out and a wide
+  // number are laid down one after another, and each is at the address the ones
+  // before it leave free. Two lists put the text and the wide number at the
+  // same address when the text was pooled first, and the wide number was read
+  // as the text — the text printed as the limbs of the number and the number
+  // printed as the text.
+  const library = [
+    "export function r(n: number): number {",
+    "  console.log(`hello`);",
+    "  let w: u256 = 340282366920938463463374607431768211455n;",
+    "  console.log(w);",
+    "  return n;",
+    "}",
+    "",
+  ].join("\n");
+  const files = { "main.ts": 'import { r } from "./lib.ts";\nr(0);\n', "lib.ts": library };
+  const { program, semantics } = programWithSemantics("typescript", files, "main.ts");
+  const contract = program.files.find((file) => file.path === "lib.ts")?.functions.r;
+  assert.ok(contract !== undefined, "the entry program imports the function under test");
+  const directory = await scratch("blaze-wasm-pooled-");
+  const built = await buildModule({
+    fn: semantics.r as SemanticFunction,
+    contract,
+    modulePath: join(directory, "candidate.wasm"),
+    hostPath: join(directory, "host.mjs"),
+  });
+  const result = run("node", [built.hostPath, built.modulePath], { input: "run\n1\n\n", timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "hello\n340282366920938463463374607431768211455\nRESULT 1\n");
+});

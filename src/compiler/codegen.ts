@@ -29,7 +29,7 @@ import { optimizeSemanticFunction } from "./semantics/optimize-ir.ts";
 import { entryIsParallel } from "./semantics/parallel.ts";
 import type { Threading } from "./core/target.ts";
 import { generateHarness, generateProbeHarness, link } from "./toolchain/linker.ts";
-import { planProbe, type ProbePlan } from "./toolchain/probe.ts";
+import { planProbe, wasmProbeInput, type ProbePlan } from "./toolchain/probe.ts";
 import { buildHostProgram } from "./runtime/nim.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone.ts";
 import { buildFacilRuntime, FACIL_IO_LIBRARIES } from "./runtime/facil.ts";
@@ -293,8 +293,9 @@ export function reusableFiles(
   // The wasm backend writes the module and no assembly: naming the assembly here
   // asked for a file that is never written, so the list could never be complete
   // and a stored candidate was rebuilt on every build for the life of the
-  // project. The module is what it delivers.
-  if (lowering === "wasm") return [paths.module, paths.implementation];
+  // project. The module is what it delivers, and the host that runs it is
+  // delivered beside it: a module nobody can run is not a deliverable.
+  if (lowering === "wasm") return [paths.module, paths.host, paths.implementation];
   // A candidate that links on its own delivers the executable that links, and
   // one that does not has none: `materialize` below returns before the harness
   // link for a candidate that calls another function of the program, because the
@@ -463,6 +464,16 @@ export interface CandidateEvaluationRequest {
    * resolve.
    */
   functions: Readonly<Record<string, SemanticFunction>>;
+  /**
+   * The functions of the program, for a build that is a program.
+   *
+   * A program is one module: every function of it is in the module and is
+   * called by the index it has there, so a function that calls another
+   * function of the program needs that function in its module — there is no
+   * linker to find it beside. A build that compiles one function on its own
+   * has nothing to hold beside it, and carries none.
+   */
+  programFunctions?: readonly SemanticFunction[];
   output: OutputKind;
   /**
    * What lowered the IR. Named for the lowering rather than the model
@@ -695,9 +706,14 @@ async function materialize(
     const module = await buildModule({
       fn,
       contract: request.contract,
+      // A program is one module, so the functions a candidate calls are in the
+      // module beside it: the module calls them by the index they have in it,
+      // and there is no linker to find them anywhere else.
+      functions: (request.programFunctions ?? []).filter((one) => one.symbol !== fn.symbol),
       modulePath: paths.module,
       hostPath: paths.host,
       candidate: candidate.id,
+      language: request.program.language,
     });
     return {
       runner: module.runner,
@@ -1057,9 +1073,16 @@ async function probeCandidate(
   // The probe links the object the C toolchain links, so it runs for every
   // kind that produces one, whatever text that object was lowered from. A
   // `wasm` build produces a module instead, and the host that runs a module
-  // is what calls it there.
+  // is what calls it there: the same protocol, one vector, and nothing
+  // compared with the answer.
   if (request.lowering === "wasm") {
-    return { called: false, reason: "a wasm candidate is run by its module host, not the native probe", stderr: "" };
+    const wasmPlan = wasmProbeInput(request.contract, request.parsed);
+    if (wasmPlan.kind === "skip") return { called: false, reason: wasmPlan.reason, stderr: "" };
+    const result = await run(process.execPath, [paths.host, paths.module], {
+      input: wasmPlan.input,
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+    return { called: true, reason: probeFault(result), stderr: result.stderr };
   }
   const runtime = await request.prepareRuntime();
   if (runtime?.objectPath === undefined) {
@@ -1216,7 +1239,7 @@ async function targetArtifact(
     const module = await readFile(paths.module);
     return {
       text: describeModule(module),
-      note: "A module is binary, so this is what it holds rather than a listing of it. The IR it was built from is the artifact the rules are applied to, and the module is regenerated from it.",
+      note: "This is the module itself: its sections, its types, its imports and their signatures, its exports and the instructions of its code. The IR it was built from is the artifact the rules are applied to, and the module is regenerated from it.",
     };
   }
   if (request.lowering === "machine") {

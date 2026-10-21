@@ -49,6 +49,7 @@ import type { SemanticFunction, SemanticProgram } from "./core/semantic-ir.ts";
 import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
+import { buildProgramModule, type ModuleFunction } from "./toolchain/ir-wasm.ts";
 import { machineRefusal } from "./toolchain/ir-machine.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
@@ -222,6 +223,7 @@ export interface ProjectPaths {
   outputSource: string;
   outputIr: string;
   outputModule: string;
+  outputHost: string;
   outputObject: string;
   outputProgram: string;
 }
@@ -430,6 +432,7 @@ function projectPaths(id: string, storeId: string): ProjectPaths {
     outputSource: `${root}/output/${id}.c`,
     outputIr: `${root}/output/${id}.ir`,
     outputModule: `${root}/output/${id}.wasm`,
+    outputHost: `${root}/output/${id}.host.mjs`,
     outputObject: `${root}/output/${id}.o`,
     outputProgram: `${root}/output/${id}.program`,
   };
@@ -895,6 +898,40 @@ function compilationUnits(program: ProgramContract, isProgram: boolean): Compila
 }
 
 /**
+ * The IR of every function of a program, as the module of the program holds it.
+ *
+ * A program is one module: every function of it is in the module, and a call of
+ * another function of the program is a call of the index that function has in
+ * it. What the module holds is the implementation that was chosen for each
+ * function — the candidate the build proved — and the functions the program
+ * declares for itself, which the build compiles no candidate of.
+ */
+async function programFunctions(
+  base: string,
+  units: readonly UnitGeneration[],
+  program: ProgramContract,
+  driver: SemanticProgram,
+): Promise<ModuleFunction[]> {
+  const functions: ModuleFunction[] = [];
+  const known = new Set<string>();
+  for (const entry of units) {
+    const selected = entry.result.selected;
+    if (selected === null || selected === undefined) continue;
+    const name = entry.unit.contract.function.name;
+    const text = await readFile(join(base, name, `${selected}.ir`), "utf8");
+    const fn = parseSemanticFunction(text, program);
+    functions.push({ fn, contract: entry.unit.contract });
+    known.add(fn.symbol);
+  }
+  for (const body of driver.bodies) {
+    if (known.has(body.symbol)) continue;
+    functions.push({ fn: body });
+    known.add(body.symbol);
+  }
+  return functions;
+}
+
+/**
  * The machine backend's answer about a program: whether it can lower every
  * function of it, and what it said about the one it cannot.
  *
@@ -933,19 +970,23 @@ function machineRefusalOf(
 }
 
 /**
- * A program is linked from native objects, so the one kind that produces no
- * object cannot build one. Every other kind answers in the IR and the compiler
- * writes the target code, so the driver links beside the others exactly as it
- * always did.
+ * What a program cannot be, when it is built as WebAssembly.
+ *
+ * A program is one module: every function of it and the body it runs, with the
+ * entry of the module as the driver the C backend writes in C. What a module
+ * cannot reach is what the host ABI does not carry, and a server to answer
+ * requests on is the one thing a program may want that a module cannot have.
  */
-function assertProgramOutput(output: OutputKind): void {
+function assertProgramOutput(output: OutputKind, source: string): void {
   if (output !== "wasm") return;
+  if (!/\bhttp\b/.test(source)) return;
   throw new CompilerError({
     category: "InputError",
     stage: "input",
-    message: "a program is linked from native objects, so it is not built as WebAssembly",
+    message: "a WebAssembly module cannot serve HTTP requests",
     detail:
-      'build the program with another output kind, or make the entry module export the function to compile as "output": "wasm"',
+      "the host ABI of a wasm module carries the runtime services the module imports, and a server is not one " +
+      "of them; build the program with another output kind",
   });
 }
 
@@ -1330,7 +1371,7 @@ export async function runBuild(
     await writeBuildRecord(store, paths, build);
 
     assertAssemblerSupportsArch(target);
-    if (phase.body !== undefined) assertProgramOutput(outputKind);
+    if (phase.body !== undefined) assertProgramOutput(outputKind, project.entry.source);
 
     // What an earlier build proved per function. It is read before this build
     // writes to it, and it is written as each function is proved, so a build
@@ -1529,6 +1570,10 @@ export async function runBuild(
         program,
         base: semantics[functionName] as SemanticFunction,
         functions: semantics,
+        // A program is one module, so the functions a candidate calls are in
+        // the module beside it. A build that compiles one function on its own
+        // has nothing to hold beside it, and carries none.
+        ...(phase.body === undefined ? {} : { programFunctions: Object.values(semantics) }),
         target,
         output: outputKind,
         lowering: backendKind,
@@ -1780,6 +1825,11 @@ export async function runBuild(
     // delivered program is the project's own name beside its sources.
     const programBinary = `program${EXECUTABLE_SUFFIX}`;
     const programPath = join(base, programBinary);
+    // A program built as WebAssembly is one module and one host: the module
+    // holds every function of the program and the body it runs, and the host is
+    // what runs the entry of it.
+    const programModule = join(base, "program.wasm");
+    const programHost = join(base, "program.host.mjs");
     const deliveredProgram = join(project.directory, `${id}${EXECUTABLE_SUFFIX}`);
     for (let round = 1; round <= programRounds; round += 1) {
       await generateUnits(mismatch);
@@ -1811,29 +1861,40 @@ export async function runBuild(
       }
       const isHttp = runtimeKind === "facil" || /\bhttp\b/.test(project.entry.source);
       const runner =
-        isHttp || runtimeKind === "none"
-          ? await buildProgramDriver({
-              objective: normalizeOptimize(input.optimize).primary,
-              mode: buildMode,
-              target,
-              program: driver,
-              workDirectory: base,
-              objectPaths,
-              ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
-              includeHttpHeader: runtimeKind === "facil",
-              lowering: backendKind,
-              includeSqliteHeader: usesSqlite,
-              libraryObjectPaths: (runtime?.libraryObjects ?? []).map((library) => library.objectPath),
-              threads,
-              outputPath: programPath,
-            })
-          : await buildProgramHost({
-              mode: buildMode,
-              program: driver,
-              workDirectory: base,
-              objectPaths,
-              outputPath: programPath,
-            });
+        backendKind === "wasm"
+          ? (await buildProgramModule({
+              // The module holds every function of the program: the candidate
+              // that was chosen for each of them, and the body the program runs
+              // as its entry.
+              functions: await programFunctions(base, unitsGenerated(), program, driver),
+              entry: driver.entry,
+              modulePath: programModule,
+              hostPath: programHost,
+              language: input.language,
+            })).runner
+          : isHttp || runtimeKind === "none"
+            ? await buildProgramDriver({
+                objective: normalizeOptimize(input.optimize).primary,
+                mode: buildMode,
+                target,
+                program: driver,
+                workDirectory: base,
+                objectPaths,
+                ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
+                includeHttpHeader: runtimeKind === "facil",
+                lowering: backendKind,
+                includeSqliteHeader: usesSqlite,
+                libraryObjectPaths: (runtime?.libraryObjects ?? []).map((library) => library.objectPath),
+                threads,
+                outputPath: programPath,
+              })
+            : await buildProgramHost({
+                mode: buildMode,
+                program: driver,
+                workDirectory: base,
+                objectPaths,
+                outputPath: programPath,
+              });
       checked = await verifyProgram({
         language: input.language,
         sourcePath: programFile.path,
@@ -1942,18 +2003,28 @@ export async function runBuild(
       if (phase.body !== undefined) {
         // The program was linked and run above, by the round that agreed with
         // the source, so what is delivered is what was checked.
-        //
-        // The program beside the project's sources is stripped, and the store's
-        // copy is not. A delivered binary is something a person runs, and a
-        // symbol table, a build id and the unwind tables of a program with no
-        // exceptions are 10-20% of a small binary for nothing. The store's copy
-        // is made before the strip, so it keeps them.
-        await deliver(programBinary, paths.outputBinary);
-        run("strip", ["--strip-unneeded", programPath]);
-        await copyFile(programPath, deliveredProgram);
-        await deliver(runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
-        delivered.push(deliveredProgram);
-        outputPath = store.resolve(paths.outputBinary);
+        if (outputKind === "wasm") {
+          // A program built as WebAssembly is one module and one host: the
+          // module holds every function of the program and the body it runs,
+          // and the host is the runtime it runs under. A module nobody can run
+          // is not a deliverable, so the host is delivered beside it.
+          await deliver("program.wasm", paths.outputModule);
+          await deliver("program.host.mjs", paths.outputHost);
+          outputPath = store.resolve(paths.outputModule);
+        } else {
+          //
+          // The program beside the project's sources is stripped, and the store's
+          // copy is not. A delivered binary is something a person runs, and a
+          // symbol table, a build id and the unwind tables of a program with no
+          // exceptions are 10-20% of a small binary for nothing. The store's copy
+          // is made before the strip, so it keeps them.
+          await deliver(programBinary, paths.outputBinary);
+          run("strip", ["--strip-unneeded", programPath]);
+          await copyFile(programPath, deliveredProgram);
+          await deliver(runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
+          delivered.push(deliveredProgram);
+          outputPath = store.resolve(paths.outputBinary);
+        }
       } else {
         const functionName = units[0].contract.function.name;
         const winner = selected[functionName];
@@ -1973,6 +2044,9 @@ export async function runBuild(
         await deliver(`${functionName}/${winner}.ir`, paths.outputIr);
         if (outputKind === "wasm") {
           await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
+          // The host is the runtime a module runs under, and a module nobody
+          // can run is not a deliverable: the host is delivered beside it.
+          await deliver(`${functionName}/${winner}.host.mjs`, paths.outputHost);
           outputPath = store.resolve(paths.outputModule);
         } else if (outputKind === "ir") {
           if (standalone) {
@@ -2195,6 +2269,10 @@ export async function runStored(
       parsed: unit.parsed,
       program,
       functions,
+      // A program is one module, so the functions a candidate calls are in
+      // the module beside it. A build that compiles one function on its own
+      // has nothing to hold beside it, and carries none.
+      ...(program.entry.function === null ? { programFunctions: Object.values(functions) } : {}),
       target,
       output,
       lowering,

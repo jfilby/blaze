@@ -198,3 +198,57 @@ export function planProbe(contract: FunctionContract, parsed: ParsedContract): P
   const callArguments = parameters.map((param) => buildValue(param.type, param.name, objects, statements, 0));
   return { kind: "call", statements, callArguments };
 }
+
+/**
+ * The input a module is called with when it is probed, or why no such call may
+ * be made.
+ *
+ * A module is called through the host that runs it, and the host reads the
+ * vector protocol: a mode line, a line of arguments and a line of elements for
+ * every buffer among them. What is settled here is the same thing the native
+ * probe settles — that the candidate came back — and the input is the one the
+ * contract itself describes.
+ *
+ * A parameter the vector protocol does not carry is a reason to skip rather
+ * than a reason to guess: a text is not a number and a reference is not a
+ * buffer, and the host reads neither.
+ */
+export function wasmProbeInput(
+  contract: FunctionContract,
+  parsed: ParsedContract,
+): { kind: "call"; input: string } | { kind: "skip"; reason: string } {
+  const plan = planProbe(contract, parsed);
+  if (plan.kind === "skip") return plan;
+  const header: string[] = [];
+  const data: string[] = [];
+  for (const param of contract.function.params) {
+    const type = parseType(param.type);
+    if (type.kind === "primitive") {
+      // A whole number of thirty-two bits or more is a number the protocol
+      // carries as a decimal, and a wide one is thirty-two bytes the protocol
+      // does not carry at all.
+      if (type.name === "u256" || type.name === "i256") {
+        return { kind: "skip", reason: `the parameter "${param.name}" is a wide number, which the vector protocol does not carry` };
+      }
+      header.push(type.name === "bool" ? "0" : "0");
+      continue;
+    }
+    if (type.kind === "text") {
+      return { kind: "skip", reason: `the parameter "${param.name}" is a text, which the vector protocol does not carry` };
+    }
+    if (type.kind === "ref") {
+      return { kind: "skip", reason: `the parameter "${param.name}" is a reference, which the vector protocol does not carry` };
+    }
+    // A buffer is a count and its elements, and the count is the one the
+    // contract states.
+    const count = type.kind === "array" ? (type.length ?? 0) : 0;
+    header.push(String(count));
+    data.push(new Array(count).fill("0").join(" "));
+  }
+  const lines = ["run", header.join(" ")];
+  for (const line of data) lines.push(line);
+  // A function that takes nothing is called with an empty header line, which
+  // is a line of its own.
+  if (header.length === 0) lines.push("");
+  return { kind: "call", input: `${lines.join("\n")}\n` };
+}

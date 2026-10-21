@@ -634,6 +634,19 @@ proc blaze_rt_text_length*(text: cstring): csize_t {.exportc, cdecl.} =
 proc blaze_rt_string_clone*(text: cstring): cstring {.exportc, cdecl.} =
   blaze_rt_string_new(cast[pointer](text), blaze_rt_string_length(text))
 
+## Two texts are compared by what they say and not by where they are: a text
+## built at run time and one written out are two addresses that can say the
+## same thing. A text that is nothing is the smaller of the two, so two texts
+## that are nothing are the same thing, which is what a comparison of two
+## absent values answers.
+proc blaze_rt_text_compare*(left, right: cstring): cint {.exportc, cdecl.} =
+  if left == nil or right == nil:
+    if left == right: return 0
+    return if left == nil: -1 else: 1
+  if left == right: return 0
+  let difference = cmp(cstring(left), cstring(right))
+  if difference < 0: -1 elif difference > 0: 1 else: 0
+
 proc blaze_rt_string_append*(left, right: cstring): cstring {.exportc, cdecl.} =
   ## The result is always a block of its own. The left string is a value the
   ## program may still be holding, and the runtime cannot tell whether it is: a

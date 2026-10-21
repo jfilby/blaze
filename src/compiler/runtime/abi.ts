@@ -255,6 +255,17 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["memory"] },
   ),
   entry(
+    "blaze_rt_text_compare",
+    "int",
+    [
+      ["left", "const char*"],
+      ["right", "const char*"],
+    ],
+    "Compares two texts by what they say.",
+    "Answers a number below zero when the left text is the smaller one, zero when the two say the same thing and a number above zero when the left text is the larger one. A text that is nothing is the smaller of the two, so two texts that are nothing are the same thing.",
+    { tags: ["memory"] },
+  ),
+  entry(
     "blaze_rt_array_new",
     "void*",
     [
@@ -2352,6 +2363,19 @@ ${guarded ? "  if (text == NULL) return 0;" : ""}
 
 const char* blaze_rt_string_clone(const char* text) {
   return blaze_rt_string_new((const unsigned char*)text, blaze_rt_string_length(text));
+}
+
+/* Two texts are compared by what they say and not by where they are: a text
+   built at run time and one written out are two addresses that can say the
+   same thing. A text that is nothing is the smaller of the two, so two texts
+   that are nothing are the same thing, which is what a comparison of two
+   absent values answers. */
+int blaze_rt_text_compare(const char* left, const char* right) {
+  if (left == NULL || right == NULL) {
+    if (left == right) return 0;
+    return left == NULL ? -1 : 1;
+  }
+  return strcmp(left, right);
 }
 
 const char* blaze_rt_string_append(const char* left, const char* right) {

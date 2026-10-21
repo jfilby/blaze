@@ -949,7 +949,7 @@ class FunctionEmitter {
     const written = this.raw(value, depth);
     const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
     if (asAny) {
-      if (isTextType(value.type) || (value.k === "const" && typeof (value as any).text === "string") || value.k === "text") {
+      if (isTextType(value.type) || value.k === "text") {
         return `${RUNTIME_NAME}_box_string(${written})`;
       }
       if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;
@@ -1115,15 +1115,16 @@ class FunctionEmitter {
         // a string built at run time and one written out are two addresses that
         // can say the same thing, and the addresses compared as if the strings
         // did. An absent string is nothing, so it is equal to another absent
-        // string and to no other, which is what the driver answers.
+        // string and to no other, which is what the driver answers. The
+        // runtime owns the texts, so the comparison is the runtime's own: the
+        // WebAssembly backend calls the same service and answers the same.
         const left = this.temporary("blaze_left");
         const right = this.temporary("blaze_right");
         const operator = cOperator(COMPARE_OPERATORS[value.op]);
         return (
           `({ const char* ${left} = ${this.raw(value.left, depth)}; ` +
           `const char* ${right} = ${this.raw(value.right, depth)}; ` +
-          `${left} == NULL || ${right} == NULL ? ${left} ${operator} ${right} ` +
-          `: strcmp(${left}, ${right}) ${operator} 0; })`
+          `${RUNTIME_NAME}_text_compare(${left}, ${right}) ${operator} 0; })`
         );
       }
       case "logical": {
