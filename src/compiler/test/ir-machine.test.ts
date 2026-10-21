@@ -3091,6 +3091,7 @@ test("a compound assignment is written in the register the name has", async () =
     assert.match(code, entry.written, `${entry.name} is written at the register the name has`);
   }
 });
+
 test("a compound assignment in a register is the one instruction that writes it", async () => {
   // The compound assignment of a name that has a register of its own is written
   // as the instruction that writes that register from the accumulator. The
