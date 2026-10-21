@@ -545,7 +545,9 @@ class TypeScriptParser {
       // read. They are named here, where they were written, rather than left
       // to the declaration parser reporting whatever token it found next.
       if (this.at("async")) {
-        this.next();
+        const at = this.next();
+        this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
+        this.skipBlock();
         continue;
       }
       if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
@@ -561,7 +563,9 @@ class TypeScriptParser {
       }
       const exported = this.accept("export");
       if (exported && this.at("async")) {
-        this.next();
+        const at = this.next();
+        this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
+        this.skipBlock();
         continue;
       }
       let isDefault = false;
@@ -1459,8 +1463,12 @@ class TypeScriptParser {
       return this.hole();
     }
     if (token.kind === "ident" && token.text === "await") {
-      this.next();
-      return this.readExpression();
+      // A function body is a straight line: there is no promise to wait for
+      // inside one, so the word is named where it was written rather than read
+      // past as the name of a value.
+      this.report(`"${token.text}" is not supported`, REFUSED_KEYWORDS[token.text], token);
+      this.readExpression();
+      return this.hole();
     }
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
