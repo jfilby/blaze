@@ -2707,8 +2707,6 @@ class Machine {
     // Which loops are written as teams is settled before the registers are
     // handed out, because a name a turn reads may not be given one: a turn runs
     // on a thread where this thread's registers mean nothing.
-    const filler = Number(process.env["BLAZE_FILLER"] ?? "0");
-    for (let index = 0; index < filler; index += 1) this.code.byte(0x90);
     this.planTeams();
     this.allocateRegisters();
     // A pinned value is in a register the convention says a callee leaves as it
@@ -3667,34 +3665,28 @@ class Machine {
     }
     const operation = COMPOUND[op.slice(0, -1)];
     this.at(value, target.type);
+    // A name the build gave a register of its own is written in that register:
+    // the value the name is given is in the accumulator and the name's own value
+    // is where it lies, so the operation is the one instruction that takes the
+    // accumulator as its operand and writes the register. The general form below
+    // writes the value down, reads the name out and reads the value back out
+    // again — four instructions where this is one.
+    if (target.register !== null && this.operatesOnRegister(operation, target.type)) {
+      this.compoundAtRegister(operation, target);
+      return;
+    }
     if (operation === "add" || operation === "mul") {
       if (this.floatOverFrame(operation, target.type, target)) {
         this.normalizeArithmetic(target.type);
         this.store(target);
         return;
       }
-      // A name the build gave a register of its own is the other side of the
-      // operation where it lies, so the instruction names that register and the
-      // copy into the scratch is left out. The two sides of a sum and of a
-      // product are the same pair either way round, so the value in the
-      // accumulator and the name in its register answer the same number.
-      if (target.register !== null && this.operatesOnRegister(operation, target.type)) {
-        this.applyAtRegister(operation, target.type, target.register);
-      } else {
-        this.scratchFrom(target);
-        this.apply(operation, target.type);
-      }
+      this.scratchFrom(target);
+      this.apply(operation, target.type);
       this.normalizeArithmetic(target.type);
       this.store(target);
       return;
     }
-    // A name the build gave a register of its own is written in that register:
-    // the value the name is given is in the accumulator and the name's own value
-    // is where it lies, so the operation is the register the name has against
-    // the accumulator. The general form below writes the value down, reads the
-    // name out and reads the value back out again — four instructions where
-    // this is two.
-    if (this.compoundInRegister(operation, target)) return;
     // Anything else needs the name on the left, and the accumulator holds the
     // value rather than the name. The value is written down before the name is
     // read rather than after, so an expression that writes the name as a side
@@ -3736,59 +3728,31 @@ class Machine {
   }
 
   /**
-   * An operation whose other side is in a register of its own, written with that
-   * register as the operand.
-   *
-   * The accumulator holds the value and the register holds the other side, so
-   * the instruction is the one that takes its operand where it is rather than
-   * the pair that copies it into the scratch first.
-   */
-  private applyAtRegister(operation: Arithmetic, type: SemanticType, register: number): void {
-    if (isFloatType(type)) {
-      this.code.sse(operation as "add" | "sub" | "mul", XMM0, register, widthOf(type) === 4);
-      return;
-    }
-    this.applyRegister(operation as "add" | "sub" | "mul" | "and" | "or" | "xor", type, register);
-  }
-
-  /**
    * A compound assignment whose name has a register of its own, written in that
    * register.
    *
    * The value the name is given is in the accumulator and the name's own value
-   * is where it lies, so the operation is the register the name has against the
-   * accumulator, and the answer is left in the register the name has. The
-   * accumulator is given the answer too, because that is where the rest of the
-   * lowering reads the value of a statement from.
+   * is in the register, so the operation is the one instruction that writes the
+   * register from the accumulator: the name is on the left of it, which is what
+   * a compound assignment means, and the answer is where the name is kept.
    *
-   * It answers whether it did: an operation whose instruction names no register
-   * of its own — a division, a remainder, a shift — is left to the general form,
-   * which brings the value into the accumulator and the other side into the
-   * scratch where those instructions expect them.
+   * The accumulator is left holding the value it had rather than the answer,
+   * which is what the rest of the lowering expects: a statement's value is
+   * written into the name it is given to, and nothing reads the accumulator
+   * afterwards.
    */
-  private compoundInRegister(operation: Arithmetic, target: Held): boolean {
-    const register = target.register;
-    if (register === null) return false;
+  private compoundAtRegister(operation: Arithmetic, target: Held): void {
+    const register = target.register as number;
     const type = target.type;
-    if (!this.operatesOnRegister(operation, type)) return false;
-    // A difference and the bitwise operations are not commutative: the name has
-    // to be on the left. The name's own value is in its register, so the value
-    // the name is given is moved into the scratch and the operation is written
-    // at the register.
     if (isFloatType(type)) {
-      this.code.movsMove(XMM1, XMM0, widthOf(type) === 4);
-      this.code.sse(operation as "sub", register, XMM1, widthOf(type) === 4);
+      this.code.sse(operation as "add" | "sub" | "mul", register, XMM0, widthOf(type) === 4);
     } else {
-      this.code.movRegReg(RCX, RAX);
-      this.applyRegisterInto(operation as "sub" | "and" | "or" | "xor", type, register, RCX);
+      const wide = operationWidth(type) === 8;
+      if (operation === "mul") this.code.imul(register, RAX, wide);
+      else this.code.alu(operation as "add" | "sub" | "and" | "or" | "xor", register, RAX, wide);
     }
     this.normalizeArithmetic(type, register);
-    // The accumulator is given the answer as well, because that is where the
-    // value of a statement is read from.
-    if (isFloatType(type)) this.code.movsMove(XMM0, register, widthOf(type) === 4);
-    else this.code.movRegReg(RAX, register);
-    this.accumulator = { id: target.id, at: this.code.written };
-    return true;
+    this.accumulator = null;
   }
 
   /**
@@ -8003,6 +7967,10 @@ class Machine {
     this.code.sseCompareLabel(XMM0, this.floatLiteral(floatBits(-WHOLE_FLOATS, false)), false, false);
     this.code.jcc("b", answer);
     this.code.cvtFloatToInt(RAX, XMM0, false, true);
+    // The conversion writes the low half of the accumulator and leaves the half
+    // above it as it was, so the register is cleared first and the answer does
+    // not depend on what the turn before wrote there.
+    this.code.zeroFloat(XMM0);
     this.code.cvtIntToFloat(XMM0, RAX, false);
     this.code.sseCompare(XMM0, XMM1, false, false);
     // The conversion drops towards zero, so it can only have rounded up — which
