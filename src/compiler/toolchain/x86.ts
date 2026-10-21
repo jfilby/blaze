@@ -1477,6 +1477,28 @@ export class Encoder {
     this.modrm(source, destination);
   }
 
+  /**
+   * A vector register cleared.
+   *
+   * `PXOR` with a register as both of its operands is the zero idiom: the
+   * processor knows the answer is zero whatever the register held, so it does
+   * not wait for the last write to it. `XORPD` is not that instruction — it
+   * writes what was there and waits for the last write to know what that was.
+   *
+   * Clearing a register before writing a conversion into it is what tells the
+   * conversion that its answer does not depend on what the register held: the
+   * conversion writes the low half of the register and leaves the half above it
+   * as it was, so without this it waits for the last write to the register —
+   * which, in a loop, is the arithmetic of the turn before it.
+   */
+  zeroFloat(register: number): void {
+    this.byte(0x66);
+    this.rex(false, register, register);
+    this.byte(0x0f);
+    this.byte(0xef);
+    this.modrm(register, register);
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Conditions                                                              */
   /* ---------------------------------------------------------------------- */

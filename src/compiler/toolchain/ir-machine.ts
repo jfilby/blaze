@@ -2212,6 +2212,9 @@ class Machine {
     const write = (name: string, weight: number): void => {
       writes.set(name, (writes.get(name) ?? 0) + weight);
     };
+    const read = (name: string, weight: number): void => {
+      reads.set(name, (reads.get(name) ?? 0) + weight);
+    };
     // A function that calls itself runs its own body once per level of the
     // recursion, so a read on a straight line through it is still a read
     // carried out many times — worth here what a read inside a loop is worth
@@ -2223,6 +2226,13 @@ class Machine {
       const weight = READ_WEIGHT[Math.min(depth + recursed, READ_WEIGHT.length - 1)];
       for (const statement of block.statements) {
         if (statement.k === "set" || statement.k === "step") write(statement.name, weight);
+        // A compound assignment reads what the name holds as well as writing
+        // what it is given, and the read is a read of the name: an accumulator
+        // that is added to on every turn of a loop is reached for as often as
+        // anything else there, and the frame round trip of keeping it there is
+        // a load and a store on every turn.
+        if (statement.k === "set" && statement.op !== "=") read(statement.name, weight);
+        if (statement.k === "step") read(statement.name, weight);
         if (statement.k === "setElement") {
           // The buffer of a write is named rather than valued, so a census of
           // the values the body computes never sees it read. Writing an element
@@ -2697,6 +2707,8 @@ class Machine {
     // Which loops are written as teams is settled before the registers are
     // handed out, because a name a turn reads may not be given one: a turn runs
     // on a thread where this thread's registers mean nothing.
+    const filler = Number(process.env["BLAZE_FILLER"] ?? "0");
+    for (let index = 0; index < filler; index += 1) this.code.byte(0x90);
     this.planTeams();
     this.allocateRegisters();
     // A pinned value is in a register the convention says a callee leaves as it
@@ -8413,9 +8425,21 @@ class Machine {
    * its own width, and a conversion is signed at that width — except for a
    * whole number of a full word, which has to be read as itself or every value
    * above the middle of the range would come back negative.
+   *
+   * The register is cleared before the conversion writes into it. The
+   * conversion writes the low half of the register and leaves the half above it
+   * as it was, so it waits for whatever last wrote there — and in a loop that
+   * is the arithmetic of the turn before, which writes zeros above the number
+   * it works on. A loop that converts a counter on every turn therefore waits
+   * for the whole arithmetic of the turn before it, and runs at a third of the
+   * speed it could. Clearing the register first says the answer does not
+   * depend on what was there, and `PXOR` is the instruction that says so: the
+   * processor knows its answer is zero whatever the register held, so it does
+   * not wait for the last write to it.
    */
   private wholeAsDouble(from: SemanticType, to: SemanticType): void {
     const single = widthOf(to) === 4;
+    this.code.zeroFloat(XMM0);
     if (widthOf(from) === 8 && isUnsigned(from)) {
       const halved = this.code.label("Lhalf");
       const done = this.code.label("Ldone");
