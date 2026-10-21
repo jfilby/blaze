@@ -30,6 +30,16 @@ too. The backend's own share of that program is small, which is why the
 program that is *only* arithmetic moved by a factor of two and this one did
 not move at all.
 
+The allocator is at its fastest because the compiler proved the loop's
+allocations are dead by the end of its turn and marked the loop as a region:
+every block a turn allocates is taken from a cursor that is rewound at the end
+of the turn, so the next turn takes the same storage again. The region is
+entered and left by a call each, and those two calls are a fifth of a turn —
+the loop is four times slower without the region, so the calls are well spent.
+Making them cheaper is a matter for the runtime's ABI rather than for the
+backend: the region is a pair of counters in the runtime's own memory, and the
+backend cannot write them without the runtime handing them over.
+
 ## What the backend does, and why
 
 The backend's discipline is that no value is given a register of its own by
