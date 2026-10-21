@@ -1258,16 +1258,18 @@ typedef struct blaze_http_client_handle_s {
      one that the callback fired when the request is ready and one that the
      program handed an exception to when it is not. A trampoline is the
      program's own function, so the adapter carries the pointer it was given
-     and calls it with the handle and the captured value that was bound. */
+     and calls it with the handle and the values the program captured when it
+     registered the handler. */
   void *resp_tramp;
-  void *resp_cap;
+  void **resp_caps;
   void *error_tramp;
-  void *error_cap;
+  void **error_caps;
 } blaze_http_client_handle_t;
 
 /* The first void* a bound callback receives is the handle the response came
    through, or nothing when the request could not be made. The second is the
-   value the program captured when it registered the handler. */
+   bundle of the values the program captured when it registered the handler:
+   one entry for each of them, in the order the program captured them. */
 typedef void (*blaze_http_client_callback)(void *p0, void *p1);
 
 #define BLAZE_HTTP_ON_RESPONSE 0
@@ -1305,15 +1307,26 @@ void blaze_http_client_header(void *handle, const char *line) {
   t[len + add + 2] = '\\0';
 }
 
-void blaze_http_client_watch(void *handle, int what, void *trampoline, void *captured) {
+void blaze_http_client_watch(void *handle, int what, void *trampoline, void **captured, size_t captured_count) {
   blaze_http_client_handle_t *h = (blaze_http_client_handle_t *)handle;
   if (!h) return;
+  /* The values the program captured are copied: the array the compiler wrote
+     out lives in the statement it registered the handler in, and the handler
+     runs later than that, when the request is sent. */
+  void **caps = NULL;
+  if (captured != NULL && captured_count > 0) {
+    caps = (void **)malloc(captured_count * sizeof(void *));
+    if (caps == NULL) return;
+    memcpy(caps, captured, captured_count * sizeof(void *));
+  }
   if (what == BLAZE_HTTP_ON_ERROR) {
     h->error_tramp = trampoline;
-    h->error_cap = captured;
+    free(h->error_caps);
+    h->error_caps = caps;
   } else {
     h->resp_tramp = trampoline;
-    h->resp_cap = captured;
+    free(h->resp_caps);
+    h->resp_caps = caps;
   }
 }
 
@@ -1345,7 +1358,7 @@ void *blaze_http_client_end(void *handle) {
        the one the request failed with, and the program reads it as the text
        it is. */
     if (h->error_tramp != NULL) {
-      ((blaze_http_client_callback)h->error_tramp)((void *)"the request could not be made", h->error_cap);
+      ((blaze_http_client_callback)h->error_tramp)((void *)"the request could not be made", h->error_caps);
     }
     return NULL;
   }
@@ -1355,7 +1368,7 @@ void *blaze_http_client_end(void *handle) {
   /* The response is in the handle now, so the callback the program gave the
      request runs against it and its own handlers read it out. */
   if (h->resp_tramp != NULL) {
-    ((blaze_http_client_callback)h->resp_tramp)(handle, h->resp_cap);
+    ((blaze_http_client_callback)h->resp_tramp)(handle, h->resp_caps);
   }
   return handle;
 }

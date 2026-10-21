@@ -227,6 +227,54 @@ test("http.request in the callback form opens a buffered request", () => {
   assert.match(written, /blaze_http_client_end/, "req.end sends the request");
 });
 
+/** A client whose callback captured two values of the scope it was written in. */
+function capturingClientSource(port: number): string {
+  return `const port = ${port};\n` +
+    `let prefix = "got: ";\n` +
+    `let suffix = "!";\n` +
+    `const req = http.request(\`http://127.0.0.1:\${port}/\`, { method: "GET" }, (res) => {\n` +
+    `  console.log(prefix + suffix);\n` +
+    `});\n` +
+    `req.end();\n`;
+}
+
+test("every value a client callback captured is carried to the callback", () => {
+  // The adapter is handed the handler of a request and the values the handler
+  // captured. It had room for one of them, so a callback that captured two was
+  // given the first and read the second out of nothing.
+  const written = generateProgramDriver(resolved(capturingClientSource(18088)), true);
+  assert.match(
+    written,
+    /blaze_http_caps\[2\] = \{ \(void \*\)\(uintptr_t\)\(\w+\), \(void \*\)\(uintptr_t\)\(\w+\) \};/,
+    "the values the callback captured are written out as a bundle of two",
+  );
+  assert.match(
+    written,
+    /blaze_http_client_watch\(blaze_http_req, 0, \(void \*\)__arrow_trampoline_\d+, blaze_http_caps, 2\);/,
+    "the request carries the whole bundle of them to the adapter",
+  );
+  assert.match(
+    written,
+    /__arrow_trampoline_\d+\(void \*p0, void \*p1\) \{\n {2}__arrow_\d+\([^;]*\(\(void \*\*\)p1\)\[0\][^;]*\(\(void \*\*\)p1\)\[1\]/,
+    "the trampoline reads both of them out of the bundle",
+  );
+});
+
+test("C backend answers a request made by a callback that captured two values", async () => {
+  const port = 18092;
+  const server = await buildHttpBinary("c", createServerSource(port));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("c", capturingClientSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.equal(answered.stdout.trim(), "got: !", "the callback read both of the values it captured");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
 test("C backend answers a request made in the callback form", async () => {
   const port = 18086;
   const server = await buildHttpBinary("c", createServerSource(port));

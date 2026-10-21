@@ -2087,6 +2087,20 @@ ${guarded ? "  if (base == NULL) blaze_rt_refuse(\"out of memory\");" : ""}
   return (void*)aligned;
 }
 
+/* The marker a block of a region carries.
+
+   A block of a region is neither the host's nor the slab's: the region owns
+   the memory and hands it out again on the next turn, so a release of one
+   must not put it on the slab's released list. The slab would hand those
+   bytes out again while the region is still rewound over them, and two
+   blocks would be live in one piece of memory.
+
+   The marker is what tells the two apart. The base of a pooled block is
+   nothing while the block is live and the address of the next block of its
+   class once it is released, so nothing else the runtime hands out carries
+   this address. */
+#define BLAZE_RT_REGION_MARK ((void *)(uintptr_t)1)
+
 /* A block out of the region that is open, laid out exactly as a block out of a
    slab is: the header first, then the payload placed with the alignment the
    allocation asked for, and slack enough for that placement to stay inside the
@@ -2122,7 +2136,10 @@ ${guarded ? '    if (fresh == NULL) blaze_rt_refuse("out of memory");' : ""}
   header->references = 1;
   header->capacity = bytes;
   header->magic = BLAZE_RT_MAGIC;
-  header->base = NULL;
+  /* The block is the region's: the region owns the memory and hands it out
+     again on the next turn, so a release of this one must not put it on the
+     slab's list. The marker is what says so. */
+  header->base = BLAZE_RT_REGION_MARK;
   /* Cleared as a whole block rather than as a payload: aligned_alloc clears
      nothing, and the bytes between the payload and the end of the block are
      what a read past the end of an array lands on, which the language answers
@@ -2303,6 +2320,17 @@ void blaze_rt_release(void* pointer) {
   blaze_rt_header* header = blaze_rt_header_of(pointer);
   if (header->references > 1) {
     header->references -= 1;
+    return;
+  }
+  if (header->base == BLAZE_RT_REGION_MARK) {
+    /* A block of a region whose region has closed. The region owns the memory
+       and hands it out again on the next turn, so this block is not the slab's
+       to keep: a block put on the slab's released list is handed out again by
+       the slab path while the region is rewound over the same bytes, and two
+       blocks would be live in one piece of it. The block is dropped instead:
+       the memory is the region's, and the region is what hands it out again. */
+    header->references = 0;
+${guarded ? "    header->magic = 0;" : ""}
     return;
   }
   if (header->base == NULL) {

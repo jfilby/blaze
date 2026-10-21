@@ -1353,16 +1353,41 @@ function trampolineParameters(count: number): string {
 }
 
 /**
+ * The parameters a trampoline of a callback is declared with: the value of the
+ * event the callback is given, and the bundle of the values it captured.
+ *
+ * What calls a callback is not a program and is given one value to hand it —
+ * the handle a response came through, or the message a request failed with —
+ * so the values the callback captured are carried beside it, in a bundle the
+ * trampoline reads them out of.
+ */
+function callbackParameters(): string {
+  return "void *p0, void *p1";
+}
+
+/**
  * How one value is handed to a callback: a string and a buffer are pointers,
  * and a number is the value the caller passed.
  */
 function callbackValue(type: string, value: string): string {
-  if (type === "text" || type === "boxedtext") return value;
+  if (type === "text") return `(const char *)(uintptr_t)(${value})`;
+  if (type === "boxedtext") return `(char **)(uintptr_t)(${value})`;
   const parsed = parseType(type);
   if (parsed.kind === "slice" || parsed.kind === "array" || parsed.kind === "ptr") {
     return `(void*)(uintptr_t)(${value})`;
   }
   return `(double)(uintptr_t)(${value})`;
+}
+
+/**
+ * One value a callback captured, read out of the bundle it was carried in.
+ *
+ * The bundle is an array of the addresses of the values, one entry for each of
+ * them and in the order the program captured them, so the trampoline reads the
+ * one it wants out of it by the place it holds.
+ */
+function captureValue(type: string, index: number): string {
+  return callbackValue(type, `((void **)p1)[${index}]`);
 }
 
 /**
@@ -4178,14 +4203,18 @@ class ProgramLowering {
         // A captured text local arrives as the pointer to the shared cell that
         // holds it, so it is passed on as the pointer it is; every other
         // parameter is narrowed into the double the trampoline is called with.
+        // What calls the trampoline is given one value — the value of the
+        // event — so the names the arrow captured are read out of the bundle
+        // it is handed beside it, one for each of them.
         const args = draft.signature.params
-          .map((param, index) => callbackValue(param.type, `p${index}`))
+          .map((param, index) =>
+            index < draft.params.length
+              ? callbackValue(param.type, index === 0 ? "p0" : "0")
+              : captureValue(param.type, index - draft.params.length),
+          )
           .join(", ");
         const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
-        // What calls the trampoline passes it two values, and what the program
-        // passes it is the value of the event and the names the arrow captured,
-        // so the trampoline is given room for as many as the arrow holds.
-        const body = `static void ${trampolineName}(${trampolineParameters(draft.signature.params.length)}) {\n  ${call}\n}`;
+        const body = `static void ${trampolineName}(${callbackParameters()}) {\n  ${call}\n}`;
         return [{ name: trampolineName, body }];
       });
     // A named function the program hands to something as a callback is called

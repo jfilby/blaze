@@ -203,9 +203,15 @@ export const HTTP_ABI: readonly HttpEntry[] = [
   httpEntry(
     "blaze_http_client_watch",
     "void",
-    [["handle", "void*"], ["what", "int"], ["trampoline", "void*"], ["captured", "void*"]],
+    [
+      ["handle", "void*"],
+      ["what", "int"],
+      ["trampoline", "void*"],
+      ["captured", "void**"],
+      ["captured_count", "size_t"],
+    ],
     "Binds one side of a buffered request: what 0 binds the handler of a response and what 1 binds the handler of an error.",
-    "The trampoline is a program function the compiler hands over; the adapter calls it with the handle and then captured.",
+    "The trampoline is a program function the compiler hands over; the adapter calls it with the handle and then the array of the values the handler captured. The array is copied, so the caller may hand over one that lives only as long as the call.",
   ),
   httpEntry(
     "blaze_http_client_write",

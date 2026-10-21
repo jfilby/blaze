@@ -901,6 +901,51 @@ test("a region opened inside an open region does not take the outer turn's block
   assert.equal(result.stdout.trim(), "7 7", "the outer turn keeps its own block across the nested region");
 });
 
+test("a region block released after its region closed is not handed out again by the slab", async () => {
+  // A block of a region is the region's own: the region hands its memory out
+  // again on the next turn, so a block that is released must not reach the
+  // slab's released list — the slab would hand those bytes out again while the
+  // region is still rewound over them, and two blocks would be live in one
+  // piece of memory.
+  //
+  // The release that comes while the region is open is answered by the depth:
+  // nothing is recycled while a region is open. The release that comes after
+  // the region closed is answered by the block itself, which has to be told
+  // apart from a pooled one — the two share the marker that says "the base of
+  // this block is nothing", and a block of a region whose base is nothing was
+  // taken for a pooled one and put on the slab's list.
+  const probe = [
+    "#include <stdio.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    `  ${RUNTIME_NAME}_region_enter();`,
+    `  void* held = ${RUNTIME_NAME}_object_new(64, 8);`,
+    "  if (held == NULL) return 1;",
+    `  ${RUNTIME_NAME}_region_leave();`,
+    `  ${RUNTIME_NAME}_release(held);`,
+    `  void* outside = ${RUNTIME_NAME}_object_new(64, 8);`,
+    "  if (outside == NULL) return 2;",
+    '  printf("%d\\n", outside == held);',
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-region-closed-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("release"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "0", "the block of the closed region is not the slab's to hand out again");
+});
+
 test("a region left more often than it was entered does not underflow", async () => {
   // A turn that leaves early — a break, or a return out of the function — has
   // the compiler write the closing call on that path as well as at the bottom
@@ -943,6 +988,41 @@ test("a region left more often than it was entered does not underflow", async ()
   const result = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout.trim(), "0", "the region is rewound, so the block after it is fresh memory");
+});
+
+test("a region block released after its region closed is not handed out again by the slab", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // The same rule the C runtime answers, in the host that runs a Nim program:
+  // a block of a region is the region's own, and a release of one after the
+  // region closed must not put it on the slab's released list, where an
+  // allocation made outside the region is handed those bytes while the region
+  // is still rewound over them.
+  const probe = [
+    "blaze_rt_region_enter()",
+    "let held = blaze_rt_object_new(64, 8)",
+    "blaze_rt_region_leave()",
+    "blaze_rt_release(cast[pointer](held))",
+    "let outside = blaze_rt_object_new(64, 8)",
+    "if cast[uint](held) == cast[uint](outside):",
+    "  echo \"ALIASED\"",
+    "else:",
+    "  echo \"distinct\"",
+    "blaze_rt_release(cast[pointer](outside))",
+  ].join("\n");
+  const directory = await scratch("blaze-nim-region-closed-");
+  const source = join(directory, "region.nim");
+  await writeFile(source, `${generateRuntimeAdapterSource()}\n${probe}\n`, "utf8");
+  const binary = join(directory, "region");
+  const built = run("nim", ["c", "--hints:off", "--warnings:off", "-d:release", `--nimcache:${join(directory, "cache")}`, `-o:${binary}`, source], {
+    timeoutMs: 300_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const out = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(out.code, 0, out.stderr);
+  assert.equal(out.stdout.trim(), "distinct");
 });
 
 test("the Nim adapter joins and clears strings as the C runtime does", async (t) => {

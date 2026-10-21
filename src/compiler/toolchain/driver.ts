@@ -1215,7 +1215,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
            fires here. */
         if (eventName === "error") {
           const bound = this.callbackRef(call.args[2], "an event the request carries a listener for");
-          return `({ blaze_http_client_watch((void *)(uintptr_t)${owner}, 1, ${bound.trampoline}, ${bound.captured}); 1.0; })`;
+          return `({ ${bound.bundle.declaration} blaze_http_client_watch((void *)(uintptr_t)${owner}, 1, ${bound.trampoline}, ${bound.bundle.name}, ${bound.count}); 1.0; })`;
         }
         const cb = call.args[2];
         let invoke = "0.0";
@@ -1225,7 +1225,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
           /* The request and response bodies are already buffered by the facil.io
              adapter, so "data" and "end" fire where they are written. Pass the
              value the callback's first parameter names (the chunk for "data"),
-             followed by the captured locals, so boxed captures stay shared. */
+             and the bundle of the captured locals beside it, so boxed captures
+             stay shared. */
           let args: string[] = [];
           if (eventName === "data") {
             if (clientResponse) {
@@ -1242,14 +1243,13 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
             }
           }
           // A capture is the value the arrow was bound with, read as the
-          // pointer the trampoline receives it as. The trampoline takes the
-          // two values the event and the captures answer, so the slots the
-          // call does not fill are written as the nothing a param-less one
-          // reads out of.
-          for (const capture of captures) args.push(`(void *)(uintptr_t)${capture}`);
-          while (args.length < 2) args.push("(void*)0");
-          const trampCall = args.length > 0 ? `${trampoline}(${args.join(", ")})` : `${trampoline}((void*)0, (void*)0)`;
-          invoke = `(${trampCall}, 1.0)`;
+          // pointer the trampoline receives it as. What calls the trampoline
+          // is given one value, so the captures travel beside it, in a bundle
+          // the trampoline reads them out of.
+          const bundle = this.captureBundle(captures);
+          const event = args.length > 0 ? args[0] : "(void*)0";
+          const trampCall = `${trampoline}(${event}, ${bundle.name})`;
+          invoke = `({ ${bundle.declaration} ${trampCall}; 1.0; })`;
         }
         return invoke;
       }
@@ -1332,7 +1332,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
       }
     }
     const bound = this.callbackRef(call.args[2], "a response, the one the callback of the request it opens reads");
-    lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.captured});`);
+    lines.push(`${bound.bundle.declaration}`);
+    lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.bundle.name}, ${bound.count});`);
     lines.push("(double)(uintptr_t)blaze_http_req;");
     return `({ ${lines.join(" ")} })`;
   }
@@ -1398,12 +1399,15 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
   }
 
   /**
-   * The trampoline of a function reference an HTTP call is given, and the value
-   * to hand what it captured. A capture is the value it was bound with, so the
-   * adapter carries the pointer to it and nothing changes between the
-   * registration and the firing of the handler.
+   * The trampoline of a function reference an HTTP call is given, and the
+   * bundle of the values it captured. A capture is the value it was bound
+   * with, so the adapter carries the pointer to it and nothing changes between
+   * the registration and the firing of the handler.
    */
-  private callbackRef(value: SemanticValue, what: string): { trampoline: string; captured: string } {
+  private callbackRef(
+    value: SemanticValue,
+    what: string,
+  ): { trampoline: string; bundle: { declaration: string; name: string }; count: number } {
     if (value === undefined || value.k !== "functionRef" || typeof value.name !== "string" || !value.name.startsWith("__arrow_")) {
       throw driverError(
         `http requests hand ${what} an arrow written where the call is made`,
@@ -1412,8 +1416,23 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
     }
     const trampoline = `__arrow_trampoline_${value.name.slice("__arrow_".length)}`;
     const captures = Array.isArray(value.captures) ? value.captures : [];
-    const first = captures.length === 0 ? "(void *)0" : `(void *)(uintptr_t)${captures[0]}`;
-    return { trampoline: `(void *)${trampoline}`, captured: first };
+    const bundle = this.captureBundle(captures);
+    return { trampoline: `(void *)${trampoline}`, bundle, count: captures.length };
+  }
+
+  /**
+   * The bundle of the values a callback captured: an array of the addresses of
+   * them, one entry for each of them and in the order the program captured
+   * them. The trampoline the callback is called through reads them out of it,
+   * so a callback that captured nothing is given no bundle at all.
+   */
+  private captureBundle(captures: readonly string[]): { declaration: string; name: string } {
+    if (captures.length === 0) return { declaration: "", name: "NULL" };
+    const entries = captures.map((capture) => `(void *)(uintptr_t)(${capture})`).join(", ");
+    return {
+      declaration: `void *blaze_http_caps[${captures.length}] = { ${entries} };`,
+      name: "blaze_http_caps",
+    };
   }
 
   argument(type: SemanticType, expression: string): string {

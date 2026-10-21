@@ -276,6 +276,15 @@ const
   BlazeSlabBytes = 256 * 1024
   BlazeDefaultAlignment = 16'u64
   BlazeMaxAllocation = 1'u64 shl 40
+  ## The marker a block of a region carries. A block of a region is neither the
+  ## host's nor the slab's: the region owns the memory and hands it out again on
+  ## the next turn, so a release of one must not put it on the slab's released
+  ## list — the slab would hand those bytes out again while the region is still
+  ## rewound over them, and two blocks would be live in one piece of memory.
+  ## The base of a pooled block is nothing while the block is live and the
+  ## address of the next block of its class once it is released, so nothing else
+  ## the runtime hands out carries this address.
+  BlazeRegionMark = 1'u64
 
 proc alignUp(value, alignment: uint64): uint64 =
   (value + alignment - 1) and not (alignment - 1)
@@ -403,8 +412,8 @@ proc blazeRegionTake(total, bytes, alignment: uint64, cleared: bool): pointer =
   let payload = cast[pointer](cast[uint](header) + BlazeHeaderSize)
   let aligned = cast[pointer]((cast[uint](payload) + uint(alignment) - 1) and not (uint(alignment) - 1))
   cast[ptr BlazeHeader](cast[uint](aligned) - BlazeHeaderSize)[] = BlazeHeader(
-    magic: BlazeMagic, base: nil, length: bytes, alignment: alignment,
-    refs: 1, capacity: bytes)
+    magic: BlazeMagic, base: cast[pointer](BlazeRegionMark), length: bytes,
+    alignment: alignment, refs: 1, capacity: bytes)
   if cleared:
     ## Cleared as a whole block rather than as a payload, which is what the C
     ## runtime does and what the comment on blazeBlock below is about: the
@@ -549,6 +558,16 @@ proc blaze_rt_release*(pointer: pointer) {.exportc, cdecl.} =
     return
   if header[].refs > 1:
     dec header[].refs
+    return
+  if cast[uint](header[].base) == BlazeRegionMark:
+    ## A block of a region whose region has closed. The region owns the memory
+    ## and hands it out again on the next turn, so this block is not the slab's
+    ## to keep: a block put on the slab's released list is handed out again by
+    ## the slab path while the region is rewound over the same bytes, and two
+    ## blocks would be live in one piece of it. The block is dropped instead:
+    ## the memory is the region's, and the region is what hands it out again.
+    header[].refs = 0
+${guarded ? "    header[].magic = BlazeFreed" : ""}
     return
   if header[].base == nil:
     ## A block that came from a slab goes back onto the list of its own class
