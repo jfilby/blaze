@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { frontendFor } from "../semantics/frontend.ts";
 import { resolveFunction, type FunctionContext } from "../semantics/ir-function.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { typeToString } from "../semantics/contract.ts";
+import { runBuild } from "../compiler.ts";
+import { run } from "../core/process.ts";
+import { writeProject } from "./project.ts";
+import { scratch } from "./scratch.ts";
 import type { FunctionContract } from "../core/types.ts";
 import type { TypeScriptFunction } from "../semantics/typescript.ts";
 
@@ -88,4 +94,48 @@ test("catch (e) binds e to blaze_last_error", () => {
   assert.match(ir, /blaze_error_clear/);
   assert.match(ir, /blaze_had_error/);
   assert.match(ir, /blaze_last_error/);
+});
+
+test("a function with a try block is built and answers what the source answers", async () => {
+  // The failure a catch arm reads is the runtime's own, so the calls the arm
+  // is written with are calls into the runtime: a backend that cannot lower
+  // them refuses the function, and the build has nothing to deliver.
+  const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
+  const directory = await scratch("blaze-try-build-");
+  await writeFile(
+    join(directory, "main.ts"),
+    [
+      "function guarded(n: number): number {",
+      "  try {",
+      "    return n + 1;",
+      "  } catch (e) {",
+      "    return 0;",
+      "  } finally {",
+      "    const z = 9;",
+      "  }",
+      "}",
+      "console.log(guarded(41));",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+  });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    { stage: () => {} },
+    "build",
+  );
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.equal(delivered.stdout, "42\n");
 });
