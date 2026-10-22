@@ -1136,11 +1136,16 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // is that type, and the other arm is then the test that decides whether to
       // hand it back — `n > 0 && node.left` is the reference when the test says
       // so — so one reference arm is enough and a number or a truth beside it
-      // is the test rather than a second value of another type. This is the
-      // reading the program pass gives the same two arms.
+      // is the test rather than a second value of another type. A text is that
+      // type as well: a number beside a text is the test, and the text is the
+      // value the operator hands back. This is the reading the program pass
+      // gives the same two arms.
       const arms: [SemanticType, SemanticType] = [value.left.type, value.right.type];
       const holds = arms.filter((arm) => convertibleTo(arm, value.type));
-      if (isReference(value.type) ? holds.length < 1 : holds.length !== arms.length) {
+      // The arms are both of the type, or one of them is the test that decides
+      // whether the other is handed back and the other is of the type.
+      const tests = arms.filter((arm) => isNumber(arm) || isBoolean(arm)).length;
+      if (!(holds.length === arms.length || (holds.length === 1 && tests === 1))) {
         problems.push(`${prefix}${value.op} over a ${typeText(arms[0])} and a ${typeText(arms[1])} is a ${typeText(value.type)}`);
       }
       return problems;

@@ -657,7 +657,10 @@ function holdsText(value: DraftValue): boolean {
     case "reference":
       return value.held.kind === "text";
     case "binary":
-      return value.op === "+" && value.type === null;
+      // A binary that is a text is one the program built: `+` over two texts,
+      // and a short-circuit operator whose arms are of different kinds, which
+      // is written as the text of the arm that answers.
+      return value.type === null && (value.op === "+" || LOGICAL.includes(value.op));
     case "conditional":
       return value.type === null;
     case "literal":
@@ -3328,7 +3331,7 @@ class ProgramResolver {
           ? holdsText(left) || holdsText(right)
             ? null
             : (draftType(left) ?? draftType(right) ?? numeric("f64"))
-          : this.common(left, right, line);
+          : this.logicalType(left, right, line);
       return { k: "binary", op, left, right, type };
     }
     if (EQUALITY.includes(op)) {
@@ -3570,6 +3573,25 @@ class ProgramResolver {
       throw programError("a number is needed", this.body, line);
     }
     return value;
+  }
+
+  /**
+   * The type the arms of a short-circuit operator have in common, which is the
+   * type of the arm the operator hands back.
+   *
+   * An arm that is a number or a truth is the test that decides whether the
+   * other arm is handed back, so the two may be of different kinds: a number
+   * beside a text is the test, and the text is the value the operator is
+   * written as. The number is written as the text of that number when it is
+   * the arm that answers.
+   */
+  private logicalType(left: DraftValue, right: DraftValue, line: number): TypeExpr | null {
+    const a = primitive(draftType(left));
+    const b = primitive(draftType(right));
+    const test = (name: PrimitiveTypeName | null): boolean => name !== null && (NUMERIC.includes(name) || name === "bool");
+    if (holdsText(left) && test(b)) return null;
+    if (holdsText(right) && test(a)) return null;
+    return this.common(left, right, line);
   }
 
   /** The type two values of one expression have in common. */

@@ -1254,3 +1254,39 @@ test("a loop's marks are read in whatever order the text writes them", () => {
     "the marks read whichever order the text writes them",
   );
 });
+
+test("a number beside a text is the test, and the text is the value", () => {
+  // `&&` and `||` hand back one of their arms rather than a truth, so what
+  // they are written as is the type of the arm they hand back. An arm that is
+  // a number is the test that decides whether the other arm is handed back,
+  // and the other arm is a text: the number is the test, and the text is the
+  // value the operator is written as.
+  const mixed = irOf(
+    {
+      "main.ts": [
+        "export function pick(n: number): number {",
+        "  const name = n || `none`;",
+        "  return name.length;",
+        "}",
+        "console.log(pick(0));",
+        "",
+      ].join("\n"),
+    },
+    "pick",
+  );
+  assert.match(mixed, /logical_or\[text\]/, "the operator is written as the text it hands back");
+  assert.match(mixed, /local\[f64\] n/, "the number arm keeps its own width");
+
+  // The same two arms in the body of a program, where the name they are
+  // written to holds a text.
+  const program = resolved({
+    "main.ts": ["let name = process.argv[2] || `sample`;", "console.log(name);", ""].join("\n"),
+  });
+  assert.match(printSemanticProgram(program.program), /logical_or\[text\]/, "the operator is written as the text it hands back");
+
+  // A number beside a number is a number, which is what it was before.
+  const plain = resolved({
+    "main.ts": ["let count = process.argv[2] || 0;", "console.log(count);", ""].join("\n"),
+  });
+  assert.match(printSemanticProgram(plain.program), /logical_or\[f64\]/, "a number beside a number is a number");
+});

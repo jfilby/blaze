@@ -1243,9 +1243,14 @@ class ProgramEmitter {
     const right = rightIsText && leftIsAny
       ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, null)})`
       : this.expression(value.right, value.type);
+    // A number arm beside a text is the test, and the text is the value the
+    // operator hands back, so a number that answers is written as the text of
+    // that number.
+    const answer = (arm: SemanticValue, written: string): string =>
+      isNumber(arm.type) && isTextType(value.type) ? this.target.toText(written, arm.type, null, this.style()) : written;
     return value.op === "and"
-      ? this.target.conditional(test, right, left)
-      : this.target.conditional(test, left, right);
+      ? this.target.conditional(test, answer(value.right, right), answer(value.left, left))
+      : this.target.conditional(test, answer(value.left, left), answer(value.right, right));
   }
 
   private coalesce(value: SemanticValue & { k: "coalesce" }): string {

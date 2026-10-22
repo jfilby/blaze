@@ -1134,6 +1134,23 @@ class FunctionEmitter {
         // is bound first.
         const arm = this.temporary("blaze_arm");
         const left = this.raw(value.left, depth);
+        // A number arm beside a text is the test, and the text is the value the
+        // operator hands back, so a number that answers is written as the text
+        // of that number.
+        if (isTextType(value.type) && (isNumber(value.left.type) || isNumber(value.right.type))) {
+          const text = (one: SemanticValue): string => {
+            const name = this.temporary("blaze_text");
+            this.asText(one, depth, name);
+            return name;
+          };
+          const first = isNumber(value.left.type) ? text(value.left) : left;
+          const second = isNumber(value.right.type) ? text(value.right) : this.raw(value.right, depth);
+          return (
+            `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
+            `${this.truth(arm, valueKind(value.left), value.left.type)} ? ` +
+            `${value.op === "and" ? second : first} : ${value.op === "and" ? first : second}; })`
+          );
+        }
         const right = isTextType(value.right.type)
           ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, depth)})`
           : isNumber(value.right.type)
