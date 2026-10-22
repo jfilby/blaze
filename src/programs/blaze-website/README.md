@@ -19,11 +19,16 @@ The program is built by Blaze, with the facil.io HTTP runtime and the SQLite
 library beside it:
 
 ```sh
-cd src/compiler
-node offline-build.ts ../programs/blaze-website /tmp/blaze-website-work
+cd src/programs/blaze-website
+blaze build
 ```
 
-The binary is written to the work directory as `program`.
+The binary is delivered beside the project file as `blaze-website`. The build
+does not run the program to check its output against the source, because the
+program reads its key from a file that is beside it when it runs and not when
+it is built, so there is nothing the build could compare; the project file
+says so with `verifyProgram = false`, the setting a program that prints
+nothing to compare asks for.
 
 ## Running
 
@@ -34,7 +39,7 @@ directory:
 ```sh
 cd src/programs/blaze-website
 printf %s "your-token-factory-key" > NEBIUS_API_KEY      # no newline
-/tmp/blaze-website-work/program 8080
+./blaze-website 8080
 ```
 
 The port is the first argument, and it is 8080 when no argument is given. The

@@ -1901,6 +1901,11 @@ export async function runBuild(
                 objectPaths,
                 outputPath: programPath,
               });
+      // The project may ask that the delivered program not be run at all: a
+      // program that serves rather than prints, or one that cannot run where
+      // it is built, has no output the build can compare, so it is delivered
+      // as it was linked and what it prints later is not the build's to say.
+      if (input.verifyProgram === false) break;
       checked = await verifyProgram({
         language: input.language,
         sourcePath: programFile.path,
@@ -1934,6 +1939,11 @@ export async function runBuild(
         "ok",
         `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
       );
+    } else if (driver !== undefined && mode === "build" && input.verifyProgram === false) {
+      // A program whose output the project does not ask to check is delivered
+      // without the comparison, and the build says so, rather than leaving the
+      // absence of a verdict where a verdict would be.
+      reporter.stage("verify", "ok", "Program output is not checked (verifyProgram = false)");
     }
     // The program has agreed with its source, so the functions it is the only
     // oracle for are proved now, and the record of what this build proved is

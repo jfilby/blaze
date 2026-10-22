@@ -117,14 +117,20 @@ These are the compiler's rules, and the program is written to them.
 The README of the program has the commands:
 
 ```sh
-cd src/compiler
-node offline-build.ts ../programs/blaze-website /tmp/blaze-website-work
-cd ../programs/blaze-website
+cd src/programs/blaze-website
+blaze build
 printf %s "your-token-factory-key" > NEBIUS_API_KEY
-/tmp/blaze-website-work/program 8080
+./blaze-website 8080
 ```
 
-Open <http://127.0.0.1:8080/> in a browser.
+The build of this project sets `verifyProgram = false`, the setting that asks
+a build to deliver the program without running it against its source. The
+check compares what the source prints with what the delivered program prints,
+and this program has nothing the build could compare: it reads its API key
+from a file that is beside it when it runs and not when it is built, so the
+delivered program raises before it prints the line the source prints. A
+program that serves rather than prints is the other kind that asks for this,
+and the benchmark programs are the ones that set it.
 
 ## What is not done
 

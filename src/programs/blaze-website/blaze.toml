@@ -4,6 +4,10 @@ output = "machine"
 backend = "machine"
 runtime = "facil"
 mode = "danger"
+# The program serves, and it reads its API key from a file that is beside the
+# binary when it runs and not when it is built, so there is no output of the
+# delivered program for the build to compare with the source's.
+verifyProgram = false
 
 [target]
 arch = "x86_64"

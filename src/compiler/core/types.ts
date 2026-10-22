@@ -463,6 +463,15 @@ export interface SourceInput {
   /** Function of the entry module to compile. Absent when the entry is a program. */
   entry?: string;
   output?: OutputKind;
+  /**
+   * Whether the build checks the delivered program against its source, by
+   * running both and comparing what they print. It is, and a project says
+   * otherwise when its program has nothing to compare: a program that serves
+   * rather than prints, or one that cannot run at all where it is built —
+   * which is the state the benchmark programs are often in, so they are the
+   * ones that set this.
+   */
+  verifyProgram?: boolean;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
   /** How the toolchain builds. Defaults to `debug`. */

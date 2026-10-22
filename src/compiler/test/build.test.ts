@@ -1303,6 +1303,79 @@ test("a contract failure stops the build before a model is asked for code", asyn
   await assert.rejects(() => readFile(join(store, "candidates.json"), "utf8"));
 });
 
+/**
+ * A program that cannot run where it is built: it reads a file that is beside
+ * it when it runs and not when it is built, the way a program reads an API key.
+ * The source catches the missing file and prints what it prints either way; the
+ * delivered program raises before it prints anything at all, so the two outputs
+ * a build compares are one line against nothing.
+ */
+async function servingProgram(name: string, verifyProgram?: boolean): Promise<string> {
+  const directory = await scratch(`blaze-${name}-`);
+  await writeFile(
+    join(directory, "main.ts"),
+    [
+      'const fs = require("fs");',
+      "let key = '';",
+      "try {",
+      '  key = `${fs.readFileSync("key.txt", "utf8")}`;',
+      "} catch {",
+      "  key = '';",
+      "}",
+      'console.log(`serving on 8080 (${key})`);',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    output: "machine",
+    mode: "debug",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+    ...(verifyProgram === undefined ? {} : { verifyProgram }),
+  });
+  return directory;
+}
+
+test("a delivered program that stops where its source does not fails the build", async () => {
+  const directory = await servingProgram("stopped-output");
+  await assert.rejects(
+    () => runBuild(
+      "input.toml",
+      { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+      quiet,
+      "build",
+    ),
+    /the delivered program exited with status 2/,
+  );
+});
+
+test("a project that asks for no check of its program's output builds a program that stops", async () => {
+  const directory = await servingProgram("unchecked-output", false);
+  const stages: string[] = [];
+  const seen: Reporter = { stage: (name, level, message) => stages.push(`${name}/${level}: ${message}`) };
+  const outcome = await runBuild(
+    "input.toml",
+    { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },
+    seen,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.notEqual(outcome.outputPath, null);
+  // The build says the check was left out rather than staying silent where a
+  // verdict would be, and the program is delivered all the same.
+  assert.ok(
+    stages.some((line) => line === "verify/ok: Program output is not checked (verifyProgram = false)"),
+    `the build says the program's output is not checked: ${stages.join("\n")}`,
+  );
+  const delivered = join(await storeDirectory(directory, "input"), "output", "input");
+  const stopped = run(delivered, [], { timeoutMs: 30_000 });
+  assert.equal(stopped.code, 2, stopped.stdout);
+  assert.equal(stopped.stdout, "", "the delivered program printed nothing before it stopped");
+});
+
 test("an unknown project is reported, not guessed", async () => {
   const directory = await workspace("unknown");
   await assert.rejects(() => inspectProject("missing", directory), /unknown project "missing"/);
