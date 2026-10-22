@@ -167,7 +167,7 @@ async function main(): Promise<void> {
   // for the program: how many connections its server may hold, and whether it
   // speaks TLS.
   const isHttp = project.runtime === "facil" || /\bhttp\b/.test(source);
-  const http = httpRuntimeNeeds(phase.body, phase.modules.map((module) => module.source));
+  const http = httpRuntimeNeeds(phase.body, [...phase.modules.map((module) => module.source), source]);
   const runtime = isHttp
     ? await buildFacilRuntime(work, "danger", target, http)
     : await buildStandaloneRuntime(work, "danger", target);

@@ -133,6 +133,16 @@ export function facilAdapterSource(): string {
 #include <fiobj_hash.h>
 #include <fiobj_str.h>
 
+/* OpenSSL, for the client that speaks TLS. The runtime is built for the
+   program it is built for, and a program that asks for a server that speaks
+   TLS, or that asks a server over "https://", gets a runtime that carries
+   OpenSSL; a program that speaks no TLS carries neither the library nor the
+   code that uses it. */
+#ifdef BLAZE_HTTP_TLS
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
+
 #define BLAZE_HTTP_MAX_ROUTES 16
 
 /* -------------------------------------------------------------------------- */
@@ -784,8 +794,19 @@ typedef struct blaze_http_client_conn_s {
   int sock;                 /* the socket, or -1 when the entry is unused */
   char host[256];           /* the host the socket is connected to */
   int port;                 /* the port the socket is connected to */
+  int secure;               /* 1 when the connection speaks TLS */
+  void *ssl;                /* the TLS session, or NULL for a plain one */
   long long used;           /* when the connection was last used */
 } blaze_http_client_conn_t;
+
+/* A connection a request is made on: the socket, and the TLS session that
+   speaks over it when there is one. The two are one thing to the program and
+   two things to the code that moves the bytes: a plain connection moves them
+   with the socket, and a secure one with the session that is over it. */
+typedef struct blaze_http_client_stream_s {
+  int sock;
+  void *ssl;
+} blaze_http_client_stream_t;
 
 /* How many connections are kept open at once: a program that talks to one
    server keeps one, and a program that talks to many keeps one each. */
@@ -892,22 +913,36 @@ static struct addrinfo *blaze_http_client_resolve(const char *host, int port) {
 
 /* Finds the connection that is open to a host and a port, or NULL when there
    is none. A connection the peer closed while it was idle is not a connection
-   any more: it is closed here, and the entry is freed. */
-static blaze_http_client_conn_t *blaze_http_client_find_cached(const char *host, int port) {
+   any more: it is closed here, and the entry is freed.
+
+   A connection that speaks TLS is a connection to a different server than a
+   plain one to the same host and port: the two are kept apart, because a
+   plain request written over a TLS connection is a request the peer cannot
+   read. */
+static void blaze_http_client_uncache(blaze_http_client_conn_t *conn);
+static blaze_http_client_conn_t *blaze_http_client_find_cached(const char *host, int port, int secure) {
   for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_CONNECTIONS; index++) {
     blaze_http_client_conn_t *conn = &blaze_http_client_conns[index];
     if (conn->sock < 0) continue;
-    if (conn->port != port || strcmp(conn->host, host) != 0) continue;
+    if (conn->port != port || conn->secure != secure) continue;
+    if (strcmp(conn->host, host) != 0) continue;
     /* The peer may have closed the connection while it was idle: a socket the
        peer closed reads as the end of the stream, and it is closed here rather
-       than handed to a request that would fail on it. */
-    char byte = 0;
-    ssize_t peeked = recv(conn->sock, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-    if (peeked == 0 ||
-        (peeked < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
-      close(conn->sock);
-      conn->sock = -1;
-      return NULL;
+       than handed to a request that would fail on it.
+
+       A TLS connection is not asked: the bytes of it are inside the session
+       and not on the socket, and a socket that holds nothing is not a session
+       that was closed. A request that fails on a closed session is asked for
+       again on a new one, which is what the request does with a connection
+       that failed it. */
+    if (conn->ssl == NULL) {
+      char byte = 0;
+      ssize_t peeked = recv(conn->sock, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+      if (peeked == 0 ||
+          (peeked < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+        blaze_http_client_uncache(conn);
+        return NULL;
+      }
     }
     return conn;
   }
@@ -916,13 +951,15 @@ static blaze_http_client_conn_t *blaze_http_client_find_cached(const char *host,
 
 /* Keeps a connection open for the next request to the same server. The oldest
    connection is closed when there is no room for another one. */
-static void blaze_http_client_cache_connection(const char *host, int port, int sock) {
+static void blaze_http_client_cache_connection(const char *host, int port, int sock, int secure, void *ssl) {
   blaze_http_client_conn_t *oldest = NULL;
   for (size_t index = 0; index < BLAZE_HTTP_CLIENT_MAX_CONNECTIONS; index++) {
     blaze_http_client_conn_t *conn = &blaze_http_client_conns[index];
     if (conn->sock < 0) {
       conn->sock = sock;
       conn->port = port;
+      conn->secure = secure;
+      conn->ssl = ssl;
       conn->used = ++blaze_http_client_clock;
       snprintf(conn->host, sizeof(conn->host), "%s", host);
       return;
@@ -934,9 +971,11 @@ static void blaze_http_client_cache_connection(const char *host, int port, int s
     close(sock);
     return;
   }
-  close(oldest->sock);
+  blaze_http_client_uncache(oldest);
   oldest->sock = sock;
   oldest->port = port;
+  oldest->secure = secure;
+  oldest->ssl = ssl;
   oldest->used = ++blaze_http_client_clock;
   snprintf(oldest->host, sizeof(oldest->host), "%s", host);
 }
@@ -944,6 +983,12 @@ static void blaze_http_client_cache_connection(const char *host, int port, int s
 /* Closes a connection and frees its entry. */
 static void blaze_http_client_uncache(blaze_http_client_conn_t *conn) {
   if (conn == NULL) return;
+  if (conn->ssl != NULL) {
+#ifdef BLAZE_HTTP_TLS
+    SSL_free((SSL *)conn->ssl);
+#endif
+    conn->ssl = NULL;
+  }
   if (conn->sock >= 0) close(conn->sock);
   conn->sock = -1;
 }
@@ -989,14 +1034,107 @@ static int blaze_http_client_connect(const char *host, int port, int timeout_ms)
   return sock;
 }
 
+/* The TLS context every secure connection of the client is made of. It is
+   made once: the context holds the trust store and the settings, and a
+   context per connection would load the trust store again for every request.
+
+   The client holds the lock while it makes a request, so the context is made
+   under the lock and is read by nobody else. */
+#ifdef BLAZE_HTTP_TLS
+static SSL_CTX *blaze_http_client_tls_context = NULL;
+
+static SSL_CTX *blaze_http_client_tls_ctx(void) {
+  if (blaze_http_client_tls_context != NULL) return blaze_http_client_tls_context;
+  SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+  if (ctx == NULL) return NULL;
+  /* The trust store is the one of the machine: a certificate the machine
+     trusts is a certificate the client trusts. */
+  SSL_CTX_set_default_verify_paths(ctx);
+  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  blaze_http_client_tls_context = ctx;
+  return ctx;
+}
+#endif
+
+/* Speaks TLS over a connection that was made. The name of the host is the
+   name the certificate of the server is checked against, and it is the name
+   the server is asked for: a server that serves many names answers with the
+   certificate of the one that was asked for.
+
+   Returns 0 when the session is up, and -1 when it is not: the certificate of
+   the server was not one the client trusts, or the handshake did not finish.
+   The reason is not kept: the program is told that the request failed, and
+   the reason a handshake failed is a thing of the machine it happened on. */
+static int blaze_http_client_tls_handshake(blaze_http_client_stream_t *stream, const char *host) {
+#ifdef BLAZE_HTTP_TLS
+  SSL_CTX *ctx = blaze_http_client_tls_ctx();
+  if (ctx == NULL) return -1;
+  SSL *ssl = SSL_new(ctx);
+  if (ssl == NULL) return -1;
+  SSL_set_fd(ssl, stream->sock);
+  SSL_set_tlsext_host_name(ssl, host);
+  /* The certificate of the server is checked against the name the request
+     names: a certificate that is valid for another host is not this host's. */
+  if (SSL_set1_host(ssl, host) != 1) {
+    SSL_free(ssl);
+    return -1;
+  }
+  if (SSL_connect(ssl) != 1) {
+    SSL_free(ssl);
+    return -1;
+  }
+  stream->ssl = ssl;
+  return 0;
+#else
+  (void)stream;
+  (void)host;
+  return -1;
+#endif
+}
+
+/* Closes a connection that is not kept open: the socket, and the session that
+   is over it when there is one. */
+static void blaze_http_client_close_stream(blaze_http_client_stream_t *stream) {
+  if (stream->ssl != NULL) {
+#ifdef BLAZE_HTTP_TLS
+    SSL_free((SSL *)stream->ssl);
+#endif
+    stream->ssl = NULL;
+  }
+  if (stream->sock >= 0) close(stream->sock);
+  stream->sock = -1;
+}
+
 /* Sends every byte of a buffer. Returns 0 when all of it was sent. */
-static int blaze_http_client_send_all(int sock, const char *data, size_t len) {
+static int blaze_http_client_send_all(blaze_http_client_stream_t *stream, const char *data, size_t len) {
   size_t sent = 0;
   while (sent < len) {
-    ssize_t n = send(sock, data + sent, len - sent, 0);
-    if (n > 0) {
-      sent += (size_t)n;
-      continue;
+    ssize_t n;
+    if (stream->ssl != NULL) {
+#ifdef BLAZE_HTTP_TLS
+      int written = SSL_write((SSL *)stream->ssl, data + sent, (int)(len - sent));
+      if (written > 0) {
+        sent += (size_t)written;
+        continue;
+      }
+      /* A session that wants to read or to write is asked again: the session
+         is over a socket, and a socket that is not ready has not said
+         anything. */
+      int why = SSL_get_error((SSL *)stream->ssl, written);
+      if (why == SSL_ERROR_WANT_READ || why == SSL_ERROR_WANT_WRITE) continue;
+      n = -1;
+#else
+      n = -1;
+#endif
+    } else {
+      n = send(stream->sock, data + sent, len - sent, 0);
+      if (n > 0) {
+        sent += (size_t)n;
+        continue;
+      }
+      if (n < 0 && errno == EINTR) continue;
+      return -1;
     }
     if (n < 0 && errno == EINTR) continue;
     return -1;
@@ -1004,19 +1142,42 @@ static int blaze_http_client_send_all(int sock, const char *data, size_t len) {
   return 0;
 }
 
-/* Reads from a socket into the buffer, appending what it reads. Returns the
-   number of bytes read, 0 at the end of the stream, and -1 when the socket
+/* Reads from a connection into the buffer, appending what it reads. Returns the
+   number of bytes read, 0 at the end of the stream, and -1 when the connection
    failed. */
-static ssize_t blaze_http_client_fill(int sock, char *buf, size_t cap, size_t *used) {
+static ssize_t blaze_http_client_fill(blaze_http_client_stream_t *stream, char *buf, size_t cap, size_t *used) {
   if (*used >= cap) return -1;
   for (;;) {
-    ssize_t n = recv(sock, buf + *used, cap - *used, 0);
-    if (n > 0) {
-      *used += (size_t)n;
-      return n;
+    ssize_t n;
+    if (stream->ssl != NULL) {
+#ifdef BLAZE_HTTP_TLS
+      int read = SSL_read((SSL *)stream->ssl, buf + *used, (int)(cap - *used));
+      if (read > 0) {
+        *used += (size_t)read;
+        return read;
+      }
+      int why = SSL_get_error((SSL *)stream->ssl, read);
+      /* The peer closed the session: the stream ended, and it ended well. */
+      if (why == SSL_ERROR_ZERO_RETURN) return 0;
+      /* A session that wants to read or to write is asked again: the session
+         is over a socket, and a socket that is not ready has not said
+         anything. */
+      if (why == SSL_ERROR_WANT_READ || why == SSL_ERROR_WANT_WRITE) continue;
+      n = -1;
+#else
+      n = -1;
+#endif
+    } else {
+      n = recv(stream->sock, buf + *used, cap - *used, 0);
+      if (n > 0) {
+        *used += (size_t)n;
+        return n;
+      }
+      if (n == 0) return 0;
+      if (errno == EINTR) continue;
+      return -1;
     }
-    if (n == 0) return 0;
-    if (errno == EINTR) continue;
+    if (n < 0 && errno == EINTR) continue;
     return -1;
   }
 }
@@ -1079,7 +1240,7 @@ static int blaze_http_client_read_header(const char *head, const char *name,
 /* Reads a body that is written in chunks and writes it out as one: the body
    is decoded where the chunks were, which is never past where they were read.
    Returns 0 when the body was read, and -1 when it was not. */
-static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
+static int blaze_http_client_read_chunked(blaze_http_client_stream_t *stream, char *buf, size_t cap,
                                            size_t body_start, size_t *used,
                                            size_t *body_len) {
   size_t read_at = body_start;
@@ -1090,7 +1251,7 @@ static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
     while (line_end == 0) {
       line_end = blaze_http_client_find_crlf(buf, read_at, *used);
       if (line_end > 0) break;
-      ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+      ssize_t n = blaze_http_client_fill(stream, buf, cap, used);
       if (n <= 0) return -1;
     }
     unsigned long long size = strtoull(buf + read_at, NULL, 16);
@@ -1108,7 +1269,7 @@ static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
           read_at = line + 2;
           continue;
         }
-        ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+        ssize_t n = blaze_http_client_fill(stream, buf, cap, used);
         if (n <= 0) return -1;
       }
       *body_len = write_at - body_start;
@@ -1116,7 +1277,7 @@ static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
     }
     /* The chunk itself. */
     while (*used < read_at + size) {
-      ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+      ssize_t n = blaze_http_client_fill(stream, buf, cap, used);
       if (n <= 0) return -1;
     }
     memcpy(buf + write_at, buf + read_at, (size_t)size);
@@ -1124,7 +1285,7 @@ static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
     read_at += (size_t)size;
     /* The CRLF that ends the chunk. */
     while (*used < read_at + 2) {
-      ssize_t n = blaze_http_client_fill(sock, buf, cap, used);
+      ssize_t n = blaze_http_client_fill(stream, buf, cap, used);
       if (n <= 0) return -1;
     }
     read_at += 2;
@@ -1138,7 +1299,7 @@ static int blaze_http_client_read_chunked(int sock, char *buf, size_t cap,
    than one answer, and reading past the end of one of them would read into
    the next. Returns 0 when the answer was read, and -1 when it was not.
    Writes through reusable whether the connection may carry another request. */
-static int blaze_http_client_read_response(int sock, char *buf, size_t cap,
+static int blaze_http_client_read_response(blaze_http_client_stream_t *stream, char *buf, size_t cap,
                                             size_t *body_at, size_t *body_len,
                                             int *reusable) {
   size_t used = 0;
@@ -1148,7 +1309,7 @@ static int blaze_http_client_read_response(int sock, char *buf, size_t cap,
   for (;;) {
     header_len = blaze_http_client_header_end(buf, used);
     if (header_len > 0) break;
-    ssize_t n = blaze_http_client_fill(sock, buf, cap, &used);
+    ssize_t n = blaze_http_client_fill(stream, buf, cap, &used);
     if (n <= 0) return -1;
   }
 
@@ -1182,11 +1343,11 @@ static int blaze_http_client_read_response(int sock, char *buf, size_t cap,
   size_t avail = used - header_len;
 
   if (chunked) {
-    if (blaze_http_client_read_chunked(sock, buf, cap, body_start, &used, body_len) != 0) return -1;
+    if (blaze_http_client_read_chunked(stream, buf, cap, body_start, &used, body_len) != 0) return -1;
   } else if (content_length >= 0) {
     const size_t want = (size_t)content_length;
     while (avail < want) {
-      ssize_t n = blaze_http_client_fill(sock, buf, cap, &used);
+      ssize_t n = blaze_http_client_fill(stream, buf, cap, &used);
       if (n <= 0) return -1;
       avail = used - body_start;
     }
@@ -1194,7 +1355,7 @@ static int blaze_http_client_read_response(int sock, char *buf, size_t cap,
   } else {
     /* The body ends where the connection ends. */
     for (;;) {
-      ssize_t n = blaze_http_client_fill(sock, buf, cap, &used);
+      ssize_t n = blaze_http_client_fill(stream, buf, cap, &used);
       if (n <= 0) break;
     }
     *body_len = used - body_start;
@@ -1212,15 +1373,22 @@ const char *blaze_http_client_request(const char *url, const char *method,
   if (length) *length = 0;
   if (!url || !method) return NULL;
 
-  /* Parse the URL into host, port and path. */
+  /* Parse the URL into host, port and path. The scheme says whether the
+     connection speaks TLS: a URL of "https://" is answered over TLS, and one
+     of "http://" is not. */
   char host[256];
+  int secure = 0;
   int port = 80;
   char path[4096];
   snprintf(path, sizeof(path), "/");
 
   const char *p = url;
   if (strncmp(p, "http://", 7) == 0) p += 7;
-  else if (strncmp(p, "https://", 8) == 0) p += 8;
+  else if (strncmp(p, "https://", 8) == 0) {
+    p += 8;
+    secure = 1;
+    port = 443;
+  }
 
   /* host */
   const char *slash = strchr(p, '/');
@@ -1234,7 +1402,7 @@ const char *blaze_http_client_request(const char *url, const char *method,
   if (colon) {
     *colon = '\\0';
     port = atoi(colon + 1);
-    if (port <= 0) port = 80;
+    if (port <= 0) port = secure ? 443 : 80;
   }
 
   /* path */
@@ -1297,16 +1465,26 @@ const char *blaze_http_client_request(const char *url, const char *method,
      own is not made again: the server that did not answer is not going to
      answer the second time either. */
   for (int attempt = 0; attempt < 2 && answer == NULL; attempt++) {
-    blaze_http_client_conn_t *conn = blaze_http_client_find_cached(host, port);
-    int sock = conn != NULL ? conn->sock : -1;
-    if (sock < 0) {
-      sock = blaze_http_client_connect(host, port, timeout_ms);
-      if (sock < 0) break;
+    blaze_http_client_conn_t *conn = blaze_http_client_find_cached(host, port, secure);
+    blaze_http_client_stream_t stream;
+    stream.sock = conn != NULL ? conn->sock : -1;
+    stream.ssl = conn != NULL ? conn->ssl : NULL;
+    if (stream.sock < 0) {
+      stream.sock = blaze_http_client_connect(host, port, timeout_ms);
+      stream.ssl = NULL;
+      if (stream.sock < 0) break;
+      /* A request of "https://" is a request over TLS: the session is made
+         over the connection that was opened, and the request is only written
+         once the session is up. */
+      if (secure && blaze_http_client_tls_handshake(&stream, host) != 0) {
+        close(stream.sock);
+        break;
+      }
     }
 
-    int sent = blaze_http_client_send_all(sock, reqbuf, (size_t)req_len);
+    int sent = blaze_http_client_send_all(&stream, reqbuf, (size_t)req_len);
     if (sent == 0 && body && body_len > 0) {
-      sent = blaze_http_client_send_all(sock, (const char *)body, body_len);
+      sent = blaze_http_client_send_all(&stream, (const char *)body, body_len);
     }
     if (sent != 0) {
       /* The request could not be sent: the connection is of no use to the
@@ -1315,33 +1493,33 @@ const char *blaze_http_client_request(const char *url, const char *method,
         blaze_http_client_uncache(conn);
         continue;
       }
-      close(sock);
+      blaze_http_client_close_stream(&stream);
       break;
     }
 
     size_t body_at = 0;
     size_t answer_size = 0;
     int reusable = 0;
-    if (blaze_http_client_read_response(sock, blaze_http_client_read_buf,
+    if (blaze_http_client_read_response(&stream, blaze_http_client_read_buf,
                                         sizeof(blaze_http_client_read_buf),
                                         &body_at, &answer_size, &reusable) != 0) {
       if (conn != NULL) {
         blaze_http_client_uncache(conn);
         continue;
       }
-      close(sock);
+      blaze_http_client_close_stream(&stream);
       break;
     }
 
     if (reusable) {
-      if (conn == NULL) blaze_http_client_cache_connection(host, port, sock);
+      if (conn == NULL) blaze_http_client_cache_connection(host, port, stream.sock, secure, stream.ssl);
     } else {
       /* The answer ends the connection, so it is closed and the next request
          opens a new one. */
       if (conn != NULL) {
         blaze_http_client_uncache(conn);
       } else {
-        close(sock);
+        blaze_http_client_close_stream(&stream);
       }
     }
     answer = blaze_http_client_read_buf + body_at;

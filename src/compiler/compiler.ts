@@ -1432,7 +1432,7 @@ export async function runBuild(
     // the same one, and the driver that runs the program links it too. The
     // HTTP runtime is built for the program that is being built: how many
     // connections its server may hold, and whether it speaks TLS.
-    const http = httpRuntimeNeeds(phase.body, phase.modules.map((module) => module.source));
+    const http = httpRuntimeNeeds(phase.body, [...phase.modules.map((module) => module.source), project.entry.source]);
     const prepareRuntime = runtimePreparer({
       lowering: backendKind,
       mode: buildMode,

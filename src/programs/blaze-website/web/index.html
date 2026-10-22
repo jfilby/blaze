@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blaze — an AI compiler</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Blaze</h1>
+    <p>An AI compiler to generate assembly from traditional source.</p>
+  </header>
+
+  <main>
+    <section id="intro">
+      <h2>What is Blaze?</h2>
+      <p>
+        Blaze is a compiler that takes traditional source code — today,
+        TypeScript — and lowers it through a rule-based pipeline to native
+        machine code. Large language models verify each stage of the
+        pipeline and propose fixes, but they do not implement fixes
+        themselves: a rule-based compiler inspects the model's proposals
+        and applies them only when they are valid.
+      </p>
+      <p>
+        The compiler's stages are source → IR → verified IR → target
+        low-level code → verified target code → binary. LLMs verify both the
+        IR and the low-level targets, which keeps every stage checkable
+        rather than merely plausible.
+      </p>
+      <p>
+        Blaze links the facil.io HTTP runtime beside programs that serve
+        HTTP, and SQLite beside programs that store data. This website is
+        itself a Blaze program: it is compiled to a native binary, serves
+        its own pages over HTTP, and saves every chat to a SQLite database.
+      </p>
+      <h3>Stages</h3>
+      <ol>
+        <li>Original source (e.g. TypeScript)</li>
+        <li>IR (intermediate representation)</li>
+        <li>Verified or revised IR (LLM-checked)</li>
+        <li>Target low-level code (e.g. machine code)</li>
+        <li>Verified or revised target code (LLM-checked)</li>
+        <li>Binary</li>
+      </ol>
+    </section>
+
+    <section id="chat">
+      <h2>Ask Blaze</h2>
+      <p>Ask a question about Blaze. A model on Nebius Token Factory answers, and the conversation is saved to SQLite.</p>
+
+      <div id="api-key-notice" class="notice" style="display:none;">
+        No Nebius API key was found. The server reads it from a file named
+        <code>NEBIUS_API_KEY</code> in its working directory, or from the file
+        passed as the second argument. Create that file and restart the server.
+      </div>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="key">
+        <label for="key-input">Your Token Factory key (optional — streams from the browser)</label>
+        <input type="password" id="key-input" placeholder="paste your key to stream straight from Nebius" autocomplete="off">
+        <button type="button" id="key-forget" style="display:none;">Forget</button>
+      </div>
+
+      <form id="form" class="form">
+        <input type="text" id="input" placeholder="Ask a question about Blaze…" autocomplete="off" required>
+        <button type="submit">Ask</button>
+      </form>
+
+      <div id="error" class="error" style="display:none;"></div>
+    </section>
+
+    <section id="history">
+      <h2>Saved chats</h2>
+      <div id="chats" class="chats">Loading…</div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

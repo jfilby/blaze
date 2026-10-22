@@ -113,6 +113,11 @@ export function httpRuntimeNeeds(body: ProgramBody | undefined, sources: readonl
   let mentions = 0;
   for (const source of sources) {
     if (/\bhttp\.serveTls\b/.test(source)) reading.needs.tls = true;
+    /* A program that asks a server over "https://" speaks TLS to it, and the
+       runtime it is given has to carry the library that speaks it. The URL is
+       the question the program asks, and the source is where the question is
+       written down. */
+    if (speaksTlsToServer(source)) reading.needs.tls = true;
     mentions += countMentions(source, "http.serveSettings");
   }
   if (reading.readALimit) {
@@ -124,6 +129,18 @@ export function httpRuntimeNeeds(body: ProgramBody | undefined, sources: readonl
     reading.needs.maxConnections = FACIL_IO_MAX_CONNECTIONS;
   }
   return reading.needs;
+}
+
+/**
+ * Whether a source asks a server over TLS.
+ *
+ * The rule is the one the SQLite facility uses: the word in the source is what
+ * says so, because the verification has to decide from the source whether to
+ * give the program a runtime that speaks TLS, and the rule has to be one the
+ * source can be asked about.
+ */
+export function speaksTlsToServer(source: string): boolean {
+  return /\bhttps:\/\//.test(source);
 }
 
 /** How many times a call is written in a source, mentions in a comment and all. */

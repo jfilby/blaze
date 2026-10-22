@@ -1,0 +1,49 @@
+* { box-sizing: border-box; }
+html { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+body { margin: 0; padding: 0; color: #1a1a1a; background: #ffffff; line-height: 1.6; }
+header { background: #0b5ed6; color: #fff; padding: 1.5rem 1rem; }
+header h1 { margin: 0 0 0.5rem 0; font-size: 1.75rem; }
+header p { margin: 0; opacity: 0.95; }
+
+main { max-width: 900px; margin: 0 auto; padding: 1.5rem 1rem; display: grid; gap: 2rem; }
+
+section h2 { font-size: 1.25rem; margin-top: 0; }
+section h3 { font-size: 1rem; margin: 1rem 0 0.5rem 0; color: #444; }
+p { margin: 0 0 1rem 0; }
+
+ol { margin: 0.5rem 0 1rem 0; padding-left: 1.25rem; }
+li { margin: 0.25rem 0; }
+
+#chat { background: #f5f7fa; border-radius: 8px; padding: 1rem; }
+.messages { border: 1px solid #d7dee7; border-radius: 8px; height: 320px; overflow-y: auto; padding: 0.75rem; margin-bottom: 0.75rem; background: #fff; }
+.message { margin: 0 0 0.75rem 0; padding: 0.5rem 0.75rem; border-radius: 8px; max-width: 85%; }
+.message.user { background: #e7f0ff; margin-left: auto; text-align: right; }
+.message.assistant { background: #f0f0f0; margin-right: auto; }
+.message .who { font-size: 0.75rem; font-weight: 600; margin-bottom: 0.25rem; opacity: 0.7; }
+.message.user .who { color: #0b5ed6; }
+.message.assistant .who { color: #555; }
+
+.form { display: flex; gap: 0.5rem; }
+.key { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.8rem; color: #555; }
+.key label { white-space: nowrap; }
+.key input[type="password"] { flex: 1; min-width: 0; padding: 0.35rem 0.6rem; border: 1px solid #d7dee7; border-radius: 6px; font-size: 0.85rem; }
+.key button { padding: 0.35rem 0.6rem; border: 1px solid #d7dee7; border-radius: 6px; background: #fff; color: #555; font-size: 0.8rem; cursor: pointer; }
+.form input[type="text"] { flex: 1; min-width: 0; padding: 0.5rem 0.75rem; border: 1px solid #c3cfe2; border-radius: 6px; font-size: 0.95rem; }
+.form button { padding: 0.5rem 1rem; border: none; border-radius: 6px; background: #0b5ed6; color: #fff; font-size: 0.95rem; cursor: pointer; }
+.form button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.notice { padding: 0.75rem; background: #fff3cd; color: #856404; border-radius: 6px; margin-bottom: 0.75rem; border: 1px solid #ffeeba; }
+.notice code { background: #fff; padding: 0 0.25rem; border-radius: 3px; }
+
+.error { color: #b00020; padding: 0.5rem; background: #fdecea; border-radius: 6px; margin-top: 0.5rem; }
+
+#chats { border: 1px solid #d7dee7; border-radius: 8px; padding: 0.75rem; background: #fff; }
+.chat { padding: 0.5rem 0; border-bottom: 1px solid #f0f0f0; font-size: 0.9rem; }
+.chat:last-child { border-bottom: none; }
+.chat .q { font-weight: 600; color: #0b5ed6; }
+.chat .a { margin-top: 0.25rem; white-space: pre-wrap; }
+
+@media (max-width: 600px) {
+  main { padding: 1rem 0.5rem; }
+  .message { max-width: 100%; }
+}
