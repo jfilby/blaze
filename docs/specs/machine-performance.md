@@ -131,61 +131,97 @@ callee to leave alone, so a call does not take it. Only an allocation does,
 and the slot the object was kept in is read only where a field's value
 allocates: where none does, the slot was written and never read.
 
-## What is left
+### A counter the body reaches only as an index is a whole number
 
-### The strength reduction the C compiler does
+The width of a counter reaches the arithmetic of the body wherever the body
+reads it as a value, and an index is not a value: it is the place in an array
+the body reaches, and the number of that place is a whole number whatever the
+counter is counted in.
 
-`sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
-the C compiler keeps the progression in a register and adds it. The backend
-converts the counter on every turn and multiplies it. The conversion is now
-free of the dependency that made it expensive, and the multiplication is one
-instruction, so what is left is the two instructions of the arithmetic that a
-progression would have replaced — and the loop is at parity with the C
-compiler's, so the two instructions are what the C compiler spends too.
-
-### A loop that counts in whole numbers
-
-A loop whose body reaches its counter only as an index is counted in whole
-numbers where the loop can be, and the double beside the counter is then
-nothing any turn reads. Where it cannot — the bound is a number the program
-wrote rather than a literal — the loop keeps both counters: the whole number
-the index is read out of, and the double the test compares.
-
-Counting it wholly in that case would take one counter instead of two, and
-the test would be a comparison of whole numbers. What it needs is the bound
-as a whole number, and the bound is a double the program wrote: the
-comparison `k < to` is the comparison `k < ceil(to)` for a whole `k`, and
-`ceil` of a number that is not one is not the number the program wrote.
-
-The IR already knows how to round a bound (`roundedBound`, in
-`ir-resolve.ts` and `ir-function.ts`), and it applies it where the counter
-is a whole number. What is missing is the rule that says the counter *may*
-be a whole number where the body reads it only as an index — the body of a
-loop that counts elements and indexes with the counter is a body of whole
-numbers for the purpose of the counter's width even where its arithmetic is
-not.
-
-Written and measured, and it was two instructions fewer on every turn of the
-loop and no faster: the loop is bound by the chain of the accumulation, not
-by the instructions around it. It is not in the compiler, because the test
-suite says the counter of a loop the checker runs with vectors is left as the
-source wrote it, and that is a decision about the IR that is not the
-backend's to make.
+So a body that counts the elements of an array and indexes with the counter
+is a body the counter's width does not reach, and the counter may be a whole
+number however the arithmetic around it is written. The rule is in the
+resolver (`ir-function.ts`), because it is a fact about the IR and not about
+the machine: the loop is then counted in whole numbers by every backend, and
+the machine backend keeps one counter instead of two and tests it with a
+comparison of whole numbers.
 
 ### The bound of a loop in a register
 
-The bound of a loop is held in a frame slot and read on every turn, and the
-test of a loop of doubles needs it in a register: `UCOMISD` compares its
-destination against its source, and the condition that answers "less than"
-without the parity bit needs the *larger* side in the destination. A bound in
-the frame is therefore read into the scratch first, and the test is two
-instructions where one would do.
+The test of a loop of doubles needs the bound in a register: `UCOMISD`
+compares its destination against its source, and the condition that answers
+"less than" without the parity bit needs the *larger* side in the
+destination. A bound in the frame is therefore read into the scratch first,
+and the test is two instructions where one will do.
 
-A bound in a register of its own would fix it, and the register it wants is
-one of the ones the expressions of the body are held in: the body needs one
-at a time and the loop needs one for as long as it runs. It is not in the
-compiler either: the load of the bound is off the chain the loop carries its
-counter along, and a loop that is bound by that chain does not wait for it.
+The register the bound is held in is one the convention asks a callee to
+leave alone, so the calls the body makes do not take it, and it is taken
+from what the expressions of the body have not taken: a bound is held for as
+long as its loop runs, and the body borrows its registers one at a time. Two
+loops nested one in the other need two of them.
+
+### A loop that adds a progression counts the progression
+
+`sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
+the progression can be counted: the counter the loop counts is the
+progression itself, moved by the step of the progression, and the bound it
+stops at is the bound the progression stops at. The turn is then the addition
+of the counter to the accumulator and nothing else, where it was a
+conversion, a multiplication and an addition.
+
+The progression has to be a whole number of steps for the two to be the same
+number, and the arithmetic of the turn has to be exact over the whole of the
+range the counter takes — so the bound has to be a number the program wrote
+out.
+
+## What is left
+
+### The strength reduction over a bound the program wrote
+
+`sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
+the progression is counted where the loop's bound is a number the program wrote
+out: the counter the loop counts is the progression itself, moved by the step
+of the progression, and the bound it stops at is the bound the progression
+stops at.
+
+The arithmetic of the turn has to be exact over the whole of the range the
+counter takes, because a double holds a whole number exactly only up to two to
+the fifty-third, and the arithmetic the turn did in doubles held the number
+exactly while the counter was under it. A bound the program wrote is a range
+nothing knows when the program is compiled, so the loop is written as it was —
+the multiplication and the offset are on every turn of it.
+
+A bound written out of the range is a runtime question, and the two forms of
+the loop are one branch apart: the bound is tested against the range, and the
+loop is written in the form the answer calls for. That is a second copy of
+every such loop, and a branch that is not there today.
+
+### A bound that is not a number
+
+A loop that counts in whole numbers compares its counter with the bound as a
+whole number, and the bound is rounded to the whole number the comparison
+against it answers the same. A bound that is not a number at all — one that is
+not finite — has no whole number to be rounded to, and the conversion of it
+answers a number no comparison against it would have given: a loop whose
+bound is infinite stops at once rather than running for ever.
+
+This is not new with the whole-number counting: a loop whose body is written
+in whole numbers was counted that way before, and the bound was rounded the
+same way. What the counting by index does is make more loops counted that
+way, and so makes the case more likely to be met.
+
+### A tail call
+
+A function whose last statement is a call and whose answer is that call's
+answer could hand the frame to the callee instead of setting one up for it,
+and the call would be a jump rather than a call. A recursive program that ends
+in a call is a third of the calls it makes, and the frame is a push and a pop
+and a subtraction on each of them.
+
+The convention is written in terms of a call and a return, and a jump to a
+callee is neither: the callee would return to the caller's caller, which is
+right for a tail call and wrong for every other, and the machine backend
+would have to know which is which at every call it writes.
 
 ## The measurements
 
