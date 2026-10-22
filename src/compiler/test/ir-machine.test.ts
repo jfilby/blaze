@@ -3235,6 +3235,96 @@ test("the bound of a loop of doubles is held in a register", async () => {
   );
 });
 
+test("a loop that adds a progression counts the progression", async () => {
+  // `sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
+  // the progression can be counted: the counter the loop counts is the
+  // progression itself, moved by the step of the progression, and the bound it
+  // stops at is the bound the progression stops at. The turn is then the
+  // addition of the counter to the accumulator and nothing else.
+  //
+  // The progression has to be a whole number of steps for the two to be the
+  // same number, and the arithmetic of the turn has to be exact over the whole
+  // of the range the counter takes — which is why the bound has to be a number
+  // the program wrote out.
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [
+      { k: "set", name: "total", op: "+=", value: add(mul(local("i", I64), number("2")), number("1")), line: 2 },
+    ],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted", variable: "i", type: I64,
+            from: number("0", I64), to: number("10", I64), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [],
+  );
+  // The sum of the odd numbers up to nineteen: a hundred.
+  assert.equal(await lowered(fn, (name) => `printf("%g", ${name}());`), "100", "the sum is the sum of the progression");
+  const code = await instructions(fn);
+  // The progression is counted, so the turn multiplies nothing and adds no
+  // offset: the counter is the number the turn adds.
+  assert.doesNotMatch(code, /\bmulsd\b/, "the progression is not multiplied out on every turn");
+});
+
+test("a loop that adds a progression over a bound it does not know is left alone", async () => {
+  // The arithmetic of the turn has to be exact over the whole of the range the
+  // counter takes, and a bound the program wrote is a range nothing knows at
+  // the time the program is compiled. The loop is written as it was.
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [
+      { k: "set", name: "total", op: "+=", value: add(mul(local("i", I64), number("2")), number("1")), line: 2 },
+    ],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted", variable: "i", type: I64,
+            from: number("0", I64), to: local("n", I64), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [{ kind: "value", name: "n", mutable: false, type: I64 }],
+  );
+  assert.equal(
+    await lowered(fn, (name) => `printf("%g", ${name}(10));`),
+    "100",
+    "the sum is the sum of the progression",
+  );
+  const code = await instructions(fn);
+  assert.match(code, /\bmulsd\b/, "the progression is multiplied out on every turn");
+});
+
 test("a compound assignment of a name to itself is the number twice", async () => {
   // The value the name is given is the name itself, so the operation reads the
   // name and writes it: the answer is the number twice. The register the name

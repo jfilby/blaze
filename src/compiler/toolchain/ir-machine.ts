@@ -4642,6 +4642,140 @@ class Machine {
    * otherwise make once per turn. The header label sits on the step, which is
    * where a `continue` belongs, and the first turn is entered at the test.
    */
+  /**
+   * A loop whose turn adds a number the counter decides, written with that
+   * number counted rather than computed.
+   *
+   * `sum += i * 2 + 1` over a counter is a sum of an arithmetic progression, and
+   * the progression can be counted: the counter the loop counts is the
+   * progression itself, moved by the step of the progression, and the bound it
+   * stops at is the bound the progression stops at. The turn is then the
+   * addition of the counter to the accumulator and nothing else, where it was a
+   * conversion, a multiplication and an addition.
+   *
+   * The progression has to be a whole number of steps for the two to be the
+   * same number: the counter is a whole number and the numbers it is
+   * multiplied by and added to are whole numbers, so the progression is whole
+   * too — and the arithmetic the turn did in doubles held it exactly, so the
+   * whole number the counter holds is the number that arithmetic gave.
+   *
+   * The loop this writes is the loop above with the counter standing for the
+   * progression: the same turns, the same numbers added to the accumulator, and
+   * the same answer.
+   */
+  private progression(loop: Extract<SemanticLoop, { kind: "counted" }>): Extract<SemanticLoop, { kind: "counted" }> | null {
+    // The counter has to be a whole number, and the progression a whole number
+    // of steps, for the arithmetic of the turn and the counter to be the same
+    // number.
+    const type = loop.type;
+    if (type.kind !== "primitive" || type.name !== "i64") return null;
+    if (loop.body.statements.length !== 1) return null;
+    if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
+    const statement = loop.body.statements[0];
+    if (statement.k !== "set" || statement.op !== "+=") return null;
+    if (statement.name === loop.variable) return null;
+    // The ends of the loop have to be known, because the arithmetic of the turn
+    // has to be exact over the whole of the range the counter takes, and the
+    // range is the one the ends say.
+    const from = wholeLiteral(loop.from);
+    const to = wholeLiteral(loop.to);
+    const step = loop.step === null ? (loop.down ? -1 : 1) : wholeLiteral(loop.step);
+    if (from === null || to === null || step === null) return null;
+    const affine = this.progressionOf(statement.value, loop.variable);
+    if (affine === null) return null;
+    const { k, c } = affine;
+    // A step of no progression is no progression, and a negative one would
+    // count the loop the other way round. A progression that is the counter
+    // itself is the loop as it was.
+    if (k < 1) return null;
+    if (k === 1 && c === 0) return null;
+    if (!Number.isSafeInteger(k) || !Number.isSafeInteger(c)) return null;
+    // The arithmetic of the turn has to be exact in the width it was computed
+    // at: a double holds a whole number exactly up to two to the fifty-third, a
+    // single up to two to the twenty-fourth, and a whole number of sixty-four
+    // bits up to two to the sixty-second, and the product of the counter and the
+    // step of the progression has to stay under the one that goes with it.
+    const limit = isFloatType(statement.value.type)
+      ? widthOf(statement.value.type) === 4
+        ? 1n << 24n
+        : 1n << 53n
+      : 1n << 62n;
+    for (const end of [BigInt(from), BigInt(to)]) {
+      if (absolute(BigInt(k) * end) >= limit) return null;
+      if (absolute(BigInt(k) * end + BigInt(c)) >= limit) return null;
+    }
+    const number = (value: number): SemanticValue => ({ k: "const", type, text: String(value) });
+    const counted: Extract<SemanticLoop, { kind: "counted" }> = {
+      kind: "counted",
+      variable: loop.variable,
+      type,
+      from: number(k * from + c),
+      to: number(k * to + c),
+      inclusive: loop.inclusive,
+      down: loop.down,
+      step: number(k * step),
+      header: loop.header,
+      exit: loop.exit,
+      body: {
+        ...loop.body,
+        statements: [{ ...statement, value: { k: "local", type, name: loop.variable } }],
+      },
+    };
+    if (loop.parallel === true) counted.parallel = true;
+    if (loop.region === true) counted.region = true;
+    if (loop.reductions !== undefined) counted.reductions = loop.reductions;
+    return counted;
+  }
+
+  /**
+   * The numbers `k` and `c` of an expression that is `k * counter + c`, or null
+   * where the expression is not of that shape.
+   */
+  private progressionOf(value: SemanticValue, counter: string): { k: number; c: number } | null {
+    if (value.k === "local") return value.name === counter ? { k: 1, c: 0 } : null;
+    if (value.k === "const") {
+      const whole = wholeLiteral(value);
+      return whole === null ? null : { k: 0, c: whole };
+    }
+    if (value.k !== "arith") return null;
+    if (value.op === "mul") {
+      const scaled = this.scaledOf(value, counter);
+      return scaled === null ? null : { k: scaled, c: 0 };
+    }
+    if (value.op !== "add" && value.op !== "sub") return null;
+    const left = this.progressionOf(value.left, counter);
+    const right = this.progressionOf(value.right, counter);
+    if (left === null || right === null) return null;
+    if (value.op === "add") {
+      if (left.k === 0) return { k: right.k, c: left.c + right.c };
+      if (right.k === 0) return { k: left.k, c: left.c + right.c };
+      return null;
+    }
+    if (left.k === 0) return { k: -right.k, c: left.c - right.c };
+    if (right.k === 0) return { k: left.k, c: left.c - right.c };
+    return null;
+  }
+
+  /**
+   * The whole number a value is the counter multiplied by, or null where it is
+   * not the counter multiplied by one.
+   */
+  private scaledOf(value: SemanticValue, counter: string): number | null {
+    if (value.k === "local") return value.name === counter ? 1 : null;
+    if (value.k !== "arith" || value.op !== "mul") return null;
+    const left = this.scaledOf(value.left, counter);
+    const right = this.scaledOf(value.right, counter);
+    if (left !== null && right === null) {
+      const whole = wholeLiteral(value.right);
+      return whole === null ? null : left * whole;
+    }
+    if (right !== null && left === null) {
+      const whole = wholeLiteral(value.left);
+      return whole === null ? null : right * whole;
+    }
+    return null;
+  }
+
   private counted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels): void {
     const type = loop.type;
     // A loop that adds up two arrays element by element is written a whole
@@ -4656,6 +4790,12 @@ class Machine {
     // addition itself one turn at a time.
     const sum = packedSumOf(loop);
     if (sum !== null && this.packedSum(sum, loop, labels)) return;
+    // A loop whose turn adds a number the counter decides is written with that
+    // number counted rather than computed: the counter the loop counts is the
+    // progression itself, and the turn is the addition of it to the
+    // accumulator and nothing else.
+    const progression = this.progression(loop);
+    if (progression !== null) loop = progression;
     // A loop whose turns are known before the first of them is written out as
     // the turns it is, each with the counter at the value that turn has.
     const plan = unrollPlan(loop);
@@ -8644,9 +8784,13 @@ class Machine {
 /* Numbers as they are written                                                  */
 /* -------------------------------------------------------------------------- */
 
+/** The magnitude of a whole number. */
+function absolute(value: bigint): bigint {
+  return value < 0n ? -value : value;
+}
+
 /** The value a whole number literal is. */
-function integerText(text: string): bigint {
-  if (/^[+-]?0[xX]/.test(text)) {
+function integerText(text: string): bigint {  if (/^[+-]?0[xX]/.test(text)) {
     const negative = text.startsWith("-");
     const body = negative ? text.slice(1) : text;
     const clean = body.endsWith("n") ? body.slice(0, -1) : body;
