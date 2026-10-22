@@ -659,7 +659,8 @@ function holdsText(value: DraftValue): boolean {
     case "binary":
       // A binary that is a text is one the program built: `+` over two texts,
       // and a short-circuit operator whose arms are of different kinds, which
-      // is written as the text of the arm that answers.
+      // is written as the text of the arm that answers. The `??` asks whether a
+      // value is nothing rather than whether it holds, and is left as it was.
       return value.type === null && (value.op === "+" || value.op === "&&" || value.op === "||");
     case "conditional":
       return value.type === null;
