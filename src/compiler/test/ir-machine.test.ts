@@ -3325,6 +3325,68 @@ test("a loop that adds a progression over a bound it does not know is left alone
   assert.match(code, /\bmulsd\b/, "the progression is multiplied out on every turn");
 });
 
+test("a loop inside a loop that holds its bound leaves the bound alone", async () => {
+  // A bound held in a register is held for as long as its loop runs, and
+  // everything written inside that loop has to leave it alone. The inner loop
+  // is written a vector at a time, and the registers it borrows are not the one
+  // the outer loop is holding its bound in.
+  const inner: SemanticBlock = {
+    id: "b3",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [{ k: "set", name: "total", op: "+=", value: mul(at("a", local("j")), number("2")), line: 5 }],
+  };
+  const outer: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("outer") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "outer", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted", variable: "i", type: F64,
+          from: number("0"), to: local("n"), inclusive: false, down: false, step: null,
+          header: "b1", exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 4 },
+              {
+                k: "loop",
+                line: 5,
+                loop: {
+                  kind: "counted", variable: "j", type: F64,
+                  from: number("0"), to: local("m"), inclusive: false, down: false, step: null,
+                  header: "b3", exit: "b2", body: inner,
+                },
+              },
+              { k: "set", name: "outer", op: "+=", value: local("total"), line: 6 },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  const fn = subject(F64, outer, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: F64 },
+    { kind: "value", name: "m", mutable: false, type: F64 },
+  ]);
+  const code = await instructions(fn);
+  assert.match(code, /\bmovups\b/, "the inner loop is written a vector at a time");
+  // Two turns of the outer loop, each summing the four elements of the array
+  // doubled: twenty each, and forty in all.
+  assert.equal(
+    await lowered(fn, (name) => `{ double a[4]={1,2,3,4}; printf("%g", ${name}(a, 2.0, 4.0)); }`),
+    "40",
+    "the outer loop counts its turns and the inner one its own",
+  );
+});
+
 test("a compound assignment of a name to itself is the number twice", async () => {
   // The value the name is given is the name itself, so the operation reads the
   // name and writes it: the answer is the number twice. The register the name

@@ -1945,6 +1945,16 @@ class Machine {
   private readonly spareBounds: number[] = [];
 
   /**
+   * Every register the bounds of this function's loops may be held in, whether
+   * a loop has taken one of them yet or not.
+   *
+   * A register a loop has not taken yet is free for anything else, and one it
+   * has is not: the loop that holds it keeps it for as long as it runs, and
+   * everything written inside that loop has to leave it alone.
+   */
+  private readonly boundRegisters: number[] = [];
+
+  /**
    * One of the registers above, when one is free and no name has been pinned
    * into it, or null when there is none to give. A register a name is pinned
    * into is not free whatever the stack says, so the two pools are asked
@@ -2693,6 +2703,7 @@ class Machine {
     for (const register of this.reserveBoundRegisters(new Set([...this.pinned.values(), ...this.spareVectors]))) {
       this.pinnedVectors.push({ register, offset: 0, single: false });
       this.spareBounds.push(register);
+      this.boundRegisters.push(register);
     }
     // The prologue pushes the registers above the frame and the lowering binds
     // its slots from there downwards, so a slot's address does not depend on
@@ -4275,7 +4286,10 @@ class Machine {
    * out.
    */
   private borrow(pool: readonly number[], howMany: number): number[] | null {
-    const spoken = new Set(this.pinned.values());
+    // The registers the bounds of the loops around this one are held in are in
+    // use: the loop that holds one keeps it for as long as it runs, and this is
+    // written inside that loop.
+    const spoken = new Set([...this.pinned.values(), ...this.boundRegisters]);
     const free = pool.filter((register) => !spoken.has(register));
     return free.length >= howMany ? free.slice(0, howMany) : null;
   }
