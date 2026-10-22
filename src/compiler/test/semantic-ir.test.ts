@@ -29,6 +29,7 @@ import {
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { resolveFunction } from "../semantics/ir-function.ts";
 import { semanticFunctionProblems, semanticIrProblems, validateSemanticProgram } from "../semantics/ir-validate.ts";
 import { parseType } from "../semantics/contract.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
@@ -58,6 +59,59 @@ function resolved(files: Record<string, string>): { program: SemanticProgram; co
 const NUMBER = { kind: "primitive", name: "f64" } as const;
 const USIZE = { kind: "primitive", name: "usize" } as const;
 const I64 = { kind: "primitive", name: "i64" } as const;
+
+/** The IR the compiler resolves for one function of a source. */
+function irOf(files: Record<string, string>, name: string): string {
+  const phase = phaseOf("typescript", files, "main.ts");
+  const contracts = phase.program.files.flatMap((file) => Object.entries(file.functions));
+  const context = { objectNames: phase.objectNames, functions: Object.fromEntries(contracts) };
+  const contract = contracts.find(([, one]) => one.function.name === name);
+  assert.ok(contract !== undefined, `${name} is a function of the program`);
+  return printSemanticFunction(resolveFunction(contract[1], context));
+}
+
+test("a counter the body reaches only as an index is a whole number", () => {
+  // The width of a counter reaches the arithmetic of the body wherever the body
+  // reads it as a value, and an index is not a value: it is the place in an
+  // array the body reaches, and the number of that place is a whole number
+  // whatever the counter is counted in. A loop that counts the elements of an
+  // array and indexes with the counter is therefore a body the counter's width
+  // does not reach, and it may count in whole numbers however the arithmetic
+  // around it is written.
+  const indexed = irOf(
+    {
+      "main.ts": [
+        "export function total(values: Float64Array, count: number): number {",
+        "  let sum = 0;",
+        "  for (let i = 0; i < count; i++) { sum += values[i] * 0.25; }",
+        "  return sum;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    "total",
+  );
+  assert.match(indexed, /for\[i64\] i/, "the counter of a loop that indexes with it is a whole number");
+  assert.match(indexed, /element\[f64\] local\[\[\]f64\] values local\[i64\] i/, "the index is the whole counter");
+
+  // A body that reads the counter as a value is left alone: there the counter's
+  // width reaches the arithmetic, and a whole number in that arithmetic is a
+  // number the source never wrote.
+  const read = irOf(
+    {
+      "main.ts": [
+        "export function total(count: number): number {",
+        "  let sum = 0;",
+        "  for (let i = 0; i < count; i++) { sum += i * 0.25; }",
+        "  return sum;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    "total",
+  );
+  assert.match(read, /for\[f64\] i/, "a counter the body reads as a value is a double");
+});
 
 /**
  * The C driver of a program, compiled and linked into an executable, the way a

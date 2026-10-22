@@ -656,6 +656,160 @@ function statementIgnoresCounter(statement: Statement, counter: string, shadowed
   return true;
 }
 
+/**
+ * Whether a loop body reaches its counter only as an index.
+ *
+ * The width of a counter reaches the arithmetic of the body wherever the body
+ * reads it as a value, and an index is not a value: it is the place in an array
+ * the body reaches, and the number of that place is a whole number whatever the
+ * counter is counted in. A body that counts the elements of an array and indexes
+ * with the counter is therefore a body the counter's width does not reach, and
+ * the counter may be a whole number even where the arithmetic of the body is
+ * written in fractions.
+ *
+ * A body that reads the counter as a value as well is left alone: there the
+ * counter's width reaches the arithmetic, and a whole number in that arithmetic
+ * is a number the source never wrote. A body that writes the counter is left
+ * alone as well: what it writes is a number of the width the counter is counted
+ * in, and a whole number written into a double counter is a number the source
+ * never wrote.
+ *
+ * A loop nested inside this one that declares a name of its own shadows the
+ * counter for its own body, so a read there is not a read of this counter.
+ */
+export function bodyIndexesCounter(body: readonly Statement[], counter: string, shadowed = false): boolean {
+  for (const statement of body) {
+    switch (statement.kind) {
+      case "loop": {
+        const hides = shadowed || statement.variable === counter;
+        if (expressionReadsOutsideIndex(statement.from, counter)) return false;
+        if (expressionReadsOutsideIndex(statement.to, counter)) return false;
+        if (statement.step !== null && expressionReadsOutsideIndex(statement.step, counter)) return false;
+        if (!bodyIndexesCounter(statement.body, counter, hides)) return false;
+        break;
+      }
+      case "forOf": {
+        const hides = shadowed || statement.variable === counter;
+        if (!bodyIndexesCounter(statement.body, counter, hides)) return false;
+        break;
+      }
+      case "if": {
+        if (!shadowed && expressionReadsOutsideIndex(statement.condition, counter)) return false;
+        if (!bodyIndexesCounter(statement.then, counter, shadowed)) return false;
+        if (!bodyIndexesCounter(statement.otherwise, counter, shadowed)) return false;
+        break;
+      }
+      case "while":
+      case "doWhile":
+        if (!shadowed && expressionReadsOutsideIndex(statement.condition, counter)) return false;
+        if (!bodyIndexesCounter(statement.body, counter, shadowed)) return false;
+        break;
+      case "indexAssign": {
+        // The counter may be the index the element is written at. The buffer it
+        // is written into is a name and not a read of the counter, and the value
+        // written is an ordinary value.
+        if (!shadowed) {
+          const at = statement.index;
+          if (!(at.k === "ident" && at.name === counter) && expressionReads(at, counter)) return false;
+          if (expressionReadsOutsideIndex(statement.value, counter)) return false;
+        }
+        break;
+      }
+      case "try": {
+        if (!bodyIndexesCounter(statement.body, counter, shadowed)) return false;
+        if (statement.catchBody !== null && !bodyIndexesCounter(statement.catchBody, counter, shadowed)) return false;
+        if (statement.finallyBody !== null && !bodyIndexesCounter(statement.finallyBody, counter, shadowed)) return false;
+        break;
+      }
+      case "declare":
+      case "assign":
+      case "memberAssign":
+      case "update":
+      case "result":
+      case "print":
+      case "expression":
+        if (!statementIndexesCounter(statement, counter, shadowed)) return false;
+        break;
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+/** Whether a statement reaches the counter of a loop only as an index. */
+function statementIndexesCounter(statement: Statement, counter: string, shadowed: boolean): boolean {
+  if (shadowed) return true;
+  const values: Expression[] = [];
+  switch (statement.kind) {
+    case "declare":
+      values.push(statement.init);
+      break;
+    case "assign":
+    case "memberAssign":
+    case "result":
+    case "print":
+    case "expression":
+      values.push(statement.value);
+      break;
+    default:
+      break;
+  }
+  for (const value of values) {
+    if (expressionReadsOutsideIndex(value, counter)) return false;
+  }
+  // A statement that writes the counter writes a number of the width the
+  // counter is counted in, and a whole number written into a double counter is
+  // a number the source never wrote.
+  if (statement.kind === "assign" && statement.target === counter) return false;
+  if (statement.kind === "update" && statement.name === counter) return false;
+  return true;
+}
+
+/**
+ * Whether an expression reads a name anywhere but as the index of an index.
+ *
+ * The counter may be the index of an index and nothing else about it: an index
+ * written as a call reads the counter inside the call, which is a read of it as
+ * a value.
+ */
+function expressionReadsOutsideIndex(expression: Expression, counter: string): boolean {
+  switch (expression.k) {
+    case "ident":
+      return expression.name === counter;
+    case "update":
+      return expression.name === counter;
+    case "index": {
+      if (expression.index.k === "ident" && expression.index.name === counter) {
+        return expressionReadsOutsideIndex(expression.base, counter);
+      }
+      return expressionReads(expression.base, counter) || expressionReads(expression.index, counter);
+    }
+    case "unary":
+      return expressionReadsOutsideIndex(expression.operand, counter);
+    case "binary":
+      return (
+        expressionReadsOutsideIndex(expression.left, counter) || expressionReadsOutsideIndex(expression.right, counter)
+      );
+    case "conditional":
+      return (
+        expressionReadsOutsideIndex(expression.condition, counter) ||
+        expressionReadsOutsideIndex(expression.then, counter) ||
+        expressionReadsOutsideIndex(expression.otherwise, counter)
+      );
+    case "member":
+      return expressionReadsOutsideIndex(expression.base, counter);
+    case "call":
+      return expression.args.some((argument) => expressionReadsOutsideIndex(argument, counter));
+    case "argv":
+      return expression.index === null ? false : expressionReadsOutsideIndex(expression.index, counter);
+    case "object":
+      return expression.fields.some((field) => expressionReadsOutsideIndex(field.value, counter));
+    default:
+      return false;
+  }
+}
+
 /** Whether an expression reads a name, wherever in it the name appears. */
 function expressionReads(expression: Expression, counter: string): boolean {
   switch (expression.k) {

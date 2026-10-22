@@ -197,7 +197,7 @@ test("a review that proposes a fix has it applied, and the artifact is regenerat
   assert.equal(outcome.build.status, "success");
   const candidates = await recorded(directory);
   assert.equal(candidates.length, 1);
-  assert.match(candidates[0].text, /set sum \+= \[mul\[f64\] \[element\[f64\] local\[\[\]f64\] values local\[f64\] index\] const\[f64\] 0\.25\]/);
+  assert.match(candidates[0].text, /set sum \+= \[mul\[f64\] \[element\[f64\] local\[\[\]f64\] values local\[i64\] index\] const\[f64\] 0\.25\]/);
   assert.doesNotMatch(candidates[0].text, /\[div\[f64\]/);
   assert.deepEqual(candidates[0].proposals, ["`reciprocal-multiply entry`: turned 1 division(s) in entry into a multiplication by their reciprocal"]);
 

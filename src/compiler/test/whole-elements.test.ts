@@ -461,6 +461,6 @@ test("a function the checker runs with vectors is left as the source wrote it", 
   const rewritten = bodyOf(CONTRACTED, "sumAll");
   const untouched = bodyOf(CONTRACTED, "sumAll", checked);
 
-  assert.match(rewritten, /"name":"i64"/, "the loop is the whole-number form");
-  assert.doesNotMatch(untouched, /"name":"i64"/, "the function is left as the source wrote it");
+  assert.match(rewritten, /blaze_limb_/, "the loop is the whole-number form");
+  assert.doesNotMatch(untouched, /blaze_limb_/, "the function is left as the source wrote it");
 });

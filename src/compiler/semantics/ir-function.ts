@@ -59,7 +59,7 @@ import { contractText, parseType } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor } from "./language.ts";
-import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
+import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
 import { isInteger, isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
@@ -925,13 +925,19 @@ class FunctionBody {
     // and an `i64` in that expression is a number the source never wrote.
     const wholeNames = new Set(this.wholeNames());
     const countsWholeItself = countsWholeNumber(statement.from, from.inferred) && (step === null || (statement.step !== null && countsWholeNumber(statement.step, step.inferred)));
-    // The counter may be a whole number on either of two grounds: the body's
+    // The counter may be a whole number on any of three grounds: the body's
     // arithmetic is already whole, so reading the counter at either width gives
-    // the same number; or the body never reads it, so there is no arithmetic for
-    // its width to reach. The second is what admits a loop whose turn calls a
-    // function and accumulates what it returns — a body of no whole numbers by
-    // any reading, whose counter is read by neither turn.
-    const countsWhole = bodyIsWhole(statement.body, statement.variable, wholeNames) || bodyIgnoresCounter(statement.body, statement.variable);
+    // the same number; the body never reads it, so there is no arithmetic for
+    // its width to reach; or the body reaches it only as an index, and an index
+    // is a whole number whatever the counter is counted in. The second is what
+    // admits a loop whose turn calls a function and accumulates what it returns
+    // — a body of no whole numbers by any reading, whose counter is read by
+    // neither turn — and the third is what admits a loop that counts elements
+    // of an array of doubles.
+    const countsWhole =
+      bodyIsWhole(statement.body, statement.variable, wholeNames) ||
+      bodyIgnoresCounter(statement.body, statement.variable) ||
+      bodyIndexesCounter(statement.body, statement.variable);
     const counted =
       countsWholeItself && countsWhole
         ? I64
