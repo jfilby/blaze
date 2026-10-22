@@ -3181,6 +3181,60 @@ test("a counter the loop reads as a number is kept in a register", async () => {
   assert.match(code, /addsd\s+0x[0-9a-f]+\(%rip\),%xmm\d+/, "the counter is stepped in a register");
 });
 
+test("the bound of a loop of doubles is held in a register", async () => {
+  // The test of a loop of doubles needs the bound in a register: the
+  // instruction that compares two doubles takes one of them as its destination
+  // and the other as its source, and the condition that answers "less than"
+  // without the parity bit needs the larger side in the destination. A bound
+  // in the frame is read into the scratch first, which is a second instruction
+  // on every turn of the loop.
+  //
+  // The body is two statements, so the loop is written the general way and the
+  // bound is the one it holds.
+  const body: SemanticBlock = {
+    id: "body",
+    releases: [],
+    terminator: { k: "next" },
+    statements: [
+      { k: "set", name: "total", op: "+=", value: local("v"), line: 2 },
+      { k: "set", name: "total", op: "+=", value: number("1"), line: 3 },
+    ],
+  };
+  const fn = subject(
+    F64,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+        {
+          k: "loop",
+          line: 2,
+          loop: {
+            kind: "counted", variable: "i", type: F64,
+            from: number("0"), to: local("n"), inclusive: false, down: false, step: null,
+            header: "b1", exit: "entry", body,
+          },
+        },
+      ],
+      terminator: { k: "return", value: local("total") },
+    },
+    [{ kind: "value", name: "v", mutable: false, type: F64 }, { kind: "value", name: "n", mutable: false, type: F64 }],
+  );
+  assert.equal(
+    await lowered(fn, (name) => `printf("%g", ${name}(2.5, 4.0));`),
+    "14",
+    "the loop turns as many times as its bound says",
+  );
+  const code = await instructions(fn);
+  // The bound is not read out of the frame into the scratch before the test.
+  assert.doesNotMatch(
+    code,
+    /movsd\s+0x[0-9a-f]+\(%rsp\),%xmm1\s*\n\s*[0-9a-f]+:\s*ucomisd/,
+    "the bound is not read into the scratch on every turn",
+  );
+});
+
 test("a compound assignment of a name to itself is the number twice", async () => {
   // The value the name is given is the name itself, so the operation reads the
   // name and writes it: the answer is the number twice. The register the name

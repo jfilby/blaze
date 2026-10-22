@@ -1935,6 +1935,16 @@ class Machine {
   private readonly spareIndexes: number[] = [];
 
   /**
+   * The vector registers the bounds of this function's loops may be held in,
+   * taken one at a time by the loop that owns one.
+   *
+   * A bound is held for as long as its loop runs, so two loops nested one in
+   * the other need two of them, and a register a loop holds is one no other
+   * value of the body may be written into.
+   */
+  private readonly spareBounds: number[] = [];
+
+  /**
    * One of the registers above, when one is free and no name has been pinned
    * into it, or null when there is none to give. A register a name is pinned
    * into is not free whatever the stack says, so the two pools are asked
@@ -1981,6 +1991,60 @@ class Machine {
     if (arithmetic === 0) return [];
     const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - Math.min(arithmetic, TEMPORARY_VECTORS), 0));
+  }
+
+  /**
+   * The registers the bounds of this function's loops may be held in.
+   *
+   * A loop that counts in doubles tests its bound on every turn, and the test
+   * needs the bound in a register: the instruction that compares two doubles
+   * takes one of them as its destination and the other as its source, and the
+   * condition that answers "less than" needs the larger side in the
+   * destination. A bound in the frame is read into the scratch first, which is
+   * a second instruction on every turn of the loop.
+   *
+   * A bound in a register is held for as long as the loop runs, so two loops
+   * nested one in the other need two of them. One is enough for a program that
+   * counts one loop at a time, which is what a program does far more often
+   * than it counts a loop inside a loop.
+   */
+  private reserveBoundRegisters(taken: ReadonlySet<number>): number[] {
+    let deepest = 0;
+    const counting = (body: SemanticBlock, depth: number): void => {
+      for (const statement of body.statements) {
+        if (statement.k === "loop") {
+          if (statement.loop.kind === "counted" && this.holdsBound(statement.loop)) {
+            deepest = Math.max(deepest, depth + 1);
+          }
+          counting(statement.loop.body, depth + 1);
+        } else if (statement.k === "if") {
+          counting(statement.then, depth);
+          if (statement.otherwise !== null) counting(statement.otherwise, depth);
+        } else if (statement.k === "block") {
+          counting(statement.body, depth);
+        }
+      }
+    };
+    counting(this.fn.entry, 0);
+    if (deepest === 0) return [];
+    const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
+    return free.slice(Math.max(free.length - deepest, 0));
+  }
+
+  /**
+   * Whether a loop holds its bound for as long as it runs, which is what a
+   * bound in a register of its own is for.
+   *
+   * A bound the program wrote out is the same number on every turn, and the
+   * instruction that compares against it takes it as an operand of its own, so
+   * it is not held at all. A bound the body writes is read again at the header
+   * instead, and a loop that counts in whole numbers compares against it with
+   * a memory operand, which is one instruction as well.
+   */
+  private holdsBound(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
+    if (!isFloatType(loop.type)) return false;
+    if (this.literalOf(loop.to, loop.type) !== null) return false;
+    return !this.reread(loop, loop.to);
   }
 
   /**
@@ -2099,16 +2163,20 @@ class Machine {
     return this.reserveSlot(type, prefix, false);
   }
 
-  private reserveSlot(type: SemanticType, prefix: string, borrowable: boolean): Held {
+  private reserveSlot(type: SemanticType, prefix: string, borrowable: boolean, register: number | null = null): Held {
     this.temporaries += 1;
     const name = this.names.reserve(`${prefix}_${this.temporaries}`);
     // A wide number is carried in four registers of its own and is written from
     // those rather than from the accumulator, so there is nothing here to hold
     // it in.
-    const register = borrowable && isFloatType(type) && !isWideType(type) ? this.takeSpareVector() : null;
-    const offset = this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8));
+    const where =
+      register ?? (borrowable && isFloatType(type) && !isWideType(type) ? this.takeSpareVector() : null);
+    // A value in a register is not in the frame, so the slot that reads and
+    // writes go through it is not reserved: its distance is zero, which is the
+    // first slot's own address, and it is never read.
+    const offset = where === null ? (this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8))) : 0;
     this.heldCount += 1;
-    const held: Held = { id: this.heldCount, offset, type, register, index: null, constant: null };
+    const held: Held = { id: this.heldCount, offset, type, register: where, index: null, constant: null };
     this.slots.set(name, held);
     return held;
   }
@@ -2163,6 +2231,23 @@ class Machine {
   private heldAt(type: SemanticType, prefix: string, value: SemanticValue): Held {
     this.at(value, type);
     const held = this.holdAcross(type, prefix);
+    this.store(held);
+    return held;
+  }
+
+  /**
+   * A bound a loop holds for as long as it runs, in a register of its own, or
+   * null where there is no register free for it.
+   *
+   * The register is one the convention asks a callee to leave alone, so the
+   * calls the body makes do not take it, and it is held for the length of the
+   * loop and given back at the end of it.
+   */
+  private heldBound(type: SemanticType, value: SemanticValue): Held | null {
+    const register = this.spareBounds.pop() ?? null;
+    if (register === null) return null;
+    this.at(value, type);
+    const held = this.reserveSlot(type, "blaze_to", false, register);
     this.store(held);
     return held;
   }
@@ -2600,6 +2685,14 @@ class Machine {
     for (const register of this.reserveTemporaryVectors(new Set(this.pinned.values()))) {
       this.pinnedVectors.push({ register, offset: 0, single: false });
       this.spareVectors.push(register);
+    }
+    // The bounds of the loops are held in registers of their own, and are
+    // taken from what the expressions of the body have not taken: a bound is
+    // held for as long as its loop runs, and the body borrows its registers one
+    // at a time.
+    for (const register of this.reserveBoundRegisters(new Set([...this.pinned.values(), ...this.spareVectors]))) {
+      this.pinnedVectors.push({ register, offset: 0, single: false });
+      this.spareBounds.push(register);
     }
     // The prologue pushes the registers above the frame and the lowering binds
     // its slots from there downwards, so a slot's address does not depend on
@@ -4157,6 +4250,20 @@ class Machine {
   }
 
   /**
+   * Whether a value of a loop names one of the names the loop writes, which is
+   * what makes it a value the loop has to look at again on each turn rather
+   * than hold for the whole loop.
+   */
+  private reread(loop: SemanticLoop, value: SemanticValue): boolean {
+    const written = this.loopWrites(loop);
+    let seen = false;
+    walkValues(value, (one) => {
+      if (one.k === "local" && written.has(one.name)) seen = true;
+    });
+    return seen;
+  }
+
+  /**
    * Registers of a kind this loop writes, or null when the program has pinned so
    * many that there are not enough left.
    *
@@ -4610,18 +4717,17 @@ class Machine {
     // `for (i = 0; i < limit; i++) { limit = 9; }` reads a different bound on
     // the second turn, so a value the body writes is read again at the header
     // instead of being held for the whole loop.
-    const written = this.loopWrites(loop);
-    const reread = (value: SemanticValue): boolean => {
-      let seen = false;
-      walkValues(value, (one) => {
-        if (one.k === "local" && written.has(one.name)) seen = true;
-      });
-      return seen;
-    };
-    const boundReread = reread(loop.to);
-    const stepReread = loop.step !== null && reread(loop.step);
+    const boundReread = this.reread(loop, loop.to);
+    const stepReread = loop.step !== null && this.reread(loop, loop.step);
     const writtenTo = boundReread ? null : this.literalOf(loop.to, type);
-    const to: Held | number = writtenTo ?? this.heldAt(type, "blaze_to", loop.to);
+    // A bound of doubles is held in a register of its own, because the test of
+    // the loop needs it in one: the instruction that compares two doubles takes
+    // one of them as its destination and the other as its source, and the
+    // condition that answers "less than" without the parity bit needs the
+    // larger side in the destination. A bound in the frame is read into the
+    // scratch first, which is a second instruction on every turn.
+    const held = writtenTo === null ? this.heldBound(type, loop.to) : null;
+    const to: Held | number = writtenTo ?? held ?? this.heldAt(type, "blaze_to", loop.to);
     let step: Held | number | null = null;
     if (loop.step !== null) {
       // A step the program wrote out is the same number on every turn, so it
@@ -4724,7 +4830,14 @@ class Machine {
     // The slots the header was read into are dead now the loop is written, and
     // whatever the statement after this one binds takes them.
     if (from !== null) this.freeSlot(from);
-    if (typeof to !== "number") this.freeSlot(to);
+    // A bound held in a register of its own hands that register back to the
+    // pool the bounds are taken from, and not to the pool the expressions of
+    // the body borrow theirs from: the bound is held for the length of the
+    // loop, and the body had no use of it.
+    if (typeof to !== "number") {
+      if (to.register === null) this.freeSlot(to);
+      else this.spareBounds.push(to.register);
+    }
     if (typeof step !== "number" && step !== null) this.freeSlot(step);
     // The register the counter was read as an index out of goes back too, and
     // the counter is dead with the loop. A loop after this one is a loop one
