@@ -3538,3 +3538,33 @@ test("an object literal is filled in through the register it is kept in", async 
   assert.match(code, /mov\s+%rax,%r15/, "the object is kept in the register it is filled in");
   assert.doesNotMatch(code, /mov\s+%rax,0x[0-9a-f]+\(%rsp\)/, "the slot the object was kept in is not written");
 });
+
+test("a number beside a text is the test, and the text is the value", async () => {
+  // `&&` and `||` hand back one of their arms rather than a truth, so what
+  // they are written as is the type of the arm they hand back. An arm that is
+  // a number is the test that decides whether the other arm is handed back,
+  // and the other arm is a text: the number is the test, and the text is the
+  // value the operator is written as. The number that answers is written as
+  // the text of that number.
+  const fn = subject(
+    TEXT,
+    {
+      id: "entry",
+      releases: [],
+      statements: [
+        {
+          k: "let",
+          slot: { kind: "text", name: "name", mutable: true, boxed: true },
+          value: { k: "logical", type: TEXT, op: "or", left: local("n", F64), right: { k: "text", type: TEXT, parts: [{ k: "text", value: "none" }] } },
+          line: 1,
+        },
+      ],
+      terminator: { k: "return", value: local("name", TEXT) },
+    },
+    [{ kind: "value", name: "n", mutable: false, type: F64 }],
+  );
+  // A number that holds is the text of that number, and a number that does
+  // not hold is the text beside it.
+  assert.equal(await lowered(fn, (name) => `printf("%s", ${name}(0.0));`), "none", "a number that does not hold hands back the text");
+  assert.equal(await lowered(fn, (name) => `printf("%s", ${name}(42.0));`), "42", "a number that holds hands back the text of that number");
+});

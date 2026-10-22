@@ -1381,3 +1381,23 @@ test("a text and a wide number are laid down beside each other and not on top of
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout, "hello\n340282366920938463463374607431768211455\nRESULT 1\n");
 });
+
+test("a number beside a text is the test, and the text is the value", async () => {
+  // `&&` and `||` hand back one of their arms rather than a truth, so what
+  // they are written as is the type of the arm they hand back. An arm that is
+  // a number is the test that decides whether the other arm is handed back,
+  // and the other arm is a text: the number is the test, and the text is the
+  // value the operator is written as.
+  await compute(
+    "n: number",
+    ["  const name = n || `none`;", "  return name.length;"],
+    "run\n0\n",
+    "RESULT 4\n",
+  );
+  await compute(
+    "n: number",
+    ["  const name = n || `none`;", "  return name.length;"],
+    "run\n5\n",
+    "RESULT 1\n",
+  );
+});

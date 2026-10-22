@@ -60,7 +60,7 @@ import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor } from "./language.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
-import { isInteger, isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
+import { isInteger, isNumber, isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 
@@ -1389,7 +1389,7 @@ class FunctionBody {
       return {
         value: {
           k: "logical",
-          type: this.common(left.value.type, right.value.type, line),
+          type: this.logicalType(left.value.type, right.value.type, line),
           op: op === "&&" ? "and" : "or",
           left: left.value,
           right: right.value,
@@ -1714,6 +1714,23 @@ class FunctionBody {
   /** The type the IR states an inferred value as. */
   private typeOf(inferred: Inferred, line: number): SemanticType {
     return inferred.kind === "type" ? inferred.type : this.objectType(inferred.key, line);
+  }
+
+  /**
+   * The type the arms of a short-circuit operator have in common, which is the
+   * type of the arm the operator hands back.
+   *
+   * An arm that is a number or a truth is the test that decides whether the
+   * other arm is handed back, so the two may be of different kinds: a number
+   * beside a text is the test, and the text is the value the operator is
+   * written as. The number is written as the text of that number when it is
+   * the arm that answers.
+   */
+  private logicalType(left: SemanticType, right: SemanticType, line: number): SemanticType {
+    const test = (type: SemanticType): boolean => isNumber(type) || isBoolean(type);
+    if (isText(left) && test(right)) return TEXT;
+    if (isText(right) && test(left)) return TEXT;
+    return this.common(left, right, line);
   }
 
   /** The type two values of one expression have in common, or a refusal. */

@@ -34,6 +34,7 @@ import {
   isWide,
   isWideType,
   isTextType,
+  isNumber,
   type SemanticBlock,
   type SemanticCall,
   type SemanticFunction,
@@ -1713,6 +1714,31 @@ class Body {
         // holds and `||` keeps it when the left one does not, so one of them
         // turns that truth over first.
         //
+        // A number beside a text is the test, and the text is the value the
+        // operator hands back, so a number that answers is written as the text
+        // of that number. The truth is asked of the number itself, which is
+        // what the language asks of it: a number that is not a number holds
+        // nothing.
+        if (isTextType(at) && isNumber(value.left.type)) {
+          const held = facts(at).held;
+          const answer = this.borrow(held);
+          this.asText(value.left, null);
+          this.keep(answer);
+          this.value(value.left, value.left.type);
+          const carrier = facts(value.left.type).held;
+          if (value.op === "or") this.lie(carrier);
+          else this.truth(carrier);
+          this.op(0x04);
+          this.code.byte(0x40);
+          this.push(null);
+          this.value(value.right, at);
+          this.keep(answer);
+          this.pop();
+          this.op(0x0b);
+          this.read(answer);
+          this.release(held, answer);
+          return;
+        }
         // The right arm is behind a branch, for the reason the `??` above
         // gives: a `select` over the two arms runs the right one whatever the
         // left one says, and writes the left one down twice to do it. The left

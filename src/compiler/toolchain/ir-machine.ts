@@ -7363,12 +7363,39 @@ class Machine {
     if (arm !== null) this.store(arm);
     this.truthOfAccumulator(value.left.type);
     this.code.jcc(value.op === "and" ? "e" : "ne", otherwise);
-    this.at(value.right, value.type);
+    // A number arm beside a text is the test, and the text is the value the
+    // operator hands back, so a number that answers is written as the text of
+    // that number.
+    this.arm(value.right, value.type);
     this.code.jmp(end);
     this.code.bind(otherwise);
     if (arm !== null) this.load(arm);
-    this.convert(value.left.type, value.type);
+    if (isNumber(value.left.type) && isTextType(value.type)) this.numberAsText();
+    else this.convert(value.left.type, value.type);
     this.code.bind(end);
+  }
+
+  /**
+   * An arm of a short-circuit operator, read as the type the operator is
+   * written as.
+   *
+   * A number read as a text is the text of that number, which is what the
+   * operator hands back where one of its arms is a number and the other is a
+   * text: the text is the value, and the number is the test that decides
+   * whether it is handed back.
+   */
+  private arm(value: SemanticValue, type: SemanticType): void {
+    if (isNumber(value.type) && isTextType(type)) {
+      this.value(value);
+      this.numberAsText();
+      return;
+    }
+    this.at(value, type);
+  }
+
+  /** The accumulator holding a number, as the text of that number. */
+  private numberAsText(): void {
+    this.formatNumber(null);
   }
 
   private coalesce(value: SemanticValue & { k: "coalesce" }): void {
