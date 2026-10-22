@@ -427,3 +427,41 @@ test("the request a program makes carries the body it wrote", async () => {
   assert.match(written, /blaze_http_client_write/, "the body of the request is written on the request");
   assert.match(written, /blaze_http_client_end/, "the request is sent");
 });
+
+test("a build replaces a program that is still running", async () => {
+  // Rebuilding while the old binary serves is the usual way round, and the
+  // file of a running program cannot be written: the copy a build delivered by
+  // was refused by the machine itself, ETXTBSY, text file busy. The delivery
+  // is a rename now, so the build replaces the name the running program is
+  // held by and leaves the running program running.
+  const directory = await scratch("blaze-rebuild-running-");
+  await writeFile(join(directory, "main.ts"), HTTP_SOURCE, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    output: "machine",
+    backend: "c",
+    mode: "debug",
+    runtime: "facil",
+  });
+  const first = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 1 },
+    QUIET,
+    "build",
+  );
+  assert.equal(first.build.status, "success");
+  const running = await startServer(first.outputPath as string);
+  try {
+    const second = await runBuild(
+      "blaze.toml",
+      { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 1 },
+      QUIET,
+      "build",
+    );
+    assert.equal(second.build.status, "success", "the build replaced the program that was running");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});

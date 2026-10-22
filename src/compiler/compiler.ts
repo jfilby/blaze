@@ -37,7 +37,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
@@ -2012,8 +2012,18 @@ export async function runBuild(
     let outputAssemblyPath: string | null = null;
     if (mode === "build") {
       const delivered: string[] = [];
+      // A file that is replaced may be the file of a program that is still
+      // running: a rebuild while the old binary serves is the usual way round,
+      // and the file of a running program cannot be written. The copy is made
+      // beside its target and renamed over it, and a rename replaces the name
+      // the running program is held by rather than the program itself.
+      const replace = async (from: string, to: string) => {
+        const beside = `${to}.delivered`;
+        await copyFile(from, beside);
+        await rename(beside, to);
+      };
       const deliver = async (from: string, to: string) => {
-        await copyFile(join(base, from), store.resolve(to));
+        await replace(join(base, from), store.resolve(to));
         delivered.push(store.resolve(to));
       };
       if (phase.body !== undefined) {
@@ -2036,7 +2046,7 @@ export async function runBuild(
           // is made before the strip, so it keeps them.
           await deliver(programBinary, paths.outputBinary);
           run("strip", ["--strip-unneeded", programPath]);
-          await copyFile(programPath, deliveredProgram);
+          await replace(programPath, deliveredProgram);
           await deliver(runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
           delivered.push(deliveredProgram);
           outputPath = store.resolve(paths.outputBinary);
