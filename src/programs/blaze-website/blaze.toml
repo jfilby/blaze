@@ -1,0 +1,15 @@
+language = "typescript"
+sourceFile = "main.ts"
+output = "machine"
+backend = "machine"
+runtime = "facil"
+mode = "danger"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+
+[optimize]
+primary = "throughput"
+secondary = "size"
