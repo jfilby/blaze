@@ -534,7 +534,15 @@ function machineError(message: string, detail?: string, functionName?: string): 
 export interface MachineRequest {
   /** The function as the IR holds it, already validated against its contract. */
   fn: SemanticFunction;
-  contract: FunctionContract;
+  /**
+   * The contract the function is called by, when the build holds one.
+   *
+   * A function of a program the source declares for itself has no contract: the
+   * program is the oracle it is checked against, and the lowering reads the
+   * signature it is called by off the IR itself — the layouts it holds are the
+   * ones the resolver laid out, and the symbol is the one the program calls.
+   */
+  contract?: FunctionContract;
   target: TargetSpec;
   /**
    * The symbols of the other functions of the program. An object may call one,
@@ -618,7 +626,7 @@ export function machineRefusal(
 ): MachineRefusal | null {
   try {
     assertMachineTarget(request.target);
-    const functionName = symbolOf(request.contract);
+    const functionName = symbolOf(request.contract ?? ({ function: { name: request.fn.name, symbol: request.fn.symbol } } as FunctionContract));
     lowerFunction(
       request.fn,
       request.contract,
@@ -645,7 +653,7 @@ export function machineRefusal(
  */
 export async function buildObject(request: MachineRequest): Promise<MachineResult> {
   assertMachineTarget(request.target);
-  const functionName = symbolOf(request.contract);
+  const functionName = symbolOf(request.contract ?? ({ function: { name: request.fn.name, symbol: request.fn.symbol } } as FunctionContract));
   const object = lowerFunction(
     request.fn,
     request.contract,
@@ -1135,33 +1143,56 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
  * mean nothing. That is the whole reason a loop's body has to be read before
  * the registers are handed out: a name on this list may not be given one.
  *
- * The list is deliberately an over-estimate. A name the loop reads but does
- * not write could be given a register safely — the turn would only be reading
- * a value another thread wrote, which is exactly what the mark forbids, so
- * such a loop is not marked in the first place — and a name that costs a
- * frame slot it did not need is a far smaller price than a name given a
- * register the turn cannot read.
+ * A name the body declares — a `let`, the counter of a loop written inside
+ * it — is the turn's own: every turn enters the declaration, so two turns
+ * have two of them, and a turn initializes a name it declares before anything
+ * reads it. Those are left off the list, so the register a turn-local
+ * accumulator or counter is worth is one the allocator may give it: the turn
+ * pushes the registers it was given and reads them back at the end, which is
+ * what keeps the value the calling thread had in one.
+ *
+ * The list is still an over-estimate. A name the loop reads but does not write
+ * could be given a register safely — the turn would only be reading a
+ * value another thread wrote, which is exactly what the mark forbids, so such
+ * a loop is not marked in the first place — and a name that costs a frame
+ * slot it did not need is a far smaller price than a name given a register the
+ * turn cannot read.
  */
 function namesAViewReads(loop: SemanticLoop): Set<string> {
   const names = new Set<string>();
+  // What the body declares, which is the turn's own: a name on this list is
+  // read out of the register it was initialized in, not out of the frame.
+  const own = new Set<string>();
   for (const block of everyBlock(loop.body)) {
     for (const statement of block.statements) {
-      // A name the body declares is the turn's own: every turn enters the
-      // declaration, so two turns have two of them.
-      if (statement.k === "let") continue;
-      if (statement.k === "set" || statement.k === "step") names.add(statement.name);
+      if (statement.k === "let") own.add(statement.slot.name);
+      if (statement.k === "loop") {
+        const inner = statement.loop;
+        if (inner.kind === "counted") own.add(inner.variable);
+        else if (inner.kind === "each") {
+          own.add(inner.index);
+          own.add(inner.element);
+        }
+      }
+    }
+  }
+  for (const block of everyBlock(loop.body)) {
+    for (const statement of block.statements) {
+      if (statement.k === "set" || statement.k === "step") {
+        if (!own.has(statement.name)) names.add(statement.name);
+      }
       if (statement.k === "setElement") names.add(statement.buffer);
       if (statement.k === "fill") names.add(statement.buffer);
       if (statement.k === "loop" && statement.loop.kind === "each") names.add(statement.loop.of);
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          if (inner.k === "local") names.add(inner.name);
+          if (inner.k === "local" && !own.has(inner.name)) names.add(inner.name);
         });
       }
     }
     if (block.terminator.k === "return" && block.terminator.value !== null) {
       walkValues(block.terminator.value, (inner) => {
-        if (inner.k === "local") names.add(inner.name);
+        if (inner.k === "local" && !own.has(inner.name)) names.add(inner.name);
       });
     }
   }
@@ -1188,7 +1219,7 @@ function returnsFromItsBody(body: SemanticBlock): boolean {
 /** The object a function's machine code is, and the code it carries. */
 function lowerFunction(
   fn: SemanticFunction,
-  contract: FunctionContract,
+  contract: FunctionContract | undefined,
   functionName: string,
   callable: ReadonlySet<string>,
   target: TargetSpec,
@@ -1720,8 +1751,14 @@ interface Held {
    * the frame. A name that is written once and read after is in a register that
    * a call cannot take, so a read of it is a move and a frame is not reserved
    * for it at all.
+   *
+   * The turn that reads the frame it was handed puts a hot name of that frame
+   * in a register of its own while it runs, which is what writes this field
+   * after the allocation was done — and reads it back to null when the turn is
+   * written, so the next statement the outer body binds sees the frame the
+   * allocation answered for.
    */
-  readonly register: number | null;
+  register: number | null;
 }
 
 class Machine {
@@ -1876,14 +1913,14 @@ class Machine {
    */
   private readonly counterRegisters = new Map<string, number>();
 
-  constructor(fn: SemanticFunction, contract: FunctionContract, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }) {
+  constructor(fn: SemanticFunction, contract: FunctionContract | undefined, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }) {
     this.fn = fn;
     this.rounds = rounds;
     this.poTParams = powerOfTwoParams;
     this.target = target;
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
-    this.layouts = { ...contract.definition.objects, ...fn.objects };
+    this.layouts = { ...(contract?.definition.objects ?? {}), ...fn.objects };
     for (const parameter of fn.params) {
       if (parameter.kind === "text" && (parameter as { boxed?: boolean }).boxed === true) this.boxedTexts.add(parameter.name);
     }
@@ -2756,12 +2793,13 @@ class Machine {
       for (const statement of block.statements) {
         if (statement.k === "loop") {
           const team = inside ? null : this.teamFor(statement.loop);
-          if (team !== null) this.teamed.add(team);
-          // Everything read inside a loop that became a turn — and inside any
-          // loop written within one — has to be in the frame rather than in a
-          // register: a thread of the team reads the frame, and the registers
-          // it has are its own.
-          if (inside || team !== null) {
+          if (team !== null) {
+            this.teamed.add(team);
+            // Everything the turn reads that is not its own is in the frame:
+            // the reads of the loops written inside it are on this list too,
+            // because a name read inside them is read inside this one — and
+            // the names they declare are not, which is what leaves a turn's
+            // own accumulator and counter worth a register.
             for (const name of namesAViewReads(statement.loop)) this.turnNames.add(name);
           }
           visit(statement.loop.body, inside || team !== null);
@@ -4094,11 +4132,20 @@ class Machine {
       this.borrowed.length = 0;
       this.accumulator = null;
       this.code.bind(turn.label);
+      // The names the turn reads out of the frame, hot enough that a register
+      // of its own is worth having: the turn reads the frame it copied, so the
+      // value is one load away, and a name read on every element of a loop the
+      // turn runs pays that load every time. The turn's own counter is among
+      // them when the body reads it as a value, and it is given a register the
+      // loop binds it into rather than one established here.
+      const cached = this.cacheTurnReads(turn.loop);
+      const established = [...cached].filter(([, held]) => held.established);
       // The registers the convention asks a callee to leave as it found them.
       // A turn is called by the runtime rather than by this function, and it
       // writes as many of them as the body it was written out of does, so it
       // hands back exactly what it was given.
       for (const register of this.pinnedRegisters) this.code.push(register);
+      for (const [, held] of cached) this.code.push(held.register);
       const frameAt = this.code.subRegImmLater(RSP);
       // The three arguments, written into slots of the turn's own before the
       // copy, because the copy is what writes over the slots the caller's
@@ -4117,6 +4164,12 @@ class Machine {
       this.code.movRegReg(RDI, RSP);
       this.code.movRegImm(RCX, BigInt(outer));
       this.code.repMovsb();
+      // The copy is what an established register reads: the slot a name sits
+      // in is at the distance from the stack pointer the outer body laid it
+      // out at, and the copy put the caller's value there.
+      for (const [name, held] of established) {
+        this.code.movRegMemSized(held.register, frame(this.slot(name).offset), widthOf(this.slot(name).type), signedOf(this.slot(name).type));
+      }
       this.writeTurn(turn.loop);
       const bytes = this.frameBytes();
       if (bytes > 0) this.code.patchWord(frameAt, bytes);
@@ -4126,13 +4179,88 @@ class Machine {
       // they were pushed on, and a return. The vector registers are not read
       // back, because the slots they were spilled into belong to the frame the
       // turn copied and are gone with it.
-      this.code.epilogue(this.pinnedRegisters, [], bytes);
+      this.code.epilogue([...this.pinnedRegisters, ...[...cached.values()].map((one) => one.register)], [], bytes);
+      for (const [name, held] of cached) {
+        if (held.established) (this.slots.get(this.names.read(name)) as Held).register = null;
+        else this.pinned.delete(name);
+      }
       this.used = outer;
       this.spareSlots.length = spares;
       this.borrowed.length = borrowed;
       this.accumulator = accumulator;
     }
     this.turns.length = 0;
+  }
+
+  /**
+   * The names of the frame the turn reads, put in registers while it runs.
+   *
+   * A name the turn reads could not be given a register of this function's:
+   * the turn runs on a thread, where the registers the outer body set up are
+   * not the turn's. But the turn has registers of its own — it pushes them
+   * above the frame it copies and reads them back at the end — and the frame
+   * it reads is the copy, so a name hot enough to be worth one is established
+   * there once and read from the register after that. The names every turn of
+   * this function reads are the same names, so the answer holds for all of
+   * them.
+   *
+   * A name the turn writes is refused: its frame copy would go stale, and the
+   * writes of a turn are the writes the parallel mark accounted for — the
+   * buffers it fills and the names it declares — which the frame carries
+   * rather than a register.
+   */
+  private cacheTurnReads(loop: TeamedLoop): Map<string, { register: number; established: boolean }> {
+    const reads = new Map<string, number>();
+    for (const { block, depth } of everyBlockAtDepth(loop.body)) {
+      const weight = READ_WEIGHT[Math.min(depth, READ_WEIGHT.length - 1)];
+      for (const statement of block.statements) {
+        for (const value of statementValues(statement)) {
+          walkValues(value, (inner) => {
+            if (inner.k === "local") reads.set(inner.name, (reads.get(inner.name) ?? 0) + weight);
+          });
+        }
+        if (statement.k === "setElement") {
+          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
+        }
+      }
+    }
+    // A name the turn writes is read back out of the frame it was written to,
+    // and the register the outer body had it in is not that frame.
+    const written = this.loopWrites(loop);
+    const pool: number[] = [];
+    for (const register of CALLEE_SAVED) {
+      if (this.pinnedRegisters.includes(register)) continue;
+      if (this.spareIndexes.includes(register)) continue;
+      if (register === OBJECT_POINTER && this.objectRegister === register) continue;
+      pool.push(register);
+    }
+    const cached = new Map<string, { register: number; established: boolean }>();
+    // The counter the loop counts is the turn's own, and the turn binds it
+    // where the loop's own header is written: a pin under the name the IR
+    // counts by is what the bind reads, and the loop establishes it from its
+    // own first value, so nothing here reads for it. The loop writes its
+    // counter by definition, which is why this is asked before the writes
+    // below refuse one.
+    if (loop.kind === "counted" && reads.get(loop.variable) !== undefined) {
+      const register = pool.pop();
+      if (register !== undefined) {
+        this.pinned.set(loop.variable, register);
+        cached.set(loop.variable, { register, established: false });
+      }
+    }
+    const ordered = [...reads.entries()].sort((left, right) => right[1] - left[1]);
+    for (const [name, count] of ordered) {
+      if (count < 2) break;
+      if (written.has(name)) continue;
+      if (!this.turnNames.has(name)) continue;
+      if (pool.length === 0) break;
+      const register = pool.pop() as number;
+      const held = this.slots.get(this.names.read(name));
+      if (held === undefined || held.register !== null) continue;
+      held.register = register;
+      cached.set(name, { register, established: true });
+    }
+    return cached;
   }
 
   /**
@@ -4790,6 +4918,114 @@ class Machine {
     return null;
   }
 
+  /**
+   * A turn whose divisor is a weight the counter decides, written with that
+   * weight counted rather than computed.
+   *
+   * The divisor of a spectral norm's turn is a triangular number of the sum of
+   * the two indices: `((i + j) * (i + j + 1)) >>> 1 + i + 1`. As a function of
+   * one index with the other fixed, that is an arithmetic progression whose
+   * step is that sum plus one — so a turn divides by the weight the turn
+   * before it divided by, moved by one step, and the product, the shift and
+   * the conversions of the weight are one addition instead.
+   *
+   * The weight is maintained as a double, and the maintaining is exact where
+   * the weight is read: a double holds a whole number exactly up to two to the
+   * fifty-third, and the weight this keeps is the number the fast path
+   * computed so long as no truncation of it has happened — which the test in
+   * the condition accounts for. The value the select answers when the test
+   * does not hold is the one the slow path wrote, and the weight a turn the
+   * test failed under left behind is a value nothing reads.
+   */
+  private weighted(loop: Extract<SemanticLoop, { kind: "counted" }>): Extract<SemanticLoop, { kind: "counted" }> | null {
+    const type = loop.type;
+    if (type.kind !== "primitive" || type.name !== "i64") return null;
+    if (loop.down) return null;
+    if (loop.step !== null) {
+      const written = wholeLiteral(loop.step);
+      if (written === null || written !== 1) return null;
+    }
+    const from = wholeLiteral(loop.from);
+    if (from === null) return null;
+    if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
+    // The turn is one accumulation of a quotient; the declarations before it
+    // are computable where they stand, which is what lets the weight read them.
+    const statements = loop.body.statements;
+    const accumulation = statements.findIndex((statement) => statement.k === "set");
+    if (accumulation < 0 || accumulation !== statements.length - 1) return null;
+    for (const statement of statements) {
+      if (statement.k === "set") {
+        if (statement.op !== "+=") return null;
+        if (statement.name === loop.variable) return null;
+        continue;
+      }
+      if (statement.k !== "let" || statement.slot.mutable) return null;
+      if (!isSafeToCompute(statement.value)) return null;
+    }
+    const statement = statements[accumulation] as Extract<SemanticStatement, { k: "set" }>;
+    // The select appears once, and where it stands is where the weight goes.
+    const select = soleSelect(statement.value);
+    if (select === null) return null;
+    if (select.type.kind !== "primitive" || select.type.name !== "f64") return null;
+    // The arm that answers when the test holds is the whole-number weight,
+    // and the progression of it is what the step of the weight is.
+    const counted = triangularOf(select.then, loop.variable);
+    if (counted === null) return null;
+    // The weight is named once, held across the loop, and stepped after the
+    // turn has divided by it.
+    const weight = this.reserveSlot(NUMBER, "blaze_triangular", false);
+    const with_weight = replaceOnce(statement.value, select, {
+      k: "select",
+      type: select.type,
+      condition: {
+        k: "logical",
+        type: select.condition.type,
+        op: "and",
+        left: select.condition,
+        right: {
+          k: "compare",
+          type: TRUTH,
+          op: "le",
+          operand: UNSIGNED,
+          left: {
+            k: "arith",
+            type: UNSIGNED,
+            op: "add",
+            left: counted.slope,
+            right: { k: "const", type: UNSIGNED, text: "0" },
+          },
+          right: { k: "const", type: UNSIGNED, text: String(TRIANGULAR_REACH) },
+        },
+      },
+      then: { k: "local", type: NUMBER, name: weight.name },
+      otherwise: select.otherwise,
+    }) as SemanticValue;
+    const body: SemanticBlock = {
+      ...loop.body,
+      statements: [
+        ...statements.slice(0, accumulation),
+        { ...statement, value: with_weight },
+        {
+          k: "set",
+          name: weight.name,
+          op: "+=",
+          value: {
+            k: "arith",
+            type: NUMBER,
+            op: "add",
+            left: counted.slope,
+            right: { k: "const", type: NUMBER, text: String(1 + counted.offset) },
+          },
+          line: statement.line,
+        },
+      ],
+    };
+    // The first weight: the fast path at the loop's own first value.
+    this.at(counted.from, NUMBER);
+    this.store(weight);
+    return { ...loop, body };
+  }
+
   private counted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels): void {
     const type = loop.type;
     // A loop that adds up two arrays element by element is written a whole
@@ -4810,6 +5046,14 @@ class Machine {
     // accumulator and nothing else.
     const progression = this.progression(loop);
     if (progression !== null) loop = progression;
+    // A turn whose divisor is a weight the counter decides — the triangular
+    // number a spectral norm divides by — is a weight counted rather than
+    // computed: the weight a turn divides by is the one the turn before it
+    // divided by, moved by the step of the progression it is. The turn is then
+    // the division by a register and one addition, where it was a product, a
+    // shift and two conversions.
+    const weighted = this.weighted(loop);
+    if (weighted !== null) loop = weighted;
     // A loop whose turns are known before the first of them is written out as
     // the turns it is, each with the counter at the value that turn has.
     const plan = unrollPlan(loop);
@@ -5355,6 +5599,26 @@ class Machine {
       this.value(value.operand);
       this.truthOfAccumulator(value.operand.type);
       this.code.jcc((whenTrue ? !value.negate : value.negate) ? "e" : "ne", label);
+      return;
+    }
+    if (value.k === "logical" && (value.op === "and" || value.op === "or")) {
+      // A condition that is two conditions joined is asked arm by arm: the
+      // arm that settles the whole settles it, and the other arm is asked
+      // only where the whole is not settled yet. The branch is the question
+      // the operator answers, so the truth of neither arm is written down as
+      // a number first — a comparison's flags are read where they are, and a
+      // boolean value in a register is tested where it lies.
+      //
+      // This is the same order the value below asks in, so what a name read
+      // here is live across is what the census said it was.
+      const settled = this.code.label("Lsettled");
+      this.truthBranch(value.left, value.op === "or", settled);
+      this.truthBranch(value.right, whenTrue, label);
+      this.code.bind(settled);
+      // The arm that settled it left the whole at the value the operator
+      // answers with when an arm settles: false for `&&`, true for `||`.
+      // The label is reached when that value is the sense asked for.
+      if ((value.op === "or") === whenTrue) this.code.jcc(whenTrue ? "ne" : "e", label);
       return;
     }
     const underNot = value.k === "unary" && value.op === "not" ? flagComparison(value.operand) : null;
@@ -6430,8 +6694,18 @@ class Machine {
       // were saved by the prologue and read back by the epilogue on every call
       // without ever holding anything. What they were reserved for is what they
       // are given here.
-      const memory = this.holdSlot(type, commutative ? "blaze_left" : "blaze_right");
-      this.store(memory);
+      //
+      // The side was just evaluated, so where a register is free the parking
+      // is a move out of the accumulator and not a write through the frame —
+      // and the instruction that reads it back reads a register, which a store
+      // and a load of the same eight bytes never answered as quickly.
+      const memory = this.reserveSlot(type, commutative ? "blaze_left" : "blaze_right", true);
+      this.borrowed.push(memory);
+      if (memory.register !== null) {
+        this.code.movsMove(memory.register, XMM0, widthOf(type) === 4);
+      } else {
+        this.store(memory);
+      }
       this.at(commutative ? value.right : value.left, type);
       if (memory.register === null) {
         this.code.sseMem(value.op as "add" | "sub" | "mul" | "div", XMM0, frame(memory.offset), widthOf(type) === 4);

@@ -360,12 +360,20 @@ class ProgramEmitter {
   private buildCounter = 0;
   /** The names of mutable text locals stored in a shared cell (boxed). */
   private readonly boxedTexts: Set<string> = new Set();
+  /**
+   * The symbols of the bodies the emitter does not write down: they were
+   * lowered by the machine backend into objects the driver links beside
+   * itself, and what this file writes of them is the declaration a call
+   * needs.
+   */
+  private readonly loweredElsewhere: ReadonlySet<string>;
   /** The names the program declared, and the names a target reads them by. */
   private names!: NameScope;
 
-  constructor(program: SemanticProgram, target: ProgramTarget) {
+  constructor(program: SemanticProgram, target: ProgramTarget, loweredElsewhere: ReadonlySet<string> = new Set()) {
     this.program = program;
     this.target = target;
+    this.loweredElsewhere = loweredElsewhere;
     this.names = new NameScope((name) => target.escape(name));
   }
 
@@ -377,8 +385,12 @@ class ProgramEmitter {
     const prelude = this.target.prelude(this.program);
     // A function the program declares is a function of the program: it is
     // written above the body that runs, and the program calls it as it calls
-    // any other function.
-    const declared = this.program.bodies.map((fn) => this.function(fn));
+    // any other function — unless the machine backend lowered it into an
+    // object the driver links beside itself, in which case what stands here is
+    // the declaration the prelude wrote and nothing else.
+    const declared = this.program.bodies
+      .filter((fn) => !this.loweredElsewhere.has(fn.symbol))
+      .map((fn) => this.function(fn));
     const extra = (this.program.extraFunctions ?? []).map((extraFn) =>
       typeof extraFn.body === "string"
         ? extraFn.body.split("\\n")
@@ -1357,8 +1369,8 @@ class ProgramEmitter {
 }
 
 /** Emits the source of one program in the language a target speaks. */
-export function generateProgramSource(program: SemanticProgram, target: ProgramTarget): string {
-  return new ProgramEmitter(program, target).emit();
+export function generateProgramSource(program: SemanticProgram, target: ProgramTarget, loweredElsewhere: ReadonlySet<string> = new Set()): string {
+  return new ProgramEmitter(program, target, loweredElsewhere).emit();
 }
 
 export type { ProgramBinaryOp, ProgramUnaryOp };

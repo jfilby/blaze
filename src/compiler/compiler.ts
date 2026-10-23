@@ -45,12 +45,19 @@ import { normalizeOptimize, parseContract, type ParsedContract } from "./semanti
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName, vectorChecked, type ContractsByName } from "./semantics/calls.ts";
 import type { ProgramBody } from "./semantics/module.ts";
-import type { SemanticFunction, SemanticProgram } from "./core/semantic-ir.ts";
+import type {
+  SemanticBlock,
+  SemanticFunction,
+  SemanticProgram,
+  SemanticStatement,
+  SemanticType,
+} from "./core/semantic-ir.ts";
+import { slotType, statementBlocksOf, statementValues, walkValues } from "./core/semantic-ir.ts";
 import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramModule, type ModuleFunction } from "./toolchain/ir-wasm.ts";
-import { machineRefusal } from "./toolchain/ir-machine.ts";
+import { buildObject as buildMachineObject, machineRefusal } from "./toolchain/ir-machine.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
@@ -953,8 +960,7 @@ function machineRefusalOf(
   semantics: Readonly<Record<string, SemanticFunction>>,
   contracts: ContractsByName,
   target: TargetSpec,
-): { function: string; reason: string; detail: string | undefined } | null {
-  const callees = new Map(Object.entries(semantics));
+): { function: string; reason: string; detail: string | undefined } | null {  const callees = new Map(Object.entries(semantics));
   for (const unit of units) {
     const name = unit.contract.function.name;
     const fn = semantics[name];
@@ -968,6 +974,162 @@ function machineRefusalOf(
     if (refusal !== null) return { function: name, reason: refusal.reason, detail: refusal.detail };
   }
   return null;
+}
+
+/**
+ * What the machine backend lowers a program's declared functions into, and
+ * what the driver keeps.
+ *
+ * A program declares its functions in the body it runs: every one of them is a
+ * body of the program, and the machine backend lowers a body into an object
+ * the driver links beside itself. A body the backend refuses keeps the
+ * definition the driver writes — but only where the boundary lets it: a call
+ * between a machine object and a function the driver writes down has to hand
+ * every argument over as both conventions carry it, and one that hands a
+ * reference or a text over does not. The caller of such a boundary is lowered
+ * the same way the callee was, and the answer is read again until it stops
+ * moving: a body pushed back into C may push the one that calls it back with
+ * it.
+ */
+interface ProgramLowering {
+  /** The symbols lowered into machine objects. */
+  lowered: ReadonlySet<string>;
+  /**
+   * The symbols of the bodies the driver writes down, which a machine object
+   * calls. The driver writes them as functions the linker can see, because an
+   * object's reference to one has to resolve to the definition the driver
+   * carries.
+   */
+  visible: ReadonlySet<string>;
+  /** Why each body that stayed was left, which is what the build log says. */
+  notes: readonly string[];
+  /** The symbols an object of this program may name a call of. */
+  callable: ReadonlySet<string>;
+}
+
+/**
+ * Whether a value of the type a call hands over can cross between the two
+ * backends.
+ *
+ * The machine backend carries a number in a register where the C backend
+ * carries it in a number, and an array as the pointer both already carry, so
+ * those cross whole. A reference is the address itself in one and the double
+ * the address converts to in the other, and a text is a block of the runtime's
+ * own in one and a C string in the other: neither is the same value on the two
+ * sides of the boundary, so neither crosses.
+ */
+function crossesBackends(type: SemanticType): boolean {
+  return (
+    type.kind === "primitive" ||
+    type.kind === "ptr" ||
+    type.kind === "slice" ||
+    type.kind === "array" ||
+    type.kind === "void"
+  );
+}
+
+/**
+ * The machine lowering of a program's declared functions.
+ *
+ * The IR asked about is the IR the program was resolved into, which is the one
+ * the objects are written from — there is no candidate of a body the program
+ * declares, so there is nothing to fold here that a later lowering would not
+ * see.
+ */
+export function programLoweringOf(
+  driver: SemanticProgram,
+  covered: ReadonlySet<string>,
+  target: TargetSpec,
+): ProgramLowering {
+  const callable = new Set<string>([
+    ...driver.bodies.map((body) => body.symbol),
+    ...driver.functions.map((signature) => signature.symbol),
+  ]);
+  // A body a contracted function covers is compiled as that function's own
+  // object, so the backend was asked about it already.
+  const lowered = new Set<string>(
+    driver.bodies.filter((body) => !covered.has(body.name)).map((body) => body.symbol),
+  );
+  const notes: string[] = [];
+  for (const body of driver.bodies) {
+    if (!lowered.has(body.symbol)) continue;
+    const refusal = machineRefusal({ fn: body, callable, target });
+    if (refusal !== null) {
+      lowered.delete(body.symbol);
+      notes.push(
+        `the machine backend refused to lower ${body.name} (${refusal.reason}); the driver keeps its C`,
+      );
+      if (refusal.detail !== undefined && refusal.detail.trim() !== "") notes.push(refusal.detail.trim());
+    }
+  }  // A call between one side and the other is the boundary, and it decides both
+  // sides together: every body that calls across an incompatible edge is
+  // lowered by the same backend as the callee is.
+  let moved = true;
+  while (moved) {
+    moved = false;
+    for (const edge of callsWithin(driver)) {
+      if (lowered.has(edge.caller) === lowered.has(edge.callee)) continue;
+      const callee = driver.bodies.find((body) => body.symbol === edge.callee);
+      if (callee === undefined) continue;
+      const incompatible = !crossesBackends(callee.returns) || callee.params.some((param) => !crossesBackends(slotType(param)));
+      if (!incompatible) continue;
+      const dropped = lowered.has(edge.caller) ? edge.caller : edge.callee;
+      if (lowered.delete(dropped)) {
+        moved = true;
+        const kept = dropped === edge.caller ? edge.caller : edge.callee;
+        notes.push(
+          `the machine backend left ${kept} in the driver: a call it shares with ${dropped === kept ? edge.caller : edge.callee} hands over what only one convention carries`,
+        );
+      }
+    }
+  }
+  // A body the driver writes down that an object calls is written as a
+  // function the linker can see, so the object's reference resolves to it.
+  const visible = new Set<string>(
+    callsWithin(driver)
+      .filter((edge) => lowered.has(edge.caller) && !lowered.has(edge.callee))
+      .map((edge) => edge.callee),
+  );
+  return { lowered, visible, notes, callable };
+}
+
+/**
+ * Every call one function of a program makes of another, with the name of the
+ * function that makes it: the edges of a boundary the two backends share.
+ */
+function callsWithin(program: SemanticProgram): { caller: string; callee: string }[] {
+  const edges: { caller: string; callee: string }[] = [];
+  for (const body of program.bodies) {
+    for (const callee of directCalleesOf(body.entry)) edges.push({ caller: body.symbol, callee });
+  }
+  for (const callee of directCalleesOf(program.entry)) edges.push({ caller: "", callee });
+  return edges;
+}
+
+/** Every function name a body or the program's own statements call directly. */
+function directCalleesOf(block: SemanticBlock): string[] {
+  const names: string[] = [];
+  for (const statement of everyStatementOf(block)) {
+    for (const value of statementValues(statement)) {
+      walkValues(value, (inner) => {
+        if (inner.k === "call") names.push(inner.call.callee);
+      });
+    }
+    if (statement.k === "call") names.push(statement.call.callee);
+  }
+  return [...new Set(names)];
+}
+
+function everyStatementOf(block: SemanticBlock): SemanticStatement[] {
+  const statements: SemanticStatement[] = [];
+  const visit = (into: SemanticBlock): void => {
+    for (const statement of into.statements) {
+      statements.push(statement);
+      for (const inner of statementBlocksOf(statement)) visit(inner);
+    }
+  };
+  visit(block);
+  return statements;
 }
 
 /**
@@ -1345,6 +1507,26 @@ export async function runBuild(
         ? `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(program.entry.function)} in ${program.entry.file}`
         : `Program contract: ${program.files.length} file(s), ${units.length} compiled function(s), program ${program.entry.file}`,
     );
+    // The program's own statements are held to the same deterministic rewrites
+    // a function's are: a top-level loop of a program is a loop like any other,
+    // and what it computes on every turn is computed once above it. This is
+    // settled before the machine backend is asked about the program, because
+    // the question is about the IR that was resolved, and the IR that was
+    // resolved is what the optimizer wrote.
+    // Resolving a program and writing out the source the toolchain runs are
+    // the same for every round: only the objects it links change.
+    const driver =
+      phase.body === undefined
+        ? undefined
+        : optimizeSemanticProgram(
+            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys),
+          );
+    // The IR is checked here, before a toolchain is asked for anything: a
+    // program no backend may lower never reaches gcc, nim or a linker.
+    if (driver !== undefined) {
+      validateSemanticProgram(driver, undefined, new Map(driver.bodies.map((fn) => [fn.name, fn])));
+      reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
+    }
     // The machine backend is asked whether it can lower this program before
     // anything is generated. The lowering of a program is one thing: the
     // objects of its functions are linked into one binary and the driver that
@@ -1353,6 +1535,7 @@ export async function runBuild(
     // backend refuses is therefore lowered by the C backend, and the build says
     // so rather than leaving a reader to wonder why the objects are not the
     // ones the project asked for.
+    let bodyLowering: ProgramLowering | undefined;
     if (backendKind === "machine") {
       const refusal = machineRefusalOf(units, semantics, contractsByName(program.files), target);
       if (refusal !== null) {
@@ -1367,6 +1550,14 @@ export async function runBuild(
         backendKind = "c";
         build.backend = "c";
         build.backendFallback = { function: refusal.function, reason: refusal.reason };
+      } else if (driver !== undefined) {
+        // Every function the program declares for itself is lowered the same
+        // way the functions a candidate implements are: into an object the
+        // driver links beside itself. What the backend refused stays in the
+        // driver, and so does everything whose call to it would hand over
+        // what only one convention carries.
+        bodyLowering = programLoweringOf(driver, new Set(units.map((unit) => unit.contract.function.name)), target);
+        for (const note of bodyLowering.notes) reporter.stage("assemble", "info", note);
       }
     }
     await writeBuildRecord(store, paths, build);
@@ -1808,23 +1999,6 @@ export async function runBuild(
     let checked: ProgramVerification | undefined;
     let mismatch: ProgramMismatch | undefined;
     let selected: Record<string, string> = {};
-    // Resolving a program and writing out the source the toolchain runs are
-    // the same for every round: only the objects it links change.
-    // The program's own statements are held to the same deterministic rewrites
-    // a function's are: a top-level loop of a program is a loop like any other,
-    // and what it computes on every turn is computed once above it.
-    const driver =
-      phase.body === undefined
-        ? undefined
-        : optimizeSemanticProgram(
-            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys),
-          );
-    // The IR is checked here, before a toolchain is asked for anything: a
-    // program no backend may lower never reaches gcc, nim or a linker.
-    if (driver !== undefined) {
-      validateSemanticProgram(driver, undefined, new Map(driver.bodies.map((fn) => [fn.name, fn])));
-      reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
-    }
     const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body, input.language);
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
@@ -1856,6 +2030,26 @@ export async function runBuild(
       // pthreads beside it. A program can want both, and asks for neither when
       // nothing of it was written as a team of threads.
       const threads: Threading[] = [];
+      // Every function the program declares for itself that no candidate
+      // covered is an object of its own, written by the machine backend
+      // beside the ones the candidates were written into. What the backend
+      // left in the driver stays there: the driver writes its definition,
+      // and an object that calls it calls a function the linker can see.
+      const loweredBodies = new Set<string>();
+      if (backendKind === "machine" && bodyLowering !== undefined) {
+        for (const body of driver.bodies) {
+          if (!bodyLowering.lowered.has(body.symbol)) continue;
+          const result = await buildMachineObject({
+            fn: body,
+            target,
+            callable: bodyLowering.callable,
+            objectPath: join(base, `${body.symbol}.o`),
+          });
+          objectPaths.push(result.objectPath);
+          loweredBodies.add(body.symbol);
+          if (result.threads && !threads.includes("pthread")) threads.push("pthread");
+        }
+      }
       if (programIsParallel(driver.entry, driver.bodies)) threads.push("openmp");
       for (const entry of unitsGenerated()) {
         const selected = entry.result.selected;
@@ -1885,6 +2079,7 @@ export async function runBuild(
                 program: driver,
                 workDirectory: base,
                 objectPaths,
+                loweredBodies: [...loweredBodies],
                 ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
                 includeHttpHeader: runtimeKind === "facil",
                 lowering: backendKind,

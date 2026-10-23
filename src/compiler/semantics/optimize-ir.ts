@@ -2717,13 +2717,25 @@ export function optimizeSemanticProgram(
   // body the next one reads. A map built once over `program.bodies` would
   // answer about the tree as it was before this pass touched it.
   const bodies = new Map(program.bodies.map((fn) => [fn.name, fn]));
+  // The whole-number arm of a body is built before the calls are written out,
+  // because the arm is what a fusion wants to copy: a call written out of a
+  // body that has no callers left would be answered by the arm-less body, and
+  // the whole-number path the arm carries would be gone with the call. The arm
+  // of a body this has already rewritten is refused on its own — its entry
+  // holds the arm's own test — so the second read below adds nothing twice.
+  wholeNumberArithmetic(program);
   for (let index = 0; index < program.bodies.length; index += 1) {
     const fn = program.bodies[index] as SemanticFunction;
     optimizeSemanticEntry(fn.entry, bodies, fn.params);
     // The same call-boundary rewrite a single function gets, run here over a
-    // body the program declares. Whole-number arithmetic runs after this, so
-    // a body it has fused is one the whole-number pass reads.
-    const restructured = restructureHotFunction(fn, bodies);
+    // body the program declares. A body of the program has no outline to mark
+    // its calls with, so this one decides: a hot call of a callee that is free
+    // of effects and reaches neither itself nor this body is written out. A
+    // callee whose body is more than a call is worth is still refused, so the
+    // functions a body calls one after another stay calls.
+    // Whole-number arithmetic runs after this, so a body it has fused is one
+    // the whole-number pass reads.
+    const restructured = restructureHotFunction(fn, bodies, { decideUnmarked: true });
     if ("refused" in restructured) continue;
     program.bodies[index] = restructured.applied;
     bodies.set(fn.name, restructured.applied);

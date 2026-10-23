@@ -39,6 +39,7 @@ import { semanticFunctionProblems, validateSemanticProgram } from "./semantics/i
 import { inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
+import { programLoweringOf } from "./compiler.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
 import { buildFacilRuntime } from "./runtime/facil.ts";
 import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
@@ -47,6 +48,7 @@ import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { symbolOf } from "./semantics/contract.ts";
 import { powerOfTwoParams } from "./semantics/power-of-two.ts";
 import type { TargetSpec } from "./core/types.ts";
+import type { Threading } from "./core/target.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
 
 
@@ -72,6 +74,8 @@ interface ProjectFile {
   language: string;
   target?: Partial<TargetSpec>;
   sourceFile: string;
+  output?: "machine" | "wasm" | "c" | "ir" | "asm";
+  backend?: "c" | "wasm" | "machine";
   runtime?: "none" | "facil" | "nim";
 }
 
@@ -119,8 +123,11 @@ async function main(): Promise<void> {
   // The program, resolved and folded exactly as a build folds the driver.
   const program = optimizeSemanticProgram(resolvedProgram, inlinable.functions);
   // The validator refuses rather than answers, so a program that is not one a
-  // backend may lower stops here with the reason it gave.
-  validateSemanticProgram(program, phase.program, inlinable.functions);
+  // backend may lower stops here with the reason it gave. The callees are the
+  // program's own bodies, the same map a build hands the validator: a loop
+  // marked parallel is proved against the bodies the program holds, which are
+  // the ones the backends lower.
+  validateSemanticProgram(program, phase.program, new Map(program.bodies.map((fn) => [fn.name, fn])));
   await writeFile(join(work, "ir.program.txt"), `${printSemanticProgram(program)}\n`, "utf8");
 
   // The symbol of a function is the one its own contract names, which the
@@ -161,6 +168,32 @@ async function main(): Promise<void> {
   }
   console.log(`  ${objectPaths.length} object(s), ${textBytes} bytes of code`);
 
+  // Every function the program declares that no contract covers is an object
+  // of its own, the way a build lowers it: what the machine backend refused
+  // stays in the driver, and so does everything whose call to it would hand
+  // over what only one convention carries.
+  const machine = (project.backend ?? (project.output === "machine" ? "machine" : "c")) === "machine";
+  const covered = new Set(resolvedByName.keys());
+  const bodyLowering = machine ? programLoweringOf(program, covered, target) : undefined;
+  if (bodyLowering !== undefined) {
+    for (const note of bodyLowering.notes) console.log(`  ${note}`);
+  }
+  const threads: Threading[] = programIsParallel(program.entry, program.bodies) ? ["openmp"] : [];
+  for (const body of program.bodies) {
+    if (bodyLowering === undefined || !bodyLowering.lowered.has(body.symbol)) continue;
+    const result = await buildMachineObject({
+      fn: body,
+      target,
+      callable: bodyLowering.callable,
+      powerOfTwoParams: powerOfTwo.params.get(body.name),
+      objectPath: join(work, `${body.symbol}.o`),
+    });
+    objectPaths.push(join(work, `${body.symbol}.o`));
+    textBytes += result.textSizeBytes;
+    if (result.threads && !threads.includes("pthread")) threads.push("pthread");
+  }
+  console.log(`  ${objectPaths.length} object(s), ${textBytes} bytes of code`);
+
   // A program that asks for the HTTP runtime links the facil.io adapter beside
   // it, the same way a build does: the source names `http`, so the driver
   // writes the `blaze_http_*` calls the adapter answers. The runtime is built
@@ -186,9 +219,11 @@ async function main(): Promise<void> {
     runtimeObjectPath: runtime.objectPath,
     includeHttpHeader: isHttp,
     includeSqliteHeader: isSqlite,
+    ...(machine ? { lowering: "machine" as const } : {}),
+    loweredBodies: (bodyLowering === undefined ? [] : program.bodies.filter((body) => bodyLowering.lowered.has(body.symbol)).map((body) => body.symbol)),
     tls: http.tls,
     libraryObjectPaths: library === undefined ? [] : [library.objectPath],
-    threads: programIsParallel(program.entry, program.bodies) ? ["openmp"] : [],
+    threads,
     outputPath,
   });
   console.log(`  ${outputPath}`);

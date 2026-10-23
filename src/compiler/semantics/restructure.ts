@@ -54,7 +54,7 @@
 
 import type { SemanticBlock, SemanticFunction, SemanticLoop, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
-import { inlineCall } from "./repair.ts";
+import { inlineCall, isSafeToCompute, substituteLocals } from "./repair.ts";
 
 /* -------------------------------------------------------------------------- */
 /* The estimate                                                                */
@@ -267,6 +267,19 @@ export interface RestructureOptions {
   readonly maxCalleeCost?: number;
   /** A profile of the caller, when the build has one. */
   readonly profile?: FunctionProfile;
+  /**
+   * A call the outline never marked may be fused where the conditions the
+   * outline answers hold: the callee is free of effects and reaches neither
+   * itself nor the caller.
+   *
+   * A program's declared functions are bodies with no contracts beside them,
+   * and nothing marked their calls: every edge stands as a call because
+   * nothing decided otherwise. This is what lets the pass decide — the same
+   * three conditions the outline weighs, and the cost guards below — so a hot
+   * call in a body of the program is written out where a contracted one
+   * marked for it would have been.
+   */
+  readonly decideUnmarked?: boolean;
 }
 
 /** The default growth and cost a fusion is held to. */
@@ -439,8 +452,22 @@ function fusionOpportunity(
     const callee = callees.get(edge.callee);
     // The program writes a callee out only when it is unverified, effect-free
     // and non-recursive; that is the shape this asks about, and it is a
-    // decision the outline already made.
-    if (edge.strategy !== "inline" || callee === undefined) continue;
+    // decision the outline already made. A body of the program has no outline
+    // to decide for it, so where the option says so, the pass decides: the
+    // callee is free of effects and reaches neither itself nor the caller,
+    // which is the shape the outline would have marked. A call this pass
+    // decides about on its own is a call in a body whose shape nothing else
+    // described, so the copy it may bring is weighed against the turns the
+    // site runs rather than against the call alone.
+    const decided = edge.strategy !== "inline" && options.decideUnmarked === true;
+    const calleeStatements = decided ? maxCalleeStatements * 2 : maxCalleeStatements;
+    const calleeCost = decided ? maxCalleeCost * 2 : maxCalleeCost;
+    if (callee === undefined) continue;
+    if (edge.strategy !== "inline") {
+      if (decided !== true) continue;
+      if (callee.allocates || callee.prints || callee.readsArgv) continue;
+      if (callee.returns.kind === "ref" || callee.returns.kind === "text") continue;
+    }
     if (reaches(callee, callees, callee.name)) return `${callee.name} reaches itself`;
     if (reaches(callee, callees, fn.name)) return `${callee.name} reaches ${fn.name}, which is the function it would be written into`;
     const sites = callSites(fn, edge.callee);
@@ -456,12 +483,12 @@ function fusionOpportunity(
       return `${callee.name} calls something ${fn.name} may not name, and writing it out would put that call here`;
     }
     const body = estimateFunction(callee, callees);
-    if (body.statements > maxCalleeStatements) {
-      return `${callee.name} is ${body.statements} statements, and a fusion may copy at most ${maxCalleeStatements}`;
+    if (body.statements > calleeStatements) {
+      return `${callee.name} is ${body.statements} statements, and a fusion may copy at most ${calleeStatements}`;
     }
     // The one thing a fusion removes is the call. A body that costs more than
     // the call is worth is code the call was buying for nothing.
-    if (body.cost > maxCalleeCost) {
+    if (body.cost > calleeCost) {
       return `${callee.name} costs ${body.cost}, and removing one call is worth ${CALL_COST}`;
     }
     if (countStatements(fn.entry) + body.statements > maxCallerStatements) {
@@ -493,6 +520,12 @@ function fuse(fn: SemanticFunction, fusion: Fusion): SemanticFunction | string {
   const context = new Map<string, SemanticFunction>();
   const clone = structuredClone(fusion.callee);
   clone.calls = [];
+  // A body whose early returns would return from the caller is not one a
+  // splice can hold — unless the guard and the value it guards are one value
+  // of their own. A body that is a guarded return over declarations and a
+  // return is written as the select it means: the arms are chosen values, the
+  // condition is asked once, and the splice lands whole.
+  selectify(clone);
   context.set(fusion.calleeName, clone);
   const outcome = inlineCall(fn, fusion.site.block, fusion.calleeName, { functions: context });
   if (!("applied" in outcome)) return outcome.refused;
@@ -528,4 +561,78 @@ export function restructureHotFunction(
   const times = fusion.site.executions;
   const note = `fused ${fusion.calleeName} into ${fusion.site.block} in ${fn.name}, which runs ${times === 1 ? "once" : `${times} times`}`;
   return { applied, note };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The body a splice can hold                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Writes a guarded return as the select it means, in place.
+ *
+ * A body that asks a question, answers it with a return from the arm and goes
+ * on to a return of its own is the shape `a(i, j)` is written in — and the
+ * shape a splice cannot hold, because an arm's return would return from the
+ * function the body was put into. Written as a select it is the same program:
+ * the condition is asked once, only the arm that answers is computed, and the
+ * body ends in the one return the splice reads.
+ *
+ * The arm values and everything between the guard and the return have to be
+ * computable where they stand and nothing more: a value that reads memory or
+ * divides by a number nobody wrote out is left as it was, and so is a body
+ * whose shape this is not. What is substituted is the declarations between the
+ * guard and the return, in the order they were written, so a declaration a
+ * later one reads is already a value when the return is read.
+ */
+function selectify(fn: SemanticFunction): void {
+  const entry = fn.entry;
+  if (entry.terminator.k !== "return" || entry.terminator.value === null) return;
+  const answer0 = entry.terminator.value;
+  if (answer0.k === "call" || !isSafeToCompute(answer0)) return;
+  const statements = entry.statements;
+  let guard = -1;
+  for (const [at, statement] of statements.entries()) {
+    if (
+      statement.k === "if" &&
+      statement.otherwise === null &&
+      statement.then.terminator.k === "return" &&
+      statement.then.terminator.value !== null
+    ) {
+      guard = at;
+    }
+  }
+  if (guard < 0) return;
+  const choice = statements[guard] as Extract<SemanticStatement, { k: "if" }>;
+  const answered = choice.then.terminator as { k: "return"; value: SemanticValue };
+  if (answered.value === null || !isSafeToCompute(answered.value)) return;
+  // Everything between the guard and the return is a declaration the return
+  // reads, and the declarations stand in one scope of their own: what the
+  // return reads of them is the value they were written with, which is what
+  // the substitution puts in.
+  const between = statements.slice(guard + 1);
+  const bindings = new Map<string, SemanticValue>();
+  for (const statement of between) {
+    if (statement.k !== "let" || statement.slot.mutable) return;
+    if (!isSafeToCompute(statement.value)) return;
+    for (const value of statementValues(statement)) {
+      walkValues(value, (inner) => {
+        if (inner.k === "call") return;
+      });
+    }
+    bindings.set(statement.slot.name, substituteLocals(structuredClone(statement.value), bindings));
+  }
+  const answer = substituteLocals(structuredClone(answer0), bindings);
+  // The guard reads nothing the declarations bound — they are written after
+  // it — and the arms are read once each, where the body read them once each.
+  entry.statements = statements.slice(0, guard);
+  entry.terminator = {
+    k: "return",
+    value: {
+      k: "select",
+      type: answer0.type,
+      condition: structuredClone(choice.condition),
+      then: answered.value,
+      otherwise: answer,
+    },
+  };
 }

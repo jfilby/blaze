@@ -12,7 +12,8 @@
  */
 
 import { writeFile } from "node:fs/promises";
-import { parseType, typeToString } from "../semantics/contract.ts";
+import { contractText, parseType, typeToString } from "../semantics/contract.ts";
+import { slotType } from "../core/semantic-ir.ts";
 import { rulesFor, type TextStyle } from "../semantics/language.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
@@ -380,6 +381,13 @@ class CDriver implements ProgramTarget {
    * call a function `send`, and the C library has one of that name.
    */
   private own = new Set<string>();
+  /**
+   * The symbols of the functions the program declares for itself that this file
+   * does not write down: they were lowered by the machine backend into objects
+   * the driver links beside itself, so what this file writes of them is the
+   * declaration the linker needs and nothing else.
+   */
+  private loweredElsewhere: ReadonlySet<string>;
   /** The style a value is written as text in, which is the language's. */
   private readonly style: TextStyle;
 
@@ -388,10 +396,12 @@ class CDriver implements ProgramTarget {
     lowering: BackendKind = "c",
     includeSqliteHeader: boolean = false,
     style: TextStyle = "javascript",
+    loweredElsewhere: ReadonlySet<string> = new Set(),
   ) {
     this.includeHttpHeader = includeHttpHeader;
     this.lowering = lowering;
     this.includeSqliteHeader = includeSqliteHeader;
+    this.loweredElsewhere = loweredElsewhere;
     this.style = style;
   }
   prelude(program: SemanticProgram): string {
@@ -404,12 +414,27 @@ class CDriver implements ProgramTarget {
       .filter((signature) => !this.own.has(signature.symbol))
       .map((signature) => this.declaration(signature))
       .join("\n");
+    // A body the machine backend lowered is linked beside this file, so what
+    // the driver holds of it is the declaration a call needs: the lowering
+    // that wrote the object took its signature from the IR, and the call the
+    // driver makes is the one the convention answers.
+    const lowered = program.bodies
+      .filter((body) => this.loweredElsewhere.has(body.symbol))
+      .map((body) =>
+        this.declaration({
+          name: body.name,
+          symbol: body.symbol,
+          params: body.params.map((param) => ({ name: param.name, type: contractText(slotType(param)) })),
+          returns: contractText(body.returns),
+        }),
+      )
+      .join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
     const sqliteHeader = this.includeSqliteHeader ? '#include "blaze_sqlite.h"\n' : "";
     const bridges = this.bridges(program);
     return `${DRIVER_PRELUDE}
-${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`}${declarations}${bridges === "" ? "" : `\n${bridges}`}`;
+${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`}${declarations}${lowered === "" ? "" : `\n${lowered}`}${bridges === "" ? "" : `\n${bridges}`}`;
   }
 
   /**
@@ -1753,10 +1778,12 @@ export function generateProgramDriver(
   includeHttpHeader: boolean = false,
   lowering: BackendKind = "c",
   includeSqliteHeader: boolean = false,
+  loweredElsewhere: ReadonlySet<string> = new Set(),
 ): string {
   return generateProgramSource(
     program,
-    new CDriver(includeHttpHeader, lowering, includeSqliteHeader, rulesFor(program.language).style),
+    new CDriver(includeHttpHeader, lowering, includeSqliteHeader, rulesFor(program.language).style, loweredElsewhere),
+    loweredElsewhere,
   );
 }
 
@@ -1799,6 +1826,13 @@ export interface ProgramDriverRequest {
    * registered, and how a reference is carried is what the backend decides.
    */
   lowering?: BackendKind;
+  /**
+   * The symbols of the functions the program declares for itself that the
+   * machine backend lowered into objects the driver links beside itself. The
+   * driver declares them and calls them; it writes no definition of them,
+   * because the one the object carries is the one the program runs.
+   */
+  loweredBodies?: readonly string[];
   /** True when the program uses SQLite, so the driver includes its header. */
   includeSqliteHeader?: boolean;
   /**
@@ -1819,6 +1853,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
       request.includeHttpHeader ?? false,
       request.lowering ?? "c",
       request.includeSqliteHeader ?? false,
+      new Set(request.loweredBodies ?? []),
     ),
     "utf8",
   );
