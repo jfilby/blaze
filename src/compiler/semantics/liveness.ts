@@ -305,9 +305,16 @@ class Graph {
           node = this.make(events);
           break;
         case "fill":
-          throw new Error(
-            `liveness does not model a fill of ${statement.buffer}: a function allocates no array, so it fills none`,
-          );
+          // `a.fill(x)` is the same write a `setElement` is, of every element
+          // at once: the value is read once for the whole walk and the array
+          // is read as the place the elements are written into, so nothing
+          // here is a definition. The index is a counter the backend binds
+          // for itself, which no use of the body reads and no use of it
+          // crosses.
+          this.value(events, statement.value);
+          events.push({ k: "read", name: statement.buffer });
+          node = this.make(events);
+          break;
         default: {
           // A statement kind this walk does not model would leave a name live
           // where it is not, and the register it is put in would be one the

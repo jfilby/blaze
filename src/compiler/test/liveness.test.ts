@@ -233,3 +233,21 @@ test("a name the left of a minimum names is read before the right one is", () =>
   );
   assert.equal(facts.get("v")?.acrossCall, false, "the value is read before the call on the other side");
 });
+test("a fill reads the array it writes into and is no definition of it", () => {
+  // `a.fill(f(v))` writes every element of the array as one value: the value
+  // the walk writes is read once, the array is read as the place the elements
+  // go into, and the pointer keeps what it held — so a name another statement
+  // reads of the array afterwards is not a register the fill took, and the
+  // value's call is one the walk is inside.
+  const fill: SemanticStatement = {
+    k: "fill",
+    buffer: "a",
+    index: "blaze_fill_i",
+    value: callOf(local("v")),
+    type: F64,
+    line: 1,
+  };
+  const facts = nameLiveness(block([fill], local("v")));
+  assert.ok(facts.get("a") !== undefined, "the array is read for the walk");
+  assert.equal(facts.get("v")?.acrossCall, true, "the value is read where the call is, before the walk runs");
+});

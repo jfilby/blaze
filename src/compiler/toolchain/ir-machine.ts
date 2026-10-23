@@ -23,7 +23,7 @@ import { run } from "../core/process.ts";
 import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
 import type { Condition } from "./x86.ts";
 import { integerLiteral } from "./c-names.ts";
-import { ARGV_LENGTH, BUILTINS } from "../semantics/builtins.ts";
+import { ARGV_LENGTH, BUILTINS, SHARED } from "../semantics/builtins.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import {
   elementTypeOf,
@@ -58,6 +58,7 @@ import {
 } from "../core/semantic-ir.ts";
 import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
 import { nameLiveness, overlaps } from "../semantics/liveness.ts";
+import { isSafeToCompute, substituteLocals, valueKey } from "../semantics/repair.ts";
 import { turnIsTooCheap } from "../semantics/parallel.ts";
 import { describeObject, writeObject, type DataLabel } from "./elf64.ts";
 import { NameScope } from "./names.ts";
@@ -131,6 +132,25 @@ const U64: SemanticType = { kind: "primitive", name: "u64" };
 const TEXT = { kind: "text" } as const;
 const POINTER: SemanticType = { kind: "primitive", name: "usize" };
 const VOID_TYPE: SemanticType = { kind: "void" };
+/** The truth a condition and a comparison are written as. */
+const TRUTH: SemanticType = { kind: "primitive", name: "bool" };
+/**
+ * The whole number the weight the counter decides is read as, which is the
+ * whole number the source's own unsigned shift reads: `>>>` reads both of its
+ * sides as the narrow unsigned number the language reads them as, so the
+ * arithmetic the weight is counted in and the test that guards its exactness
+ * are a comparison of these.
+ */
+const UNSIGNED: SemanticType = { kind: "primitive", name: "u32" };
+/**
+ * The largest sum a fast weight is triangular over. The weight the shift
+ * computes is exact while the product `s * (s + 1)` fits the unsigned number
+ * the shift reads it as: `>>>` answers `s * (s + 1)` read as a u32, and the
+ * last sum whose product is one less than a full 232 sequence is 65534, whose
+ * product is 4294901760. One further, and the product wraps and the weight the
+ * fast arm answers is whatever wrapped into it.
+ */
+const TRIANGULAR_REACH = 65_534;
 /** A reference the source left unshaped: a pointer to whatever it points at. */
 const ANY_TYPE: SemanticType = { kind: "ref", of: null };
 
@@ -1421,6 +1441,214 @@ function wholeLiteral(value: SemanticValue): number | null {
 }
 
 /**
+ * The select a value is written as one of, or null where it is none or not
+ * alone. The select appears once, and where it stands is where the weight
+ * goes: a value with two of them is one whose fast arm this pass cannot put a
+ * weight under without either of the other's arms disagreeing about it.
+ */
+function soleSelect(value: SemanticValue): Extract<SemanticValue, { k: "select" }> | null {
+  let found: Extract<SemanticValue, { k: "select" }> | null = null;
+  let again = false;
+  walkValues(value, (inner) => {
+    if (inner.k !== "select") return;
+    again = again || found !== null;
+    found ??= inner;
+  });
+  return found === null || again ? null : found;
+}
+
+/**
+ * The two sides of a sum laid end to end, in the order the sum computes them.
+ * An arm that is one sum of weights and one compensation is a sum of the
+ * pieces this walks: the kernel stands among plain addends, so what the turn
+ * adds past the weight is what is left when the kernel is taken out.
+ */
+function addendsOf(value: SemanticValue, into: SemanticValue[]): void {
+  if (value.k !== "arith" || value.op !== "add") {
+    into.push(value);
+    return;
+  }
+  addendsOf(value.left, into);
+  addendsOf(value.right, into);
+}
+
+/** Whether two values are written as one: the same shape with the same leaves. */
+function sameValue(left: SemanticValue, right: SemanticValue): boolean {
+  return valueKey(left) === valueKey(right);
+}
+
+/** Whether a value of the IR is what a tree's node is, in the shape of one. */
+function isValueNode(node: unknown): node is SemanticValue {
+  return node !== null && typeof node === "object" && typeof (node as { k?: unknown }).k === "string";
+}
+
+/**
+ * The one occurrence of a value in a tree, written as another: the match is
+ * the tree's own value, and everything around it is kept as it was. A tree the
+ * match stands in twice is one this refuses by the count it counted — the
+ * caller asked for the one, and two of them is a shape the rewrite is not the
+ * rewrite of.
+ */
+function replaceOnce<T>(node: T, match: SemanticValue, replacement: SemanticValue): T {
+  const found = valueKey(match);
+  let replaced = false;
+  let again = false;
+  const walk = (node: unknown): unknown => {
+    if (isValueNode(node) && valueKey(node) === found) {
+      if (replaced) again = true;
+      replaced = true;
+      return structuredClone(replacement);
+    }
+    if (Array.isArray(node)) return node.map(walk);
+    if (node !== null && typeof node === "object") {
+      return Object.fromEntries(
+        Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, walk(entry)]),
+      );
+    }
+    return node;
+  };
+  const written = walk(node);
+  if (!replaced || again) throw machineError("a value a rewrite asks for once is not in it, or is in it twice");
+  return written as T;
+}
+
+/**
+ * The sum a triangular kernel is built over, or null where the addend is not
+ * one. The kernel is the product the source wrote the triangular number of:
+ * one side is the sum and the other that sum plus one, so `((i + j) * (i + j +
+ * 1)) >>> 1` has the pair of it.
+ */
+function sumOfKernel(kernel: SemanticValue): SemanticValue | null {
+  if (kernel.k !== "arith") return null;
+  const product = kernel.op === "ushr" ? kernel.left : null;
+  if (product === null || product.k !== "arith" || product.op !== "mul") return null;
+  if (kernel.right.k !== "const" || wholeLiteral(kernel.right) !== 1) return null;
+  const sum = oneAbove(product.left, product.right) ?? oneAbove(product.right, product.left);
+  return sum;
+}
+
+/** The value of the pair, where one of the two sides is the other plus one. */
+function oneAbove(value: SemanticValue, other: SemanticValue): SemanticValue | null {
+  if (other.k !== "arith" || other.op !== "add") return null;
+  if (other.right.k === "const" && wholeLiteral(other.right) === 1 && sameValue(other.left, value)) return value;
+  if (other.left.k === "const" && wholeLiteral(other.left) === 1 && sameValue(other.right, value)) return value;
+  return null;
+}
+
+/**
+ * How much a value moves by per turn of a counter, or null where the turns say
+ * nothing about it.
+ */
+function growthOf(
+  value: SemanticValue,
+  counter: string,
+  writes: (name: string) => boolean,
+): number | null {
+  switch (value.k) {
+    case "const": {
+      return wholeLiteral(value) === null ? null : 0;
+    }
+    case "local":
+      // A name the loop writes is not a number the turns keep: it is whatever
+      // the body makes of it, and no shape of one makes it a step this pass
+      // may count.
+      if (value.name === counter) return 1;
+      return writes(value.name) ? null : 0;
+    case "arith": {
+      const left = growthOf(value.left, counter, writes);
+      const right = growthOf(value.right, counter, writes);
+      if (left === null || right === null) return null;
+      if (value.op === "add") return left + right;
+      if (value.op === "sub") return left - right;
+      if (value.op === "mul") {
+        // A product of two movers is a mover of the turns squared, which is no one
+        // amount: only a move times a written number is a move the weight may
+        // count.
+        const amount =
+          left === 0 ? wholeLiteral(value.right)
+          : right === 0 ? wholeLiteral(value.left)
+          : null;
+        const moving = left === 0 ? right : right === 0 ? left : null;
+        if (amount === null || moving === null) return null;
+        return amount * moving;
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * What a fast arm's weight is worth at the counter's first value, or null
+ * where the arm is not one.
+ *
+ * The arm that answers where the test holds is the triangular number the
+ * source computes its divisor with — `((i + j) * (i + j + 1)) >>> 1 + i + 1`
+ * is how it is written — and what the turns travel through is the sum that
+ * product is over and whatever else the arm added to it. The sum is the step
+ * that moves by one per turn; and what moves with it by a whole number of
+ * steps is the offset every turn adds past the sum, which is what the write of
+ * the weight counts.
+ */
+function triangularOf(
+  arm: SemanticValue,
+  counter: string,
+  initial: SemanticValue,
+  lets: ReadonlyMap<string, SemanticValue>,
+  writes: (name: string) => boolean,
+): { slope: SemanticValue; offset: number; from: SemanticValue } | null {
+  // The arm reads the names the body declared around it, and what it reads of
+  // a name is the value that name was bound with: the shape of the sum is the
+  // shape of the arithmetic, and a chain of declarations is what the walk
+  // chases through. One round of that per level is what a chain stands for.
+  let resolved = arm;
+  for (let round = 0; round < 8 && lets.size > 0; round += 1) {
+    resolved = substituteLocals(resolved, lets);
+  }
+  const addends: SemanticValue[] = [];
+  addendsOf(resolved, addends);
+  let kernel: SemanticValue | null = null;
+  let sum: SemanticValue | null = null;
+  const rest: SemanticValue[] = [];
+  for (const addend of addends) {
+    if (kernel !== null) {
+      rest.push(addend);
+      continue;
+    }
+    const over = sumOfKernel(addend);
+    if (over === null) {
+      rest.push(addend);
+      continue;
+    }
+    kernel = addend;
+    sum = over;
+  }
+  if (kernel === null || sum === null) return null;
+  // The sum is what the turns move over, so a turn of one moves it by one.
+  // Any other step the arm is a progression the weight cannot be held as, and
+  // the turn that remains a compute is where it belongs.
+  if (growthOf(sum, counter, writes) !== 1) return null;
+  // Whatever else the arm answered with, it moved by a whole number of steps
+  // per turn, or the turns would walk an arm the weight cannot count.
+  let offset = 0;
+  for (const addend of rest) {
+    const growth = growthOf(addend, counter, writes);
+    if (growth === null) return null;
+    if (!Number.isSafeInteger(offset + growth)) return null;
+    offset += growth;
+  }
+  // The first weight is the arm at the counter's first value: the sum stood
+  // where the loop starts from, and the rest of the arm is what answered there.
+  const from = substituteLocals(
+    structuredClone(resolved),
+    new Map([[counter, structuredClone(initial)] as [string, SemanticValue]]),
+  );
+  if (hasCall(from) || !isSafeToCompute(from)) return null;
+  return { slope: sum, offset, from };
+}
+
+/**
  * Whether anything in a body is a call, which is what a body is not unrolled
  * for.
  *
@@ -1780,6 +2008,19 @@ class Machine {
   private readonly names = new NameScope((name) => name);
   private readonly slots = new Map<string, Held>();
   private readonly boxedTexts = new Set<string>();
+  /**
+   * How many elements each buffer name holds, as the name was bound with.
+   *
+   * An array reaches a function as a pointer to its elements, and no count
+   * arrives with it — but a few forms give the count where the array is bound:
+   * the elements written out, the count the program settled on when it runs,
+   * and the name of the array the binding is again. `a.fill(x)` is a walk over
+   * that count, so the count is read where the binding is written and held
+   * here, the way the C driver holds it beside the name as `${name}_length`.
+   * Anything else the lowering is asked to walk is refused rather than walked
+   * over a number nobody read.
+   */
+  private readonly arrayCounts = new Map<string, bigint | Held>();
   private readonly loops: { header: string; exit: string; names: { header: string; exit: string } }[] = [];
   /**
    * The region loop the code being written is inside the body of, if any.
@@ -2210,9 +2451,18 @@ class Machine {
     return this.reserveSlot(type, prefix, false);
   }
 
-  private reserveSlot(type: SemanticType, prefix: string, borrowable: boolean, register: number | null = null): Held {
+  private reserveSlot(
+    type: SemanticType,
+    prefix: string,
+    borrowable: boolean,
+    register: number | null = null,
+    named?: string,
+  ): Held {
     this.temporaries += 1;
-    const name = this.names.reserve(`${prefix}_${this.temporaries}`);
+    // A name the caller reserved is the one the slot is read by: the IR the
+    // caller wrote holds it, and reserving it again would spell the slot by
+    // another name than the one the IR reads.
+    const name = named ?? this.names.reserve(`${prefix}_${this.temporaries}`);
     // A wide number is carried in four registers of its own and is written from
     // those rather than from the accumulator, so there is nothing here to hold
     // it in.
@@ -2280,6 +2530,113 @@ class Machine {
     const held = this.holdAcross(type, prefix);
     this.store(held);
     return held;
+  }
+
+  /**
+   * The count of elements an array binding holds, so a fill of the name is
+   * written over the same number, or null where the binding says none.
+   *
+   * An array is bound three ways here, as it is in C: with the values written
+   * out, whose count the IR knows; with the count the program settled on when
+   * it runs, which is read once here; and as the name of an array it is again,
+   * whose count is the one that name holds. A binding of nothing else is a
+   * pointer turned, and a count it does not say is one a fill cannot be
+   * written over.
+   */
+  private boundElementsOf(value: SemanticValue): bigint | Held | null {
+    if (value.k !== "buffer") {
+      if (value.k === "local" && value.type.kind === "array") {
+        return this.arrayCounts.get(this.names.read(value.name)) ?? null;
+      }
+      return null;
+    }
+    if (value.length !== null) return BigInt(value.length);
+    if (value.count !== null) return this.heldElements(value.count);
+    return value.values.length === 0 ? null : BigInt(value.values.length);
+  }
+
+  /** The count a name is bound with, kept against the name the target reads it as. */
+  private rememberElements(name: string, count: bigint | Held | null): void {
+    const emitted = this.names.read(name);
+    if (count === null) this.arrayCounts.delete(emitted);
+    else this.arrayCounts.set(emitted, count);
+  }
+
+  private heldElements(count: SemanticValue): Held {
+    this.countAsSize(count);
+    const held = this.holdAcross(USIZE, "blaze_count");
+    this.store(held);
+    return held;
+  }
+
+  /**
+   * Every element of an array written as one value, as `a.fill(x)` is.
+   *
+   * The count the walk is over is the one the name was bound with — the
+   * binding read it and kept it for exactly this — and the write is the same
+   * one a `setElement` is: the value is read once for the whole walk, and the
+   * address of an element is the buffer moved by the index at the width of an
+   * element, which is what `lea` is. The index is a counter of this function's
+   * own, stepped in the frame: a fill is where a program puts a value into an
+   * array once, not a hot turn, so the two instructions a frame index costs on
+   * a turn cost less than the register a walk of one would take from the rest
+   * of the function.
+   *
+   * The value the walk writes is the value the statement names: one argument
+   * to one call of the walk, not one per element the C form writes it as, and
+   * a value that is a call is made once the source says it is.
+   */
+  private fill(statement: Extract<SemanticStatement, { k: "fill" }>): void {
+    const buffer = this.slot(statement.buffer);
+    const count = this.arrayCounts.get(this.names.read(statement.buffer));
+    if (count === undefined) {
+      throw machineError(
+        `${this.fn.symbol} fills ${statement.buffer}, which it binds with no count of its own`,
+        "the count of an array is settled where the array is bound: a fill of a name the binding does not count is not one this backend writes",
+      );
+    }
+    const element = statement.type;
+    const written = this.hold(element, "blaze_fill");
+    // The value is read once, at the type the elements are written at: a fill
+    // writes one value into every element of the array.
+    this.at(statement.value, element);
+    this.store(written);
+    // The accumulator note is a claim about the register, and the address
+    // arithmetic the walk takes it through is a claim nothing backs: it is
+    // read back out of the frame again rather than believed.
+    this.accumulator = null;
+    const index = this.holdAcross(USIZE, "blaze_fill_index");
+    this.code.movRegImm(RAX, 0n);
+    this.store(index);
+    const test = this.code.label("Ltest");
+    this.code.jmp(test);
+    const body = this.code.label("Lfill");
+    this.code.bind(body);
+    if (buffer.register === null) this.code.movRegMem(RCX, frame(buffer.offset));
+    else this.code.movRegReg(RCX, buffer.register);
+    this.load(index);
+    this.code.lea(RCX, indexed(RCX, RAX, widthOf(element)));
+    this.load(written);
+    this.storeInto(element, RCX);
+    this.accumulator = null;
+    // The index is stepped before the test, the way every loop of this
+    // lowering counts: the first turn runs at zero and the one after it at the
+    // next number, and the test is where the walk comes back to.
+    this.load(index);
+    this.code.aluImm("add", RAX, 1);
+    this.store(index);
+    this.code.bind(test);
+    this.load(index);
+    if (typeof count === "bigint") {
+      this.code.movRegImm(RCX, count);
+      this.code.alu("cmp", RAX, RCX);
+    } else if (count.register === null) {
+      this.code.aluRegMem("cmp", RAX, frame(count.offset), true);
+    } else {
+      this.code.alu("cmp", RAX, count.register);
+    }
+    this.code.jcc("b", body);
+    this.freeSlot(index);
   }
 
   /**
@@ -2372,6 +2729,12 @@ class Machine {
           // the values the body computes never sees it read. Writing an element
           // changes what the pointer reaches and not the pointer itself, so it
           // is a read of the name rather than a write of it.
+          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
+        }
+        if (statement.k === "fill") {
+          // A fill is every element written at once, and the pointer it writes
+          // through is read on every turn of the walk it is, which is a read
+          // the census counts here the way a write of one element counts it.
           reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
         }
       }
@@ -3512,8 +3875,16 @@ class Machine {
           return;
         }
         if (statement.slot.kind === "buffer") {
+          // The count a name holds is read out of the value the name is bound
+          // with, before the pointer is: a fill of the name is written over
+          // the count it was bound with, and reading it after the pointer
+          // would still be the same number. The C driver writes both in this
+          // order too.
+          const count = this.boundElementsOf(statement.value);
           this.value(statement.value);
-          this.store(this.bind(statement.slot.name, type));
+          const bound = this.bind(statement.slot.name, type);
+          this.store(bound);
+          this.rememberElements(statement.slot.name, count);
           return;
         }
         // A wide number is not in the accumulator, so it is written down from
@@ -3534,6 +3905,15 @@ class Machine {
       }
       case "set":
         const held = this.slot(statement.name);
+        // A name that holds an array and is bound again is bound with the
+        // count the new value holds — the same question a binding asks,
+        // because a fill written after this one walks the array as it is now.
+        if (held.type.kind === "array") {
+          this.rememberElements(
+            statement.name,
+            statement.op === "=" ? this.boundElementsOf(statement.value) : null,
+          );
+        }
         if (isWideType(held.type)) {
           this.wideValue(statement.value);
           this.wideStore(held);
@@ -3714,6 +4094,9 @@ class Machine {
         return;
       case "loop":
         this.loop(statement.loop);
+        return;
+      case "fill":
+        this.fill(statement);
         return;
     }
   }
@@ -4946,7 +5329,7 @@ class Machine {
       if (written === null || written !== 1) return null;
     }
     const from = wholeLiteral(loop.from);
-    if (from === null) return null;
+    if (from === null || from < 0) return null;
     if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
     // The turn is one accumulation of a quotient; the declarations before it
     // are computable where they stand, which is what lets the weight read them.
@@ -4959,7 +5342,7 @@ class Machine {
         if (statement.name === loop.variable) return null;
         continue;
       }
-      if (statement.k !== "let" || statement.slot.mutable) return null;
+      if (statement.k !== "let" || statement.slot.kind !== "value" || statement.slot.mutable) return null;
       if (!isSafeToCompute(statement.value)) return null;
     }
     const statement = statements[accumulation] as Extract<SemanticStatement, { k: "set" }>;
@@ -4968,12 +5351,26 @@ class Machine {
     if (select === null) return null;
     if (select.type.kind !== "primitive" || select.type.name !== "f64") return null;
     // The arm that answers when the test holds is the whole-number weight,
-    // and the progression of it is what the step of the weight is.
-    const counted = triangularOf(select.then, loop.variable);
+    // and the progression of it is what the step of the weight is. The names
+    // the arm reads are the declarations the body made of its own values,
+    // which the arm lives among and the weight may read where they stand.
+    const lets = new Map<string, SemanticValue>();
+    for (const entry of statements.slice(0, accumulation)) {
+      if (entry.k === "let" && entry.slot.kind === "value") lets.set(entry.slot.name, entry.value);
+    }
+    const counted = triangularOf(
+      select.then,
+      loop.variable,
+      loop.from,
+      lets,
+      (name) => writesCounter(loop.body, name),
+    );
     if (counted === null) return null;
     // The weight is named once, held across the loop, and stepped after the
-    // turn has divided by it.
-    const weight = this.reserveSlot(NUMBER, "blaze_triangular", false);
+    // turn has divided by it. The name is the slot's own: the IR below reads
+    // it as a value of its own, and nothing else of the body ever declares it.
+    const weightName = this.names.reserve("blaze_triangular");
+    const weight = this.reserveSlot(NUMBER, "blaze_triangular", false, null, weightName);
     const with_weight = replaceOnce(statement.value, select, {
       k: "select",
       type: select.type,
@@ -4997,7 +5394,7 @@ class Machine {
           right: { k: "const", type: UNSIGNED, text: String(TRIANGULAR_REACH) },
         },
       },
-      then: { k: "local", type: NUMBER, name: weight.name },
+      then: { k: "local", type: NUMBER, name: weightName },
       otherwise: select.otherwise,
     }) as SemanticValue;
     const body: SemanticBlock = {
@@ -5007,7 +5404,7 @@ class Machine {
         { ...statement, value: with_weight },
         {
           k: "set",
-          name: weight.name,
+          name: weightName,
           op: "+=",
           value: {
             k: "arith",
@@ -5994,6 +6391,35 @@ class Machine {
       return;
     }
     this.code.movRegImm(RAX, 0n);
+  }
+
+  /**
+   * The count a program settles on, read as a size.
+   *
+   * A NaN is no count, and a count that is not a number is no count the run
+   * makes: zero, which is the answer the C driver writes for the same value.
+   * The conversion alone would read the middle of the range the machine
+   * converts a NaN to as a size, and an allocation of that is a fault.
+   */
+  private countAsSize(count: SemanticValue): void {
+    if (!isFloatType(count.type)) {
+      this.at(count, USIZE);
+      return;
+    }
+    this.at(count, NUMBER);
+    // A NaN leaves every comparison's flags saying unordered, which is the
+    // parity bit: a count that is not a number is written as zero, the way the
+    // C driver's own count of the same value is.
+    const answer = this.code.label("Lcount");
+    const done = this.code.label("Lcounted");
+    this.code.zeroFloat(XMM1);
+    this.code.sseCompare(XMM0, XMM1, false, true);
+    this.code.jcc("p", answer);
+    this.convert(NUMBER, USIZE);
+    this.code.jmp(done);
+    this.code.bind(answer);
+    this.code.movRegImm(RAX, 0n);
+    this.code.bind(done);
   }
 
   private constant(value: SemanticValue & { k: "const" }): void {
@@ -8345,6 +8771,25 @@ class Machine {
    * it already had and reloads the address for a call-valued element.
    */
   private buffer(value: SemanticValue & { k: "buffer" }): void {
+    // A window of a block another name holds is the block itself moved by the
+    // offset it starts at: no block of its own is allocated and nothing is
+    // cleared, because the block it looks into is the one the name it was
+    // taken of frees. The C driver writes the same window as the base moved
+    // by the offset the source wrote, which is what this is.
+      if (value.view !== null) {
+      // The offset is read first and parked: the value the block is taken of
+      // is a value like any other, and the scratch beside the accumulator is
+      // the register it may take. The parked slot is the statement's own —
+      // the one that holds it hands it back when the statement is done — so
+      // nothing here hands it back twice.
+      const offset = this.hold(POINTER, "blaze_view");
+      this.countAsSize(value.view.offset);
+      this.store(offset);
+      this.value(value.view.of);
+      this.code.movRegMem(RCX, frame(offset.offset));
+      this.code.lea(RAX, indexed(RCX, RAX, 1));
+      return;
+    }
     // A count the program settled on when it runs is a value like any other:
     // it is read into the first argument register the same way every other
     // runtime call is handed its arguments. Refusing it here meant a compiled
@@ -8358,7 +8803,7 @@ class Machine {
           "an array is written either with its elements or with the number of them",
         );
       }
-      this.at(count, USIZE);
+      this.countAsSize(count);
       this.code.movRegReg(RDI, RAX);
     } else {
       this.code.movRegImm(RDI, BigInt(value.length));
@@ -8672,6 +9117,15 @@ class Machine {
       this.code.movRegImm(RDI, 0n);
       this.code.movRegImm(RSI, 8n);
       this.runtime("_array_new");
+      return;
+    }
+    if (call.callee === SHARED) {
+      // A block of bytes the program lays out is the allocator's answer: the
+      // count is read as a size and the block is handed back, which is what
+      // the C driver writes the same call as.
+      this.countAsSize(argument);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_allocate");
       return;
     }
     if (call.callee === "Promise") {

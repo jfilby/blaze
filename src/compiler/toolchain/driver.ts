@@ -388,6 +388,14 @@ class CDriver implements ProgramTarget {
    * declaration the linker needs and nothing else.
    */
   private loweredElsewhere: ReadonlySet<string>;
+  /**
+   * The symbols of the bodies this file does define and an object of the
+   * program calls. A call from another object resolves only to a definition
+   * the linker can see, so a body among these is written out with external
+   * linkage: it is `static` in the source program's sense, but the file it
+   * lives in is not the only file of the program.
+   */
+  private readonly sharedWithObjects: ReadonlySet<string>;
   /** The style a value is written as text in, which is the language's. */
   private readonly style: TextStyle;
 
@@ -397,11 +405,13 @@ class CDriver implements ProgramTarget {
     includeSqliteHeader: boolean = false,
     style: TextStyle = "javascript",
     loweredElsewhere: ReadonlySet<string> = new Set(),
+    sharedWithObjects: ReadonlySet<string> = new Set(),
   ) {
     this.includeHttpHeader = includeHttpHeader;
     this.lowering = lowering;
     this.includeSqliteHeader = includeSqliteHeader;
     this.loweredElsewhere = loweredElsewhere;
+    this.sharedWithObjects = sharedWithObjects;
     this.style = style;
   }
   prelude(program: SemanticProgram): string {
@@ -530,7 +540,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`
         return `${cDeclarationType(parseType(param.type))} ${param.name}`;
       })
       .join(", ");
-    const own = this.own.has(signature.symbol) ? "static " : "";
+    const own = this.own.has(signature.symbol) && !this.sharedWithObjects.has(signature.symbol) ? "static " : "";
     return [`${own}${returns} ${cSymbolName(signature.symbol)}(${given || "void"})${cSymbolLabel(signature.symbol)} {`];
   }
 
@@ -1779,10 +1789,18 @@ export function generateProgramDriver(
   lowering: BackendKind = "c",
   includeSqliteHeader: boolean = false,
   loweredElsewhere: ReadonlySet<string> = new Set(),
+  sharedWithObjects: ReadonlySet<string> = new Set(),
 ): string {
   return generateProgramSource(
     program,
-    new CDriver(includeHttpHeader, lowering, includeSqliteHeader, rulesFor(program.language).style, loweredElsewhere),
+    new CDriver(
+      includeHttpHeader,
+      lowering,
+      includeSqliteHeader,
+      rulesFor(program.language).style,
+      loweredElsewhere,
+      sharedWithObjects,
+    ),
     loweredElsewhere,
   );
 }
@@ -1833,6 +1851,13 @@ export interface ProgramDriverRequest {
    * because the one the object carries is the one the program runs.
    */
   loweredBodies?: readonly string[];
+  /**
+   * The symbols of the bodies that stayed in the driver and are called by an
+   * object the machine backend wrote. The driver defines them, but the call
+   * comes from another object file, so the definition the linker resolves to
+   * is written with external linkage rather than as a function of this file.
+   */
+  sharedBodies?: readonly string[];
   /** True when the program uses SQLite, so the driver includes its header. */
   includeSqliteHeader?: boolean;
   /**
@@ -1854,6 +1879,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
       request.lowering ?? "c",
       request.includeSqliteHeader ?? false,
       new Set(request.loweredBodies ?? []),
+      new Set(request.sharedBodies ?? []),
     ),
     "utf8",
   );

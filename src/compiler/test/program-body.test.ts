@@ -1246,6 +1246,35 @@ async function agreesWithNode(source: string, runtime?: "nim"): Promise<void> {
   assert.equal(delivered.stdout, original.stdout);
 }
 
+/**
+ * A program the machine backend lowers every function of, with the notes the
+ * build made. The notes are what says the machine backend refused a body, so a
+ * test that pins a shape the machine lowers reads them and asserts none of
+ * them refused.
+ */
+async function deliveredByMachine(
+  source: string,
+  mode?: BuildMode,
+): Promise<{ directory: string; binary: string; notes: string[] }> {
+  const directory = await scratch("blaze-machine-");
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+  });
+  const notes: string[] = [];
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}`, ...(mode === undefined ? {} : { mode }) },
+    { stage: (_at: string, _level: string, message: string) => notes.push(message) },
+    "build",
+  );
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  return { directory, binary: outcome.outputPath, notes };
+}
+
 test("a program runs the shapes a number and a name decide", async (t) => {
   const { directory, binary } = await program(SHAPES);
   const source = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
@@ -2484,3 +2513,104 @@ test("a wide number a declared function hands back is marked from its body", asy
   await agreesWithNode(source);
 });
 
+
+test("a fill of a window over a shared block is lowered by the machine backend", async () => {
+  // The shape the spectral norm benchmark is: one block laid out, three windows
+  // over it, a fill of the first one, and functions of the program that read
+  // each other's windows over calls. The machine backend lowered none of this
+  // while it had no answer for a fill or a window — every function of it fell
+  // back to the C driver, and a program of one backend beside another failed to
+  // link at the callee the object called but the driver had written `static`.
+  // So this is checked against node with every function of it asked of the
+  // machine backend, and with nothing of it left in the driver.
+  const source = [
+    "const bytesPerFloat = Float64Array.BYTES_PER_ELEMENT;",
+    "",
+    "function mainThread(n: number) {",
+    "  const sab = new SharedArrayBuffer(3 * bytesPerFloat * n);",
+    "  const u = new Float64Array(sab, 0, n).fill(1);",
+    "  const v = new Float64Array(sab, bytesPerFloat * n, n);",
+    "  const w = new Float64Array(sab, 2 * bytesPerFloat * n, n);",
+    "  for (let i = 0; i < 10; i++) {",
+    "    atAu(u, v, w);",
+    "    atAu(v, u, w);",
+    "  }",
+    "  let vBv = 0;",
+    "  let vv = 0;",
+    "  for (let i = 0; i < n; i++) {",
+    "    vBv += u[i] * v[i];",
+    "    vv += v[i] * v[i];",
+    "  }",
+    "  const result = Math.sqrt(vBv / vv);",
+  "  console.log(result.toFixed(9));",
+    "  function atAu(u: Float64Array, v: Float64Array, w: Float64Array) {",
+    "    au(u, w);",
+    "    atu(w, v);",
+    "  }",
+    "  function au(u: Float64Array, v: Float64Array) {",
+    "    for (let i = 0; i < n; i++) {",
+    "      let t = 0;",
+    "      for (let j = 0; j < n; j++) {",
+    "        t += u[j] / a(i, j);",
+    "      }",
+    "      v[i] = t;",
+    "    }",
+    "  }",
+    "  function atu(u: Float64Array, v: Float64Array) {",
+    "    for (let i = 0; i < n; i++) {",
+    "      let t = 0;",
+    "      for (let j = 0; j < n; j++) {",
+    "        t += u[j] / a(j, i);",
+    "      }",
+    "      v[i] = t;",
+    "    }",
+    "  }",
+    "  function a(i: number, j: number) {",
+    "    return ((i + j) * (i + j + 1) >>> 1) + i + 1;",
+    "  }",
+    "}",
+    "mainThread(3);",
+    "",
+  ].join("\n");
+  const { binary, notes } = await deliveredByMachine(source, "danger");
+  assert.equal(notes.filter((note) => /refused to lower/.test(note)).length, 0, notes.join("\n"));
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "1.233644501\n");
+});
+
+test("a turn whose divisor is a triangular number the counter decides is counted", async () => {
+  // The divisor of the spectral norm's inner turn is `a(i, j)`, a triangular
+  // number of the sum of the two indices plus the outer one. As a function of
+  // the counter with the other index fixed it is an arithmetic progression, so
+  // the machine backend counts it: the product, the shift and the conversions
+  // of the weight are one addition a turn. The value it answers is the value
+  // the compute answered, and this is checked against the source's own run.
+  const source = [
+    "function a(i: number, j: number): number {",
+    "  return ((i + j) * (i + j + 1) >>> 1) + i + 1;",
+    "}",
+    "function au(u: Float64Array, v: Float64Array, n: number): void {",
+    "  for (let i = 0; i < n; i++) {",
+    "    let t = 0;",
+    "    for (let j = 0; j < n; j++) {",
+    "      t += u[j] / a(i, j);",
+    "    }",
+    "    v[i] = t;",
+    "  }",
+    "}",
+    "const n = 5;",
+    "const u = new Float64Array([1, 1, 1, 1, 1]);",
+    "const v = new Float64Array(n);",
+    "au(u, v, n);",
+    "console.log(v[0], v[2], v[4]);",
+    "",
+  ].join("\n");
+  const { directory, binary, notes } = await deliveredByMachine(source, "danger");
+  assert.equal(notes.filter((note) => /refused to lower/.test(note)).length, 0, notes.join("\n"));
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+});

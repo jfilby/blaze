@@ -221,6 +221,10 @@ async function main(): Promise<void> {
     includeSqliteHeader: isSqlite,
     ...(machine ? { lowering: "machine" as const } : {}),
     loweredBodies: (bodyLowering === undefined ? [] : program.bodies.filter((body) => bodyLowering.lowered.has(body.symbol)).map((body) => body.symbol)),
+    // A body that stayed in the driver and is called by an object is the
+    // definition the object's reference resolves to, so it is written as a
+    // function the linker can see.
+    sharedBodies: bodyLowering === undefined ? [] : [...bodyLowering.visible],
     tls: http.tls,
     libraryObjectPaths: library === undefined ? [] : [library.objectPath],
     threads,

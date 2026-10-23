@@ -2080,6 +2080,10 @@ export async function runBuild(
                 workDirectory: base,
                 objectPaths,
                 loweredBodies: [...loweredBodies],
+                // A body that stayed in the driver and is called by an object
+                // is the definition the object's reference resolves to, so it
+                // is written as a function the linker can see.
+                sharedBodies: bodyLowering === undefined ? [] : [...bodyLowering.visible],
                 ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
                 includeHttpHeader: runtimeKind === "facil",
                 lowering: backendKind,
