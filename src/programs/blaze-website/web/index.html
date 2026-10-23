@@ -42,10 +42,12 @@
         this page talks to is the one behind the chat below, at runtime.
       </p>
       <p>
-        Blaze links the facil.io HTTP runtime beside programs that serve
-        HTTP, and SQLite beside programs that store data. This website is
-        itself a Blaze program: it is compiled to a native binary, serves
-        its own pages over HTTP, and saves every chat to a SQLite database.
+        The runtimes of a Blaze program: the facil.io HTTP runtime is
+        vendored — the compiler carries its source and builds it into the
+        program's binary — and SQLite is linked beside programs that store
+        data. This website is itself a Blaze program: it is compiled to a
+        native binary, serves its own pages over HTTP, and saves every chat
+        to a SQLite database.
       </p>
       <h3>Stages</h3>
       <ol>
@@ -79,8 +81,10 @@
 
     <footer>
       Built with <strong>Blaze</strong>: compiled to a native binary that
-      serves <a href="https://facil.io/" target="_blank" rel="noopener">facil.io</a>
-      over HTTP and keeps every chat in <a href="https://www.sqlite.org/" target="_blank" rel="noopener">SQLite</a>.
+      serves HTTP through the vendored
+      <a href="https://facil.io/" target="_blank" rel="noopener">facil.io</a>
+      and keeps every chat in the linked
+      <a href="https://www.sqlite.org/" target="_blank" rel="noopener">SQLite</a> library.
       Questions travel to <a href="https://tokenfactory.nebius.com/" target="_blank" rel="noopener">Nebius Token Factory</a>.
     </footer>
   </main>

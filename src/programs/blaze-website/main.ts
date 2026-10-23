@@ -6,7 +6,7 @@
  * and saves every question and answer to a SQLite database.
  *
  * The program is compiled by Blaze to a native binary with the facil.io
- * HTTP runtime and the SQLite library beside it.
+ * HTTP runtime vendored into it and the SQLite library linked beside it.
  *
  * Usage:
  *   blaze-website [port]

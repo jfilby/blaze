@@ -15,8 +15,8 @@ every question and answer to a SQLite database.
 
 ## Building
 
-The program is built by Blaze, with the facil.io HTTP runtime and the SQLite
-library beside it:
+The program is built by Blaze, with the facil.io HTTP runtime vendored into
+it and the SQLite library linked beside it:
 
 ```sh
 cd src/programs/blaze-website
