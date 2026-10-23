@@ -3,25 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Blaze — an AI compiler</title>
+  <title>Blaze: an AI compiler</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <h1>Blaze</h1>
-    <p>An AI compiler to generate assembly from traditional source.</p>
+    <div class="header-inner">
+      <div class="site-mark">B</div>
+      <div>
+        <h1>Blaze</h1>
+        <p>An AI compiler to generate assembly from traditional source.</p>
+      </div>
+    </div>
   </header>
 
   <main>
     <section id="intro">
       <h2>What is Blaze?</h2>
       <p>
-        Blaze is a compiler that takes traditional source code — today,
-        TypeScript — and lowers it through a rule-based pipeline to native
-        machine code. Large language models verify each stage of the
-        pipeline and propose fixes, but they do not implement fixes
-        themselves: a rule-based compiler inspects the model's proposals
-        and applies them only when they are valid.
+        Blaze compiles traditional source code (TypeScript and Python)
+        through a rule-based pipeline to native machine code, C, or
+        WebAssembly. Large language models verify each stage of the pipeline
+        and propose fixes, but they do not implement fixes themselves: a
+        rule-based compiler inspects the model's proposals and applies them
+        only when they are valid.
       </p>
       <p>
         The compiler's stages are source → IR → verified IR → target
@@ -40,7 +45,7 @@
         <li>Original source (e.g. TypeScript)</li>
         <li>IR (intermediate representation)</li>
         <li>Verified or revised IR (LLM-checked)</li>
-        <li>Target low-level code (e.g. machine code)</li>
+        <li>Target low-level code (machine code, C, or WebAssembly)</li>
         <li>Verified or revised target code (LLM-checked)</li>
         <li>Binary</li>
       </ol>
@@ -50,19 +55,7 @@
       <h2>Ask Blaze</h2>
       <p>Ask a question about Blaze. A model on Nebius Token Factory answers, and the conversation is saved to SQLite.</p>
 
-      <div id="api-key-notice" class="notice" style="display:none;">
-        No Nebius API key was found. The server reads it from a file named
-        <code>NEBIUS_API_KEY</code> in its working directory, or from the file
-        passed as the second argument. Create that file and restart the server.
-      </div>
-
-      <div id="messages" class="messages"></div>
-
-      <div class="key">
-        <label for="key-input">Your Token Factory key (optional — streams from the browser)</label>
-        <input type="password" id="key-input" placeholder="paste your key to stream straight from Nebius" autocomplete="off">
-        <button type="button" id="key-forget" style="display:none;">Forget</button>
-      </div>
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
 
       <form id="form" class="form">
         <input type="text" id="input" placeholder="Ask a question about Blaze…" autocomplete="off" required>
@@ -76,6 +69,13 @@
       <h2>Saved chats</h2>
       <div id="chats" class="chats">Loading…</div>
     </section>
+
+    <footer>
+      Built with <strong>Blaze</strong>: compiled to a native binary that
+      serves <a href="https://facil.io/" target="_blank" rel="noopener">facil.io</a>
+      over HTTP and keeps every chat in <a href="https://www.sqlite.org/" target="_blank" rel="noopener">SQLite</a>.
+      Questions travel to <a href="https://tokenfactory.nebius.com/" target="_blank" rel="noopener">Nebius Token Factory</a>.
+    </footer>
   </main>
 
   <script type="module" src="/app.js"></script>

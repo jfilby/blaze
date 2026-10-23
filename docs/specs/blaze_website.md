@@ -51,15 +51,11 @@ text-to-text model on Nebius Token Factory when this was written: 0.06 per
 million input tokens and 0.24 per million output tokens. The model and the
 endpoint are named in `main.ts`.
 
-The browser can ask the model itself, when the visitor pastes a Token
-Factory key into the page: then the question streams straight from the
-browser to Nebius Token Factory, token by token, through the Vercel AI SDK
-(`createOpenAI` pointed at the Token Factory endpoint, `streamText` over the
-question). Token Factory allows a browser to ask it — `access-control-allow-origin`
-is `*` — so the page can hold the key and the stream both. A chat asked that
-way is not saved, because the question and the answer would have to travel
-to the program in a form the program could tell apart, and the text of a
-program is not cut.
+The Nebius API key is server-side only: the program reads it from a file
+named `NEBIUS_API_KEY` in its working directory when it starts, and nothing
+about it ever reaches the browser. Every answer comes back through the Blaze
+program, and every chat the program answers is saved to SQLite — a chat that
+is asked is a chat that is saved.
 
 ## The database
 
@@ -145,11 +141,9 @@ and the benchmark programs are the ones that set it.
   the request the way the model asks for a conversation, and the text of an
   answer would have to be escaped before it is written into the JSON of the
   request, which the program has no way to do yet.
-- **A chat the browser streamed itself is not saved.** The question and the
-  answer would have to travel to the program in a form the program could
-  tell apart, and the text of a program is not cut: there is no `indexOf` of
-  a text, so a body of `question\n\nanswer` cannot be told apart into its
-  two halves.
+- **The model is called from the server.** The Nebius call happens inside the
+  program, key and all, and the browser only talks to the program: nothing
+  about the key or the model's stream reaches the visitor's page.
 - **The key is read from a file, not the environment.** The runtime of a
   program has no `process.env` yet, so the API key is read from a file.
 - **The key file must exist when the program starts.** A file that is not

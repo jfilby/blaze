@@ -71,14 +71,10 @@ text-to-text model on Nebius Token Factory at the time this was written:
 and the endpoint are named in `main.ts`, so a different model or endpoint is
 one edit away.
 
-The browser can ask the model itself, when the visitor pastes a Token
-Factory key into the page: then the question streams straight from the
-browser to Nebius Token Factory, token by token, through the Vercel AI SDK
-(`createOpenAI` pointed at the Token Factory endpoint, `streamText` over the
-question). A chat asked that way is not saved, because the question and the
-answer would have to travel to the program in a form the program could tell
-apart, and the text of a program is not cut. The chat that goes through the
-program is the one that is saved.
+The Nebius API key is server-side only: the program reads it from a file
+named `NEBIUS_API_KEY` in its working directory, and nothing about it ever
+reaches the browser. Every answer comes back through the Blaze program, and
+every chat the program answers is saved to SQLite.
 
 ## What the program works within
 
