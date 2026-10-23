@@ -22,7 +22,7 @@ import { optimizeSemanticFunction } from "../semantics/optimize-ir.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { run } from "../core/process.ts";
 import { typeText } from "../core/semantic-ir.ts";
-import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticStatement, SemanticType, SemanticValue, TextType } from "../core/semantic-ir.ts";
 import type { TypeExpr } from "../core/types.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
 import { scratch } from "./scratch.ts";
@@ -33,6 +33,8 @@ const U32: SemanticType = { kind: "primitive", name: "u32" };
 const BOOL: SemanticType = { kind: "primitive", name: "bool" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 const I64: SemanticType = { kind: "primitive", name: "i64" };
+const U64: SemanticType = { kind: "primitive", name: "u64" };
+const TEXT: TextType = { kind: "text" };
 
 const constOf = (text: string, type: SemanticType = F64): SemanticValue => ({ k: "const", type, text });
 
@@ -1723,4 +1725,136 @@ test("a residue whose carry is written again before it is left alone", () => {
     ],
   }, { kind: "void" }, [n]));
   assert.doesNotMatch(after, /\[and\[i64\]/);
+});
+
+test("two strings written out are folded into the one string", () => {
+  // A string added to a string is built by joining the two at run time, and two
+  // strings written out join to one string written out. The fold answered with
+  // the type the addition was asked about rather than the type a string is, so
+  // a folded string was one the validator read as a number wearing a string's
+  // clothes; it is folded to text now, and the parts are the joined text.
+  const text = (value: string): SemanticValue => ({ k: "text", type: TEXT, parts: [{ k: "text", value }] });
+  const folded = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("concat", text("blaze"), text("compiles"), TEXT) },
+    statements: [],
+  }, TEXT));
+  assert.match(folded, /\[text "blazecompiles"\]/, "the two literals are one literal");
+  assert.doesNotMatch(folded, /concat/);
+
+  // A string with a value interpolated in it is not two written-out strings,
+  // and neither is one with a name on a side: both stay as they were written.
+  const kept = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: {
+      k: "return",
+      value: bin("concat", { k: "text", type: TEXT, parts: [{ k: "value", value: paramI("x") }] }, text("!"), TEXT),
+    },
+    statements: [],
+  }, TEXT, [{ kind: "value", name: "x", mutable: false, type: I32 }]));
+  assert.match(kept, /concat/);
+});
+
+test("a right shift of a negative whole number keeps its sign the way the machine shifts", () => {
+  // `>>` is the arithmetic shift the machine writes, which is the floor of the
+  // division by the power of two: `-7 >> 1` is `-4`, and the truncation the
+  // fold computed handed the folded constant a number the backend did not.
+  const folded = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("shr", constOf("-7", I32), constOf("1", I32), I32) },
+    statements: [],
+  }, I32));
+  assert.match(folded, /const\[i32\] -4/, "-7 >> 1 is -4");
+  assert.doesNotMatch(folded, /shr/);
+});
+
+test("a shift count is read the width the shift is carried out at", () => {
+  // The count of a shift is masked to the width the shift is carried out at,
+  // by the language and by the machine alike: `1 << 33` at `i32` is
+  // `1 << 1` = 2, and the product of the whole count wrapped to the width of
+  // the type is zero. A count past the width at a wide type goes the same way,
+  // read down to 64 bits.
+  const overflow = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("shl", constOf("1", I32), constOf("33", I32), I32) },
+    statements: [],
+  }, I32));
+  assert.match(overflow, /const\[i32\] 2\b/, "1 << 33 is 1 << 1 at i32");
+  const wide = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("shl", constOf("1", I64), constOf("64", I64), I64) },
+    statements: [],
+  }, I64));
+  assert.match(wide, /const\[i64\] 1\b/, "1 << 64 is 1 << 0 at i64");
+});
+
+test("a bitwise operation at a wide type keeps the high half of its answer", () => {
+  // `&`, `|` and `^` are operations on the bits at the width of the type, and
+  // reading a wide type's sides as the 32 bit integers the language reads its
+  // own bitwise sides at cut the high half of the answer away:
+  // `4294967296 | 1` is 4294967297, not one.
+  const masked = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("or", constOf("4294967296", USIZE), constOf("1", USIZE), USIZE) },
+    statements: [],
+  }, USIZE));
+  assert.match(masked, /const\[usize\] 4294967297/, "4294967296 | 1 keeps its high bit");
+
+  // An answer the text cannot carry exactly is left as the operation it came
+  // from, which the backend computes at the width it wraps to: `-7 & -2` at
+  // `u64` is the high half full, 18446744073709551608, which is past 2^53.
+  const refused = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("and", constOf("-7", U64), constOf("-2", U64), U64) },
+    statements: [],
+  }, U64));
+  assert.match(refused, /and\[u64\]/, "an answer past 2^53 stays as it was written");
+});
+
+test("an unsigned right shift reads its sides as the unsigned 32 bit numbers the language reads them as", () => {
+  // `>>>` is the one shift that converts, so it is folded at the reading the
+  // language gives it: `-1 >>> 1` is 2147483647, whatever the unsigned value
+  // the sides were written at.
+  const converted = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: bin("ushr", constOf("-1", I32), constOf("1", USIZE), U32) },
+    statements: [],
+  }, U32));
+  assert.match(converted, /const\[u32\] 2147483647/, "-1 >>> 1 is 0x7fffffff");
+});
+
+test("a sized buffer keeps the count its fold wrote and no element it never wrote", () => {
+  // The children a buffer holds are its count, the two sides of a view and its
+  // elements, and the rebuild handed every one of them to the elements: the
+  // count stayed the arithmetic it was written as and the element list took
+  // the folded number in, so a buffer the program asked to size by `2 + 3`
+  // was one whose count nothing had folded and whose elements it never wrote.
+  const folded = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: {
+      k: "return",
+      value: { k: "buffer", type: { kind: "array", of: F64, length: null }, element: F64, length: null, count: bin("add", constOf("2", USIZE), constOf("3", USIZE), USIZE), view: null, values: [] },
+    },
+    statements: [],
+  }, { kind: "array", of: F64, length: null } as SemanticType));
+  assert.match(folded, /const\[usize\] 5\b/, "the count is the folded sum");
+  assert.doesNotMatch(folded, /add\[usize\]/, "the count is not the sum it was written as");
+
+  // A view is the same question with one more pair: the block it looks into
+  // and the byte offset it starts at are kept where they were read from.
+  const viewed = printed(fnOf({
+    id: "entry", releases: [],
+    terminator: {
+      k: "return",
+      value: {
+        k: "buffer", type: { kind: "array", of: F64, length: null }, element: F64, length: null, count: constOf("16", USIZE),
+        view: { of: { k: "local", type: { kind: "array", of: F64, length: null }, name: "block" }, offset: bin("add", constOf("0", USIZE), constOf("8", USIZE), USIZE) },
+        values: [],
+      },
+    },
+    statements: [],
+  }, { kind: "array", of: F64, length: null } as SemanticType, [{ kind: "buffer", name: "block", mutable: false, element: F64, length: null }]));
+  assert.match(viewed, /const\[usize\] 8\b/, "the view keeps its offset");
+  assert.match(viewed, /local\[\[f64\]\] block/, "the view keeps the block it looks into");
+  assert.doesNotMatch(viewed, /add\[usize\]/, "the view's offset is the folded sum");
 });

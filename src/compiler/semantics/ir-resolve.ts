@@ -1410,7 +1410,7 @@ function captureValue(param: string, capture: SemanticType, bundle: string): str
  * handler reads them when a request arrives.
  */
 function captureHolders(draft: ProgramFunctionDraft): string[] {
-  return draft.captured.map((capture, index) => `blaze_capture_${draft.name}_${index}`);
+  return draft.captured.map((_, index) => `blaze_capture_${draft.name}_${index}`);
 }
 
 /**

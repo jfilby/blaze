@@ -30,7 +30,7 @@ const PORT = 18150;
  * something the binary does not print is a source that does not describe the
  * program.
  */
-async function buildBinary(source: string, port: number = PORT): Promise<string> {
+async function buildBinary(source: string): Promise<string> {
   const directory = await scratch("blaze-http-features-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {

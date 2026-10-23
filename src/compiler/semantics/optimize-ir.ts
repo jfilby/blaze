@@ -40,7 +40,7 @@ import type {
   SemanticType,
   SemanticValue,
 } from "../core/semantic-ir.ts";
-import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, typeEquals, walkValues } from "../core/semantic-ir.ts";
+import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { restructureHotFunction } from "./restructure.ts";
@@ -187,12 +187,12 @@ function foldArithmetic(op: string, left: number, right: number, name: NumericNa
     case "pow": folded = left ** right; break;
     case "min": folded = Math.min(left, right); break;
     case "max": folded = Math.max(left, right); break;
-    case "shl": folded = left * 2 ** right; break;
-    case "shr": folded = Math.trunc(left / 2 ** right); break;
+    case "shl": folded = left * 2 ** shiftCount(right, name); break;
+    case "shr": folded = Math.floor(left / 2 ** shiftCount(right, name)); break;
     case "ushr": folded = left >>> right; break;
-    case "and": folded = toBits(left) & toBits(right); break;
-    case "or": folded = toBits(left) | toBits(right); break;
-    case "xor": folded = toBits(left) ^ toBits(right); break;
+    case "and": folded = wholeBits(left, right, "and", name); break;
+    case "or": folded = wholeBits(left, right, "or", name); break;
+    case "xor": folded = wholeBits(left, right, "xor", name); break;
     default: return null;
   }
   if (isFloat) {
@@ -200,7 +200,7 @@ function foldArithmetic(op: string, left: number, right: number, name: NumericNa
     // back reads as the very double the operation produced.
     const text = asText(folded);
     const read = Number(text);
-    if (Number.isNaN(folded) || Object.is(folded, -0) || Infinity) return folded;
+    if (Number.isNaN(folded) || Object.is(folded, -0) || !Number.isFinite(folded)) return folded;
     if (!Object.is(read, folded)) return null;
     return folded;
   }
@@ -210,6 +210,73 @@ function foldArithmetic(op: string, left: number, right: number, name: NumericNa
 /** Two 32 bit values as the signed integer their bits spell. */
 function toBits(value: number): number {
   return value | 0;
+}
+
+/**
+ * The count a shift is taken at, which is the count the backend takes it at:
+ * masked to the width the shift is carried out at — 32 bits for the narrow
+ * types, which the C compiler promotes to an int and whose count the machine
+ * masks, and 64 for the wide ones — because `x << 32` is `x << 0` wherever the
+ * backend reads it. A fold that multiplied by the whole count answered a
+ * different number than the machine it was folded for: `1 << 32` at `i32` is
+ * one, and the product wrapped to the width of the type is zero. A count the
+ * language reads as anything else — a wider number, a negative one, one
+ * written with a fraction — is read down the same way, because the mask is
+ * what the count is read through wherever a shift is taken.
+ */
+function shiftCount(count: number, name: NumericName): number {
+  return count & (WIDTH[name] === 64 ? 63 : 31);
+}
+
+/**
+ * One bitwise operation over two whole numbers, at the width the type holds.
+ *
+ * `and`, `or` and `xor` are operations on the bits, so the width they are
+ * carried out at is the width of the answer: a 64 bit type carries them over
+ * all 64 bits, and reading its sides as 32 bit integers — as the language
+ * reads `&`, `|` and `^` at — took the high half of the answer away.
+ * `4294967296 | 1` at `usize` is 4294967297, not one.
+ *
+ * The sides are wrapped to the range of the type first, which is what a
+ * register holds, and a narrow one is read as the 32 bit integer the language
+ * reads its bitwise sides at, promotion included. The answer is read back at
+ * the sign of the type, and one a double does not carry exactly is not an
+ * answer at all: the fold leaves the operation as it was written for the
+ * backend to compute at the width it wraps to.
+ */
+function wholeBits(left: number, right: number, op: "and" | "or" | "xor", name: NumericName): number {
+  if (WIDTH[name] !== 64) {
+    if (op === "and") return toBits(left) & toBits(right);
+    if (op === "or") return toBits(left) | toBits(right);
+    return toBits(left) ^ toBits(right);
+  }
+  const modulus = 2n ** 64n;
+  const wrap = (value: number): bigint => {
+    const whole = BigInt(Math.trunc(value));
+    return ((whole % modulus) + modulus) % modulus;
+  };
+  const leftBits = wrap(left);
+  const rightBits = wrap(right);
+  const wrapped = op === "and" ? leftBits & rightBits : op === "or" ? leftBits | rightBits : leftBits ^ rightBits;
+  if (!isUnsigned({ kind: "primitive", name } as SemanticType) && wrapped >= 2n ** 63n) {
+    return readBack(wrapped - modulus);
+  }
+  return readBack(wrapped);
+}
+
+/**
+ * The number a 64 bit bitwise answer is read back as. A whole number the
+ * double cannot hold exactly is not an answer this pass may store: its
+ * shortest form reads back as a different number, and wrapping that double —
+ * 18446744073709552000 is exactly 2^64 — would land the whole answer on a
+ * different bit pattern than the one the operation computed. A number the
+ * answer does not carry is read back as the one the wrap leaves alone and the
+ * fold that writes it back refuses, so the operation stays as it was written
+ * and the backend computes its own width.
+ */
+function readBack(wrapped: bigint): number {
+  const read = Number(wrapped);
+  return Number.isSafeInteger(read) ? read : NaN;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -296,7 +363,18 @@ function withChildren(value: SemanticValue, children: SemanticValue[]): Semantic
     // fold never changes a type, so the folded values line up with them.
     case "call": return { ...value, call: { ...value.call, args: children } };
     case "newObject": return { ...value, fields: value.fields.map((field) => ({ ...field, value: next() })) };
-    case "buffer": return { ...value, values: children };
+    case "buffer": {
+      // The children a buffer holds are the count, then the two sides of a
+      // view, then the elements — the same order `valueChildren` walked them
+      // out in. Handing every one of them to `values` wrote the folded count
+      // into the elements of the buffer and left the count the arithmetic it
+      // was before the fold, so a sized buffer the program asked for held a
+      // count nothing had folded and an element it never wrote.
+      let at = 0;
+      const count = value.count === null ? null : (children[at++] as SemanticValue);
+      const view = value.view === null ? null : { of: children[at++] as SemanticValue, offset: children[at++] as SemanticValue };
+      return { ...value, count, view, values: children.slice(at) };
+    }
     case "text":
       return {
         ...value,
@@ -352,7 +430,7 @@ function foldConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null
   if (left === null) return null;
   const right = literalTextOf(value.right);
   if (right === null) return null;
-  return { k: "text", type: value.type, parts: [{ k: "text", value: left + right }] };
+  return { k: "text", type: TEXT, parts: [{ k: "text", value: left + right }] };
 }
 
 /**

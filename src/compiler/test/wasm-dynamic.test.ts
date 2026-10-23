@@ -14,13 +14,13 @@ import { join } from "node:path";
 import { buildModule } from "../toolchain/ir-wasm.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract } from "../core/types.ts";
-import type { SemanticCall, SemanticFunction, SemanticStatement, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticCall, SemanticFunction, SemanticStatement, SemanticType, SemanticValue, TextType } from "../core/semantic-ir.ts";
 import { scratch } from "./scratch.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
 const DYNAMIC: SemanticType = { kind: "ref", of: null };
-const TEXT: SemanticType = { kind: "text" };
+const TEXT: TextType = { kind: "text" };
 
 /** A call of a builtin, which is the compiler's own and not a function of the program. */
 function builtin(callee: string, type: SemanticType, args: SemanticValue[], argTypes: SemanticType[]): SemanticValue {
