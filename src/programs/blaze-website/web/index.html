@@ -35,6 +35,13 @@
         rather than merely plausible.
       </p>
       <p>
+        LLM use at compile time is optional. The pipeline is rule-based
+        throughout, and a build works with no model, no API key and no
+        network access to a model endpoint: LLM verification is a check you
+        can switch on, not a step the compiler depends on. The only model
+        this page talks to is the one behind the chat below, at runtime.
+      </p>
+      <p>
         Blaze links the facil.io HTTP runtime beside programs that serve
         HTTP, and SQLite beside programs that store data. This website is
         itself a Blaze program: it is compiled to a native binary, serves

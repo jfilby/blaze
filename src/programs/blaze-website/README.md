@@ -30,6 +30,17 @@ it is built, so there is nothing the build could compare; the project file
 says so with `verifyProgram = false`, the setting a program that prints
 nothing to compare asks for.
 
+## Compile time
+
+LLM use at compile time is optional. Building `blaze-website` does not call a
+model, does not need an API key, and works without any model access: you can
+run `blaze build` with no key file and no network to a model endpoint.
+
+The only place a model is used is at runtime. When the chat is asked a
+question, the program itself calls the Nebius Token Factory model, and that
+call needs `NEBIUS_API_KEY` — but only when the program runs, never when it is
+built.
+
 ## Running
 
 The program reads its own files from `web/`, so it is started from the
