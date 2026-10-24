@@ -24,3 +24,8 @@ secondary = "size"
 [generation]
 maxCandidates = 2
 maxAttempts = 3
+
+[benchmark]
+command = "./spectral_norm 1500"
+working_dir = "."
+
