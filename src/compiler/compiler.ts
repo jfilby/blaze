@@ -49,7 +49,6 @@ import type {
   SemanticBlock,
   SemanticFunction,
   SemanticProgram,
-  SemanticStatement,
   SemanticType,
 } from "./core/semantic-ir.ts";
 import { slotType, statementBlocksOf, statementValues, walkValues } from "./core/semantic-ir.ts";
@@ -1076,9 +1075,9 @@ export function programLoweringOf(
       const dropped = lowered.has(edge.caller) ? edge.caller : edge.callee;
       if (lowered.delete(dropped)) {
         moved = true;
-        const kept = dropped === edge.caller ? edge.caller : edge.callee;
+        const partner = dropped === edge.caller ? edge.callee : edge.caller;
         notes.push(
-          `the machine backend left ${kept} in the driver: a call it shares with ${dropped === kept ? edge.caller : edge.callee} hands over what only one convention carries`,
+          `the machine backend left ${dropped} in the driver: a call it shares with ${partner} hands over what only one convention carries`,
         );
       }
     }
@@ -1111,28 +1110,30 @@ function callsWithin(program: SemanticProgram): { caller: string; callee: string
 /** Every function name a body or the program's own statements call directly. */
 function directCalleesOf(block: SemanticBlock): string[] {
   const names: string[] = [];
-  for (const statement of everyStatementOf(block)) {
-    for (const value of statementValues(statement)) {
-      walkValues(value, (inner) => {
+  const visit = (visited: SemanticBlock): void => {
+    for (const statement of visited.statements) {
+      for (const value of statementValues(statement)) {
+        walkValues(value, (inner) => {
+          if (inner.k === "call") names.push(inner.call.callee);
+          if (inner.k === "functionRef") names.push(inner.name);
+        });
+      }
+      if (statement.k === "call") names.push(statement.call.callee);
+      for (const inner of statementBlocksOf(statement)) visit(inner);
+    }
+    // A block ends in a terminator, and the value a return hands back is a value
+    // the block computes: the call of a closure a body ends with is the call a
+    // boundary between the backends has to be read from, so the walk of a block
+    // reaches it the way it reaches every statement's values.
+    if (visited.terminator.k === "return" && visited.terminator.value !== null) {
+      walkValues(visited.terminator.value, (inner) => {
         if (inner.k === "call") names.push(inner.call.callee);
         if (inner.k === "functionRef") names.push(inner.name);
       });
     }
-    if (statement.k === "call") names.push(statement.call.callee);
-  }
-  return [...new Set(names)];
-}
-
-function everyStatementOf(block: SemanticBlock): SemanticStatement[] {
-  const statements: SemanticStatement[] = [];
-  const visit = (into: SemanticBlock): void => {
-    for (const statement of into.statements) {
-      statements.push(statement);
-      for (const inner of statementBlocksOf(statement)) visit(inner);
-    }
   };
   visit(block);
-  return statements;
+  return [...new Set(names)];
 }
 
 /**

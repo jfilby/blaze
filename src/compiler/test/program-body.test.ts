@@ -2614,3 +2614,44 @@ test("a turn whose divisor is a triangular number the counter decides is counted
   assert.equal(original.code, 0, original.stderr);
   assert.equal(delivered.stdout, original.stdout);
 });
+
+test("a call a body makes in its return is a boundary the two backends share", async () => {
+  // The shape the http server benchmark is: a body the machine backend lowers
+  // ends by handing back the call of a body that takes text, and that body is
+  // one the backend refused (`Math.ceil` in it). The call was read only where
+  // the walk of a body reached a return — the walk of the statements never saw
+  // it — so the caller stayed an object while the callee the driver wrote down
+  // stayed `static`, and the program did not link at the callee's name. A call
+  // in a return is one of the program's calls: the caller of it is lowered the
+  // same way the callee was.
+  const source = [
+    'const label = "";',
+    "function refused(name) {",
+    "  return Math.ceil(name.length / 2);",
+    "}",
+    "function lowerable(v) {",
+    "  return refused(`v=${v}`);",
+    "}",
+    "console.log(label, lowerable(3));",
+    "",
+  ].join("\n");
+  const { directory, binary, notes } = await deliveredByMachine(source, "danger");
+  assert.ok(
+    notes.some((note) => /refused to lower refused \(refused calls Math\.ceil/.test(note)),
+    notes.join("\n"),
+  );
+  assert.ok(
+    notes.some(
+      (note) =>
+        /left lowerable in the driver: a call it shares with refused hands over what only one convention carries/.test(
+          note,
+        ),
+    ),
+    notes.join("\n"),
+  );
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+});
