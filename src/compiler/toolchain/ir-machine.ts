@@ -5875,12 +5875,52 @@ class Machine {
       const gone = new Set(dead);
       alive = alive.filter((entry) => !gone.has(entry));
     }
+    // The lean turn reads only the weight, so declarations the guarded turn
+    // kept for its select and its slow arm — the overflow checks, the
+    // whole-number sum, the floating sum — may be dead here even where they
+    // are alive in the guarded body. Drop them the same way, against the lean
+    // body, so the fast turns do not compute them.
+    let aliveLean = [...alive];
+    if (with_weight_alone !== null) {
+      for (;;) {
+        const tryBody = {
+          ...loop.body,
+          statements: [
+            ...aliveLean,
+            { ...statement, value: with_weight_alone },
+            {
+              k: "set" as const,
+              name: weightName,
+              op: "+=" as const,
+              value: { k: "local" as const, type: NUMBER, name: stepName },
+              line: statement.line,
+            },
+            {
+              k: "set" as const,
+              name: stepName,
+              op: "+=" as const,
+              value: { k: "const" as const, type: NUMBER, text: "1" },
+              line: statement.line,
+            },
+          ],
+        } as SemanticBlock;
+        const dead = aliveLean.filter(
+          (entry) =>
+            entry.k === "let" &&
+            entry.slot.kind === "value" &&
+            !everyValue(tryBody).some((value) => readsLocal(value, entry.slot.name)),
+        );
+        if (dead.length === 0) break;
+        const gone = new Set(dead);
+        aliveLean = aliveLean.filter((entry) => !gone.has(entry));
+      }
+    }
     const leanBody = with_weight_alone === null
       ? null
       : ({
           ...loop.body,
           statements: [
-            ...alive,
+            ...aliveLean,
             { ...statement, value: with_weight_alone },
             {
               k: "set",
