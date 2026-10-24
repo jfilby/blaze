@@ -2,5 +2,5 @@ private-docs
 .blaze/
 node_modules/
 *.o
-
 .blazeup/
+.commandcode/
