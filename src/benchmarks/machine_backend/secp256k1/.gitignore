@@ -1,4 +1,3 @@
-blaze.toml
 0-ffi
 go.*
 secp256k1

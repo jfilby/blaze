@@ -1,0 +1,28 @@
+language = "typescript"
+sourceFile = "1.js"
+output = "machine"
+backend = "machine"
+mode = "danger"
+
+[model]
+# provider = "opencode-go"
+# model = "cat-jam-free"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+features = ["sse4.1"]
+
+[optimize]
+primary = "throughput"
+secondary = "size"
+
+[generation]
+maxCandidates = 2
+maxAttempts = 3
+
+[benchmark]
+command = "./http_server 10"
+working_dir = "."
+

@@ -1,0 +1,27 @@
+language = "typescript"
+sourceFile = "1.ts"
+output = "machine"
+backend = "machine"
+mode = "danger"
+
+[model]
+# provider = "opencode-go"
+# model = "longcat-2.5-preview-free"
+
+[target]
+arch = "x86_64"
+os = "linux"
+abi = "sysv"
+
+[optimize]
+primary = "throughput"
+secondary = "size"
+
+[generation]
+maxCandidates = 2
+maxAttempts = 3
+
+[benchmark]
+command = "./binarytrees 17"
+working_dir = "."
+
