@@ -2347,6 +2347,233 @@ test("a whole number accumulator is refused, because the additions are of double
   assert.doesNotMatch(await emitted(fn), /\bmovups\b/, "the loop is written a counter at a time");
 });
 
+/* -------------------------------------------------------------------------- */
+/* Weighted divisor: a triangular weight counted, and its guards asked once    */
+/* -------------------------------------------------------------------------- */
+
+const U32_MACHINE: SemanticType = { kind: "primitive", name: "u32" };
+
+const times = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: F64, op: "mul", left, right });
+const wholeTimes = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: I64, op: "mul", left, right });
+const wholeSum = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: I64, op: "add", left, right });
+const shiftedByOne = (left: SemanticValue): SemanticValue =>
+  ({ k: "arith", type: U32_MACHINE, op: "ushr", left, right: { k: "const", type: U32_MACHINE, text: "1" } });
+const wholeElement = (array: string, index: SemanticValue): SemanticValue => ({
+  k: "element",
+  type: F64,
+  of: local(array, ARRAY_OF_F64),
+  index,
+});
+const chosen = (condition: SemanticValue, then: SemanticValue, otherwise: SemanticValue): SemanticValue =>
+  ({ k: "select", type: F64, condition, then, otherwise });
+const joined = (left: SemanticValue, right: SemanticValue): SemanticValue =>
+  ({ k: "logical", type: BOOL, op: "and", left, right });
+
+/** `(u64)x + bias <= bound`, the biased range test the whole-number form carries. */
+const withinReach = (x: SemanticValue, bias = "33554432", bound = "67108864"): SemanticValue =>
+  ({
+    k: "compare",
+    type: BOOL,
+    op: "le",
+    operand: U64,
+    left: { k: "arith", type: U64, op: "add", left: x, right: { k: "const", type: U64, text: bias } },
+    right: { k: "const", type: U64, text: bound },
+  });
+
+/** The triangular kernel the spectral norm divides by: `((i + j) * (i + j + 1)) >>> 1 + i + 1`. */
+const kernel = (i: number, j: number): number => ((i + j) * (i + j + 1) >>> 1) + i + 1;
+
+/**
+ * The sum a spectral norm's inner loop answers, over a counter the turn divides
+ * a triangular weight by: one fast arm said in whole numbers, one slow arm said
+ * the way the source said it, and a run of range tests the counter carries.
+ *
+ * The condition is written with the arms the tests come in: `condition` adds a
+ * leaf of its own to the two the whole-number form carries, so a test can
+ * refuse the pass with a leaf the ends cannot answer for.
+ */
+function weightedSubject(condition?: (j: SemanticValue) => SemanticValue): SemanticFunction {
+  const j = (name: string): SemanticValue => local(name, I64);
+  const entry: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: I64,
+          from: { k: "const", type: I64, text: "0" },
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              { k: "let", slot: { kind: "value", name: "invariant2", mutable: false, type: BOOL }, value: withinReach(local("i", I64)), line: 4 },
+              {
+                k: "loop",
+                line: 5,
+                loop: {
+                  kind: "counted",
+                  variable: "j",
+                  type: I64,
+                  from: { k: "const", type: I64, text: "0" },
+                  to: local("n"),
+                  inclusive: false,
+                  down: false,
+                  step: null,
+                  header: "b3",
+                  exit: "b2",
+                  body: {
+                    id: "b4",
+                    releases: [],
+                    terminator: { k: "next" },
+                    statements: [
+                      { k: "let", slot: { kind: "value", name: "common4", mutable: false, type: I64 }, value: wholeSum(local("i", I64), j("j")), line: 6 },
+                      { k: "let", slot: { kind: "value", name: "common6", mutable: false, type: F64 }, value: add(local("i", I64), j("j")), line: 6 },
+                      {
+                        k: "set",
+                        name: "total",
+                        op: "+=",
+                        line: 7,
+                        value: divide(
+                          wholeElement("a", j("j")),
+                          chosen(
+                            condition === undefined
+                              ? joined(local("invariant2", BOOL), withinReach(j("j")))
+                              : condition(j("j")),
+                            wholeSum(wholeSum(shiftedByOne(wholeTimes(j("common4"), wholeSum(j("common4"), { k: "const", type: I64, text: "1" }))), local("i", I64)), { k: "const", type: I64, text: "1" }),
+                            add(add(shiftedByOne(times(j("common6"), add(j("common6"), number("1")))), local("i", I64)), number("1")),
+                          ),
+                        ),
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  return subject(F64, entry, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: F64 },
+  ]);
+}
+
+/** Lays an array of ones down, calls the function and prints the sum in full. */
+function weightedDriver(turns: number): (name: string) => string {
+  return (name) => [
+    `  double a[${Math.max(turns, 1)}];`,
+    ...Array.from({ length: Math.max(turns, 1) }, (_one, at_) => `  a[${at_}] = 1.0;`),
+    `  printf("%.17g", ${name}(a, ${turns}));`,
+  ].join("\n");
+}
+
+/** The sum the source's loop answers, in the order it added the turns up. */
+function weightedReference(turns: number): number {
+  let total = 0;
+  for (let i = 0; i < turns; i += 1) {
+    for (let j = 0; j < turns; j += 1) total += 1 / kernel(i, j);
+  }
+  return total;
+}
+
+test("a weight's guards are asked of the loop's ends, and the turns branch on the answer", async () => {
+  // The turns of a bound within the reach take the fast arm from the first to
+  // the last; the turns of a bound past it take the slow arm the whole way.
+  // Both answer the sum the source wrote. The listing is the two loops the
+  // answer chose between: the lean one divides by the weight the build gave a
+  // register of its own, and the guarded one divides by the slot the select
+  // answered into.
+  for (const turns of [5, 1000]) {
+    assert.equal(
+      Number(await lowered(weightedSubject(), weightedDriver(turns))),
+      weightedReference(turns),
+      `the fast arm answers the sum the loop wrote, at ${turns}`,
+    );
+    const listing = await emitted(weightedSubject());
+    assert.equal(
+      (listing.match(/divsd/g) ?? []).length,
+      2,
+      "the loop is written twice: the lean turns the ends admitted, and the guarded turns beside them",
+    );
+  }
+});
+
+test("a bound the ends refuse takes the slow arm, and answers the sum the source wrote", async () => {
+  // The test here is the whole-number form's own, with the bias and the bound
+  // five apart: the ends ask it of a bound of ten and it refuses, so the turns
+  // run the guarded loop, whose every turn is the computation the source said.
+  const turns = 10;
+  const subject = weightedSubject((j) => withinReach(j, "2", "4"));
+  assert.equal(
+    Number(await lowered(subject, weightedDriver(turns))),
+    weightedReference(turns),
+    "the slow arm answers what the source's own arithmetic answers",
+  );
+  const listing = await emitted(subject);
+  assert.equal((listing.match(/divsd/g) ?? []).length, 2, "the turns the ends refused keep the select and the tests under it");
+});
+
+test("a side that fell off the width keeps the turns it was written with", async () => {
+  // The side here is five less the counter: it crosses zero on the sixth turn,
+  // and the value the turns read it at is the huge number its bits are from
+  // there on. The ends of such a run hold together while the middle does not,
+  // and the direction the side moved between the ends is what says so — it
+  // moved the wrong way, so the turns run the guarded loop.
+  const falling = (j: SemanticValue): SemanticValue =>
+    ({
+      k: "compare",
+      type: BOOL,
+      op: "ge",
+      operand: U64,
+      left: { k: "arith", type: U64, op: "sub", left: { k: "const", type: U64, text: "0" }, right: { k: "arith", type: I64, op: "sub", left: j, right: { k: "const", type: I64, text: "5" } } },
+      right: { k: "const", type: U64, text: "65534" },
+    });
+  const turns = 10;
+  const subject = weightedSubject(falling);
+  assert.equal(
+    Number(await lowered(subject, weightedDriver(turns))),
+    weightedReference(turns),
+    "the guarded turns answer what the source's own arithmetic answers",
+  );
+  assert.equal((await emitted(subject)).match(/divsd/g)?.length, 2, "the loop is written twice, and the guarded one is what runs");
+});
+
+test("a guard the ends cannot answer for keeps the test it was written with", async () => {
+  // An equality is one turn's answer and not the run's: the ends deciding it
+  // would answer every turn the same, which the turns are not. The loop keeps
+  // its guards, and answers the sum the source wrote.
+  for (const condition of [
+    (j: SemanticValue) => joined(withinReach(j), { k: "compare", type: BOOL, op: "eq", operand: U64, left: j, right: { k: "const", type: U64, text: "3" } } as SemanticValue),
+    (j: SemanticValue) => ({ k: "logical", type: BOOL, op: "or", left: withinReach(j), right: withinReach(j) } as SemanticValue),
+  ]) {
+    const subject = weightedSubject(condition);
+    assert.equal((await emitted(subject)).match(/divsd/g)?.length, 1, "the guards stay on the turns, and the loop is written once");
+    assert.equal(
+      Number(await lowered(subject, weightedDriver(5))),
+      weightedReference(5),
+      "the guarded loop answers the sum the source wrote",
+    );
+  }
+});
+
 /**
  * One machine object, lowered and run, answering a whole number the driver
  * hands it. Written here rather than reusing `lowered`, which has no way to
@@ -3567,4 +3794,91 @@ test("a number beside a text is the test, and the text is the value", async () =
   // not hold is the text beside it.
   assert.equal(await lowered(fn, (name) => `printf("%s", ${name}(0.0));`), "none", "a number that does not hold hands back the text");
   assert.equal(await lowered(fn, (name) => `printf("%s", ${name}(42.0));`), "42", "a number that holds hands back the text of that number");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Packed weighted division under AVX-512                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The loop the weighted form leaves behind, written out by hand so the packed
+ * path can be asked for directly: `total += a[j] / weight; weight += step;
+ * step += 1` over a counter of whole numbers.
+ */
+function packedWeightedSubject(): SemanticFunction {
+  const counter = (name: string): SemanticValue => local(name, I64);
+  return subject(F64, {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      { k: "let", slot: { kind: "value", name: "weight", mutable: true, type: F64 }, value: number("1"), line: 3 },
+      { k: "let", slot: { kind: "value", name: "step", mutable: true, type: F64 }, value: number("1"), line: 4 },
+      {
+        k: "loop",
+        line: 5,
+        loop: {
+          kind: "counted",
+          variable: "j",
+          type: I64,
+          from: number("0", I64),
+          to: local("n", I64),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              {
+                k: "set",
+                name: "total",
+                op: "+=",
+                line: 6,
+                value: divide(wholeElement("a", counter("j")), local("weight")),
+              },
+              { k: "set", name: "weight", op: "+=", line: 7, value: local("step") },
+              { k: "set", name: "step", op: "+=", line: 8, value: number("1") },
+            ],
+          },
+        },
+      },
+    ],
+  }, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: I64 },
+  ]);
+}
+
+const AVX512: TargetSpec = { ...TARGET, features: ["avx512f"] };
+
+test("a weight the loop maintains is divided eight elements at a time under AVX-512", async () => {
+  const fn = packedWeightedSubject();
+  const text = await emitted(fn, ["f", "g", "h9"], AVX512);
+  assert.match(text, /\bvdivpd\b/, "eight divisions is one packed instruction");
+  assert.match(text, /\bvbroadcastsd\b/, "the weight the turns divide by is broadcast to every lane");
+  assert.match(text, /\bvmovupd\b/, "eight elements are read in one unaligned load");
+});
+
+test("without AVX-512 the same loop is written one division at a time", async () => {
+  const fn = packedWeightedSubject();
+  const text = await emitted(fn, ["f", "g", "h9"], TARGET);
+  assert.doesNotMatch(text, /\bvdivpd\b/, "no packed division without the feature");
+  assert.match(text, /\bdivsd\b/, "the turns divide one at a time");
+});
+
+test("the packed loop keeps the additions in the order the source wrote them", async () => {
+  const fn = packedWeightedSubject();
+  const text = await emitted(fn, ["f", "g", "h9"], AVX512);
+  // Eight quotients are stored and read back one lane at a time, so the
+  // additions into the accumulator are one per lane in the order the turns
+  // came, and never a horizontal fold.
+  const additions = (text.match(/\baddsd\b/g) ?? []).length;
+  assert.ok(additions >= 8, `eight quotients are added one at a time, found ${additions}`);
+  assert.doesNotMatch(text, /\bhaddpd\b/, "no horizontal fold reorders the additions");
+  assert.doesNotMatch(text, /\bvhaddpd\b/, "no horizontal fold reorders the additions");
 });

@@ -135,14 +135,6 @@ const VOID_TYPE: SemanticType = { kind: "void" };
 /** The truth a condition and a comparison are written as. */
 const TRUTH: SemanticType = { kind: "primitive", name: "bool" };
 /**
- * The whole number the weight the counter decides is read as, which is the
- * whole number the source's own unsigned shift reads: `>>>` reads both of its
- * sides as the narrow unsigned number the language reads them as, so the
- * arithmetic the weight is counted in and the test that guards its exactness
- * are a comparison of these.
- */
-const UNSIGNED: SemanticType = { kind: "primitive", name: "u32" };
-/**
  * The largest sum a fast weight is triangular over. The weight the shift
  * computes is exact while the product `s * (s + 1)` fits the unsigned number
  * the shift reads it as: `>>>` answers `s * (s + 1)` read as a u32, and the
@@ -917,6 +909,82 @@ function packedSumOf(loop: SemanticLoop): PackedSum | null {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Packed weighted division: eight divides by a maintained weight at a time   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A counted loop whose turn adds `array[counter] / weight` into an accumulator,
+ * where `weight` and `step` are maintained by the loop (`weight += step`,
+ * `step += 1`). This is the shape `weighted()` leaves behind for a spectral
+ * norm-style loop once the triangular divisor has been strength-reduced to a
+ * counted weight.
+ *
+ * Divisor `k` turns into the future is `weight + k * step + k * (k - 1) / 2`,
+ * so eight consecutive turns divide by eight different weights. The packed form
+ * computes those eight divisors at once, divides eight elements at once with a
+ * single packed division, then adds the eight quotients into the accumulator
+ * in source order so the answer is bit-for-bit the scalar loop's.
+ */
+interface PackedWeighted {
+  /** The counter the loop counts on, which the element is read at. */
+  readonly counter: string;
+  /** The name the quotients are added into. */
+  readonly accumulator: string;
+  /** The array the element is read from. */
+  readonly array: string;
+  /** The maintained weight the turn divides by. */
+  readonly weight: string;
+  /** The maintained step the weight is stepped by. */
+  readonly step: string;
+}
+
+/**
+ * Whether a counted loop is the packed-weightable form, and which names it uses.
+ * Every condition here is a refusal: anything the shape does not guarantee is
+ * left to the scalar loop.
+ */
+function packedWeightedOf(loop: SemanticLoop): PackedWeighted | null {
+  if (loop.kind !== "counted") return null;
+  if (loop.type.kind !== "primitive" || loop.type.name !== "i64") return null;
+  if (loop.down) return null;
+  if (loop.step !== null) {
+    const written = wholeLiteral(loop.step);
+    if (written === null || written !== 1) return null;
+  }
+  const from = wholeLiteral(loop.from);
+  if (from === null || from < 0) return null;
+  if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
+  const statements = loop.body.statements;
+  // `total += array[j] / weight; weight += step; step += 1`, nothing else.
+  if (statements.length !== 3) return null;
+  const division = statements[0];
+  if (division.k !== "set" || division.op !== "+=" || division.name === loop.variable) return null;
+  const value = division.value;
+  if (value.k !== "arith" || value.op !== "div") return null;
+  if (value.type.kind !== "primitive" || value.type.name !== "f64") return null;
+  const element = value.left;
+  const divisor = value.right;
+  if (element.k !== "element" || element.of.k !== "local") return null;
+  if (element.index.k !== "local" || element.index.name !== loop.variable) return null;
+  if (element.type.kind !== "primitive" || element.type.name !== "f64") return null;
+  if (divisor.k !== "local") return null;
+  const weight = divisor.name;
+  const accumulator = division.name;
+  // `weight += step`
+  const stepped = statements[1];
+  if (stepped.k !== "set" || stepped.op !== "+=" || stepped.name !== weight) return null;
+  if (stepped.value.k !== "local") return null;
+  const step = stepped.value.name;
+  // `step += 1`
+  const advanced = statements[2];
+  if (advanced.k !== "set" || advanced.op !== "+=" || advanced.name !== step) return null;
+  if (advanced.value.k !== "const") return null;
+  const one = wholeLiteral(advanced.value);
+  if (one === null || one !== 1) return null;
+  return { counter: loop.variable, accumulator, array: element.of.name, weight, step };
+}
+
 /**
  * The registers one turn of a packed sum is written with: where the pair of
  * counters it is for stands, how far along the arrays it reads has come, and
@@ -1536,6 +1604,116 @@ function oneAbove(value: SemanticValue, other: SemanticValue): SemanticValue | n
 }
 
 /**
+ * The leaves a test of comparisons is written as a run of, or null where one
+ * of its runs is not a run of comparisons. Two conditions joined by an `and`
+ * hold together only where both hold, so the leaves of a run of them are what
+ * the run asks; anything else — an `or`, a test that is not a comparison — is
+ * carried as the leaf it is and what it asks is the leaf's own to answer.
+ */
+function conjunctsOf(value: SemanticValue): SemanticValue[] | null {
+  if (value.k === "logical" && value.op === "and") {
+    const left = conjunctsOf(value.left);
+    const right = conjunctsOf(value.right);
+    return left === null || right === null ? null : [...left, ...right];
+  }
+  return [value];
+}
+
+/**
+ * Whether anything in a value reads the name, which is what a declaration
+ * nothing reads any more is told by.
+ */
+function readsLocal(value: SemanticValue, name: string): boolean {
+  let found = false;
+  walkValues(value, (inner) => {
+    if (inner.k === "local" && inner.name === name) found = true;
+  });
+  return found;
+}
+
+/**
+ * One leaf of a test of a weight, written as the tests the loop's ends answer,
+ * or null where the leaf is not one the ends answer for.
+ *
+ * A truth the body decides for itself — a boolean the turns never write — is
+ * the same answer wherever the turn reads it, and is carried as it is. A
+ * comparison is the ends' to answer when exactly one of its sides moves with
+ * the counter by one: the side that grows is greatest at the bound and least
+ * at the first value, so the lower-of comparison holds for the run where it
+ * holds at both ends, and the greater-of the same way the other round. The
+ * other side does not move, and what it reads where the test stands is what it
+ * reads on every turn after.
+ *
+ * The ends are both asked of every comparison that moves, whichever direction
+ * it moves in. What needs the second end is the value the turns read at sixty
+ * four bits: a side whose invariant part is below zero is read as the huge
+ * number its bits are, which falls off the top of the width once the counter
+ * passes it — the values are huge, then small, and a test at the bound alone
+ * would call such a run held when its first turns were not. The fall happens
+ * at most once, because the turns together move the side by less than the
+ * width holds, so a run whose ends both hold is a run that holds between
+ * them, and one whose first end does not hold is refused here.
+ */
+function hoistableLeaf(
+  leaf: SemanticValue,
+  counter: string,
+  writes: (name: string) => boolean,
+  from: SemanticValue,
+  to: SemanticValue,
+): SemanticValue | null {
+  if (leaf.k === "local") {
+    if (!isBoolean(leaf.type) || writes(leaf.name)) return null;
+    return structuredClone(leaf);
+  }
+  if (leaf.k !== "compare") return null;
+  if (leaf.op !== "le" && leaf.op !== "lt" && leaf.op !== "ge" && leaf.op !== "gt") return null;
+  // The comparison is read at the widest unsigned width, where the side that
+  // moves cannot pass the top of the width more than once over the whole run.
+  // Anything narrower wraps at four billion, and a shape that wraps twice is
+  // not one the ends answer for.
+  if (!isUnsigned(leaf.operand) || widthOf(leaf.operand) !== 8) return null;
+  const left = growthOf(leaf.left, counter, writes);
+  const right = growthOf(leaf.right, counter, writes);
+  if (left === null || right === null) return null;
+  if (left !== 0 && right !== 0) return null;
+  if (left === 0 && right === 0) return structuredClone(leaf);
+  const growth = left !== 0 ? left : right;
+  if (growth !== 1 && growth !== -1) return null;
+  const growing = left !== 0;
+  const moving = growing ? leaf.left : leaf.right;
+  const standing = growing ? leaf.right : leaf.left;
+  const at = (end: SemanticValue): SemanticValue =>
+    substituteLocals(
+      structuredClone(moving),
+      new Map([[counter, structuredClone(end) as SemanticValue]]),
+    );
+  const atFrom = { ...leaf, left: growing ? at(from) : standing, right: growing ? standing : at(from) } as SemanticValue;
+  const atTo = { ...leaf, left: growing ? at(to) : standing, right: growing ? standing : at(to) } as SemanticValue;
+  // The certificate that the turns read the side in the order its arithmetic
+  // says: the side moves by one per turn, so between the ends it moves in the
+  // direction it moves in and by no more than the width holds — unless the
+  // value it is read at fell off the top of the width on the way, which is
+  // what the ends alone cannot see. The side at the bound being past (or
+  // behind, for a shrinking side) the side at the first value is what says it
+  // did not fall, and with it the comparison holds where the ends hold.
+  const certificate = {
+    k: "compare",
+    type: leaf.type,
+    op: growing ? "gt" : "lt",
+    operand: leaf.operand,
+    left: at(to),
+    right: at(from),
+  } as SemanticValue;
+  return {
+    k: "logical",
+    type: leaf.type,
+    op: "and",
+    left: { k: "logical", type: leaf.type, op: "and", left: atFrom, right: atTo } as SemanticValue,
+    right: certificate,
+  };
+}
+
+/**
  * How much a value moves by per turn of a counter, or null where the turns say
  * nothing about it.
  */
@@ -1998,6 +2176,8 @@ class Machine {
   private readonly floatLabels = new Map<string, string>();
   /** The labels of the numbers laid down in both halves of a pair. */
   private readonly floatPairs = new Map<string, string>();
+  /** The labels of the eight-double constant vectors laid down for packed loops. */
+  private readonly floatLists = new Map<string, string>();
   readonly labels: DataLabel[] = [];
   /** The symbols the code calls or reads that this object does not define. */
   readonly externals: string[] = [];
@@ -2141,6 +2321,15 @@ class Machine {
    * about the function being written.
    */
   private readonly rounds: boolean;
+  /**
+   * Whether the target the build was asked for has AVX-512 foundation support,
+   * which is what lets the lowering emit packed 512-bit division. The feature
+   * is named in `target.features` by the project; it is not probed from the
+   * host processor, so a binary built with it only runs on AVX-512 hardware.
+   */
+  private get avx512(): boolean {
+    return this.target.features.includes("avx512f");
+  }
   /**
    * The parameter indices that hold power-of-two arrays, so division by one of
    * their elements can be strength-reduced to a shift.
@@ -5090,6 +5279,188 @@ class Machine {
     return true;
   }
 
+  /* ---------------------------------------------------------------------- */
+  /* Packed weighted division: eight divides by a maintained weight at a time */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * One scalar double read out of a held slot into a register, used to move the
+   * maintained weight, step and accumulator in and out of the packed loop.
+   */
+  private loadFloat(held: Held, into: number): void {
+    if (held.register !== null) this.code.movsMove(into, held.register, false);
+    else this.code.movsLoad(into, frame(held.offset), false);
+  }
+
+  /**
+   * A counted loop whose turn adds `array[counter] / weight` into an
+   * accumulator, with `weight` and `step` maintained by the loop, written with
+   * eight packed divisions at a time when the target has AVX-512.
+   *
+   * The weight the turn divides by is an arithmetic progression whose step is
+   * itself stepped by one per turn, so divisor `k` turns into the future is
+   * `weight + k * step + k * (k - 1) / 2`. Eight consecutive divisors are
+   * built at once as `weight + [0..7] * step + [0,0,1,3,6,10,15,21]`, eight
+   * elements are loaded at once, divided with a single `vdivpd`, and the eight
+   * quotients are added into the accumulator one lane at a time in source
+   * order, so the sum is bit-for-bit the scalar loop's. The scalar tail writes
+   * the leftover turns the way the scalar loop would.
+   *
+   * Returns false when the registers the packed form needs are pinned, leaving
+   * the loop to the scalar lowering.
+   */
+  private packedWeightedAvx512(
+    loop: Extract<SemanticLoop, { kind: "counted" }>,
+    labels: LoopLabels,
+  ): boolean {
+    const packed = packedWeightedOf(loop);
+    if (packed === null) return false;
+    const weight = this.slot(packed.weight);
+    const step = this.slot(packed.step);
+    const accumulator = this.slot(packed.accumulator);
+    const array = this.slot(packed.array);
+    // The registers names the rest of the function relies on are spoken for,
+    // and so is the low half of every register the prologue spilled: a 512-bit
+    // write through one of them is a write to that name's value too.
+    const spoken = new Set<number>([...this.pinned.values(), ...this.pinnedVectors.map((saved) => saved.register)]);
+    const free = (register: number): boolean => !spoken.has(register);
+    // The scratch the weight and step the slots are advanced with are written
+    // through, which must be free too.
+    if (!free(XMM0) || !free(XMM1)) return false;
+    // The whole-number registers the turns are written with: the counter's own
+    // when the build pinned it to one, and three more for the array's base, the
+    // bound and the address a constant vector is read through.
+    const integerFree = [RDI, RSI, R8, R9, R10, R11].filter(free);
+    const pinnedCounter = this.pinned.get(this.names.read(loop.variable)) ?? null;
+    const counter = pinnedCounter ?? (integerFree.shift() ?? null);
+    if (counter === null) return false;
+    const [baseRegister, boundRegister, addressRegister] = integerFree;
+    if (baseRegister === undefined || boundRegister === undefined || addressRegister === undefined) return false;
+    // The running sum is kept in a register of its own: the pinned one when the
+    // build gave the accumulator one, and a free one otherwise.
+    const accumulatorRegister =
+      accumulator.register !== null ? accumulator.register : ([0, 1, 2, 3, 4, 5, 6, 7].find(free) ?? null);
+    if (accumulatorRegister === null) return false;
+    spoken.add(accumulatorRegister);
+    // Four vector registers: where the eight quotients land, where the eight
+    // divisors are built, and the weight and step broadcast to every lane.
+    const vectors: number[] = [];
+    for (let register = 0; register <= 15 && vectors.length < 4; register += 1) {
+      if (free(register)) vectors.push(register);
+    }
+    if (vectors.length < 4) return false;
+    const [quotient, divisors, weightVector, stepVector] = vectors;
+    // Canonical copies of the maintained weight and step the packed loop steps
+    // through, so the loop does not depend on whether the source kept them in
+    // registers or in the frame.
+    const weightSlot = this.scratch(8, "blaze_packed_weight");
+    const stepSlot = this.scratch(8, "blaze_packed_step");
+    // The eight quotients are stored here and read back one lane at a time so
+    // the addition into the accumulator stays in source order.
+    const quotients = this.scratch(64, "blaze_packed_quotients");
+    // Constants the weight and step are advanced by: `weight += 8 * step + 28`,
+    // `step += 8`.
+    const eight = this.scratch(8, "blaze_packed_eight");
+    const twentyEight = this.scratch(8, "blaze_packed_twenty_eight");
+    const one = this.scratch(8, "blaze_packed_one");
+    // Lay the index and triangular constant vectors down once, aligned for a
+    // 512-bit load.
+    const indexBits = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n].map((k) => floatBits(Number(k), false));
+    const triBits = [0n, 0n, 1n, 3n, 6n, 10n, 15n, 21n].map((k) => floatBits(Number(k), false));
+    const indexLabel = this.floatList(indexBits);
+    const triLabel = this.floatList(triBits);
+    // Store the constants into their slots.
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(8, false)), false);
+    this.code.movsStore(frame(eight), XMM0, false);
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(28, false)), false);
+    this.code.movsStore(frame(twentyEight), XMM0, false);
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(1, false)), false);
+    this.code.movsStore(frame(one), XMM0, false);
+    // Spill the maintained weight and step into their canonical slots.
+    this.loadFloat(weight, XMM0);
+    this.code.movsStore(frame(weightSlot), XMM0, false);
+    this.loadFloat(step, XMM0);
+    this.code.movsStore(frame(stepSlot), XMM0, false);
+    // The array's base pointer and the bound the counter is tested against.
+    if (array.register !== null) this.code.movRegReg(baseRegister, array.register);
+    else this.code.movRegMemSized(baseRegister, frame(array.offset), 8, false);
+    if (loop.to.k === "local") {
+      const bound = this.slot(loop.to.name);
+      if (bound.register !== null) this.code.movRegReg(boundRegister, bound.register);
+      else this.code.movRegMemSized(boundRegister, frame(bound.offset), 8, false);
+    } else {
+      this.code.movRegImm(boundRegister, BigInt(wholeLiteral(loop.to) as number));
+    }
+    // The running sum, read into the register the packed loop adds into. Where
+    // the build gave the accumulator a register of its own, it is already
+    // holding the value.
+    if (accumulator.register === null) this.code.movsLoad(accumulatorRegister, frame(accumulator.offset), false);
+    // The counter starts at the loop's first value.
+    this.code.movRegImm(counter, BigInt(wholeLiteral(loop.from) as number));
+
+    const packedHeader = this.code.label("Lpacked");
+    const tail = this.code.label("Ltail");
+    this.code.bind(labels.header);
+    this.code.bind(packedHeader);
+    // Fewer than eight elements left: write them the scalar way.
+    this.code.lea(addressRegister, mem(counter, 8));
+    this.code.alu("cmp", addressRegister, boundRegister, true);
+    this.code.jcc("g", tail);
+    // Load eight elements of the array at the counter.
+    this.code.evexLoad(quotient, indexed(baseRegister, counter, 8));
+    // Divisor k is `weight + k * step + tri(k)`, built eight at a time: the
+    // step is multiplied by the index vector and the weight and the triangular
+    // offsets are added, each read out of the read-only data where it lies.
+    this.code.evexBroadcastSd(weightVector, frame(weightSlot));
+    this.code.evexBroadcastSd(stepVector, frame(stepSlot));
+    this.code.leaLabel(addressRegister, indexLabel);
+    this.code.evexMul(divisors, stepVector, mem(addressRegister));
+    this.code.evexAdd(divisors, divisors, weightVector);
+    this.code.leaLabel(addressRegister, triLabel);
+    this.code.evexAdd(divisors, divisors, mem(addressRegister));
+    // Eight packed divisions, one per lane.
+    this.code.evexDiv(quotient, quotient, divisors);
+    // Store the quotients and add each lane into the accumulator in source order.
+    this.code.evexStore(frame(quotients), quotient);
+    for (let lane = 0; lane < 8; lane += 1) {
+      this.code.movsLoad(XMM0, frame(quotients + lane * 8), false);
+      this.code.sse("add", accumulatorRegister, XMM0, false);
+    }
+    // Advance the maintained weight and step by eight turns.
+    this.code.movsLoad(XMM0, frame(stepSlot), false);
+    this.code.sseMem("mul", XMM0, frame(eight), false);
+    this.code.sseMem("add", XMM0, frame(twentyEight), false);
+    this.code.movsLoad(XMM1, frame(weightSlot), false);
+    this.code.sse("add", XMM1, XMM0, false);
+    this.code.movsStore(frame(weightSlot), XMM1, false);
+    this.code.movsLoad(XMM0, frame(stepSlot), false);
+    this.code.sseMem("add", XMM0, frame(eight), false);
+    this.code.movsStore(frame(stepSlot), XMM0, false);
+    this.code.aluImm("add", counter, 8, true);
+    this.code.jmp(packedHeader);
+    this.code.bind(tail);
+    // The scalar tail: one turn at a time, stepping weight and step as the
+    // scalar loop does.
+    this.code.alu("cmp", counter, boundRegister, true);
+    this.code.jcc("ge", labels.exit);
+    this.code.movsLoad(XMM0, frame(weightSlot), false);
+    this.code.movsLoad(XMM1, indexed(baseRegister, counter, 8), false);
+    this.code.sse("div", XMM1, XMM0, false);
+    this.code.sse("add", accumulatorRegister, XMM1, false);
+    this.code.movsLoad(XMM0, frame(weightSlot), false);
+    this.code.sseMem("add", XMM0, frame(stepSlot), false);
+    this.code.movsStore(frame(weightSlot), XMM0, false);
+    this.code.movsLoad(XMM0, frame(stepSlot), false);
+    this.code.sseMem("add", XMM0, frame(one), false);
+    this.code.movsStore(frame(stepSlot), XMM0, false);
+    this.code.aluImm("add", counter, 1, true);
+    this.code.jmp(tail);
+    this.code.bind(labels.exit);
+    // The running sum is written back where the accumulator reads it.
+    if (accumulator.register === null) this.code.movsStore(frame(accumulator.offset), accumulatorRegister, false);
+    return true;
+  }
+
   /**
    * One value under the addition, in both lanes of a register at once.
    *
@@ -5320,7 +5691,11 @@ class Machine {
    * does not hold is the one the slow path wrote, and the weight a turn the
    * test failed under left behind is a value nothing reads.
    */
-  private weighted(loop: Extract<SemanticLoop, { kind: "counted" }>): Extract<SemanticLoop, { kind: "counted" }> | null {
+  private weighted(loop: Extract<SemanticLoop, { kind: "counted" }>): {
+    guarded: Extract<SemanticLoop, { kind: "counted" }>;
+    lean: Extract<SemanticLoop, { kind: "counted" }> | null;
+    hoisted: SemanticValue | null;
+  } | null {
     const type = loop.type;
     if (type.kind !== "primitive" || type.name !== "i64") return null;
     if (loop.down) return null;
@@ -5350,6 +5725,12 @@ class Machine {
     const select = soleSelect(statement.value);
     if (select === null) return null;
     if (select.type.kind !== "primitive" || select.type.name !== "f64") return null;
+    // A turn this pass has already weighted is the one whose fast arm is the
+    // weight itself, and weighting it again would hold a second value under the
+    // name the first turn's steps keep moving. The arm the weight replaced is a
+    // name this pass reserved, so a select whose fast arm is that name is the
+    // turn again, and the loop is left as the rewrite left it.
+    if (select.then.k === "local" && select.then.name.startsWith("blaze_triangular")) return null;
     // The arm that answers when the test holds is the whole-number weight,
     // and the progression of it is what the step of the weight is. The names
     // the arm reads are the declarations the body made of its own values,
@@ -5366,65 +5747,222 @@ class Machine {
       (name) => writesCounter(loop.body, name),
     );
     if (counted === null) return null;
+    // The arm the test refuses is the computation the source wrote, and it
+    // read the declarations where they stood. The arm lives under the test,
+    // which is the one place its answers are asked for, so what it read is
+    // carried into it: the declaration a slow arm alone reads is computed
+    // where the arm runs, and not on the turns the fast arm answers, which
+    // used to convert the counter's sum to a double on every one of them.
+    let otherwise = structuredClone(select.otherwise);
+    for (let round = 0; round < 8 && lets.size > 0; round += 1) {
+      otherwise = substituteLocals(otherwise, lets);
+    }
     // The weight is named once, held across the loop, and stepped after the
     // turn has divided by it. The name is the slot's own: the IR below reads
     // it as a value of its own, and nothing else of the body ever declares it.
+    // A float of a loop this long is worth a register of its own where one is
+    // free, which is what keeps the value off the frame on every turn of the
+    // loop; a register that is spoken for leaves it where a slot was.
     const weightName = this.names.reserve("blaze_triangular");
-    const weight = this.reserveSlot(NUMBER, "blaze_triangular", false, null, weightName);
+    const weight = this.reserveSlot(NUMBER, "blaze_triangular", true, null, weightName);
+    // The step is a second held value beside the weight. It starts where the
+    // first turn's step is — the sum at the loop's first value, moved by one —
+    // and every turn hands what it held to the weight before moving itself,
+    // which is the same number the derivation below it used to write.
+    const stepName = this.names.reserve("blaze_triangular_step");
+    const step = this.reserveSlot(NUMBER, "blaze_triangular_step", true, null, stepName);
+    // The reach of the weight: the sum the turns move may not pass the value
+    // the whole-number path's own arithmetic is exact at. The comparison is
+    // read at sixty-four bits, where the sum of two counters and the bias
+    // beside them is what it is — a counter is under two to the sixty-third
+    // and the sum of two of them is under two to the sixty-fourth, so nothing
+    // wraps and the test fails exactly where the weight would.
+    const reach = {
+      k: "compare",
+      type: TRUTH,
+      op: "le",
+      operand: U64,
+      left: counted.slope,
+      right: { k: "const", type: U64, text: String(TRIANGULAR_REACH) },
+    } as SemanticValue;
+    const guarded = {
+      k: "logical",
+      type: select.condition.type,
+      op: "and",
+      left: select.condition,
+      right: reach,
+    } as SemanticValue;
+    // The test is a run of comparisons the counter carries, and every one of
+    // them is of a value that moves with the counter by one against a value
+    // that does not move at all. Where that can be said of the whole test, it
+    // is asked once where the loop starts and once where it ends, and the
+    // turns branch on the answer instead of computing the tests again on
+    // every one of them; see `hoistableGuard`.
+    const hoisted = this.hoistableGuard(guarded, loop);
     const with_weight = replaceOnce(statement.value, select, {
       k: "select",
       type: select.type,
-      condition: {
-        k: "logical",
-        type: select.condition.type,
-        op: "and",
-        left: select.condition,
-        right: {
-          k: "compare",
-          type: TRUTH,
-          op: "le",
-          operand: UNSIGNED,
-          left: {
-            k: "arith",
-            type: UNSIGNED,
-            op: "add",
-            left: counted.slope,
-            right: { k: "const", type: UNSIGNED, text: "0" },
-          },
-          right: { k: "const", type: UNSIGNED, text: String(TRIANGULAR_REACH) },
-        },
-      },
+      condition: guarded,
       then: { k: "local", type: NUMBER, name: weightName },
-      otherwise: select.otherwise,
+      otherwise,
     }) as SemanticValue;
-    const body: SemanticBlock = {
-      ...loop.body,
-      statements: [
-        ...statements.slice(0, accumulation),
-        { ...statement, value: with_weight },
-        {
-          k: "set",
+    // The turn the weight stands in alone: where the ends answered for the
+    // whole run, the turns divide by the weight and nothing else, and the
+    // select and the tests under it are the guarded loop's to carry.
+    const with_weight_alone = hoisted === null
+      ? null
+      : (replaceOnce(statement.value, select, {
+          k: "local",
+          type: select.type,
           name: weightName,
-          op: "+=",
-          value: {
-            k: "arith",
-            type: NUMBER,
-            op: "add",
-            left: counted.slope,
-            right: { k: "const", type: NUMBER, text: String(1 + counted.offset) },
-          },
-          line: statement.line,
-        },
-      ],
-    };
-    // The first weight: the fast path at the loop's own first value.
+        }) as SemanticValue);
+    // The first weight: the fast path at the loop's own first value, and the
+    // step beside it that the turns move the weight by.
+    const slopeAtStart = substituteLocals(
+      structuredClone(counted.slope),
+      new Map([[loop.variable, structuredClone(loop.from)] as [string, SemanticValue]]),
+    );
     this.at(counted.from, NUMBER);
     this.store(weight);
-    return { ...loop, body };
+    this.at(
+      {
+        k: "arith",
+        type: NUMBER,
+        op: "add",
+        left: slopeAtStart,
+        right: { k: "const", type: NUMBER, text: String(1 + counted.offset) },
+      },
+      NUMBER,
+    );
+    this.store(step);
+    // A declaration the body read only where the weight has taken its place is
+    // a declaration nothing reads now, and computing it on every turn was the
+    // work the weight made needless. What is left unread is left out, a pass
+    // at a time, because a declaration another one was read through goes with
+    // the second one. What the guarded turn still reads, the turn without the
+    // select reads no more of — what the guarded body keeps, both bodies keep.
+    let alive = [...statements.slice(0, accumulation)];
+    let guardedBody: SemanticBlock;
+    for (;;) {
+      guardedBody = {
+        ...loop.body,
+        statements: [
+          ...alive,
+          { ...statement, value: with_weight },
+          {
+            k: "set",
+            name: weightName,
+            op: "+=",
+            value: { k: "local", type: NUMBER, name: stepName },
+            line: statement.line,
+          },
+          {
+            k: "set",
+            name: stepName,
+            op: "+=",
+            value: { k: "const", type: NUMBER, text: "1" },
+            line: statement.line,
+          },
+        ],
+      };
+      const dead = alive.filter(
+        (entry) =>
+          entry.k === "let" &&
+          entry.slot.kind === "value" &&
+          !everyValue(guardedBody).some((value) => readsLocal(value, entry.slot.name)),
+      );
+      if (dead.length === 0) break;
+      const gone = new Set(dead);
+      alive = alive.filter((entry) => !gone.has(entry));
+    }
+    const leanBody = with_weight_alone === null
+      ? null
+      : ({
+          ...loop.body,
+          statements: [
+            ...alive,
+            { ...statement, value: with_weight_alone },
+            {
+              k: "set",
+              name: weightName,
+              op: "+=",
+              value: { k: "local", type: NUMBER, name: stepName },
+              line: statement.line,
+            },
+            {
+              k: "set",
+              name: stepName,
+              op: "+=",
+              value: { k: "const", type: NUMBER, text: "1" },
+              line: statement.line,
+            },
+          ],
+        } as SemanticBlock);
+    return {
+      guarded: { ...loop, body: guardedBody },
+      lean: leanBody === null ? null : { ...loop, body: leanBody },
+      hoisted,
+    };
+  }
+
+  /**
+   * A test of a weight, asked of the loop's ends rather than of every turn.
+   *
+   * The test a spectral norm's weight is asked under is a run of comparisons
+   * the counter carries, and every one of them is of a value that moves with
+   * the counter by one against a value that does not move at all. Each of them
+   * is then asked of the loop's first value and of its bound, and the run
+   * holds for every turn between where the ends hold together and the side
+   * moved the way its arithmetic says it does between them: a side that moves
+   * by one per turn travels less than the width it is read at, so it falls
+   * off the top of that width at most once over the run — the ends say where
+   * the comparison held, and the direction the side moved says it did not
+   * fall on the way. The test is asked of the ends once, and the
+   * turns branch on the one answer, where each of them computed the
+   * comparisons again.
+   *
+   * What keeps this the same program: the comparisons are read at sixty-four
+   * unsigned bits, where the moving side's travel fits — a narrower
+   * comparison wraps at four billion and holds again past it, which is a
+   * shape this refuses rather than reasons about; so is a comparison of two
+   * moving sides, a test the body writes its own bound under, and anything
+   * the arms are but comparisons and truths the body never writes. Those keep
+   * the test they were written with.
+   */
+  private hoistableGuard(
+    condition: SemanticValue,
+    loop: Extract<SemanticLoop, { kind: "counted" }>,
+  ): SemanticValue | null {
+    if (!isBoolean(condition.type)) return null;
+    // A bound the body writes is read again at the header, and the turns could
+    // run past the value the test at the end was asked of.
+    if (this.reread(loop, loop.to)) return null;
+    const leaves = conjunctsOf(condition);
+    if (leaves === null) return null;
+    const written = (name: string): boolean => writesCounter(loop.body, name);
+    const parts: SemanticValue[] = [];
+    for (const leaf of leaves) {
+      const hoisted = hoistableLeaf(leaf, loop.variable, written, loop.from, loop.to);
+      if (hoisted === null) return null;
+      parts.push(hoisted);
+    }
+    let whole = parts[0] as SemanticValue;
+    for (const part of parts.slice(1)) {
+      whole = { k: "logical", type: TRUTH, op: "and", left: whole, right: part } as SemanticValue;
+    }
+    return whole;
   }
 
   private counted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels): void {
     const type = loop.type;
+    // With AVX-512, a loop whose turn divides by a weight the counter maintains
+    // can divide eight elements at a time with a single packed division. The
+    // weight is an arithmetic progression whose step steps by one per turn, so
+    // the divisors differ per lane while the addition into the accumulator stays
+    // in source order.
+    if (this.avx512) {
+      if (this.packedWeightedAvx512(loop, labels)) return;
+    }
     // A loop that adds up two arrays element by element is written a whole
     // vector at a time. It is recognised here rather than in a pass over the IR
     // because the arithmetic is the machine's: `optimize-ir.ts` runs before any
@@ -5450,7 +5988,26 @@ class Machine {
     // the division by a register and one addition, where it was a product, a
     // shift and two conversions.
     const weighted = this.weighted(loop);
-    if (weighted !== null) loop = weighted;
+    if (weighted !== null && weighted.lean !== null && !this.teamed.has(loop)) {
+      // The loop comes back twice: the turns the ends' answer admits divide by
+      // the weight and nothing else, and the turns it refuses keep the select
+      // and the tests under it. The answer is asked of the loop's two ends
+      // once, and the turns run the form it admits, which is the same turns
+      // the one loop ran with the tests on every one of them. The body is
+      // flat — the shape above refused everything else — so a turn that
+      // leaves early is not one of them, and the two are the loop the source
+      // wrote.
+      const after = this.code.label("Lweighted");
+      const guarded = this.code.label("Lguarded");
+      this.truthBranch(weighted.hoisted as SemanticValue, false, guarded);
+      this.loop(weighted.lean);
+      this.code.jmp(after);
+      this.code.bind(guarded);
+      this.loop(weighted.guarded);
+      this.code.bind(after);
+      return;
+    }
+    if (weighted !== null) loop = weighted.guarded;
     // A loop whose turns are known before the first of them is written out as
     // the turns it is, each with the counter at the value that turn has.
     const plan = unrollPlan(loop);
@@ -8576,6 +9133,27 @@ class Machine {
       this.rodata.push(Number((bits >> BigInt(index * 8)) & 0xffn));
     }
     this.floatPairs.set(bits.toString(), label);
+    return label;
+  }
+
+  /**
+   * Eight doubles laid down as one constant vector, which a packed loop reads
+   * with a single 512-bit load. The vector is laid down on a sixty-four byte
+   * boundary so the load is aligned.
+   */
+  private floatList(bits: readonly bigint[]): string {
+    const key = bits.join("|");
+    const held = this.floatLists.get(key);
+    if (held !== undefined) return held;
+    while (this.rodata.length % 64 !== 0) this.rodata.push(0);
+    const label = this.code.label("Lfloat8");
+    this.labels.push({ name: label, offset: this.rodata.length });
+    for (const value of bits) {
+      for (let index = 0; index < 8; index += 1) {
+        this.rodata.push(Number((value >> BigInt(index * 8)) & 0xffn));
+      }
+    }
+    this.floatLists.set(key, label);
     return label;
   }
 

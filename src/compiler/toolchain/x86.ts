@@ -1541,6 +1541,112 @@ export class Encoder {
   }
 
   /* ---------------------------------------------------------------------- */
+  /* EVEX (AVX-512)                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The opcode map code written in the low bits of EVEX byte 2. `0x01` is the
+   * plain 0F map (VMOVUPD, VDIVPD, VADDPD ...), `0x02` is the 0F38 map
+   * (VBROADCASTSD ...). The `0x10` bit is fixed for EVEX.
+   */
+  private static readonly EVEX_MAP_0F = 0x01;
+  private static readonly EVEX_MAP_0F38 = 0x02;
+
+  /**
+   * The four-byte EVEX prefix: `62`, byte 2, byte 3, byte 4.
+   *
+   * Byte 2: `~R ~X ~B 1 0 0 0 1` for the 0F map — R, X, B are the bit-inverted
+   * high bits of the destination register, the source index and the source
+   * base. A register operand is a register rm, so X and B are set (not used).
+   * Byte 3: `W ~vvvv 1 pp`, W selects 64 bit, vvvv is the first source register
+   * (bit-inverted, low four bits here, high bit in byte 4), pp is 01 for the
+   * 66 prefix. Byte 4: `0 LL 0 V' 0 0 0`, LL selects the vector length (2 =
+   * 512 bit) and V' is the bit-inverted high bit of vvvv.
+   */
+  private evex4(
+    w: boolean,
+    vvvv: number,
+    reg: number,
+    rm: number | Memory,
+    map: number,
+    pp: number,
+    ll: 0 | 1 | 2,
+  ): void {
+    this.byte(0x62);
+    const rBit = reg >= 8 ? 0 : 1;
+    let xBit = 1;
+    let bBit = 1;
+    if (typeof rm !== "number") {
+      xBit = rm.index !== null && rm.index >= 8 ? 0 : 1;
+      bBit = rm.base !== null && rm.base >= 8 ? 0 : 1;
+    }
+    this.byte((rBit << 7) | (xBit << 6) | (bBit << 5) | 0x10 | map);
+    const byte3 =
+      (w ? 0x80 : 0) | ((~vvvv) & 0xf) << 3 | 0x04 | pp;
+    this.byte(byte3);
+    const vvvvHigh = vvvv >= 16 ? 0 : 1;
+    this.byte((ll << 5) | (vvvvHigh << 3));
+  }
+
+  /** `VMOVUPD zmm, [mem]` — an unaligned 512-bit load of eight doubles. */
+  public evexLoad(register: number, address: Memory): void {
+    this.evex4(true, 0, register, address, Encoder.EVEX_MAP_0F, 0b01, 2);
+    this.byte(0x10);
+    this.modrm(address, register);
+  }
+
+  /** `VMOVUPD [mem], zmm` — an unaligned 512-bit store of eight doubles. */
+  public evexStore(address: Memory, register: number): void {
+    this.evex4(true, 0, register, address, Encoder.EVEX_MAP_0F, 0b01, 2);
+    this.byte(0x11);
+    this.modrm(address, register);
+  }
+
+  /**
+   * `VDIVPD zmm_dest, zmm_src1, zmm_src2/m512` — eight packed double divisions
+   * at once, one per lane. `source2` may be a register or a memory address.
+   */
+  public evexDiv(destination: number, source: number, source2: number | Memory): void {
+    this.evex4(true, source, destination, source2, Encoder.EVEX_MAP_0F, 0b01, 2);
+    this.byte(0x5e);
+    this.modrm(source2, destination);
+  }
+
+  /**
+   * `VMULPD zmm_dest, zmm_src1, zmm_src2/m512` — eight packed double multiplications
+   * at once, one per lane. `source2` may be a register or a memory address.
+   */
+  public evexMul(destination: number, source: number, source2: number | Memory): void {
+    this.evex4(true, source, destination, source2, Encoder.EVEX_MAP_0F, 0b01, 2);
+    this.byte(0x59);
+    this.modrm(source2, destination);
+  }
+
+  /**
+   * `VADDPD zmm_dest, zmm_src1, zmm_src2/m512` — eight packed double additions
+   * at once, one per lane. `source2` may be a register or a memory address.
+   */
+  public evexAdd(destination: number, source: number, source2: number | Memory): void {
+    this.evex4(true, source, destination, source2, Encoder.EVEX_MAP_0F, 0b01, 2);
+    this.byte(0x58);
+    this.modrm(source2, destination);
+  }
+
+  /** `VBROADCASTSD zmm, [m64]` — one double broadcast to all eight lanes. */
+  public evexBroadcastSd(register: number, address: Memory): void {
+    this.evex4(true, 0, register, address, Encoder.EVEX_MAP_0F38, 0b01, 2);
+    this.byte(0x19);
+    this.modrm(address, register);
+  }
+
+  /** `VMOVAPD zmm_dest, zmm_source` — a 512-bit register-to-register move. */
+  public evexMovapd(destination: number, source: number): void {
+    this.evex4(true, source, destination, source, Encoder.EVEX_MAP_0F, 0b01, 2);
+    this.byte(0x28);
+    this.modrm(source, destination);
+  }
+
+  /* ---------------------------------------------------------------------- */
   /* Conditions                                                              */
   /* ---------------------------------------------------------------------- */
 
