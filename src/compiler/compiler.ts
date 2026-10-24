@@ -1085,6 +1085,8 @@ export function programLoweringOf(
   }
   // A body the driver writes down that an object calls is written as a
   // function the linker can see, so the object's reference resolves to it.
+  // This includes bodies referenced by contracted (unit) functions, which are
+  // compiled as objects of their own and may hand the driver a callback.
   const visible = new Set<string>(
     callsWithin(driver)
       .filter((edge) => lowered.has(edge.caller) && !lowered.has(edge.callee))
@@ -1113,6 +1115,7 @@ function directCalleesOf(block: SemanticBlock): string[] {
     for (const value of statementValues(statement)) {
       walkValues(value, (inner) => {
         if (inner.k === "call") names.push(inner.call.callee);
+        if (inner.k === "functionRef") names.push(inner.name);
       });
     }
     if (statement.k === "call") names.push(statement.call.callee);
