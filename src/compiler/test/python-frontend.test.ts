@@ -372,15 +372,11 @@ test("a loop walks a range, and a list is walked by its own index", () => {
   assert.match(refused, /a loop walks a range/);
 });
 
-test("a slice and a negative index are outside the subset", () => {
+test("a slice makes a function uncontractable", () => {
   const slice = diagnostic(() =>
     phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3]\n" }, "main.py"),
   );
   assert.match(slice, /contract states no postcondition/);
-  const negative = diagnostic(() =>
-    phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[-1]\n" }, "main.py"),
-  );
-  assert.match(negative, /a negative index is not part of the subset/);
 });
 
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {

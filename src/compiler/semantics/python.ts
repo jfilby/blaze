@@ -1934,7 +1934,7 @@ class PythonParser {
           value = { k: "slice", base: value, start, stop, step };
           continue;
         }
-        const index = this.expression();
+        let index = this.expression();
         if (this.at(":")) {
           this.next();
           let stop: PyValue | null = null;
@@ -1952,14 +1952,16 @@ class PythonParser {
           value = { k: "slice", base: value, start: index, stop, step };
           continue;
         }
-        // A negative index counts from the end of the list, and the compiler
-        // reads an index as a count from the start of it.
+        // A negative index counts from the end of the list; the compiler
+        // reads an index as a count from the start of it, so a[-n] is
+        // the element at len(base) - n.
         if (index.k === "unary" && index.op === "-") {
-          this.report(
-            "a negative index is not part of the subset",
-            "an index that counts from the start of the list, as in a[i]",
-            this.peek(),
-          );
+          index = {
+            k: "binary",
+            op: "-",
+            left: { k: "call", name: "len", args: [value] },
+            right: index.operand,
+          };
         }
         this.expect("]");
         value = { k: "index", base: value, index };
