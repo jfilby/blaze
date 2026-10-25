@@ -33,7 +33,7 @@ import type {
 } from "./module.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 import type { PyStatement, PyTextPart, PyValue } from "./python.ts";
-import { builtinName, conditionIsBoolean, describeValue } from "./python.ts";
+import { builtinName, conditionIsBoolean, describeValue, typeOfValue } from "./python.ts";
 import { frontendError } from "./diagnostics.ts";
 
 /** The operators a program value may use, as Python writes them. */
@@ -84,11 +84,16 @@ const ASSIGN_OPERATORS: Record<string, ProgramAssignOp> = {
 interface Bindings {
   /** The names that hold a dict, and the keys each of them holds. */
   readonly dicts: Map<string, Set<string>>;
+  /** The values names hold, for evaluating comprehensions. */
+  readonly values: Map<string, PyValue>;
 }
 
 /** The bindings of a program body that holds nothing yet. */
 function noBindings(): Bindings {
-  return { dicts: new Map() };
+  return { dicts: new Map(), values: new Map() };
+}
+function cloneBindings(b: Bindings): Bindings {
+  return { dicts: new Map(b.dicts), values: new Map(b.values) };
 }
 
 /**
@@ -99,6 +104,9 @@ function noBindings(): Bindings {
  * a number, which is a double.
  */
 function programValue(one: PyValue, bindings: Bindings): ProgramValue {
+  if (one.k === "name" && bindings.values.has(one.name)) {
+    return programValue(bindings.values.get(one.name)!, bindings);
+  }
   switch (one.k) {
     case "number":
       return one.whole ? { k: "whole", text: one.text } : { k: "number", text: one.text };
@@ -204,6 +212,32 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         );
       }
       return { k: "field", object: programValue(one.base, bindings), field: one.field };
+    }
+    case "comprehension": {
+      const iterableItems: PyValue[] = [];
+      if (one.iterable.k === "list") {
+        iterableItems.push(...one.iterable.items);
+      } else if (one.iterable.k === "call" && one.iterable.name === "range" && one.iterable.args.length === 1 && one.iterable.args[0].k === "number") {
+        const n = Number(one.iterable.args[0].text);
+        for (let i = 0; i < n; i++) iterableItems.push({ k: "number", text: String(i), whole: true });
+      } else {
+        throw frontendError("a comprehension needs a list or a range with a constant bound", "write the list out, as in [f(x) for x in [1, 2, 3]]");
+      }
+      const values: ProgramValue[] = [];
+      for (const item of iterableItems) {
+        const child = cloneBindings(bindings);
+        child.values.set(one.target, item);
+        if (one.condition !== null) {
+          const cond = programValue(one.condition, child);
+          if (cond.k === "boolean" && !cond.value) continue;
+        }
+        values.push(programValue(one.element, child));
+      }
+      const names = new Map();
+      if (one.iterable.k === "call" && one.iterable.name === "range") names.set(one.target, "int");
+      else if (one.iterable.k === "list" && one.iterable.items.length > 0 && one.iterable.items[0].k === "number") names.set(one.target, one.iterable.items[0].whole ? "int" : "float");
+      const whole = typeOfValue(one.element, names) === "int";
+      return { k: "buffer", element: whole ? "i64" : "f64", values };
     }
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the width
@@ -390,9 +424,10 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
 function bound(bindings: Bindings, name: string, value: PyValue): void {
   if (value.k === "dict") {
     bindings.dicts.set(name, new Set(value.entries.map((entry) => entry.name)));
-    return;
+  } else {
+    bindings.dicts.delete(name);
   }
-  bindings.dicts.delete(name);
+  bindings.values.set(name, value);
 }
 
 /** Whether a value is the command line of a Python program. */

@@ -389,6 +389,7 @@ export type PyValue =
   | { k: "field"; base: PyValue; field: string }
   /** A list written out where it is made. */
   | { k: "list"; items: PyValue[] }
+  | { k: "comprehension"; element: PyValue; target: string; iterable: PyValue; condition: PyValue | null }
   /** A dict written out where it is made. */
   | { k: "dict"; entries: { name: string; value: PyValue }[] }
   | { k: "binary"; op: string; left: PyValue; right: PyValue }
@@ -2050,24 +2051,38 @@ class PythonParser {
       return first;
     }
     if (token.kind === "op" && token.text === "[") {
-      const items: PyValue[] = [];
-      if (!this.at("]")) {
-        for (;;) {
-          items.push(this.expression());
-          if (this.at("for")) {
-            this.report(
-              "a comprehension is not part of the subset",
-              "a loop that fills a list, written out",
-              token,
-            );
-            // Read past the rest of the comprehension.
-            while (this.peek().kind !== "end" && !this.at("]")) this.next();
-            if (this.at("]")) this.next();
-            return this.hole();
-          }
-          if (this.accept(",")) continue;
-          break;
+      if (this.at("]")) {
+        this.next();
+        return { k: "list", items: [] };
+      }
+      const first = this.expression();
+      if (this.at("for")) {
+        this.next();
+        const targetToken = this.peek();
+        if (targetToken.kind !== "name") {
+          this.report("expected the name of the loop variable", `near "${targetToken.text}"`, targetToken);
+          return this.hole();
         }
+        const target = targetToken.text;
+        this.next();
+        if (!(this.peek().kind === "name" && this.peek().text === "in")) {
+          this.report('expected "in"', `near "${this.peek().text}"`, this.peek());
+          return this.hole();
+        }
+        this.next();
+        const iterable = this.expression();
+        let condition: PyValue | null = null;
+        if (this.at("if")) {
+          this.next();
+          condition = this.expression();
+        }
+        this.expect("]");
+        return { k: "comprehension", element: first, target, iterable, condition };
+      }
+      const items: PyValue[] = [first];
+      while (this.accept(",")) {
+        if (this.at("]")) break;
+        items.push(this.expression());
       }
       this.expect("]");
       return { k: "list", items };
@@ -2198,6 +2213,8 @@ export function describeValue(value: PyValue): string {
       return `${describeValue(value.base)}.${value.field}`;
     case "list":
       return "a list";
+    case "comprehension":
+      return "a list";
     case "dict":
       return "a dict";
     case "binary":
@@ -2299,6 +2316,11 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       return;
     case "list":
       value.items.forEach((item) => eachValueIn(item, visit, line));
+      return;
+    case "comprehension":
+      eachValueIn(value.element, visit, line);
+      eachValueIn(value.iterable, visit, line);
+      if (value.condition !== null) eachValueIn(value.condition, visit, line);
       return;
     case "dict":
       value.entries.forEach((entry) => eachValueIn(entry.value, visit, line));
@@ -2430,6 +2452,8 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
     case "field":
       return "unknown";
     case "list":
+      return "list";
+    case "comprehension":
       return "list";
     case "dict":
       return "dict";
@@ -2577,6 +2601,9 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "slice", base: lowerValue(value.base), start: value.start === null ? null : lowerValue(value.start), stop: value.stop === null ? null : lowerValue(value.stop), step: value.step === null ? null : lowerValue(value.step) };
     case "field":
       return { k: "member", base: lowerValue(value.base), field: value.field };
+    case "comprehension": {
+      throw frontendError("a comprehension is not supported in a function", "write the loop out");
+    }
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the
       // element is the width of what it holds.
@@ -2735,6 +2762,7 @@ export function isBooleanCondition(value: PyValue): boolean {
     case "slice":
     case "field":
     case "list":
+    case "comprehension":
     case "dict":
     case "conditional":
       return false;
@@ -2972,6 +3000,9 @@ class BodyAnalysis {
         }
         return `${parameter.name}[${index}]`;
       }
+      case "comprehension": {
+        this.uncontractable("uses a comprehension", line, "a loop that fills a list, written out");
+      }
       case "slice": {
         this.uncontractable("slices a value", line, "a contracted function is computed from its parameters alone");
       }
@@ -3040,6 +3071,8 @@ function dependsOn(value: PyValue, name: string): boolean {
       return value.args.some((argument) => dependsOn(argument, name));
     case "list":
       return value.items.some((item) => dependsOn(item, name));
+    case "comprehension":
+      return dependsOn(value.element, name) || dependsOn(value.iterable, name) || (value.condition !== null && dependsOn(value.condition, name));
     case "dict":
       return value.entries.some((entry) => dependsOn(entry.value, name));
     case "conditional":
@@ -3326,6 +3359,8 @@ function conversionInValue(value: PyValue): string | null {
       return conversionInValue(value.base);
     case "list":
       return value.items.map(conversionInValue).find((found) => found !== null) ?? null;
+    case "comprehension":
+      return conversionInValue(value.element) ?? conversionInValue(value.iterable) ?? (value.condition === null ? null : conversionInValue(value.condition));
     case "dict":
       return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
     case "text":
