@@ -162,6 +162,22 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    * using the given certificate and private key files. The call never returns
    * while the server runs. */
   "http.serveTls": { params: [USIZE, ANY, ANY], returns: { kind: "void" }, arity: 3 },
+  /* ---------------------------------------------------------------------- */
+  /* Triton / kernel builtins                                                 */
+  /* ---------------------------------------------------------------------- */
+  "tl.load": { params: [ANY], returns: ANY, arities: [1, 2, 3] },
+  "tl.store": { params: [ANY, ANY], returns: { kind: "void" }, arities: [2, 3, 4] },
+  "tl.program_id": { params: [], returns: F64, arities: [0, 1] },
+  "tl.num_programs": { params: [], returns: F64, arities: [0, 1] },
+  "tl.arange": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  "tl.full": { params: [ANY, ANY], returns: ANY, arities: [2, 3] },
+  "tl.zeros": { params: [ANY], returns: ANY, arities: [1, 2] },
+  "tl.ones": { params: [ANY], returns: ANY, arities: [1, 2] },
+  "tl.where": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
+  "tl.math.exp": { params: [ANY], returns: F64, arity: 1 },
+  "tl.math.log": { params: [ANY], returns: F64, arity: 1 },
+  "tl.math.sin": { params: [ANY], returns: F64, arity: 1 },
+  "tl.math.cos": { params: [ANY], returns: F64, arity: 1 },
   /** `blaze_error_clear()` clears the pending error flag a try block starts with. */
   "blaze_error_clear": { params: [], returns: { kind: "void" }, arity: 0 },
   /** `blaze_had_error()` is 1 when the last awaited call failed, else 0. */

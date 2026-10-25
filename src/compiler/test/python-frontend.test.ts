@@ -286,7 +286,7 @@ test("a tl.where is the choice the compiler writes", () => {
   assert.equal(where.condition.op, ">");
 });
 
-test("the tl.* calls a real kernel uses are refused by name", () => {
+test("the tl.* calls a real kernel uses are accepted by the frontend", () => {
   const source = [
     "import triton.language as tl",
     "",
@@ -299,11 +299,8 @@ test("the tl.* calls a real kernel uses are refused by name", () => {
     "    tl.store(out_ptr + offsets, x, mask=mask)",
     "",
   ].join("\n");
-  const refused = diagnostic(() => pythonFrontend.analyze(source, "kernel.py"));
-  assert.match(refused, /"tl\.load" is not a function this file may call/);
-  assert.match(refused, /"tl\.store" is not a function this file may call/);
-  assert.match(refused, /"tl\.program_id" is not a function this file may call/);
-  assert.match(refused, /"tl\.arange" is not a function this file may call/);
+  const analysis = pythonFrontend.analyze(source, "kernel.py");
+  assert.equal(analysis.functions.length, 1);
 });
 
 test("a named argument names the call it was written on", () => {
@@ -312,13 +309,6 @@ test("a named argument names the call it was written on", () => {
   );
   assert.match(refused, /a named argument is not part of the subset/);
   assert.match(refused, /print is called with its arguments in order/);
-  const spelled = diagnostic(() =>
-    pythonFrontend.analyze(
-      "import triton.language as tl\n\n@triton.jit\ndef f(x: float) -> None:\n    tl.abs(x, out=y)\n",
-      "kernel.py",
-    ),
-  );
-  assert.match(spelled, /tl\.abs is called with its arguments in order/);
 });
 
 test("a function of a module reads no command line", () => {

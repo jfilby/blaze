@@ -70,7 +70,7 @@ function with typed parameters and a declared return, `if` / `elif` / `else`,
 `while`, `for ... in range(...)`, list and dict literals, f-strings. And they
 keep going, into everything the subset refuses:
 
-| Refused in the subset | Where Triton uses it |
+| Needed in the subset | Where Triton uses it |
 |---|---|
 | decorators (`@triton.jit`) | every kernel |
 | `tl.load`, `tl.store` | every read and write |
@@ -83,11 +83,7 @@ keep going, into everything the subset refuses:
 | pointers, offsets, strides, masks | how a kernel addresses data |
 | `import triton` and `import triton.language as tl` | modules the compiler does not read |
 
-Every one of these is refused by name today, with the line it was written on
-and what to write instead. Compiling Triton means either widening the subset
-until Triton fits, or refusing Triton's source and saying what to write
-instead. The first is a project of its own; the second is what the compiler
-already does for every program it cannot compile.
+These constructs must be implemented in the compiler for Triton kernels to compile. The Python frontend must accept them and lower them into a form the rest of the pipeline can handle. Named arguments in `tl.*` calls must be accepted (with positional mapping where the kernel calls are written). Each of `tl.load`, `tl.store`, `tl.program_id`, `tl.arange`, `tl.full`, `tl.where`, `tl.math.*`, and the grid launch `kernel[grid](...)` need implementations across the frontend, IR/value model, builtins, runtime, and backends as appropriate.
 
 ### 2. The builtins Triton calls do not exist
 
@@ -203,8 +199,8 @@ them:
 
 - `test/triton-frontend.test.ts` — the Python frontend on a subset of Triton's
   source: a `@triton.jit` decorator, `tl.load`, `tl.store`, `tl.program_id`,
-  `tl.arange`, `tl.math.exp`, each refused by name with the line it was written
-  on.
+  `tl.arange`, `tl.math.exp` must be accepted and lowered by the frontend (with
+  named arguments supported where used).
 - `test/triton-program.test.ts` — an end-to-end build of a program that
   launches one kernel and prints its result, built and run. The build's own
   verification against the source is the assertion: the test asserts the build

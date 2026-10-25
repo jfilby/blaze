@@ -59,6 +59,7 @@ import { buildProgramModule, type ModuleFunction } from "./toolchain/ir-wasm.ts"
 import { buildObject as buildMachineObject, machineRefusal } from "./toolchain/ir-machine.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
+import { usesTritonSource } from "./runtime/triton.ts";
 import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import type { LiteralKeys } from "./semantics/program-objects.ts";
@@ -1634,7 +1635,7 @@ export async function runBuild(
       runtime: runtimeKind,
       target,
       workspace: { workDirectory: base, functionName: program.entry.file },
-      libraries: usesSqlite ? ["sqlite"] : [],
+      libraries: usesSqlite || usesTritonSource(project.entry.source) ? (usesSqlite && usesTritonSource(project.entry.source) ? ["sqlite", "triton"] : usesSqlite ? ["sqlite"] : ["triton"]) : [],
       http,
     });
     // The machine, one measurement at a time however many functions are being
@@ -2458,7 +2459,7 @@ export async function runStored(
     runtime,
     target,
     workspace: { workDirectory: base, functionName: program.entry.file },
-    libraries: usesSqliteSource(input.source) ? ["sqlite"] : [],
+    libraries: usesSqliteSource(input.source) || usesTritonSource(input.source) ? (usesSqliteSource(input.source) && usesTritonSource(input.source) ? ["sqlite", "triton"] : usesSqliteSource(input.source) ? ["sqlite"] : ["triton"]) : [],
     // The runtime is built for the program the stored candidates belong to, so
     // it is built for the same program the build built it for: the source of
     // the project is what says what its server holds and whether it speaks

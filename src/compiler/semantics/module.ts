@@ -173,7 +173,7 @@ export type ProgramStatement =
   | { kind: "continue"; line: number }
   | { kind: "block"; body: ProgramStatement[]; line: number }
   /** A call kept for what it does, as in `main();`. */
-  | { kind: "invoke"; function: string; args: ProgramValue[]; line: number }
+  | { kind: "invoke"; function: string; args: ProgramValue[]; line: number; grid?: ProgramValue }
   /** A function the program declares, which runs when it is called. */
   | { kind: "function"; name: string; params: { name: string; type: string | null }[]; body: ProgramStatement[]; line: number }
   /** What a function hands back, as `return value;` is written. */

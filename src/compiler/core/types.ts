@@ -403,7 +403,7 @@ export const RUNTIME_KINDS: readonly RuntimeKind[] = ["none", "nim", "facil"];
  * calls into it the way it calls into the runtime. SQLite is the first one:
  * a program that uses SQLite links the SQLite library beside its runtime.
  */
-export type LibraryKind = "sqlite";
+export type LibraryKind = "sqlite" | "triton";
 
 /**
  * How hard the toolchain builds, and how much of itself it checks:

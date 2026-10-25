@@ -145,6 +145,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           otherwise: programValue(one.args[2], bindings),
         };
       }
+      if ((one as any).grid !== undefined) {
+        return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)), grid: programValue((one as any).grid, bindings) } as any;
+      }
       return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)) };
     }
     case "index": {
@@ -330,6 +333,15 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       const called = one.value;
       if (called.k !== "call") {
         throw frontendError(`"${describeValue(called)}" is not a call`, "a statement of a program is a call");
+      }
+      if ((called as any).grid !== undefined) {
+        return {
+          kind: "invoke",
+          function: builtinName(called.name),
+          args: called.args.map((argument) => programValue(argument, bindings)),
+          grid: (called as any).grid,
+          line: one.line,
+        } as any;
       }
       return {
         kind: "invoke",

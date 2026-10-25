@@ -45,6 +45,8 @@ import { buildFacilRuntime } from "./runtime/facil.ts";
 import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
 import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
+import { buildTritonLibrary } from "./runtime/triton-build.ts";
+import { usesTritonSource } from "./runtime/triton.ts";
 import { symbolOf } from "./semantics/contract.ts";
 import { powerOfTwoParams } from "./semantics/power-of-two.ts";
 import type { TargetSpec } from "./core/types.ts";
@@ -207,7 +209,12 @@ async function main(): Promise<void> {
   // A program that uses SQLite links the SQLite library beside the runtime, the
   // same way a build does.
   const isSqlite = usesSqliteSource(source);
-  const library = isSqlite ? await buildSqliteLibrary(work, "danger", target) : undefined;
+  const isTriton = usesTritonSource(source);
+  const sqliteLibrary = isSqlite ? await buildSqliteLibrary(work, "danger", target) : undefined;
+  const tritonLibrary = isTriton ? await buildTritonLibrary(work, "danger", target) : undefined;
+  const libraryObjectPaths: string[] = [];
+  if (sqliteLibrary !== undefined) libraryObjectPaths.push(sqliteLibrary.objectPath);
+  if (tritonLibrary !== undefined) libraryObjectPaths.push(tritonLibrary.objectPath);
   const outputPath = join(work, "program");
   await buildProgramDriver({
     mode: "danger",
@@ -226,7 +233,7 @@ async function main(): Promise<void> {
     // function the linker can see.
     sharedBodies: bodyLowering === undefined ? [] : [...bodyLowering.visible],
     tls: http.tls,
-    libraryObjectPaths: library === undefined ? [] : [library.objectPath],
+    libraryObjectPaths,
     threads,
     outputPath,
   });

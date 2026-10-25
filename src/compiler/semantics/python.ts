@@ -383,7 +383,7 @@ export type PyValue =
   | { k: "none" }
   | { k: "name"; name: string }
   /** A call, of a name the project declares or of a builtin. */
-  | { k: "call"; name: string; args: PyValue[] }
+  | { k: "call"; name: string; args: PyValue[]; grid?: PyValue }
   | { k: "index"; base: PyValue; index: PyValue }
   | { k: "field"; base: PyValue; field: string }
   /** A list written out where it is made. */
@@ -617,6 +617,24 @@ export function builtinName(name: string): string {
     case "tl.ceil":
     case "tl.math.ceil":
       return "whole.ceil";
+    case "tl.math.exp":
+      return "Math.exp";
+    case "tl.math.log":
+      return "Math.log";
+    case "tl.math.sin":
+      return "Math.sin";
+    case "tl.math.cos":
+      return "Math.cos";
+    case "tl.load":
+    case "tl.store":
+    case "tl.program_id":
+    case "tl.num_programs":
+    case "tl.arange":
+    case "tl.full":
+    case "tl.zeros":
+    case "tl.ones":
+    case "tl.where":
+      return name;
     default:
       return name;
   }
@@ -1525,13 +1543,19 @@ class PythonParser {
             // A named argument is a keyword the compiler does not read: the
             // call is written with its arguments in order.
             if (this.at("=")) {
-              this.report(
-                "a named argument is not part of the subset",
-                `${spelling} is called with its arguments in order, as in ${spelling}(a, b)`,
-                this.peek(),
-              );
-              this.next();
-              this.expression();
+              if (spelling.startsWith("tl.") || spelling.startsWith("triton.")) {
+                this.next(); // consume =
+                const valueArg = this.expression();
+                args.push(valueArg);
+              } else {
+                this.report(
+                  "a named argument is not part of the subset",
+                  `${spelling} is called with its arguments in order, as in ${spelling}(a, b)`,
+                  this.peek(),
+                );
+                this.next();
+                this.expression();
+              }
             } else {
               args.push(argument);
             }
@@ -1540,13 +1564,25 @@ class PythonParser {
           }
         }
         this.expect(")");
-        if (value.k !== "name" && value.k !== "field") {
-          this.report("only a named function is called", `near "${describeValue(value)}"`, this.peek());
-          value = { k: "call", name: "", args: [] };
+        if (value.k === "name" || value.k === "field") {
+          const name = value.k === "name" ? value.name : dottedName(value);
+          value = { k: "call", name, args };
           continue;
         }
-        const name = value.k === "name" ? value.name : `${value.base.k === "name" ? value.base.name : ""}.${value.field}`;
-        value = { k: "call", name, args };
+        if (value.k === "index") {
+          // Allow grid launch syntax like kernel[grid](args...)
+          const name =
+            value.base.k === "name"
+              ? value.base.name
+              : value.base.k === "field"
+                ? dottedName(value.base)
+                : "";
+          const grid = value.index;
+          value = { k: "call", name, args, grid } as any;
+          continue;
+        }
+        this.report("only a named function is called", `near "${describeValue(value)}"`, this.peek());
+        value = { k: "call", name: "", args: [] };
         continue;
       }
       if (this.at("[")) {
@@ -1651,7 +1687,7 @@ class PythonParser {
       return { k: "name", name: token.text };
     }
     if (token.kind === "op" && token.text === "(") {
-      const inner = this.expression();
+      const first = this.expression();
       // A tuple is a list in brackets of its own, and the subset has no
       // tuple: a value in brackets is one value.
       if (this.at(",")) {
@@ -1665,7 +1701,7 @@ class PythonParser {
         return { k: "number", text: "0", whole: true };
       }
       this.expect(")");
-      return inner;
+      return first;
     }
     if (token.kind === "op" && token.text === "[") {
       const items: PyValue[] = [];
@@ -2019,6 +2055,7 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       if (value.name === "tl.sqrt" || value.name === "tl.math.sqrt") return "float";
       if (value.name === "tl.floor" || value.name === "tl.math.floor") return "int";
       if (value.name === "tl.ceil" || value.name === "tl.math.ceil") return "int";
+      if (value.name === "tl.math.exp" || value.name === "tl.math.log" || value.name === "tl.math.sin" || value.name === "tl.math.cos") return "float";
       if (value.name === "tl.abs" || value.name === "tl.math.abs") {
         const first = value.args[0];
         return first === undefined ? "unknown" : typeOfValue(first, names);
@@ -2085,6 +2122,50 @@ const IR_OPERATORS: Record<string, BinaryOp> = {
   "or": "||",
 };
 
+/** A dotted name for a field access chain, e.g. `tl.math.exp`. */
+function dottedName(value: PyValue): string {
+  if (value.k === "name") return value.name;
+  if (value.k === "field") {
+    return `${dottedName(value.base)}.${value.field}`;
+  }
+  return "";
+}
+
+function isTritonBuiltin(name: string): boolean {
+  if (name.startsWith("tl.")) {
+    if (name === "tl.where") return true;
+    if (
+      name === "tl.abs" ||
+      name === "tl.sqrt" ||
+      name === "tl.floor" ||
+      name === "tl.ceil" ||
+      name === "tl.math.abs" ||
+      name === "tl.math.sqrt" ||
+      name === "tl.math.floor" ||
+      name === "tl.math.ceil" ||
+      name === "tl.math.exp" ||
+      name === "tl.math.log" ||
+      name === "tl.math.sin" ||
+      name === "tl.math.cos"
+    )
+      return true;
+    if (
+      name === "tl.load" ||
+      name === "tl.store" ||
+      name === "tl.program_id" ||
+      name === "tl.num_programs" ||
+      name === "tl.arange" ||
+      name === "tl.full" ||
+      name === "tl.zeros" ||
+      name === "tl.ones"
+    )
+      return true;
+    return false;
+  }
+  if (name.startsWith("triton.")) return true;
+  return false;
+}
+
 /** The operators of the compiler's IR that a Python unary lowers to. */
 const IR_UNARY: Record<string, UnaryOp> = {
   "-": "-",
@@ -2130,6 +2211,8 @@ export function lowerValue(value: PyValue): Expression {
           otherwise: lowerValue(value.args[2]),
         };
       }
+      // For kernel operations not directly supported by the IR yet, still lower
+      // them as calls so they can be refused later with proper diagnostics
       return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
     }
     case "index":
@@ -2898,6 +2981,9 @@ export const pythonFrontend: Frontend = {
     }
     for (const [name, line] of calls) {
       if (known.has(name) || builtins.includes(name)) continue;
+      // Allow Triton module calls through the frontend for now; they will be
+      // implemented further down the pipeline.
+      if (isTritonBuiltin(name) || name.startsWith("tl.") || name.startsWith("triton.")) continue;
       if (CONVERSIONS.includes(name) && builtins === MODULE_BUILTINS) {
         diagnostics.report(
           `"${name}" is not part of a module`,

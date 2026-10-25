@@ -364,6 +364,8 @@ class CDriver implements ProgramTarget {
   private readonly includeHttpHeader: boolean;
   /** True when the program uses SQLite, so the driver includes its header. */
   private readonly includeSqliteHeader: boolean;
+  /** True when the program uses Triton, so the driver includes its header. */
+  private readonly includeTritonHeader: boolean = false;
   /**
    * The backend the functions of the program were lowered by.
    *
@@ -442,9 +444,10 @@ class CDriver implements ProgramTarget {
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
     const sqliteHeader = this.includeSqliteHeader ? '#include "blaze_sqlite.h"\n' : "";
+    const tritonHeader = this.includeTritonHeader ? '#include "blaze_triton.h"\n' : "";
     const bridges = this.bridges(program);
     return `${DRIVER_PRELUDE}
-${httpHeader}${httpDefault}${sqliteHeader}${objects === "" ? "" : `${objects}\n`}${declarations}${lowered === "" ? "" : `\n${lowered}`}${bridges === "" ? "" : `\n${bridges}`}`;
+${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" : `${objects}\n`}${declarations}${lowered === "" ? "" : `\n${lowered}`}${bridges === "" ? "" : `\n${bridges}`}`;
   }
 
   /**

@@ -35,6 +35,7 @@ import { buildStandaloneRuntime, writeRuntimeHeader } from "./runtime/standalone
 import { buildFacilRuntime, facilIoLibraries } from "./runtime/facil.ts";
 import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./runtime/http-needs.ts";
 import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
+import { buildTritonLibrary } from "./runtime/triton-build.ts";
 import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
 import type { Review } from "./core/proposal.ts";
 
@@ -544,6 +545,9 @@ export function runtimePreparer(request: {
       for (const library of request.libraries ?? []) {
         if (library === "sqlite") {
           libraryObjects.push(await buildSqliteLibrary(workDirectory, request.mode, request.target));
+        }
+        if (library === "triton") {
+          libraryObjects.push(await buildTritonLibrary(workDirectory, request.mode, request.target));
         }
       }
       return { ...prepared, libraryObjects };
