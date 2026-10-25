@@ -337,7 +337,6 @@ test("the constructs outside the subset are refused with what to write instead",
   const cases: [string, RegExp][] = [
 
     ["def f() -> int:\n    yield 1\n", /a value the function hands back with return/],
-    ["def f() -> int:\n    async def g() -> int:\n        return 1\n", /a compiled program has nothing to wait for/],
     ["def f() -> int:\n    with open('x') as g:\n        pass\n", /a plain block/],
     ["def f() -> int:\n    g = lambda: 1\n    return g\n", /a function written with def/],
     ["def f(a: int) -> bool:\n    return a is None\n", /the comparison `==`/],

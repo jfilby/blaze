@@ -771,18 +771,10 @@ class PythonParser {
         continue;
       }
       if (token.kind === "name" && token.text === "async") {
+        // `async` names nothing the compiler keeps: an async function is a
+        // function, an async class is a class, and the keyword is dropped
+        // where it was written.
         this.next();
-        if (this.peek().kind === "name" && this.peek().text === "def") {
-          this.functionDefinition(decorators);
-        } else {
-          this.skipStatement();
-        }
-        this.report(
-          '"async" is not supported',
-          "a compiled program has nothing to wait for, so write a straight line",
-          token,
-        );
-        decorators = [];
         continue;
       }
       if (token.kind === "name" && token.text === "class") {
@@ -1233,17 +1225,14 @@ class PythonParser {
       switch (token.text) {
         case "async":
           this.next();
+          // `async` names nothing the compiler keeps: drop it and read the
+          // statement it modifies as a plain one.
           if (this.peek().kind === "name" && this.peek().text === "def") {
             this.nestedFunction();
-          } else {
-            this.skipStatement();
+            return { k: "pass", line: token.line };
           }
-          this.report(
-            '"async" is not supported',
-            "a compiled program has nothing to wait for, so write a straight line",
-            token,
-          );
-          return { k: "pass", line: token.line };
+          // Fall through to re-read the now-current statement.
+          return this.statement();
         case "class":
           this.next();
           if (this.peek().kind === "name") this.next();
