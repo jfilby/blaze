@@ -736,6 +736,14 @@ class ProgramEmitter {
         this.write(this.target.newline());
         return;
       case "call":
+        if (statement.call.grid !== undefined) {
+          const gridExpr = this.expression(statement.call.grid);
+          this.write(`for (double blaze_grid_i = 0.0; blaze_grid_i < ${gridExpr}; blaze_grid_i += 1.0) {`);
+          this.write("  blaze_triton_block_index = blaze_grid_i;");
+          this.write("  " + this.target.discard(this.call(statement.call), statement.call.returns.kind === "void") + ";");
+          this.write("}");
+          return;
+        }
         this.write(this.target.discard(this.call(statement.call), statement.call.returns.kind === "void"));
         return;
       case "if":

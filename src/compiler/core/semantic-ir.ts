@@ -88,7 +88,7 @@ export function isReference(type: SemanticType): boolean {
 
 /** True for a type this IR knows how to read a length and an element out of. */
 export function isSequence(type: SemanticType): boolean {
-  return type.kind === "array" || type.kind === "slice" || type.kind === "ptr";
+  return type.kind === "array" || type.kind === "slice" || type.kind === "ptr" || type.kind === "mask";
 }
 
 /** A type as the IR text names it. The contract text is the canonical form. */
@@ -102,6 +102,8 @@ export function typeText(type: SemanticType): string {
       return `${typeText(type.of)}*`;
     case "slice":
       return `[]${typeText(type.of)}`;
+    case "mask":
+      return `mask<${typeText(type.of)}>`;
     case "array":
       return type.length === null ? `[${typeText(type.of)}]` : `[${typeText(type.of)}; ${type.length}]`;
     case "ref":
@@ -663,6 +665,8 @@ export interface SemanticCall {
   retain: boolean;
   /** A function the compiler itself provides, as `Math.abs` is. */
   builtin: boolean;
+  /** The grid a kernel is launched on, when the call is a grid launch. */
+  grid?: SemanticValue;
 }
 
 /* -------------------------------------------------------------------------- */

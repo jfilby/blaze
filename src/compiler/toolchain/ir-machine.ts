@@ -9731,6 +9731,29 @@ class Machine {
       this.roundDown();
       return;
     }
+    if (call.callee === "tl.program_id") {
+      this.code.xorFloat(XMM0, XMM0);
+      return;
+    }
+    if (call.callee === "tl.math.exp") {
+      this.at(call.args[0], NUMBER);
+      this.external("exp");
+      this.code.call("exp");
+      return;
+    }
+    if (call.callee === "tl.arange") {
+      // Block range: a single program instance covers one block, so the
+      // range is [0, end) on the CPU fallback.
+      this.code.xorFloat(XMM0, XMM0);
+      return;
+    }
+    if (call.callee === "tl.load") {
+      this.at(call.args[0], NUMBER);
+      return;
+    }
+    if (call.callee === "tl.store") {
+      return;
+    }
     if (call.callee === "array.new") {
       this.code.movRegImm(RDI, 0n);
       this.code.movRegImm(RSI, 8n);

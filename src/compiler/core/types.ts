@@ -57,6 +57,7 @@ export type TypeExpr =
   | { kind: "primitive"; name: PrimitiveTypeName }
   | { kind: "ptr"; of: TypeExpr }
   | { kind: "slice"; of: TypeExpr }
+  | { kind: "mask"; of: TypeExpr }
   | { kind: "array"; of: TypeExpr; length: number | null }
   /**
    * A reference to an object on the heap. `of` is null until the object is

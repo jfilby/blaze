@@ -274,9 +274,10 @@ class BodyTypes {
         for (const argument of expression.args) this.expression(argument);
         const builtin = builtinFor(expression.name);
         if (builtin !== null) {
-          if (expression.args.length !== builtin.params.length) {
+          const allowed = builtin.arities ?? [builtin.arity ?? builtin.params.length];
+          if (!allowed.includes(expression.args.length)) {
             throw objectsError(
-              `${expression.name} takes ${builtin.params.length} argument${builtin.params.length === 1 ? "" : "s"}`,
+              `${expression.name} takes ${allowed.join(" or ")} argument${allowed.length === 1 && allowed[0] === 1 ? "" : "s"}`,
               `${this.path}: ${this.functionName} calls it with ${expression.args.length}`,
             );
           }

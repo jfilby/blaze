@@ -199,6 +199,8 @@ interface DraftCall {
   effects: Effect[];
   /** A function the compiler itself provides, as `Math.abs` is. */
   builtin: boolean;
+  /** The grid a kernel is launched on, when the call is a grid launch. */
+  grid?: DraftValue;
   /**
    * True when what the call hands back is a bigint, which is what the callee
    * declared: `function f(): bigint` hands back a bigint and one declared
@@ -2143,6 +2145,9 @@ class ProgramResolver {
         };
       case "invoke": {
         const call = this.call({ k: "call", function: statement.function, args: statement.args }, statement.line);
+        if (statement.grid !== undefined) {
+          call.grid = this.value(statement.grid, null, statement.line);
+        }
         return { kind: "invoke", call, line: statement.line };
       }
       case "if":
@@ -5278,6 +5283,7 @@ class ProgramLowering {
       ownership: call.name === SHARED ? "owned" : ownership(call.returns),
       retain: false,
       builtin: call.builtin,
+      grid: call.grid === undefined ? undefined : this.value(call.grid, null, line),
     };
   }
 

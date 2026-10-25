@@ -444,7 +444,7 @@ class CDriver implements ProgramTarget {
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
     const sqliteHeader = this.includeSqliteHeader ? '#include "blaze_sqlite.h"\n' : "";
-    const tritonHeader = this.includeTritonHeader ? '#include "blaze_triton.h"\n' : "";
+    const tritonHeader = this.includeTritonHeader ? '#include "blaze_triton.h"\nstatic double blaze_triton_block_index = 0.0;\n' : "";
     const bridges = this.bridges(program);
     return `${DRIVER_PRELUDE}
 ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" : `${objects}\n`}${declarations}${lowered === "" ? "" : `\n${lowered}`}${bridges === "" ? "" : `\n${bridges}`}`;

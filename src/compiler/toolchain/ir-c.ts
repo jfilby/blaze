@@ -195,6 +195,22 @@ function builtinExpression(name: string, args: string[]): string {
       return `trunc(${args[0]})`;
     case "Math.ceil":
       return `ceil(${args[0]})`;
+    case "tl.math.exp":
+      return `exp(${args[0]})`;
+    case "tl.math.log":
+      return `log(${args[0]})`;
+    case "tl.math.sin":
+      return `sin(${args[0]})`;
+    case "tl.math.cos":
+      return `cos(${args[0]})`;
+    case "tl.program_id":
+      return `(blaze_triton_block_index)`;
+    case "tl.load":
+      return `((${args.length > 1 ? args[1] : "1.0"}) ? (*((double*)(${args[0]}))) : 0.0)`;
+    case "tl.store":
+      return `(*((double*)(${args[0]}) = ${args[1]}, 0.0)`;
+    case "tl.arange":
+      return `(0.0)`;
     case "Math.random":
       // The runtime's own random is what a program body is given, so a module
       // function and a program body answer the same call the same way.

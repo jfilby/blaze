@@ -116,7 +116,7 @@ export function parseType(text: string): TypeExpr {
   }
 
   const [, head, argument] = composite;
-  if (head === "ptr" || head === "slice") {
+  if (head === "ptr" || head === "slice" || head === "mask") {
     return { kind: head, of: parseType(argument) };
   }
   if (head === "ref") {
@@ -155,6 +155,7 @@ export function typeToString(type: TypeExpr): string {
       return type.name;
     case "ptr":
     case "slice":
+    case "mask":
       return `${type.kind}<${typeToString(type.of)}>`;
     case "array":
       return type.length === null ? `array<${typeToString(type.of)}>` : `array<${typeToString(type.of)},${type.length}>`;
@@ -177,7 +178,7 @@ export function typeToString(type: TypeExpr): string {
 export function contractText(type: SemanticType): string {
   if (type.kind === "primitive") return type.name;
   if (type.kind === "text") return "text";
-  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
+  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "mask" || type.kind === "array") {
     const of = contractText(type.of);
     return type.kind === "array" && type.length !== null ? `array<${of},${type.length}>` : `${type.kind}<${of}>`;
   }
@@ -185,10 +186,10 @@ export function contractText(type: SemanticType): string {
   return "void";
 }
 
-export type BufferType = Extract<TypeExpr, { kind: "ptr" | "slice" | "array" }>;
+export type BufferType = Extract<TypeExpr, { kind: "ptr" | "slice" | "array" | "mask" }>;
 
 export function isBufferType(type: TypeExpr): type is BufferType {
-  return type.kind === "ptr" || type.kind === "slice" || type.kind === "array";
+  return type.kind === "ptr" || type.kind === "slice" || type.kind === "array" || type.kind === "mask";
 }
 
 /** Element type of a buffer type, or null for anything else. */

@@ -1136,7 +1136,8 @@ class IrScanner {
     this.at += 1;
     switch (head) {
       case "ptr":
-      case "slice": {
+      case "slice":
+      case "mask": {
         const of = this.contract();
         this.expect(">");
         return { kind: head, of };

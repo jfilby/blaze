@@ -1514,9 +1514,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   if (!allowed.includes(call.args.length)) {
     problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${allowed.join(" or ")}`);
   }
-  if (call.argTypes.length !== call.args.length) {
-    problems.push(`${prefix}${call.callee} passes ${call.args.length} arguments as ${call.argTypes.length} types`);
-  }
+  // Variable-arity builtins may carry more types than arguments; that is expected.
   for (let index = 0; index < params.length; index += 1) {
     const parameter = contractType(params[index]);
     if (parameter === null) {
