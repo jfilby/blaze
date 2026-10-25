@@ -202,7 +202,6 @@ matter are the ones a Python program is most likely to write:
 | `lambda` | a function written with `def` |
 | `is`, `is not`, `in`, `not in` | `==` and `!=`, and a loop that looks for the value |
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
-| a slice, `a[1:3]` | an index |
 | a negative index, `a[-1]` | an index the compiler reads as a count from the start |
 | `*args`, `**kwargs` | a fixed list of parameters |
 | a default value | every parameter is given |
