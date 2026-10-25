@@ -335,7 +335,6 @@ test("the constructs outside the subset are refused with what to write instead",
   const cases: [string, RegExp][] = [
 
     ["def f() -> int:\n    yield 1\n", /a value the function hands back with return/],
-    ["def f(a: int) -> int:\n    match a:\n        case 1:\n            return 1\n    return 0\n", /a chain of if \/ elif/],
     ["def f(a: int = 1) -> int:\n    return a\n", /a parameter has no default value/],
     ["def f() -> int:\n    if (n := 1) > 0:\n        return n\n    return 0\n", /a walrus is not part of the subset/],
     ["def f(x: float) -> float:\n    return round(x)\n", /it rounds half to even/],

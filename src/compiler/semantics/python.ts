@@ -1349,17 +1349,50 @@ class PythonParser {
           }
           this.skipNewline();
           return { k: "pass", line: token.line };
-        case "match":
+        case "match": {
           this.next();
-          this.expression();
+          const subject = this.expression();
           this.expect(":");
-          this.skipBlock();
-          this.report(
-            '"match" is not supported',
-            "a chain of if / elif",
-            token,
-          );
-          return { k: "pass", line: token.line };
+          if (this.atKind("newline")) this.next();
+          const cases: { pattern: PyValue; guard: PyValue | null; body: PyStatement[]; wildcard: boolean }[] = [];
+          if (this.atKind("indent")) {
+            this.next();
+            while (this.peek().kind !== "dedent" && this.peek().kind !== "end") {
+              if (!(this.peek().kind === "name" && this.peek().text === "case")) {
+                this.skipStatement();
+                continue;
+              }
+              this.next();
+              const pattern = this.expression();
+              const wildcard = pattern.k === "name" && (pattern.name === "_" || true);
+              let guard: PyValue | null = null;
+              if (this.peek().kind === "name" && this.peek().text === "if") {
+                this.next();
+                guard = this.expression();
+              }
+              this.expect(":");
+              const body = this.block();
+              cases.push({ pattern, guard, body, wildcard });
+            }
+            if (this.atKind("dedent")) this.next();
+          }
+          // Turn the cases into a chain of if / elif / else.
+          let otherwise: PyStatement[] = [];
+          for (let i = cases.length - 1; i >= 0; i--) {
+            const entry = cases[i];
+            if (entry.wildcard) {
+              otherwise = entry.body;
+              continue;
+            }
+            let condition: PyValue = { k: "binary", op: "==", left: subject, right: entry.pattern };
+            if (entry.guard !== null) {
+              condition = { k: "binary", op: "and", left: condition, right: entry.guard };
+            }
+            otherwise = [{ k: "if", condition, then: entry.body, otherwise, line: token.line }];
+          }
+          if (otherwise.length === 0) return { k: "pass", line: token.line };
+          return otherwise[0];
+        }
         case "import":
           this.report(
             "an import is written at the top of the module",
