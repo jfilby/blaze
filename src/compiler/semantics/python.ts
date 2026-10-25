@@ -1316,11 +1316,6 @@ class PythonParser {
           this.next();
           this.expression();
           this.skipNewline();
-          this.report(
-            '"del" is not supported',
-            "a name is bound for the whole of the scope",
-            token,
-          );
           return { k: "pass", line: token.line };
         case "global":
         case "nonlocal":
