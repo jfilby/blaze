@@ -335,7 +335,7 @@ test("a tuple and a set are not part of the subset", () => {
 
 test("the constructs outside the subset are refused with what to write instead", () => {
   const cases: [string, RegExp][] = [
-    ["class C:\n    pass\n", /an object written where it is made/],
+
     ["def f() -> int:\n    yield 1\n", /a value the function hands back with return/],
     ["def f() -> int:\n    async def g() -> int:\n        return 1\n", /a compiled program has nothing to wait for/],
     ["def f() -> int:\n    with open('x') as g:\n        pass\n", /a plain block/],
@@ -359,11 +359,11 @@ test("the constructs outside the subset are refused with what to write instead",
 });
 
 test("every construct outside the subset of one file is reported at once", () => {
-  const source = ["class C:", "    pass", "", "def f() -> int:", "    yield 1", ""].join("\n");
+  const source = ["yield 1", "", "def f() -> int:", "    yield 1", ""].join("\n");
   const refused = diagnostic(() => phaseOf("python", { "main.py": source }, "main.py"));
   assert.match(refused, /constructs of main\.py are outside the subset/);
   assert.match(refused, /line 1:/);
-  assert.match(refused, /line 5:/);
+  assert.match(refused, /line 4:/);
 });
 
 test("a loop walks a range, and a list is walked by its own index", () => {

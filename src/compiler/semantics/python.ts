@@ -404,6 +404,7 @@ export interface PyParam {
 export type PyStatement =
   | { k: "declare"; name: string; type: TypeExpr | null; value: PyValue; line: number }
   | { k: "assign"; name: string; op: string; value: PyValue; line: number }
+  | { k: "storeField"; target: PyValue; value: PyValue; line: number }
   | { k: "return"; value: PyValue | null; line: number }
   | { k: "if"; condition: PyValue; then: PyStatement[]; otherwise: PyStatement[]; line: number }
   | { k: "while"; condition: PyValue; body: PyStatement[]; line: number }
@@ -435,9 +436,17 @@ export interface PyFunction {
   line: number;
 }
 
+/** A class a file declares, as the frontend reads it. */
+export interface PyClass {
+  name: string;
+  fields: { name: string; type: TypeExpr }[];
+  line: number;
+}
+
 /** A Python file, read. */
 export interface PyModule {
   functions: PyFunction[];
+  classes: PyClass[];
   imports: ModuleImport[];
   /** The statements the file runs, in the order they run. */
   body: PyStatement[];
@@ -509,6 +518,10 @@ export function mapPythonType(text: string, position: string): TypeExpr {
   const source = text.trim();
   if (source in PYTHON_TYPES) return PYTHON_TYPES[source];
   if (source in PYTHON_LISTS) return PYTHON_LISTS[source];
+  const recordMatch = /^record\[(.+)\]$/.exec(source);
+  if (recordMatch !== null) {
+    return { kind: "ref", of: null, name: recordMatch[1].trim() };
+  }
   throw frontendError(
     `unsupported Python type "${source}"`,
     `at ${position}; supported: ${Object.keys(PYTHON_TYPES).join(", ")}, ${Object.keys(PYTHON_LISTS).join(", ")}`,
@@ -741,6 +754,7 @@ class PythonParser {
    */
   parseModule(): PyModule {
     const functions: PyFunction[] = [];
+    const classes: PyClass[] = [];
     const imports: ModuleImport[] = [];
     const body: PyStatement[] = [];
     let entryGuard = true;
@@ -772,19 +786,91 @@ class PythonParser {
         continue;
       }
       if (token.kind === "name" && token.text === "class") {
-        this.next();
-        if (this.peek().kind === "name") this.next();
+        const classToken = this.next();
+        const nameToken = this.peek();
+        const className = nameToken.kind === "name" ? nameToken.text : "";
+        if (nameToken.kind === "name") this.next();
+        let baseName: string | null = null;
         if (this.at("(")) {
+          const baseToken = this.peek();
+          if (baseToken.kind === "name") {
+            baseName = baseToken.text;
+            this.next();
+          }
           while (!this.at(")") && this.peek().kind !== "end") this.next();
           if (this.at(")")) this.next();
         }
         this.expect(":");
-        this.block();
-        this.report(
-          '"class" is not supported',
-          "an object written where it is made, as in {'left': None, 'right': None}",
-          token,
-        );
+        const fields: { name: string; type: TypeExpr }[] = [];
+        if (this.atKind("newline")) {
+          this.next();
+          if (this.atKind("indent")) {
+            this.next();
+            while (this.peek().kind !== "dedent" && this.peek().kind !== "end") {
+              if (this.peek().kind === "name" && this.peek().text === "def") {
+                const method = this.functionDefinition([]);
+                if (method !== null) {
+                  functions.push(method);
+                }
+                continue;
+              }
+              const fieldToken = this.peek();
+              if (fieldToken.kind === "name") {
+                const fieldName = fieldToken.text;
+                this.next();
+                if (this.at(":")) {
+                  this.next();
+                  const fieldType = this.annotation();
+                  if (fieldType !== null) {
+                    fields.push({ name: fieldName, type: fieldType });
+                  }
+                }
+              }
+              this.skipNewline();
+            }
+            if (this.atKind("dedent")) this.next();
+          }
+        }
+        // Single inheritance: a child carries the fields of its base, so a
+        // constructor of the child builds the whole object. Methods are
+        // inherited by name, because a method is a function whose first
+        // parameter is the instance it is called on.
+        if (baseName !== null) {
+          const baseClass = classes.find((entry) => entry.name === baseName);
+          if (baseClass !== undefined) {
+            const existing = new Set(fields.map((field) => field.name));
+            for (const baseField of baseClass.fields) {
+              if (!existing.has(baseField.name)) {
+                fields.unshift(baseField);
+                existing.add(baseField.name);
+              }
+            }
+          }
+        }
+
+        // Generate a constructor function returning an object literal.
+        const constructor: PyFunction = {
+          name: className,
+          params: fields.map((field) => ({ name: field.name, type: field.type })),
+          returns: { kind: "ref", of: null, name: className },
+          body: [
+            {
+              k: "return",
+              value: {
+                k: "dict",
+                entries: fields.map((field) => ({
+                  name: field.name,
+                  value: { k: "name", name: field.name },
+                })),
+              },
+              line: classToken.line,
+            },
+          ],
+          decorators: [],
+          line: classToken.line,
+        };
+        functions.push(constructor);
+        classes.push({ name: className, fields, line: classToken.line });
         decorators = [];
         continue;
       }
@@ -821,7 +907,7 @@ class PythonParser {
       if (!isEntryGuard(statement)) entryGuard = false;
       body.push(statement);
     }
-    return { functions, imports, body, entryGuard };
+    return { functions, classes, imports, body, entryGuard };
   }
 
   /**
@@ -997,14 +1083,9 @@ class PythonParser {
           break;
         }
         this.next();
-        if (parameter.text === "self" || parameter.text === "cls") {
-          this.report(
-            "a method is not part of the subset",
-            "a function of a module takes what it is given, as in def dot(a: list[float]) -> float",
-            parameter,
-          );
-          break;
-        }
+        // `self` and `cls` name the instance a method is given, which is now
+        // a parameter like any other: a method is a function whose first
+        // parameter is the object it is called on.
         if (!this.at(":")) {
           this.report(
             "every parameter declares its type",
@@ -1406,6 +1487,24 @@ class PythonParser {
   /** A binding, and the compound assignments of one. */
   private assignment(): PyStatement | null {
     const name = this.peek();
+    if (
+      name.kind === "name" &&
+      this.peek(1).kind === "op" &&
+      this.peek(1).text === "." &&
+      this.peek(2).kind === "name" &&
+      this.peek(3).kind === "op" &&
+      this.peek(3).text === "="
+    ) {
+      const base = { k: "name" as const, name: name.text };
+      this.next(); // base
+      this.next(); // .
+      const field = this.peek();
+      this.next(); // field
+      this.next(); // =
+      const value = this.expression();
+      this.skipNewline();
+      return { k: "storeField", target: { k: "field", base, field: field.text }, value, line: name.line };
+    }
     if (name.kind !== "name") return null;
     const after = this.peek(1);
     if (after.kind === "op" && after.text === ":") {
@@ -1851,6 +1950,20 @@ class PythonParser {
           return value;
         }
         this.next();
+        if (this.at("(") && !(value.k === "name" && (value.name === "tl" || value.name === "math" || value.name === "sys"))) {
+          this.next();
+          const args: PyValue[] = [value];
+          if (!this.at(")")) {
+            for (;;) {
+              args.push(this.expression());
+              if (this.accept(",")) continue;
+              break;
+            }
+          }
+          this.expect(")");
+          value = { k: "call", name: field.text, args };
+          continue;
+        }
         value = { k: "field", base: value, field: field.text };
         continue;
       }
@@ -2497,6 +2610,24 @@ export function lowerStatement(statement: PyStatement): Statement {
         value: lowerValue(statement.value),
         line: statement.line,
       };
+    case "storeField": {
+      const target = statement.target as { k: "field"; base: PyValue; field: string };
+      const base = target.base;
+      if (base.k !== "name") {
+        throw frontendError(
+          '"obj.field = value" is not supported yet',
+          "the object is a name the program holds",
+        );
+      }
+      return {
+        kind: "memberAssign",
+        base: base.name,
+        field: target.field,
+        op: "=" as AssignOperator,
+        value: lowerValue(statement.value),
+        line: statement.line,
+      };
+    }
     case "return":
       return { kind: "result", value: lowerValue(statement.value ?? { k: "none" }), line: statement.line };
     case "if":
@@ -3105,6 +3236,7 @@ function conversionInStatement(statement: PyStatement): string | null {
   switch (statement.k) {
     case "declare":
     case "assign":
+    case "storeField":
       return conversionInValue(statement.value);
     case "return":
       return statement.value === null ? null : conversionInValue(statement.value);

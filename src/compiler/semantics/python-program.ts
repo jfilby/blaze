@@ -282,6 +282,25 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       bound(bindings, one.name, one.value);
       return { kind: "assign", name: one.name, op: operator, value, line: one.line };
     }
+    case "storeField": {
+      const target = one.target as { k: "field"; base: PyValue; field: string };
+      const base = target.base;
+      if (base.k !== "name") {
+        throw frontendError(
+          '"obj.field = value" is not supported yet',
+          "the object is a name the program holds",
+        );
+      }
+      const value = programValue(one.value, bindings);
+      return {
+        kind: "fieldAssign",
+        object: base.name,
+        op: "=",
+        field: target.field,
+        value,
+        line: one.line,
+      };
+    }
     case "return":
       return { kind: "result", value: programValue(one.value ?? { k: "none" }, bindings), line: one.line };
     case "if":
