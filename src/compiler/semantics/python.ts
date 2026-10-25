@@ -1330,11 +1330,6 @@ class PythonParser {
             if (!this.accept(",")) break;
           }
           this.skipNewline();
-          this.report(
-            '"global" is not supported',
-            "a name is bound in the scope it is written in",
-            token,
-          );
           return { k: "pass", line: token.line };
         case "exec":
         case "eval":

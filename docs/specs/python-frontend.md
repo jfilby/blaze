@@ -204,7 +204,6 @@ matter are the ones a Python program is most likely to write:
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
 | `*args`, `**kwargs` | a fixed list of parameters |
 | a default value | every parameter is given |
-| `global`, `nonlocal` | a name is bound in the scope it is written in |
 | `del` | a name is bound for the whole of the scope it is written in |
 | `assert` | a line written out with `print`, and a failure as one |
 | `str.format`, `%` on a text | an f-string |
