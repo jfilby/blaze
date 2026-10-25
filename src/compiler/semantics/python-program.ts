@@ -190,7 +190,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     }
     case "slice": {
       throw frontendError(
-        "a slice is not supported in a program body yet",
+        "a program holds numbers, strings and references, and not a slice",
         "an index, as in a[i]",
       );
     }
