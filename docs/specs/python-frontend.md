@@ -197,7 +197,6 @@ matter are the ones a Python program is most likely to write:
 | `class` | an object written where it is made, as in `{"left": None, "right": None}` |
 | `yield`, `async`, `await` | a straight line: a compiled program has nothing to wait for |
 | a comprehension | a loop that fills a list, written out |
-| `with` | the subset reads no file: `open` is not in it |
 | a decorator | a function is called where it is written, and the decorator is not run |
 | `lambda` | a function written with `def` |
 | `in`, `not in` | a loop that looks for the value |

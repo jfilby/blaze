@@ -1336,11 +1336,6 @@ class PythonParser {
           }
           this.expect(":");
           this.block();
-          this.report(
-            '"with" is not supported',
-            "a plain block",
-            token,
-          );
           return { k: "pass", line: token.line };
         case "type":
           this.next();
