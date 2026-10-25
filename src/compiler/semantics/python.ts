@@ -2788,7 +2788,7 @@ class Uncontractable extends Error {
  * The operators the contract language states a result with. A Python body
  * that uses one the contract language has not states no postcondition.
  */
-const CONTRACT_OPERATORS: readonly string[] = ["+", "-", "*", "**", "==", "!=", "<", "<=", ">", ">="];
+const CONTRACT_OPERATORS: readonly string[] = ["+", "-", "*", "**", "//", "==", "!=", "<", "<=", ">", ">="];
 
 /**
  * The expression the result must equal, or null when the body has none: a
