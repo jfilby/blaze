@@ -135,6 +135,16 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       if (one.name === "str" && one.args.length === 1) {
         return { k: "text", parts: [{ k: "value", value: programValue(one.args[0], bindings) }] };
       }
+      // `tl.where(c, x, y)` is the choice the program model writes, whether the
+      // source spelled it `x if c else y` or `tl.where`.
+      if (one.name === "tl.where" && one.args.length === 3) {
+        return {
+          k: "conditional",
+          condition: programValue(one.args[0], bindings),
+          then: programValue(one.args[1], bindings),
+          otherwise: programValue(one.args[2], bindings),
+        };
+      }
       return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)) };
     }
     case "index": {

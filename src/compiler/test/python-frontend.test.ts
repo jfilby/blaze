@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { diagnostic, phaseOf } from "./phase.ts";
 import { pythonFrontend } from "../semantics/python.ts";
-import { mapPythonType } from "../semantics/python.ts";
+import { parsePython, Diagnostics, mapPythonType, type PyFunction } from "../semantics/python.ts";
 import { generateHarness } from "../toolchain/linker.ts";
 
 /** The contract of a one file Python module. */
@@ -142,10 +142,11 @@ test("an import of a module that is not a file of the project is refused", () =>
   assert.deepEqual(pythonFrontend.resolveImport("helpers"), ["helpers.py"]);
 });
 
-test("the two modules of the standard library the compiler knows are read", () => {
+test("the modules of the standard library the compiler knows are read", () => {
   // `math` is where the roundings and the root the compiler has are written,
-  // and `sys` is where the command line is: the two are the only imports a
-  // Python file may write.
+  // `sys` is where the command line is, and `triton` with `triton.language`
+  // are the modules a kernel is written with: the ones a Python file may
+  // import.
   const phase = phaseOf(
     "python",
     { "main.py": "import math\nimport sys\n\ndef f(a: int) -> int:\n    return a\n" },
@@ -156,7 +157,7 @@ test("the two modules of the standard library the compiler knows are read", () =
     phaseOf("python", { "main.py": "import os\nprint(1)\n" }, "main.py"),
   );
   assert.match(refused, /"os" is not a module the compiler knows/);
-  assert.match(refused, /math and sys/);
+  assert.match(refused, /math, sys, triton, triton\.language/);
 });
 
 test("a call of a name the compiler does not know is refused", () => {
@@ -209,6 +210,115 @@ test("a power is read as a power, and a power is right-associative", () => {
   assert.equal(exponent.op, "**");
   assert.deepEqual(exponent.left, { k: "whole", text: "3" });
   assert.deepEqual(exponent.right, { k: "whole", text: "2" });
+});
+
+test("a decorator is read above a function and carried on it", () => {
+  const diagnostics = new Diagnostics();
+  const parsed = parsePython(
+    "@triton.jit\ndef add_kernel(x_ptr: int, y_ptr: int, output_ptr: int, n_elements: int, BLOCK_SIZE: int) -> None:\n    pass\n",
+    "main.py",
+    diagnostics,
+  );
+  const kernel = parsed.functions.find((f) => f.name === "add_kernel");
+  assert.ok(kernel !== undefined, "the function is declared");
+  assert.deepEqual(kernel.decorators, ["triton.jit"]);
+});
+
+test("several decorators are read above a function", () => {
+  const diagnostics = new Diagnostics();
+  const parsed = parsePython(
+    "@a.b\n@c\ndef f(a: int) -> int:\n    return a\n",
+    "main.py",
+    diagnostics,
+  );
+  const f = parsed.functions.find((fn) => fn.name === "f");
+  assert.ok(f !== undefined, "the function is declared");
+  assert.deepEqual(f.decorators, ["a.b", "c"]);
+});
+
+test("the modules a kernel is written with are the ones the compiler knows", () => {
+  const analysis = pythonFrontend.analyze(
+    "import triton\nimport triton.language as tl\n",
+    "kernel.py",
+  );
+  assert.equal(analysis.functions.length, 0);
+  // A rename the kernel is not written with is refused, as every other one is.
+  const refused = diagnostic(() =>
+    pythonFrontend.analyze("import triton.language as language\n", "kernel.py"),
+  );
+  assert.match(refused, /renaming an import is not supported/);
+});
+
+test("a kernel the subset carries is read with its decorator, its constant and its calls", () => {
+  const source = [
+    "import triton",
+    "import triton.language as tl",
+    "",
+    "@triton.jit",
+    "def select_kernel(x: float, y: float, flag: bool, BLOCK: tl.constexpr) -> float:",
+    "    chosen = tl.where(flag, x, y)",
+    "    signed = tl.abs(chosen)",
+    "    return tl.sqrt(signed + BLOCK)",
+    "",
+  ].join("\n");
+  const analysis = pythonFrontend.analyze(source, "kernel.py");
+  assert.equal(analysis.functions.length, 1);
+  const kernel = analysis.functions[0].handle as PyFunction;
+  assert.ok(kernel !== undefined);
+  assert.deepEqual(kernel.decorators, ["triton.jit"]);
+  assert.deepEqual(kernel.params.map((param) => param.type), [
+    { kind: "primitive", name: "f64" },
+    { kind: "primitive", name: "f64" },
+    { kind: "primitive", name: "bool" },
+    { kind: "primitive", name: "i64" },
+  ]);
+});
+
+test("a tl.where is the choice the compiler writes", () => {
+  const phase = phaseOf("python", { "main.py": "print(tl.where(1 > 0, 2.0, 3.0))\n" }, "main.py");
+  const statement = phase.body?.statements[0];
+  assert.ok(statement !== undefined && statement.kind === "print");
+  const where = statement.values[0];
+  assert.equal(where.k, "conditional");
+  assert.equal(where.then.k, "number");
+  assert.equal(where.otherwise.k, "number");
+  assert.equal(where.condition.k, "binary");
+  assert.equal(where.condition.op, ">");
+});
+
+test("the tl.* calls a real kernel uses are refused by name", () => {
+  const source = [
+    "import triton.language as tl",
+    "",
+    "@triton.jit",
+    "def add_kernel(x_ptr: int, y_ptr: int, out_ptr: int, n: int, BLOCK: tl.constexpr) -> None:",
+    "    pid = tl.program_id(axis=0)",
+    "    offsets = pid * BLOCK + tl.arange(0, BLOCK)",
+    "    mask = offsets < n",
+    "    x = tl.load(x_ptr + offsets, mask=mask)",
+    "    tl.store(out_ptr + offsets, x, mask=mask)",
+    "",
+  ].join("\n");
+  const refused = diagnostic(() => pythonFrontend.analyze(source, "kernel.py"));
+  assert.match(refused, /"tl\.load" is not a function this file may call/);
+  assert.match(refused, /"tl\.store" is not a function this file may call/);
+  assert.match(refused, /"tl\.program_id" is not a function this file may call/);
+  assert.match(refused, /"tl\.arange" is not a function this file may call/);
+});
+
+test("a named argument names the call it was written on", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": 'print(1, sep=", ")\n' }, "main.py"),
+  );
+  assert.match(refused, /a named argument is not part of the subset/);
+  assert.match(refused, /print is called with its arguments in order/);
+  const spelled = diagnostic(() =>
+    pythonFrontend.analyze(
+      "import triton.language as tl\n\n@triton.jit\ndef f(x: float) -> None:\n    tl.abs(x, out=y)\n",
+      "kernel.py",
+    ),
+  );
+  assert.match(spelled, /tl\.abs is called with its arguments in order/);
 });
 
 test("a function of a module reads no command line", () => {

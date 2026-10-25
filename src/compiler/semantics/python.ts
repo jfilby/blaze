@@ -430,6 +430,8 @@ export interface PyFunction {
   params: PyParam[];
   returns: TypeExpr;
   body: PyStatement[];
+  /** The decorators written above the function, such as `@triton.jit`. */
+  decorators: string[];
   line: number;
 }
 
@@ -452,11 +454,12 @@ export interface PyModule {
 
 /**
  * The modules of the standard library the compiler knows: `math` for the
- * roundings and the root the compiler has, and `sys` for the command line the
- * program was given. Every other import is refused, because a module of the
- * standard library is a file the compiler does not read.
+ * roundings and the root the compiler has, `sys` for the command line the
+ * program was given, and `triton` with `triton.language` for the kernels a
+ * Triton source declares. Every other import is refused, because a module of
+ * the standard library is a file the compiler does not read.
  */
-export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys"]);
+export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "triton", "triton.language"]);
 
 /**
  * The keywords the subset does not read, and what a source writes instead of
@@ -496,6 +499,13 @@ const PYTHON_TYPES: Record<string, TypeExpr> = {
   bool: { kind: "primitive", name: "bool" },
   str: { kind: "text" },
   None: { kind: "void" },
+  /**
+   * The constant a kernel is given: `BLOCK_SIZE: tl.constexpr` is a value the
+   * launch states and the kernel reads as a whole number, which is what the
+   * block sizes and the strides a kernel takes are. A constant of another
+   * kind is not part of the subset.
+   */
+  "tl.constexpr": { kind: "primitive", name: "i64" },
 };
 
 /** The lists a Python annotation may name, and the type of what they hold. */
@@ -592,6 +602,21 @@ export function builtinName(name: string): string {
       return "Math.sqrt";
     case "math.trunc":
       return "whole.trunc";
+    // The `tl.*` calls a kernel is written with, which are the operations the
+    // compiler has under the names its own IR spells them: `tl.where` is not
+    // here because it is not a call at all, but the choice the IR writes.
+    case "tl.abs":
+    case "tl.math.abs":
+      return "Math.abs";
+    case "tl.sqrt":
+    case "tl.math.sqrt":
+      return "Math.sqrt";
+    case "tl.floor":
+    case "tl.math.floor":
+      return "whole.floor";
+    case "tl.ceil":
+    case "tl.math.ceil":
+      return "whole.ceil";
     default:
       return name;
   }
@@ -605,10 +630,27 @@ const CONVERSIONS: readonly string[] = ["int", "float", "str"];
 
 /**
  * The builtins a function of a module may call: the ones Python has as
- * builtins and the compiler has as operations. A module is a library of
- * functions, and a library has no conversions and no command line.
+ * builtins and the compiler has as operations, and the `tl.*` calls a kernel
+ * is written with. A module is a library of functions, and a library has no
+ * conversions and no command line.
  */
-export const MODULE_BUILTINS: readonly string[] = ["len", "range", "abs", "min", "max", "print"];
+export const MODULE_BUILTINS: readonly string[] = [
+  "len",
+  "range",
+  "abs",
+  "min",
+  "max",
+  "print",
+  "tl.where",
+  "tl.abs",
+  "tl.sqrt",
+  "tl.floor",
+  "tl.ceil",
+  "tl.math.abs",
+  "tl.math.sqrt",
+  "tl.math.floor",
+  "tl.math.ceil",
+];
 
 /**
  * The builtins a program may call: the ones of a module, and the conversions
@@ -700,11 +742,22 @@ class PythonParser {
     const imports: ModuleImport[] = [];
     const body: PyStatement[] = [];
     let entryGuard = true;
+    /** The decorators written above the next function definition. */
+    let decorators: string[] = [];
     while (this.peek().kind !== "end") {
       const token = this.peek();
+      // Decorators precede a function definition: `@triton.jit` before
+      // `def kernel(...)`. They are carried on the function and read
+      // downstream: the compiler does not run them, and a backend that does
+      // not know a decorator refuses it by name.
+      if (token.kind === "op" && token.text === "@") {
+        decorators.push(this.decorator());
+        continue;
+      }
       if (token.kind === "name" && token.text === "def") {
-        const parsed = this.functionDefinition();
+        const parsed = this.functionDefinition(decorators);
         if (parsed !== null) functions.push(parsed);
+        decorators = [];
         continue;
       }
       if (token.kind === "name" && token.text === "from") {
@@ -728,10 +781,11 @@ class PythonParser {
   /**
    * `import math`: a module of the standard library the compiler knows.
    *
-   * The standard library is not in the subset, and the two modules that are
-   * are the ones the compiler's own operations are written under: `math` for
-   * the roundings and the root the compiler has, and `sys` for the command
-   * line the program was given. Every other import is refused, because a
+   * The standard library is not in the subset, and the modules that are are
+   * the ones the compiler's own operations are written under: `math` for the
+   * roundings and the root the compiler has, `sys` for the command line the
+   * program was given, and `triton` with `triton.language as tl` for the
+   * kernels a Triton source declares. Every other import is refused, because a
    * module of the standard library is a file the compiler does not read.
    */
   private standardImport(): void {
@@ -743,19 +797,41 @@ class PythonParser {
       return;
     }
     this.next();
-    if (this.accept("as")) {
-      this.report(
-        "renaming an import is not supported",
-        `as written on line ${module.line}; write the name the compiler knows`,
-        module,
-      );
-      this.skipStatement();
-      return;
+    // A dotted module is one import: `import triton.language` names the
+    // module `triton.language`, and the dots are part of its name.
+    let path = module.text;
+    while (this.at(".")) {
+      this.next();
+      const part = this.peek();
+      if (part.kind !== "name") {
+        this.report("expected the name of a module", `near "${part.text}"`, part);
+        this.skipStatement();
+        return;
+      }
+      this.next();
+      path += `.${part.text}`;
     }
-    if (!KNOWN_MODULES.has(module.text)) {
+    if (this.accept("as")) {
+      const alias = this.peek();
+      if (alias.kind === "name") this.next();
+      // The rename a kernel is written with is the one spelling the subset
+      // reads: `import triton.language as tl` binds `tl`, which is what every
+      // `tl.*` call of a kernel is written under. Every other rename binds a
+      // name the compiler does not read.
+      if (!(path === "triton.language" && alias.kind === "name" && alias.text === "tl")) {
+        this.report(
+          "renaming an import is not supported",
+          `as written on line ${module.line}; write the name the compiler knows`,
+          module,
+        );
+        this.skipStatement();
+        return;
+      }
+    }
+    if (!KNOWN_MODULES.has(path)) {
       this.report(
-        `"${module.text}" is not a module the compiler knows`,
-        `line ${module.line}: the compiler reads the modules of the project, as in \`from helpers import dot\`, and the two of the standard library it knows are ${[...KNOWN_MODULES].join(" and ")}`,
+        `"${path}" is not a module the compiler knows`,
+        `line ${module.line}: the compiler reads the modules of the project, as in \`from helpers import dot\`, and the modules of the standard library it knows are ${[...KNOWN_MODULES].join(", ")}`,
         module,
       );
       this.skipStatement();
@@ -798,8 +874,34 @@ class PythonParser {
     return { specifier: module.text, names, default: false, line: start.line };
   }
 
+  /** `@triton.jit`: a decorator, as a dotted name such as `triton.jit`. */
+  private decorator(): string {
+    this.next(); // the `@`
+    const parts: string[] = [];
+    for (;;) {
+      const token = this.peek();
+      if (token.kind !== "name") {
+        this.report(
+          "expected the name of a decorator",
+          `near "${token.text}"; write it as @name or @name.name`,
+          token,
+        );
+        this.skipStatement();
+        return "";
+      }
+      this.next();
+      parts.push(token.text);
+      if (!this.at(".")) break;
+      this.next();
+    }
+    // The newline that ends the line of the decorator is not a statement: the
+    // function definition that follows it is read from its own line.
+    this.skipNewline();
+    return parts.join(".");
+  }
+
   /** `def name(a: int, b: float) -> float:` and the body it holds. */
-  private functionDefinition(): PyFunction | null {
+  private functionDefinition(decorators: string[] = []): PyFunction | null {
     const start = this.next();
     const name = this.peek();
     if (name.kind !== "name") {
@@ -885,7 +987,7 @@ class PythonParser {
       return null;
     }
     const body = this.block();
-    return { name: name.text, params, returns, body, line: start.line };
+    return { name: name.text, params, returns, body, decorators, line: start.line };
   }
 
   /**
@@ -900,6 +1002,18 @@ class PythonParser {
     }
     this.next();
     let text = token.text;
+    // A dotted type is one type: `tl.constexpr` is the constant a kernel is
+    // given, and the dots are part of its name.
+    while (this.at(".")) {
+      this.next();
+      const part = this.peek();
+      if (part.kind !== "name") {
+        this.report("expected a type", `near "${part.text}"`, part);
+        return null;
+      }
+      this.next();
+      text += `.${part.text}`;
+    }
     if (this.at("[")) {
       this.next();
       const element = this.peek();
@@ -1397,16 +1511,23 @@ class PythonParser {
       if (this.at("(")) {
         this.next();
         const args: PyValue[] = [];
+        // The spelling of the call the arguments are read for, so a refusal
+        // names the function it was written on.
+        const spelling =
+          value.k === "name"
+            ? value.name
+            : value.k === "field"
+              ? `${value.base.k === "name" ? value.base.name : describeValue(value.base)}.${value.field}`
+              : "the function";
         if (!this.at(")")) {
           for (;;) {
             const argument = this.expression();
             // A named argument is a keyword the compiler does not read: the
-            // ones a program writes are `sep` and `end`, and a plain print is
-            // what it writes.
+            // call is written with its arguments in order.
             if (this.at("=")) {
               this.report(
                 "a named argument is not part of the subset",
-                "a program prints with a plain print, as in print(a, b)",
+                `${spelling} is called with its arguments in order, as in ${spelling}(a, b)`,
                 this.peek(),
               );
               this.next();
@@ -1895,6 +2016,20 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       }
       if (value.name === "math.floor" || value.name === "math.ceil" || value.name === "math.trunc") return "int";
       if (value.name === "math.sqrt") return "float";
+      if (value.name === "tl.sqrt" || value.name === "tl.math.sqrt") return "float";
+      if (value.name === "tl.floor" || value.name === "tl.math.floor") return "int";
+      if (value.name === "tl.ceil" || value.name === "tl.math.ceil") return "int";
+      if (value.name === "tl.abs" || value.name === "tl.math.abs") {
+        const first = value.args[0];
+        return first === undefined ? "unknown" : typeOfValue(first, names);
+      }
+      // `tl.where` answers whichever of the two values the condition chose, so
+      // the type of the answer is the type the two have in common.
+      if (value.name === "tl.where" && value.args.length === 3) {
+        const then = typeOfValue(value.args[1], names);
+        const otherwise = typeOfValue(value.args[2], names);
+        return then === otherwise ? then : "unknown";
+      }
       return "unknown";
     }
     case "index":
@@ -1983,6 +2118,17 @@ export function lowerValue(value: PyValue): Expression {
       // compiler reads a length off the name it is written by.
       if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name") {
         return { k: "length", buffer: value.args[0].name };
+      }
+      // `tl.where(c, x, y)` is a choice: the condition answers which of the two
+      // values the kernel holds, and the IR carries a choice as a conditional
+      // whether the source spelled it `a if c else b` or `tl.where`.
+      if (value.name === "tl.where" && value.args.length === 3) {
+        return {
+          k: "conditional",
+          condition: lowerValue(value.args[0]),
+          then: lowerValue(value.args[1]),
+          otherwise: lowerValue(value.args[2]),
+        };
       }
       return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
     }
