@@ -1755,15 +1755,11 @@ class PythonParser {
       return { k: "binary", op: token.text, left, right };
     }
     if (token.kind === "name" && token.text === "is") {
-      if (this.peek(1).kind === "name" && this.peek(1).text === "not") this.next();
+      const negated = this.peek(1).kind === "name" && this.peek(1).text === "not";
+      if (negated) this.next();
       this.next();
-      this.binary(0);
-      this.report(
-        '"is" is not supported',
-        "the comparison `==`",
-        token,
-      );
-      return left;
+      const right = this.binary(0);
+      return { k: "binary", op: negated ? "!=" : "==", left, right };
     }
     if (token.kind === "name" && token.text === "in") {
       this.next();

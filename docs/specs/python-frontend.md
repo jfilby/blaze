@@ -200,7 +200,7 @@ matter are the ones a Python program is most likely to write:
 | `with` | the subset reads no file: `open` is not in it |
 | a decorator | a function is called where it is written, and the decorator is not run |
 | `lambda` | a function written with `def` |
-| `is`, `is not`, `in`, `not in` | `==` and `!=`, and a loop that looks for the value |
+| `in`, `not in` | a loop that looks for the value |
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
 | `*args`, `**kwargs` | a fixed list of parameters |
 | a default value | every parameter is given |
