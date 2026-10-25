@@ -759,12 +759,15 @@ class PythonParser {
       if (token.kind === "name" && token.text === "async") {
         this.next();
         if (this.peek().kind === "name" && this.peek().text === "def") {
-          const parsed = this.functionDefinition(decorators);
-          if (parsed !== null) functions.push(parsed);
-          decorators = [];
-          continue;
+          this.functionDefinition(decorators);
+        } else {
+          this.skipStatement();
         }
-        this.skipStatement();
+        this.report(
+          '"async" is not supported',
+          "a compiled program has nothing to wait for, so write a straight line",
+          token,
+        );
         decorators = [];
         continue;
       }
@@ -777,6 +780,11 @@ class PythonParser {
         }
         this.expect(":");
         this.block();
+        this.report(
+          '"class" is not supported',
+          "an object written where it is made, as in {'left': None, 'right': None}",
+          token,
+        );
         decorators = [];
         continue;
       }
@@ -968,6 +976,11 @@ class PythonParser {
             this.next();
             this.expression();
           }
+          this.report(
+            '"*args" is not supported',
+            "a function takes a fixed list of parameters",
+            parameter,
+          );
           if (this.accept(",")) continue;
           break;
         }
@@ -999,6 +1012,11 @@ class PythonParser {
         if (this.at("=")) {
           this.next();
           this.expression();
+          this.report(
+            "a default value is not supported",
+            "a parameter has no default value",
+            parameter,
+          );
         }
         if (annotation === null) break;
         params.push({ name: parameter.text, type: annotation });
@@ -1127,11 +1145,16 @@ class PythonParser {
         case "async":
           this.next();
           if (this.peek().kind === "name" && this.peek().text === "def") {
-            const parsed = this.nestedFunction();
-            return parsed;
+            this.nestedFunction();
+          } else {
+            this.skipStatement();
           }
-          this.skipStatement();
-          return null;
+          this.report(
+            '"async" is not supported',
+            "a compiled program has nothing to wait for, so write a straight line",
+            token,
+          );
+          return { k: "pass", line: token.line };
         case "class":
           this.next();
           if (this.peek().kind === "name") this.next();
@@ -1141,6 +1164,11 @@ class PythonParser {
           }
           this.expect(":");
           this.block();
+          this.report(
+            '"class" is not supported',
+            "an object written where it is made, as in {'left': None, 'right': None}",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "def":
           return this.nestedFunction();
@@ -1182,11 +1210,21 @@ class PythonParser {
             this.expression();
           }
           this.skipNewline();
+          this.report(
+            '"assert" is not supported',
+            "a line written out with print",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "yield":
           this.next();
           while (this.peek().kind !== "newline" && this.peek().kind !== "end" && !this.at(":")) this.next();
           this.skipNewline();
+          this.report(
+            '"yield" is not supported',
+            "a value the function hands back with return",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "raise":
           this.next();
@@ -1199,6 +1237,11 @@ class PythonParser {
           this.next();
           this.expression();
           this.skipNewline();
+          this.report(
+            '"del" is not supported',
+            "a name is bound for the whole of the scope",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "global":
         case "nonlocal":
@@ -1208,6 +1251,11 @@ class PythonParser {
             if (!this.accept(",")) break;
           }
           this.skipNewline();
+          this.report(
+            '"global" is not supported',
+            "a name is bound in the scope it is written in",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "exec":
         case "eval":
@@ -1224,6 +1272,11 @@ class PythonParser {
           }
           this.expect(":");
           this.block();
+          this.report(
+            '"with" is not supported',
+            "a plain block",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "type":
           this.next();
@@ -1239,6 +1292,11 @@ class PythonParser {
           this.expression();
           this.expect(":");
           this.skipBlock();
+          this.report(
+            '"match" is not supported',
+            "a chain of if / elif",
+            token,
+          );
           return { k: "pass", line: token.line };
         case "import":
           this.report(
@@ -1537,7 +1595,12 @@ class PythonParser {
       }
       this.expect(":");
       this.expression();
-      return { k: "number", text: "0", whole: true };
+      this.report(
+        '"lambda" is not supported',
+        "a function written with def",
+        token,
+      );
+      return this.hole();
     }
     return this.conditionalExpression();
   }
@@ -1610,20 +1673,36 @@ class PythonParser {
       return { k: "binary", op: token.text, left, right };
     }
     if (token.kind === "name" && token.text === "is") {
+      if (this.peek(1).kind === "name" && this.peek(1).text === "not") this.next();
       this.next();
-      const right = this.binary(0);
-      return { k: "binary", op: "==", left, right };
+      this.binary(0);
+      this.report(
+        '"is" is not supported',
+        "the comparison `==`",
+        token,
+      );
+      return left;
     }
     if (token.kind === "name" && token.text === "in") {
       this.next();
-      const right = this.binary(0);
-      return { k: "binary", op: "==", left, right };
+      this.binary(0);
+      this.report(
+        '"in" is not supported',
+        "a loop that looks for the value",
+        token,
+      );
+      return left;
     }
     if (token.kind === "name" && token.text === "not" && this.peek(1).text === "in") {
       this.next();
       this.next();
-      const right = this.binary(0);
-      return { k: "binary", op: "!=", left, right };
+      this.binary(0);
+      this.report(
+        '"not in" is not supported',
+        "a loop that looks for the value",
+        token,
+      );
+      return left;
     }
     return left;
   }
@@ -1731,6 +1810,11 @@ class PythonParser {
         this.next();
         const index = this.expression();
         if (this.at(":")) {
+          this.report(
+            "a slice is not part of the subset",
+            "an index, as in a[i]",
+            this.peek(),
+          );
           this.next();
           if (!this.at("]") && !this.at(":")) this.expression();
           if (this.at(":")) {
@@ -1850,15 +1934,15 @@ class PythonParser {
         for (;;) {
           items.push(this.expression());
           if (this.at("for")) {
-            this.next();
-            if (this.peek().kind === "name") this.next();
-            if (this.accept("in")) this.expression();
-            if (this.at("if")) {
-              this.next();
-              this.expression();
-            }
-            this.expect("]");
-            return { k: "list", items };
+            this.report(
+              "a comprehension is not part of the subset",
+              "a loop that fills a list, written out",
+              token,
+            );
+            // Read past the rest of the comprehension.
+            while (this.peek().kind !== "end" && !this.at("]")) this.next();
+            if (this.at("]")) this.next();
+            return this.hole();
           }
           if (this.accept(",")) continue;
           break;
