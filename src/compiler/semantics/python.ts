@@ -1289,11 +1289,6 @@ class PythonParser {
             this.expression();
           }
           this.skipNewline();
-          this.report(
-            '"assert" is not supported',
-            "a line written out with print",
-            token,
-          );
           return { k: "pass", line: token.line };
         case "yield":
           this.next();

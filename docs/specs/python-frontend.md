@@ -204,7 +204,6 @@ matter are the ones a Python program is most likely to write:
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
 | `*args`, `**kwargs` | a fixed list of parameters |
 | a default value | every parameter is given |
-| `assert` | a line written out with `print`, and a failure as one |
 | `str.format`, `%` on a text | an f-string |
 | `round` | it rounds half to even, and the compiler rounds half up |
 | a match | a chain of `if` / `elif` |
