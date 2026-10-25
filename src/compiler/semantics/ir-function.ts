@@ -1092,6 +1092,13 @@ class FunctionBody {
           inferred: asType(element),
         };
       }
+      case "slice": {
+        const base = this.typed(expression.base, null, line);
+        if (expression.start !== null) this.typed(expression.start, null, line);
+        if (expression.stop !== null) this.typed(expression.stop, null, line);
+        if (expression.step !== null) this.typed(expression.step, null, line);
+        return base;
+      }
       case "member":
         return this.field(expression, expect, line);
       case "call":

@@ -1713,6 +1713,13 @@ function usageOf(declaration: TypeScriptFunction): {
         expression(value.index);
         return;
       }
+      case "slice": {
+        expression(value.base);
+        if (value.start !== null) expression(value.start);
+        if (value.stop !== null) expression(value.stop);
+        if (value.step !== null) expression(value.step);
+        return;
+      }
       case "member":
         expression(value.base);
         return;
@@ -2111,6 +2118,9 @@ class BodyAnalysis {
           );
         }
         return `(${this.serialize(expression.left, loop, line)} ${expression.op} ${this.serialize(expression.right, loop, line)})`;
+      case "slice": {
+        throw frontendError("a slice is not supported", `line ${line}`);
+      }
       case "index": {
         if (expression.base.k !== "ident") {
           throw frontendError("only single level indexing is supported", `line ${line}`);
@@ -2195,6 +2205,13 @@ function dependsOn(expression: Expression, name: string): boolean {
       return dependsOn(expression.left, name) || dependsOn(expression.right, name);
     case "index":
       return dependsOn(expression.base, name) || dependsOn(expression.index, name);
+    case "slice":
+      return (
+        dependsOn(expression.base, name) ||
+        (expression.start !== null && dependsOn(expression.start, name)) ||
+        (expression.stop !== null && dependsOn(expression.stop, name)) ||
+        (expression.step !== null && dependsOn(expression.step, name))
+      );
     case "member":
       return dependsOn(expression.base, name);
     case "call":
@@ -2231,6 +2248,8 @@ function describe(expression: Expression): string {
       return `${expression.buffer}.length`;
     case "index":
       return `${describe(expression.base)}[]`;
+    case "slice":
+      return `${describe(expression.base)}[...]`;
     case "member":
       return `${describe(expression.base)}.${expression.field}`;
     case "argv":

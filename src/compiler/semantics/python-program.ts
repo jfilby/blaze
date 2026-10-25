@@ -188,6 +188,12 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       }
       return { k: "element", buffer: one.base.name, index: programValue(one.index, bindings) };
     }
+    case "slice": {
+      throw frontendError(
+        "a slice is not supported in a program body yet",
+        "an index, as in a[i]",
+      );
+    }
     case "field": {
       // A dict has no fields: Python reads one by its key, and a field of it
       // is an attribute the language does not have.

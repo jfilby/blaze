@@ -265,6 +265,13 @@ class BodyTypes {
         this.expression(expression.index);
         return { kind: "type", type: base.kind === "object" ? ANY_REF : elementOf(base) };
       }
+      case "slice": {
+        const base = this.expression(expression.base);
+        if (expression.start !== null) this.expression(expression.start);
+        if (expression.stop !== null) this.expression(expression.stop);
+        if (expression.step !== null) this.expression(expression.step);
+        return { kind: "type", type: base.kind === "object" ? ANY_REF : (base.kind === "type" && base.type.kind === "array" ? base.type : { kind: "array", of: elementOf(base), length: null }) };
+      }
       case "member": {
         const base = this.expression(expression.base);
         if (base.kind === "object") return this.field(base.key, expression.field);
@@ -828,6 +835,13 @@ function expressionReads(expression: Expression, counter: string): boolean {
       );
     case "index":
       return expressionReads(expression.base, counter) || expressionReads(expression.index, counter);
+    case "slice":
+      return (
+        expressionReads(expression.base, counter) ||
+        (expression.start !== null && expressionReads(expression.start, counter)) ||
+        (expression.stop !== null && expressionReads(expression.stop, counter)) ||
+        (expression.step !== null && expressionReads(expression.step, counter))
+      );
     case "member":
       return expressionReads(expression.base, counter);
     case "call":
@@ -866,6 +880,13 @@ function expressionIsWhole(expression: Expression, counter: string, whole: Reado
       return expressionIsWhole(expression.left, counter, whole) && expressionIsWhole(expression.right, counter, whole);
     case "index":
       return expressionIsWhole(expression.base, counter, whole) && expressionIsWhole(expression.index, counter, whole);
+    case "slice":
+      return (
+        expressionIsWhole(expression.base, counter, whole) &&
+        (expression.start === null || expressionIsWhole(expression.start, counter, whole)) &&
+        (expression.stop === null || expressionIsWhole(expression.stop, counter, whole)) &&
+        (expression.step === null || expressionIsWhole(expression.step, counter, whole))
+      );
     case "member":
       return expressionIsWhole(expression.base, counter, whole);
     case "argv":

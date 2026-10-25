@@ -56,6 +56,7 @@ export type Expression =
   | { k: "argv"; index: Expression | null }
   | { k: "length"; buffer: string }
   | { k: "index"; base: Expression; index: Expression }
+  | { k: "slice"; base: Expression; start: Expression | null; stop: Expression | null; step: Expression | null }
   | { k: "member"; base: Expression; field: string }
   | { k: "call"; name: string; args: Expression[] }
   | { k: "object"; fields: { name: string; value: Expression }[] }

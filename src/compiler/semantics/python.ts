@@ -385,6 +385,7 @@ export type PyValue =
   /** A call, of a name the project declares or of a builtin. */
   | { k: "call"; name: string; args: PyValue[]; grid?: PyValue }
   | { k: "index"; base: PyValue; index: PyValue }
+  | { k: "slice"; base: PyValue; start: PyValue | null; stop: PyValue | null; step: PyValue | null }
   | { k: "field"; base: PyValue; field: string }
   /** A list written out where it is made. */
   | { k: "list"; items: PyValue[] }
@@ -1904,19 +1905,52 @@ class PythonParser {
       }
       if (this.at("[")) {
         this.next();
-        const index = this.expression();
         if (this.at(":")) {
-          this.report(
-            "a slice is not part of the subset",
-            "an index, as in a[i]",
-            this.peek(),
-          );
+          // A slice: a[start:stop] or a[start:stop:step].
           this.next();
-          if (!this.at("]") && !this.at(":")) this.expression();
+          let start: PyValue | null = null;
+          let stop: PyValue | null = null;
+          let step: PyValue | null = null;
+          if (!this.at(":") && !this.at("]")) {
+            start = this.expression();
+          }
           if (this.at(":")) {
             this.next();
-            if (!this.at("]")) this.expression();
+            if (!this.at(":") && !this.at("]")) {
+              stop = this.expression();
+            }
+            if (this.at(":")) {
+              this.next();
+              if (!this.at("]")) {
+                step = this.expression();
+              }
+            }
+          } else if (start !== null && !this.at("]")) {
+            // a[i] single index handled below; if we got here via colon above
           }
+          this.expect("]");
+          // Distinguish a single index from a slice: a slice has a colon.
+          // Re-check: if no colon was consumed, treat as index.
+          value = { k: "slice", base: value, start, stop, step };
+          continue;
+        }
+        const index = this.expression();
+        if (this.at(":")) {
+          this.next();
+          let stop: PyValue | null = null;
+          let step: PyValue | null = null;
+          if (!this.at(":") && !this.at("]")) {
+            stop = this.expression();
+          }
+          if (this.at(":")) {
+            this.next();
+            if (!this.at("]")) {
+              step = this.expression();
+            }
+          }
+          this.expect("]");
+          value = { k: "slice", base: value, start: index, stop, step };
+          continue;
         }
         // A negative index counts from the end of the list, and the compiler
         // reads an index as a count from the start of it.
@@ -2181,6 +2215,8 @@ export function describeValue(value: PyValue): string {
       return `"${value.name}(...)"`;
     case "index":
       return `${describeValue(value.base)}[...]`;
+    case "slice":
+      return `${describeValue(value.base)}[...]`;
     case "field":
       return `${describeValue(value.base)}.${value.field}`;
     case "list":
@@ -2274,6 +2310,12 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
     case "index":
       eachValueIn(value.base, visit, line);
       eachValueIn(value.index, visit, line);
+      return;
+    case "slice":
+      eachValueIn(value.base, visit, line);
+      if (value.start !== null) eachValueIn(value.start, visit, line);
+      if (value.stop !== null) eachValueIn(value.stop, visit, line);
+      if (value.step !== null) eachValueIn(value.step, visit, line);
       return;
     case "field":
       eachValueIn(value.base, visit, line);
@@ -2405,6 +2447,8 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       return "unknown";
     }
     case "index":
+      return "unknown";
+    case "slice":
       return "unknown";
     case "field":
       return "unknown";
@@ -2552,6 +2596,8 @@ export function lowerValue(value: PyValue): Expression {
     }
     case "index":
       return { k: "index", base: lowerValue(value.base), index: lowerValue(value.index) };
+    case "slice":
+      return { k: "slice", base: lowerValue(value.base), start: value.start === null ? null : lowerValue(value.start), stop: value.stop === null ? null : lowerValue(value.stop), step: value.step === null ? null : lowerValue(value.step) };
     case "field":
       return { k: "member", base: lowerValue(value.base), field: value.field };
     case "list": {
@@ -2709,6 +2755,7 @@ export function isBooleanCondition(value: PyValue): boolean {
     case "text":
     case "none":
     case "index":
+    case "slice":
     case "field":
     case "list":
     case "dict":
@@ -2948,6 +2995,9 @@ class BodyAnalysis {
         }
         return `${parameter.name}[${index}]`;
       }
+      case "slice": {
+        throw frontendError("a slice is not supported in this position", `line ${line}`);
+      }
       case "call": {
         // The contract language has one function of its own: `len(x)`, which
         // is the length of the buffer or of the text `x` holds.
@@ -3005,6 +3055,8 @@ function dependsOn(value: PyValue, name: string): boolean {
       return dependsOn(value.left, name) || dependsOn(value.right, name);
     case "index":
       return dependsOn(value.base, name) || dependsOn(value.index, name);
+    case "slice":
+      return dependsOn(value.base, name) || (value.start !== null && dependsOn(value.start, name)) || (value.stop !== null && dependsOn(value.stop, name)) || (value.step !== null && dependsOn(value.step, name));
     case "field":
       return dependsOn(value.base, name);
     case "call":
@@ -3101,6 +3153,13 @@ function usageOf(declaration: PyFunction): {
         }
         expression(value.base);
         expression(value.index);
+        return;
+      }
+      case "slice": {
+        expression(value.base);
+        if (value.start !== null) expression(value.start);
+        if (value.stop !== null) expression(value.stop);
+        if (value.step !== null) expression(value.step);
         return;
       }
       case "field":
@@ -3279,6 +3338,13 @@ function conversionInValue(value: PyValue): string | null {
       );
     case "index":
       return conversionInValue(value.base) ?? conversionInValue(value.index);
+    case "slice":
+      return (
+        conversionInValue(value.base) ??
+        (value.start === null ? null : conversionInValue(value.start)) ??
+        (value.stop === null ? null : conversionInValue(value.stop)) ??
+        (value.step === null ? null : conversionInValue(value.step))
+      );
     case "field":
       return conversionInValue(value.base);
     case "list":
