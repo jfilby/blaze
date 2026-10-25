@@ -212,7 +212,6 @@ matter are the ones a Python program is most likely to write:
 | a match | a chain of `if` / `elif` |
 | a walrus, `:=` | a name bound by a statement |
 | `print(..., sep=`, `end=` | a plain `print` |
-| a power, `a ** b` | the compiler's power is a fraction and Python's is a whole number when both sides are whole, and the two are two numbers: write the multiplication out |
 | an import of a module but `math` and `sys` | a module of the standard library is a file the compiler does not read |
 | a call of a name the compiler does not know | a file calls the functions it declares, the functions it imports, and the builtins of the subset |
 | `sys.argv` in a function of a module | a module is a library of functions, and a library reads no command line: the command line is read by the program |
