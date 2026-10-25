@@ -2062,14 +2062,13 @@ class PythonParser {
       // A tuple is a list in brackets of its own, and the subset has no
       // tuple: a value in brackets is one value.
       if (this.at(",")) {
-        this.report(
-          "a tuple is not part of the subset",
-          "a list is written in square brackets, as in [1.0, 2.0]",
-          this.peek(),
-        );
-        while (!this.at(")") && this.peek().kind !== "end") this.next();
+        const items: PyValue[] = [first];
+        while (this.accept(",")) {
+          if (this.at(")")) break;
+          items.push(this.expression());
+        }
         this.expect(")");
-        return { k: "number", text: "0", whole: true };
+        return { k: "list", items };
       }
       this.expect(")");
       return first;

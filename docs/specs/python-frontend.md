@@ -218,7 +218,6 @@ matter are the ones a Python program is most likely to write:
 | `d.key` where `d` is a dict | a dict is read by its key, as in `d["key"]` |
 | `len("hello")` | the length of a value written out is not read: write it into a name and take the length of that |
 | `len(a)` where `a` is a list parameter | a list reaches a function as a pointer to its first element and no length arrives with it: the length is a parameter of its own |
-| a tuple, `(1, 2)` | a list is written in square brackets, as in `[1.0, 2.0]` |
 | a set, `{1, 2}` | a dict is written with named keys, as in `{"a": 1}` |
 | `a.append(x)` | a list is a buffer, and a buffer is fixed: the list a program uses is the one it wrote out |
 
