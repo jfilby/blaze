@@ -924,6 +924,7 @@ class PythonParser {
   private decorator(): string {
     this.next(); // the `@`
     const parts: string[] = [];
+    const startToken = this.peek();
     for (;;) {
       const token = this.peek();
       if (token.kind !== "name") {
@@ -943,6 +944,13 @@ class PythonParser {
     // The newline that ends the line of the decorator is not a statement: the
     // function definition that follows it is read from its own line.
     this.skipNewline();
+    if (parts.length === 0 || parts[0] !== "triton") {
+      this.report(
+        '"@" is not supported',
+        "a decorator is not supported: a function is called where it is written, and the decorator is not run",
+        startToken,
+      );
+    }
     return parts.join(".");
   }
 
