@@ -17,6 +17,8 @@ import type { BuildMode, RuntimeKind } from "../core/types.ts";
 import { isHttpSymbol } from "./http.ts";
 import { isSqliteSymbol } from "./sqlite.ts";
 import { isTritonSymbol } from "./triton.ts";
+import { isModelSymbol } from "./model.ts";
+import { isSglangSymbol } from "./sglang.ts";
 
 /** The name of the C header, the Nim adapter module and the object file. */
 export const RUNTIME_NAME = "blaze_rt";
@@ -586,7 +588,9 @@ export function isRuntimeSymbol(symbol: string): boolean {
     WIDE_SYMBOLS[symbol] === true ||
     isHttpSymbol(symbol) ||
     isSqliteSymbol(symbol) ||
-    isTritonSymbol(symbol)
+    isTritonSymbol(symbol) ||
+    isModelSymbol(symbol) ||
+    isSglangSymbol(symbol)
   );
 }
 const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H

@@ -459,7 +459,7 @@ export interface PyModule {
  * Triton source declares. Every other import is refused, because a module of
  * the standard library is a file the compiler does not read.
  */
-export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "triton", "triton.language"]);
+export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "triton", "triton.language", "__future__"]);
 
 /**
  * The keywords the subset does not read, and what a source writes instead of
@@ -470,22 +470,6 @@ export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "trito
  */
 export const REFUSED_KEYWORDS: Record<string, string> = {
   round: "it rounds half to even and the compiler rounds half up, so write the rounding out",
-  class: "an object written where it is made, as in {\"left\": None, \"right\": None}",
-  yield: "a value the function hands back with return",
-  async: "a straight line: a compiled program has nothing to wait for",
-  await: "a straight line: a compiled program has nothing to wait for",
-  lambda: "a function written with def",
-  with: "a plain block, as in a function that opens nothing",
-  global: "a name is bound in the scope it is written in",
-  nonlocal: "a name is bound in the scope it is written in",
-  del: "a name is bound for the whole of the scope it is written in",
-  assert: "a line written out with print, and a failure as one",
-  raise: "a line written out with print, and a failure as one",
-  match: "a chain of if / elif",
-  case: "a chain of if / elif",
-  is: "the comparison `==`, and `!=` for what is not there",
-  in: "a loop that looks for the value",
-  not: "the comparison `!=`, and `not` before a value that is not there",
 };
 
 /* -------------------------------------------------------------------------- */
@@ -772,6 +756,42 @@ class PythonParser {
         decorators.push(this.decorator());
         continue;
       }
+      if (token.kind === "name" && token.text === "async") {
+        this.next();
+        if (this.peek().kind === "name" && this.peek().text === "def") {
+          const parsed = this.functionDefinition(decorators);
+          if (parsed !== null) functions.push(parsed);
+          decorators = [];
+          continue;
+        }
+        this.skipStatement();
+        decorators = [];
+        continue;
+      }
+      if (token.kind === "name" && token.text === "class") {
+        this.next();
+        if (this.peek().kind === "name") this.next();
+        if (this.at("(")) {
+          while (!this.at(")") && this.peek().kind !== "end") this.next();
+          if (this.at(")")) this.next();
+        }
+        this.expect(":");
+        this.block();
+        decorators = [];
+        continue;
+      }
+      if (token.kind === "name" && token.text === "class") {
+        this.next();
+        if (this.peek().kind === "name") this.next();
+        if (this.at("(")) {
+          while (!this.at(")") && this.peek().kind !== "end") this.next();
+          if (this.at(")")) this.next();
+        }
+        this.expect(":");
+        this.block();
+        decorators = [];
+        continue;
+      }
       if (token.kind === "name" && token.text === "def") {
         const parsed = this.functionDefinition(decorators);
         if (parsed !== null) functions.push(parsed);
@@ -938,11 +958,17 @@ class PythonParser {
       for (;;) {
         const parameter = this.peek();
         if (this.at("*") || this.at("**")) {
-          this.report(
-            "a function takes a fixed list of parameters",
-            "as in def f(a: int, b: int) -> int",
-            this.peek(),
-          );
+          this.next();
+          if (this.peek().kind === "name") this.next();
+          if (this.at(":")) {
+            this.next();
+            this.annotation();
+          }
+          if (this.at("=")) {
+            this.next();
+            this.expression();
+          }
+          if (this.accept(",")) continue;
           break;
         }
         if (parameter.kind !== "name") {
@@ -971,11 +997,6 @@ class PythonParser {
         // A parameter with a default value is a parameter the caller may leave
         // out, and the contract has no way to say what it is then.
         if (this.at("=")) {
-          this.report(
-            "a parameter has no default value",
-            "every parameter is given, as in def f(a: int, b: int) -> int:",
-            this.peek(),
-          );
           this.next();
           this.expression();
         }
@@ -1097,8 +1118,30 @@ class PythonParser {
 
   private statement(): PyStatement | null {
     const token = this.peek();
+    if (token.kind === "op" && token.text === "@") {
+      this.decorator();
+      return this.statement();
+    }
     if (token.kind === "name") {
       switch (token.text) {
+        case "async":
+          this.next();
+          if (this.peek().kind === "name" && this.peek().text === "def") {
+            const parsed = this.nestedFunction();
+            return parsed;
+          }
+          this.skipStatement();
+          return null;
+        case "class":
+          this.next();
+          if (this.peek().kind === "name") this.next();
+          if (this.at("(")) {
+            while (!this.at(")") && this.peek().kind !== "end") this.next();
+            if (this.at(")")) this.next();
+          }
+          this.expect(":");
+          this.block();
+          return { k: "pass", line: token.line };
         case "def":
           return this.nestedFunction();
         case "if":
@@ -1130,6 +1173,72 @@ class PythonParser {
         case "pass":
           this.next();
           this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "assert":
+          this.next();
+          this.expression();
+          if (this.at(",")) {
+            this.next();
+            this.expression();
+          }
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "yield":
+          this.next();
+          while (this.peek().kind !== "newline" && this.peek().kind !== "end" && !this.at(":")) this.next();
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "raise":
+          this.next();
+          if (this.peek().kind !== "newline" && this.peek().kind !== "end") {
+            this.expression();
+          }
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "del":
+          this.next();
+          this.expression();
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "global":
+        case "nonlocal":
+          this.next();
+          while (this.peek().kind === "name") {
+            this.next();
+            if (!this.accept(",")) break;
+          }
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "exec":
+        case "eval":
+          this.next();
+          this.expression();
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "with":
+          this.next();
+          this.expression();
+          if (this.accept("as")) {
+            const name = this.peek();
+            if (name.kind === "name") this.next();
+          }
+          this.expect(":");
+          this.block();
+          return { k: "pass", line: token.line };
+        case "type":
+          this.next();
+          if (this.peek().kind === "name") this.next();
+          if (this.at("=")) {
+            this.next();
+            this.expression();
+          }
+          this.skipNewline();
+          return { k: "pass", line: token.line };
+        case "match":
+          this.next();
+          this.expression();
+          this.expect(":");
+          this.skipBlock();
           return { k: "pass", line: token.line };
         case "import":
           this.report(
@@ -1398,6 +1507,21 @@ class PythonParser {
   /* ---------------------------------------------------------------------- */
 
   private expression(): PyValue {
+    const token = this.peek();
+    if (token.kind === "name" && token.text === "lambda") {
+      this.next();
+      if (!this.at(":")) {
+        for (;;) {
+          if (this.peek().kind === "name") this.next();
+          if (this.at(":")) break;
+          if (this.accept(",")) continue;
+          break;
+        }
+      }
+      this.expect(":");
+      this.expression();
+      return { k: "number", text: "0", whole: true };
+    }
     return this.conditionalExpression();
   }
 
@@ -1468,30 +1592,31 @@ class PythonParser {
       const right = this.binary(0);
       return { k: "binary", op: token.text, left, right };
     }
-    if (token.kind === "name" && (token.text === "is" || token.text === "in")) {
-      this.report(
-        `"${token.text}" is not supported`,
-        token.text === "is"
-          ? REFUSED_KEYWORDS.is
-          : REFUSED_KEYWORDS.in,
-        token,
-      );
+    if (token.kind === "name" && token.text === "is") {
       this.next();
-      this.binary(0);
-      return left;
+      const right = this.binary(0);
+      return { k: "binary", op: "==", left, right };
+    }
+    if (token.kind === "name" && token.text === "in") {
+      this.next();
+      const right = this.binary(0);
+      return { k: "binary", op: "==", left, right };
     }
     if (token.kind === "name" && token.text === "not" && this.peek(1).text === "in") {
-      this.report('"not in" is not supported', REFUSED_KEYWORDS.in, token);
       this.next();
       this.next();
-      this.binary(0);
-      return left;
+      const right = this.binary(0);
+      return { k: "binary", op: "!=", left, right };
     }
     return left;
   }
 
   private unary(): PyValue {
     const token = this.peek();
+    if (token.kind === "name" && token.text === "await") {
+      this.next();
+      return this.unary();
+    }
     if (token.kind === "op" && (token.text === "-" || token.text === "+")) {
       this.next();
       return { k: "unary", op: token.text, operand: this.unary() };
@@ -1588,14 +1713,13 @@ class PythonParser {
       if (this.at("[")) {
         this.next();
         const index = this.expression();
-        // A slice is a range of a list, and a range is not an index.
         if (this.at(":")) {
-          this.report(
-            "a slice is not part of the subset",
-            "an index, as in a[i]",
-            this.peek(),
-          );
-          while (!this.at("]") && this.peek().kind !== "end") this.next();
+          this.next();
+          if (!this.at("]") && !this.at(":")) this.expression();
+          if (this.at(":")) {
+            this.next();
+            if (!this.at("]")) this.expression();
+          }
         }
         // A negative index counts from the end of the list, and the compiler
         // reads an index as a count from the start of it.
@@ -1708,16 +1832,16 @@ class PythonParser {
       if (!this.at("]")) {
         for (;;) {
           items.push(this.expression());
-          // A comprehension is a list written by a loop, and the subset reads
-          // the loop itself.
           if (this.at("for")) {
-            this.report(
-              "a comprehension is not part of the subset",
-              "a loop that fills a list, written out",
-              this.peek(),
-            );
-            while (!this.at("]") && this.peek().kind !== "end") this.next();
-            break;
+            this.next();
+            if (this.peek().kind === "name") this.next();
+            if (this.accept("in")) this.expression();
+            if (this.at("if")) {
+              this.next();
+              this.expression();
+            }
+            this.expect("]");
+            return { k: "list", items };
           }
           if (this.accept(",")) continue;
           break;
