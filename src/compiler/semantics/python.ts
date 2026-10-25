@@ -389,6 +389,7 @@ export type PyValue =
   | { k: "field"; base: PyValue; field: string }
   /** A list written out where it is made. */
   | { k: "list"; items: PyValue[] }
+  | { k: "membership"; value: PyValue; container: PyValue; negated: boolean }
   | { k: "comprehension"; element: PyValue; target: string; iterable: PyValue; condition: PyValue | null }
   /** A dict written out where it is made. */
   | { k: "dict"; entries: { name: string; value: PyValue }[] }
@@ -1759,24 +1760,14 @@ class PythonParser {
     }
     if (token.kind === "name" && token.text === "in") {
       this.next();
-      this.binary(0);
-      this.report(
-        '"in" is not supported',
-        "a loop that looks for the value",
-        token,
-      );
-      return left;
+      const container = this.binary(0);
+      return { k: "membership", value: left, container, negated: false };
     }
     if (token.kind === "name" && token.text === "not" && this.peek(1).text === "in") {
       this.next();
       this.next();
-      this.binary(0);
-      this.report(
-        '"not in" is not supported',
-        "a loop that looks for the value",
-        token,
-      );
-      return left;
+      const container = this.binary(0);
+      return { k: "membership", value: left, container, negated: true };
     }
     return left;
   }
@@ -2213,6 +2204,8 @@ export function describeValue(value: PyValue): string {
       return `${describeValue(value.base)}.${value.field}`;
     case "list":
       return "a list";
+    case "membership":
+      return "a membership test";
     case "comprehension":
       return "a list";
     case "dict":
@@ -2316,6 +2309,10 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       return;
     case "list":
       value.items.forEach((item) => eachValueIn(item, visit, line));
+      return;
+    case "membership":
+      eachValueIn(value.value, visit, line);
+      eachValueIn(value.container, visit, line);
       return;
     case "comprehension":
       eachValueIn(value.element, visit, line);
@@ -2453,6 +2450,8 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       return "unknown";
     case "list":
       return "list";
+    case "membership":
+      return "bool";
     case "comprehension":
       return "list";
     case "dict":
@@ -2603,6 +2602,9 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "member", base: lowerValue(value.base), field: value.field };
     case "comprehension": {
       throw frontendError("a comprehension is not supported in a function", "write the loop out");
+    }
+    case "membership": {
+      throw frontendError("membership is not supported in a function", "write the loop out");
     }
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the
@@ -2763,6 +2765,7 @@ export function isBooleanCondition(value: PyValue): boolean {
     case "field":
     case "list":
     case "comprehension":
+    case "membership":
     case "dict":
     case "conditional":
       return false;
@@ -3000,8 +3003,11 @@ class BodyAnalysis {
         }
         return `${parameter.name}[${index}]`;
       }
-      case "comprehension": {
+    case "comprehension": {
         this.uncontractable("uses a comprehension", line, "a loop that fills a list, written out");
+      }
+      case "membership": {
+        this.uncontractable("tests membership", line, "a loop that looks for the value");
       }
       case "slice": {
         this.uncontractable("slices a value", line, "a contracted function is computed from its parameters alone");
@@ -3073,6 +3079,8 @@ function dependsOn(value: PyValue, name: string): boolean {
       return value.items.some((item) => dependsOn(item, name));
     case "comprehension":
       return dependsOn(value.element, name) || dependsOn(value.iterable, name) || (value.condition !== null && dependsOn(value.condition, name));
+    case "membership":
+      return dependsOn(value.value, name) || dependsOn(value.container, name);
     case "dict":
       return value.entries.some((entry) => dependsOn(entry.value, name));
     case "conditional":
@@ -3361,6 +3369,8 @@ function conversionInValue(value: PyValue): string | null {
       return value.items.map(conversionInValue).find((found) => found !== null) ?? null;
     case "comprehension":
       return conversionInValue(value.element) ?? conversionInValue(value.iterable) ?? (value.condition === null ? null : conversionInValue(value.condition));
+    case "membership":
+      return conversionInValue(value.value) ?? conversionInValue(value.container);
     case "dict":
       return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
     case "text":

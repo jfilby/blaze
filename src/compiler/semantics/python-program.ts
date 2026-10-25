@@ -213,6 +213,22 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       }
       return { k: "field", object: programValue(one.base, bindings), field: one.field };
     }
+    case "membership": {
+      const items: PyValue[] = [];
+      if (one.container.k === "list") items.push(...one.container.items);
+      else if (one.container.k === "call" && one.container.name === "range" && one.container.args.length === 1 && one.container.args[0].k === "number") {
+        const n = Number(one.container.args[0].text);
+        for (let i = 0; i < n; i++) items.push({ k: "number", text: String(i), whole: true });
+      } else {
+        throw frontendError("membership needs a list or a range with a constant bound", "write the list out");
+      }
+      let found = false;
+      for (const item of items) {
+        // equality check: compare programValue text? Use PyValue equality approx
+        if (one.value.k === "number" && item.k === "number" && one.value.text === item.text) { found = true; break; }
+      }
+      return { k: "boolean", value: one.negated ? !found : found };
+    }
     case "comprehension": {
       const iterableItems: PyValue[] = [];
       if (one.iterable.k === "list") {
