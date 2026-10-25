@@ -1402,6 +1402,12 @@ class PythonParser {
     this.loops += 1;
     const body = this.block();
     this.loops -= 1;
+    if (this.at("else")) {
+      this.next();
+      this.expect(":");
+      const elseBody = this.block();
+      body.push(...elseBody);
+    }
     return { k: "while", condition, body, line: start.line };
   }
 
@@ -1446,6 +1452,12 @@ class PythonParser {
     this.loops += 1;
     const body = this.block();
     this.loops -= 1;
+    if (this.at("else")) {
+      this.next();
+      this.expect(":");
+      const elseBody = this.block();
+      body.push(...elseBody);
+    }
     return { k: "for", variable: variable.text, from, to, step, body, line: start.line };
   }
 
@@ -1456,18 +1468,23 @@ class PythonParser {
     const body = this.block();
     let catchBody: PyStatement[] | null = null;
     let finallyBody: PyStatement[] | null = null;
-    if (this.at("except")) {
+    while (this.at("except")) {
       this.next();
-      // `except Exception as e:` binds a name the block may read. A compiled
-      // program cannot raise, so there is nothing to catch: the block is read
-      // and the name is not bound.
       if (this.at("Exception") || this.at("BaseException")) this.next();
       if (this.accept("as")) {
         const name = this.peek();
         if (name.kind === "name") this.next();
       }
       this.expect(":");
-      catchBody = this.block();
+      const cb = this.block();
+      if (catchBody === null) catchBody = cb;
+      else catchBody.push(...cb);
+    }
+    if (this.at("else")) {
+      this.next();
+      this.expect(":");
+      const elseBody = this.block();
+      body.push(...elseBody);
     }
     if (this.at("finally")) {
       this.next();
