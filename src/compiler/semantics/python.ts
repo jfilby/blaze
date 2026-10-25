@@ -2996,7 +2996,7 @@ class BodyAnalysis {
         return `${parameter.name}[${index}]`;
       }
       case "slice": {
-        throw frontendError("a slice is not supported in this position", `line ${line}`);
+        this.uncontractable("slices a value", line, "a contracted function is computed from its parameters alone");
       }
       case "call": {
         // The contract language has one function of its own: `len(x)`, which

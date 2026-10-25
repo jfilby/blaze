@@ -376,7 +376,7 @@ test("a slice and a negative index are outside the subset", () => {
   const slice = diagnostic(() =>
     phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3]\n" }, "main.py"),
   );
-  assert.match(slice, /a slice is not supported/);
+  assert.match(slice, /contract states no postcondition/);
   const negative = diagnostic(() =>
     phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[-1]\n" }, "main.py"),
   );
