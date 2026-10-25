@@ -186,12 +186,29 @@ test("a conversion is not part of a module, and a module says so", () => {
   assert.match(refused, /"int" is not part of a module/);
 });
 
-test("a power is not part of the subset", () => {
-  const refused = diagnostic(() =>
-    phaseOf("python", { "main.py": "print(2 ** 3)\n" }, "main.py"),
-  );
-  assert.match(refused, /a power is not part of the subset/);
-  assert.match(refused, /write the multiplication out/);
+test("a power is read as a power, and a power is right-associative", () => {
+  const phase = phaseOf("python", { "main.py": "print(2 ** 3)\n" }, "main.py");
+  const statement = phase.body?.statements[0];
+  assert.ok(statement !== undefined && statement.kind === "print");
+  const power = statement.values[0];
+  assert.equal(power.k, "binary");
+  assert.equal(power.op, "**");
+  assert.deepEqual(power.left, { k: "whole", text: "2" });
+  assert.deepEqual(power.right, { k: "whole", text: "3" });
+
+  // `a ** b ** c` is `a ** (b ** c)`: the exponent is itself a power.
+  const nested = phaseOf("python", { "main.py": "print(2 ** 3 ** 2)\n" }, "main.py");
+  const nestedStatement = nested.body?.statements[0];
+  assert.ok(nestedStatement !== undefined && nestedStatement.kind === "print");
+  const nestedPower = nestedStatement.values[0];
+  assert.equal(nestedPower.k, "binary");
+  assert.equal(nestedPower.op, "**");
+  assert.deepEqual(nestedPower.left, { k: "whole", text: "2" });
+  const exponent = nestedPower.right;
+  assert.equal(exponent.k, "binary");
+  assert.equal(exponent.op, "**");
+  assert.deepEqual(exponent.left, { k: "whole", text: "3" });
+  assert.deepEqual(exponent.right, { k: "whole", text: "2" });
 });
 
 test("a function of a module reads no command line", () => {

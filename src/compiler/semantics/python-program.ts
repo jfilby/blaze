@@ -43,6 +43,7 @@ const BINARY_OPERATORS: Record<string, ProgramBinaryOp> = {
   "*": "*",
   "/": "/",
   "//": "//",
+  "**": "**",
   "%": "%",
   "==": "==",
   "!=": "!=",

@@ -1379,17 +1379,15 @@ class PythonParser {
   private power(): PyValue {
     const base = this.postfix();
     if (!this.at("**")) return base;
-    const token = this.next();
-    // A power is not in the subset: the compiler's power is a fraction and
-    // Python's is a whole number when both sides are whole, and the two are two
-    // numbers that print differently.
-    this.report(
-      "a power is not part of the subset",
-      "the compiler's power is a fraction and Python's is a whole number when both sides are whole, and the two are two numbers; write the multiplication out",
-      token,
-    );
-    this.unary();
-    return base;
+    this.next();
+    // A power is right-associative: `a ** b ** c` is `a ** (b ** c)`, so the
+    // exponent is itself a power. The exponent is a unary, so that a negative
+    // exponent is read as `2 ** (-1)` and not as `2 ** 0` with a stray minus.
+    // The compiler's power is always floating, so `2 ** 3` answers `8.0` where
+    // Python answers `8`; the values are equal and a program that needs a
+    // whole number writes `int(2 ** 3)`.
+    const exponent = this.unary();
+    return { k: "binary", op: "**", left: base, right: exponent };
   }
 
   /** What is written after a value: a call, an element, a field. */
@@ -1911,6 +1909,9 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       return value.op === "not" ? "bool" : typeOfValue(value.operand, names);
     case "binary": {
       if (COMPARISONS.includes(value.op)) return "bool";
+      // A power is always floating: `2 ** 3` is `8.0`, and a whole number is
+      // read back with `int`.
+      if (value.op === "**") return "float";
       const left = typeOfValue(value.left, names);
       const right = typeOfValue(value.right, names);
       if (left === "float" || right === "float") return "float";
@@ -1937,6 +1938,7 @@ const IR_OPERATORS: Record<string, BinaryOp> = {
   "*": "*",
   "/": "/",
   "//": "//",
+  "**": "**",
   "%": "%",
   "==": "==",
   "!=": "!=",

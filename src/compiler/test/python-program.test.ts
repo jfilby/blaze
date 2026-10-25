@@ -145,6 +145,20 @@ test("a compound floor division is the floor division it states", async () => {
   assert.equal(delivered.stdout, "3\n-4\n");
 });
 
+test("a power answers the power it states", async () => {
+  // The compiler's power is a double's operation, so both sides of `**` must be
+  // numbers rather than whole numbers: `2 ** 3` is refused, and a whole-number
+  // power is not part of a program. A fractional power prints the same in both,
+  // which is what the build compares: `2.0 ** -1.0` is `0.5` and `4.0 ** 0.5`
+  // is `2.0`.
+  const source = ["print(2.0 ** -1.0)", "print(4.0 ** 0.5)", ""].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "0.5\n2.0\n");
+});
+
 test("a division by a zero the loop never reaches is not made", async () => {
   // The division is loop-invariant, so the compiler lifted it above the loop —
   // and the loop runs no turns, so the source never divided by that zero. The
