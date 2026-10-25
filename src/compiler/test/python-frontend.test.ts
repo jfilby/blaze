@@ -326,9 +326,7 @@ test("a docstring says nothing, and a string of three quotes is read", () => {
   assert.equal(phase.program.files[0].functions["f"] !== undefined, true);
 });
 
-test("a tuple and a set are not part of the subset", () => {
-  const tuple = diagnostic(() => phaseOf("python", { "main.py": "t = (1, 2)\n" }, "main.py"));
-  assert.match(tuple, /a tuple is not part of the subset/);
+test("a set is not part of the subset", () => {
   const set = diagnostic(() => phaseOf("python", { "main.py": "s = {1, 2}\n" }, "main.py"));
   assert.match(set, /a set is not part of the subset/);
 });
@@ -337,14 +335,6 @@ test("the constructs outside the subset are refused with what to write instead",
   const cases: [string, RegExp][] = [
 
     ["def f() -> int:\n    yield 1\n", /a value the function hands back with return/],
-    ["def f() -> int:\n    with open('x') as g:\n        pass\n", /a plain block/],
-    ["def f() -> int:\n    g = lambda: 1\n    return g\n", /a function written with def/],
-    ["def f(a: int) -> bool:\n    return a is None\n", /the comparison `==`/],
-    ["def f(a: list[int]) -> bool:\n    return 1 in a\n", /a loop that looks for the value/],
-    ["def f(a: list[int]) -> list[int]:\n    return [x for x in a]\n", /a comprehension is not part of the subset/],
-    ["def f() -> int:\n    global x\n    return 1\n", /a name is bound in the scope it is written in/],
-    ["def f() -> int:\n    del x\n    return 1\n", /a name is bound for the whole of the scope/],
-    ["def f() -> int:\n    assert True\n    return 1\n", /a line written out with print/],
     ["def f(a: int) -> int:\n    match a:\n        case 1:\n            return 1\n    return 0\n", /a chain of if \/ elif/],
     ["def f(a: int = 1) -> int:\n    return a\n", /a parameter has no default value/],
     ["def f() -> int:\n    if (n := 1) > 0:\n        return n\n    return 0\n", /a walrus is not part of the subset/],

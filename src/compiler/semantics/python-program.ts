@@ -229,6 +229,13 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       }
       return { k: "boolean", value: one.negated ? !found : found };
     }
+    case "lambda": {
+      return {
+        k: "arrow",
+        params: one.params,
+        body: [{ kind: "result", value: programValue(one.body, bindings), line: 0 }],
+      };
+    }
     case "comprehension": {
       const iterableItems: PyValue[] = [];
       if (one.iterable.k === "list") {
