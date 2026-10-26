@@ -21,7 +21,7 @@ import { NameScope } from "./names.ts";
 import type { ProgramBinaryOp, ProgramUnaryOp } from "../semantics/module.ts";
 import type { SemanticProgram } from "../semantics/ir-resolve.ts";
 import type { FunctionSignature, TypeExpr } from "../core/types.ts";
-import { contractText } from "../semantics/contract.ts";
+import { contractText, parseType } from "../semantics/contract.ts";
 import { rulesFor, type TextStyle } from "../semantics/language.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
 import { isWideType } from "../core/semantic-ir.ts";
@@ -1051,16 +1051,30 @@ class ProgramEmitter {
       this.modCtx = savedCtx;
       return result;
     }
-    const argumentsText = call.args.map((argument, index) => {
+    const argumentsText: string[] = [];
+    call.args.forEach((argument, index) => {
       const type = call.argTypes[index] ?? argument.type;
       // A string a function writes through is shared through a cell, and the
       // cell is what the function is given: what is passed is the name of the
       // cell and not the text it holds, for the text in the cell is what the
       // function writes.
       if (call.signature.params[index]?.type === "boxedtext" && argument.k === "local") {
-        return this.names.read(argument.name);
+        argumentsText.push(this.names.read(argument.name));
+      } else {
+        argumentsText.push(this.target.argument(type, this.expression(argument, type)));
       }
-      return this.target.argument(type, this.expression(argument, type));
+      // A callee's array parameter carries its length beside it, so pass the
+      // length of this argument as the hidden parameter that follows it.
+      const paramType = call.signature.params[index] !== undefined ? parseType(call.signature.params[index].type) : null;
+      if (paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr")) {
+        if (argument.k === "local") {
+          argumentsText.push(`${this.names.read(argument.name)}_length`);
+        } else if (argument.k === "buffer") {
+          argumentsText.push(String(argument.values.length));
+        } else {
+          argumentsText.push("0");
+        }
+      }
     });
     const expression = (value: SemanticValue, as: SemanticType | null = null): string => this.expression(value, as);
     return call.builtin

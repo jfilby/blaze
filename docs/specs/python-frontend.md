@@ -212,7 +212,6 @@ matter are the ones a Python program is most likely to write:
 | `sys.argv` in a function of a module | a module is a library of functions, and a library reads no command line: the command line is read by the program |
 | `d.key` where `d` is a dict | a dict is read by its key, as in `d["key"]` |
 | `len("hello")` | the length of a value written out is not read: write it into a name and take the length of that |
-| `len(a)` where `a` is a list parameter | a list reaches a function as a pointer to its first element and no length arrives with it: the length is a parameter of its own |
 | a set, `{1, 2}` | a dict is written with named keys, as in `{"a": 1}` |
 | `a.append(x)` | a list is a buffer, and a buffer is fixed: the list a program uses is the one it wrote out |
 
@@ -654,11 +653,12 @@ a new section and needs nothing else.
 - **The length of a value written out is not read.** `len("hello")` is
   refused: the compiler reads a length off the name it is written by, and a
   program writes the value into a name first.
-- **The length of a list a function was given is not read.** `len(a)` where
-  `a` is a list parameter is refused: a list reaches a function as a pointer
-  to its first element and no length arrives with it, and the length is a
-  parameter of its own. The compiler's own backends say the same, and a
-  program that takes the length as a parameter is compiled and checked.
+- **The length of a list a function was given is carried with it.** `len(a)`
+  where `a` is a list parameter is answered from the length that travels
+  beside the pointer, so a function may read it directly instead of taking
+  the length as a parameter of its own. The compiler's own backends carry it
+  the same way, and a program that takes the length as a parameter is still
+  compiled and checked.
 
 ### Open questions
 

@@ -195,7 +195,14 @@ export function planProbe(contract: FunctionContract, parsed: ParsedContract): P
   }
 
   const statements: string[] = [];
-  const callArguments = parameters.map((param) => buildValue(param.type, param.name, objects, statements, 0));
+  const callArguments = parameters.flatMap((param) => {
+    const base = buildValue(param.type, param.name, objects, statements, 0);
+    if (param.type.kind === "array" || param.type.kind === "slice" || param.type.kind === "ptr") {
+      const count = param.type.kind === "array" ? (param.type.length ?? 0) : 0;
+      return [base, String(count)];
+    }
+    return [base];
+  });
   return { kind: "call", statements, callArguments };
 }
 

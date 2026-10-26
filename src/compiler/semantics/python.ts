@@ -2459,27 +2459,6 @@ function readsCommandLine(body: readonly PyStatement[]): boolean {
 }
 
 /**
- * The name of a list parameter whose length a body reads, or null when it
- * reads none.
- *
- * A list reaches a function as a pointer to its first element, and no length
- * arrives with it: the compiler's own C cannot answer the length of a list a
- * function was given, so a body that asks for one is refused rather than
- * compiled into something that reads past the end of it.
- */
-function lengthOfAList(body: readonly PyStatement[], lists: ReadonlySet<string>): string | null {
-  let found: string | null = null;
-  eachValue(body, (value) => {
-    if (found !== null || value.k !== "call" || value.name !== "len") return;
-    if (value.args.length !== 1) return;
-    const argument = value.args[0];
-    if (argument.k !== "name" || !lists.has(argument.name)) return;
-    found = argument.name;
-  });
-  return found;
-}
-
-/**
  * A Python file, read into what it declares, imports and runs.
  */
 export function parsePython(source: string, path: string, diagnostics: Diagnostics): PyModule {
@@ -3755,19 +3734,6 @@ export const pythonFrontend: Frontend = {
           `line ${declaration.line} of ${analysis.path}: a module is a library of functions, and a conversion is a program of its own`,
         );
       }
-    }
-    // The length of a list a function was given is not read: the list
-    // arrives as a pointer to its first element, and no length arrives with
-    // it.
-    const lists = new Set(
-      declaration.params.filter((param) => param.type.kind === "slice" || param.type.kind === "array").map((param) => param.name),
-    );
-    const length = lengthOfAList(declaration.body, lists);
-    if (length !== null) {
-      throw frontendError(
-        `${declaration.name} reads the length of a list, which the compiler does not carry`,
-        `line ${declaration.line} of ${analysis.path}: a list reaches a function as a pointer to its first element and no length arrives with it; take the length as a parameter of its own, as in def dot(a: list[float], n: int) -> float:`,
-      );
     }
     const body = new BodyAnalysis(declaration).run();
     const usage = usageOf(declaration);

@@ -320,6 +320,7 @@ class FunctionEmitter {
   private pending: string[] = [];
   private depth = 1;
   private temporaries = 0;
+  private arrayParamLengths = new Map<string, string>();
   /** Set once a whole number is written out, which is what the helper is for. */
   private wholeNumbers = false;
 
@@ -330,13 +331,22 @@ class FunctionEmitter {
   emit(): string {
     // Parameters are the scope the body reads its arguments from, bound before
     // anything is written so a body that shadows one writes a second name.
-    const parameters = this.fn.params.map((param) => {
+    const parameters: string[] = [];
+    for (const param of this.fn.params) {
       const type = slotType(param);
       const name = this.names.declare(param.name, type);
       const boxed = param.kind === "text" && (param as { boxed?: boolean }).boxed === true;
       if (boxed) this.boxedTexts.add(param.name);
-      return boxed ? `char **${name}` : `${declaredType(type)} ${name}`;
-    });
+      parameters.push(boxed ? `char **${name}` : `${declaredType(type)} ${name}`);
+      // A function's array parameter carries its length beside it, so the body
+      // can ask for it and join arrays at run time. The length is a hidden
+      // parameter the caller supplies alongside the pointer.
+      if (isSequence(type)) {
+        const lengthName = this.names.declare(`${param.name}_length`, USIZE);
+        this.arrayParamLengths.set(param.name, lengthName);
+        parameters.push(`${declaredType(USIZE)} ${lengthName}`);
+      }
+    }
     this.block(this.fn.entry, 1);
     const layouts = cObjectDeclarations(this.fn.objects);
     const signature = `${declaredType(this.fn.returns)} ${this.fn.symbol}(${parameters.join(", ") || "void"})`;
@@ -431,6 +441,11 @@ class FunctionEmitter {
           return;
         }
         this.write([`${pad(depth)}${declaredType(type)} ${name} = ${this.expression(statement.value, type, depth)};`]);
+        if (isSequence(type)) {
+          // An array local carries its length beside it, so a later `length`
+          // of it and a join of it answer from that hidden variable.
+          this.write([`${pad(depth)}size_t ${name}_length = ${this.arrayLength(statement.value, depth)};`]);
+        }
         return;
       }
       case "set": {
@@ -767,13 +782,29 @@ class FunctionEmitter {
     // generic path does would be a copy the call does not want.
     const http = this.httpCall(call, depth);
     if (http !== null) return http;
-    const args = call.args.map((argument, index) => {
+    const args: string[] = [];
+    call.args.forEach((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;
       const targetType = builtin !== null ? builtin.params[index] : (call.argTypes[index] ?? argument.type);
       if (argument.k === "local" && isTextType(argument.type) && this.boxedTexts.has(argument.name)) {
-        return this.names.read(argument.name);
+        args.push(this.names.read(argument.name));
+      } else {
+        args.push(this.expression(argument, targetType, depth));
       }
-      return this.expression(argument, targetType, depth);
+      // A callee's array parameter carries its length beside it, so pass the
+      // length of this argument as the hidden parameter that follows it.
+      const paramType = builtin !== null
+        ? null
+        : (call.signature.params[index] !== undefined ? parseType(call.signature.params[index].type) : null);
+      if (paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr") && !call.builtin) {
+        try {
+          args.push(this.arrayLength(argument, depth));
+        } catch {
+          // If the length cannot be settled, pass 0 and let the callee fail
+          // loudly rather than silently miscompiling.
+          args.push("0");
+        }
+      }
     });
     if (!call.builtin) {
       this.declareCallee(call);
@@ -870,9 +901,14 @@ class FunctionEmitter {
   private declareCallee(call: SemanticCall): void {
     const symbol = call.signature.symbol;
     if (symbol === this.fn.symbol || this.externs.has(symbol)) return;
-    const parameters = call.signature.params
-      .map((param) => `${declaredType(parseType(param.type))} ${cEscape(param.name, TAKEN)}`)
-      .join(", ");
+    const parameters = call.signature.params.flatMap((param) => {
+      const type = parseType(param.type);
+      const base = `${declaredType(type)} ${cEscape(param.name, TAKEN)}`;
+      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") {
+        return [base, `${declaredType(USIZE)} ${cEscape(param.name, TAKEN)}_length`];
+      }
+      return [base];
+    }).join(", ");
     this.externs.set(
       symbol,
       `/* defined by another function of this program, and linked beside this one */\nextern ${declaredType(parseType(call.signature.returns))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
@@ -1062,8 +1098,23 @@ class FunctionEmitter {
         return this.buildObject(value);
       case "loadField":
         return `((struct ${value.layout}*)(uintptr_t)(${this.raw(value.object, depth)}))->${cMemberName(value.field)}`;
-      case "length":
+      case "length": {
+        // An array parameter carries its length beside it, so asking for its
+        // length answers that hidden parameter rather than reading a header
+        // that is not there.
+        if (value.of.k === "local" && this.arrayParamLengths.has(value.of.name)) {
+          return this.arrayParamLengths.get(value.of.name)!;
+        }
+        if (isSequence(value.of.type)) {
+          // A non-parameter array: try to settle its length at compile time.
+          try {
+            return this.arrayLength(value.of, depth);
+          } catch {
+            // Fall through to the text/array length path below.
+          }
+        }
         return this.length(value.of, depth);
+      }
       case "element": {
         const isDynamic = value.of.type?.kind === "ref" && value.of.type?.of === null;
         if (isDynamic) {
@@ -1400,6 +1451,17 @@ class FunctionEmitter {
 
   /** The length of an array whose length the compiler can settle on. */
   private arrayLength(value: SemanticValue, depth: number): string {
+    if (value.k === "local" && this.arrayParamLengths.has(value.name)) {
+      return this.arrayParamLengths.get(value.name)!;
+    }
+    if (value.k === "local") {
+      // A local array carries its length beside it, under the same name with
+      // a `_length` suffix, so asking for its length answers that variable.
+      return `${value.name}_length`;
+    }
+    if (value.k === "arith" && value.op === "arrayConcat") {
+      return `(${this.arrayLength(value.left, depth)} + ${this.arrayLength(value.right, depth)})`;
+    }
     if (value.k === "buffer") {
       if (value.count !== null) {
         return this.expression(value.count, USIZE, depth);
