@@ -6926,6 +6926,15 @@ class Machine {
           this.convert(NUMBER, value.type);
           return;
         }
+        // An array that reaches a function as a parameter carries its length
+        // beside it, and this backend does not carry that length: refuse, so
+        // the C backend, which does, lowers the function instead.
+        if (value.of.k === "local" && this.fn.params.some((p) => p.name === (value.of as { k: "local"; name: string }).name)) {
+          throw machineError(
+            `${this.fn.symbol} reads an element of an array parameter, which this backend has not written`,
+            "an array parameter is read by the C backend; build this function as C output",
+          );
+        }
         const element = elementTypeOf(value.of.type) ?? value.type;
         this.readFrom(element, this.addressOf(value.of, value.index, element));
         this.convert(element, value.type);

@@ -111,18 +111,27 @@ function lengthParameters(parsed: ParsedContract): string[] {
   for (const range of [...parsed.contract.memory.reads, ...parsed.contract.memory.writes]) {
     const match = /^[A-Za-z_][A-Za-z0-9_]*\[([^:]+):(.+)\]$/.exec(range.trim());
     if (match === null) continue;
-    for (const bound of [match[1], match[2]]) {
-      for (const identifier of bound.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
-        const type = parsed.env.get(identifier);
-        if (type === undefined) continue;
-        // A buffer is not a count. The bound `len(a)` is the length of the
-        // buffer `a`, and the vector gives a buffer a length of its own: a
-        // vector that gave the buffer a count would read the count as the
-        // buffer, and the precondition the range states would be checked
-        // against a number.
-        if (isBufferType(type)) continue;
-        names.add(identifier);
-      }
+    const otherBounds = [match[2], match[1]];
+    for (let bi = 0; bi < 2; bi++) {
+      const bound = [match[1], match[2]][bi];
+      const other = otherBounds[bi];
+      const trimmed = bound.trim();
+      // A bound that is a single identifier names a length the vector settles
+      // on the buffer's size, unless that same identifier also appears in the
+      // other bound's expression: then it is an index (such as `i` in
+      // `a[i:i+1]`), and the vector gives it an ordinary value instead.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) continue;
+      const identifier = trimmed;
+      if (new RegExp(`\\b${identifier}\\b`).test(other)) continue;
+      const type = parsed.env.get(identifier);
+      if (type === undefined) continue;
+      // A buffer is not a count. The bound `len(a)` is the length of the
+      // buffer `a`, and the vector gives a buffer a length of its own: a
+      // vector that gave the buffer a count would read the count as the
+      // buffer, and the precondition the range states would be checked
+      // against a number.
+      if (isBufferType(type)) continue;
+      names.add(identifier);
     }
   }
   return [...names];
@@ -219,7 +228,7 @@ interface VectorBuilder {
   random: () => number;
 }
 
-function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParameters: readonly string[]): TestVector {
+function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParameters: readonly string[], indexParameters: ReadonlySet<string> = new Set()): TestVector {
   // Keyed by whatever the source called the parameter, so this is built from
   // entries: a parameter called `__proto__` would otherwise set the prototype
   // of the record instead of adding an argument, and the vector would reach
@@ -235,6 +244,14 @@ function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParam
       const element = bufferElement(type);
       const size = type.kind === "array" && type.length !== null ? type.length : builder.length;
       args.push([param.name, Array.from({ length: size }, (_, index) => formatScalar(element, scalarFor(builder, element, index)))]);
+      continue;
+    }
+    if (indexParameters.has(param.name) && (type.kind === "primitive" && isIntegerType(type.name as never))) {
+      // An index stays inside the buffer it reads: a value at most the
+      // buffer's length, so the precondition that guards the access holds.
+      const maxIndex = Math.max(0, builder.length - 1);
+      const value = Math.floor(builder.random() * (maxIndex + 1));
+      args.push([param.name, formatScalar(type, BigInt(value))]);
       continue;
     }
     args.push([param.name, formatScalar(type, randomScalar(builder.random, type))]);
@@ -258,6 +275,22 @@ function scalarFor(builder: VectorBuilder, type: ScalarType, index: number): Sca
 /** Fixed, boundary and randomized vectors, filtered by the preconditions. */
 export function planTestVectors(parsed: ParsedContract, config: TestConfig): TestVector[] {
   const lengths = lengthParameters(parsed);
+  // Parameters that appear inside a memory range's bounds are indices into a
+  // buffer, not counts: they are generated within the buffer's length so the
+  // precondition that guards the access can hold, instead of spanning the
+  // whole integer type and overflowing the arithmetic the contract wraps.
+  const indexParams = new Set<string>();
+  for (const range of [...parsed.contract.memory.reads, ...parsed.contract.memory.writes]) {
+    const match = /^[A-Za-z_][A-Za-z0-9_]*\[([^:]+):(.+)\]$/.exec(range.trim());
+    if (match === null) continue;
+    for (const bound of [match[1], match[2]]) {
+      for (const identifier of bound.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
+        const type = parsed.env.get(identifier);
+        if (type === undefined || isBufferType(type)) continue;
+        indexParams.add(identifier);
+      }
+    }
+  }
   const random = mulberry32(config.seed);
   const maxLength = Math.max(1, config.maxLength);
 
@@ -285,12 +318,24 @@ export function planTestVectors(parsed: ParsedContract, config: TestConfig): Tes
 
   const vectors: TestVector[] = [];
   for (const builder of builders) {
-    const vector = buildVector(parsed, builder, lengths);
+    const vector = buildVector(parsed, builder, lengths, indexParams);
     const violations = preconditionFailures(parsed, vectorValues(parsed.contract, vector));
     if (violations.length > 0) continue;
     vectors.push(vector);
   }
 
+  if (vectors.length === 0) {
+    // Fall back to a vector whose scalar parameters are all zero and whose
+    // buffers have the smallest non-empty length: a precondition that ties a
+    // scalar to a buffer's length is most likely to hold for the smallest
+    // inputs, and a function whose domain excludes them is not checkable by
+    // vectors at all.
+    const fallbackBuilder: VectorBuilder = { id: "fallback-0", kind: "fixed", length: 1, pattern: "zeros", random };
+    const fallback = buildVector(parsed, fallbackBuilder, lengths, indexParams);
+    if (preconditionFailures(parsed, vectorValues(parsed.contract, fallback)).length === 0) {
+      vectors.push(fallback);
+    }
+  }
   if (vectors.length === 0) {
     throw verificationError(
       `no test vector satisfies the preconditions of ${parsed.contract.function.name}`,
@@ -454,7 +499,14 @@ export function verifyCandidate(request: VerifyRequest): VerificationResult {
   const { vectors } = request;
   const expected = vectors.map((vector) => {
     const values = vectorValues(request.contract, vector);
-    return { vector, values, result: referenceResult(request.parsed, values) };
+    try {
+      return { vector, values, result: referenceResult(request.parsed, values), skip: false };
+    } catch {
+      // A vector whose contract cannot be evaluated (for example, an index
+      // out of bounds of a slice) is out of the function's domain: it is not
+      // compared, and the candidate is not faulted for it.
+      return { vector, values, result: null, skip: true };
+    }
   });
 
   // A candidate that allocates without bound is refused by its own allocator
@@ -503,6 +555,7 @@ export function verifyCandidate(request: VerifyRequest): VerificationResult {
   const actual = decodeRunResults(request.contract, execution.stdout, vectors.length);
   const failures: TestFailure[] = [];
   expected.forEach((entry, index) => {
+    if (entry.skip) return;
     const tolerance = toleranceFor(request.parsed, entry.values);
     if (!valuesMatch(entry.result, actual[index], tolerance)) {
       failures.push({

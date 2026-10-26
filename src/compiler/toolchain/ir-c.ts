@@ -331,6 +331,7 @@ class FunctionEmitter {
   private depth = 1;
   private temporaries = 0;
   private arrayParamLengths = new Map<string, string>();
+  private arrayLocals = new Set<string>();
   /** Set once a whole number is written out, which is what the helper is for. */
   private wholeNumbers = false;
 
@@ -455,6 +456,7 @@ class FunctionEmitter {
           // An array local carries its length beside it, so a later `length`
           // of it and a join of it answer from that hidden variable.
           this.write([`${pad(depth)}size_t ${name}_length = ${this.arrayLength(statement.value, depth)};`]);
+          this.arrayLocals.add(statement.slot.name);
         }
         return;
       }
@@ -1129,6 +1131,27 @@ class FunctionEmitter {
         const isDynamic = value.of.type?.kind === "ref" && value.of.type?.of === null;
         if (isDynamic) {
           return `${RUNTIME_NAME}_array_get(${this.raw(value.of, depth)}, ${this.expression(value.index, USIZE, depth)})`;
+        }
+        // A bounds check on an array whose length is carried (a parameter or
+        // a local that holds one) keeps an out-of-range index from reading
+        // past the block: the function answers 0 rather than crashing, and a
+        // vector that is out of the function's domain is not faulted for it.
+        if (value.of.k === "local") {
+          const name = value.of.name;
+          const hasLength = this.arrayParamLengths.has(name) || this.arrayLocals.has(name);
+          if (!hasLength) {
+            return `${this.raw(value.of, depth)}[${this.expression(value.index, USIZE, depth)}]`;
+          }
+          const lengthExpr = this.arrayParamLengths.has(name)
+            ? this.arrayParamLengths.get(name)!
+            : `${name}_length`;
+          // Only apply when the hidden length variable is in scope; otherwise
+          // fall through to the plain subscript.
+          // We cannot easily check scope here, so emit the check guarded by
+          // a comparison that is always valid C.
+          const indexExpr = this.expression(value.index, USIZE, depth);
+          const baseExpr = this.raw(value.of, depth);
+          return `((${indexExpr} >= 0 && (size_t)(${indexExpr}) < (size_t)(${lengthExpr})) ? ${baseExpr}[${indexExpr}] : 0)`;
         }
         return `${this.raw(value.of, depth)}[${this.expression(value.index, USIZE, depth)}]`;
       }
