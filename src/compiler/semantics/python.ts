@@ -2763,6 +2763,52 @@ export function lowerValue(value: PyValue): Expression {
 }
 
 /** A Python statement, as the compiler's IR writes it. */
+/** Expand storeSlice statements into multiple storeElement statements. */
+function expandStoreSlices(statements: PyStatement[]): PyStatement[] {
+  const result: PyStatement[] = [];
+  for (const stmt of statements) {
+    if (stmt.k === "storeSlice") {
+      const s = stmt as { k: "storeSlice"; base: string; start: PyValue | null; stop: PyValue | null; step: PyValue | null; value: PyValue; line: number };
+      const base = s.base;
+      const rhsItems = s.value.k === "list" ? s.value.items : [];
+      let startBound = 0;
+      if (s.start !== null && s.start.k === "number") {
+        startBound = Number(s.start.text);
+      }
+      const step = s.step === null ? 1 : (s.step.k === "number" ? Number(s.step.text) : 1);
+      for (let j = 0; j < rhsItems.length; j++) {
+        const idx = startBound + j * step;
+        result.push({
+          k: "storeElement",
+          target: { k: "index", base: { k: "name", name: base }, index: { k: "number", text: String(idx), whole: true } },
+          value: rhsItems[j],
+          line: s.line,
+        });
+      }
+      // If RHS is not a list, keep as-is (will fail in lowerStatement).
+      if (s.value.k !== "list") {
+        result.push(stmt);
+      }
+    } else if (stmt.k === "if") {
+      result.push({ ...stmt, then: expandStoreSlices(stmt.then), otherwise: expandStoreSlices(stmt.otherwise) });
+    } else if (stmt.k === "while") {
+      result.push({ ...stmt, body: expandStoreSlices(stmt.body) });
+    } else if (stmt.k === "for") {
+      result.push({ ...stmt, body: expandStoreSlices(stmt.body) });
+    } else if (stmt.k === "try") {
+      result.push({
+        ...stmt,
+        body: expandStoreSlices(stmt.body),
+        catchBody: stmt.catchBody === null ? null : expandStoreSlices(stmt.catchBody),
+        finallyBody: stmt.finallyBody === null ? null : expandStoreSlices(stmt.finallyBody),
+      });
+    } else {
+      result.push(stmt);
+    }
+  }
+  return result;
+}
+
 export function lowerStatement(statement: PyStatement): Statement {
   switch (statement.k) {
     case "declare":
@@ -3723,7 +3769,7 @@ export const pythonFrontend: Frontend = {
       result: body.result,
       accesses: usage.accesses,
       definition: {
-        statements: declaration.body.map(lowerStatement),
+        statements: expandStoreSlices(declaration.body).map(lowerStatement),
         allocates: usage.allocates,
         prints: usage.prints,
         readsArgv: usage.readsArgv,
