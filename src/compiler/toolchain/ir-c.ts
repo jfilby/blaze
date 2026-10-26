@@ -248,6 +248,16 @@ function builtinExpression(name: string, args: string[]): string {
       // The argument is read twice, so it is bound: a value the IR calls is a
       // call that would otherwise run twice.
       return `({ double blaze_operand = ${args[0]}; double blaze_rounded = floor(blaze_operand + 0.5); (blaze_rounded == 0.0 && blaze_operand < 0.0) ? -0.0 : blaze_rounded; })`;
+    case "blaze_rt_dict_new":
+      return `blaze_rt_dict_new()`;
+    case "blaze_rt_dict_get":
+      return `blaze_rt_dict_get(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set":
+      return `blaze_rt_dict_set(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_has":
+      return `blaze_rt_dict_has(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_len":
+      return `blaze_rt_dict_len(${args[0]})`;
     default:
       throw backendError(
         `this backend cannot lower ${name}`,

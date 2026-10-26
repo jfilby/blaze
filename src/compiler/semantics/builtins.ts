@@ -68,6 +68,11 @@ export const ARGV = "argv";
 
 export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.max": { params: [F64, F64], returns: F64, arity: 2 },
+  "blaze_rt_dict_new": { params: [], returns: F64, arity: 0 },
+  "blaze_rt_dict_get": { params: [F64, TEXT], returns: F64, arity: 2 },
+  "blaze_rt_dict_set": { params: [F64, TEXT, F64], returns: F64, arity: 3 },
+  "blaze_rt_dict_has": { params: [F64, TEXT], returns: F64, arity: 2 },
+  "blaze_rt_dict_len": { params: [F64], returns: F64, arity: 1 },
   "Math.min": { params: [F64, F64], returns: F64, arity: 2 },
   "Math.sqrt": { params: [F64], returns: F64, arity: 1 },
   "Math.abs": { params: [F64], returns: F64, arity: 1 },

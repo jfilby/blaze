@@ -114,6 +114,11 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_set", "void", [["array", "double"], ["index", "double"], ["value", "double"]], "Writes one element of a dynamic array.", "Returns nothing.", { tags: ["object"] }),
   entry("blaze_rt_dyn_array_new", "double", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_dict_new", "double", [], "Creates an empty dictionary.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get", "double", [["dict", "double"], ["key", "const char*"]], "Reads one value of a dictionary by its string key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
@@ -2467,6 +2472,70 @@ void* blaze_rt_object_new(size_t bytes, size_t alignment) {
 size_t blaze_rt_object_size(void* pointer) {
 ${guarded ? "  if (pointer == NULL) return 0;" : ""}
   return blaze_rt_header_of(pointer)->length;
+}
+
+/* A small string-keyed dictionary. Keys are owned copies; values are doubles. */
+typedef struct { char* key; double value; } blaze_rt_dict_entry;
+typedef struct { blaze_rt_dict_entry* entries; size_t count; size_t capacity; } blaze_rt_dict;
+
+static blaze_rt_dict* blaze_rt_dict_alloc(void) {
+  blaze_rt_dict* d = (blaze_rt_dict*)malloc(sizeof(blaze_rt_dict));
+  if (d == NULL) return NULL;
+  d->entries = NULL;
+  d->count = 0;
+  d->capacity = 0;
+  return d;
+}
+
+double blaze_rt_dict_new(void) {
+  return (double)(uintptr_t)blaze_rt_dict_alloc();
+}
+
+static blaze_rt_dict_entry* blaze_rt_dict_find(blaze_rt_dict* d, const char* key) {
+  for (size_t i = 0; i < d->count; i++) {
+    if (strcmp(d->entries[i].key, key) == 0) return &d->entries[i];
+  }
+  return NULL;
+}
+
+double blaze_rt_dict_get(double dict, const char* key) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL || key == NULL) return 0.0 / 0.0; /* NaN */
+  blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
+  if (e == NULL) return 0.0 / 0.0; /* NaN */
+  return e->value;
+}
+
+double blaze_rt_dict_has(double dict, const char* key) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL || key == NULL) return 0.0;
+  return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
+}
+
+double blaze_rt_dict_set(double dict, const char* key, double value) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL || key == NULL) return 0.0 / 0.0;
+  blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
+  if (e != NULL) { e->value = value; return (double)(uintptr_t)d; }
+  if (d->count == d->capacity) {
+    size_t nc = d->capacity == 0 ? 8 : d->capacity * 2;
+    blaze_rt_dict_entry* ne = (blaze_rt_dict_entry*)realloc(d->entries, nc * sizeof(blaze_rt_dict_entry));
+    if (ne == NULL) return 0.0 / 0.0;
+    d->entries = ne;
+    d->capacity = nc;
+  }
+  d->entries[d->count].key = (char*)malloc(strlen(key) + 1);
+  if (d->entries[d->count].key == NULL) return 0.0 / 0.0;
+  strcpy(d->entries[d->count].key, key);
+  d->entries[d->count].value = value;
+  d->count++;
+  return (double)(uintptr_t)d;
+}
+
+double blaze_rt_dict_len(double dict) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL) return 0.0;
+  return (double)d->count;
 }
 
 static const double* blaze_rt_arguments = NULL;

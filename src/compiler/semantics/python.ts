@@ -614,6 +614,16 @@ export function builtinName(name: string): string {
       return "Math.sqrt";
     case "math.trunc":
       return "whole.trunc";
+    case "dict_new":
+      return "blaze_rt_dict_new";
+    case "dict_get":
+      return "blaze_rt_dict_get";
+    case "dict_set":
+      return "blaze_rt_dict_set";
+    case "dict_has":
+      return "blaze_rt_dict_has";
+    case "dict_len":
+      return "blaze_rt_dict_len";
     // The `tl.*` calls a kernel is written with, which are the operations the
     // compiler has under the names its own IR spells them: `tl.where` is not
     // here because it is not a call at all, but the choice the IR writes.
@@ -671,6 +681,11 @@ export const MODULE_BUILTINS: readonly string[] = [
   "min",
   "max",
   "print",
+  "dict_new",
+  "dict_get",
+  "dict_set",
+  "dict_has",
+  "dict_len",
   "tl.where",
   "tl.abs",
   "tl.sqrt",
@@ -3431,6 +3446,11 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
     case "call": {
       if (value.name === "len" || value.name === "range") return "int";
       if (value.name === "int") return "int";
+      if (value.name === "dict_new") return "int";
+      if (value.name === "dict_get") return "float";
+      if (value.name === "dict_set") return "int";
+      if (value.name === "dict_has") return "bool";
+      if (value.name === "dict_len") return "int";
       if (value.name === "float") return "float";
       if (value.name === "str") return "text";
       if (value.name === "abs" || value.name === "min" || value.name === "max") {
@@ -3596,6 +3616,10 @@ export function lowerValue(value: PyValue): Expression {
     case "name":
       return { k: "ident", name: value.name };
     case "call": {
+      // `len(x)` on a dictionary reads the number of entries it holds.
+      if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name" && currentDictNames.has(value.args[0].name)) {
+        return { k: "call", name: "blaze_rt_dict_len", args: [ { k: "ident", name: value.args[0].name } ] } as Expression;
+      }
       // `len(x)` is the length of the list or of the text `x` holds, and the
       // compiler reads a length off the name it is written by.
       if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name") {
@@ -3617,6 +3641,16 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
     }
     case "index": {
+      // A dictionary is a hash map: reading d[key] is dict_get.
+      if (value.base.k === "name" && currentDictNames.has(value.base.name)) {
+        const keyStr = value.index.k === "text"
+          ? (value.index.parts?.[0]?.k === "text" ? value.index.parts[0].value : "")
+          : null;
+        const keyExpr = keyStr !== null
+          ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
+          : lowerValue(value.index);
+        return { k: "call", name: "blaze_rt_dict_get", args: [ { k: "ident", name: value.base.name }, keyExpr ] } as Expression;
+      }
       // A slice indexed at any position can be simplified to an index of the
       // base: `a[i:j][k]` is `a[i+k]`. The IR's slice returns the base (not
       // a sub-buffer), so without this simplification the wrong element is
@@ -3653,6 +3687,14 @@ export function lowerValue(value: PyValue): Expression {
       throw frontendError("a walrus is not part of the subset", "a name bound by a statement, as in x = 1");
     }
     case "membership": {
+      // A dictionary supports membership by key.
+      if (value.container.k === "name" && currentDictNames.has(value.container.name)) {
+        const keyExpr = value.value.k === "text"
+          ? { k: "text", parts: value.value.parts }
+          : lowerValue(value.value);
+        const has = { k: "call", name: "blaze_rt_dict_has", args: [ { k: "ident", name: value.container.name }, keyExpr ] } as Expression;
+        return value.negated ? { k: "unary", op: "!", operand: has } : has;
+      }
       throw frontendError("membership is not supported in a function", "write the loop out");
     }
     case "list": {
@@ -3677,8 +3719,14 @@ export function lowerValue(value: PyValue): Expression {
     case "sized": {
       return { k: "sized", element: value.element, count: lowerValue(value.count) };
     }
-    case "dict":
-      return { k: "object", fields: value.entries.map((entry) => ({ name: entry.name, value: lowerValue(entry.value) })) };
+    case "dict": {
+      // A dictionary is a hash map: build it with dict_set.
+      let expr: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] } as Expression;
+      for (const entry of value.entries) {
+        expr = { k: "call", name: "blaze_rt_dict_set", args: [expr, { k: "text", parts: [{ k: "text", value: entry.name }] } as unknown as Expression, lowerValue(entry.value)] } as Expression;
+      }
+      return expr;
+    }
     case "binary": {
       // Set operations in a function are not lowered: the function's lists are
       // fixed buffers, and a set operation needs a buffer of a size the
@@ -3759,10 +3807,15 @@ function expandStoreSlices(statements: PyStatement[]): PyStatement[] {
   return result;
 }
 
+/** The names that hold a dictionary in the function currently being lowered. */
+let currentDictNames = new Set<string>();
+
 export function lowerStatement(statement: PyStatement): Statement {
   switch (statement.k) {
-    case "declare":
+    case "declare": {
+      if (statement.value.k === "dict") currentDictNames.add(statement.name);
       return { kind: "declare", name: statement.name, type: statement.type, init: lowerValue(statement.value), line: statement.line };
+    }
     case "assign":
       return {
         kind: "assign",
@@ -3774,6 +3827,17 @@ export function lowerStatement(statement: PyStatement): Statement {
     case "storeField": {
       const target = statement.target as { k: "field"; base: PyValue; field: string };
       const base = target.base;
+      if (base.k === "name" && currentDictNames.has(base.name)) {
+        return {
+          kind: "expression",
+          value: {
+            k: "call",
+            name: "blaze_rt_dict_set",
+            args: [ { k: "ident", name: base.name }, { k: "text", parts: [{ k: "text", value: target.field }] } as Expression, lowerValue(statement.value) ],
+          } as Expression,
+          line: statement.line,
+        };
+      }
       if (base.k !== "name") {
         throw frontendError(
           '"obj.field = value" is not supported',
@@ -3792,6 +3856,24 @@ export function lowerStatement(statement: PyStatement): Statement {
     case "storeElement": {
       const target = statement.target as { k: "index"; base: PyValue; index: PyValue };
       const base = target.base;
+      if (base.k === "name" && currentDictNames.has(base.name)) {
+        // A dictionary is a hash map: writing d[key] = value is a call.
+        const keyStr = target.index.k === "text"
+          ? (target.index.parts?.[0]?.k === "text" ? target.index.parts[0].value : "")
+          : null;
+        const keyExpr = keyStr !== null
+          ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
+          : lowerValue(target.index);
+        return {
+          kind: "expression",
+          value: {
+            k: "call",
+            name: "blaze_rt_dict_set",
+            args: [ { k: "ident", name: base.name }, keyExpr, lowerValue(statement.value) ],
+          } as Expression,
+          line: statement.line,
+        };
+      }
       if (base.k !== "name") {
         throw frontendError('"a[i] = value" is not supported', "the buffer is a name the program holds, as in a[i] = value");
       }
