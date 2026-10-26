@@ -467,6 +467,20 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "dict":
       return { k: "object", fields: one.entries.map((entry) => ({ name: entry.name, value: programValue(entry.value, bindings) })) };
     case "binary": {
+      // List concatenation: a + b where both are lists produces a new list.
+      if (one.op === "+" ) {
+        let left = one.left;
+        if (left.k === "name" && bindings.values.has(left.name)) left = bindings.values.get(left.name)!;
+        let right = one.right;
+        if (right.k === "name" && bindings.values.has(right.name)) right = bindings.values.get(right.name)!;
+        if (left.k === "list" && right.k === "list") {
+          const items = [...left.items, ...right.items];
+          const whole = items.every((item) => item.k === "number" && item.whole);
+          const element: PrimitiveTypeName = whole ? "i64" : "f64";
+          return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+        }
+      }
+      // String concatenation is handled by the binary operator.
       const operator = BINARY_OPERATORS[one.op];
       if (operator === undefined) {
         throw frontendError(

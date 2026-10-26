@@ -3166,6 +3166,18 @@ class BodyAnalysis {
         return `(${value.op}${this.serialize(value.operand, loop, line)})`;
       }
       case "binary": {
+        // List concatenation: a + b where both are lists. The contract
+        // language has no concatenation, so the function is uncontractable.
+        if (value.op === "+") {
+          const leftType = typeOfValue(value.left, this.types);
+          const rightType = typeOfValue(value.right, this.types);
+          if (leftType === "list" && rightType === "list") {
+            throw frontendError(
+              "list concatenation is not supported in a function",
+              "a function's lists are read only; write the list out, as in [1, 2, 3, 4]",
+            );
+          }
+        }
         if (!CONTRACT_OPERATORS.includes(value.op)) {
           this.uncontractable(
             `computes with ${value.op}, which a contract cannot state`,

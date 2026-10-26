@@ -545,6 +545,19 @@ test("an f-string slice with a negative step in a program body", () => {
   assert.equal(declaration.value.parts[0].value, "24 olleh");
 });
 
+test("list concatenation in a program body", () => {
+  const phase = phaseOf("python", { "main.py": "a = [1, 2, 3]\nb = [4, 5, 6]\nc = a + b\n" }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[2] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "buffer");
+  assert.equal(declaration.value.values.length, 6);
+  assert.equal(declaration.value.values[0].text, "1");
+  assert.equal(declaration.value.values[3].text, "4");
+  assert.equal(declaration.value.values[5].text, "6");
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",
