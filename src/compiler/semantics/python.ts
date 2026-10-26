@@ -402,6 +402,8 @@ export type PyValue =
 export interface PyParam {
   name: string;
   type: TypeExpr;
+  /** The value used when the caller omits this argument, if any. */
+  default?: PyValue;
 }
 
 /** A statement a Python body runs. */
@@ -1094,19 +1096,13 @@ class PythonParser {
         }
         this.next();
         const annotation = this.annotation();
-        // A parameter with a default value is a parameter the caller may leave
-        // out, and the contract has no way to say what it is then.
+        let defaultValue: PyValue | undefined;
         if (this.at("=")) {
           this.next();
-          this.expression();
-          this.report(
-            "a default value is not supported",
-            "a parameter has no default value",
-            parameter,
-          );
+          defaultValue = this.expression();
         }
         if (annotation === null) break;
-        params.push({ name: parameter.text, type: annotation });
+        params.push({ name: parameter.text, type: annotation, default: defaultValue });
         if (this.accept(",")) continue;
         break;
       }
@@ -2461,9 +2457,150 @@ function readsCommandLine(body: readonly PyStatement[]): boolean {
 /**
  * A Python file, read into what it declares, imports and runs.
  */
+/**
+ * Fills in the arguments a call omits, using the defaults its callee declares.
+ *
+ * A default value is a value the caller may leave out, and leaving it out is
+ * the same as writing it in: the call is rewritten to carry it, so nothing
+ * downstream has to know that it was optional.
+ */
+function fillDefaultArguments(module: PyModule): PyModule {
+  const defaults = new Map<string, PyValue[]>();
+  for (const fn of module.functions) {
+    defaults.set(fn.name, fn.params.map((param) => param.default as PyValue));
+  }
+  const fillValue = (value: PyValue): PyValue => {
+    if (value.k === "call") {
+      const ds = defaults.get(value.name);
+      if (ds !== undefined && value.args.length < ds.length) {
+        const padded = [...value.args];
+        for (let i = value.args.length; i < ds.length; i++) {
+          if (ds[i] !== undefined) padded.push(ds[i]!);
+          else break;
+        }
+        value.args = padded;
+      }
+      value.args = value.args.map(fillValue);
+      if (value.grid !== undefined) value.grid = fillValue(value.grid);
+      return value;
+    }
+    // Recurse into composite values.
+    switch (value.k) {
+      case "binary":
+        value.left = fillValue(value.left);
+        value.right = fillValue(value.right);
+        break;
+      case "unary":
+        value.operand = fillValue(value.operand);
+        break;
+      case "conditional":
+        value.condition = fillValue(value.condition);
+        value.then = fillValue(value.then);
+        value.otherwise = fillValue(value.otherwise);
+        break;
+      case "index":
+        value.base = fillValue(value.base);
+        value.index = fillValue(value.index);
+        break;
+      case "slice":
+        value.base = fillValue(value.base);
+        if (value.start !== null) value.start = fillValue(value.start);
+        if (value.stop !== null) value.stop = fillValue(value.stop);
+        if (value.step !== null) value.step = fillValue(value.step);
+        break;
+      case "list":
+        value.items = value.items.map(fillValue);
+        break;
+      case "membership":
+        value.value = fillValue(value.value);
+        value.container = fillValue(value.container);
+        break;
+      case "comprehension":
+        value.element = fillValue(value.element);
+        value.iterable = fillValue(value.iterable);
+        if (value.condition !== null) value.condition = fillValue(value.condition);
+        break;
+      case "lambda":
+        value.body = fillValue(value.body);
+        break;
+      case "dict":
+        value.entries = value.entries.map((entry) => ({ ...entry, value: fillValue(entry.value) }));
+        break;
+      case "field":
+        value.base = fillValue(value.base);
+        break;
+    }
+    return value;
+  };
+  const fillStatement = (stmt: PyStatement): PyStatement => {
+    switch (stmt.k) {
+      case "declare":
+        stmt.value = fillValue(stmt.value);
+        break;
+      case "assign":
+        stmt.value = fillValue(stmt.value);
+        break;
+      case "storeField":
+        stmt.target = fillValue(stmt.target);
+        stmt.value = fillValue(stmt.value);
+        break;
+      case "storeElement":
+        stmt.target = fillValue(stmt.target) as any;
+        stmt.value = fillValue(stmt.value);
+        break;
+      case "storeSlice":
+        if (stmt.start !== null) stmt.start = fillValue(stmt.start);
+        if (stmt.stop !== null) stmt.stop = fillValue(stmt.stop);
+        if (stmt.step !== null) stmt.step = fillValue(stmt.step);
+        stmt.value = fillValue(stmt.value);
+        break;
+      case "return":
+        if (stmt.value !== null) stmt.value = fillValue(stmt.value);
+        break;
+      case "if":
+        stmt.condition = fillValue(stmt.condition);
+        stmt.then = stmt.then.map(fillStatement);
+        stmt.otherwise = stmt.otherwise.map(fillStatement);
+        break;
+      case "while":
+        stmt.condition = fillValue(stmt.condition);
+        stmt.body = stmt.body.map(fillStatement);
+        break;
+      case "for":
+        stmt.from = fillValue(stmt.from);
+        stmt.to = fillValue(stmt.to);
+        if (stmt.step !== null) stmt.step = fillValue(stmt.step);
+        stmt.body = stmt.body.map(fillStatement);
+        break;
+      case "print":
+        stmt.values = stmt.values.map(fillValue);
+        break;
+      case "call":
+        stmt.value = fillValue(stmt.value);
+        break;
+      case "function":
+        stmt.body = stmt.body.map(fillStatement);
+        break;
+      case "try":
+        stmt.body = stmt.body.map(fillStatement);
+        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map(fillStatement);
+        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map(fillStatement);
+        break;
+    }
+    return stmt;
+  };
+  const filledFunctions = module.functions.map((fn) => ({
+    ...fn,
+    body: fn.body.map(fillStatement),
+  }));
+  const filledBody = module.body.map(fillStatement);
+  return { ...module, functions: filledFunctions, body: filledBody };
+}
+
 export function parsePython(source: string, path: string, diagnostics: Diagnostics): PyModule {
   const parser = new PythonParser(tokenizePython(source, path), path, diagnostics);
-  return parser.parseModule();
+  const module = parser.parseModule();
+  return fillDefaultArguments(module);
 }
 
 /* -------------------------------------------------------------------------- */

@@ -201,7 +201,6 @@ matter are the ones a Python program is most likely to write:
 | `in`, `not in` | a loop that looks for the value |
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
 | `*args`, `**kwargs` | a fixed list of parameters |
-| a default value | every parameter is given |
 | `str.format`, `%` on a text | an f-string |
 | `round` | it rounds half to even, and the compiler rounds half up |
 | a match | a chain of `if` / `elif` |
