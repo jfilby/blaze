@@ -3607,8 +3607,8 @@ export function lowerStatement(statement: PyStatement): Statement {
       const base = target.base;
       if (base.k !== "name") {
         throw frontendError(
-          '"obj.field = value" is not supported yet',
-          "the object is a name the program holds",
+          '"obj.field = value" is not supported',
+          "the object is a name the program holds, as in a.field = value",
         );
       }
       return {
@@ -3624,7 +3624,7 @@ export function lowerStatement(statement: PyStatement): Statement {
       const target = statement.target as { k: "index"; base: PyValue; index: PyValue };
       const base = target.base;
       if (base.k !== "name") {
-        throw frontendError('"a[i] = value" is not supported yet', "the object is a name the program holds");
+        throw frontendError('"a[i] = value" is not supported', "the buffer is a name the program holds, as in a[i] = value");
       }
       return {
         kind: "indexAssign",

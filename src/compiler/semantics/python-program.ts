@@ -747,7 +747,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       const target = one.target as { k: "index"; base: PyValue; index: PyValue };
       const base = target.base;
       if (base.k !== "name") {
-        throw frontendError('"a[i] = value" is not supported yet', "the object is a name the program holds");
+        throw frontendError('"a[i] = value" is not supported', "the object is a name the program holds");
       }
       return {
         kind: "elementAssign",
@@ -882,7 +882,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       const base = target.base;
       if (base.k !== "name") {
         throw frontendError(
-          '"obj.field = value" is not supported yet',
+          '"obj.field = value" is not supported',
           "the object is a name the program holds",
         );
       }
