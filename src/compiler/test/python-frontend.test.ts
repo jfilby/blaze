@@ -420,6 +420,46 @@ test("a slice with a negative step in a program body", () => {
   assert.equal(declaration.value.values[4].text, "1");
 });
 
+test("a string slice in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 's = "hello"\na = s[1:3]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[1] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "el");
+});
+
+test("a string slice with a negative bound in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 's = "hello"\na = s[-2:]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[1] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "lo");
+});
+
+test("a string slice with a step in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 's = "hello"\na = s[::2]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[1] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "hlo");
+});
+
+test("a string slice with a negative step in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 's = "hello"\na = s[::-1]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[1] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "olleh");
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",

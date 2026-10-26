@@ -202,13 +202,64 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       if (base.k === "name" && bindings.values.has(base.name)) {
         base = bindings.values.get(base.name)!;
       }
-      // A program can slice only a list whose contents are known: a literal
-      // list or a name bound to one. A slice of a name that holds no list, or
-      // of anything else, is refused.
+      // A program can slice a list or a string whose contents are known: a
+      // literal or a name bound to one. Anything else is refused.
+      if (base.k === "text") {
+        // Only plain strings (a single text part) can be sliced; an
+        // f-string with interpolated values has no fixed text to slice.
+        if (base.parts.length !== 1 || base.parts[0].k !== "text") {
+          throw frontendError(
+            "a program can slice only a plain string",
+            `slice ${describeValue(one.base)}, which is not a plain string`,
+          );
+        }
+        const text = base.parts[0].value;
+        const len = text.length;
+        const sliceBound = (bound: PyValue | null, defaultValue: number): number => {
+          if (bound === null) return defaultValue;
+          let resolved = bound;
+          if (resolved.k === "name" && bindings.values.has(resolved.name)) {
+            resolved = bindings.values.get(resolved.name)!;
+          }
+          if (resolved.k === "unary" && resolved.op === "-") {
+            const n = numberOf(resolved.operand);
+            return Math.max(0, len - n);
+          }
+          return numberOf(resolved);
+        };
+        let step = 1;
+        if (one.step !== null) {
+          let resolved = one.step;
+          if (resolved.k === "name" && bindings.values.has(resolved.name)) {
+            resolved = bindings.values.get(resolved.name)!;
+          }
+          if (resolved.k === "unary" && resolved.op === "-") {
+            step = -numberOf(resolved.operand);
+          } else {
+            step = numberOf(resolved);
+          }
+        }
+        if (step === 0) {
+          throw frontendError("a slice step must not be zero", "a slice step of zero is not allowed");
+        }
+        const start = sliceBound(one.start, step > 0 ? 0 : len - 1);
+        const stop = sliceBound(one.stop, step > 0 ? len : -1);
+        let sliced = "";
+        if (step > 0) {
+          for (let i = Math.max(0, Math.min(start, len)); i < Math.max(0, Math.min(stop, len)); i += step) {
+            sliced += text[i];
+          }
+        } else {
+          for (let i = Math.min(len - 1, Math.max(start, -1)); i > Math.max(-1, Math.min(stop, -1)); i += step) {
+            sliced += text[i];
+          }
+        }
+        return { k: "text", parts: [{ k: "text", value: sliced }] };
+      }
       if (base.k !== "list") {
         throw frontendError(
-          "a program can slice only a list",
-          `slice ${describeValue(one.base)}, which is not a list`,
+          "a program can slice only a list or a string",
+          `slice ${describeValue(one.base)}, which is not a list or a string`,
         );
       }
       const items = base.items;
