@@ -137,6 +137,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "text.trim": { params: [TEXT], returns: TEXT, arity: 1 },
   "JSON.stringify": { params: [ANY], returns: ANY, arity: 1 },
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
+  /** `JSON.get(value, key)` reads one field of a dynamic object the runtime
+   *  parsed, and answers the value the field names. A field the object does
+   *  not carry, and a value that is not an object at all, answer nothing. */
+  "JSON.get": { params: [ANY, TEXT], returns: ANY, arity: 2 },
   "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
   "fs.readFileSync": { params: [ANY, ANY], returns: ANY, arity: 2 },
   /** `process.env.NAME` reads an environment variable as the text it is set

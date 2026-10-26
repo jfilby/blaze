@@ -1,13 +1,16 @@
 /**
- * The frontend of the Blaze website: a chat that asks questions about Blaze.
+ * The frontend of the Blaze website's chat page.
  *
  * The chat sends each question to the Blaze program, which asks a model on
- * Nebius Token Factory and saves the question and answer to SQLite. The Nebius
- * API key lives only on the server (in a file beside it); nothing about it
- * ever reaches the browser, and the page never calls Nebius directly: every
- * answer comes back through the Blaze program.
+ * Nebius Token Factory and saves the question and answer to SQLite. The
+ * Nebius API key lives only in the environment the program runs in; nothing
+ * about it ever reaches the browser, and the page never calls Nebius
+ * directly: every answer comes back through the Blaze program.
  *
- * The page also loads the saved chats and shows them below the form.
+ * The page also loads the saved chats and shows them below the form, and a
+ * saved chat can be resumed: its transcript is loaded into the panel and the
+ * questions asked afterwards continue the thread it belongs to, so the model
+ * answers with the conversation so far behind it.
  */
 
 /** The elements the page writes into. */
@@ -16,9 +19,14 @@ const input = document.getElementById("input");
 const messages = document.getElementById("messages");
 const chats = document.getElementById("chats");
 const error = document.getElementById("error");
+const newChat = document.getElementById("newChat");
 
 /** Whether a request is in flight. */
 let busy = false;
+
+/** The thread the next question continues: 0 for a chat that begins anew,
+ *  and the id of the thread a saved chat started when it was resumed. */
+let currentThread = 0;
 
 /** Shows an error message under the form. */
 function showError(message) {
@@ -37,7 +45,7 @@ function appendMessage(who, text) {
   div.className = "message " + who;
   const whoDiv = document.createElement("div");
   whoDiv.className = "who";
-  whoDiv.textContent = who === "user" ? "You" : "Blaze";
+  whoDiv.textContent = who === "user" ? "You" : "Blaze assistant";
   const textDiv = document.createElement("div");
   textDiv.textContent = text;
   div.appendChild(whoDiv);
@@ -68,20 +76,28 @@ function hideTyping(typing) {
 }
 
 /** The answer of a saved chat: the content of the model's reply, when the
- *  chat carries the model's own JSON, and the raw text otherwise. */
+ *  chat carries the model's own JSON, and the raw text otherwise. The JSON
+ *  of an error the program could not answer with is named as the error it
+ *  is, rather than shown as the JSON it is. */
 function answerOf(chat) {
   const saved = typeof chat.answer === "string" && chat.answer.startsWith("{") ? JSON.parse(chat.answer) : chat.answer;
+  if (saved && saved.error) {
+    return "The model could not be asked: " + (saved.error.message || JSON.stringify(saved.error));
+  }
   return saved?.choices?.[0]?.message?.content || String(chat.answer);
 }
 
 /** Asks the Blaze program a question and shows the answer. */
-async function askThroughBlaze(question) {
+async function askThroughBlaze(question, thread) {
   /* The question is sent as the body of the request, plain text: the program
-     reads it with req.text() and asks the model with it, and saves the chat. */
+     reads it with req.text() and asks the model with it, and saves the chat.
+     A question that continues a thread says so in front of itself, as
+     "T<thread>\n", which the program reads as the thread to continue. */
+  const body = thread > 0 ? `T${thread}\n${question}` : question;
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
-    body: question,
+    body,
   });
   if (!response.ok) throw new Error("the server answered " + response.status);
   /* The answer is the model's JSON, or the JSON of an error the program
@@ -110,7 +126,7 @@ async function ask(question) {
 
   try {
     const typing = showTyping();
-    const answer = await askThroughBlaze(question);
+    const answer = await askThroughBlaze(question, currentThread);
     hideTyping(typing);
     appendMessage("assistant", answer);
     await loadChats();
@@ -125,6 +141,43 @@ async function ask(question) {
   }
 }
 
+/** Resumes a saved chat: its transcript is loaded into the panel, and the
+ *  questions asked afterwards continue the thread it belongs to. */
+async function resumeChat(id) {
+  hideError();
+  try {
+    const response = await fetch("/api/resume/" + id);
+    if (!response.ok) throw new Error("the server answered " + response.status);
+    const data = await response.json();
+    if (!data || !data.messages) throw new Error("that chat is not there any more");
+    currentThread = data.thread;
+    messages.innerHTML = "";
+    for (const message of data.messages) {
+      appendMessage("user", message.question);
+      appendMessage("assistant", answerOf(message));
+    }
+    newChat.hidden = false;
+    input.focus();
+  } catch (failure) {
+    showError(failure instanceof Error ? failure.message : String(failure));
+  }
+}
+
+/** Starts a chat anew: the next question begins a thread of its own. */
+function startNewChat() {
+  hideError();
+  currentThread = 0;
+  messages.innerHTML = "";
+  newChat.hidden = true;
+  input.focus();
+}
+
+/** A saved message as the list of chats shows it: the first 256 characters,
+ *  and an ellipsis behind the ones a longer message keeps past there. */
+function preview(text) {
+  return text.length > 256 ? text.slice(0, 256) + "…" : text;
+}
+
 /** Loads the saved chats from the Blaze program and shows them. */
 async function loadChats() {
   try {
@@ -137,12 +190,20 @@ async function loadChats() {
       div.className = "chat";
       const q = document.createElement("div");
       q.className = "q";
-      q.textContent = "Q: " + chat.question;
+      q.textContent = "Q: " + preview(chat.question);
       const a = document.createElement("div");
       a.className = "a";
-      a.textContent = "A: " + answerOf(chat);
+      a.textContent = "A: " + preview(answerOf(chat));
       div.appendChild(q);
       div.appendChild(a);
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "resume";
+      resume.textContent = "Resume";
+      resume.addEventListener("click", () => {
+        resumeChat(chat.id);
+      });
+      div.appendChild(resume);
       chats.appendChild(div);
     }
     if (list.length === 0) {
@@ -171,6 +232,10 @@ input.addEventListener("keypress", (event) => {
     if (question === "") return;
     ask(question);
   }
+});
+
+newChat.addEventListener("click", () => {
+  startNewChat();
 });
 
 loadChats();

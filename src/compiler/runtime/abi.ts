@@ -3059,16 +3059,21 @@ static size_t blaze_dyn_reg_n = 0;
 static size_t blaze_dyn_reg_cap = 0;
 
 static double blaze_dyn_register(void* p) {
-  if (blaze_dyn_reg_n == blaze_dyn_reg_cap) {
+  /* Handle 0 is not a dynamic value: it is the nothing a missing field
+     answers, the way a pointer to nothing is 0. The slot stays reserved, so
+     a lookup of 0 finds nothing and a read of a field that is not there is
+     told apart from every value that is. */
+  if (blaze_dyn_reg_n + 1 >= blaze_dyn_reg_cap) {
     blaze_dyn_reg_cap = blaze_dyn_reg_cap ? blaze_dyn_reg_cap * 2 : 64;
     blaze_dyn_reg = realloc(blaze_dyn_reg, blaze_dyn_reg_cap * sizeof(void*));
   }
+  blaze_dyn_reg_n += 1;
   blaze_dyn_reg[blaze_dyn_reg_n] = p;
-  return (double)(blaze_dyn_reg_n++);
+  return (double)blaze_dyn_reg_n;
 }
 static blaze_dyn* blaze_dyn_lookup(double h) {
   size_t i = (size_t)h;
-  if (i >= blaze_dyn_reg_n) return NULL;
+  if (i == 0 || i > blaze_dyn_reg_n) return NULL;
   return (blaze_dyn*)blaze_dyn_reg[i];
 }
 

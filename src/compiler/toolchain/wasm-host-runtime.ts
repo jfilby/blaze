@@ -262,7 +262,9 @@ let cursor = 65536;
 let textStyle = 0;
 let lastError = "";
 const freeBlocks = new Map();
-const dynValues = [];
+/* Slot 0 stays reserved: 0 is not a dynamic value, it is the nothing a
+   missing field answers, the way the C runtime reserves it. */
+const dynValues = [null];
 
 /* The arguments the program was given. A module has no process of its own, so
    the arguments it reads are the ones the host was started with. */
@@ -444,13 +446,15 @@ function makeText(text) {
 }
 
 function dynRegister(value) {
+  /* Handle 0 is not a dynamic value: it is the nothing a missing field
+     answers. The slot stays reserved, the way the C runtime reserves it. */
   dynValues.push(value);
   return dynValues.length - 1;
 }
 
 function dynLookup(handle) {
   const at = Math.trunc(handle);
-  if (!Number.isFinite(at) || at < 0 || at >= dynValues.length) return null;
+  if (at <= 0 || !Number.isFinite(at) || at >= dynValues.length) return null;
   return dynValues[at];
 }
 

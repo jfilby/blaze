@@ -917,15 +917,6 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
 
   builtin(call: SemanticCall, argumentsText: string[], expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
-    // A text the program reads apart is the pointer it is, and anything else
-    // is what the runtime renders as one: the same wall every dynamic value
-    // crosses, crossed the other way.
-    const textArgument = (index: number): string => {
-      const at = call.args[index];
-      return at !== undefined && (isTextType(at.type) || at.k === "text")
-        ? argument(index)
-        : `${RUNTIME_NAME}_to_text(${argument(index)})`;
-    };
     switch (call.callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;
@@ -1015,6 +1006,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
           ? `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${argument(0)}))`
           : `${RUNTIME_NAME}_json_parse(${argument(0)})`;
+      // One field of a dynamic object, by its name. The object is the handle
+      // it is carried in, and the field is the text it is spelled with.
+      case "JSON.get":
+        return `${RUNTIME_NAME}_json_get(${argument(0)}, ${argument(1)})`;
       case "JSON.stringify": {
         // An object literal is serialized where it is written: the field names
         // are the source's and the values are rendered as text one by one, so no
@@ -1030,8 +1025,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // the bytes it names; anything else is what the runtime renders it as,
       // which is the wall a dynamic value crosses by.
       case "text.indexOf": {
-        const left = textArgument(0);
-        const right = textArgument(1);
+        const left = argument(0);
+        const right = argument(1);
         return `((double)${RUNTIME_NAME}_text_index_of(${left}, ${right}))`;
       }
       case "text.slice": {
@@ -1039,10 +1034,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // reads as a stop it can never reach: a stop below zero counts back
         // from the end, so the end itself is the number a stop stops at.
         const stop = call.args.length > 2 ? `(long long)(${argument(2)})` : "9223372036854775807LL";
-        return `${RUNTIME_NAME}_text_slice(${textArgument(0)}, (long long)(${argument(1)}), ${stop})`;
+        return `${RUNTIME_NAME}_text_slice(${argument(0)}, (long long)(${argument(1)}), ${stop})`;
       }
       case "text.trim":
-        return `${RUNTIME_NAME}_text_trim(${textArgument(0)})`;
+        return `${RUNTIME_NAME}_text_trim(${argument(0)})`;
       case "crypto.createHash":
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":

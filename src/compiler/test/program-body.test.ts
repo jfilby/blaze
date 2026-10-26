@@ -1255,6 +1255,7 @@ async function agreesWithNode(source: string, runtime?: "nim"): Promise<void> {
 async function deliveredByMachine(
   source: string,
   mode?: BuildMode,
+  verify = true,
 ): Promise<{ directory: string; binary: string; notes: string[] }> {
   const directory = await scratch("blaze-machine-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
@@ -1263,6 +1264,7 @@ async function deliveredByMachine(
     sourceFile: "main.ts",
     model: { provider: "replay", file: REPLAY },
     output: "machine",
+    ...(verify ? {} : { verifyProgram: false }),
   });
   const notes: string[] = [];
   const outcome = await runBuild(
@@ -2654,6 +2656,52 @@ test("a call a body makes in its return is a boundary the two backends share", a
   assert.equal(original.code, 0, original.stderr);
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, original.stdout);
+});
+
+test("a field of a dynamic object is read as the text it holds", async () => {
+  // A model's answer arrives as JSON, and what a program takes out of it is
+  // the content of the reply: parse the text, read the fields by name, take
+  // the first choice, and render what the content names. The chain crosses
+  // the dynamic wall — an object by its handle, a text at its use — and what
+  // comes out is the text the JSON said. A field that is not there answers
+  // nothing, and the program reads that as the empty text.
+  //
+  // The program is not one node can run: JSON.parse of a program is the
+  // runtime's own, and JSON.get with it, the way req.text() is — so the
+  // delivered binary is what is asserted, the way the SQLite tests assert.
+  // The fields read on the way are objects and arrays, whose handles
+  // `Number` carries across the wall whole; the content itself is a text,
+  // which `Number` would read as the digits it opens with, so it is rendered
+  // where it is read and never guarded through `Number`.
+  const source = [
+    "var extracted = \"\";",
+    "",
+    "function contentOf(raw: string): void {",
+    "  const parsed = JSON.parse(raw);",
+    "  const choices = JSON.get(parsed, \"choices\");",
+    "  if (Number(choices) != 0) {",
+    "    const first = choices[0];",
+    "    if (Number(first) != 0) {",
+    "      const message = JSON.get(first, \"message\");",
+    "      if (Number(message) != 0) {",
+    "        extracted = `${JSON.get(message, \"content\")}`;",
+    "      }",
+    "    }",
+    "  }",
+    "}",
+    "",
+    "contentOf('{\"choices\":[{\"message\":{\"content\":\"hello world\"}}]}');",
+    "console.log(extracted);",
+    "extracted = \"\";",
+    "contentOf('{\"error\":{\"message\":\"no such key\"}}');",
+    "console.log(`after: ${extracted}`);",
+    "",
+  ].join("\n");
+  const { binary } = await deliveredByMachine(source, "danger", false);
+
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.deepEqual(delivered.stdout.trimEnd().split("\n"), ["hello world", "after:"]);
 });
 
 test("a text a program reads apart is read apart in the body and in a function", async () => {

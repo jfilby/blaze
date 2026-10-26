@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blaze: chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="site-mark">B</div>
+      <div>
+        <h1>Blaze</h1>
+        <p>An AI compiler to generate assembly from traditional source.</p>
+      </div>
+      <nav class="menu" aria-label="Site">
+        <a href="/">Home</a>
+        <a href="/chat" class="active">Chat</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section id="chat">
+      <div class="chat-head">
+        <h2>Ask Blaze</h2>
+        <button id="newChat" type="button" hidden>New chat</button>
+      </div>
+      <p>Ask a question about Blaze. A model on Nebius Token Factory answers, and the conversation is saved to SQLite. Resume a saved chat below to continue it where it left off.</p>
+
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
+
+      <form id="form" class="form">
+        <input type="text" id="input" placeholder="Ask a question about Blaze…" autocomplete="off" required>
+        <button type="submit">Ask</button>
+      </form>
+
+      <div id="error" class="error" style="display:none;"></div>
+    </section>
+
+    <section id="history">
+      <h2>Saved chats</h2>
+      <div id="chats" class="chats">Loading…</div>
+    </section>
+
+    <footer>
+      Built with <strong>Blaze</strong>: compiled to a native binary that
+      serves HTTP through the vendored
+      <a href="https://facil.io/" target="_blank" rel="noopener">facil.io</a>
+      and keeps every chat in the linked
+      <a href="https://www.sqlite.org/" target="_blank" rel="noopener">SQLite</a> library.
+      Questions travel to <a href="https://tokenfactory.nebius.com/" target="_blank" rel="noopener">Nebius Token Factory</a>.
+    </footer>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

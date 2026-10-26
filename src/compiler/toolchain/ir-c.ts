@@ -219,6 +219,10 @@ function builtinExpression(name: string, args: string[]): string {
     // cleared before the body runs, and the arm runs when one is pending.
     case "blaze_error_clear":
       return `(blaze_error_clear(), 0.0)`;
+    case "JSON.get":
+      // One field of a dynamic object: the object is the handle it is carried
+      // in, and the field is the text it is spelled with.
+      return `${RUNTIME_NAME}_json_get(${args[0]}, ${args[1]})`;
     case "process.env":
       // The environment variable a module function reads is the runtime's to
       // ask for: the name is the text it is spelled with, and the answer is

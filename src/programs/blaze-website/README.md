@@ -75,19 +75,32 @@ Open <http://127.0.0.1:8080/> in a browser.
 
 | Route | Method | What it answers |
 |---|---|---|
-| `/` | GET | the website |
+| `/` | GET | the home page |
+| `/chat` | GET | the chat |
 | `/app.js`, `/style.css` | GET | the website's own files |
 | `/api/chat` | POST | the question, as the plain-text body; the model's JSON answer |
-| `/api/chats` | GET | every saved chat, newest first, as a JSON array |
+| `/api/resume/<id>` | GET | the transcript of the thread a saved chat belongs to |
+| `/api/chats` | GET | the last ten saved chats, newest first, as a JSON array |
 
 Anything else is a 404.
 
 ## The chat
 
-The question arrives as the body of the request, plain text. The program
-asks the model with it, saves the question and the model's JSON answer to
-SQLite, and returns the JSON answer to the browser, which reads the answer
-out of `choices[0].message.content` the way JavaScript reads JSON.
+The chat lives at `/chat`. The question arrives as the body of the request,
+plain text. The program asks the model with it, saves the question and the
+model's JSON answer to SQLite, and returns the JSON answer to the browser,
+which reads the answer out of `choices[0].message.content` the way
+JavaScript reads JSON.
+
+A saved chat can be resumed. Every question and answer is a row of the
+`messages` table, and the thread a row belongs to is the id of the question
+that began it. Resuming a saved chat loads its transcript into the panel and
+continues the thread: the questions asked afterwards name the thread in
+front of themselves, as `T<thread>\n<question>`, and the model is given the
+conversation so far — the last ten turns of it, with the content of every
+earlier answer read out of the JSON it was saved as — so an answer it gives
+now is an answer to a question it can see the context of. A fresh question
+begins a thread of its own.
 
 The model is `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`, the cheapest
 text-to-text model on Nebius Token Factory at the time this was written:
@@ -131,9 +144,7 @@ These are the compiler's rules, and the program is written to them.
 - **There is no end-to-end test of the program.** The compiler's suite
   covers the features the program needs — the HTTP runtime, TLS to a server,
   SQLite — but nothing asserts the website's own routes or the chat flow.
-- **The chat is not conversational.** Every question is asked on its own:
-  the model is not given the chat so far, so a question that says "it" has
-  nothing behind the word to point at. A chat that remembers would build the
-  request the way the model asks for a conversation, and the text of an
-  answer would have to be escaped before it is written into the JSON of the
-  request — which the program now can, with `jsonEscape`.
+- **A fresh question starts a thread of its own.** The conversation so far
+  is only behind a question that resumes a saved chat: a run of fresh
+  questions is a run of one-turn chats, and continuing one of those means
+  resuming it.

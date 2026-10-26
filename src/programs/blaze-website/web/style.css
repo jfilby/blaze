@@ -55,6 +55,24 @@ header {
 header h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.02em; }
 header p { margin: 0.15rem 0 0 0; font-size: 0.95rem; color: #ffffff; opacity: 0.95; }
 
+/* The menu at the top: Home and Chat, pushed to the right edge of the
+   header. A link that is the page being read is the page being read, so the
+   current one is marked. */
+.menu {
+  margin-left: auto;
+  display: flex;
+  gap: 0.35rem;
+}
+.menu a {
+  color: #ffffff;
+  padding: 0.4rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.menu a:hover { background: #1f2937; text-decoration: none; }
+.menu a.active { background: #0b5ed6; }
+
 /* ---------- Layout ---------- */
 main {
   max-width: 1100px;
@@ -71,6 +89,7 @@ main {
 @media (max-width: 600px) {
   main { padding: 1rem 0.75rem 3rem; }
   section { padding: 1.1rem; }
+  .menu { margin-left: 0; }
 }
 
 /* ---------- Sections ---------- */
@@ -94,6 +113,24 @@ li { margin: 0.35rem 0; }
 
 /* ---------- Chat ---------- */
 #chat { display: flex; flex-direction: column; gap: 0.75rem; }
+.chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.chat-head h2 { margin: 0; font-size: 1.25rem; color: #111827; }
+#newChat {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #374151;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+#newChat:hover { border-color: #0b5ed6; color: #0b5ed6; }
 .messages {
   flex: 1;
   border: 1px solid #e5e7eb;
@@ -196,6 +233,18 @@ li { margin: 0.35rem 0; }
 .chat:last-child { border-bottom: none; }
 .chat .q { font-weight: 800; color: #0b5ed6; }
 .chat .a { color: #374151; white-space: pre-wrap; }
+.chat .resume {
+  align-self: flex-start;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #0b5ed6;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.chat .resume:hover { background: #dbeafe; }
 /* ---------- Footer ---------- */
 footer {
   grid-column: 1 / -1;

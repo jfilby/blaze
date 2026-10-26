@@ -3505,6 +3505,15 @@ class Body {
         this.dynamicValue(argument(0));
         this.callService("blaze_rt_json_stringify");
         return DYNAMIC_TYPE;
+      case "JSON.get": {
+        // One field of a dynamic object: the object goes down as the handle
+        // it is carried in, the field as the text it is spelled with, and the
+        // answer is the value the field names.
+        this.dynamicValue(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_json_get");
+        return DYNAMIC_TYPE;
+      }
       case "crypto.createHash":
         this.callService("blaze_rt_md5_create");
         return DYNAMIC_TYPE;
