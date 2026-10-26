@@ -409,8 +409,10 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       return { k: "field", object: programValue(one.base, bindings), field: one.field };
     }
     case "membership": {
+      let container = one.container;
+      if (container.k === "name" && bindings.values.has(container.name)) container = bindings.values.get(container.name)!;
       const items: PyValue[] = [];
-      if (one.container.k === "list") items.push(...one.container.items);
+      if (container.k === "list" || container.k === "set") items.push(...container.items);
       else if (one.container.k === "call" && one.container.name === "range" && one.container.args.length === 1 && one.container.args[0].k === "number") {
         const n = Number(one.container.args[0].text);
         for (let i = 0; i < n; i++) items.push({ k: "number", text: String(i), whole: true });
@@ -469,6 +471,18 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       const whole = one.items.every((item) => item.k === "number" && item.whole);
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: one.items.map((item) => programValue(item, bindings)) };
+    }
+    case "set": {
+      const seen = new Set<string>();
+      const deduped = one.items.filter((item) => {
+        if (item.k !== "number") return true;
+        if (seen.has(item.text)) return false;
+        seen.add(item.text);
+        return true;
+      });
+      const whole = deduped.every((item) => item.k === "number" && item.whole);
+      const element: PrimitiveTypeName = whole ? "i64" : "f64";
+      return { k: "buffer", element, values: deduped.map((item) => programValue(item, bindings)) };
     }
     case "sized": {
       throw frontendError("a sized array is not part of a program", "write the list out, as in [1, 2, 3]");

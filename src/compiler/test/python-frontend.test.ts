@@ -323,11 +323,6 @@ test("a docstring says nothing, and a string of three quotes is read", () => {
   assert.equal(phase.program.files[0].functions["f"] !== undefined, true);
 });
 
-test("a set is not part of the subset", () => {
-  const set = diagnostic(() => phaseOf("python", { "main.py": "s = {1, 2}\n" }, "main.py"));
-  assert.match(set, /a set is not part of the subset/);
-});
-
 test("the constructs outside the subset are refused with what to write instead", () => {
   const cases: [string, RegExp][] = [
 

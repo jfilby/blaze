@@ -209,7 +209,6 @@ matter are the ones a Python program is most likely to write:
 | `sys.argv` in a function of a module | a module is a library of functions, and a library reads no command line: the command line is read by the program |
 | `d.key` where `d` is a dict | a dict is read by its key, as in `d["key"]` |
 | `len("hello")` | the length of a value written out is not read: write it into a name and take the length of that |
-| a set, `{1, 2}` | a dict is written with named keys, as in `{"a": 1}` |
 | `a.append(x)` | a list is a buffer, and a buffer is fixed: the list a program uses is the one it wrote out |
 
 ## The types

@@ -389,6 +389,7 @@ export type PyValue =
   | { k: "field"; base: PyValue; field: string }
   /** A list written out where it is made. */
   | { k: "list"; items: PyValue[] }
+  | { k: "set"; items: PyValue[] }
   | { k: "sized"; element: "i64" | "f64"; count: PyValue }
   | { k: "membership"; value: PyValue; container: PyValue; negated: boolean }
   | { k: "comprehension"; element: PyValue; target: string; iterable: PyValue; condition: PyValue | null }
@@ -2190,29 +2191,38 @@ class PythonParser {
       return { k: "list", items };
     }
     if (token.kind === "op" && token.text === "{") {
-      const entries: { name: string; value: PyValue }[] = [];
-      if (!this.at("}")) {
-        for (;;) {
-          const key = this.next();
-          const name = key.kind === "name" || key.kind === "string" ? key.text : null;
-          if (name === null) {
-            // A set is a dict of nothing, and the subset has no set: the keys
-            // of a dict are names.
-            this.report(
-              "a set is not part of the subset",
-              `near "${key.text}"; a dict is written with named keys, as in {"a": 1}`,
-              key,
-            );
-          } else {
-            this.expect(":");
-            entries.push({ name, value: this.expression() });
-          }
-          if (this.accept(",")) continue;
-          break;
+      if (this.at("}")) {
+        this.next();
+        return { k: "dict", entries: [] };
+      }
+      // Decide set vs dict by whether the first element is followed by ":".
+      const first = this.expression();
+      if (this.at(":")) {
+        // A dict: key: value pairs.
+        const entries: { name: string; value: PyValue }[] = [];
+        const name = first.k === "name" ? first.name : (first.k === "text" ? (first as any).parts?.[0]?.value : null);
+        this.next(); // :
+        const value = this.expression();
+        entries.push({ name: name ?? "", value });
+        while (this.accept(",")) {
+          if (this.at("}")) break;
+          const key = this.expression();
+          const keyName = key.k === "name" ? key.name : (key.k === "text" ? (key as any).parts?.[0]?.value : null);
+          this.expect(":");
+          const val = this.expression();
+          entries.push({ name: keyName ?? "", value: val });
         }
+        this.expect("}");
+        return { k: "dict", entries };
+      }
+      // A set: comma-separated values.
+      const items: PyValue[] = [first];
+      while (this.accept(",")) {
+        if (this.at("}")) break;
+        items.push(this.expression());
       }
       this.expect("}");
-      return { k: "dict", entries };
+      return { k: "set", items };
     }
     this.report(`unexpected "${token.text}"`, "a value is written here", token);
     return this.hole();
@@ -2315,6 +2325,8 @@ export function describeValue(value: PyValue): string {
       return `${describeValue(value.base)}.${value.field}`;
     case "list":
       return "a list";
+    case "set":
+      return "a set";
     case "membership":
       return "a membership test";
     case "comprehension":
@@ -2429,6 +2441,9 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
     case "list":
       value.items.forEach((item) => eachValueIn(item, visit, line));
       return;
+    case "set":
+      value.items.forEach((item) => eachValueIn(item, visit, line));
+      return;
     case "sized":
       eachValueIn(value.count, visit, line);
       return;
@@ -2541,6 +2556,9 @@ function fillDefaultArguments(module: PyModule): PyModule {
         if (value.step !== null) value.step = fillValue(value.step);
         break;
       case "list":
+        value.items = value.items.map(fillValue);
+        break;
+      case "set":
         value.items = value.items.map(fillValue);
         break;
       case "membership":
@@ -2681,6 +2699,15 @@ function expandWalrus(module: PyModule): PyModule {
         return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
       }
       case "list": {
+        const pres: PyStatement[] = [];
+        const items = value.items.map((item) => {
+          const r = expandExpr(item, scope);
+          pres.push(...r.pre);
+          return r.value;
+        });
+        return { value: { ...value, items }, pre: pres };
+      }
+      case "set": {
         const pres: PyStatement[] = [];
         const items = value.items.map((item) => {
           const r = expandExpr(item, scope);
@@ -3180,6 +3207,8 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       return "unknown";
     case "list":
       return "list";
+    case "set":
+      return "list";
     case "sized":
       return "list";
     case "membership":
@@ -3374,6 +3403,19 @@ export function lowerValue(value: PyValue): Expression {
       // element is the width of what it holds.
       const whole = value.items.every((item) => item.k === "number" && item.whole);
       return { k: "buffer", element: whole ? "i64" : "f64", values: value.items.map(lowerValue) };
+    }
+    case "set": {
+      // A set is a buffer of its (deduplicated) elements. Deduplication is
+      // done where the values are known; here we keep every element.
+      const whole = value.items.every((item) => item.k === "number" && item.whole);
+      const seen = new Set<string>();
+      const deduped = value.items.filter((item) => {
+        if (item.k !== "number") return true;
+        if (seen.has(item.text)) return false;
+        seen.add(item.text);
+        return true;
+      });
+      return { k: "buffer", element: whole ? "i64" : "f64", values: deduped.map(lowerValue) };
     }
     case "sized": {
       return { k: "sized", element: value.element, count: lowerValue(value.count) };
@@ -3601,9 +3643,12 @@ export function isBooleanCondition(value: PyValue): boolean {
     case "conditional":
       return false;
     case "sized":
+    case "set":
       return false;
     case "walrus":
-      return isBooleanCondition(value.value);
+      return isBooleanCondition((value as { k: "walrus"; name: string; value: PyValue }).value);
+    default:
+      return false;
   }
 }
 
@@ -3862,6 +3907,10 @@ class BodyAnalysis {
     case "comprehension": {
         this.uncontractable("uses a comprehension", line, "a loop that fills a list, written out");
       }
+      case "set": {
+        this.uncontractable("uses a set", line, "a dict is written with named keys, as in {\"a\": 1}");
+        return "0";
+      }
       case "lambda": {
         this.uncontractable("uses a lambda", line, "a function written with def");
         return "0";
@@ -3994,6 +4043,8 @@ function dependsOn(value: PyValue, name: string): boolean {
       return dependsOn(value.body, name);
     case "walrus":
       return dependsOn((value as { k: "walrus"; name: string; value: PyValue }).value, name);
+    case "set":
+      return value.items.some((item) => dependsOn(item, name));
     case "sized":
       return dependsOn((value as { k: "sized"; element: "i64" | "f64"; count: PyValue }).count, name);
     case "dict":
@@ -4297,8 +4348,12 @@ function conversionInValue(value: PyValue): string | null {
       return conversionInValue(value.body);
     case "walrus":
       return conversionInValue((value as { k: "walrus"; name: string; value: PyValue }).value);
+    case "set":
+      return value.items.map((item) => conversionInValue(item)).find((x) => x !== null) ?? null;
     case "sized":
       return conversionInValue((value as { k: "sized"; element: "i64" | "f64"; count: PyValue }).count);
+    default:
+      return null;
     case "dict":
       return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
     case "text":
