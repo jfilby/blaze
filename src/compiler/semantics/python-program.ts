@@ -481,45 +481,95 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     }
     case "storeSlice": {
       const base = one.base;
-      // The RHS must be a list literal for in-place replacement.
-      let rhsItems: PyValue[];
+      // If the RHS is a list literal, desugar to element assignments.
       if (one.value.k === "list") {
-        rhsItems = one.value.items;
-      } else {
-        throw frontendError(
-          "slice assignment needs a list on the right",
-          "write the values as a list, as in a[1:3] = [10, 20]",
-        );
-      }
-      // Compute the slice indices.
-      let startBound = 0;
-      if (one.start !== null) {
-        if (one.start.k === "number") {
-          startBound = Number(one.start.text);
-        } else if (one.start.k === "unary" && one.start.op === "-") {
-          const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
-          let len = 0;
-          const baseVal = bindings.values.get(base);
-          if (baseVal !== undefined && baseVal.k === "list") {
-            len = baseVal.items.length;
+        const rhsItems = one.value.items;
+        let startBound = 0;
+        if (one.start !== null) {
+          if (one.start.k === "number") {
+            startBound = Number(one.start.text);
+          } else if (one.start.k === "unary" && one.start.op === "-") {
+            const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
+            let len = 0;
+            const baseVal = bindings.values.get(base);
+            if (baseVal !== undefined && baseVal.k === "list") {
+              len = baseVal.items.length;
+            }
+            startBound = Math.max(0, len - n);
           }
-          startBound = Math.max(0, len - n);
         }
+        const step = one.step === null ? 1 : (one.step.k === "number" ? Number(one.step.text) : 1);
+        const assignments: ProgramStatement[] = [];
+        for (let j = 0; j < rhsItems.length; j++) {
+          const idx = startBound + j * step;
+          assignments.push({
+            kind: "elementAssign",
+            buffer: base,
+            index: { k: "whole", text: String(idx) },
+            op: "=",
+            value: programValue(rhsItems[j], bindings),
+            line: one.line,
+          });
+        }
+        return { kind: "block", body: assignments, line: one.line };
       }
-      const step = one.step === null ? 1 : (one.step.k === "number" ? Number(one.step.text) : 1);
-      const assignments: ProgramStatement[] = [];
-      for (let j = 0; j < rhsItems.length; j++) {
-        const idx = startBound + j * step;
-        assignments.push({
-          kind: "elementAssign",
-          buffer: base,
-          index: { k: "whole", text: String(idx) },
-          op: "=",
-          value: programValue(rhsItems[j], bindings),
+      // Variable RHS: generate a runtime loop.
+      const loopVar = "_i";
+      const rhsValue = one.value;
+      // Number of iterations
+      const nPy: PyValue = { k: "call", name: "len", args: [rhsValue] };
+      // Resolve negative start to a positive index at compile time if possible.
+      let startPy: PyValue;
+      if (one.start === null) {
+        startPy = { k: "number", text: "0", whole: true };
+      } else if (one.start.k === "unary" && one.start.op === "-") {
+        const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
+        const baseVal = bindings.values.get(base);
+        let len = 0;
+        if (baseVal !== undefined && baseVal.k === "list") len = baseVal.items.length;
+        startPy = { k: "number", text: String(Math.max(0, len - n)), whole: true };
+      } else {
+        startPy = one.start;
+      }
+      // Step expression
+      const stepPy: PyValue = one.step === null ? { k: "number", text: "1", whole: true } : one.step;
+      // Loop body: base[start + _i * step] = rhs[_i]
+      const loopBody: PyStatement[] = [
+        {
+          k: "storeElement",
+          target: {
+            k: "index",
+            base: { k: "name", name: base },
+            index: {
+              k: "binary",
+              op: "+",
+              left: startPy,
+              right: {
+                k: "binary",
+                op: "*",
+                left: { k: "name", name: loopVar },
+                right: stepPy,
+              },
+            },
+          },
+          value: {
+            k: "index",
+            base: rhsValue,
+            index: { k: "name", name: loopVar },
+          },
           line: one.line,
-        });
-      }
-      return { kind: "block", body: assignments, line: one.line };
+        },
+      ];
+      const loopStmt: PyStatement = {
+        k: "for",
+        variable: loopVar,
+        from: { k: "number", text: "0", whole: true },
+        to: nPy,
+        step: null,
+        body: loopBody,
+        line: one.line,
+      };
+      return statement(loopStmt, bindings);
     }
     case "storeField": {
       const target = one.target as { k: "field"; base: PyValue; field: string };

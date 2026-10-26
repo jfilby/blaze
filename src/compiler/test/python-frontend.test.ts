@@ -487,6 +487,14 @@ test("a slice assignment in a program body", () => {
   assert.equal((statements[1] as any).body[1].index.text, "2");
 });
 
+test("a slice assignment with a variable RHS in a program body", () => {
+  const phase = phaseOf("python", { "main.py": "a = [1, 2, 3, 4, 5]\nb = [10, 20]\na[1:3] = b\n" }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  assert.equal(statements[2].kind, "for");
+  assert.equal((statements[2] as any).variable, "_i");
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",
