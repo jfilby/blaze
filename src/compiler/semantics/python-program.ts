@@ -470,6 +470,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: one.items.map((item) => programValue(item, bindings)) };
     }
+    case "sized": {
+      throw frontendError("a sized array is not part of a program", "write the list out, as in [1, 2, 3]");
+    }
     case "dict":
       return { k: "object", fields: one.entries.map((entry) => ({ name: entry.name, value: programValue(entry.value, bindings) })) };
     case "binary": {
