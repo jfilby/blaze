@@ -274,15 +274,33 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       // A program can slice a list or a string whose contents are known: a
       // literal or a name bound to one. Anything else is refused.
       if (base.k === "text") {
-        // Only plain strings (a single text part) can be sliced; an
-        // f-string with interpolated values has no fixed text to slice.
-        if (base.parts.length !== 1 || base.parts[0].k !== "text") {
+        // Resolve the text to a plain string. A plain string (a single text
+        // part) is used directly; an f-string is evaluated to a string when
+        // every interpolated value is a constant.
+        let text: string | null = null;
+        if (base.parts.length === 1 && base.parts[0].k === "text") {
+          text = base.parts[0].value;
+        } else {
+          // Try to evaluate the f-string to a concrete string.
+          const parts: string[] = [];
+          let ok = true;
+          for (const part of base.parts) {
+            if (part.k === "text") {
+              parts.push(part.value);
+            } else {
+              const str = stringOf(part.value, bindings);
+              if (str === null) { ok = false; break; }
+              parts.push(str);
+            }
+          }
+          if (ok) text = parts.join("");
+        }
+        if (text === null) {
           throw frontendError(
-            "a program can slice only a plain string",
+            "a program can slice only a plain string or an f-string of constants",
             `slice ${describeValue(one.base)}, which is not a plain string`,
           );
         }
-        const text = base.parts[0].value;
         const len = text.length;
         const sliceBound = (bound: PyValue | null, defaultValue: number): number => {
           if (bound === null) return defaultValue;
@@ -476,6 +494,32 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         otherwise: programValue(one.otherwise, bindings),
       };
   }
+}
+
+/** The string a PyValue holds at compile time, or null when it cannot be
+ *  evaluated to a string. Handles numbers, booleans, None, plain strings,
+ *  names bound to a string, and f-strings of constants. */
+function stringOf(value: PyValue, bindings: Bindings): string | null {
+  if (value.k === "number") return value.text;
+  if (value.k === "boolean") return value.value ? "True" : "False";
+  if (value.k === "none") return "None";
+  if (value.k === "text") {
+    const parts: string[] = [];
+    for (const part of value.parts) {
+      if (part.k === "text") {
+        parts.push(part.value);
+      } else {
+        const str = stringOf(part.value, bindings);
+        if (str === null) return null;
+        parts.push(str);
+      }
+    }
+    return parts.join("");
+  }
+  if (value.k === "name" && bindings.values.has(value.name)) {
+    return stringOf(bindings.values.get(value.name)!, bindings);
+  }
+  return null;
 }
 
 /** The whole number a PyValue holds, refusing anything that is not one. */

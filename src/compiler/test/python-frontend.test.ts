@@ -515,6 +515,36 @@ test("a chained slice with a negative index in a program body", () => {
   assert.equal(declaration.value.text, "4");
 });
 
+test("an f-string slice in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 'x = 42\ns = f"hello {x}"\na = s[0:5]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[2] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "hello");
+});
+
+test("an f-string slice with a step in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 'x = 42\ns = f"hello {x}"\na = s[::2]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[2] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "hlo4");
+});
+
+test("an f-string slice with a negative step in a program body", () => {
+  const phase = phaseOf("python", { "main.py": 'x = 42\ns = f"hello {x}"\na = s[::-1]\n' }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[2] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "text");
+  assert.equal(declaration.value.parts[0].value, "24 olleh");
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",
