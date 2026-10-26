@@ -35,6 +35,7 @@ import type { PrimitiveTypeName } from "../core/types.ts";
 import type { PyStatement, PyTextPart, PyValue } from "./python.ts";
 import { builtinName, conditionIsBoolean, describeValue, typeOfValue } from "./python.ts";
 import { frontendError } from "./diagnostics.ts";
+import { BitSet } from "../util/sets.ts";
 
 /** The operators a program value may use, as Python writes them. */
 const BINARY_OPERATORS: Record<string, ProgramBinaryOp> = {
@@ -103,6 +104,65 @@ function cloneBindings(b: Bindings): Bindings {
  * source writes `1n` for, which is the `i64` a Python `int` is. A fraction is
  * a number, which is a double.
  */
+/**
+ * A sparse set: a dense array of elements plus a sparse map from an element's
+ * key to its index in the dense array. Membership, insertion and removal are
+ * answered in constant time, and the dense array keeps the elements in the order
+ * they were inserted.
+ *
+ * This is the classic sparse-set trick, generalised to arbitrary keys through
+ * a map: the dense array is the set's contents, and the sparse map is the
+ * inverse of it. A key is in the set exactly when its sparse entry points at a
+ * dense slot that still holds it.
+ */
+class SparseSet {
+  private dense: PyValue[] = [];
+  private sparse: Map<string, number> = new Map();
+
+  private keyOf(value: PyValue): string {
+    return value.k === "number" ? `n:${value.text}` : JSON.stringify(value);
+  }
+
+  has(value: PyValue): boolean {
+    const key = this.keyOf(value);
+    const index = this.sparse.get(key);
+    if (index === undefined) return false;
+    return index < this.dense.length && this.keyOf(this.dense[index]) === key;
+  }
+
+  add(value: PyValue): boolean {
+    if (this.has(value)) return false;
+    this.sparse.set(this.keyOf(value), this.dense.length);
+    this.dense.push(value);
+    return true;
+  }
+
+  remove(value: PyValue): boolean {
+    const key = this.keyOf(value);
+    const index = this.sparse.get(key);
+    if (index === undefined || index >= this.dense.length || this.keyOf(this.dense[index]) !== key) return false;
+    const last = this.dense[this.dense.length - 1];
+    this.dense[index] = last;
+    this.sparse.set(this.keyOf(last), index);
+    this.dense.pop();
+    this.sparse.delete(key);
+    return true;
+  }
+
+  toArray(): PyValue[] {
+    return [...this.dense];
+  }
+
+  get size(): number {
+    return this.dense.length;
+  }
+
+  clear(): void {
+    this.dense = [];
+    this.sparse.clear();
+  }
+}
+
 function programValue(one: PyValue, bindings: Bindings): ProgramValue {
   if (one.k === "name" && bindings.values.has(one.name)) {
     return programValue(bindings.values.get(one.name)!, bindings);
@@ -419,11 +479,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       } else {
         throw frontendError("membership needs a list or a range with a constant bound", "write the list out");
       }
-      let found = false;
-      for (const item of items) {
-        // equality check: compare programValue text? Use PyValue equality approx
-        if (one.value.k === "number" && item.k === "number" && one.value.text === item.text) { found = true; break; }
-      }
+      const set = new SparseSet();
+      for (const item of items) set.add(item);
+      const found = set.has(one.value);
       return { k: "boolean", value: one.negated ? !found : found };
     }
     case "lambda": {
@@ -473,13 +531,24 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       return { k: "buffer", element, values: one.items.map((item) => programValue(item, bindings)) };
     }
     case "set": {
-      const seen = new Set<string>();
-      const deduped = one.items.filter((item) => {
-        if (item.k !== "number") return true;
-        if (seen.has(item.text)) return false;
-        seen.add(item.text);
-        return true;
-      });
+      // Pick the representation by domain: a bitset for small bounded
+      // non-negative integers, a sparse set otherwise.
+      const nums = one.items.filter((i) => i.k === "number" && i.whole).map((i) => Number((i as { k: "number"; text: string }).text));
+      const allNonNegInts = one.items.length > 0 && one.items.every((i) => i.k === "number" && i.whole && Number(i.text) >= 0);
+      const max = allNonNegInts ? Math.max(...nums) : -1;
+      let deduped: PyValue[];
+      if (allNonNegInts && max <= 1024) {
+        const bs = new BitSet(max + 1);
+        deduped = [];
+        for (const item of one.items) {
+          const v = Number((item as { k: "number"; text: string }).text);
+          if (!bs.has(v)) { bs.add(v); deduped.push(item); }
+        }
+      } else {
+        const set = new SparseSet();
+        for (const item of one.items) set.add(item);
+        deduped = set.toArray();
+      }
       const whole = deduped.every((item) => item.k === "number" && item.whole);
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: deduped.map((item) => programValue(item, bindings)) };
@@ -503,54 +572,63 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       }
       // Set operations: union, intersection, difference, symmetric difference.
       if (left.k === "set" && right.k === "set") {
-        const eq = (a: PyValue, b: PyValue): boolean =>
-          a.k === "number" && b.k === "number" && a.text === b.text;
-        const inSet = (x: PyValue, set: PyValue): boolean =>
-          set.k === "set" && set.items.some((it) => eq(it, x));
+        const leftSet = new SparseSet();
+        for (const item of left.items) leftSet.add(item);
+        const rightSet = new SparseSet();
+        for (const item of right.items) rightSet.add(item);
+
         if (one.op === "|") {
-          const items: PyValue[] = [...left.items];
-          for (const r of right.items) if (!inSet(r, left)) items.push(r);
+          const result = new SparseSet();
+          for (const item of left.items) result.add(item);
+          for (const item of right.items) result.add(item);
+          const items = result.toArray();
           const whole = items.every((i) => i.k === "number" && i.whole);
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "&") {
-          const items = left.items.filter((x) => inSet(x, right));
+          const result = new SparseSet();
+          for (const item of left.items) if (rightSet.has(item)) result.add(item);
+          const items = result.toArray();
           const whole = items.every((i) => i.k === "number" && i.whole);
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "-") {
-          const items = left.items.filter((x) => !inSet(x, right));
+          const result = new SparseSet();
+          for (const item of left.items) if (!rightSet.has(item)) result.add(item);
+          const items = result.toArray();
           const whole = items.every((i) => i.k === "number" && i.whole);
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "^") {
-          const items = [...left.items.filter((x) => !inSet(x, right)), ...right.items.filter((x) => !inSet(x, left))];
+          const result = new SparseSet();
+          for (const item of left.items) if (!rightSet.has(item)) result.add(item);
+          for (const item of right.items) if (!leftSet.has(item)) result.add(item);
+          const items = result.toArray();
           const whole = items.every((i) => i.k === "number" && i.whole);
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
-        // Subset / superset comparisons.
         if (one.op === "<=") {
-          const ok = left.items.every((x) => inSet(x, right));
+          const ok = left.items.every((x) => rightSet.has(x));
           return { k: "boolean", value: ok };
         }
         if (one.op === "<") {
-          const ok = left.items.every((x) => inSet(x, right)) && left.items.length < right.items.length;
+          const ok = left.items.every((x) => rightSet.has(x)) && left.items.length < right.items.length;
           return { k: "boolean", value: ok };
         }
         if (one.op === ">=") {
-          const ok = right.items.every((x) => inSet(x, left));
+          const ok = right.items.every((x) => leftSet.has(x));
           return { k: "boolean", value: ok };
         }
         if (one.op === ">") {
-          const ok = right.items.every((x) => inSet(x, left)) && right.items.length < left.items.length;
+          const ok = right.items.every((x) => leftSet.has(x)) && right.items.length < left.items.length;
           return { k: "boolean", value: ok };
         }
         if (one.op === "==" || one.op === "!=") {
-          const ok = left.items.length === right.items.length && left.items.every((x) => inSet(x, right));
+          const ok = left.items.length === right.items.length && left.items.every((x) => rightSet.has(x));
           return { k: "boolean", value: one.op === "==" ? ok : !ok };
         }
       }
