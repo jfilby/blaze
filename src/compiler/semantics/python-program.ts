@@ -481,37 +481,64 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     }
     case "storeSlice": {
       const base = one.base;
-      // If the RHS is a list literal, desugar to element assignments.
+      // If the RHS is a list literal, handle it.
       if (one.value.k === "list") {
         const rhsItems = one.value.items;
+        // Resolve base to its list value if known.
+        const baseVal = bindings.values.get(base);
+        const baseItems = baseVal !== undefined && baseVal.k === "list" ? baseVal.items : [];
+        const baseLen = baseItems.length;
+        // Compute slice indices.
         let startBound = 0;
         if (one.start !== null) {
           if (one.start.k === "number") {
             startBound = Number(one.start.text);
           } else if (one.start.k === "unary" && one.start.op === "-") {
             const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
-            let len = 0;
-            const baseVal = bindings.values.get(base);
-            if (baseVal !== undefined && baseVal.k === "list") {
-              len = baseVal.items.length;
-            }
-            startBound = Math.max(0, len - n);
+            startBound = Math.max(0, baseLen - n);
           }
         }
+        if (startBound < 0) startBound = 0;
+        if (startBound > baseLen) startBound = baseLen;
         const step = one.step === null ? 1 : (one.step.k === "number" ? Number(one.step.text) : 1);
-        const assignments: ProgramStatement[] = [];
-        for (let j = 0; j < rhsItems.length; j++) {
-          const idx = startBound + j * step;
-          assignments.push({
-            kind: "elementAssign",
-            buffer: base,
-            index: { k: "whole", text: String(idx) },
-            op: "=",
-            value: programValue(rhsItems[j], bindings),
-            line: one.line,
-          });
+        // Compute stop bound.
+        let stopBound = baseLen;
+        if (one.stop !== null) {
+          if (one.stop.k === "number") {
+            stopBound = Number(one.stop.text);
+          } else if (one.stop.k === "unary" && one.stop.op === "-") {
+            const n = one.stop.operand.k === "number" ? Number(one.stop.operand.text) : 0;
+            stopBound = Math.max(0, baseLen - n);
+          }
         }
-        return { kind: "block", body: assignments, line: one.line };
+        if (stopBound < 0) stopBound = 0;
+        if (stopBound > baseLen) stopBound = baseLen;
+        // Number of elements being replaced.
+        const sliceLen = step > 0
+          ? Math.max(0, Math.ceil((stopBound - startBound) / step))
+          : Math.max(0, Math.ceil((startBound - stopBound) / -step));
+        // If same length, desugar to element assignments (in-place).
+        if (sliceLen === rhsItems.length) {
+          const assignments: ProgramStatement[] = [];
+          for (let j = 0; j < rhsItems.length; j++) {
+            const idx = startBound + j * step;
+            assignments.push({
+              kind: "elementAssign",
+              buffer: base,
+              index: { k: "whole", text: String(idx) },
+              op: "=",
+              value: programValue(rhsItems[j], bindings),
+              line: one.line,
+            });
+          }
+          return { kind: "block", body: assignments, line: one.line };
+        }
+        // Different length: the compiler's lists are fixed buffers, so
+        // changing the length is not supported.
+        throw frontendError(
+          "slice assignment that changes the length is not supported",
+          "a list is a buffer, and a buffer is fixed: replace elements in place, as in a[1:3] = [10, 20]",
+        );
       }
       // Variable RHS: generate a runtime loop.
       const loopVar = "_i";
