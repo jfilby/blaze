@@ -361,9 +361,15 @@ test("a loop walks a range, and a list is walked by its own index", () => {
   assert.match(refused, /a loop walks a range/);
 });
 
-test("a slice makes a function uncontractable", () => {
+test("a slice used internally keeps a function contractable", () => {
+  const phase = phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    b = a[0:2]\n    return b[0] + b[1]\n" }, "main.py");
+  const contract = phase.program.files[0].functions["f"];
+  assert.deepEqual(contract.ensures, ["result == (a[0:2][0] + a[0:2][1])"]);
+});
+
+test("a function returning a slice is uncontractable", () => {
   const slice = diagnostic(() =>
-    phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3]\n" }, "main.py"),
+    phaseOf("python", { "main.py": "def f(a: list[int]) -> list[int]:\n    return a[1:3]\n" }, "main.py"),
   );
   assert.match(slice, /contract states no postcondition/);
 });

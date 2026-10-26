@@ -2911,7 +2911,7 @@ class BodyAnalysis {
         return;
       }
       case "return":
-        this.result = this.serialize(statement.value ?? { k: "none" }, loop, statement.line);
+        this.result = this.serialize(statement.value ?? { k: "none" }, loop, statement.line, true);
         return;
       case "for":
         this.executeLoop(statement);
@@ -2987,7 +2987,7 @@ class BodyAnalysis {
   }
 
   /** The contract text of a value, or null when a contract cannot state it. */
-  private serialize(value: PyValue, loop: LoopContext | null, line: number): string {
+  private serialize(value: PyValue, loop: LoopContext | null, line: number, asResult: boolean = false): string {
     switch (value.k) {
       case "number":
         return value.text;
@@ -3033,16 +3033,22 @@ class BodyAnalysis {
         }
         const base = value.base;
         const parameter = this.declaration.params.find((param) => param.name === base.name);
-        if (parameter === undefined) {
+        if (parameter !== undefined) {
+          const index = this.serialize(value.index, loop, line);
+          if (loop !== null && dependsOn(value.index, loop.variable)) {
+            this.accesses.push({ parameter: parameter.name, lo: loop.lo, hi: loop.hiExclusive });
+          } else {
+            this.accesses.push({ parameter: parameter.name, lo: index, hi: `(${index} + 1)` });
+          }
+          return `${parameter.name}[${index}]`;
+        }
+        // The base may be a bound variable (e.g., a slice), not a parameter.
+        const bound = this.bindings.get(base.name);
+        if (bound === undefined) {
           throw frontendError(`indexing unknown parameter "${base.name}"`, `line ${line}`);
         }
         const index = this.serialize(value.index, loop, line);
-        if (loop !== null && dependsOn(value.index, loop.variable)) {
-          this.accesses.push({ parameter: parameter.name, lo: loop.lo, hi: loop.hiExclusive });
-        } else {
-          this.accesses.push({ parameter: parameter.name, lo: index, hi: `(${index} + 1)` });
-        }
-        return `${parameter.name}[${index}]`;
+        return `${bound}[${index}]`;
       }
     case "comprehension": {
         this.uncontractable("uses a comprehension", line, "a loop that fills a list, written out");
@@ -3054,7 +3060,52 @@ class BodyAnalysis {
         this.uncontractable("tests membership", line, "a loop that looks for the value");
       }
       case "slice": {
-        this.uncontractable("slices a value", line, "a contracted function is computed from its parameters alone");
+        if (value.base.k !== "name") {
+          throw frontendError("only single level slicing is supported", `line ${line}`);
+        }
+        const base = value.base;
+        const parameter = this.declaration.params.find((param) => param.name === base.name);
+        if (parameter === undefined) {
+          // The base may be a bound variable (e.g., another slice), not a parameter.
+          const bound = this.bindings.get(base.name);
+          if (bound === undefined) {
+            throw frontendError(`slicing unknown parameter "${base.name}"`, `line ${line}`);
+          }
+          // A slice that is the function's result cannot be stated as a
+          // postcondition: the contract language has no buffer equality.
+          if (asResult) {
+            this.uncontractable("returns a slice", line, "a contract states what a function returns, which is a number");
+          }
+          const start = value.start === null ? "" : this.serialize(value.start, loop, line);
+          const stop = value.stop === null ? "" : this.serialize(value.stop, loop, line);
+          if (value.step !== null) {
+            const step = this.serialize(value.step, loop, line);
+            return `${bound}[${start}:${stop}:${step}]`;
+          }
+          if (value.stop !== null || value.start !== null) {
+            return `${bound}[${start}:${stop}]`;
+          }
+          return `${bound}[:]`;
+        }
+        // A slice that is the function's result cannot be stated as a
+        // postcondition: the contract language has no buffer equality.
+        if (asResult) {
+          this.uncontractable("returns a slice", line, "a contract states what a function returns, which is a number");
+        }
+        const start = value.start === null ? "" : this.serialize(value.start, loop, line);
+        const stop = value.stop === null ? "" : this.serialize(value.stop, loop, line);
+        // Push an access range for the sliced elements of the parameter.
+        const lo = value.start === null ? "0" : start;
+        const hi = value.stop === null ? `len(${parameter.name})` : stop;
+        this.accesses.push({ parameter: parameter.name, lo, hi });
+        if (value.step !== null) {
+          const step = this.serialize(value.step, loop, line);
+          return `${parameter.name}[${start}:${stop}:${step}]`;
+        }
+        if (value.stop !== null || value.start !== null) {
+          return `${parameter.name}[${start}:${stop}]`;
+        }
+        return `${parameter.name}[:]`;
       }
       case "call": {
         // The contract language has one function of its own: `len(x)`, which
@@ -3220,6 +3271,11 @@ function usageOf(declaration: PyFunction): {
         return;
       }
       case "slice": {
+        if (value.base.k === "name" && parameters.has(value.base.name)) {
+          const lo = value.start === null ? "0" : (contractTextOf(value.start) ?? "0");
+          const hi = value.stop === null ? `len(${value.base.name})` : (contractTextOf(value.stop) ?? `len(${value.base.name})`);
+          access(value.base.name, lo, hi);
+        }
         expression(value.base);
         if (value.start !== null) expression(value.start);
         if (value.stop !== null) expression(value.stop);

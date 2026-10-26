@@ -216,6 +216,7 @@ export type Expr =
   | { t: "null" }
   | { t: "var"; name: string }
   | { t: "index"; base: Expr; index: Expr }
+  | { t: "slice"; base: Expr; start: Expr | null; stop: Expr | null; step: Expr | null }
   | { t: "call"; name: string; args: Expr[] }
   | { t: "reduce"; op: ReduceOp; varName: string; from: Expr; to: Expr; exclusive: boolean; body: Expr }
   | { t: "unary"; op: "!" | "-"; operand: Expr }
@@ -263,6 +264,7 @@ const OPERATORS = [
   "]",
   ",",
   "=",
+  ":",
 ];
 
 function tokenize(source: string): Token[] {
@@ -415,9 +417,51 @@ class ExpressionParser {
   private parsePostfix(): Expr {
     let base = this.parsePrimary();
     while (this.acceptOp("[")) {
-      const index = this.parseOr();
-      this.expectOp("]");
-      base = { t: "index", base, index };
+      if (this.peek().kind === "op" && (this.peek() as any).text === ":") {
+        // base[:stop:step], base[::step], or base[:].
+        this.next();
+        let start: Expr | null = null;
+        let stop: Expr | null = null;
+        let step: Expr | null = null;
+        if (this.peek().kind === "op" && (this.peek() as any).text === ":") {
+          // base[::step] or base[:].
+          this.next();
+          if (!(this.peek().kind === "op" && (this.peek() as any).text === "]")) {
+            step = this.parseOr();
+          }
+        } else if (!(this.peek().kind === "op" && (this.peek() as any).text === "]")) {
+          // base[:stop] or base[:stop:step].
+          stop = this.parseOr();
+          if (this.acceptOp(":")) {
+            if (!(this.peek().kind === "op" && (this.peek() as any).text === "]")) {
+              step = this.parseOr();
+            }
+          }
+        }
+        this.expectOp("]");
+        base = { t: "slice", base, start, stop, step };
+      } else {
+        const first = this.parseOr();
+        if (this.acceptOp(":")) {
+          // base[start:stop:step], base[start:], or base[start::step].
+          let start: Expr | null = first;
+          let stop: Expr | null = null;
+          let step: Expr | null = null;
+          if (!(this.peek().kind === "op" && (this.peek() as any).text === "]") && !(this.peek().kind === "op" && (this.peek() as any).text === ":")) {
+            stop = this.parseOr();
+          }
+          if (this.acceptOp(":")) {
+            if (!(this.peek().kind === "op" && (this.peek() as any).text === "]")) {
+              step = this.parseOr();
+            }
+          }
+          this.expectOp("]");
+          base = { t: "slice", base, start, stop, step };
+        } else {
+          this.expectOp("]");
+          base = { t: "index", base, index: first };
+        }
+      }
     }
     return base;
   }
@@ -613,6 +657,14 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
         throw contractError(`index must be an integer, got ${describeType(index)}`);
       }
       return base.of;
+    }
+    case "slice": {
+      const base = typeOf(expression.base, env);
+      if (base.kind !== "ptr" && base.kind !== "slice" && base.kind !== "array") {
+        throw contractError(`cannot slice ${describeType(base)}`);
+      }
+      // A slice of a buffer is a buffer of the same element type.
+      return base;
     }
     case "reduce": {
       // A range runs over the integers i between its bounds, so a bound may be
@@ -818,6 +870,47 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
         );
       }
       return base.values[Number(indexValue)];
+    }
+    case "slice": {
+      const base = evaluate(expression.base, context);
+      if (!isBufferValue(base)) {
+        throw contractError(`cannot slice ${formatValue(base)}`);
+      }
+      const len = base.values.length;
+      const sliceBound = (bound: Expr | null, defaultValue: number): number => {
+        if (bound === null) return defaultValue;
+        const value = evaluate(bound, context);
+        if (typeof value !== "bigint") {
+          throw contractError(`slice bound must be an integer, got ${formatValue(value)}`);
+        }
+        let n = Number(value);
+        if (n < 0) n = len + n;
+        return n;
+      };
+      let step = 1;
+      if (expression.step !== null) {
+        const stepValue = evaluate(expression.step, context);
+        if (typeof stepValue !== "bigint") {
+          throw contractError(`slice step must be an integer, got ${formatValue(stepValue)}`);
+        }
+        step = Number(stepValue);
+      }
+      if (step === 0) {
+        throw contractError("slice step must not be zero");
+      }
+      const start = sliceBound(expression.start, step > 0 ? 0 : len - 1);
+      const stop = sliceBound(expression.stop, step > 0 ? len : -1);
+      const sliced: Value[] = [];
+      if (step > 0) {
+        for (let i = Math.max(0, Math.min(start, len)); i < Math.max(0, Math.min(stop, len)); i += step) {
+          sliced.push(base.values[i]);
+        }
+      } else {
+        for (let i = Math.min(len - 1, Math.max(start, -1)); i > Math.max(-1, Math.min(stop, -1)); i += step) {
+          sliced.push(base.values[i]);
+        }
+      }
+      return { kind: "buffer", type: base.type, values: sliced } as Value;
     }
     case "call": {
       if (expression.name === "len") {
