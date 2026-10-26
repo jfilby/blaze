@@ -35,6 +35,17 @@ const db = sqlite.open("chats.db");
 sqlite.exec(db, "CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, answer TEXT)");
 sqlite.exec(db, "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread INTEGER, question TEXT, answer TEXT)");
 sqlite.exec(db, "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+/* Every thread belongs to a person, named by the cookie the browser holds.
+   The people table is the source of the ids: an insert into it makes the
+   next id, and an id is never handed to a second person. The column the
+   schema before people had no room for is added beside it, so a database
+   that was made before the cookie was keeps its rows. */
+sqlite.exec(db, "CREATE TABLE IF NOT EXISTS people (id INTEGER PRIMARY KEY AUTOINCREMENT)");
+/* The column the schema before people had no room for is added beside it, so
+   a database that was made before the cookie was keeps its rows — and those
+   rows belonged to nobody the cookie can name, so no person owns them. */
+sqlite.exec(db, "ALTER TABLE messages ADD COLUMN person TEXT");
+sqlite.exec(db, "UPDATE messages SET person = '' WHERE person IS NULL");
 
 const marker = sqlite.prepare(db, "SELECT value FROM meta WHERE key = 'migrated'");
 var migrated = 0;
@@ -76,6 +87,56 @@ const MODEL = configValue(configText, "model");
 /** The key the chat asks with, from the environment: it is never written
  *  into the source, the configuration or anything the browser is sent. */
 const apiKey = process.env.NEBIUS_API_KEY;
+
+/** The cookie that names the person a browser is: its name, and how long a
+ *  browser keeps it, in seconds — a year, which a visitor who comes back
+ *  within is still the person they were. */
+const PERSON_COOKIE = "blaze_chat";
+const PERSON_COOKIE_MAX_AGE = 31536000;
+
+/**
+ * The value of one cookie of a `Cookie` header: `name=value; other=value`
+ * is read for the one cookie whose name is asked for. A cookie the header
+ * does not carry answers the empty text.
+ */
+function cookieValue(header: string, name: string): string {
+  const wanted = `${name}=`;
+  var rest = header;
+  while (rest.length > 0) {
+    const at = rest.indexOf(wanted);
+    if (at < 0) return "";
+    /* The name has to begin the cookie it is read from: a value that holds
+       the name is not the name. A cookie begins the header or follows the
+       semicolon and the space that separate it from the one before. */
+    if (at === 0 || rest.slice(at - 1, at) === " " || rest.slice(at - 1, at) === ";") {
+      const value = rest.slice(at + wanted.length, rest.length);
+      const end = value.indexOf(";");
+      return (end < 0 ? value : value.slice(0, end)).trim();
+    }
+    rest = rest.slice(at + wanted.length, rest.length);
+  }
+  return "";
+}
+
+/** The person a request was sent by: the id the cookie names. A request
+ *  without the cookie, or with one that names nobody, is sent by nobody. */
+function personOf(header: string): number {
+  const named = cookieValue(header, PERSON_COOKIE);
+  if (named === "") return 0;
+  const wanted = Number(named);
+  return wanted > 0 ? wanted : 0;
+}
+
+/** The id of a person nobody has been yet: an insert into the people table
+ *  makes one, and AUTOINCREMENT never hands an id out twice. */
+function newPerson(): number {
+  sqlite.exec(db, "INSERT INTO people DEFAULT VALUES");
+  const last = sqlite.prepare(db, "SELECT MAX(id) FROM people");
+  var made = 0;
+  if (sqlite.step(last) > 0) made = sqlite.columnNumber(last, 0);
+  sqlite.finalize(last);
+  return made;
+}
 
 /**
  * The text as JSON says it: every quote, backslash and end of a line escaped,
@@ -222,11 +283,12 @@ function savedThread(): number {
   return Number(savedThreadText);
 }
 
-function saveChat(question: string, answer: string, thread: number): void {
-  const insert = sqlite.prepare(db, "INSERT INTO messages (thread, question, answer) VALUES (?, ?, ?)");
+function saveChat(question: string, answer: string, thread: number, person: number): void {
+  const insert = sqlite.prepare(db, "INSERT INTO messages (thread, question, answer, person) VALUES (?, ?, ?, ?)");
   sqlite.bindNumber(insert, 1, thread);
   sqlite.bindText(insert, 2, question);
   sqlite.bindText(insert, 3, answer);
+  sqlite.bindText(insert, 4, `${person}`);
   sqlite.step(insert);
   sqlite.finalize(insert);
   /* A question that began a thread is its own thread root: the row was
@@ -251,11 +313,13 @@ function saveChat(question: string, answer: string, thread: number): void {
 
 var chatsJson = "";
 
-function buildChats(): void {
+function buildChats(person: number): void {
   /* One entry per saved chat — a thread — and the entry is the last message
-     the thread exchanged: the newest row of each thread, the newest ten
-     threads of all. */
-  const read = sqlite.prepare(db, "SELECT id, thread, question, answer FROM messages WHERE id IN (SELECT MAX(id) FROM messages GROUP BY thread) ORDER BY id DESC LIMIT 10");
+     the thread exchanged, of the threads the person the request was sent by
+     owns: the newest row of each of their threads, the newest ten of them. */
+  const read = sqlite.prepare(db, "SELECT id, thread, question, answer FROM messages WHERE person = ? AND id IN (SELECT MAX(id) FROM messages WHERE person = ? GROUP BY thread) ORDER BY id DESC LIMIT 10");
+  sqlite.bindText(read, 1, `${person}`);
+  sqlite.bindText(read, 2, `${person}`);
   let json = "[";
   let first = 1;
   while (sqlite.step(read) > 0) {
@@ -275,16 +339,19 @@ var clearJson = "{}";
 
 /**
  * Clears the chat that is open: every message of the thread it belongs to
- * is deleted from the database. A chat that was never saved — one that
- * began a thread of its own and has not been asked yet, or one the browser
- * began anew — has no thread to delete, and the call leaves the database
- * alone; the browser clears the panel it was showing either way.
+ * is deleted from the database — but only the thread the person the request
+ * was sent by owns, so a thread another person holds is never touched. A
+ * chat that was never saved — one that began a thread of its own and has
+ * not been asked yet, or one the browser began anew — has no thread to
+ * delete, and the call leaves the database alone; the browser clears the
+ * panel it was showing either way.
  */
-function clearChat(id: number): void {
+function clearChat(id: number, person: number): void {
   clearJson = `{"cleared":${id > 0 ? id : 0}}`;
   if (id > 0) {
-    const del = sqlite.prepare(db, "DELETE FROM messages WHERE thread = ?");
+    const del = sqlite.prepare(db, "DELETE FROM messages WHERE thread = ? AND person = ?");
     sqlite.bindNumber(del, 1, id);
+    sqlite.bindText(del, 2, `${person}`);
     sqlite.step(del);
     sqlite.finalize(del);
   }
@@ -295,21 +362,24 @@ var deleteJson = "{}";
 
 /**
  * Deletes one saved chat: the thread the row belongs to is gone from the
- * database, the last message it exchanged included. The id the browser
- * sends is the row it saw in the list of saved chats, and the thread behind
- * that row is what a saved chat is.
+ * database, the last message it exchanged included — but only when the
+ * person the request was sent by owns it. The id the browser sends is the
+ * row it saw in the list of saved chats, and the thread behind that row is
+ * what a saved chat is.
  */
-function deleteChat(id: number): void {
+function deleteChat(id: number, person: number): void {
   deleteJson = `{"deleted":${id > 0 ? id : 0}}`;
   if (id > 0) {
-    const finder = sqlite.prepare(db, "SELECT thread FROM messages WHERE id = ?");
+    const finder = sqlite.prepare(db, "SELECT thread FROM messages WHERE id = ? AND person = ?");
     sqlite.bindNumber(finder, 1, id);
+    sqlite.bindText(finder, 2, `${person}`);
     var thread = 0;
     if (sqlite.step(finder) > 0) thread = sqlite.columnNumber(finder, 0);
     sqlite.finalize(finder);
     if (thread > 0) {
-      const del = sqlite.prepare(db, "DELETE FROM messages WHERE thread = ?");
+      const del = sqlite.prepare(db, "DELETE FROM messages WHERE thread = ? AND person = ?");
       sqlite.bindNumber(del, 1, thread);
+      sqlite.bindText(del, 2, `${person}`);
       sqlite.step(del);
       sqlite.finalize(del);
     }
@@ -320,16 +390,18 @@ function deleteChat(id: number): void {
  *  its questions and answers oldest first. */
 var resumeJson = "";
 
-function buildResume(id: number): void {
+function buildResume(id: number, person: number): void {
   resumeJson = "[]";
-  const finder = sqlite.prepare(db, "SELECT thread FROM messages WHERE id = ?");
+  const finder = sqlite.prepare(db, "SELECT thread FROM messages WHERE id = ? AND person = ?");
   sqlite.bindNumber(finder, 1, id);
+  sqlite.bindText(finder, 2, `${person}`);
   var thread = 0;
   if (sqlite.step(finder) > 0) thread = sqlite.columnNumber(finder, 0);
   sqlite.finalize(finder);
   if (thread > 0) {
-    const read = sqlite.prepare(db, "SELECT id, question, answer FROM messages WHERE thread = ? ORDER BY id ASC");
+    const read = sqlite.prepare(db, "SELECT id, question, answer FROM messages WHERE thread = ? AND person = ? ORDER BY id ASC");
     sqlite.bindNumber(read, 1, thread);
+    sqlite.bindText(read, 2, `${person}`);
     var json = `{"thread":${thread},"messages":[`;
     var first = 1;
     while (sqlite.step(read) > 0) {
@@ -350,26 +422,40 @@ const chatHtml = `${fs.readFileSync(`${web}/chat.html`, "utf8")}`;
 const appJs = `${fs.readFileSync(`${web}/app.js`, "utf8")}`;
 const styleCss = `${fs.readFileSync(`${web}/style.css`, "utf8")}`;
 
+/**
+ * One answer the server sends: the status, the kind of the body, the body
+ * itself, and the cookie a browser is to keep, when it was sent by nobody
+ * the cookie could name. The cookie is written on every answer, so the
+ * first page a browser opens makes it a person and every request after
+ * carries the id back.
+ */
+function respond(res: any, status: number, kind: string, body: string, setCookie: string): void {
+  res.writeHead(status);
+  res.setHeader("Content-Type", kind);
+  if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
+  res.end(body);
+}
+
 const server = http.createServer((req: any, res: any) => {
   const path = req.path;
   const method = req.method;
 
+  const cookieText = `${req.header("Cookie")}`;
+  var person = personOf(cookieText);
+  var setCookie = "";
+  if (person === 0) {
+    person = newPerson();
+    setCookie = `${PERSON_COOKIE}=${person}; Path=/; Max-Age=${PERSON_COOKIE_MAX_AGE}; SameSite=Lax`;
+  }
+
   if (path === "/" && method === "GET") {
-    res.writeHead(200);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.end(indexHtml);
+    respond(res, 200, "text/html; charset=utf-8", indexHtml, setCookie);
   } else if (path === "/chat" && method === "GET") {
-    res.writeHead(200);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.end(chatHtml);
+    respond(res, 200, "text/html; charset=utf-8", chatHtml, setCookie);
   } else if (path === "/app.js" && method === "GET") {
-    res.writeHead(200);
-    res.setHeader("Content-Type", "text/javascript; charset=utf-8");
-    res.end(appJs);
+    respond(res, 200, "text/javascript; charset=utf-8", appJs, setCookie);
   } else if (path === "/style.css" && method === "GET") {
-    res.writeHead(200);
-    res.setHeader("Content-Type", "text/css; charset=utf-8");
-    res.end(styleCss);
+    respond(res, 200, "text/css; charset=utf-8", styleCss, setCookie);
   } else if (path === "/api/chat" && method === "POST") {
     /* The question arrives as the body of the request, plain text: a JSON
        body would have to be read field by field, and a field of a parsed
@@ -391,9 +477,10 @@ const server = http.createServer((req: any, res: any) => {
       }
     }
     askModel(question, thread);
-    saveChat(question, modelAnswer, thread);
+    saveChat(question, modelAnswer, thread, person);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
     /* The thread the question was saved under travels with the answer, so
        the browser asks the next question of the same session: the
        conversation the panel holds is one chat, and the saved chats show it
@@ -406,9 +493,10 @@ const server = http.createServer((req: any, res: any) => {
       res.end(`{"thread":${savedThread()},"reply":${modelAnswer}}`);
     }
   } else if (path.indexOf("/api/resume/") === 0 && method === "GET") {
-    buildResume(Number(path.slice(12, path.length)));
+    buildResume(Number(path.slice(12, path.length)), person);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
     res.end(resumeJson);
   } else if (path === "/api/clear" && method === "POST") {
     /* The chat that is open names the thread it continues, as "T<thread>":
@@ -422,25 +510,29 @@ const server = http.createServer((req: any, res: any) => {
       const wanted = Number(body.slice(1, at));
       if (wanted > 0) thread = wanted;
     }
-    clearChat(thread);
+    clearChat(thread, person);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
     res.end(clearJson);
   } else if (path.indexOf("/api/chats/") === 0 && method === "DELETE") {
     /* The id of the saved chat is the tail of the path, from behind the
        eleven characters of "/api/chats/". */
-    deleteChat(Number(path.slice(11, path.length)));
+    deleteChat(Number(path.slice(11, path.length)), person);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
     res.end(deleteJson);
   } else if (path === "/api/chats" && method === "GET") {
-    buildChats();
+    buildChats(person);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
     res.end(chatsJson);
   } else {
     res.writeHead(404);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    if (setCookie !== "") res.setHeader("Set-Cookie", setCookie);
     res.end("not found\n");
   }
 });

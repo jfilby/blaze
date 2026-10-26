@@ -234,7 +234,15 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `req.end()` sends the buffered request, and the events the callback of
    * the `http.request` call registered fire when it is sent. */
   "req.end": { params: [ANY], returns: ANY, arity: 1 },
+  /** `req.text()` is the body of the request, as text. */
   "req.text": { params: [ANY], returns: ANY, arity: 1 },
+  /**
+   * `req.header(name)` is the value of a header of the request, as text. A
+   * header the request does not carry is an empty string, and the name the
+   * header is asked for is read the way the protocol spells it: the search
+   * is case-insensitive, because the peer spells the name its own way.
+   */
+  "req.header": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "res.writeHead": { params: [ANY, ANY], returns: ANY, arity: 2 },
   /** `res.setHeader(name, value)` sets a header of the response, and is
    *  written before the body is sent. */

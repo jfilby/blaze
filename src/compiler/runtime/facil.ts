@@ -274,18 +274,40 @@ const char *blaze_http_req_path(blaze_http_request *request) {
   return req->path_copy;
 }
 
+/* A header name, searched for case-insensitively: the name a browser puts on
+   the wire is its own spelling of it, and a program asks for the header by
+   the name the protocol gives it. */
+typedef struct {
+  const char *name;
+  size_t length;
+  FIOBJ found;
+} blaze_http_header_search;
+
+static int blaze_http_header_search_task(FIOBJ obj, void *arg) {
+  blaze_http_header_search *search = (blaze_http_header_search *)arg;
+  FIOBJ key = fiobj_hash_key_in_loop();
+  if (!key) return 0;
+  fio_str_info_s ks = fiobj_obj2cstr(key);
+  if (ks.len != search->length) return 0;
+  if (strncasecmp(ks.data, search->name, search->length) != 0) return 0;
+  /* A header the peer sent twice arrives as an array of its values, and the
+     value a program reads is the first of them. */
+  FIOBJ value = FIOBJ_TYPE_IS(obj, FIOBJ_T_ARRAY) ? fiobj_ary_index(obj, 0) : obj;
+  fio_str_info_s vs = fiobj_obj2cstr(value);
+  search->found = fiobj_str_new(vs.data, vs.len);
+  return -1;
+}
+
 const char *blaze_http_req_header(blaze_http_request *request, const char *name) {
   blaze_http_request_t *req = (blaze_http_request_t *)request;
   if (!req || !req->h || !name) return "";
-  FIOBJ key = fiobj_str_new(name, strlen(name));
-  FIOBJ value = fiobj_hash_get(req->h->headers, key);
-  fiobj_free(key);
-  if (!value) return "";
-  /* The value is copied into the request's own memory: a handler that reads
-     two headers holds both of them, and the value of the first is still there
-     when it reads the second. */
-  fio_str_info_s vs = fiobj_obj2cstr(value);
-  return blaze_http_owned_add(req, vs.data, vs.len);
+  blaze_http_header_search search = {name, strlen(name), 0};
+  fiobj_each1(req->h->headers, 0, blaze_http_header_search_task, &search);
+  if (!search.found) return "";
+  fio_str_info_s vs = fiobj_obj2cstr(search.found);
+  const char *answer = blaze_http_owned_add(req, vs.data, vs.len);
+  fiobj_free(search.found);
+  return answer;
 }
 
 const char *blaze_http_req_body(blaze_http_request *request, size_t *length) {

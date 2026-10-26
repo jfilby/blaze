@@ -248,6 +248,8 @@ async function loadChats() {
       a.textContent = "A: " + preview(answerOf(chat));
       div.appendChild(q);
       div.appendChild(a);
+      const actions = document.createElement("div");
+      actions.className = "chat-actions-row";
       const resume = document.createElement("button");
       resume.type = "button";
       resume.className = "resume";
@@ -255,7 +257,7 @@ async function loadChats() {
       resume.addEventListener("click", () => {
         resumeChat(chat.thread);
       });
-      div.appendChild(resume);
+      actions.appendChild(resume);
       const del = document.createElement("button");
       del.type = "button";
       del.className = "delete";
@@ -264,7 +266,8 @@ async function loadChats() {
       del.addEventListener("click", () => {
         deleteSavedChat(chat.thread);
       });
-      div.appendChild(del);
+      actions.appendChild(del);
+      div.appendChild(actions);
       chats.appendChild(div);
     }
     if (list.length === 0) {

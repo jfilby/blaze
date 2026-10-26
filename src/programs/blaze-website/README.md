@@ -66,6 +66,12 @@ The API key is never in a file the project carries: it comes from the
 starts. A chat asked without it is answered with the error that says so, as
 JSON the browser shows — and nothing about the key ever reaches the browser.
 
+Saved chats belong to the browser that made them: on the first visit the
+program hands the browser a `blaze_chat` cookie, and every question, saved
+chat, resume, clear and delete is read and written through the person that
+cookie names. One browser never sees another's chats, and a clear or delete
+of a chat another browser holds leaves it alone.
+
 The port is the first argument, and it is 8080 when no argument is given. The
 message the program writes is printed when it starts.
 

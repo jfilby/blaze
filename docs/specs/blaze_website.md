@@ -21,6 +21,7 @@ SQLite library linked beside the binary the compiler delivers.
 | The configuration | `config.toml` in the working directory | the endpoint and the model |
 | The key | `NEBIUS_API_KEY` in the environment | the API key of Nebius Token Factory |
 | The database | `chats.db` in the working directory | every chat, saved when it is answered |
+| The person | `blaze_chat` in the browser's cookie jar | who a chat belongs to |
 
 ## The routes
 
@@ -82,7 +83,8 @@ shows.
 ## The database
 
 Two tables: the chats of the schema before threads, which are copied into
-the messages once, and the messages themselves.
+the messages once, and the messages themselves — each row carrying the
+person the cookie names, so a chat belongs to the browser that asked it.
 
 ```sql
 CREATE TABLE IF NOT EXISTS chats (
@@ -95,15 +97,38 @@ CREATE TABLE IF NOT EXISTS messages (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   thread   INTEGER,
   question TEXT,
-  answer   TEXT
+  answer   TEXT,
+  person   TEXT
 );
 ```
+
+A person is a cookie. The first page a browser opens makes it a person —
+an insert into a `people` table, whose AUTOINCREMENT id is never handed to
+a second browser — and the answer carries `Set-Cookie: blaze_chat=<id>`.
+Every request after carries the cookie back, and every question, list,
+resume, clear and delete is read and written through the person it names:
+a browser sees its own saved chats and nobody else's, and a resume, a
+clear or a delete that names a thread another person holds leaves it alone.
+The person is who the cookie says, not who a login says — a shared or
+forged cookie sees that person's chats, which is the honesty of a cookie
+without an account behind it.
 
 The connection is opened when the program starts and is used by every
 request that reads it or writes it. The runtime serves the handlers of a
 server on its own threads, and a connection is not shared between two of
 them, so the program opens the one connection and the requests that use it
 arrive one at a time — a website whose chat is asked one question at a time.
+
+## The person is a cookie
+
+Every chat belongs to the browser that asked it. The program reads the
+`Cookie` header of a request — `req.header("Cookie")`, which the compiler
+lowers to a search of the request's headers that compares the name without
+its case, because the peer spells the name its own way — and reads the
+`blaze_chat` cookie out of it. A browser that carries none is made a person
+of its own, and every answer carries the cookie that names it; the person
+is stored beside every message, and the list, the resume, the clear and the
+delete are all read and written through the person the request names.
 
 ## The model is asked over TLS
 

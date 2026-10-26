@@ -1348,6 +1348,17 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         /* Read the buffered request body and return it as a Blaze string. */
         return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${argument(0)}, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len); })`;
       }
+      case "req.header": {
+        /* Read one header of the request, as a Blaze string. The runtime
+           searches the headers case-insensitively, so the name the source
+           spells is the name the header is found by, whatever the peer put
+           on the wire. The value is copied into a managed string, the way
+           req.path is: the request keeps its own, and the program holds the
+           copy it read. */
+        const name = this.requestBody(call.args[1], expression);
+        return `({ const char *blaze_http_request_text = blaze_http_req_header((void *)(uintptr_t)${argument(0)}, ${name});` +
+          ` (double)(uintptr_t)${RUNTIME_NAME}_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)); })`;
+      }
       case "req.end":
         /* Client-side: the buffered request is sent here, and every handler the
            callback of the `http.request` call left on it fires as the response
