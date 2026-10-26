@@ -490,17 +490,68 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "dict":
       return { k: "object", fields: one.entries.map((entry) => ({ name: entry.name, value: programValue(entry.value, bindings) })) };
     case "binary": {
+      // Resolve operands that are names bound to values.
+      const resolve = (v: PyValue): PyValue => (v.k === "name" && bindings.values.has(v.name)) ? bindings.values.get(v.name)! : v;
+      const left = resolve(one.left);
+      const right = resolve(one.right);
       // List concatenation: a + b where both are lists produces a new list.
-      if (one.op === "+" ) {
-        let left = one.left;
-        if (left.k === "name" && bindings.values.has(left.name)) left = bindings.values.get(left.name)!;
-        let right = one.right;
-        if (right.k === "name" && bindings.values.has(right.name)) right = bindings.values.get(right.name)!;
-        if (left.k === "list" && right.k === "list") {
-          const items = [...left.items, ...right.items];
-          const whole = items.every((item) => item.k === "number" && item.whole);
+      if (one.op === "+" && left.k === "list" && right.k === "list") {
+        const items = [...left.items, ...right.items];
+        const whole = items.every((item) => item.k === "number" && item.whole);
+        const element: PrimitiveTypeName = whole ? "i64" : "f64";
+        return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+      }
+      // Set operations: union, intersection, difference, symmetric difference.
+      if (left.k === "set" && right.k === "set") {
+        const eq = (a: PyValue, b: PyValue): boolean =>
+          a.k === "number" && b.k === "number" && a.text === b.text;
+        const inSet = (x: PyValue, set: PyValue): boolean =>
+          set.k === "set" && set.items.some((it) => eq(it, x));
+        if (one.op === "|") {
+          const items: PyValue[] = [...left.items];
+          for (const r of right.items) if (!inSet(r, left)) items.push(r);
+          const whole = items.every((i) => i.k === "number" && i.whole);
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+        }
+        if (one.op === "&") {
+          const items = left.items.filter((x) => inSet(x, right));
+          const whole = items.every((i) => i.k === "number" && i.whole);
+          const element: PrimitiveTypeName = whole ? "i64" : "f64";
+          return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+        }
+        if (one.op === "-") {
+          const items = left.items.filter((x) => !inSet(x, right));
+          const whole = items.every((i) => i.k === "number" && i.whole);
+          const element: PrimitiveTypeName = whole ? "i64" : "f64";
+          return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+        }
+        if (one.op === "^") {
+          const items = [...left.items.filter((x) => !inSet(x, right)), ...right.items.filter((x) => !inSet(x, left))];
+          const whole = items.every((i) => i.k === "number" && i.whole);
+          const element: PrimitiveTypeName = whole ? "i64" : "f64";
+          return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+        }
+        // Subset / superset comparisons.
+        if (one.op === "<=") {
+          const ok = left.items.every((x) => inSet(x, right));
+          return { k: "boolean", value: ok };
+        }
+        if (one.op === "<") {
+          const ok = left.items.every((x) => inSet(x, right)) && left.items.length < right.items.length;
+          return { k: "boolean", value: ok };
+        }
+        if (one.op === ">=") {
+          const ok = right.items.every((x) => inSet(x, left));
+          return { k: "boolean", value: ok };
+        }
+        if (one.op === ">") {
+          const ok = right.items.every((x) => inSet(x, left)) && right.items.length < left.items.length;
+          return { k: "boolean", value: ok };
+        }
+        if (one.op === "==" || one.op === "!=") {
+          const ok = left.items.length === right.items.length && left.items.every((x) => inSet(x, right));
+          return { k: "boolean", value: one.op === "==" ? ok : !ok };
         }
       }
       // String concatenation is handled by the binary operator.

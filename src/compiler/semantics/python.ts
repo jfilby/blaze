@@ -3423,6 +3423,15 @@ export function lowerValue(value: PyValue): Expression {
     case "dict":
       return { k: "object", fields: value.entries.map((entry) => ({ name: entry.name, value: lowerValue(entry.value) })) };
     case "binary": {
+      // Set operations in a function are not lowered: the function's lists are
+      // fixed buffers, and a set operation needs a buffer of a size the
+      // compiler cannot always settle on. Write the operation out as a loop.
+      if (value.left.k === "set" && value.right.k === "set") {
+        throw frontendError(
+          "a set operation is not supported in a function",
+          "write the operation out as a loop, as in for x in a: ...",
+        );
+      }
       const operator = IR_OPERATORS[value.op];
       if (operator === undefined) {
         throw frontendError(`"${value.op}" is not an operator the compiler has`, "the body is refused where it is written");
