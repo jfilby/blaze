@@ -1821,6 +1821,10 @@ class Body {
           this.convert(TEXT, at);
           return;
         }
+        if (value.op === "arrayConcat") {
+          unreachable("arrayConcat is not written by the wasm backend", "arrayConcat");
+          return;
+        }
         const held = facts(compared).held;
         this.value(value.left, compared);
         this.value(value.right, compared);

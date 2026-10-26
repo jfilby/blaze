@@ -87,6 +87,7 @@ import {
   commonNumber,
   hasCall,
   isReference,
+  isSequence,
   roundedBound,
   slotType,
   typeText,
@@ -1480,6 +1481,21 @@ class FunctionBody {
       return {
         value: { k: "arith", type: TEXT, op: "concat", left: left.value, right: right.value },
         inferred: asType(numeric(left.inferred, right.inferred)),
+      };
+    }
+    // An array added to an array joins the two: the elements of the right
+    // follow those of the left. Anything else mixed with an array is refused.
+    if (isSequence(left.value.type) || isSequence(right.value.type)) {
+      if (!isSequence(left.value.type) || !isSequence(right.value.type)) {
+        throw this.error(
+          `"${op}" is written over a ${typeText(left.value.type)} and a ${typeText(right.value.type)}`,
+          line,
+          `a list is added to a list, and compared with == and ===`,
+        );
+      }
+      return {
+        value: { k: "arith", type: left.value.type, op: "arrayConcat", left: left.value, right: right.value },
+        inferred: left.inferred,
       };
     }
     // `%`, a shift and a bitwise operator are operations on whole numbers

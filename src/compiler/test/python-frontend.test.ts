@@ -558,6 +558,20 @@ test("list concatenation in a program body", () => {
   assert.equal(declaration.value.values[5].text, "6");
 });
 
+test("list concatenation in a function is uncontractable", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: list[int], b: list[int]) -> list[int]:\n    return a + b\n" }, "main.py"),
+  );
+  assert.match(refused, /contract states no postcondition/);
+});
+
+test("list concatenation of constants in a function is uncontractable", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f() -> int:\n    c = [1, 2, 3] + [4, 5, 6]\n    return c[0] + c[5]\n" }, "main.py"),
+  );
+  assert.match(refused, /contract states no postcondition/);
+});
+
 test("a chained slice in a function body", () => {
   const phase = phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3][0]\n" }, "main.py");
   const contract = phase.program.files[0].functions["f"];

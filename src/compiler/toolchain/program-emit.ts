@@ -1291,6 +1291,10 @@ class ProgramEmitter {
       case "concat":
         // A string is added to a string: the driver builds the text.
         return this.target.stringConcat(this.expression(value.left), this.expression(value.right));
+      case "arrayConcat":
+        // Array concatenation in a program body is evaluated eagerly and never
+        // reaches the emitter; a function body that keeps one is refused.
+        throw new Error("arrayConcat is not emitted by the program backend");
       case "min":
         return this.target.min(this.expression(value.left, value.type), this.expression(value.right, value.type));
       case "max":

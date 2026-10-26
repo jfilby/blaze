@@ -215,6 +215,7 @@ const ARITH_OPS: readonly ArithOp[] = [
   "or",
   "xor",
   "concat",
+  "arrayConcat",
 ];
 
 /** A number the IR text states, or a refusal of what is not one. */

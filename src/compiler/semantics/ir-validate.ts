@@ -1042,6 +1042,12 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         }
         return problems;
       }
+      if (value.op === "arrayConcat") {
+        if (!isSequence(value.left.type) || !isSequence(value.right.type) || !isSequence(value.type)) {
+          problems.push(`${prefix}arrayConcat is written over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
+        }
+        return problems;
+      }
       if (value.op === "add" && (isTextType(value.left.type) || isTextType(value.right.type))) {
         if (!isTextType(value.type)) {
           problems.push(`${prefix}text added to a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);

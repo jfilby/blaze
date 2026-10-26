@@ -7576,6 +7576,12 @@ class Machine {
       this.concat(value.left, value.right, type);
       return;
     }
+    if (value.op === "arrayConcat") {
+      throw machineError(
+        `${this.fn.symbol} concatenates two lists, which this backend has not written`,
+        "a list reaches a function as a pointer to its first element and no length arrives with it; write the list out, as in [1, 2, 3, 4]",
+      );
+    }
     if (value.op === "pow") {
       this.at(value.right, NUMBER);
       const right = this.hold(NUMBER, "blaze_right");

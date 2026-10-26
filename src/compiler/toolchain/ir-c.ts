@@ -1248,6 +1248,12 @@ class FunctionEmitter {
 
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {
     if (isWideType(value.type)) return this.wideArith(value, depth);
+    if (value.op === "arrayConcat") {
+      throw backendError(
+        `${this.fn.symbol} concatenates two lists, which this backend has not written`,
+        "a list reaches a function as a pointer to its first element and no length arrives with it; write the list out, as in [1, 2, 3, 4]",
+      );
+    }
     if (value.op === "concat") return this.concat(value.left, value.right, depth);
     const left = this.expression(value.left, value.type, depth);
     const right = this.expression(value.right, value.type, depth);

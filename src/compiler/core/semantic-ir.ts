@@ -360,7 +360,9 @@ export type ArithOp =
   | "or"
   | "xor"
   /** Text added to text. */
-  | "concat";
+  | "concat"
+  /** An array added to an array: the elements of the right follow those of the left. */
+  | "arrayConcat";
 
 /** The six comparisons, over one operand type. */
 export type CompareOp = "eq" | "ne" | "lt" | "le" | "gt" | "ge";
@@ -613,7 +615,7 @@ function makesCall(value: SemanticValue): boolean {
       // and each of those is a call. A body whose only call is a concatenation
       // is a body that calls, and a frame that does not know it is a frame
       // whose calls are made off the boundary the convention wants them on.
-      if (value.op === "concat") return true;
+      if (value.op === "concat" || value.op === "arrayConcat") return true;
       return (value.op === "mul" || value.op === "div") && isWideType(value.type);
     case "compare":
       return isTextType(value.operand);

@@ -123,6 +123,7 @@ const SHRINKING_WHOLE_OPERATIONS: Record<ArithOp, boolean> = {
   or: false,
   xor: false,
   concat: false,
+  arrayConcat: false,
 };
 /** The widths a whole number type holds, by the width of its name. */
 const WHOLE_BITS: Record<string, number> = { i8: 8, i16: 16, i32: 32, i64: 64, u8: 8, u16: 16, u32: 32, u64: 64 };

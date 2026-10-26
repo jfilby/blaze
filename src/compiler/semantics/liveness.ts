@@ -453,7 +453,7 @@ class Graph {
         // kernel, which is a real call and clobbers every register the caller
         // saved. Leaving these out pins the names around them to registers that
         // the kernel overwrites.
-        if (value.op === "pow" || value.op === "concat") {
+        if (value.op === "pow" || value.op === "concat" || value.op === "arrayConcat") {
           events.push({ k: "call" });
         } else if ((value.op === "mul" || value.op === "div") && isWideType(value.type)) {
           events.push({ k: "call" });

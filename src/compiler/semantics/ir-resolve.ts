@@ -86,6 +86,7 @@ import {
   isCarriedAsAddress,
   isFloat,
   isReference,
+  isSequence,
   isWide,
   isTextType,
   isWhole,
@@ -651,6 +652,28 @@ function declaredWideBigint(compiled: DraftProgram | null, written: readonly Dra
 }
 
 /** True when the value is a string, which is the one type a number is not. */
+function isSequenceType(type: TypeExpr | null): boolean {
+  return type !== null && (type.kind === "slice" || type.kind === "array" || type.kind === "ptr");
+}
+
+function holdsArray(value: DraftValue): boolean {
+  switch (value.k) {
+    case "buffer":
+    case "sized":
+    case "view":
+    case "fill":
+      return true;
+    case "reference":
+      return value.held.kind === "array";
+    case "binary":
+      return isSequenceType(value.type);
+    case "conditional":
+      return isSequenceType(value.type);
+    default:
+      return false;
+  }
+}
+
 function holdsText(value: DraftValue): boolean {
   switch (value.k) {
     case "text":
@@ -3401,6 +3424,18 @@ class ProgramResolver {
       }
       return { k: "binary", op: "+", left, right, type: null };
     }
+    if (op === "+" && (holdsArray(left) || holdsArray(right))) {
+      if (!holdsArray(left) || !holdsArray(right)) {
+        throw programError(
+          'a list is only added to a list',
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: write the list out, as in [1, 2, 3, 4]`,
+        );
+      }
+      const type = draftType(left) ?? draftType(right);
+      return { k: "binary", op: "+", left, right, type };
+    }
     if (op === "**") {
       // A power is a double's operation: the language raises on a bigint rather
       // than computing one, and a bigint read as a double is not the number the
@@ -5208,6 +5243,11 @@ class ProgramLowering {
     // that each target truncates to a different answer.
     const counted = op === "<<" || op === ">>" || op === ">>>";
     const right = this.value(value.right, counted ? numeric("usize") : sideType(value.right, value.type), line);
+    // An array added to an array is the one operation that joins two
+    // sequences: the elements of the right follow those of the left.
+    if (op === "+" && isSequence(left.type) && isSequence(right.type)) {
+      return { k: "arith", type: left.type, op: "arrayConcat", left, right };
+    }
     // A string added to a string is the one operation with no number behind
     // it: the two arms were text, and it is text the IR states.
     if (value.type === null) return { k: "arith", type: TEXT, op: "concat", left, right };

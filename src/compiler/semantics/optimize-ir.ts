@@ -434,6 +434,30 @@ function foldConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null
 }
 
 /**
+ * An array added to an array, when both of them are written out.
+ *
+ * Two arrays written out are one array written out, with the elements of the
+ * right following those of the left, and the array is the same one the program
+ * would have built by joining them at run time.
+ */
+function foldArrayConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null {
+  if (value.left.k !== "buffer" || value.right.k !== "buffer") return null;
+  if (value.left.count !== null || value.left.view !== null) return null;
+  if (value.right.count !== null || value.right.view !== null) return null;
+  const element = value.left.element;
+  if (!typeEquals(element, value.right.element)) return null;
+  return {
+    k: "buffer",
+    type: value.type,
+    element,
+    length: (value.left.length ?? value.left.values.length) + (value.right.length ?? value.right.values.length),
+    count: null,
+    view: null,
+    values: [...value.left.values, ...value.right.values],
+  };
+}
+
+/**
  * The value one node folds to, or null when it stays as it is written.
  *
  * This is the whole of constant folding and the whole of the algebraic
@@ -451,6 +475,7 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // one string written out, and a string written out is not built at run
       // time at all.
       if (value.op === "concat") return foldConcat(value);
+      if (value.op === "arrayConcat") return foldArrayConcat(value);
       const name = numberType(value);
       if (name === null) return null;
       const left = literalOf(value.left);
