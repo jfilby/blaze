@@ -204,7 +204,6 @@ matter are the ones a Python program is most likely to write:
 | `str.format`, `%` on a text | an f-string |
 | `round` | it rounds half to even, and the compiler rounds half up |
 | a match | a chain of `if` / `elif` |
-| a walrus, `:=` | a name bound by a statement |
 | `print(..., sep=`, `end=` | a plain `print` |
 | an import of a module but `math` and `sys` | a module of the standard library is a file the compiler does not read |
 | a call of a name the compiler does not know | a file calls the functions it declares, the functions it imports, and the builtins of the subset |

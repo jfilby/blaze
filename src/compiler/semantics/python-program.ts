@@ -431,6 +431,12 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         body: [{ kind: "result", value: programValue(one.body, bindings), line: 0 }],
       };
     }
+    case "walrus": {
+      // Should have been lifted by expandWalrus; evaluate the value as a
+      // fallback.
+      bound(bindings, one.name, one.value);
+      return programValue(one.value, bindings);
+    }
     case "comprehension": {
       const iterableItems: PyValue[] = [];
       if (one.iterable.k === "list") {

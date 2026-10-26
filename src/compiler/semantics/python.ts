@@ -396,7 +396,8 @@ export type PyValue =
   | { k: "binary"; op: string; left: PyValue; right: PyValue }
   | { k: "unary"; op: string; operand: PyValue }
   | { k: "conditional"; condition: PyValue; then: PyValue; otherwise: PyValue }
-  | { k: "lambda"; params: { name: string; type: null }[]; body: PyValue };
+  | { k: "lambda"; params: { name: string; type: null }[]; body: PyValue }
+  | { k: "walrus"; name: string; value: PyValue };
 
 /** A parameter of a function, and the type it was given. */
 export interface PyParam {
@@ -1574,6 +1575,14 @@ class PythonParser {
     }
     if (name.kind !== "name") return null;
     const after = this.peek(1);
+    // A walrus at statement level: `x := e` declares `x` with `e`.
+    if (after.kind === "op" && after.text === ":=") {
+      this.next(); // name
+      this.next(); // :=
+      const value = this.expression();
+      this.skipNewline();
+      return { k: "declare", name: name.text, type: null, value, line: name.line };
+    }
     if (after.kind === "op" && after.text === ":") {
       // A name with a type: `total: float = 0.0`.
       this.next();
@@ -1773,6 +1782,16 @@ class PythonParser {
       this.expect(":");
       const body = this.expression();
       return { k: "lambda", params, body };
+    }
+    // A walrus names a value and hands it back: `x := e` is `e` written into
+    // `x`, and the value of the expression is `e`.
+    const first = this.peek();
+    if (first.kind === "name" && this.peek(1).kind === "op" && this.peek(1).text === ":=") {
+      const nameToken = first;
+      this.next(); // name
+      this.next(); // :=
+      const value = this.expression();
+      return { k: "walrus", name: nameToken.text, value };
     }
     return this.conditionalExpression();
   }
@@ -2303,6 +2322,8 @@ export function describeValue(value: PyValue): string {
       return "a function";
     case "dict":
       return "a dict";
+    case "walrus":
+      return describeValue(value.value);
     case "binary":
       return `${describeValue(value.left)} ${value.op} ${describeValue(value.right)}`;
     case "unary":
@@ -2414,6 +2435,9 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       return;
     case "lambda":
       eachValueIn(value.body, visit, line);
+      return;
+    case "walrus":
+      eachValueIn(value.value, visit, line);
       return;
     case "dict":
       value.entries.forEach((entry) => eachValueIn(entry.value, visit, line));
@@ -2597,10 +2621,196 @@ function fillDefaultArguments(module: PyModule): PyModule {
   return { ...module, functions: filledFunctions, body: filledBody };
 }
 
+/**
+ * Lifts a walrus out of an expression into the statement that holds it.
+ *
+ * `x := e` is `e` written into `x`: the value of the expression is `e`, and
+ * the assignment happens where the expression is evaluated. An expression
+ * cannot carry a statement, so the assignment is lifted to the statement that
+ * holds the expression, and the walrus is replaced by a read of the name.
+ */
+function expandWalrus(module: PyModule): PyModule {
+  type Expanded = { value: PyValue; pre: PyStatement[] };
+
+  const expandExpr = (value: PyValue): Expanded => {
+    switch (value.k) {
+      case "walrus": {
+        const inner = expandExpr(value.value);
+        return {
+          value: { k: "name", name: value.name },
+          pre: [...inner.pre, { k: "declare", name: value.name, type: null, value: inner.value, line: value.value && (value.value as any).line ? (value.value as any).line : 1 }],
+        };
+      }
+      case "binary": {
+        const L = expandExpr(value.left);
+        const R = expandExpr(value.right);
+        return { value: { ...value, left: L.value, right: R.value }, pre: [...L.pre, ...R.pre] };
+      }
+      case "unary": {
+        const O = expandExpr(value.operand);
+        return { value: { ...value, operand: O.value }, pre: O.pre };
+      }
+      case "conditional": {
+        const C = expandExpr(value.condition);
+        const T = expandExpr(value.then);
+        const O = expandExpr(value.otherwise);
+        return { value: { ...value, condition: C.value, then: T.value, otherwise: O.value }, pre: [...C.pre, ...T.pre, ...O.pre] };
+      }
+      case "index": {
+        const B = expandExpr(value.base);
+        const I = expandExpr(value.index);
+        return { value: { ...value, base: B.value, index: I.value }, pre: [...B.pre, ...I.pre] };
+      }
+      case "slice": {
+        const B = expandExpr(value.base);
+        const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start);
+        const P = value.stop === null ? { value: null, pre: [] } : expandExpr(value.stop);
+        const E = value.step === null ? { value: null, pre: [] } : expandExpr(value.step);
+        return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
+      }
+      case "list": {
+        const pres: PyStatement[] = [];
+        const items = value.items.map((item) => {
+          const r = expandExpr(item);
+          pres.push(...r.pre);
+          return r.value;
+        });
+        return { value: { ...value, items }, pre: pres };
+      }
+      case "membership": {
+        const V = expandExpr(value.value);
+        const C = expandExpr(value.container);
+        return { value: { ...value, value: V.value, container: C.value }, pre: [...V.pre, ...C.pre] };
+      }
+      case "comprehension": {
+        const E = expandExpr(value.element);
+        const I = expandExpr(value.iterable);
+        const C = value.condition === null ? { value: null, pre: [] } : expandExpr(value.condition);
+        return { value: { ...value, element: E.value, iterable: I.value, condition: C.value }, pre: [...E.pre, ...I.pre, ...C.pre] };
+      }
+      case "dict": {
+        const pres: PyStatement[] = [];
+        const entries = value.entries.map((entry) => {
+          const r = expandExpr(entry.value);
+          pres.push(...r.pre);
+          return { ...entry, value: r.value };
+        });
+        return { value: { ...value, entries }, pre: pres };
+      }
+      case "field": {
+        const B = expandExpr(value.base);
+        return { value: { ...value, base: B.value }, pre: B.pre };
+      }
+      case "call": {
+        const pres: PyStatement[] = [];
+        const args = value.args.map((arg) => {
+          const r = expandExpr(arg);
+          pres.push(...r.pre);
+          return r.value;
+        });
+        const grid = value.grid === undefined ? undefined : expandExpr(value.grid).value;
+        return { value: { ...value, args, grid }, pre: pres };
+      }
+      case "lambda":
+        // Walrus inside a lambda is not lifted (a lambda has no statement
+        // list); leave the node as it is.
+        return { value, pre: [] };
+      default:
+        return { value, pre: [] };
+    }
+  };
+
+  const expandStmt = (stmt: PyStatement): PyStatement[] => {
+    switch (stmt.k) {
+      case "declare": {
+        const r = expandExpr(stmt.value);
+        return [...r.pre, { ...stmt, value: r.value }];
+      }
+      case "assign": {
+        const r = expandExpr(stmt.value);
+        return [...r.pre, { ...stmt, value: r.value }];
+      }
+      case "storeElement": {
+        const t = expandExpr(stmt.target);
+        const v = expandExpr(stmt.value);
+        return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
+      }
+      case "storeSlice": {
+        const s = stmt.start === null ? { value: null, pre: [] } : expandExpr(stmt.start);
+        const p = stmt.stop === null ? { value: null, pre: [] } : expandExpr(stmt.stop);
+        const e = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step);
+        const v = expandExpr(stmt.value);
+        return [...s.pre, ...p.pre, ...e.pre, ...v.pre, { ...stmt, start: s.value, stop: p.value, step: e.value, value: v.value }];
+      }
+      case "storeField": {
+        const t = expandExpr(stmt.target);
+        const v = expandExpr(stmt.value);
+        return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
+      }
+      case "return": {
+        if (stmt.value === null) return [stmt];
+        const r = expandExpr(stmt.value);
+        return [...r.pre, { ...stmt, value: r.value }];
+      }
+      case "if": {
+        const c = expandExpr(stmt.condition);
+        const thenBody = stmt.then.flatMap(expandStmt);
+        const elseBody = stmt.otherwise.flatMap(expandStmt);
+        return [...c.pre, { ...stmt, condition: c.value, then: thenBody, otherwise: elseBody }];
+      }
+      case "while": {
+        const c = expandExpr(stmt.condition);
+        const body = stmt.body.flatMap(expandStmt);
+        return [...c.pre, { ...stmt, condition: c.value, body }];
+      }
+      case "for": {
+        const f = expandExpr(stmt.from);
+        const t = expandExpr(stmt.to);
+        const s = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step);
+        const body = stmt.body.flatMap(expandStmt);
+        return [...f.pre, ...t.pre, ...s.pre, { ...stmt, from: f.value, to: t.value, step: s.value, body }];
+      }
+      case "print": {
+        const pres: PyStatement[] = [];
+        const values = stmt.values.map((v) => {
+          const r = expandExpr(v);
+          pres.push(...r.pre);
+          return r.value;
+        });
+        return [...pres, { ...stmt, values }];
+      }
+      case "call": {
+        const r = expandExpr(stmt.value);
+        return [...r.pre, { ...stmt, value: r.value }];
+      }
+      case "function": {
+        return [{ ...stmt, body: stmt.body.flatMap(expandStmt) }];
+      }
+      case "try": {
+        return [{
+          ...stmt,
+          body: stmt.body.flatMap(expandStmt),
+          catchBody: stmt.catchBody === null ? null : stmt.catchBody.flatMap(expandStmt),
+          finallyBody: stmt.finallyBody === null ? null : stmt.finallyBody.flatMap(expandStmt),
+        }];
+      }
+      default:
+        return [stmt];
+    }
+  };
+
+  const expandedFunctions = module.functions.map((fn) => ({
+    ...fn,
+    body: fn.body.flatMap(expandStmt),
+  }));
+  const expandedBody = module.body.flatMap(expandStmt);
+  return { ...module, functions: expandedFunctions, body: expandedBody };
+}
+
 export function parsePython(source: string, path: string, diagnostics: Diagnostics): PyModule {
   const parser = new PythonParser(tokenizePython(source, path), path, diagnostics);
   const module = parser.parseModule();
-  return fillDefaultArguments(module);
+  return fillDefaultArguments(expandWalrus(module));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2672,6 +2882,8 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       return "list";
     case "lambda":
       return "unknown";
+    case "walrus":
+      return typeOfValue(value.value, names);
     case "dict":
       return "dict";
     case "unary":
@@ -2842,6 +3054,11 @@ export function lowerValue(value: PyValue): Expression {
     }
     case "lambda": {
       throw frontendError("\"lambda\" is not supported", "a function written with def");
+    }
+    case "walrus": {
+      // Walrus is lifted to a declaration by expandWalrus; one that remains
+      // here is in a position that cannot carry a statement.
+      throw frontendError("a walrus is not part of the subset", "a name bound by a statement, as in x = 1");
     }
     case "membership": {
       throw frontendError("membership is not supported in a function", "write the loop out");
@@ -3074,6 +3291,8 @@ export function isBooleanCondition(value: PyValue): boolean {
     case "dict":
     case "conditional":
       return false;
+    case "walrus":
+      return isBooleanCondition(value.value);
   }
 }
 
@@ -3334,6 +3553,11 @@ class BodyAnalysis {
       }
       case "lambda": {
         this.uncontractable("uses a lambda", line, "a function written with def");
+        return "0";
+      }
+      case "walrus": {
+        this.uncontractable("uses a walrus", line, "a name bound by a statement, as in x = 1");
+        return this.serialize((value as { k: "walrus"; name: string; value: PyValue }).value, loop, line);
       }
       case "membership": {
         this.uncontractable("tests membership", line, "a loop that looks for the value");
@@ -3457,6 +3681,8 @@ function dependsOn(value: PyValue, name: string): boolean {
       return dependsOn(value.value, name) || dependsOn(value.container, name);
     case "lambda":
       return dependsOn(value.body, name);
+    case "walrus":
+      return dependsOn((value as { k: "walrus"; name: string; value: PyValue }).value, name);
     case "dict":
       return value.entries.some((entry) => dependsOn(entry.value, name));
     case "conditional":
@@ -3756,6 +3982,8 @@ function conversionInValue(value: PyValue): string | null {
       return conversionInValue(value.value) ?? conversionInValue(value.container);
     case "lambda":
       return conversionInValue(value.body);
+    case "walrus":
+      return conversionInValue(value.value);
     case "dict":
       return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
     case "text":
