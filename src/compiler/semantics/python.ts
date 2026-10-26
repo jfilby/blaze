@@ -1493,6 +1493,94 @@ class PythonParser {
 
   /** A binding, and the compound assignments of one. */
   private assignment(): PyStatement | null {
+    // A parenthesised base names the same value the name inside it does, so
+    // `(a)[i] = value` is `a[i] = value`. Unwrap the parentheses and read
+    // the assignment off the name they hold.
+    if (this.peek().kind === "op" && this.peek().text === "(") {
+      this.next(); // (
+      const inner = this.peek();
+      if (inner.kind !== "name") {
+        this.skipStatement();
+        return null;
+      }
+      this.next(); // name
+      if (!this.accept(")")) {
+        this.skipStatement();
+        return null;
+      }
+      const name = inner;
+      // `name[i] = value` / `name[i:j] = value`
+      if (this.peek().kind === "op" && this.peek().text === "[") {
+        this.next(); // [
+        let sliceOrIndex: PyValue;
+        if (this.at(":")) {
+          this.next();
+          let start: PyValue | null = null;
+          let stop: PyValue | null = null;
+          let step: PyValue | null = null;
+          if (this.at(":")) {
+            this.next();
+            if (!this.at("]")) step = this.expression();
+          } else if (!this.at("]")) {
+            stop = this.expression();
+            if (this.at(":")) {
+              this.next();
+              if (!this.at("]")) step = this.expression();
+            }
+          }
+          this.expect("]");
+          sliceOrIndex = { k: "slice", base: { k: "name", name: name.text }, start, stop, step };
+        } else {
+          const index = this.expression();
+          if (this.at(":")) {
+            this.next();
+            let stop: PyValue | null = null;
+            let step: PyValue | null = null;
+            if (!this.at(":") && !this.at("]")) stop = this.expression();
+            if (this.at(":")) {
+              this.next();
+              if (!this.at("]")) step = this.expression();
+            }
+            this.expect("]");
+            sliceOrIndex = { k: "slice", base: { k: "name", name: name.text }, start: index, stop, step };
+          } else {
+            this.expect("]");
+            sliceOrIndex = { k: "index", base: { k: "name", name: name.text }, index };
+          }
+        }
+        if (!this.at("=")) {
+          this.skipStatement();
+          return null;
+        }
+        this.next(); // =
+        const value = this.expression();
+        this.skipNewline();
+        if (sliceOrIndex.k === "index") {
+          return { k: "storeElement", target: sliceOrIndex, value, line: name.line };
+        }
+        return { k: "storeSlice", base: name.text, start: sliceOrIndex.start, stop: sliceOrIndex.stop, step: sliceOrIndex.step, value, line: name.line };
+      }
+      // `name.field = value`
+      if (this.peek().kind === "op" && this.peek().text === ".") {
+        this.next(); // .
+        const field = this.peek();
+        if (field.kind !== "name") {
+          this.skipStatement();
+          return null;
+        }
+        this.next(); // field
+        if (this.peek().kind !== "op" || this.peek().text !== "=") {
+          this.skipStatement();
+          return null;
+        }
+        this.next(); // =
+        const value = this.expression();
+        this.skipNewline();
+        return { k: "storeField", target: { k: "field", base: { k: "name", name: name.text }, field: field.text }, value, line: name.line };
+      }
+      this.skipStatement();
+      return null;
+    }
     const name = this.peek();
     // `a[i] = value` and `a[i:j] = value`: an element or a slice replaced.
     if (
