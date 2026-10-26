@@ -84,8 +84,19 @@ async function askThroughBlaze(question) {
     body: question,
   });
   if (!response.ok) throw new Error("the server answered " + response.status);
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || JSON.stringify(data);
+  /* The answer is the model's JSON, or the JSON of an error the program
+     could not answer with. Either way it is JSON, but a body that arrived
+     empty or arrived as anything else is read as the text it is and named,
+     rather than thrown past the person who asked. */
+  const raw = await response.text();
+  try {
+    const data = JSON.parse(raw);
+    if (data && data.error) return "The model could not be asked: " + (data.error.message || JSON.stringify(data.error));
+    return data.choices?.[0]?.message?.content || JSON.stringify(data);
+  } catch {
+    if (raw.trim() === "") throw new Error("the model answered nothing");
+    return raw;
+  }
 }
 
 /** Asks a question: always through the Blaze program, which holds the key. */

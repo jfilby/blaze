@@ -226,6 +226,11 @@ const PRIMITIVES: Record<string, string> = {
   number: "f64",
   bigint: "i64",
   boolean: "bool",
+  // A text is what the runtime lays out and what the source reads apart: the
+  // type a parameter of a function that takes a configuration value is
+  // written at, and the answer a function that reads a text apart hands
+  // back. The language spells it `string` and the contract calls it `text`.
+  string: "text",
   // The compiler's own wide integer, named as a type. It is neither a
   // TypeScript type nor a typed array: a source spells it to ask for
   // arithmetic at a fixed width wider than any the language has a keyword for,

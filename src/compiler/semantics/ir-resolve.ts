@@ -689,12 +689,15 @@ function holdsText(value: DraftValue): boolean {
       return value.type === null && (value.op === "+" || value.op === "&&" || value.op === "||");
     case "conditional":
       return value.type === null;
+    case "call":
+      // A call that hands back a string is a string, the way the type of the
+      // call says it is: printing one is printing the text it answered.
+      return value.call.returns.kind === "text";
     case "literal":
     case "buffer":
     case "sized":
     case "view":
     case "fill":
-    case "call":
     case "length":
     case "stringLength":
     case "element":
@@ -1914,6 +1917,10 @@ class ProgramResolver {
     const value = result.value;
     if (value.k === "literal") return numeric(isBigint(value) ? BIGINT_TYPE : "f64");
     if (value.k === "boolean") return { kind: "primitive", name: "bool" };
+    // A string the body hands back is the string it is: a text is a value the
+    // type of a draft does not spell, and a function that returns one from
+    // every path is a function the call sites read the text of.
+    if (holdsText(value)) return TEXT;
     return { kind: "void" };
   }
 
@@ -2390,6 +2397,12 @@ class ProgramResolver {
         }
         // A block of bytes is what the views over it are taken of, and a
         // program holds one as the reference it is.
+        if (value.call.returns.kind === "text") {
+          // A name bound to a call that hands back a string holds the string
+          // it answered: a text is what the program holds, and the calls the
+          // compiler provides answer the texts a program reads apart.
+          return declare({ kind: "text", mutable, value: null });
+        }
         if (value.call.returns.kind === "ref" || value.call.returns.kind === "ptr") {
           return declare({ kind: "object", mutable, type: value.call.returns });
         }

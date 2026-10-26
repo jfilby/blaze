@@ -278,6 +278,16 @@ function readValue(value: ProgramValue, reading: Reading): void {
 function readCall(callee: string, args: readonly ProgramValue[], reading: Reading): void {
   if (callee === "http.serveTls") {
     reading.needs.tls = true;
+  } else if (callee === "http.request" || callee === "fetch") {
+    /* The URL a client request is made to decides whether the runtime needs
+       the TLS backend, and the URL is often a literal the source spells out:
+       "https://" speaks TLS and "http://" does not. A URL the source does not
+       spell — one read out of a file of configuration, or put together while
+       the program runs — is a URL the compiler cannot decide on, so the
+       runtime is given the backend that can speak either. A program whose
+       every URL is a literal it wrote keeps the decision it made. */
+    const url = args[0];
+    if (url === undefined || !writtenText(url)) reading.needs.tls = true;
   } else if (callee === "http.serveSettings") {
     reading.calls += 1;
     const stated = args[1];
@@ -293,4 +303,13 @@ function readCall(callee: string, args: readonly ProgramValue[], reading: Readin
     }
   }
   for (const argument of args) readValue(argument, reading);
+}
+
+/** Whether a value is a text the source wrote out in full: every part of it
+ *  is text as written, and nothing in it was computed while the program runs.
+ *  A template string with nothing interpolated in it is still a text written
+ *  out in full, and one with a name in it is not. */
+function writtenText(value: ProgramValue): boolean {
+  if (value.k !== "text") return false;
+  return value.parts.every((part) => part.k === "text");
 }

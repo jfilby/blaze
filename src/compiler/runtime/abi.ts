@@ -109,6 +109,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_md5_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
   entry("blaze_rt_md5_digest", "double", [["hasher", "double"]], "Finalizes and returns the hex digest.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
+  entry(
+    "blaze_rt_env_get",
+    "const char*",
+    [["name", "const char*"]],
+    "Reads an environment variable.",
+    "Returns a borrowed string: the value the environment sets the name to, and the empty string where it sets nothing. The string is owned by the environment and is valid for the life of the process.",
+    { tags: ["host"] },
+  ),
   entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
   entry("blaze_rt_array_get", "double", [["array", "double"], ["index", "double"]], "Reads one element of a dynamic array.", "Returns the element.", { tags: ["object"] }),
   entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
@@ -553,6 +561,18 @@ const I256_DECLARATIONS: readonly string[] = [
 ];
 
 /**
+ * The prototypes of the text helpers. Like the wide kernel, they are not
+ * services a host calls: they are operations over the texts the runtime
+ * itself lays out, so only the C runtime defines them and a program reaches
+ * for them where the source reads a text apart.
+ */
+const TEXT_DECLARATIONS: readonly string[] = [
+  "long long blaze_rt_text_index_of(const char* text, const char* needle)",
+  "const char* blaze_rt_text_slice(const char* text, long long start, long long stop)",
+  "const char* blaze_rt_text_trim(const char* text)",
+];
+
+/**
  * The wide integer symbols, which generated code may reference alongside the
  * runtime ABI. Kept apart from `RUNTIME_SYMBOLS` because they are the compiler's
  * own arithmetic rather than a service the host provides; see
@@ -560,6 +580,15 @@ const I256_DECLARATIONS: readonly string[] = [
  */
 export const WIDE_SYMBOLS: Record<string, true> = Object.fromEntries(
   [...U256_DECLARATIONS, ...I256_DECLARATIONS].map((declaration) => [
+    declaration.slice(declaration.indexOf("blaze_rt_"), declaration.indexOf("(")),
+    true as const,
+  ]),
+);
+
+/** The text-helper symbols, which stand beside the runtime ABI the way the
+ *  wide kernel does: the compiler's own answer over the runtime's own texts. */
+export const TEXT_SYMBOLS: Record<string, true> = Object.fromEntries(
+  TEXT_DECLARATIONS.map((declaration) => [
     declaration.slice(declaration.indexOf("blaze_rt_"), declaration.indexOf("(")),
     true as const,
   ]),
@@ -591,6 +620,7 @@ export function isRuntimeSymbol(symbol: string): boolean {
   return (
     RUNTIME_SYMBOLS[symbol] === true ||
     WIDE_SYMBOLS[symbol] === true ||
+    TEXT_SYMBOLS[symbol] === true ||
     isHttpSymbol(symbol) ||
     isSqliteSymbol(symbol) ||
     isTritonSymbol(symbol) ||
@@ -676,7 +706,7 @@ export function runtimeHeaderSource(): string {
       item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
     })${suffix};`;
   }).join("\n");
-  return `${HEADER_PREAMBLE}\n${declarations}\n\n${[...U256_DECLARATIONS, ...I256_DECLARATIONS].map((declaration) => `${declaration};`).join("\n")}\n${HEADER_EPILOGUE}`;
+  return `${HEADER_PREAMBLE}\n${declarations}\n\n${[...U256_DECLARATIONS, ...I256_DECLARATIONS, ...TEXT_DECLARATIONS].map((declaration) => `${declaration};`).join("\n")}\n${HEADER_EPILOGUE}`;
 }
 
 /**
@@ -2448,6 +2478,56 @@ const char* blaze_rt_string_append(const char* left, const char* right) {
   return joined;
 }
 
+/* The whitespace a text may carry at its ends: the space the keyboard writes
+   and the ends of a line a file of configuration is read with. The C library
+   has a function for the question, but the runtime asks it of one character
+   at a time in two places and a helper of its own says the one answer twice
+   rather than reaching for a header the rest of the source never wants. */
+static int blaze_rt_text_is_space(char character) {
+  return character == ' ' || character == '\\t' || character == '\\n' || character == '\\r' || character == '\\v' || character == '\\f';
+}
+
+/* Where a needle first says itself in a text, counted in bytes from the
+   front, and nowhere (-1) when it never does. A text that is nothing holds
+   no needle at all, and a needle that is nothing is nowhere in one. */
+long long blaze_rt_text_index_of(const char* text, const char* needle) {
+  if (text == NULL || needle == NULL) return -1;
+  const char* at = strstr(text, needle);
+  return at == NULL ? -1 : (long long)(at - text);
+}
+
+/* The bytes of a text between two indexes. An index below zero counts back
+   from the end, an index past the end stops at the end, and a range that
+   holds nothing answers an empty text: the language answers a read past the
+   end of an array with zero and not an error, and a slice that holds nothing
+   is the text that says nothing. */
+const char* blaze_rt_text_slice(const char* text, long long start, long long stop) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const long long length = (long long)blaze_rt_text_length(text);
+  long long from = start;
+  long long to = stop;
+  if (from < 0) from += length;
+  if (to < 0) to += length;
+  if (from < 0) from = 0;
+  if (to > length) to = length;
+  if (to <= from) return blaze_rt_string_new(NULL, 0);
+  return blaze_rt_string_new((const unsigned char*)text + from, (size_t)(to - from));
+}
+
+/* The text with the whitespace at both ends gone. A key or a value read out
+   of a file of configuration arrives with the end of the line it sat on
+   still attached, and a key read with it would never compare equal to the
+   key that was written: the trim is what makes the two the same text. */
+const char* blaze_rt_text_trim(const char* text) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const long long length = (long long)blaze_rt_text_length(text);
+  long long start = 0;
+  long long stop = length;
+  while (start < stop && blaze_rt_text_is_space(text[start])) start += 1;
+  while (stop > start && blaze_rt_text_is_space(text[stop - 1])) stop -= 1;
+  return blaze_rt_string_new((const unsigned char*)text + start, (size_t)(stop - start));
+}
+
 void* blaze_rt_array_new(size_t count, size_t elementSize) {
   /* Cleared, and deliberately so. A program is allowed to read past what it
      filled: a while loop over an array runs until the read comes back
@@ -3143,6 +3223,17 @@ void blaze_rt_array_set(double array, double index, double value) {
   size_t i = (size_t)index;
   if (i >= d->count) return;
   ((double*)d->items)[i] = value;
+}
+
+/* An environment variable, read by its name. The value belongs to the
+   environment and is valid for the life of the process, so it is handed back
+   as the borrowed string it is. A name the environment sets nothing for is
+   the empty string, which is what a program reads a configuration value
+   that is not there as. */
+const char* blaze_rt_env_get(const char* name) {
+  if (name == NULL) return "";
+  const char* value = getenv(name);
+  return value == NULL ? "" : value;
 }
 
 double blaze_rt_file_read(const char* path, const char* mode) {

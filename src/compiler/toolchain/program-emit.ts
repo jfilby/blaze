@@ -1065,7 +1065,10 @@ class ProgramEmitter {
       }
       // A callee's array parameter carries its length beside it, so pass the
       // length of this argument as the hidden parameter that follows it.
-      const paramType = call.signature.params[index] !== undefined ? parseType(call.signature.params[index].type) : null;
+      // A text and the cell a captured text travels in are not sequences:
+      // neither carries a length beside it, so neither is parsed as one.
+      const written = call.signature.params[index]?.type;
+      const paramType = written !== undefined && written !== "text" && written !== "boxedtext" ? parseType(written) : null;
       if (paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr")) {
         if (argument.k === "local") {
           argumentsText.push(`${this.names.read(argument.name)}_length`);

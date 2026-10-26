@@ -116,6 +116,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_md5_update",
   "blaze_rt_md5_digest",
   "blaze_rt_file_read",
+  "blaze_rt_env_get",
 ];
 
 /**
@@ -154,6 +155,22 @@ const SIGNATURE_OVERRIDES: Record<string, { params: readonly string[]; result: s
 };
 
 /**
+ * The text helpers, which stand beside the runtime ABI the way the wide
+ * kernel does: they are not services a host of the ABI provides but
+ * operations over the texts the runtime lays out, and they are here so a
+ * module reads a text apart the way a native program does.
+ *
+ * The indexes travel as numbers, which is what a module carries an index of
+ * a text as on this side of the wall: everything else it holds there is a
+ * number too, and the host reads the whole number off it.
+ */
+const TEXT_SERVICES: readonly HostService[] = [
+  { symbol: "blaze_rt_text_index_of", params: ["i32", "i32"], result: "f64" },
+  { symbol: "blaze_rt_text_slice", params: ["i32", "f64", "f64"], result: "i32" },
+  { symbol: "blaze_rt_text_trim", params: ["i32"], result: "i32" },
+];
+
+/**
  * The services of the host ABI, by the name they are imported under.
  *
  * The table is the runtime ABI with the C types replaced by the WebAssembly
@@ -176,6 +193,7 @@ export const HOST_SERVICES: readonly HostService[] = [
     };
   }),
   ...WIDE_SERVICES,
+  ...TEXT_SERVICES,
 ];
 
 /** Every service by name, so a lowering asks for one without searching. */
@@ -999,6 +1017,16 @@ export function blaze_rt_file_read(path, mode) {
 `,
   },
   {
+    service: "blaze_rt_env_get",
+    source: `
+export function blaze_rt_env_get(name) {
+  const variable = new TextDecoder().decode(textBytes(name));
+  const value = globalThis.process !== undefined ? globalThis.process.env[variable] : undefined;
+  return makeText(typeof value === "string" ? value : "");
+}
+`,
+  },
+  {
     service: "blaze_rt_u256_from_u64",
     source: `
 export function blaze_rt_u256_from_u64(out, value) {
@@ -1105,6 +1133,50 @@ export function blaze_rt_u256_equal(left, right) {
     source: `
 export function blaze_rt_print_u256(value) {
   writeOut(new TextEncoder().encode(wideText(readWide(value))));
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_index_of",
+    source: `
+export function blaze_rt_text_index_of(text, needle) {
+  const haystack = new TextDecoder().decode(textBytes(text));
+  const part = new TextDecoder().decode(textBytes(needle));
+  return haystack.indexOf(part);
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_slice",
+    source: `
+export function blaze_rt_text_slice(text, start, stop) {
+  const bytes = textBytes(text);
+  const length = bytes.length;
+  let from = Math.trunc(start);
+  let to = Math.trunc(stop);
+  if (from < 0) from += length;
+  if (to < 0) to += length;
+  if (from < 0) from = 0;
+  if (to > length) to = length;
+  if (to <= from) return makeText(new Uint8Array(0));
+  return makeText(bytes.slice(from, to));
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_trim",
+    source: `
+function blaze_rt_text_is_space(byte) {
+  return byte === 32 || byte === 9 || byte === 10 || byte === 13 || byte === 11 || byte === 12;
+}
+
+export function blaze_rt_text_trim(text) {
+  const bytes = textBytes(text);
+  let start = 0;
+  let stop = bytes.length;
+  while (start < stop && blaze_rt_text_is_space(bytes[start])) start += 1;
+  while (stop > start && blaze_rt_text_is_space(bytes[stop - 1])) stop -= 1;
+  return makeText(bytes.slice(start, stop));
 }
 `,
   },

@@ -11,8 +11,9 @@
  * Usage:
  *   blaze-website [port]
  *
- * The port defaults to 8080. The Nebius Token Factory API key is read from a
- * file named NEBIUS_API_KEY in the working directory.
+ * The port defaults to 8080. The endpoint the chat asks and the model it
+ * asks there are read from config.toml in the working directory, and the key
+ * it asks with comes from the NEBIUS_API_KEY environment variable.
  */
 
 const fs = require("fs");
@@ -20,30 +21,96 @@ const fs = require("fs");
 const args = process.argv.slice(2);
 const portArg = args[0];
 const listenPort = portArg > 0 ? portArg : 8080;
-const keyFile = "NEBIUS_API_KEY";
-/** The endpoint the chat asks, and the model it asks: the Token Factory
- *  endpoint and its cheapest text-to-text model. */
-const ENDPOINT = "https://api.tokenfactory.nebius.com/v1/chat/completions";
 
 const web = "web";
 
 const db = sqlite.open("chats.db");
 sqlite.exec(db, "CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, answer TEXT)");
 
-let apiKey = "";
+/* The configuration, read once when the program starts. A file that is not
+   there is read as the empty text, and every value a configuration without
+   the line answers the empty text too: the chat answers with the error that
+   says so rather than a call the endpoint cannot be made with. */
+let configText = "";
 try {
-  apiKey = `${fs.readFileSync(keyFile, "utf8")}`;
+  configText = `${fs.readFileSync("config.toml", "utf8")}`;
 } catch {
-  apiKey = "";
+  configText = "";
 }
 
-const MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B";
+/**
+ * The value of one `key = "value"` line of the configuration, with the
+ * quotes and the whitespace the line leaves behind gone. A key the
+ * configuration does not name answers the empty text.
+ */
+function configValue(text: string, key: string): string {
+  const at = text.indexOf(`${key} = "`);
+  if (at < 0) return "";
+  const rest = text.slice(at + key.length + 4, text.length);
+  const end = rest.indexOf("\"");
+  if (end < 0) return "";
+  return rest.slice(0, end).trim();
+}
 
-function askModel(question): any {
-  const body = `{"model":"${MODEL}","messages":[{"role":"user","content":"${question}"}],"temperature":0.7}`;
-  const headers = "Authorization: Bearer " + apiKey + "\r\nContent-Type: application/json\r\n";
-  const response = http.request(ENDPOINT, "POST", headers, body);
-  return response;
+/** The endpoint the chat asks, and the model it asks there. */
+const ENDPOINT = configValue(configText, "endpoint");
+const MODEL = configValue(configText, "model");
+/** The key the chat asks with, from the environment: it is never written
+ *  into the source, the configuration or anything the browser is sent. */
+const apiKey = process.env.NEBIUS_API_KEY;
+
+/**
+ * The text as JSON says it: every quote, backslash and end of a line escaped,
+ * so a question with any of them in it is still one JSON string when the
+ * model reads it, and so is every answer the saved chats are written out as.
+ */
+function jsonEscape(value: string): string {
+  var out = "";
+  var rest = value;
+  while (rest.length > 0) {
+    const backslash = rest.indexOf("\\");
+    const quote = rest.indexOf("\"");
+    const newline = rest.indexOf("\n");
+    const enter = rest.indexOf("\r");
+    const tab = rest.indexOf("\t");
+    var stop = -1;
+    if (backslash >= 0) stop = backslash;
+    if (quote >= 0 && (stop < 0 || quote < stop)) stop = quote;
+    if (newline >= 0 && (stop < 0 || newline < stop)) stop = newline;
+    if (enter >= 0 && (stop < 0 || enter < stop)) stop = enter;
+    if (tab >= 0 && (stop < 0 || tab < stop)) stop = tab;
+    if (stop < 0) {
+      out += rest;
+      break;
+    }
+    out += rest.slice(0, stop);
+    const character = rest.slice(stop, stop + 1);
+    if (character === "\\") out += "\\\\";
+    else if (character === "\"") out += "\\\"";
+    else if (character === "\n") out += "\\n";
+    else if (character === "\r") out += "\\r";
+    else if (character === "\t") out += "\\t";
+    rest = rest.slice(stop + 1, rest.length);
+  }
+  return out;
+}
+
+/** What the model answered last, as the JSON it sent. */
+var modelAnswer = "";
+
+/**
+ * Asks the model the question. The answer is written into the name the
+ * program holds it in, because a function hands back a number or a
+ * reference, and the JSON an answer is, is a string.
+ */
+function askModel(question: string): void {
+  if (apiKey === "") {
+    modelAnswer = `{"error":{"type":"config","message":"NEBIUS_API_KEY is not set"}}`;
+  } else {
+    const body = `{"model":"${MODEL}","messages":[{"role":"user","content":"${jsonEscape(question)}"}],"temperature":0.7}`;
+    const headers = `Authorization: Bearer ${apiKey}\r\nContent-Type: application/json\r\n`;
+    modelAnswer = `${http.request(ENDPOINT, "POST", headers, body)}`;
+  }
 }
 
 function saveChat(question, answer): void {
@@ -65,7 +132,7 @@ function buildChats(): void {
       json += ",";
     }
     first = 0;
-    json += `{"id":${sqlite.columnNumber(read, 0)},"question":"${sqlite.columnText(read, 1)}","answer":"${sqlite.columnText(read, 2)}"}`;
+    json += `{"id":${sqlite.columnNumber(read, 0)},"question":"${jsonEscape(`${sqlite.columnText(read, 1)}`)}","answer":"${jsonEscape(`${sqlite.columnText(read, 2)}`)}"}`;
   }
   sqlite.finalize(read);
   json += "]";
@@ -97,11 +164,11 @@ const server = http.createServer((req: any, res: any) => {
        body would have to be read field by field, and a field of a parsed
        JSON object is read as the number it is, which a question is not. */
     const question = req.text();
-    const answer = askModel(question);
-    saveChat(question, answer);
+    askModel(question);
+    saveChat(question, modelAnswer);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(answer);
+    res.end(modelAnswer);
   } else if (path === "/api/chats" && method === "GET") {
     buildChats();
     res.writeHead(200);

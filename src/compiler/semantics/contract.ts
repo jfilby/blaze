@@ -533,7 +533,7 @@ export interface BufferValue {
   readonly values: readonly Value[];
 }
 
-export type Value = bigint | number | boolean | null | BufferValue;
+export type Value = bigint | number | boolean | string | null | BufferValue;
 
 export function isBufferValue(value: Value): value is BufferValue {
   return typeof value === "object" && value !== null && "values" in value;
@@ -547,6 +547,7 @@ export function formatValue(value: Value): string {
     return Number.isInteger(value) ? value.toString() : value.toPrecision(17);
   }
   if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string") return `"${value}"`;
   if (value === null) return "null";
   return `[${value.values.map(formatValue).join(", ")}]`;
 }
@@ -831,6 +832,11 @@ function compareIntegerToFloat(integer: bigint, float: number): number {
 
 function valuesEqual(left: Value, right: Value): boolean {
   if (isBufferValue(left) || isBufferValue(right) || left === null || right === null) {
+    return left === right;
+  }
+  // A text is the word it says itself: it compares the way it was written,
+  // which is what the harness read off the line and what the reference said.
+  if (typeof left === "string" || typeof right === "string") {
     return left === right;
   }
   if (typeof left === "boolean" || typeof right === "boolean") {
@@ -1380,6 +1386,11 @@ export function valuesMatch(expected: Value, actual: Value, tolerance: number | 
     if (!Number.isInteger(floating)) return false;
     if (floating > Number.MAX_SAFE_INTEGER || floating < Number.MIN_SAFE_INTEGER) return floating === Number(whole);
     return BigInt(floating) === whole;
+  }
+  // A text result is the word it says itself: it matches the word the
+  // candidate printed and nothing about a number.
+  if (typeof expected === "string" || typeof actual === "string") {
+    return typeof expected === "string" && typeof actual === "string" && expected === actual;
   }
   if (typeof expected === "boolean" || typeof actual === "boolean") {
     return typeof expected === "boolean" && typeof actual === "boolean" && expected === actual;

@@ -973,8 +973,55 @@ class ProgramParser {
           value = { k: "length", of: value.name };
           continue;
         }
+        if (member === "env" && value.k === "name" && value.name === "process" && this.at(".")) {
+          // `process.env.NAME` reads the environment variable NAME, as the
+          // text it is set to. The name is the spelling of the variable, and
+          // the value is read when the program runs, so a key a program is
+          // given arrives without ever being written into the source.
+          this.next();
+          const variable = this.identifier("the name of the environment variable");
+          value = {
+            k: "call",
+            function: "process.env",
+            args: [{ k: "text", parts: [{ k: "text", value: variable }] }],
+          };
+          continue;
+        }
         if (member === "argv" && value.k === "name" && value.name === "process") {
           value = { k: "argv", index: null, offset: 0 };
+          continue;
+        }
+        if (member === "trim" && this.at("(")) {
+          // `s.trim()` answers the text with the whitespace at both ends gone:
+          // a value read out of a file of configuration arrives with the end
+          // of the line it sat on still attached, and a key read with it would
+          // never compare equal to the key that was written.
+          this.next();
+          this.expect(")");
+          value = { k: "call", function: "text.trim", args: [value] };
+          continue;
+        }
+        if (member === "indexOf" && this.at("(")) {
+          // `s.indexOf(needle)` answers where the needle first says itself in
+          // the text, counted from the front, and -1 where it never does.
+          this.next();
+          const args = [value, ...this.arguments()];
+          if (args.length !== 2) {
+            this.fail("s.indexOf(needle) takes the one text it looks for", this.peek());
+          }
+          value = { k: "call", function: "text.indexOf", args };
+          continue;
+        }
+        if (member === "slice" && this.at("(") && value.k !== "argv") {
+          // `s.slice(start, end)` answers the text between two indexes, and
+          // `s.slice(start)` the text from one index to the end. The slice of
+          // `process.argv` is the command line, and is the argv below.
+          this.next();
+          const args = [value, ...this.arguments()];
+          if (args.length < 2 || args.length > 3) {
+            this.fail("s.slice(start) or s.slice(start, end) slices a text", this.peek());
+          }
+          value = { k: "call", function: "text.slice", args };
           continue;
         }
         if (member === "slice") {

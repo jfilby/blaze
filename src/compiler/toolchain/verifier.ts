@@ -240,6 +240,13 @@ function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParam
       args.push([param.name, formatScalar(type, BigInt(builder.length))]);
       continue;
     }
+    if (type.kind === "text") {
+      // A text parameter is one word of the header line, and it is the value
+      // itself: a text is not a buffer, so it has no data line to follow it.
+      // The vector is generated, so the word it carries is generated too.
+      args.push([param.name, `arg${args.length}`]);
+      continue;
+    }
     if (type.kind !== "primitive") {
       const element = bufferElement(type);
       const size = type.kind === "array" && type.length !== null ? type.length : builder.length;
@@ -375,6 +382,11 @@ export function vectorValues(contract: FunctionContract, vector: TestVector): Ma
   for (const param of contract.function.params) {
     const type = parseType(param.type);
     const argument = vector.args[param.name];
+    if (type.kind === "text") {
+      // A text parameter is the word itself, read back the way it was written.
+      values.set(param.name, typeof argument === "string" ? argument : "");
+      continue;
+    }
     if (type.kind !== "primitive") {
       if (argument === null || argument === undefined || typeof argument === "string") {
         values.set(param.name, null);
@@ -398,15 +410,17 @@ export function encodeRunRequest(contract: FunctionContract, vectors: readonly T
       header.push(
         type.kind === "primitive"
           ? String(argument)
-          : argument === null || argument === undefined || typeof argument === "string"
-            ? "-1"
-            : String(argument.length),
+          : type.kind === "text"
+            ? String(argument)
+            : argument === null || argument === undefined || typeof argument === "string"
+              ? "-1"
+              : String(argument.length),
       );
     }
     lines.push(header.join(" "));
     for (const param of contract.function.params) {
       const type = parseType(param.type);
-      if (type.kind === "primitive") continue;
+      if (type.kind === "primitive" || type.kind === "text") continue;
       const argument = vector.args[param.name];
       // An empty or null buffer has no data line, exactly like the harness
       // expects: one line per buffer that actually carries elements.
@@ -422,6 +436,12 @@ export function decodeRunResults(contract: FunctionContract, stdout: string, exp
   const results: Value[] = [];
   for (const line of stdout.split("\n")) {
     if (!line.startsWith("RESULT ")) continue;
+    // A text result is the word itself: it is read back the way it was
+    // written, not parsed as the number a scalar is read as.
+    if (type.kind === "text") {
+      results.push(line.slice("RESULT ".length).trim());
+      continue;
+    }
     results.push(parseScalar(type, line.slice("RESULT ".length).trim()));
   }
   if (results.length !== expected) {

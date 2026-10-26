@@ -283,10 +283,11 @@ test("a body no one expression states still states what the function does", asyn
 });
 
 test("a type or a name the compiler cannot read is still refused", async () => {
-  assert.match(
-    diagnostic(() => contractOf("typescript", `export function text(): string { return "hi"; }\n`)),
-    /unsupported TypeScript type "string"/,
-  );
+  // `string` is the text the contract states, so a function that takes one
+  // and hands one back is read: its parameter is the text it is written at.
+  const textual = contractOf("typescript", `export function echo(raw: string): string { return raw; }\n`);
+  assert.deepEqual(textual.function.params.map((param) => param.type), ["text"]);
+  assert.equal(textual.function.returns, "text");
 
   assert.match(
     diagnostic(() => contractOf("typescript", `export function odd(x: Date): number { return 0; }\n`)),

@@ -1206,6 +1206,21 @@ proc blaze_rt_md5_create*(): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_md5_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
 proc blaze_rt_md5_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} = 0.0
+
+proc getenv(name: cstring): cstring {.importc: "getenv", header: "<stdlib.h>".}
+
+proc blaze_rt_env_get*(name: cstring): cstring {.exportc, cdecl.} =
+  ## The environment variable NAME, as the text it is set to. The value
+  ## belongs to the environment and lives as long as the process does, so it
+  ## is handed back the way it was borrowed. A name the environment sets
+  ## nothing for is the empty text.
+  if name == nil:
+    return ""
+  let value = getenv(name)
+  if value == nil:
+    ""
+  else:
+    value
 `;
 }
 

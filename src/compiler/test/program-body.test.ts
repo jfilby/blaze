@@ -2655,3 +2655,39 @@ test("a call a body makes in its return is a boundary the two backends share", a
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, original.stdout);
 });
+
+test("a text a program reads apart is read apart in the body and in a function", async () => {
+  // A configuration file is read as one text, and what a program takes out of
+  // it is where a key ends, what stands between two indexes, and the
+  // whitespace the ends of its lines leave behind. The three answers come
+  // from the runtime's own text helpers, and they are the same answers in the
+  // statements a body runs and in a function the backends lower.
+  const source = [
+    'var answered = "";',
+    "",
+    "function valueOf(raw: string): void {",
+    '  const eq = raw.indexOf("=");',
+    "  answered = raw.slice(eq + 1, raw.length).trim();",
+    "}",
+    "",
+    'valueOf("  model = nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B  ");',
+    "console.log(answered);",
+    'console.log("abc".indexOf("b"));',
+    'console.log("abc".indexOf("z"));',
+    'console.log("hello".slice(1, 3));',
+    'console.log("hello".slice(2));',
+    'console.log("  padded  ".trim());',
+    "",
+  ].join("\n");
+  const { directory, binary, notes } = await deliveredByMachine(source, "danger");
+  // Neither the body nor the function asks the C backend to step in: the text
+  // helpers are lowered where the rest of the program is.
+  assert.equal(notes.filter((note) => /refused to lower/.test(note)).length, 0, notes.join("\n"));
+
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.equal(delivered.stdout.trimEnd().split("\n")[0], "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B");
+});

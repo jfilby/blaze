@@ -310,6 +310,11 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   // An unshaped reference (`any`) accepts anything the program can hand it:
   // numbers, text, arrays, objects and other dynamic values alike.
   if (to.kind === "ref" && to.of === null && to.name === undefined) return true;
+  // A value the runtime holds is a string when it holds one, and the runtime
+  // renders it as one at the use: a text read of a dynamic value is the
+  // reading the language itself answers, which is how a body of a request
+  // arrives as the text it is.
+  if (isTextType(to) && from.kind === "ref" && from.of === null && from.name === undefined) return true;
   if (isNumber(from) && isNumber(to)) return !isWideType(from) || isWideType(to);
   if (isTextType(from) && isTextType(to)) return true;
   if (isReference(from) && isReference(to)) return true;

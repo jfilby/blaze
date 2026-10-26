@@ -48,6 +48,36 @@ test("a program that speaks TLS is built with the TLS backend", () => {
   assert.equal(needs.tls, true, "a server that speaks TLS is built with the TLS backend");
 });
 
+test("a client request to a URL the source does not spell is built with the TLS backend", () => {
+  // The URL a program asks for decides whether its runtime speaks TLS, and
+  // the source is where the decision is read from — but not every URL is
+  // written in the source. A program that reads its endpoint out of a file of
+  // configuration asks for a URL the compiler cannot see, and that URL may
+  // well be one over TLS: the runtime is given the backend that can speak
+  // either, because the other answer is a request that fails without a word.
+  const fromFile = httpRuntimeNeeds(bodyOf('const url = `${fs.readFileSync("config.toml")}`;\nhttp.request(url, "GET", "", "");\n'), [
+    'const url = `${fs.readFileSync("config.toml")}`;\nhttp.request(url, "GET", "", "");\n',
+  ]);
+  assert.equal(fromFile.tls, true, "a URL the compiler cannot read may be one over TLS");
+
+  // A URL the source spells out is still the program's own decision: a
+  // literal "http://" is a request over plain text and no TLS backend beside
+  // it, whatever else the program reads from a file.
+  const spelled = httpRuntimeNeeds(
+    bodyOf('const key = `${fs.readFileSync("key.txt")}`;\nhttp.request("http://127.0.0.1:8080/", "POST", key, "x");\n'),
+    ['const key = `${fs.readFileSync("key.txt")}`;\nhttp.request("http://127.0.0.1:8080/", "POST", key, "x");\n'],
+  );
+  assert.equal(spelled.tls, false, "a URL the source spells as http:// is a request over plain text");
+
+  // A template string with nothing interpolated into it is a URL written out
+  // in full, whatever punctuation it carries.
+  const templated = httpRuntimeNeeds(
+    bodyOf('http.request(`http://127.0.0.1:8080/`, "GET", "", "");\n'),
+    ['http.request(`http://127.0.0.1:8080/`, "GET", "", "");\n'],
+  );
+  assert.equal(templated.tls, false, "a template string nothing was interpolated into is a URL the source spells");
+});
+
 test("a program that speaks TLS in a function of another file is built with the TLS backend", () => {
   // The source of a file the compiler cannot read the calls of is read as
   // well: a program that asks for TLS anywhere asks for it.

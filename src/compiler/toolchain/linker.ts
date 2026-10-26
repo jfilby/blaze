@@ -84,6 +84,7 @@ function isWideScalar(type: TypeExpr): boolean {
 /** C type used in the harness declaration for a contract type. */
 export function cDeclarationType(type: TypeExpr): string {
   if (type.kind === "void") return "void";
+  if (type.kind === "text") return "const char*";
   if (type.kind === "ref") {
     // An unshaped reference (`any`) is a dynamic value, carried as a double
     // handle so it mixes with the arithmetic the generated C performs.
@@ -306,6 +307,18 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[], labe
   types.forEach((type, index) => {
     const name = names[index];
     const label = labels[index];
+    // A text parameter is one whitespace-free word of the header line, kept
+    // in a copy of its own: the line it was read off is overwritten by the
+    // next one, and the value is read again at the call.
+    if (type.kind === "text") {
+      body.push("  {");
+      body.push(`    char* token = next_token(&cursor);`);
+      body.push(`    if (token == NULL) fail("missing value for ${label}");`);
+      body.push(`    ${name} = strdup(token);`);
+      body.push(`    if (${name} == NULL) fail("out of memory");`);
+      body.push("  }");
+      return;
+    }
     if (type.kind === "primitive") {
       body.push("  {");
       body.push(`    char* token = next_token(&cursor);`);
@@ -354,7 +367,8 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[], labe
 function dataReader(types: readonly TypeExpr[], names: readonly string[], labels: readonly string[]): string {
   const body: string[] = [];
   types.forEach((type, index) => {
-    if (type.kind === "primitive") return;
+    // A text is one word of the header line and no data line of its own.
+    if (type.kind === "primitive" || type.kind === "text") return;
     const name = names[index];
     body.push(`  if (count_${name} != 0) {`);
     body.push(`    if (getline(&input_line, &input_capacity, input) <= 0) fail("missing data for ${labels[index]}");`);
@@ -380,6 +394,9 @@ function vectorStorage(types: readonly TypeExpr[], names: readonly string[]): st
 }
 
 function resultPrint(returns: TypeExpr): string {
+  // A text result is printed as it says itself: a text that is nothing is the
+  // text that says nothing, which is what the harness reads back.
+  if (returns.kind === "text") return 'printf("RESULT %s\\n", value == NULL ? "" : value);';
   // A wide number is four limbs and no C scalar, so it is written by the
   // kernel's own formatter: `printf("%llu", (unsigned long long)(value))` is C
   // the compiler rejects as "aggregate value used where an integer was
@@ -531,7 +548,15 @@ int main(void) {
   const long long start = now_ns();
   for (long long iteration = 0; iteration < iterations; iteration += 1) {
     ${invocation}
-    sink += ${isWideScalar(returns) ? `(double)${returns.kind === "primitive" && returns.name === "i256" ? "blaze_rt_i256_to_i64" : "blaze_rt_u256_to_u64"}(&value)` : "(double)value"};
+    /* A text result is measured for the call it took, not for the value it
+       says: a text has no number in it the bench could add up. */
+    sink += ${
+      returns.kind === "text"
+        ? "0.0"
+        : isWideScalar(returns)
+          ? `(double)${returns.kind === "primitive" && returns.name === "i256" ? "blaze_rt_i256_to_i64" : "blaze_rt_u256_to_u64"}(&value)`
+          : "(double)value"
+    };
   }
   const long long elapsed = now_ns() - start;
   printf("BENCH %lld %.17g\\n", elapsed, (double)sink);

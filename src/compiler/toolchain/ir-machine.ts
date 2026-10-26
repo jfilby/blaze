@@ -9860,6 +9860,64 @@ class Machine {
       this.code.bind(end);
       return;
     }
+    // The text the program reads apart. The arguments are written down one
+    // at a time, because evaluating one takes the accumulator the other is
+    // read into, and the runtime is called with the two of them where the
+    // convention puts them.
+    if (call.callee === "text.indexOf" || call.callee === "text.slice" || call.callee === "text.trim") {
+      const text = (at: number): Held => {
+        const value = call.args[at];
+        if (isTextType(value.type)) {
+          this.at(value, TEXT);
+        } else {
+          // A dynamic value crosses as the runtime's own text: the value is
+          // the box it is held in, and the runtime reads the bytes out of it.
+          this.value(value);
+          this.runtime("_to_text");
+        }
+        const held = this.hold(TEXT, "blaze_text");
+        this.store(held);
+        return held;
+      };
+      // An index the source wrote as a number is carried as the whole number
+      // it is: the fraction is read down into the accumulator's whole half,
+      // and the call takes it where the convention puts a whole number.
+      const index = (at: number): Held => {
+        this.at(call.args[at], NUMBER);
+        this.code.cvtFloatToInt(RAX, XMM0, false, true);
+        const held = this.hold(POINTER, "blaze_text_index");
+        this.store(held);
+        return held;
+      };
+      if (call.callee === "text.indexOf") {
+        const left = text(0);
+        const right = text(1);
+        this.callSymbol("blaze_rt_text_index_of", [left, right], TEXT);
+        // The index answers as a whole number in the accumulator, and the
+        // number the language holds is a fraction: the widening is here.
+        this.code.zeroFloat(XMM0);
+        this.code.cvtIntToFloat(XMM0, RAX, false);
+        return;
+      }
+      if (call.callee === "text.slice") {
+        const sliced = text(0);
+        const start = index(1);
+        const stop = call.args.length > 2 ? index(2) : null;
+        this.callSymbol("blaze_rt_text_slice", [sliced, start, ...(stop === null ? [] : [stop])], TEXT);
+        return;
+      }
+      const trimmed = text(0);
+      this.callSymbol("blaze_rt_text_trim", [trimmed], TEXT);
+      return;
+    }
+    if (call.callee === "process.env") {
+      // The environment variable is read by its name, and the answer is the
+      // text it is set to: a pointer to the bytes, which is what a text is.
+      this.at(call.args[0], TEXT);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_env_get");
+      return;
+    }
     const library = MATH_LIBRARY[call.callee];
     if (library === undefined || BUILTINS[call.callee] === undefined) {
       throw machineError(`${this.fn.symbol} calls ${call.callee}, which this backend does not lower`);

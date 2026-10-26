@@ -125,10 +125,24 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `u256_div(a, b)` computes integer division a / b. */
   "u256_div": { params: [U256, U256], returns: U256, arity: 2 },
   "require": { params: [ANY], returns: ANY, arity: 1 },
+  /** `text.indexOf(needle)` answers where the needle first says itself in the
+   *  text, counted in bytes from the front, and -1 where it never does. */
+  "text.indexOf": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** `text.slice(start, stop)` answers the text between two indexes, and
+   *  `text.slice(start)` the text from one index to the end. An index below
+   *  zero counts back from the end, and an index past the end stops there. */
+  "text.slice": { params: [TEXT, F64, F64], returns: TEXT, arities: [2, 3] },
+  /** `text.trim()` answers the text with the whitespace at both ends gone:
+   *  the ends of a line a file is read with arrive still attached to it. */
+  "text.trim": { params: [TEXT], returns: TEXT, arity: 1 },
   "JSON.stringify": { params: [ANY], returns: ANY, arity: 1 },
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
   "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
   "fs.readFileSync": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** `process.env.NAME` reads an environment variable as the text it is set
+   *  to. A name the environment does not set is the empty text, which is what
+   *  a program reads a configuration value that is not there as. */
+  "process.env": { params: [TEXT], returns: TEXT, arity: 1 },
   "hasher.update": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
   "hasher.update.digest": { params: [ANY, ANY], returns: ANY, arity: 2 },
   "array.new": { params: [], returns: ANY, arity: 0 },

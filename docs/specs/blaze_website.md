@@ -18,7 +18,8 @@ SQLite library linked beside the binary the compiler delivers.
 |---|---|---|
 | The server | `src/programs/blaze-website/main.ts` | the routes, the model, the database |
 | The website | `src/programs/blaze-website/web/` | HTML, CSS and vanilla JavaScript |
-| The key | `NEBIUS_API_KEY` in the working directory | the API key of Nebius Token Factory |
+| The configuration | `config.toml` in the working directory | the endpoint and the model |
+| The key | `NEBIUS_API_KEY` in the environment | the API key of Nebius Token Factory |
 | The database | `chats.db` in the working directory | every chat, saved when it is answered |
 
 ## The routes
@@ -49,13 +50,15 @@ is a chat that is saved.
 The model is `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`, the cheapest
 text-to-text model on Nebius Token Factory when this was written: 0.06 per
 million input tokens and 0.24 per million output tokens. The model and the
-endpoint are named in `main.ts`.
+endpoint are named in `config.toml`.
 
-The Nebius API key is server-side only: the program reads it from a file
-named `NEBIUS_API_KEY` in its working directory when it starts, and nothing
-about it ever reaches the browser. Every answer comes back through the Blaze
-program, and every chat the program answers is saved to SQLite — a chat that
-is asked is a chat that is saved.
+The Nebius API key is server-side only: the program reads it from the
+`NEBIUS_API_KEY` environment variable when it starts, and nothing about it
+ever reaches the browser. Every answer comes back through the Blaze program,
+and every chat the program answers is saved to SQLite — a chat that is asked
+is a chat that is saved. A chat asked without the key, or without the
+configuration, is answered with the error that says so, as JSON the browser
+shows.
 
 ## The database
 
@@ -103,10 +106,10 @@ These are the compiler's rules, and the program is written to them.
 - **A command-line argument is read as a number.** `ARGV(n)` answers the
   number an argument states, and an argument that is not a number at all is
   NaN — so the port is read off the command line and the API key is not: the
-  key is read from a file, because a key is text.
-- **An error is an error.** The API key that is not there is a runtime
-  failure, which stops the program rather than answering a chat with an
-  error message, so the key file must exist when the program starts.
+  key is read from the environment, because a key is text.
+- **An error is an error.** The endpoint that is not configured and the key
+  that is not set are answered with the error that says so, as JSON the
+  browser shows, rather than a chat answered with nothing.
 
 ## How to run it
 
@@ -115,18 +118,18 @@ The README of the program has the commands:
 ```sh
 cd src/programs/blaze-website
 blaze build
-printf %s "your-token-factory-key" > NEBIUS_API_KEY
+export NEBIUS_API_KEY="your-token-factory-key"
 ./blaze-website 8080
 ```
 
 The build of this project sets `verifyProgram = false`, the setting that asks
 a build to deliver the program without running it against its source. The
 check compares what the source prints with what the delivered program prints,
-and this program has nothing the build could compare: it reads its API key
-from a file that is beside it when it runs and not when it is built, so the
-delivered program raises before it prints the line the source prints. A
-program that serves rather than prints is the other kind that asks for this,
-and the benchmark programs are the ones that set it.
+and this program has nothing the build could compare: it reads its key from
+the environment and its endpoint from a file that are beside it when it runs
+and not when it is built, so the delivered program cannot be compared with
+the source's output. A program that serves rather than prints is the other
+kind that asks for this, and the benchmark programs are the ones that set it.
 
 ## What is not done
 
@@ -137,14 +140,9 @@ and the benchmark programs are the ones that set it.
   covers the features the program needs — the HTTP runtime, TLS to a server,
   SQLite — but nothing asserts the website's own routes or the chat flow.
 - **The chat is not conversational.** Every question is asked on its own:
-  the model is not given the chat so far. A chat that remembers would build
-  the request the way the model asks for a conversation, and the text of an
-  answer would have to be escaped before it is written into the JSON of the
-  request, which the program has no way to do yet.
+  the model is not given the chat so far. A chat that remembers would give
+  the model the conversation so far, which the request can now carry — the
+  text of an answer is escaped into it with `jsonEscape`.
 - **The model is called from the server.** The Nebius call happens inside the
   program, key and all, and the browser only talks to the program: nothing
   about the key or the model's stream reaches the visitor's page.
-- **The key is read from a file, not the environment.** The runtime of a
-  program has no `process.env` yet, so the API key is read from a file.
-- **The key file must exist when the program starts.** A file that is not
-  there is a runtime failure, and a program body cannot catch one.

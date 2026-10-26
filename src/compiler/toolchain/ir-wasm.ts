@@ -3548,6 +3548,39 @@ class Body {
         this.callService("blaze_rt_to_number");
         return F64_TYPE;
       }
+      case "text.indexOf": {
+        // Where the needle first says itself in the text. The two texts go
+        // down at the offsets their bytes are at, and the service answers the
+        // index the module carries a number at.
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_text_index_of");
+        return F64_TYPE;
+      }
+      case "text.slice": {
+        // The text between two indexes. A slice written with one index runs
+        // to the end, which the service reads as a stop it can never reach.
+        this.textArgument(argument(0));
+        this.value(argument(1), F64_TYPE);
+        if (call.args.length > 2) this.value(argument(2), F64_TYPE);
+        else this.float(Number.MAX_SAFE_INTEGER, true);
+        this.callService("blaze_rt_text_slice");
+        return TEXT;
+      }
+      case "text.trim": {
+        // The text with the whitespace at both ends gone.
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_text_trim");
+        return TEXT;
+      }
+      case "process.env": {
+        // The environment variable a program reads: the host asks for it by
+        // its name, and the answer is the text it is set to, empty where the
+        // host set nothing at all.
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_env_get");
+        return TEXT;
+      }
       default:
         return null;
     }

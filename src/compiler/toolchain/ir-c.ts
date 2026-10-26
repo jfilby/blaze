@@ -219,6 +219,11 @@ function builtinExpression(name: string, args: string[]): string {
     // cleared before the body runs, and the arm runs when one is pending.
     case "blaze_error_clear":
       return `(blaze_error_clear(), 0.0)`;
+    case "process.env":
+      // The environment variable a module function reads is the runtime's to
+      // ask for: the name is the text it is spelled with, and the answer is
+      // the text it is set to, empty where it is not set at all.
+      return `${RUNTIME_NAME}_env_get(${args[0]})`;
     case "blaze_had_error":
       return `(blaze_had_error())`;
     case "blaze_last_error":
@@ -794,6 +799,27 @@ class FunctionEmitter {
     // generic path does would be a copy the call does not want.
     const http = this.httpCall(call, depth);
     if (http !== null) return http;
+    // The text a program reads apart: the answer is read where the arguments
+    // are placed, so these are written before the generic path too. A text
+    // argument is the pointer to the bytes it names, and anything else is
+    // what the runtime renders as one — the wall a dynamic value crosses.
+    if (call.callee === "text.indexOf" || call.callee === "text.slice" || call.callee === "text.trim") {
+      const textOf = (value: SemanticValue): string => {
+        const raw = this.expression(value, isTextType(value.type) ? TEXT : null, depth);
+        return isTextType(value.type) || value.k === "text" ? raw : `${RUNTIME_NAME}_to_text(${raw})`;
+      };
+      if (call.callee === "text.indexOf") {
+        return `((double)${RUNTIME_NAME}_text_index_of(${textOf(call.args[0])}, ${textOf(call.args[1])}))`;
+      }
+      if (call.callee === "text.slice") {
+        // A slice written with one index runs to the end, which the runtime
+        // reads as a stop it can never reach: a stop below zero counts back
+        // from the end, so the end itself is the number a stop stops at.
+        const stop = call.args.length > 2 ? `(long long)(${this.expression(call.args[2], null, depth)})` : "9223372036854775807LL";
+        return `${RUNTIME_NAME}_text_slice(${textOf(call.args[0])}, (long long)(${this.expression(call.args[1], null, depth)}), ${stop})`;
+      }
+      return `${RUNTIME_NAME}_text_trim(${textOf(call.args[0])})`;
+    }
     const args: string[] = [];
     call.args.forEach((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;

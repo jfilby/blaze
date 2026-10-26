@@ -917,6 +917,15 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
 
   builtin(call: SemanticCall, argumentsText: string[], expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
+    // A text the program reads apart is the pointer it is, and anything else
+    // is what the runtime renders as one: the same wall every dynamic value
+    // crosses, crossed the other way.
+    const textArgument = (index: number): string => {
+      const at = call.args[index];
+      return at !== undefined && (isTextType(at.type) || at.k === "text")
+        ? argument(index)
+        : `${RUNTIME_NAME}_to_text(${argument(index)})`;
+    };
     switch (call.callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;
@@ -1017,10 +1026,31 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_string(${argument(0)}))`
           : `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
       }
+      // The text the program reads apart. A text argument is the pointer to
+      // the bytes it names; anything else is what the runtime renders it as,
+      // which is the wall a dynamic value crosses by.
+      case "text.indexOf": {
+        const left = textArgument(0);
+        const right = textArgument(1);
+        return `((double)${RUNTIME_NAME}_text_index_of(${left}, ${right}))`;
+      }
+      case "text.slice": {
+        // A slice written with one index runs to the end, which the runtime
+        // reads as a stop it can never reach: a stop below zero counts back
+        // from the end, so the end itself is the number a stop stops at.
+        const stop = call.args.length > 2 ? `(long long)(${argument(2)})` : "9223372036854775807LL";
+        return `${RUNTIME_NAME}_text_slice(${textArgument(0)}, (long long)(${argument(1)}), ${stop})`;
+      }
+      case "text.trim":
+        return `${RUNTIME_NAME}_text_trim(${textArgument(0)})`;
       case "crypto.createHash":
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      // `process.env.NAME`: the runtime reads the variable by its name and
+      // hands back the text it is set to, empty where it is not set at all.
+      case "process.env":
+        return `${RUNTIME_NAME}_env_get(${argument(0)})`;
       case "hasher.update":
         return `${RUNTIME_NAME}_md5_update(${argument(0)}, ${RUNTIME_NAME}_to_text(${argument(1)}))`;
       case "hasher.update.digest":
