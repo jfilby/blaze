@@ -409,6 +409,8 @@ export type PyStatement =
   | { k: "declare"; name: string; type: TypeExpr | null; value: PyValue; line: number }
   | { k: "assign"; name: string; op: string; value: PyValue; line: number }
   | { k: "storeField"; target: PyValue; value: PyValue; line: number }
+  | { k: "storeElement"; target: PyValue; value: PyValue; line: number }
+  | { k: "storeSlice"; base: string; start: PyValue | null; stop: PyValue | null; step: PyValue | null; value: PyValue; line: number }
   | { k: "return"; value: PyValue | null; line: number }
   | { k: "if"; condition: PyValue; then: PyStatement[]; otherwise: PyStatement[]; line: number }
   | { k: "while"; condition: PyValue; body: PyStatement[]; line: number }
@@ -1493,6 +1495,69 @@ class PythonParser {
   /** A binding, and the compound assignments of one. */
   private assignment(): PyStatement | null {
     const name = this.peek();
+    // `a[i] = value` and `a[i:j] = value`: an element or a slice replaced.
+    if (
+      name.kind === "name" &&
+      this.peek(1).kind === "op" &&
+      this.peek(1).text === "["
+    ) {
+      const base = { k: "name" as const, name: name.text };
+      this.next(); // name
+      this.next(); // [
+      // Parse the slice or index.
+      let sliceOrIndex: PyValue;
+      if (this.at(":")) {
+        // A slice: a[:stop], a[start:], a[start:stop], etc.
+        this.next(); // :
+        let start: PyValue | null = null;
+        let stop: PyValue | null = null;
+        let step: PyValue | null = null;
+        if (this.at(":")) {
+          this.next();
+          if (!this.at("]")) step = this.expression();
+        } else if (!this.at("]")) {
+          stop = this.expression();
+          if (this.at(":")) {
+            this.next();
+            if (!this.at("]")) step = this.expression();
+          }
+        }
+        this.expect("]");
+        sliceOrIndex = { k: "slice", base, start, stop, step };
+      } else {
+        const index = this.expression();
+        if (this.at(":")) {
+          // a[start:stop:step]
+          this.next();
+          let stop: PyValue | null = null;
+          let step: PyValue | null = null;
+          if (!this.at(":") && !this.at("]")) stop = this.expression();
+          if (this.at(":")) {
+            this.next();
+            if (!this.at("]")) step = this.expression();
+          }
+          this.expect("]");
+          sliceOrIndex = { k: "slice", base, start: index, stop, step };
+        } else {
+          this.expect("]");
+          sliceOrIndex = { k: "index", base, index };
+        }
+      }
+      // Expect `=`.
+      if (!this.at("=")) {
+        // Not an assignment; skip.
+        this.skipStatement();
+        return null;
+      }
+      this.next(); // =
+      const value = this.expression();
+      this.skipNewline();
+      if (sliceOrIndex.k === "index") {
+        return { k: "storeElement", target: sliceOrIndex, value, line: name.line };
+      }
+      // Slice assignment.
+      return { k: "storeSlice", base: name.text, start: sliceOrIndex.start, stop: sliceOrIndex.stop, step: sliceOrIndex.step, value, line: name.line };
+    }
     if (
       name.kind === "name" &&
       this.peek(1).kind === "op" &&
@@ -2709,6 +2774,24 @@ export function lowerStatement(statement: PyStatement): Statement {
         line: statement.line,
       };
     }
+    case "storeElement": {
+      const target = statement.target as { k: "index"; base: PyValue; index: PyValue };
+      const base = target.base;
+      if (base.k !== "name") {
+        throw frontendError('"a[i] = value" is not supported yet', "the object is a name the program holds");
+      }
+      return {
+        kind: "indexAssign",
+        buffer: base.name,
+        index: lowerValue(target.index),
+        op: "=" as AssignOperator,
+        value: lowerValue(statement.value),
+        line: statement.line,
+      };
+    }
+    case "storeSlice": {
+      throw frontendError('"a[i:j] = value" is not supported in a function', "a function\'s parameters are read only");
+    }
     case "return":
       return { kind: "result", value: lowerValue(statement.value ?? { k: "none" }), line: statement.line };
     case "if":
@@ -3405,6 +3488,8 @@ function conversionInStatement(statement: PyStatement): string | null {
     case "declare":
     case "assign":
     case "storeField":
+    case "storeElement":
+    case "storeSlice":
       return conversionInValue(statement.value);
     case "return":
       return statement.value === null ? null : conversionInValue(statement.value);

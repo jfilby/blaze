@@ -464,6 +464,63 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       bound(bindings, one.name, one.value);
       return { kind: "assign", name: one.name, op: operator, value, line: one.line };
     }
+    case "storeElement": {
+      const target = one.target as { k: "index"; base: PyValue; index: PyValue };
+      const base = target.base;
+      if (base.k !== "name") {
+        throw frontendError('"a[i] = value" is not supported yet', "the object is a name the program holds");
+      }
+      return {
+        kind: "elementAssign",
+        buffer: base.name,
+        index: programValue(target.index, bindings),
+        op: "=",
+        value: programValue(one.value, bindings),
+        line: one.line,
+      };
+    }
+    case "storeSlice": {
+      const base = one.base;
+      // The RHS must be a list literal for in-place replacement.
+      let rhsItems: PyValue[];
+      if (one.value.k === "list") {
+        rhsItems = one.value.items;
+      } else {
+        throw frontendError(
+          "slice assignment needs a list on the right",
+          "write the values as a list, as in a[1:3] = [10, 20]",
+        );
+      }
+      // Compute the slice indices.
+      let startBound = 0;
+      if (one.start !== null) {
+        if (one.start.k === "number") {
+          startBound = Number(one.start.text);
+        } else if (one.start.k === "unary" && one.start.op === "-") {
+          const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
+          let len = 0;
+          const baseVal = bindings.values.get(base);
+          if (baseVal !== undefined && baseVal.k === "list") {
+            len = baseVal.items.length;
+          }
+          startBound = Math.max(0, len - n);
+        }
+      }
+      const step = one.step === null ? 1 : (one.step.k === "number" ? Number(one.step.text) : 1);
+      const assignments: ProgramStatement[] = [];
+      for (let j = 0; j < rhsItems.length; j++) {
+        const idx = startBound + j * step;
+        assignments.push({
+          kind: "elementAssign",
+          buffer: base,
+          index: { k: "whole", text: String(idx) },
+          op: "=",
+          value: programValue(rhsItems[j], bindings),
+          line: one.line,
+        });
+      }
+      return { kind: "block", body: assignments, line: one.line };
+    }
     case "storeField": {
       const target = one.target as { k: "field"; base: PyValue; field: string };
       const base = target.base;

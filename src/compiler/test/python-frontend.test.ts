@@ -466,6 +466,27 @@ test("a string slice with a negative step in a program body", () => {
   assert.equal(declaration.value.parts[0].value, "olleh");
 });
 
+test("an element assignment in a program body", () => {
+  const phase = phaseOf("python", { "main.py": "a = [1, 2, 3]\na[1] = 10\n" }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  assert.equal(statements[1].kind, "elementAssign");
+  assert.equal((statements[1] as any).buffer, "a");
+  assert.equal((statements[1] as any).index.k, "whole");
+  assert.equal((statements[1] as any).index.text, "1");
+});
+
+test("a slice assignment in a program body", () => {
+  const phase = phaseOf("python", { "main.py": "a = [1, 2, 3, 4, 5]\na[1:3] = [10, 20]\n" }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  assert.equal(statements[1].kind, "block");
+  assert.equal((statements[1] as any).body.length, 2);
+  assert.equal((statements[1] as any).body[0].kind, "elementAssign");
+  assert.equal((statements[1] as any).body[0].index.text, "1");
+  assert.equal((statements[1] as any).body[1].index.text, "2");
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",
