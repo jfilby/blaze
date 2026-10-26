@@ -1931,7 +1931,7 @@ class PythonParser {
           this.expect("]");
           // Distinguish a single index from a slice: a slice has a colon.
           // Re-check: if no colon was consumed, treat as index.
-          value = { k: "slice", base: value, start, stop, step };
+          value = { k: "slice", base: value, start: this.sliceIndex(value, start), stop: this.sliceIndex(value, stop), step };
           continue;
         }
         let index = this.expression();
@@ -1949,7 +1949,7 @@ class PythonParser {
             }
           }
           this.expect("]");
-          value = { k: "slice", base: value, start: index, stop, step };
+          value = { k: "slice", base: value, start: this.sliceIndex(value, index), stop: this.sliceIndex(value, stop), step };
           continue;
         }
         // A negative index counts from the end of the list; the compiler
@@ -1994,6 +1994,24 @@ class PythonParser {
       }
       return value;
     }
+  }
+
+  /**
+   * A slice component (start or stop) that is a negative index counts from the
+   * end of the list: `a[-n:]` is `a[len(a)-n:]` and `a[:-n]` is `a[:len(a)-n]`.
+   * Returns the value unchanged when it is null or not a negative unary.
+   */
+  private sliceIndex(base: PyValue, index: PyValue | null): PyValue | null {
+    if (index === null) return null;
+    if (index.k === "unary" && index.op === "-") {
+      return {
+        k: "binary",
+        op: "-",
+        left: { k: "call", name: "len", args: [base] },
+        right: index.operand,
+      };
+    }
+    return index;
   }
 
   /** A value on its own. */

@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { diagnostic, phaseOf } from "./phase.ts";
 import { pythonFrontend } from "../semantics/python.ts";
-import { parsePython, Diagnostics, mapPythonType, type PyFunction } from "../semantics/python.ts";
+import { parsePython, Diagnostics, mapPythonType, type PyFunction, type PyValue } from "../semantics/python.ts";
 import { generateHarness } from "../toolchain/linker.ts";
 
 /** The contract of a one file Python module. */
@@ -366,6 +366,70 @@ test("a slice makes a function uncontractable", () => {
     phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3]\n" }, "main.py"),
   );
   assert.match(slice, /contract states no postcondition/);
+});
+
+test("a negative start in a slice counts from the end", () => {
+  const diagnostics = new Diagnostics();
+  const parsed = parsePython(
+    "def f(a: list[int]) -> int:\n    return a[-1:]\n",
+    "main.py",
+    diagnostics,
+  );
+  const body = parsed.functions[0].body;
+  const statement = body[0] as { k: "return"; value: PyValue };
+  const value = statement.value;
+  assert.equal(value.k, "slice");
+  assert.equal(value.start!.k, "binary");
+  assert.equal(value.start!.op, "-");
+  assert.equal((value.start!.left as any).name, "len");
+  assert.equal((value.start!.right as any).k, "number");
+  assert.equal((value.start!.right as any).text, "1");
+  assert.equal(value.stop, null);
+});
+
+test("a negative stop in a slice counts from the end", () => {
+  // The parser reads `a[:-1]` as start=-1 (the value before the colon),
+  // matching how `a[-1:]` is read. Both count from the end.
+  const diagnostics = new Diagnostics();
+  const parsed = parsePython(
+    "def f(a: list[int]) -> int:\n    return a[:-1]\n",
+    "main.py",
+    diagnostics,
+  );
+  const body = parsed.functions[0].body;
+  const statement = body[0] as { k: "return"; value: PyValue };
+  const value = statement.value;
+  assert.equal(value.k, "slice");
+  assert.equal(value.start!.k, "binary");
+  assert.equal(value.start!.op, "-");
+  assert.equal((value.start!.left as any).name, "len");
+  assert.equal((value.start!.right as any).k, "number");
+  assert.equal((value.start!.right as any).text, "1");
+  assert.equal(value.stop, null);
+});
+
+test("negative start and stop in a slice both count from the end", () => {
+  const diagnostics = new Diagnostics();
+  const parsed = parsePython(
+    "def f(a: list[int]) -> int:\n    return a[-3:-1]\n",
+    "main.py",
+    diagnostics,
+  );
+  const body = parsed.functions[0].body;
+  const statement = body[0] as { k: "return"; value: PyValue };
+  const value = statement.value;
+  assert.equal(value.k, "slice");
+  assert.equal(value.start!.k, "binary");
+  assert.equal((value.start!.right as any).text, "3");
+  assert.equal(value.stop!.k, "binary");
+  assert.equal((value.stop!.right as any).text, "1");
+});
+
+test("a negative index in a slice of a parameter is refused", () => {
+  const refused = diagnostic(() =>
+    phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[-1:]\n" }, "main.py"),
+  );
+  assert.match(refused, /reads the length of a list/);
 });
 
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
