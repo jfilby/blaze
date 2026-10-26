@@ -407,6 +407,10 @@ export interface PyParam {
   type: TypeExpr;
   /** The value used when the caller omits this argument, if any. */
   default?: PyValue;
+  /** True when this parameter collects the remaining positional arguments. */
+  rest?: boolean;
+  /** True when this parameter collects the remaining keyword arguments. */
+  kwargs?: boolean;
 }
 
 /** A statement a Python body runs. */
@@ -1062,22 +1066,42 @@ class PythonParser {
     if (!this.at(")")) {
       for (;;) {
         const parameter = this.peek();
+        const isKwargs = this.at("**");
         if (this.at("*") || this.at("**")) {
           this.next();
-          if (this.peek().kind === "name") this.next();
-          if (this.at(":")) {
-            this.next();
-            this.annotation();
+          const restToken = this.peek();
+          if (restToken.kind !== "name") {
+            this.report("expected the name of a parameter", `near "${restToken.text}"`, restToken);
+            this.skipBlock();
+            return null;
           }
-          if (this.at("=")) {
-            this.next();
-            this.expression();
+          this.next();
+          if (!this.at(":")) {
+            this.report(
+              "every parameter declares its type",
+              `as in def f(${restToken.text}: int) -> int:`,
+              restToken,
+            );
+            this.skipBlock();
+            return null;
           }
-          this.report(
-            '"*args" is not supported',
-            "a function takes a fixed list of parameters",
-            parameter,
-          );
+          this.next();
+          const annotation = this.annotation();
+          if (annotation === null) {
+            this.skipBlock();
+            return null;
+          }
+          if (isKwargs) {
+            this.report(
+              '"**kwargs" is not supported',
+              "a function takes a fixed list of parameters; a dict is written with named keys",
+              restToken,
+            );
+          } else {
+            // `*args: int` collects into a list of ints.
+            const sliceType: TypeExpr = { kind: "slice", of: annotation };
+            params.push({ name: restToken.text, type: sliceType, rest: true });
+          }
           if (this.accept(",")) continue;
           break;
         }
@@ -3226,10 +3250,155 @@ function expandComprehensions(module: PyModule): PyModule {
   return { ...module, functions: expandedFunctions, body: expandedBody };
 }
 
+/**
+ * Packs the trailing arguments of a call to a function with `*args` into a
+ * single list, so the function receives them the way its parameter declares.
+ */
+function packRestArguments(module: PyModule): PyModule {
+  const restIndex = new Map<string, number>();
+  for (const fn of module.functions) {
+    const idx = fn.params.findIndex((p) => p.rest === true);
+    if (idx >= 0) restIndex.set(fn.name, idx);
+  }
+  const packValue = (value: PyValue): PyValue => {
+    if (value.k === "call") {
+      const idx = restIndex.get(value.name);
+      if (idx !== undefined) {
+        const fixed = idx; // number of fixed params before *args
+        if (value.args.length > fixed) {
+          const fixedArgs = value.args.slice(0, fixed);
+          const extra = value.args.slice(fixed);
+          value.args = [...fixedArgs, { k: "list", items: extra }];
+        } else if (value.args.length === fixed) {
+          value.args = [...value.args, { k: "list", items: [] }];
+        }
+      }
+      value.args = value.args.map(packValue);
+      if (value.grid !== undefined) value.grid = packValue(value.grid);
+      return value;
+    }
+    switch (value.k) {
+      case "binary":
+        value.left = packValue(value.left);
+        value.right = packValue(value.right);
+        break;
+      case "unary":
+        value.operand = packValue(value.operand);
+        break;
+      case "conditional":
+        value.condition = packValue(value.condition);
+        value.then = packValue(value.then);
+        value.otherwise = packValue(value.otherwise);
+        break;
+      case "index":
+        value.base = packValue(value.base);
+        value.index = packValue(value.index);
+        break;
+      case "slice":
+        value.base = packValue(value.base);
+        if (value.start !== null) value.start = packValue(value.start);
+        if (value.stop !== null) value.stop = packValue(value.stop);
+        if (value.step !== null) value.step = packValue(value.step);
+        break;
+      case "list":
+        value.items = value.items.map(packValue);
+        break;
+      case "set":
+        value.items = value.items.map(packValue);
+        break;
+      case "membership":
+        value.value = packValue(value.value);
+        value.container = packValue(value.container);
+        break;
+      case "comprehension":
+        value.element = packValue(value.element);
+        value.iterable = packValue(value.iterable);
+        if (value.condition !== null) value.condition = packValue(value.condition);
+        break;
+      case "lambda":
+        value.body = packValue(value.body);
+        break;
+      case "dict":
+        value.entries = value.entries.map((e) => ({ ...e, value: packValue(e.value) }));
+        break;
+      case "field":
+        value.base = packValue(value.base);
+        break;
+      case "walrus":
+        value.value = packValue(value.value);
+        break;
+    }
+    return value;
+  };
+  const packStmt = (stmt: PyStatement): PyStatement => {
+    switch (stmt.k) {
+      case "declare":
+        stmt.value = packValue(stmt.value);
+        break;
+      case "assign":
+        stmt.value = packValue(stmt.value);
+        break;
+      case "storeField":
+        stmt.target = packValue(stmt.target);
+        stmt.value = packValue(stmt.value);
+        break;
+      case "storeElement":
+        stmt.target = packValue(stmt.target) as any;
+        stmt.value = packValue(stmt.value);
+        break;
+      case "storeSlice":
+        if (stmt.start !== null) stmt.start = packValue(stmt.start);
+        if (stmt.stop !== null) stmt.stop = packValue(stmt.stop);
+        if (stmt.step !== null) stmt.step = packValue(stmt.step);
+        stmt.value = packValue(stmt.value);
+        break;
+      case "return":
+        if (stmt.value !== null) stmt.value = packValue(stmt.value);
+        break;
+      case "if":
+        stmt.condition = packValue(stmt.condition);
+        stmt.then = stmt.then.map(packStmt);
+        stmt.otherwise = stmt.otherwise.map(packStmt);
+        break;
+      case "while":
+        stmt.condition = packValue(stmt.condition);
+        stmt.body = stmt.body.map(packStmt);
+        break;
+      case "for":
+        stmt.from = packValue(stmt.from);
+        stmt.to = packValue(stmt.to);
+        if (stmt.step !== null) stmt.step = packValue(stmt.step);
+        stmt.body = stmt.body.map(packStmt);
+        break;
+      case "print":
+        stmt.values = stmt.values.map(packValue);
+        break;
+      case "call":
+        stmt.value = packValue(stmt.value);
+        break;
+      case "function":
+        stmt.body = stmt.body.map(packStmt);
+        break;
+      case "try":
+        stmt.body = stmt.body.map(packStmt);
+        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map(packStmt);
+        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map(packStmt);
+        break;
+    }
+    return stmt;
+  };
+  const packedFunctions = module.functions.map((fn) => ({
+    ...fn,
+    body: fn.body.map(packStmt),
+  }));
+  const packedBody = module.body.map(packStmt);
+  return { ...module, functions: packedFunctions, body: packedBody };
+}
+
 export function parsePython(source: string, path: string, diagnostics: Diagnostics): PyModule {
   const parser = new PythonParser(tokenizePython(source, path), path, diagnostics);
   const module = parser.parseModule();
-  return fillDefaultArguments(expandWalrus(expandComprehensions(module)));
+  return packRestArguments(fillDefaultArguments(expandWalrus(expandComprehensions(module))));
 }
 
 /* -------------------------------------------------------------------------- */

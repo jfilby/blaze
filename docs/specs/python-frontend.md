@@ -199,7 +199,7 @@ matter are the ones a Python program is most likely to write:
 | a decorator | a function is called where it is written, and the decorator is not run |
 | `in`, `not in` | a loop that looks for the value |
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
-| `*args`, `**kwargs` | a fixed list of parameters |
+| `**kwargs` | a fixed list of parameters; a dict is written with named keys |
 | `str.format`, `%` on a text | an f-string |
 | `round` | it rounds half to even, and the compiler rounds half up |
 | a match | a chain of `if` / `elif` |

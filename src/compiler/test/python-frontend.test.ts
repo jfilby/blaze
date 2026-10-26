@@ -328,7 +328,6 @@ test("the constructs outside the subset are refused with what to write instead",
 
     ["def f() -> int:\n    yield 1\n", /a value the function hands back with return/],
     ["def f(x: float) -> float:\n    return round(x)\n", /it rounds half to even/],
-    ["def f(a: int, *rest: int) -> int:\n    return a\n", /a function takes a fixed list of parameters/],
   ];
   for (const [source, expected] of cases) {
     const refused = diagnostic(() => phaseOf("python", { "main.py": source }, "main.py"));
