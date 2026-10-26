@@ -1249,10 +1249,7 @@ class FunctionEmitter {
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {
     if (isWideType(value.type)) return this.wideArith(value, depth);
     if (value.op === "arrayConcat") {
-      throw backendError(
-        `${this.fn.symbol} concatenates two lists, which this backend has not written`,
-        "a list reaches a function as a pointer to its first element and no length arrives with it; write the list out, as in [1, 2, 3, 4]",
-      );
+      return this.arrayConcat(value.left, value.right, value.type, depth);
     }
     if (value.op === "concat") return this.concat(value.left, value.right, depth);
     const left = this.expression(value.left, value.type, depth);
@@ -1398,6 +1395,56 @@ class FunctionEmitter {
       `const ${wide} ${left} = ${this.expression(value.left, value.type, depth)}; ` +
       `const ${wide} ${right} = ${this.expression(value.right, value.type, depth)}; ` +
       `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${value.op}(&${out}, &${left}, &${right}); ${out}; })`
+    );
+  }
+
+  /** The length of an array whose length the compiler can settle on. */
+  private arrayLength(value: SemanticValue, depth: number): string {
+    if (value.k === "buffer") {
+      if (value.count !== null) {
+        return this.expression(value.count, USIZE, depth);
+      }
+      if (value.view !== null) {
+        // A view's length is not carried in the IR; refuse rather than guess.
+        throw backendError(
+          `${this.fn.symbol} reads the length of a view, which this backend cannot settle`,
+          "a view reaches a function as a window and no length arrives with it",
+        );
+      }
+      return String(value.length ?? value.values.length);
+    }
+    throw backendError(
+      `${this.fn.symbol} reads the length of an array, which this backend cannot settle`,
+      "an array reaches a function as a pointer to its first element and no length arrives with it; pass the length as a parameter, as in f(a, len(a))",
+    );
+  }
+
+  /** Two arrays as one, which is what `+` over two arrays is. */
+  private arrayConcat(left: SemanticValue, right: SemanticValue, type: SemanticType, depth: number): string {
+    const element = elementTypeOf(type);
+    if (element === null) {
+      throw backendError(
+        `${this.fn.symbol} concatenates two arrays whose element type is not known`,
+        "write the list out, as in [1, 2, 3, 4]",
+      );
+    }
+    const elementName = declaredType(element);
+    const leftLen = this.arrayLength(left, depth);
+    const rightLen = this.arrayLength(right, depth);
+    const leftExpr = this.raw(left, depth);
+    const rightExpr = this.raw(right, depth);
+    const block = this.temporary(`${elementName}_concat`);
+    return (
+      `({ const size_t ${block}_llen = (size_t)(${leftLen}); ` +
+      `const size_t ${block}_rlen = (size_t)(${rightLen}); ` +
+      `const size_t ${block}_n = ${block}_llen + ${block}_rlen; ` +
+      `${elementName}* ${block}_left = ${leftExpr}; ` +
+      `${elementName}* ${block}_right = ${rightExpr}; ` +
+      `${elementName}* ${block} = (${elementName}*)${RUNTIME_NAME}_allocate((${block}_n == 0 ? 1 : ${block}_n) * sizeof(${elementName})); ` +
+      `if (${block} == NULL) ${RUNTIME_NAME}_raise("out of memory"); ` +
+      `for (size_t ${block}_i = 0; ${block}_i < ${block}_llen; ${block}_i++) ${block}[${block}_i] = ${block}_left[${block}_i]; ` +
+      `for (size_t ${block}_i = 0; ${block}_i < ${block}_rlen; ${block}_i++) ${block}[${block}_llen + ${block}_i] = ${block}_right[${block}_i]; ` +
+      `${block}; })`
     );
   }
 
