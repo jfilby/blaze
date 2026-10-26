@@ -197,10 +197,67 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       return { k: "element", buffer: one.base.name, index: programValue(one.index, bindings) };
     }
     case "slice": {
-      throw frontendError(
-        "a program holds numbers, strings and references, and not a slice",
-        "an index, as in a[i]",
-      );
+      // Resolve the base to the PyValue it holds (a name looks up its value).
+      let base = one.base;
+      if (base.k === "name" && bindings.values.has(base.name)) {
+        base = bindings.values.get(base.name)!;
+      }
+      // A program can slice only a list whose contents are known: a literal
+      // list or a name bound to one. A slice of a name that holds no list, or
+      // of anything else, is refused.
+      if (base.k !== "list") {
+        throw frontendError(
+          "a program can slice only a list",
+          `slice ${describeValue(one.base)}, which is not a list`,
+        );
+      }
+      const items = base.items;
+      const len = items.length;
+      // A slice bound: null means the default, a number is taken as-is, a name
+      // is looked up, and a negative unary counts from the end (`len - n`).
+      const sliceBound = (bound: PyValue | null, defaultValue: number): number => {
+        if (bound === null) return defaultValue;
+        let resolved = bound;
+        if (resolved.k === "name" && bindings.values.has(resolved.name)) {
+          resolved = bindings.values.get(resolved.name)!;
+        }
+        if (resolved.k === "unary" && resolved.op === "-") {
+          const n = numberOf(resolved.operand);
+          return Math.max(0, len - n);
+        }
+        return numberOf(resolved);
+      };
+      // Step is taken as-is (it may be negative), not as `len - n`.
+      let step = 1;
+      if (one.step !== null) {
+        let resolved = one.step;
+        if (resolved.k === "name" && bindings.values.has(resolved.name)) {
+          resolved = bindings.values.get(resolved.name)!;
+        }
+        if (resolved.k === "unary" && resolved.op === "-") {
+          step = -numberOf(resolved.operand);
+        } else {
+          step = numberOf(resolved);
+        }
+      }
+      if (step === 0) {
+        throw frontendError("a slice step must not be zero", "a slice step of zero is not allowed");
+      }
+      const start = sliceBound(one.start, step > 0 ? 0 : len - 1);
+      const stop = sliceBound(one.stop, step > 0 ? len : -1);
+      const sliced: PyValue[] = [];
+      if (step > 0) {
+        for (let i = Math.max(0, Math.min(start, len)); i < Math.max(0, Math.min(stop, len)); i += step) {
+          sliced.push(items[i]);
+        }
+      } else {
+        for (let i = Math.min(len - 1, Math.max(start, -1)); i > Math.max(-1, Math.min(stop, -1)); i += step) {
+          sliced.push(items[i]);
+        }
+      }
+      const whole = sliced.every((item) => item.k === "number" && item.whole);
+      const element: PrimitiveTypeName = whole ? "i64" : "f64";
+      return { k: "buffer", element, values: sliced.map((item) => programValue(item, bindings)) };
     }
     case "field": {
       // A dict has no fields: Python reads one by its key, and a field of it
@@ -299,6 +356,17 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         otherwise: programValue(one.otherwise, bindings),
       };
   }
+}
+
+/** The whole number a PyValue holds, refusing anything that is not one. */
+function numberOf(value: PyValue): number {
+  if (value.k !== "number") {
+    throw frontendError(
+      "a slice bound must be a number",
+      `a slice bound is ${describeValue(value)}`,
+    );
+  }
+  return Number(value.text);
 }
 
 /** The text of a value written as it is, or null when it is not one text. */
