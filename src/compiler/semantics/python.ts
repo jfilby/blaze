@@ -2632,83 +2632,87 @@ function fillDefaultArguments(module: PyModule): PyModule {
 function expandWalrus(module: PyModule): PyModule {
   type Expanded = { value: PyValue; pre: PyStatement[] };
 
-  const expandExpr = (value: PyValue): Expanded => {
+  const expandExpr = (value: PyValue, scope: Set<string>): Expanded => {
     switch (value.k) {
       case "walrus": {
-        const inner = expandExpr(value.value);
+        const inner = expandExpr(value.value, scope);
+        const stmt: PyStatement = scope.has(value.name)
+          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
+          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
+        if (!scope.has(value.name)) scope.add(value.name);
         return {
           value: { k: "name", name: value.name },
-          pre: [...inner.pre, { k: "declare", name: value.name, type: null, value: inner.value, line: value.value && (value.value as any).line ? (value.value as any).line : 1 }],
+          pre: [...inner.pre, stmt],
         };
       }
       case "binary": {
-        const L = expandExpr(value.left);
-        const R = expandExpr(value.right);
+        const L = expandExpr(value.left, scope);
+        const R = expandExpr(value.right, scope);
         return { value: { ...value, left: L.value, right: R.value }, pre: [...L.pre, ...R.pre] };
       }
       case "unary": {
-        const O = expandExpr(value.operand);
+        const O = expandExpr(value.operand, scope);
         return { value: { ...value, operand: O.value }, pre: O.pre };
       }
       case "conditional": {
-        const C = expandExpr(value.condition);
-        const T = expandExpr(value.then);
-        const O = expandExpr(value.otherwise);
+        const C = expandExpr(value.condition, scope);
+        const T = expandExpr(value.then, scope);
+        const O = expandExpr(value.otherwise, scope);
         return { value: { ...value, condition: C.value, then: T.value, otherwise: O.value }, pre: [...C.pre, ...T.pre, ...O.pre] };
       }
       case "index": {
-        const B = expandExpr(value.base);
-        const I = expandExpr(value.index);
+        const B = expandExpr(value.base, scope);
+        const I = expandExpr(value.index, scope);
         return { value: { ...value, base: B.value, index: I.value }, pre: [...B.pre, ...I.pre] };
       }
       case "slice": {
-        const B = expandExpr(value.base);
-        const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start);
-        const P = value.stop === null ? { value: null, pre: [] } : expandExpr(value.stop);
-        const E = value.step === null ? { value: null, pre: [] } : expandExpr(value.step);
+        const B = expandExpr(value.base, scope);
+        const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start, scope);
+        const P = value.stop === null ? { value: null, pre: [] } : expandExpr(value.stop, scope);
+        const E = value.step === null ? { value: null, pre: [] } : expandExpr(value.step, scope);
         return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
       }
       case "list": {
         const pres: PyStatement[] = [];
         const items = value.items.map((item) => {
-          const r = expandExpr(item);
+          const r = expandExpr(item, scope);
           pres.push(...r.pre);
           return r.value;
         });
         return { value: { ...value, items }, pre: pres };
       }
       case "membership": {
-        const V = expandExpr(value.value);
-        const C = expandExpr(value.container);
+        const V = expandExpr(value.value, scope);
+        const C = expandExpr(value.container, scope);
         return { value: { ...value, value: V.value, container: C.value }, pre: [...V.pre, ...C.pre] };
       }
       case "comprehension": {
-        const E = expandExpr(value.element);
-        const I = expandExpr(value.iterable);
-        const C = value.condition === null ? { value: null, pre: [] } : expandExpr(value.condition);
+        const E = expandExpr(value.element, scope);
+        const I = expandExpr(value.iterable, scope);
+        const C = value.condition === null ? { value: null, pre: [] } : expandExpr(value.condition, scope);
         return { value: { ...value, element: E.value, iterable: I.value, condition: C.value }, pre: [...E.pre, ...I.pre, ...C.pre] };
       }
       case "dict": {
         const pres: PyStatement[] = [];
         const entries = value.entries.map((entry) => {
-          const r = expandExpr(entry.value);
+          const r = expandExpr(entry.value, scope);
           pres.push(...r.pre);
           return { ...entry, value: r.value };
         });
         return { value: { ...value, entries }, pre: pres };
       }
       case "field": {
-        const B = expandExpr(value.base);
+        const B = expandExpr(value.base, scope);
         return { value: { ...value, base: B.value }, pre: B.pre };
       }
       case "call": {
         const pres: PyStatement[] = [];
         const args = value.args.map((arg) => {
-          const r = expandExpr(arg);
+          const r = expandExpr(arg, scope);
           pres.push(...r.pre);
           return r.value;
         });
-        const grid = value.grid === undefined ? undefined : expandExpr(value.grid).value;
+        const grid = value.grid === undefined ? undefined : expandExpr(value.grid, scope).value;
         return { value: { ...value, args, grid }, pre: pres };
       }
       case "lambda":
@@ -2720,78 +2724,106 @@ function expandWalrus(module: PyModule): PyModule {
     }
   };
 
-  const expandStmt = (stmt: PyStatement): PyStatement[] => {
+  const expandStmt = (stmt: PyStatement, scope: Set<string>): PyStatement[] => {
     switch (stmt.k) {
       case "declare": {
-        const r = expandExpr(stmt.value);
+        const r = expandExpr(stmt.value, scope);
         return [...r.pre, { ...stmt, value: r.value }];
       }
       case "assign": {
-        const r = expandExpr(stmt.value);
+        const r = expandExpr(stmt.value, scope);
         return [...r.pre, { ...stmt, value: r.value }];
       }
       case "storeElement": {
-        const t = expandExpr(stmt.target);
-        const v = expandExpr(stmt.value);
+        const t = expandExpr(stmt.target, scope);
+        const v = expandExpr(stmt.value, scope);
         return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
       }
       case "storeSlice": {
-        const s = stmt.start === null ? { value: null, pre: [] } : expandExpr(stmt.start);
-        const p = stmt.stop === null ? { value: null, pre: [] } : expandExpr(stmt.stop);
-        const e = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step);
-        const v = expandExpr(stmt.value);
+        const s = stmt.start === null ? { value: null, pre: [] } : expandExpr(stmt.start, scope);
+        const p = stmt.stop === null ? { value: null, pre: [] } : expandExpr(stmt.stop, scope);
+        const e = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step, scope);
+        const v = expandExpr(stmt.value, scope);
         return [...s.pre, ...p.pre, ...e.pre, ...v.pre, { ...stmt, start: s.value, stop: p.value, step: e.value, value: v.value }];
       }
       case "storeField": {
-        const t = expandExpr(stmt.target);
-        const v = expandExpr(stmt.value);
+        const t = expandExpr(stmt.target, scope);
+        const v = expandExpr(stmt.value, scope);
         return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
       }
       case "return": {
         if (stmt.value === null) return [stmt];
-        const r = expandExpr(stmt.value);
+        const r = expandExpr(stmt.value, scope);
         return [...r.pre, { ...stmt, value: r.value }];
       }
       case "if": {
-        const c = expandExpr(stmt.condition);
-        const thenBody = stmt.then.flatMap(expandStmt);
-        const elseBody = stmt.otherwise.flatMap(expandStmt);
+        const c = expandExpr(stmt.condition, scope);
+        const thenBody = stmt.then.flatMap((s) => expandStmt(s, scope));
+        const elseBody = stmt.otherwise.flatMap((s) => expandStmt(s, scope));
         return [...c.pre, { ...stmt, condition: c.value, then: thenBody, otherwise: elseBody }];
       }
       case "while": {
-        const c = expandExpr(stmt.condition);
-        const body = stmt.body.flatMap(expandStmt);
-        return [...c.pre, { ...stmt, condition: c.value, body }];
+        const c = expandExpr(stmt.condition, scope);
+        const body = stmt.body.flatMap((s) => expandStmt(s, scope));
+        if (c.pre.length === 0) {
+          return [...c.pre, { ...stmt, condition: c.value, body }];
+        }
+        // A condition with side effects (such as a walrus) must be
+        // re-evaluated every turn, so it cannot be lifted out of the loop.
+        // Re-run its assignments and test it each turn, using a flag to leave
+        // the loop when it turns false, since a `break` here would not be
+        // carried to the right place.
+        const flag = `_walrus_cond_${stmt.line}`;
+        return [
+          { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line: stmt.line },
+          {
+            k: "while",
+            condition: { k: "name", name: flag },
+            body: [
+              ...c.pre,
+              {
+                k: "if",
+                condition: { k: "unary", op: "not", operand: c.value },
+                then: [{ k: "assign", name: flag, op: "=", value: { k: "boolean", value: false }, line: stmt.line }],
+                otherwise: body,
+                line: stmt.line,
+              },
+            ],
+            line: stmt.line,
+          },
+        ];
       }
       case "for": {
-        const f = expandExpr(stmt.from);
-        const t = expandExpr(stmt.to);
-        const s = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step);
-        const body = stmt.body.flatMap(expandStmt);
+        const f = expandExpr(stmt.from, scope);
+        const t = expandExpr(stmt.to, scope);
+        const s = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step, scope);
+        const body = stmt.body.flatMap((s) => expandStmt(s, scope));
         return [...f.pre, ...t.pre, ...s.pre, { ...stmt, from: f.value, to: t.value, step: s.value, body }];
       }
       case "print": {
         const pres: PyStatement[] = [];
         const values = stmt.values.map((v) => {
-          const r = expandExpr(v);
+          const r = expandExpr(v, scope);
           pres.push(...r.pre);
           return r.value;
         });
         return [...pres, { ...stmt, values }];
       }
       case "call": {
-        const r = expandExpr(stmt.value);
+        const r = expandExpr(stmt.value, scope);
         return [...r.pre, { ...stmt, value: r.value }];
       }
       case "function": {
-        return [{ ...stmt, body: stmt.body.flatMap(expandStmt) }];
+        const fnParams = (stmt as any).params.map((p: any) => p.name);
+        const fnScope = new Set([...scope, ...fnParams]);
+        return [{ ...stmt, body: stmt.body.flatMap((s: any) => expandStmt(s, fnScope)) }];
       }
       case "try": {
         return [{
           ...stmt,
-          body: stmt.body.flatMap(expandStmt),
-          catchBody: stmt.catchBody === null ? null : stmt.catchBody.flatMap(expandStmt),
-          finallyBody: stmt.finallyBody === null ? null : stmt.finallyBody.flatMap(expandStmt),
+          body: stmt.body.flatMap((s) => expandStmt(s, scope)),
+          catchBody: stmt.catchBody === null ? null : stmt.catchBody.flatMap((s) => expandStmt(s, scope)),
+          finallyBody: stmt.finallyBody === null ? null : stmt.finallyBody.flatMap((s) => expandStmt(s, scope)),
         }];
       }
       default:
@@ -2801,9 +2833,9 @@ function expandWalrus(module: PyModule): PyModule {
 
   const expandedFunctions = module.functions.map((fn) => ({
     ...fn,
-    body: fn.body.flatMap(expandStmt),
+    body: fn.body.flatMap((st) => expandStmt(st, new Set(fn.params.map((p) => p.name)))),
   }));
-  const expandedBody = module.body.flatMap(expandStmt);
+  const expandedBody = module.body.flatMap((st) => expandStmt(st, new Set()));
   return { ...module, functions: expandedFunctions, body: expandedBody };
 }
 
