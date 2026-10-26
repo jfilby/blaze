@@ -2696,8 +2696,27 @@ export function lowerValue(value: PyValue): Expression {
       // them as calls so they can be refused later with proper diagnostics
       return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
     }
-    case "index":
+    case "index": {
+      // A slice indexed at a constant position can be simplified to an index
+      // of the base: `a[i:j][k]` is `a[i+k]` when both `i` and `k` are
+      // constants. Without this, the IR's slice (which returns the base)
+      // would give the wrong element.
+      if (value.base.k === "slice" && value.base.start !== null && value.base.start.k === "number" && value.index.k === "number") {
+        const start = Number(value.base.start.text);
+        const idx = Number(value.index.text);
+        const new_index = { k: "number" as const, text: String(start + idx), whole: value.base.start.whole && value.index.whole };
+        return { k: "index", base: lowerValue(value.base.base), index: lowerValue(new_index) };
+      }
+      // A slice indexed at a negative constant position: `a[i:j][-k]` is
+      // `a[j-k]` (approximately; ignores step for simplicity).
+      if (value.base.k === "slice" && value.base.stop !== null && value.base.stop.k === "number" && value.index.k === "unary" && value.index.op === "-") {
+        const stop = Number(value.base.stop.text);
+        const n = value.index.operand.k === "number" ? Number(value.index.operand.text) : 0;
+        const new_index = { k: "number" as const, text: String(stop - n), whole: true };
+        return { k: "index", base: lowerValue(value.base.base), index: lowerValue(new_index) };
+      }
       return { k: "index", base: lowerValue(value.base), index: lowerValue(value.index) };
+    }
     case "slice":
       return { k: "slice", base: lowerValue(value.base), start: value.start === null ? null : lowerValue(value.start), stop: value.stop === null ? null : lowerValue(value.stop), step: value.step === null ? null : lowerValue(value.step) };
     case "field":
@@ -3111,6 +3130,12 @@ class BodyAnalysis {
         return `(${this.serialize(value.left, loop, line)} ${value.op} ${this.serialize(value.right, loop, line)})`;
       }
       case "index": {
+        if (value.base.k === "slice") {
+          // Indexing into a slice: serialize the slice, then index into it.
+          const sliceText = this.serialize(value.base, loop, line);
+          const index = this.serialize(value.index, loop, line);
+          return `${sliceText}[${index}]`;
+        }
         if (value.base.k !== "name") {
           throw frontendError("only single level indexing is supported", `line ${line}`);
         }

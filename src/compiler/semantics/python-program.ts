@@ -188,6 +188,75 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           return { k: "field", object: { k: "name", name: one.base.name }, field: key };
         }
       }
+      // A slice produces a buffer, and indexing into it is resolved at compile
+      // time when the slice and the index are both constant.
+      if (one.base.k === "slice") {
+        const sliced = programValue(one.base, bindings);
+        if (sliced.k !== "buffer") {
+          throw frontendError(
+            `a program cannot read an element of ${describeValue(one.base)}`,
+            "a list is read by its index, as in a[0]",
+          );
+        }
+        let idx: number;
+        if (one.index.k === "number") {
+          idx = Number(one.index.text);
+        } else if (one.index.k === "unary" && one.index.op === "-") {
+          const n = one.index.operand.k === "number" ? Number(one.index.operand.text) : 0;
+          idx = sliced.values.length - n;
+        } else if (
+          one.index.k === "binary" && one.index.op === "-" &&
+          one.index.left.k === "call" && one.index.left.name === "len" &&
+          one.index.left.args.length === 1 && one.index.left.args[0].k === "slice"
+        ) {
+          // The parser converted a[-n] to a[len(a)-n]; resolve it using
+          // the slice's known length.
+          const n = one.index.right.k === "number" ? Number(one.index.right.text) : 0;
+          idx = sliced.values.length - n;
+        } else {
+          // Try evaluating the index.
+          const indexValue = programValue(one.index, bindings);
+          if (indexValue.k === "whole" || indexValue.k === "number") {
+            idx = Number(indexValue.text);
+          } else {
+            throw frontendError(
+              `a program cannot read an element of ${describeValue(one.base)} with a non-constant index`,
+              "a list is read by its index, as in a[0]",
+            );
+          }
+        }
+        if (idx < 0 || idx >= sliced.values.length) {
+          throw frontendError(
+            `index ${idx} is out of range for a slice of length ${sliced.values.length}`,
+            "a list is read by its index, as in a[0]",
+          );
+        }
+        return sliced.values[idx];
+      }
+      // A list literal is indexed directly.
+      if (one.base.k === "list") {
+        const items = one.base.items;
+        const indexValue = programValue(one.index, bindings);
+        let idx: number;
+        if (indexValue.k === "whole" || indexValue.k === "number") {
+          idx = Number(indexValue.text);
+        } else if (one.index.k === "unary" && one.index.op === "-") {
+          const n = one.index.operand.k === "number" ? Number(one.index.operand.text) : 0;
+          idx = items.length - n;
+        } else {
+          throw frontendError(
+            `a program cannot read an element of a list with a non-constant index`,
+            "a list is read by its index, as in a[0]",
+          );
+        }
+        if (idx < 0 || idx >= items.length) {
+          throw frontendError(
+            `index ${idx} is out of range for a list of length ${items.length}`,
+            "a list is read by its index, as in a[0]",
+          );
+        }
+        return programValue(items[idx], bindings);
+      }
       if (one.base.k !== "name") {
         throw frontendError(
           `a program cannot read an element of ${describeValue(one.base)}`,

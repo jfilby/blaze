@@ -495,6 +495,26 @@ test("a slice assignment with a variable RHS in a program body", () => {
   assert.equal((statements[2] as any).variable, "_i");
 });
 
+test("a chained slice in a program body", () => {
+  const phase = phaseOf("python", { "main.py": "a = [1, 2, 3, 4, 5]\nb = a[1:4][1]\n" }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[1] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "whole");
+  assert.equal(declaration.value.text, "3");
+});
+
+test("a chained slice with a negative index in a program body", () => {
+  const phase = phaseOf("python", { "main.py": "a = [1, 2, 3, 4, 5]\nb = a[1:4][-1]\n" }, "main.py");
+  const statements = phase.body?.statements;
+  assert.ok(statements !== undefined);
+  const declaration = statements[1] as { kind: "declare"; name: string; value: any };
+  assert.equal(declaration.kind, "declare");
+  assert.equal(declaration.value.k, "whole");
+  assert.equal(declaration.value.text, "4");
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",
