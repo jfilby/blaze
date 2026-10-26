@@ -29,9 +29,9 @@ SQLite library linked beside the binary the compiler delivers.
 | `/` | GET | the home page |
 | `/chat` | GET | the chat |
 | `/app.js`, `/style.css` | GET | the website's own files |
-| `/api/chat` | POST | the question, as the plain-text body; the model's JSON answer |
+| `/api/chat` | POST | the question, as the plain-text body; the thread it was saved under and the model's JSON answer |
 | `/api/resume/<id>` | GET | the transcript of the thread a saved chat belongs to |
-| `/api/chats` | GET | the last ten saved chats, newest first, as a JSON array |
+| `/api/chats` | GET | the last ten saved chats, newest first, each shown at its last message |
 
 Anything else is a 404.
 
@@ -53,16 +53,18 @@ A saved chat can be resumed. Every question and answer is a row of the
 `messages` table, and the thread a row belongs to is the id of the question
 that began it — the chats of the schema before threads are copied in once,
 each as its own thread, with a marker in a `meta` table saying the copy ran.
-Resuming a saved chat reads its thread back as a transcript, and the
-questions asked afterwards name the thread in front of themselves, as
-`T<thread>\n<question>` — the rest of the body is the question, which is
-what a plain-text body can carry without a JSON field to read. The model is
-given the conversation so far: the last ten turns of the thread, oldest
-first, with the content of every earlier answer read out of the JSON it was
-saved as, by parsing the reply and reading `choices`, the first element of
-the array, `message` and `content` off it — a read the compiler's
-`JSON.get` answers, over a dynamic value whose handle the program carries.
-A fresh question begins a thread of its own.
+A chat is a session: the questions asked one after another continue the
+thread the first of them began, because the answer travels with the thread
+it was saved under and the browser asks the next question of the same
+thread; New chat starts a thread of its own, and resuming a saved chat
+continues the session it belongs to. The model is given the conversation so
+far: the last ten turns of the thread, oldest first, with the content of
+every earlier answer read out of the JSON it was saved as, by parsing the
+reply and reading `choices`, the first element of the array, `message` and
+`content` off it — a read the compiler's `JSON.get` answers, over a dynamic
+value whose handle the program carries. Clear deletes the session that is
+open, and the saved chats each have a delete of their own that deletes the
+session they belong to.
 
 The model is `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`, the cheapest
 text-to-text model on Nebius Token Factory when this was written: 0.06 per
@@ -164,10 +166,11 @@ kind that asks for this, and the benchmark programs are the ones that set it.
 - **There is no end-to-end test of the program.** The compiler's suite
   covers the features the program needs — the HTTP runtime, TLS to a server,
   SQLite — but nothing asserts the website's own routes or the chat flow.
-- **A fresh question starts a thread of its own.** The conversation so far
-  is only behind a question that resumes a saved chat: a run of fresh
-  questions is a run of one-turn chats, and continuing one of those means
-  resuming it.
+- **A session is one thread.** The questions asked one after another in the
+  panel continue the thread the first of them began — the answer travels
+  with the thread it was saved under, and the browser asks the next question
+  of the same thread — so the saved chats show one entry per session, at its
+  latest exchange. New chat starts a thread of its own.
 - **The model is called from the server.** The Nebius call happens inside the
   program, key and all, and the browser only talks to the program: nothing
   about the key or the model's stream reaches the visitor's page.

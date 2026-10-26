@@ -78,9 +78,9 @@ Open <http://127.0.0.1:8080/> in a browser.
 | `/` | GET | the home page |
 | `/chat` | GET | the chat |
 | `/app.js`, `/style.css` | GET | the website's own files |
-| `/api/chat` | POST | the question, as the plain-text body; the model's JSON answer |
+| `/api/chat` | POST | the question, as the plain-text body; the thread it was saved under and the model's JSON answer |
 | `/api/resume/<id>` | GET | the transcript of the thread a saved chat belongs to |
-| `/api/chats` | GET | the last ten saved chats, newest first, as a JSON array |
+| `/api/chats` | GET | the last ten saved chats, newest first, each shown at its last message |
 
 Anything else is a 404.
 
@@ -92,15 +92,12 @@ model's JSON answer to SQLite, and returns the JSON answer to the browser,
 which reads the answer out of `choices[0].message.content` the way
 JavaScript reads JSON.
 
-A saved chat can be resumed. Every question and answer is a row of the
-`messages` table, and the thread a row belongs to is the id of the question
-that began it. Resuming a saved chat loads its transcript into the panel and
-continues the thread: the questions asked afterwards name the thread in
-front of themselves, as `T<thread>\n<question>`, and the model is given the
-conversation so far — the last ten turns of it, with the content of every
-earlier answer read out of the JSON it was saved as — so an answer it gives
-now is an answer to a question it can see the context of. A fresh question
-begins a thread of its own.
+A chat is a session: the questions asked one after another in the panel
+continue the thread the first of them began, so the conversation the panel
+holds is one saved chat, shown in the list at its latest exchange. New chat
+starts a session of its own, and resuming a saved chat continues the session
+it belongs to. Clear deletes the session that is open, and the saved chats
+each have a delete of their own that deletes the session they belong to.
 
 The model is `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`, the cheapest
 text-to-text model on Nebius Token Factory at the time this was written:
@@ -144,7 +141,8 @@ These are the compiler's rules, and the program is written to them.
 - **There is no end-to-end test of the program.** The compiler's suite
   covers the features the program needs — the HTTP runtime, TLS to a server,
   SQLite — but nothing asserts the website's own routes or the chat flow.
-- **A fresh question starts a thread of its own.** The conversation so far
-  is only behind a question that resumes a saved chat: a run of fresh
-  questions is a run of one-turn chats, and continuing one of those means
-  resuming it.
+- **A session is one thread.** The questions asked one after another in the
+  panel continue the thread the first of them began — the answer travels
+  with the thread it was saved under, and the browser asks the next question
+  of the same thread — so the saved chats show one entry per session, at its
+  latest exchange. New chat starts a thread of its own.

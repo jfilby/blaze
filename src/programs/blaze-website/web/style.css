@@ -120,7 +120,9 @@ li { margin: 0.35rem 0; }
   gap: 1rem;
 }
 .chat-head h2 { margin: 0; font-size: 1.25rem; color: #111827; }
-#newChat {
+.chat-actions { display: flex; gap: 0.4rem; }
+#newChat,
+#clearChat {
   padding: 0.4rem 0.9rem;
   border: 1px solid #d1d5db;
   border-radius: 8px;
@@ -130,7 +132,7 @@ li { margin: 0.35rem 0; }
   font-weight: 700;
   cursor: pointer;
 }
-#newChat:hover { border-color: #0b5ed6; color: #0b5ed6; }
+#newChat:hover, #clearChat:hover { border-color: #0b5ed6; color: #0b5ed6; }
 .messages {
   flex: 1;
   border: 1px solid #e5e7eb;
@@ -245,6 +247,18 @@ li { margin: 0.35rem 0; }
   cursor: pointer;
 }
 .chat .resume:hover { background: #dbeafe; }
+.chat .delete {
+  align-self: flex-start;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.chat .delete:hover { background: #fee2e2; }
 /* ---------- Footer ---------- */
 footer {
   grid-column: 1 / -1;

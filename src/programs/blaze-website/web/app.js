@@ -20,6 +20,7 @@ const messages = document.getElementById("messages");
 const chats = document.getElementById("chats");
 const error = document.getElementById("error");
 const newChat = document.getElementById("newChat");
+const clearChat = document.getElementById("clearChat");
 
 /** Whether a request is in flight. */
 let busy = false;
@@ -87,7 +88,10 @@ function answerOf(chat) {
   return saved?.choices?.[0]?.message?.content || String(chat.answer);
 }
 
-/** Asks the Blaze program a question and shows the answer. */
+/** Asks the Blaze program a question and shows the answer. The answer
+ *  travels with the thread the question was saved under, and the questions
+ *  asked next continue that thread: the conversation the panel holds is one
+ *  session, and the saved chats show it as the one entry it is. */
 async function askThroughBlaze(question, thread) {
   /* The question is sent as the body of the request, plain text: the program
      reads it with req.text() and asks the model with it, and saves the chat.
@@ -100,19 +104,21 @@ async function askThroughBlaze(question, thread) {
     body,
   });
   if (!response.ok) throw new Error("the server answered " + response.status);
-  /* The answer is the model's JSON, or the JSON of an error the program
-     could not answer with. Either way it is JSON, but a body that arrived
-     empty or arrived as anything else is read as the text it is and named,
-     rather than thrown past the person who asked. */
+  /* The answer travels as the thread it was saved under and the model's JSON
+     beside it. A thread the program names is the session the panel holds, so
+     the next question continues it without the page asking twice. */
   const raw = await response.text();
+  let data;
   try {
-    const data = JSON.parse(raw);
-    if (data && data.error) return "The model could not be asked: " + (data.error.message || JSON.stringify(data.error));
-    return data.choices?.[0]?.message?.content || JSON.stringify(data);
+    data = JSON.parse(raw);
   } catch {
-    if (raw.trim() === "") throw new Error("the model answered nothing");
-    return raw;
+    throw new Error("the server answered with something that was not JSON");
   }
+  if (data && data.thread > 0) currentThread = data.thread;
+  const reply = data ? data.reply : null;
+  if (reply === null || reply === undefined) throw new Error("the model answered nothing");
+  if (reply.error) return "The model could not be asked: " + (reply.error.message || JSON.stringify(reply.error));
+  return reply?.choices?.[0]?.message?.content || JSON.stringify(reply);
 }
 
 /** Asks a question: always through the Blaze program, which holds the key. */
@@ -129,7 +135,13 @@ async function ask(question) {
     const answer = await askThroughBlaze(question, currentThread);
     hideTyping(typing);
     appendMessage("assistant", answer);
-    await loadChats();
+    /* The question was saved under a thread, so the panel holds a session of
+       its own: a new chat and a clear are both there to be asked for. The
+       list of saved chats is left as it is — it is loaded when the page
+       opens and after a chat is cleared or deleted, not after every message
+       the session is asked. */
+    newChat.hidden = false;
+    clearChat.hidden = false;
   } catch (failure) {
     showError(failure instanceof Error ? failure.message : String(failure));
     appendMessage("assistant", "Sorry, I could not answer that question.");
@@ -157,6 +169,7 @@ async function resumeChat(id) {
       appendMessage("assistant", answerOf(message));
     }
     newChat.hidden = false;
+    clearChat.hidden = false;
     input.focus();
   } catch (failure) {
     showError(failure instanceof Error ? failure.message : String(failure));
@@ -169,13 +182,52 @@ function startNewChat() {
   currentThread = 0;
   messages.innerHTML = "";
   newChat.hidden = true;
+  clearChat.hidden = true;
   input.focus();
 }
 
-/** A saved message as the list of chats shows it: the first 256 characters,
+/** Clears the chat that is open: the thread it continues is deleted from
+ *  the database, and the panel it was showing is emptied. A chat that was
+ *  never saved has nothing to delete, and the panel is emptied all the same. */
+async function clearOpenChat() {
+  hideError();
+  const thread = currentThread;
+  startNewChat();
+  if (thread > 0) {
+    try {
+      const response = await fetch("/api/clear", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: `T${thread}\n`,
+      });
+      if (!response.ok) throw new Error("the server answered " + response.status);
+      await loadChats();
+    } catch (failure) {
+      showError(failure instanceof Error ? failure.message : String(failure));
+    }
+  }
+}
+
+/** Deletes one saved chat: the thread it is saved as is gone from the
+ *  database, and the list of saved chats is loaded again. A chat that is
+ *  deleted while it is the one the panel is showing is cleared from the
+ *  panel as well, so the panel never shows a chat that is gone. */
+async function deleteSavedChat(id) {
+  hideError();
+  try {
+    const response = await fetch("/api/chats/" + id, { method: "DELETE" });
+    if (!response.ok) throw new Error("the server answered " + response.status);
+    if (currentThread > 0 && currentThread === id) startNewChat();
+    await loadChats();
+  } catch (failure) {
+    showError(failure instanceof Error ? failure.message : String(failure));
+  }
+}
+
+/** A saved message as the list of chats shows it: the first 200 characters,
  *  and an ellipsis behind the ones a longer message keeps past there. */
 function preview(text) {
-  return text.length > 256 ? text.slice(0, 256) + "…" : text;
+  return text.length > 200 ? text.slice(0, 200) + "…" : text;
 }
 
 /** Loads the saved chats from the Blaze program and shows them. */
@@ -201,9 +253,18 @@ async function loadChats() {
       resume.className = "resume";
       resume.textContent = "Resume";
       resume.addEventListener("click", () => {
-        resumeChat(chat.id);
+        resumeChat(chat.thread);
       });
       div.appendChild(resume);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "delete";
+      del.textContent = "Delete";
+      del.setAttribute("aria-label", "Delete saved chat " + chat.thread);
+      del.addEventListener("click", () => {
+        deleteSavedChat(chat.thread);
+      });
+      div.appendChild(del);
       chats.appendChild(div);
     }
     if (list.length === 0) {
@@ -236,6 +297,10 @@ input.addEventListener("keypress", (event) => {
 
 newChat.addEventListener("click", () => {
   startNewChat();
+});
+
+clearChat.addEventListener("click", () => {
+  clearOpenChat();
 });
 
 loadChats();

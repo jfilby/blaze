@@ -199,6 +199,29 @@ function askModel(question: string, thread: number): void {
   }
 }
 
+/** The thread the question that was saved last belongs to. A question that
+ *  began a thread of its own is saved under the id of the row it made, and
+ *  the chat route answers with that id: the browser asks the next question
+ *  of the same thread, so the conversation the panel holds — a run of
+ *  questions, or a resumed chat — is one session, and the saved chats show
+ *  it as the one entry it is. */
+var savedThread = 0;
+
+/** The thread the question that was saved last belongs to, held as the text
+ *  of the number it is: a name a handler captures is a copy unless it is an
+ *  array or a string, and the thread the browser is to continue has to be
+ *  seen by the handler that answers. A question that began a thread of its
+ *  own is saved under the id of the row it made, and the chat route answers
+ *  with that id: the browser asks the next question of the same thread, so
+ *  the conversation the panel holds — a run of questions, or a resumed chat
+ *  — is one session, and the saved chats show it as the one entry it is. */
+var savedThreadText = "0";
+
+/** The thread the last question was saved under, as a number. */
+function savedThread(): number {
+  return Number(savedThreadText);
+}
+
 function saveChat(question: string, answer: string, thread: number): void {
   const insert = sqlite.prepare(db, "INSERT INTO messages (thread, question, answer) VALUES (?, ?, ?)");
   sqlite.bindNumber(insert, 1, thread);
@@ -219,14 +242,20 @@ function saveChat(question: string, answer: string, thread: number): void {
       sqlite.bindNumber(fix, 2, made);
       sqlite.step(fix);
       sqlite.finalize(fix);
+      savedThreadText = `${made}`;
     }
+  } else {
+    savedThreadText = `${thread}`;
   }
 }
 
 var chatsJson = "";
 
 function buildChats(): void {
-  const read = sqlite.prepare(db, "SELECT id, question, answer FROM messages ORDER BY id DESC LIMIT 10");
+  /* One entry per saved chat — a thread — and the entry is the last message
+     the thread exchanged: the newest row of each thread, the newest ten
+     threads of all. */
+  const read = sqlite.prepare(db, "SELECT id, thread, question, answer FROM messages WHERE id IN (SELECT MAX(id) FROM messages GROUP BY thread) ORDER BY id DESC LIMIT 10");
   let json = "[";
   let first = 1;
   while (sqlite.step(read) > 0) {
@@ -234,11 +263,57 @@ function buildChats(): void {
       json += ",";
     }
     first = 0;
-    json += `{"id":${sqlite.columnNumber(read, 0)},"question":"${jsonEscape(`${sqlite.columnText(read, 1)}`)}","answer":"${jsonEscape(`${sqlite.columnText(read, 2)}`)}"}`;
+    json += `{"id":${sqlite.columnNumber(read, 0)},"thread":${sqlite.columnNumber(read, 1)},"question":"${jsonEscape(`${sqlite.columnText(read, 2)}`)}","answer":"${jsonEscape(`${sqlite.columnText(read, 3)}`)}"}`;
   }
   sqlite.finalize(read);
   json += "]";
   chatsJson = json;
+}
+
+/** What a clear answered, as the JSON the browser reads. */
+var clearJson = "{}";
+
+/**
+ * Clears the chat that is open: every message of the thread it belongs to
+ * is deleted from the database. A chat that was never saved — one that
+ * began a thread of its own and has not been asked yet, or one the browser
+ * began anew — has no thread to delete, and the call leaves the database
+ * alone; the browser clears the panel it was showing either way.
+ */
+function clearChat(id: number): void {
+  clearJson = `{"cleared":${id > 0 ? id : 0}}`;
+  if (id > 0) {
+    const del = sqlite.prepare(db, "DELETE FROM messages WHERE thread = ?");
+    sqlite.bindNumber(del, 1, id);
+    sqlite.step(del);
+    sqlite.finalize(del);
+  }
+}
+
+/** What a delete answered, as the JSON the browser reads. */
+var deleteJson = "{}";
+
+/**
+ * Deletes one saved chat: the thread the row belongs to is gone from the
+ * database, the last message it exchanged included. The id the browser
+ * sends is the row it saw in the list of saved chats, and the thread behind
+ * that row is what a saved chat is.
+ */
+function deleteChat(id: number): void {
+  deleteJson = `{"deleted":${id > 0 ? id : 0}}`;
+  if (id > 0) {
+    const finder = sqlite.prepare(db, "SELECT thread FROM messages WHERE id = ?");
+    sqlite.bindNumber(finder, 1, id);
+    var thread = 0;
+    if (sqlite.step(finder) > 0) thread = sqlite.columnNumber(finder, 0);
+    sqlite.finalize(finder);
+    if (thread > 0) {
+      const del = sqlite.prepare(db, "DELETE FROM messages WHERE thread = ?");
+      sqlite.bindNumber(del, 1, thread);
+      sqlite.step(del);
+      sqlite.finalize(del);
+    }
+  }
 }
 
 /** The transcript of a resumed chat, as JSON: the thread it belongs to, and
@@ -319,12 +394,45 @@ const server = http.createServer((req: any, res: any) => {
     saveChat(question, modelAnswer, thread);
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(modelAnswer);
+    /* The thread the question was saved under travels with the answer, so
+       the browser asks the next question of the same session: the
+       conversation the panel holds is one chat, and the saved chats show it
+       as the one entry it is. An answer that is nothing at all — a request
+       the model never answered — travels as a null reply, which the browser
+       names rather than parses. */
+    if (modelAnswer === "") {
+      res.end(`{"thread":${savedThread()},"reply":null}`);
+    } else {
+      res.end(`{"thread":${savedThread()},"reply":${modelAnswer}}`);
+    }
   } else if (path.indexOf("/api/resume/") === 0 && method === "GET") {
     buildResume(Number(path.slice(12, path.length)));
     res.writeHead(200);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.end(resumeJson);
+  } else if (path === "/api/clear" && method === "POST") {
+    /* The chat that is open names the thread it continues, as "T<thread>":
+       the same marker a question that continues a thread travels with. A
+       body without one is a chat that was never saved, and there is nothing
+       in the database to delete. */
+    const body = req.text();
+    var thread = 0;
+    const at = body.indexOf("\n");
+    if (at > 0 && body.slice(0, 1) === "T") {
+      const wanted = Number(body.slice(1, at));
+      if (wanted > 0) thread = wanted;
+    }
+    clearChat(thread);
+    res.writeHead(200);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(clearJson);
+  } else if (path.indexOf("/api/chats/") === 0 && method === "DELETE") {
+    /* The id of the saved chat is the tail of the path, from behind the
+       eleven characters of "/api/chats/". */
+    deleteChat(Number(path.slice(11, path.length)));
+    res.writeHead(200);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(deleteJson);
   } else if (path === "/api/chats" && method === "GET") {
     buildChats();
     res.writeHead(200);
