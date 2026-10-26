@@ -4745,6 +4745,23 @@ export const pythonFrontend: Frontend = {
     for (const imported of parsed.imports) {
       for (const name of imported.names ?? []) known.add(name);
     }
+    // A name bound to a function (a lambda) may be called as one.
+    const collectLambdas = (stmts: PyStatement[]): void => {
+      for (const stmt of stmts) {
+        if (stmt.k === "declare" && stmt.value.k === "lambda") known.add(stmt.name);
+        if (stmt.k === "if") { collectLambdas(stmt.then); collectLambdas(stmt.otherwise); }
+        if (stmt.k === "while") collectLambdas(stmt.body);
+        if (stmt.k === "for") collectLambdas(stmt.body);
+        if (stmt.k === "function") collectLambdas(stmt.body);
+        if (stmt.k === "try") {
+          collectLambdas(stmt.body);
+          if (stmt.catchBody !== null) collectLambdas(stmt.catchBody);
+          if (stmt.finallyBody !== null) collectLambdas(stmt.finallyBody);
+        }
+      }
+    };
+    collectLambdas(parsed.body);
+    for (const fn of parsed.functions) collectLambdas(fn.body);
     // A file that holds statements is a program, and a program has the
     // conversions and the roundings a module of functions has not.
     const builtins = parsed.body.length === 0 ? MODULE_BUILTINS : PYTHON_BUILTINS;

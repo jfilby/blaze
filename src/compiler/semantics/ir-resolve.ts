@@ -2333,6 +2333,11 @@ class ProgramResolver {
         // A name bound to `process.argv` is a reference to an argument value.
         return declare({ kind: "object", mutable, type: { kind: "ref", of: null } });
       }
+      case "function":
+        // A name bound to a function (a lambda) is called by inlining its body
+        // where the call is written, so the name itself is never read: declare
+        // a placeholder the optimizer removes.
+        return declare({ kind: "number", mutable, type: "i64", text: "0" });
       case "null":
         return declare({ kind: "object", mutable, type: REF_NULL });
       case "boolean":

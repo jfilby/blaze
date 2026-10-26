@@ -179,6 +179,19 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "name":
       return { k: "name", name: one.name };
     case "call": {
+      // A name bound to a function (a lambda) is called by inlining its body
+      // with the arguments bound to its parameters.
+      if (one.name !== "len" && one.name !== "str" && one.name !== "tl.where" && bindings.values.has(one.name)) {
+        const fn = bindings.values.get(one.name)!;
+        if (fn.k === "lambda") {
+          const child = cloneBindings(bindings);
+          fn.params.forEach((param, idx) => {
+            if (idx < one.args.length) child.values.set(param.name, one.args[idx]);
+          });
+          // Inline: evaluate the body (single expression).
+          return programValue(fn.body, child);
+        }
+      }
       // `len(x)` is the length of the list or of the text `x` holds, and the
       // program model reads a length off the name it is written by.
       if (one.name === "len" && one.args.length === 1 && one.args[0].k === "name") {
@@ -485,10 +498,17 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       return { k: "boolean", value: one.negated ? !found : found };
     }
     case "lambda": {
+      // The parameters of a lambda are whole numbers unless a use says
+      // otherwise: the arrow the program model holds names each parameter's
+      // type, and a Python lambda writes none.
       return {
         k: "arrow",
-        params: one.params,
-        body: [{ kind: "result", value: programValue(one.body, bindings), line: 0 }],
+        // The body a call reads is the lambda's own, which the program model
+        // inlines where the call is written. The arrow registered here is the
+        // function the name holds; its body is a placeholder, since a lambda
+        // is only ever called.
+        params: one.params.map((param) => ({ name: param.name, type: "bigint" })),
+        body: [{ kind: "result", value: { k: "whole", text: "0" }, line: 0 }],
       };
     }
     case "walrus": {
