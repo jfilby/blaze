@@ -558,6 +558,12 @@ test("list concatenation in a program body", () => {
   assert.equal(declaration.value.values[5].text, "6");
 });
 
+test("a chained slice in a function body", () => {
+  const phase = phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3][0]\n" }, "main.py");
+  const contract = phase.program.files[0].functions["f"];
+  assert.deepEqual(contract.ensures, ["result == a[1:3][0]"]);
+});
+
 test("a parameter of a function of a module is read only, and the range it reads is stated", () => {
   const source = [
     "def first(a: list[float]) -> float:",

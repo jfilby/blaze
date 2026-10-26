@@ -2697,23 +2697,23 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
     }
     case "index": {
-      // A slice indexed at a constant position can be simplified to an index
-      // of the base: `a[i:j][k]` is `a[i+k]` when both `i` and `k` are
-      // constants. Without this, the IR's slice (which returns the base)
-      // would give the wrong element.
-      if (value.base.k === "slice" && value.base.start !== null && value.base.start.k === "number" && value.index.k === "number") {
-        const start = Number(value.base.start.text);
-        const idx = Number(value.index.text);
-        const new_index = { k: "number" as const, text: String(start + idx), whole: value.base.start.whole && value.index.whole };
-        return { k: "index", base: lowerValue(value.base.base), index: lowerValue(new_index) };
-      }
-      // A slice indexed at a negative constant position: `a[i:j][-k]` is
-      // `a[j-k]` (approximately; ignores step for simplicity).
-      if (value.base.k === "slice" && value.base.stop !== null && value.base.stop.k === "number" && value.index.k === "unary" && value.index.op === "-") {
-        const stop = Number(value.base.stop.text);
-        const n = value.index.operand.k === "number" ? Number(value.index.operand.text) : 0;
-        const new_index = { k: "number" as const, text: String(stop - n), whole: true };
-        return { k: "index", base: lowerValue(value.base.base), index: lowerValue(new_index) };
+      // A slice indexed at any position can be simplified to an index of the
+      // base: `a[i:j][k]` is `a[i+k]`. The IR's slice returns the base (not
+      // a sub-buffer), so without this simplification the wrong element is
+      // read. When `i` is null it defaults to 0; a step other than 1 is
+      // not handled.
+      if (value.base.k === "slice") {
+        const slice = value.base;
+        const step = slice.step;
+        const isUnitStep = step === null || (step.k === "number" && Number(step.text) === 1);
+        if (isUnitStep) {
+          const startExpr = slice.start === null
+            ? { k: "number" as const, text: "0", whole: true }
+            : slice.start;
+          // a[i:j][k] -> a[i + k]
+          const new_index: PyValue = { k: "binary", op: "+", left: startExpr, right: value.index };
+          return { k: "index", base: lowerValue(slice.base), index: lowerValue(new_index) };
+        }
       }
       return { k: "index", base: lowerValue(value.base), index: lowerValue(value.index) };
     }
