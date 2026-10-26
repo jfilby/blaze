@@ -21,7 +21,7 @@ The scope is the first version: a Python **module** (a library of functions) and
 a Python **program** (the statements of the entry module), the compiler's value
 model (a number, text, an array, an object, a reference), and the arithmetic
 and the text of a value that Python spells its own way. Not in scope: classes,
-generators, coroutines, decorators, comprehensions, context managers, pattern
+generators, coroutines, context managers, pattern
 matching, `async`, and the standard library. A Python program is a program of
 this compiler that was written in Python, not a Python runtime: the source is
 compiled, and what runs is a native binary.
@@ -196,7 +196,6 @@ matter are the ones a Python program is most likely to write:
 |---|---|
 | `class` | an object written where it is made, as in `{"left": None, "right": None}` |
 | `yield`, `async`, `await` | a straight line: a compiled program has nothing to wait for |
-| a decorator | a function is called where it is written, and the decorator is not run |
 | `in`, `not in` | a loop that looks for the value |
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
 | `**kwargs` | a fixed list of parameters; a dict is written with named keys |
@@ -602,7 +601,7 @@ a new section and needs nothing else.
 
 ## What is not done
 
-- **No classes, no generators, no decorators, no comprehensions, no context
+- **No classes, no generators, no context
   managers, no pattern matching, no `async`.** Each is refused with the line
   it was written on.
 - **No standard library.** A module of the project is a file of the project:

@@ -1032,7 +1032,6 @@ class PythonParser {
   private decorator(): string {
     this.next(); // the `@`
     const parts: string[] = [];
-    const startToken = this.peek();
     for (;;) {
       const token = this.peek();
       if (token.kind !== "name") {
@@ -1049,16 +1048,23 @@ class PythonParser {
       if (!this.at(".")) break;
       this.next();
     }
+    // A decorator may carry arguments, as in `@decorator(arg)`: they are
+    // read and discarded, since the decorator itself is not run.
+    if (this.at("(")) {
+      let depth = 0;
+      do {
+        const next = this.next();
+        if (next.kind === "op") {
+          if (next.text === "(" || next.text === "[" || next.text === "{") depth += 1;
+          else if (next.text === ")" || next.text === "]" || next.text === "}") depth -= 1;
+        }
+      } while (depth > 0 && this.peek().kind !== "end");
+    }
     // The newline that ends the line of the decorator is not a statement: the
     // function definition that follows it is read from its own line.
     this.skipNewline();
-    if (parts.length === 0 || parts[0] !== "triton") {
-      this.report(
-        '"@" is not supported',
-        "a decorator is not supported: a function is called where it is written, and the decorator is not run",
-        startToken,
-      );
-    }
+    // A decorator is not run: the compiler has no runtime for it, and the
+    // function is defined as it was written. The name is kept for the record.
     return parts.join(".");
   }
 
