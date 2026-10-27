@@ -20,7 +20,7 @@
 import { stat, writeFile } from "node:fs/promises";
 import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
+import { DEFAULT_ALIGNMENT, isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
 import type { Condition } from "./x86.ts";
 import { integerLiteral } from "./c-names.ts";
 import { ARGV_LENGTH, BUILTINS, SHARED } from "../semantics/builtins.ts";
@@ -9664,12 +9664,45 @@ class Machine {
     return found;
   }
 
+  /**
+   * Whether an object literal writes every field its layout has, which is what
+   * decides the block it is given.
+   *
+   * A literal that does is a caller of the runtime's `allocate_uninitialized`,
+   * and one that leaves a field out keeps the cleared block. The two cases are
+   * read here rather than at the point of allocation because the fields of the
+   * literal are the whole of what decides it, and the answer is the same one
+   * the C backend reaches in its own `writesEveryField`.
+   */
+  private writesEveryField(value: SemanticValue & { k: "newObject" }, layout: ObjectLayout): boolean {
+    if (layout.align > DEFAULT_ALIGNMENT) return false;
+    const written = new Set(value.fields.map((entry) => entry.name));
+    return layout.fields.every((entry) => written.has(entry.name));
+  }
+
   /** An object, allocated and filled as one value, on the terms `buffer` above. */
   private object(value: SemanticValue & { k: "newObject" }): void {
     const layout = this.layout(value.layout);
-    this.code.movRegImm(RDI, BigInt(layout.size));
-    this.code.movRegImm(RSI, BigInt(layout.align));
-    this.runtime("_object_new");
+    // A literal that writes every field its layout has leaves nothing for the
+    // clearing to answer, so the block it is given is not cleared: the
+    // runtime's own note on `allocate_uninitialized` names an object literal
+    // that writes its whole payload as what it is for. One that leaves a field
+    // out keeps the cleared block, because a program is allowed to read a field
+    // it never wrote and the source answers that read as a zero.
+    //
+    // The uncleared block carries the runtime's default alignment rather than
+    // the layout's own: a field is at most a pointer wide, so no layout asks
+    // for more than that today, and the check is what keeps that true rather
+    // than what makes it true. This is the same decision the C backend makes in
+    // `writesEveryField`, and it is made for the same reason.
+    if (this.writesEveryField(value, layout)) {
+      this.code.movRegImm(RDI, BigInt(layout.size));
+      this.runtime("_allocate_uninitialized");
+    } else {
+      this.code.movRegImm(RDI, BigInt(layout.size));
+      this.code.movRegImm(RSI, BigInt(layout.align));
+      this.runtime("_object_new");
+    }
     // The object being built is kept in a slot of the frame as well as in the
     // register the fields are written through, because anything a field's value
     // reads that builds an object of its own takes that register for itself and

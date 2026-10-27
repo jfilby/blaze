@@ -236,7 +236,97 @@ from the read-only data: `step += 1` is one addition and not a load of the
 literal, a copy and an addition. The copy is a move, and the move is the wait
 described above.
 
+### An object literal that writes every field is not cleared
+
+An object literal writes its whole payload before any of it is read, so a block
+cleared first is a pass over the object the program never asked for. A literal
+that writes every field of its layout is therefore given the runtime's
+`allocate_uninitialized`, and one that leaves a field out keeps the cleared
+block — a program is allowed to read a field it never wrote, and the source
+answers that read as a zero.
+
+The C backend had made this choice since it was written (`writesEveryField` in
+`toolchain/ir-c.ts`); the machine backend had not, and the clearing was 12% of
+`binarytrees` — a quarter of it inside `memset`, and the rest of it the cache
+line per node that a second pass over the payload touches.
+
+### An uncleared block of a region is its header and its payload
+
+A cleared block keeps a whole alignment of room past the end of its payload.
+Those bytes are what a read past the end of the block answers with, and the
+source language answers that read as a zero, so the room is what makes the
+answer true and it stays.
+
+A block that is *not* cleared has no such answer to give: its caller writes
+every byte of its payload before reading any. So the only room it needs past the
+header is what places the payload on the alignment it asked for — and the header
+is three sixteens long, so a payload placed at the header's end is already
+placed on every alignment up to sixteen as long as the region's cursor is
+16-byte aligned. Rounding the span up to sixteen is what keeps it so.
+
+This is the working set of a program whose marked loop builds a value per turn.
+A node of sixteen bytes advanced the cursor by eighty bytes before and by
+sixty-four after, so a loop that builds a tree of such nodes touches a fifth
+less memory — and on `binarytrees` that fifth was worth more than every
+instruction the allocator executes.
+
 ## What is left
+
+### The header of a block a region hands out
+
+Two fifths of what is left of `binarytrees` is the region's own layout: a node
+of sixteen bytes is given a header of forty-eight before it, so sixty-four bytes
+of the cursor's travel buy sixteen bytes of tree. Measured by cutting the header
+away — which is not a program any of this may ship, and was done only to price
+the change — the program ran 1.3 times faster than it does now, with the slack
+already gone.
+
+What a sound version needs is a proof about a layout rather than about one
+allocation: that no block of it anywhere in the program is ever released,
+retained, resized, measured, or handed to a runtime call that reads a header,
+and that the block does not outlive the region it was taken from. A block that
+answers yes to that can be the payload and nothing else, and the region's cursor
+advances by the payload rounded to sixteen.
+
+The proof is a whole-program one because a block escapes the function that
+allocated it: `createTree` hands its tree back and `checksum` walks it, and
+neither of them is where the answer is. It is also a proof about the *runtime
+calls the program makes*, because `ref<any>` is a value any of them may be
+handed. A first version could refuse any layout a dynamic (or otherwise opaque)
+call in the program can be given.
+
+### The instructions a recursive call spends on one value
+
+`createTree` is twenty-four instructions a node, and three of them are the same
+number moved three times. The source is `depth-- > 0 ? … : …`, whose IR is a
+`let t1 = depth`, a step of `depth`, and a test of `t1`; the parameter, the
+`let` and the read of it for the test are three copies of one value in three
+registers because each is a name the build gave a register of its own and the
+accumulator is how a value moves between them.
+
+Two of those are the accumulator discipline rather than the `let`: a value read
+out of a register-held name is copied into the accumulator, and a value stored
+into one is copied out of it. The pair is a move when the source and the
+destination are registers, and the `let` could be one move rather than three if
+the store knew the accumulator had just been loaded from the same slot — the
+lowering keeps a note of that for the frame but not for a register.
+
+### A field read twice
+
+`checksum` tests `node.left` for nothing and then passes `node.left` to the
+recursive call, and the two are two loads of the same field with nothing that
+could have written it in between. The C compiler eliminates one of them; the
+machine backend has no such pass, and a load is a seventh of what the function
+spends on a node.
+
+### A comparison whose other side is a literal
+
+`t1 > 0` is lowered as a load of `0.0` into the scratch and a comparison against
+it, because the operand order a float comparison needs puts the *larger* side in
+the destination and the literal is the larger side only for `>` and `>=`. For
+those two the literal can be the instruction's own memory operand
+(`sseCompareLabel` already exists for a literal in the read-only data), which is
+one instruction less on the test of every loop written `while (i > 0)`.
 
 ### The strength reduction over a bound the program wrote
 
@@ -315,4 +405,39 @@ The second row is the one worth keeping: the registers are only worth having
 when the moves into and out of them do not wait on the division of the turn
 before, and the form that puts them in registers *without* that is twice as slow
 as leaving them in the frame.
+
+### What the allocator was worth on `binarytrees`
+
+The same method, on the benchmark program: `hyperfine --warmup 5 --runs 40
+'taskset -c 0 ./program 17'`, with the forms built from this tree and run one
+after another. The program's instruction count is the deterministic half of the
+pair — `valgrind --tool=callgrind ./program 14`, which is a smaller depth so
+that a run is a minute and not five — and the clock is the half the machine
+gets a vote in.
+
+| Form of the allocation | Instructions at depth 14 | The program at depth 17 |
+|---|---|---|
+| the tree before this round | 287.0M | 527 ms |
+| an object literal that writes every field is not cleared | 232.5M | 507 ms |
+| and an uncleared block of a region is its header and its payload | 235.5M | 454 ms |
+
+The first change is 19% of the instructions and 4% of the clock: what it removes
+is a pass over the payload that the processor pays for in bandwidth rather than
+in instructions, and the payload of a node is two words. The second is thirteen
+more instructions a node — the header's stores are the same and the room test is
+a word narrower — and 12% of the clock, because what it removes is a fifth of
+the memory the turn touches. Together they are 1.2 times the program, and the
+run-to-run spread on the machine this was measured on is ±6%, which is why each
+row is a change of one thing.
+
+The allocator's *instructions* are not what those milliseconds were. A fast half
+of the region's allocation made into a leaf function — no frame, no spill, the
+room test first — took the allocator from 28.7 instructions a block to 27 and
+was worth 4% at most, while the span of the block was worth 12%. That change was
+withdrawn rather than kept: the C compiler emits different code around it even
+where the C is the same, and a shared-block program in the suite (a spectral
+norm over three windows of one `SharedArrayBuffer`) printed a different answer
+with it. Four percent is not worth an unexplained difference in what a program
+computes, and the same four percent is the reason the *next* change to that
+function is worth measuring rather than reasoning about.
 

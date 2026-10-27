@@ -339,7 +339,12 @@ test("a standalone build links the compiler runtime, and a function that allocat
   const undefinedSymbols = run("nm", ["--defined-only", join(await project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
   assert.doesNotMatch(undefinedSymbols.stdout, /blaze_rt_/, "a call the runtime defines belongs to the runtime object");
   const asked = run("nm", ["--undefined-only", join(await project(allocating), "work/make/c1.o")], { timeoutMs: 30_000 });
-  assert.match(asked.stdout, /blaze_rt_object_new/, "a function that allocates must reach the runtime");
+  // The literal `{ left: null, right: null }` writes every field its layout has,
+  // so the block it is given is not cleared and the entry the object names is
+  // the uncleared one — the same choice the C backend makes for the same
+  // literal. Either entry is the runtime's, which is what this asserts: the
+  // allocation is a call the candidate leaves unresolved.
+  assert.match(asked.stdout, /blaze_rt_(object_new|allocate_uninitialized)/, "a function that allocates must reach the runtime");
   const beside = run("nm", ["--defined-only", join(await project(allocating), `work/${RUNTIME_NAME}.o`)], { timeoutMs: 30_000 });
   for (const line of asked.stdout.split("\n").filter((entry) => /\sU\s/.test(entry))) {
     const symbol = line.trim().split(/\s+/)[1] ?? "";
@@ -853,6 +858,52 @@ test("a region hands out a block whose read past the end is a zero, as the langu
   const result = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout.trim(), "42 0", "the second turn's array is a fresh one, so it reads zero past its end");
+});
+
+test("a region packs an uncleared block and keeps the slack of a cleared one", async () => {
+  // A block that is cleared keeps a whole alignment of room past the end of its
+  // payload, because those bytes are what a read past the end of it answers
+  // with: the program is allowed to make that read and the language answers it
+  // as a zero. A block that is not cleared has no such answer to give — its
+  // caller writes every byte before reading any — so the only room it needs
+  // past the header is what places its payload, and the header is three
+  // sixteens long. A marked loop that builds a value per turn is the working
+  // set of a whole program, so the packed form is worth its own test: a node of
+  // sixteen bytes advances the cursor by sixty-four and not by eighty.
+  const probe = [
+    "#include <stdio.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    `  ${RUNTIME_NAME}_region_enter();`,
+    `  char* a = (char*)${RUNTIME_NAME}_allocate_uninitialized(16);`,
+    `  char* b = (char*)${RUNTIME_NAME}_allocate_uninitialized(16);`,
+    `  double* cleared = (double*)${RUNTIME_NAME}_object_new(16, 8);`,
+    "  if (a == NULL || b == NULL || cleared == NULL) return 1;",
+    "  const int aligned = ((unsigned long long)a % 16) == 0 && ((unsigned long long)b % 16) == 0;",
+    '  printf("%lld %d %g\\n", (long long)(b - a), aligned, cleared[2]);',
+    `  ${RUNTIME_NAME}_region_leave();`,
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-region-packed-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("release"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(
+    result.stdout.trim(),
+    "64 1 0",
+    "an uncleared block is its header and its payload, and a cleared one still answers zero past its end",
+  );
 });
 
 test("a region opened inside an open region does not take the outer turn's blocks", async () => {

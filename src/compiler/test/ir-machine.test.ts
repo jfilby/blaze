@@ -1634,6 +1634,59 @@ test("an object is allocated, written and read back through its own layout", asy
   assert.equal(await lowered(read, (name) => `struct Point p = {1.0, 2.0}; printf("%.17g", ${name}(&p));`), "2");
 });
 
+test("an object literal that writes every field is given a block that was not cleared", async () => {
+  // A literal writes its whole payload before any of it is read, so a block
+  // cleared first is a pass over the object the program never asked for: the
+  // runtime's own note on `allocate_uninitialized` names an object literal as
+  // what it is for, and the C backend has made this choice for the same literal
+  // since it was written. A literal that leaves a field out keeps the cleared
+  // block, because a program is allowed to read a field it never wrote and the
+  // source answers that read as a zero.
+  const allocationOf = async (fields: { name: string; value: SemanticValue }[]): Promise<string> => {
+    const directory = await scratch("blaze-machine-cleared-");
+    const fn = subject(POINT, handsBack({ k: "newObject", type: POINT, layout: "Point", fields }), NUMBERS, { Point: POINT_LAYOUT });
+    const objectPath = join(directory, "subject.o");
+    await buildObject({ fn, contract: contracted(fn), target: TARGET, callable: new Set(), objectPath });
+    const undefined_ = run("nm", ["--undefined-only", objectPath], { timeoutMs: 30_000 });
+    assert.equal(undefined_.code, 0, undefined_.stderr);
+    return undefined_.stdout;
+  };
+
+  const every = await allocationOf([
+    { name: "x", value: local("v") },
+    { name: "y", value: local("w") },
+  ]);
+  assert.match(every, /blaze_rt_allocate_uninitialized/, "a literal that writes every field is not cleared first");
+  assert.doesNotMatch(every, /blaze_rt_object_new\b/, "and the cleared allocation is not the entry it names");
+
+  // The same literal read back, so the block it was given is a block the
+  // program can still read: the entry changed, the layout did not.
+  const full = subject(
+    POINT,
+    handsBack({
+      k: "newObject",
+      type: POINT,
+      layout: "Point",
+      fields: [
+        { name: "x", value: local("v") },
+        { name: "y", value: local("w") },
+      ],
+    }),
+    NUMBERS,
+    { Point: POINT_LAYOUT },
+  );
+  assert.equal(
+    await lowered(full, (name) => `struct Point* p = ${name}(1.5, 2.5); printf("%.17g %.17g", p->x, p->y);`),
+    "1.5 2.5",
+  );
+
+  assert.match(
+    await allocationOf([{ name: "x", value: local("v") }]),
+    /blaze_rt_object_new\b/,
+    "a literal that leaves a field out keeps the cleared block",
+  );
+});
+
 test("a reference reaches a callee that takes one written as a reference to no layout", async () => {
   // The caller holds a point as a `ref<Point>` and the callee takes a
   // `ref<any>`. They are one word and the call must pass it, whichever of the

@@ -1816,7 +1816,7 @@ size_t blaze_rt_i256_format(const blaze_i256* value, unsigned base, unsigned cha
   }
   if (used + 1u > size) return 0;
   memcpy(buffer, text, used);
-  buffer[used] = '\0';
+  buffer[used] = '\\0';
   return used;
 }
 
@@ -2063,6 +2063,36 @@ static inline __attribute__((always_inline)) size_t blaze_rt_class_of(size_t tot
    then ran past the values it was given. */
 static void* blaze_rt_region_take(size_t total, size_t bytes, size_t alignment, int cleared);
 
+/* The room a region advances its cursor by for a block of this payload.
+
+   A block that is cleared keeps a whole alignment of room past the end of its
+   payload. Those bytes are what a read past the end of the block answers with:
+   the program is allowed to make that read and the language answers it as a
+   zero, and the clear is what makes that answer true.
+
+   A block that is not cleared has no such answer to give — the caller of an
+   uncleared block writes every byte of its payload before reading any — so the
+   only room it needs past the header is what places the payload on the
+   alignment it asked for. The header is three sixteens long, so a payload
+   placed at the header's end is already placed on every alignment up to
+   sixteen, as long as the cursor is 16-byte aligned; rounding the room up to
+   sixteen is what keeps it so for the block after this one.
+
+   This is most of a program's working set where a marked loop builds a value
+   per turn: a node of sixteen bytes advanced the cursor by eighty before and
+   by sixty-four after, so a loop that builds a tree of such nodes touches a
+   fifth less memory. */
+static size_t blaze_rt_region_span(size_t bytes, size_t alignment, int cleared) {
+  const size_t slack = cleared ? BLAZE_RT_DEFAULT_ALIGNMENT : 0;
+  if (alignment <= BLAZE_RT_DEFAULT_ALIGNMENT) {
+    return (bytes + BLAZE_RT_HEADER_SIZE + slack + BLAZE_RT_DEFAULT_ALIGNMENT - 1) & ~(size_t)(BLAZE_RT_DEFAULT_ALIGNMENT - 1);
+  }
+  /* A payload placed on an alignment past sixteen needs the slack for its own
+     placement, wherever it is: the cursor is 16-byte aligned and the payload is
+     at most an alignment less a sixteen past the header. */
+  return (bytes + alignment + BLAZE_RT_HEADER_SIZE + BLAZE_RT_DEFAULT_ALIGNMENT - 1) & ~(size_t)(BLAZE_RT_DEFAULT_ALIGNMENT - 1);
+}
+
 static void* blaze_rt_block(size_t bytes, size_t alignment, int cleared) {
   if (alignment == 0) alignment = BLAZE_RT_DEFAULT_ALIGNMENT;
 ${guarded ? `  /* The payload is placed with a mask, which only places it for a power of
@@ -2077,7 +2107,7 @@ ${guarded ? `  /* The payload is placed with a mask, which only places it for a 
   if (alignment > BLAZE_RT_MAX_ALLOCATION - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("object alignment is too large");
   if (bytes > BLAZE_RT_MAX_ALLOCATION - alignment - BLAZE_RT_HEADER_SIZE) blaze_rt_refuse("request too large");` : ""}
   const size_t total = bytes + alignment + BLAZE_RT_HEADER_SIZE;
-  if (blaze_rt_region_depth > 0) return blaze_rt_region_take(total, bytes, alignment, cleared);
+  if (blaze_rt_region_depth > 0) return blaze_rt_region_take(blaze_rt_region_span(bytes, alignment, cleared), bytes, alignment, cleared);
   const size_t cls = cleared ? blaze_rt_class_of(total, alignment) : 0;
   if (cls != 0) {
     /* The header of a pooled block is at the start of its class, so the payload
@@ -2701,6 +2731,46 @@ static size_t blaze_rt_write_number(const char* text, size_t length, unsigned ch
   return written;
 }
 
+/* The answer a value's shortest decimal has been, kept.
+
+   What a number is written as does not depend on when it is asked for, and a
+   program writes the same few numbers out over and over: the scale of a
+   record, the price of an item, the constant of a computation, the same field
+   of every element of an array. The search below is what a value costs the
+   first time it is said and not what it costs every time: a slot holds the
+   bits of the value, the style it was written in and the bytes it was written
+   as, and a value whose bits are in a slot is copied out rather than searched
+   for again.
+
+   The table belongs to the thread, because two threads writing two numbers do
+   not have to be told about each other and a torn slot would be a wrong number
+   rather than a slow one. It is direct-mapped: a slot is the value's bits
+   folded and cut, so two values that land in one slot take turns rather than
+   growing a table nothing ever shrinks. */
+#define BLAZE_RT_NUMBER_SLOTS 128u
+/* The longest a double is written: -1.7976931348623157e+308 is 24 bytes. */
+#define BLAZE_RT_NUMBER_TEXT 28u
+
+typedef struct {
+  uint64_t bits;
+  unsigned char style;
+  unsigned char length;
+  unsigned char text[BLAZE_RT_NUMBER_TEXT];
+} blaze_number_slot;
+
+static _Thread_local blaze_number_slot blaze_number_known[BLAZE_RT_NUMBER_SLOTS];
+
+static blaze_number_slot* blaze_number_slot_of(double value) {
+  uint64_t bits;
+  memcpy(&bits, &value, sizeof bits);
+  /* A value's low bits are the ones a written decimal has few of: 12.5 and
+     7.25 are two mantissas whose bottom bits are all zero, so folding the word
+     onto itself puts both in one slot. Multiplying by the golden ratio's odd
+     neighbour and taking the top bits mixes every bit into the choice. */
+  bits ^= (uint64_t)blaze_rt_text_style;
+  return &blaze_number_known[(size_t)((bits * 0x9E3779B97F4A7C15ULL) >> 57)];
+}
+
 size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) {
   /* The shortest decimal that reads back as this value, placed the way the
      source language places it: in full from 1e-6 up to 1e21, and in exponential
@@ -2765,6 +2835,16 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
     }
     written[used] = '\\0';
     return blaze_rt_write_number(written, (size_t)used, buffer, size);
+  }
+  /* A value the thread has already written is written again from what it was
+     written as. */
+  {
+    blaze_number_slot* slot = blaze_number_slot_of(value);
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    if (slot->length != 0 && slot->bits == bits && slot->style == (unsigned char)blaze_rt_text_style) {
+      return blaze_rt_write_number((const char*)slot->text, (size_t)slot->length, buffer, size);
+    }
   }
   /* The shortest decimal that reads back as this value.
 
@@ -2877,6 +2957,18 @@ size_t blaze_rt_format_number(double value, unsigned char* buffer, size_t size) 
     }
     while (scale_count > 0) written[used++] = scale_text[--scale_count];
     written[used] = '\\0';
+  }
+
+  /* The bytes are kept for the next writing of this value, which is the whole
+     of what the search above is worth keeping: a value said twice is searched
+     for once. A slot holds the sign as well as the digits, because the value's
+     bits are what the slot is found by. */
+  if (used > 0 && used <= (int)BLAZE_RT_NUMBER_TEXT) {
+    blaze_number_slot* slot = blaze_number_slot_of(value);
+    memcpy(&slot->bits, &value, sizeof slot->bits);
+    slot->style = (unsigned char)blaze_rt_text_style;
+    slot->length = (unsigned char)used;
+    memcpy(slot->text, written, (size_t)used);
   }
 
   return blaze_rt_write_number(written, (size_t)used, buffer, size);
@@ -3077,18 +3169,100 @@ static blaze_dyn* blaze_dyn_lookup(double h) {
   return (blaze_dyn*)blaze_dyn_reg[i];
 }
 
+/* The pool a dynamic value and the text it holds are written in.
+
+   A dynamic value is a handle: the number a program passes around is the index
+   of the value in the registry, and the registry only ever grows, so a value of
+   this kind is asked for once and never given back. A parse of a document is
+   therefore a run of allocations with no release behind any of them, and a
+   small document is seventy or so of them, a few words each. The host
+   allocator answers every one with a size class, a free list and a header of
+   its own, and none of what it does is ever used again.
+
+   The pool answers all of them with a cursor. A chunk is taken a page at a
+   time and never handed back — the same life the registry has — and a value is
+   written where the cursor is and the cursor moves past it. What is left of
+   the ask is the memory the value had to have.
+
+   The text a value holds comes out of the same cursor, because a text is
+   written once and read for as long as the program runs, and the pool's
+   alignment is not worth a second mechanism for it. The first text of a chunk
+   sits a header's width past the start of the chunk: blaze_rt_text_length
+   reads the header in front of a text to tell a managed string from a literal,
+   and a text at the very start of a chunk would have nothing in front of it to
+   read.
+
+   The pool is per thread for the reason the slab is: a turn of a parallel loop
+   that builds values of its own must not share a cursor with the turn beside
+   it. That the registry itself is one list every thread appends to is a
+   separate matter, and one this pool does not make worse. */
+#define BLAZE_RT_DYN_POOL_BYTES (64u * 1024u)
+#define BLAZE_RT_DYN_POOL_GUARD 64u
+
+static _Thread_local char* blaze_rt_dyn_pool_at = NULL;
+static _Thread_local char* blaze_rt_dyn_pool_end = NULL;
+
+static void* blaze_rt_dyn_pool_take(size_t bytes, size_t alignment) {
+  if (blaze_rt_dyn_pool_at != NULL) {
+    const uintptr_t start = (uintptr_t)blaze_rt_dyn_pool_at;
+    const uintptr_t aligned = (start + (alignment - 1)) & ~(uintptr_t)(alignment - 1);
+    if ((size_t)((uintptr_t)blaze_rt_dyn_pool_end - aligned) >= bytes) {
+      blaze_rt_dyn_pool_at = (char*)(aligned + bytes);
+      return (void*)aligned;
+    }
+  }
+  size_t room = BLAZE_RT_DYN_POOL_BYTES;
+  if (bytes + alignment + BLAZE_RT_DYN_POOL_GUARD > room) room = bytes + alignment + BLAZE_RT_DYN_POOL_GUARD;
+  /* The chunk is not cleared. Every byte a value occupies is written before it
+     is read, and the few bytes of room before the first text of it are read
+     only by the header test, which is asking whether the words in front of a
+     text are a header and not what they say. Asking the host for memory that
+     is already zero costs a pass over the chunk; asking for memory is all this
+     needs. */
+  char* chunk = (char*)malloc(room);
+  if (chunk == NULL) { blaze_rt_raise("out of memory"); return NULL; }
+  const char* base = chunk + BLAZE_RT_DYN_POOL_GUARD;
+  const uintptr_t aligned = ((uintptr_t)base + (alignment - 1)) & ~(uintptr_t)(alignment - 1);
+  blaze_rt_dyn_pool_at = (char*)(aligned + bytes);
+  blaze_rt_dyn_pool_end = chunk + room;
+  return (void*)aligned;
+}
+
+/* A dynamic value with no field set. Every field is written, so the chunk it
+   came out of did not have to be cleared for it. */
 static blaze_dyn* blaze_dyn_new(blaze_dyn_kind k) {
-  blaze_dyn* d = calloc(1, sizeof(blaze_dyn));
+  blaze_dyn* d = (blaze_dyn*)blaze_rt_dyn_pool_take(sizeof(blaze_dyn), sizeof(double));
   d->kind = k;
+  d->number = 0.0;
+  d->text = NULL;
+  d->items = NULL;
+  d->count = 0;
+  d->capacity = 0;
   return d;
 }
 
-static char* blaze_dyn_strdup(const char* s) {
-  if (!s) return NULL;
-  size_t n = strlen(s);
-  char* r = malloc(n + 1);
-  memcpy(r, s, n + 1);
-  return r;
+/* Text the pool holds a copy of, which is what a dynamic value's text is when
+   the value outlives the bytes it was written from. */
+static char* blaze_dyn_text(const char* text, size_t length) {
+  char* copy = (char*)blaze_rt_dyn_pool_take(length + 1, 1);
+  if (length > 0) memcpy(copy, text, length);
+  copy[length] = '\\0';
+  return copy;
+}
+
+/* A text value whose text the pool already holds, which is the form a parsed
+   string takes: the parser writes the bytes once and the value is the handle
+   that points at them.
+
+   The length of the text is kept in the value's count, which nothing else uses
+   for a text: a value that writes its own text out then measures it by two
+   loads rather than by walking it, and a walk of a document writes every text
+   it holds. */
+static double blaze_dyn_text_handle(char* text, size_t length) {
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_TEXT);
+  d->text = text;
+  d->count = length;
+  return blaze_dyn_register(d);
 }
 
 double blaze_rt_box_number(double value) {
@@ -3098,7 +3272,10 @@ double blaze_rt_box_number(double value) {
 }
 double blaze_rt_box_string(const char* value) {
   blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_TEXT);
-  d->text = blaze_dyn_strdup(value);
+  if (value == NULL) return blaze_dyn_register(d);
+  const size_t length = strlen(value);
+  d->text = blaze_dyn_text(value, length);
+  d->count = length;
   return blaze_dyn_register(d);
 }
 double blaze_rt_box_null(void) {
@@ -3137,14 +3314,14 @@ const char* blaze_rt_to_text(double value) {
     }
     static char buf[64];
     snprintf(buf, 64, "%.17g", value);
-    return blaze_dyn_strdup(buf);
+    return blaze_dyn_text(buf, strlen(buf));
   }
   if (d->kind == BLAZE_DYN_NUMBER) {
     /* The number is written the way the language writes it, which is the
        shortest decimal that reads back as it. */
-    char* buf = malloc(64);
+    char* buf = (char*)blaze_rt_dyn_pool_take(64, 1);
     size_t written = blaze_rt_format_number(d->number, (unsigned char*)buf, 64);
-    buf[written] = '\0';
+    buf[written] = '\\0';
     return buf;
   }
   /* A boolean and a null are written the way the language writes them, and the
@@ -3272,77 +3449,224 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   return blaze_rt_box_string(answer);
 }
 
-static void json_skip_ws(const char** p) { while (**p==' '||**p=='\\t'||**p=='\\n'||**p=='\\r') (*p)++; }
+/* The four characters a document may be spaced with, as a table: a document is
+   spaced between every token it writes, so this is looked at more than any
+   other byte of one. */
+static const unsigned char json_space[256] = { [' '] = 1, ['\\t'] = 1, ['\\n'] = 1, ['\\r'] = 1 };
 
-static void json_append_utf8(char** out, size_t* len, size_t* cap, unsigned int cp) {
-  char buf[4]; int n;
-  if (cp < 0x80) { buf[0]=(char)cp; n=1; }
-  else if (cp < 0x800) { buf[0]=(char)(0xC0|(cp>>6)); buf[1]=(char)(0x80|(cp&0x3F)); n=2; }
-  else { buf[0]=(char)(0xE0|(cp>>12)); buf[1]=(char)(0x80|((cp>>6)&0x3F)); buf[2]=(char)(0x80|(cp&0x3F)); n=3; }
-  for (int i=0;i<n;i++){ if (*len+2>=*cap){ *cap = *cap ? *cap*2 : 64; *out=realloc(*out,*cap);} (*out)[(*len)++]=buf[i]; }
+static void json_skip_ws(const char** p) {
+  const unsigned char* at = (const unsigned char*)*p;
+  while (json_space[*at]) at += 1;
+  *p = (const char*)at;
 }
 
-static char* json_parse_string(const char** p) {
+/* The place a string of a document ends and whether anything in it is written
+   as an escape.
+
+   A string with no escape in it is a run of bytes a copy takes in one go, and
+   that is what most strings of a document are: a key and a value are written
+   as themselves rather than as \\u escapes. Finding the end first is what makes
+   that one write of the length the text has, where reading a byte at a time
+   grows a buffer and copies what is already in it on the way. */
+static const char* json_string_end(const char* p, int* escaped) {
+  int seen = 0;
+  for (;;) {
+    if (*p == '"') { *escaped = seen; return p; }
+    if (*p == '\\0') return NULL;
+    if (*p == '\\\\') {
+      seen = 1;
+      p += 1;
+      if (*p == '\\0') return NULL;
+    }
+    p += 1;
+  }
+}
+
+/* The value of a hex digit, or -1 where the character is not one. */
+static int json_hex(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+/* One code point as the bytes of UTF-8, and how many there are. */
+static size_t json_utf8(char* out, unsigned int cp) {
+  if (cp < 0x80) { out[0] = (char)cp; return 1; }
+  if (cp < 0x800) { out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+  out[0] = (char)(0xE0 | (cp >> 12));
+  out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+  out[2] = (char)(0x80 | (cp & 0x3F));
+  return 3;
+}
+
+/* A string of a document, as text the pool holds. NULL when the document is not
+   one: a string that does not end, or an escape that is not one the grammar
+   writes.
+
+   The escaped form of a string is never longer than the bytes it was written
+   with — six bytes of \\uXXXX are three bytes of UTF-8 at most, and every other
+   escape is two bytes for one — so the room the quoted run takes is the room
+   the text takes and no part of it is written twice. */
+static char* json_parse_string(const char** p, size_t* length) {
   if (**p != '"') return NULL;
-  (*p)++;
-  size_t cap=64,len=0;
-  char* out=malloc(cap);
-  while (**p && **p != '"') {
-    if (**p == '\\\\') {
-      (*p)++;
-      if (**p == '"') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='"'; (*p)++; }
-      else if (**p == '\\\\') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\\\'; (*p)++; }
-      else if (**p == '/') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='/'; (*p)++; }
-      else if (**p == 'b') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\b'; (*p)++; }
-      else if (**p == 'f') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\f'; (*p)++; }
-      else if (**p == 'n') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\n'; (*p)++; }
-      else if (**p == 'r') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\r'; (*p)++; }
-      else if (**p == 't') { if (len+2>=cap){cap*=2;out=realloc(out,cap);} out[len++]='\\t'; (*p)++; }
-      else if (**p == 'u') {
-        (*p)++;
-        unsigned int cp=0;
-        for (int i=0;i<4;i++) {
-          if (!**p) { free(out); return NULL; }
-          char h=**p; int v;
-          if (h>='0'&&h<='9') v=h-'0';
-          else if (h>='a'&&h<='f') v=h-'a'+10;
-          else if (h>='A'&&h<='F') v=h-'A'+10;
-          else { free(out); return NULL; }
-          cp=cp*16+v;
-          (*p)++;
+  const char* start = *p + 1;
+  int escaped = 0;
+  const char* end = json_string_end(start, &escaped);
+  if (end == NULL) return NULL;
+  const size_t room = (size_t)(end - start);
+  char* out = (char*)blaze_rt_dyn_pool_take(room + 1, 1);
+  size_t used = 0;
+  if (!escaped) {
+    /* A short string is copied a byte at a time rather than through the C
+       library's copy, which is chosen for runs long enough to have a shape. */
+    if (room < 16) { for (size_t i = 0; i < room; i += 1) out[i] = start[i]; }
+    else memcpy(out, start, room);
+    used = room;
+  } else {
+    const char* at = start;
+    while (at < end) {
+      if (*at != '\\\\') { out[used++] = *at; at += 1; continue; }
+      at += 1;
+      switch (*at) {
+        case '"': out[used++] = '"'; at += 1; break;
+        case '\\\\': out[used++] = '\\\\'; at += 1; break;
+        case '/': out[used++] = '/'; at += 1; break;
+        case 'b': out[used++] = '\\b'; at += 1; break;
+        case 'f': out[used++] = '\\f'; at += 1; break;
+        case 'n': out[used++] = '\\n'; at += 1; break;
+        case 'r': out[used++] = '\\r'; at += 1; break;
+        case 't': out[used++] = '\\t'; at += 1; break;
+        case 'u': {
+          at += 1;
+          unsigned int cp = 0;
+          for (int digit = 0; digit < 4; digit += 1) {
+            const int value = json_hex(*at);
+            if (value < 0) return NULL;
+            cp = cp * 16 + (unsigned int)value;
+            at += 1;
+          }
+          used += json_utf8(out + used, cp);
+          break;
         }
-        json_append_utf8(&out,&len,&cap,cp);
-      } else { free(out); return NULL; }
-    } else {
-      if (len+2>=cap){cap*=2;out=realloc(out,cap);}
-      out[len++]=**p;
-      (*p)++;
+        default: return NULL;
+      }
     }
   }
-  if (**p != '"') { free(out); return NULL; }
-  (*p)++;
-  out[len]=0;
+  out[used] = '\\0';
+  *p = end + 1;
+  *length = used;
   return out;
 }
 
+/* The powers of ten a double holds exactly: 10^22 is 2^22 * 5^22, and 5^22 is
+   under 2^53, so every one of these is a mantissa the hardware has. */
+static const double json_pow10[23] = {
+  1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+  1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+};
+
+/* The number a token of a document stands for, and whether the token is one.
+
+   A document's numbers are mostly whole and short, and the C library's strtod
+   is asked to settle everything any C program may write: a hexadecimal form, a
+   leading space, a locale whose point is not a point, an exponent past the
+   range of a double. The grammar of a document writes none of those; what it
+   writes is a mantissa of digits and a decimal point some places along them. A
+   mantissa of sixteen digits is an integer a double holds exactly, a power of
+   ten up to 10^22 is a double exactly, and one multiply or one divide by it is
+   one rounding — so the answer is the double the decimal names, reached in an
+   integer loop rather than in a call that reads a locale and builds a bignum.
+
+   What falls outside that — more digits than a double holds, a point more than
+   twenty two places away, an exponent past the range — is the host's to
+   settle, and the host settles it. */
+static int json_parse_number(const char** p, double* out) {
+  const char* start = *p;
+  const char* at = start;
+  const int negative = *at == '-';
+  if (*at == '-' || *at == '+') at += 1;
+  unsigned long long mantissa = 0;
+  int digits = 0;
+  int exponent = 0;
+  int overlong = 0;
+  while (*at >= '0' && *at <= '9') {
+    if (digits == 19) { overlong = 1; break; }
+    mantissa = mantissa * 10ULL + (unsigned long long)(*at - '0');
+    digits += 1;
+    at += 1;
+  }
+  if (*at == '.') {
+    at += 1;
+    if (*at < '0' || *at > '9') return 0;
+    while (*at >= '0' && *at <= '9') {
+      if (digits == 19) { overlong = 1; break; }
+      mantissa = mantissa * 10ULL + (unsigned long long)(*at - '0');
+      digits += 1;
+      exponent -= 1;
+      at += 1;
+    }
+  }
+  if (digits == 0) return 0;
+  int written = 0;
+  if (*at == 'e' || *at == 'E') {
+    at += 1;
+    int sign = 1;
+    if (*at == '+' || *at == '-') { if (*at == '-') sign = -1; at += 1; }
+    if (*at < '0' || *at > '9') return 0;
+    while (*at >= '0' && *at <= '9') {
+      if (written > 999) overlong = 1;
+      else written = written * 10 + (*at - '0');
+      at += 1;
+    }
+    exponent += sign * written;
+  }
+  if (overlong || (unsigned long long)mantissa > 9007199254740992ULL || exponent < -22 || exponent > 22) {
+    char* end = NULL;
+    const double value = strtod(start, &end);
+    if (end == start) return 0;
+    *p = end;
+    *out = value;
+    return 1;
+  }
+  double value;
+  if (mantissa == 0) value = 0.0;
+  else if (exponent == 0) value = (double)mantissa;
+  else if (exponent > 0) value = (double)mantissa * json_pow10[exponent];
+  else value = (double)mantissa / json_pow10[-exponent];
+  *p = at;
+  *out = negative ? -value : value;
+  return 1;
+}
+
 static int json_parse_value(const char** p, double* out);
+
+static void json_push(blaze_dyn* array, double value) {
+  if (array->count == array->capacity) {
+    array->capacity = array->capacity ? array->capacity * 2 : 8;
+    array->items = realloc(array->items, array->capacity * sizeof(double));
+  }
+  ((double*)array->items)[array->count] = value;
+  array->count += 1;
+}
 
 static int json_parse_array(const char** p, double* out) {
   if (**p != '[') return 0;
   (*p)++;
   json_skip_ws(p);
-  double arr = blaze_rt_dyn_array_new();
-  if (**p == ']') { (*p)++; *out = arr; return 1; }
-  while (1) {
-    double v;
-    if (!json_parse_value(p, &v)) return 0;
-    blaze_rt_array_push(arr, v);
+  blaze_dyn* array = blaze_dyn_new(BLAZE_DYN_ARRAY);
+  const double handle = blaze_dyn_register(array);
+  if (**p == ']') { (*p)++; *out = handle; return 1; }
+  for (;;) {
+    double value;
+    if (!json_parse_value(p, &value)) return 0;
+    json_push(array, value);
     json_skip_ws(p);
     if (**p == ',') { (*p)++; json_skip_ws(p); continue; }
     if (**p == ']') { (*p)++; break; }
     return 0;
   }
-  *out = arr;
+  *out = handle;
   return 1;
 }
 
@@ -3353,24 +3677,23 @@ static int json_parse_object(const char** p, double* out) {
   blaze_dyn* od = blaze_dyn_new(BLAZE_DYN_OBJECT);
   double oh = blaze_dyn_register(od);
   if (**p == '}') { (*p)++; *out = oh; return 1; }
-  while (1) {
-    if (**p != '"') return 0;
-    char* keystr = json_parse_string(p);
-    if (!keystr) return 0;
+  for (;;) {
+    size_t key_length = 0;
+    char* key = json_parse_string(p, &key_length);
+    if (!key) return 0;
     json_skip_ws(p);
-    if (**p != ':') { free(keystr); return 0; }
+    if (**p != ':') return 0;
     (*p)++;
     json_skip_ws(p);
     double val;
-    if (!json_parse_value(p, &val)) { free(keystr); return 0; }
+    if (!json_parse_value(p, &val)) return 0;
     if (od->count == od->capacity) {
       od->capacity = od->capacity ? od->capacity * 2 : 8;
       od->items = realloc(od->items, od->capacity * 2 * sizeof(double));
     }
-    ((double*)od->items)[od->count*2] = blaze_rt_box_string(keystr);
+    ((double*)od->items)[od->count*2] = blaze_dyn_text_handle(key, key_length);
     ((double*)od->items)[od->count*2+1] = val;
     od->count++;
-    free(keystr);
     json_skip_ws(p);
     if (**p == ',') { (*p)++; json_skip_ws(p); continue; }
     if (**p == '}') { (*p)++; break; }
@@ -3382,24 +3705,47 @@ static int json_parse_object(const char** p, double* out) {
 
 static int json_parse_value(const char** p, double* out) {
   json_skip_ws(p);
-  if (**p == '"') {
-    char* s = json_parse_string(p);
-    if (!s) return 0;
-    *out = blaze_rt_box_string(s);
-    free(s);
+  const char c = **p;
+  if (c == '"') {
+    size_t length = 0;
+    char* text = json_parse_string(p, &length);
+    if (!text) return 0;
+    *out = blaze_dyn_text_handle(text, length);
     return 1;
   }
-  if (**p == '[') return json_parse_array(p, out);
-  if (**p == '{') return json_parse_object(p, out);
-  if (strncmp(*p, "true", 4) == 0) { *p += 4; blaze_dyn* _db = blaze_dyn_new(BLAZE_DYN_BOOL); _db->number = 1.0; *out = blaze_dyn_register(_db); return 1; }
-  if (strncmp(*p, "false", 5) == 0) { *p += 5; blaze_dyn* _db = blaze_dyn_new(BLAZE_DYN_BOOL); _db->number = 0.0; *out = blaze_dyn_register(_db); return 1; }
-  if (strncmp(*p, "null", 4) == 0) { *p += 4; *out = blaze_rt_box_null(); return 1; }
-  char* end = NULL;
-  double v = strtod(*p, &end);
-  if (end == *p) return 0;
-  *p = end;
-  *out = blaze_rt_box_number(v);
-  return 1;
+  if (c == '[') return json_parse_array(p, out);
+  if (c == '{') return json_parse_object(p, out);
+  /* A word is read a character at a time rather than compared four bytes at a
+     time, so a document that ends inside one is not read past its end. */
+  if (c == 't') {
+    if ((*p)[1] != 'r' || (*p)[2] != 'u' || (*p)[3] != 'e') return 0;
+    *p += 4;
+    blaze_dyn* held = blaze_dyn_new(BLAZE_DYN_BOOL);
+    held->number = 1.0;
+    *out = blaze_dyn_register(held);
+    return 1;
+  }
+  if (c == 'f') {
+    if ((*p)[1] != 'a' || (*p)[2] != 'l' || (*p)[3] != 's' || (*p)[4] != 'e') return 0;
+    *p += 5;
+    blaze_dyn* held = blaze_dyn_new(BLAZE_DYN_BOOL);
+    held->number = 0.0;
+    *out = blaze_dyn_register(held);
+    return 1;
+  }
+  if (c == 'n') {
+    if ((*p)[1] != 'u' || (*p)[2] != 'l' || (*p)[3] != 'l') return 0;
+    *p += 4;
+    *out = blaze_rt_box_null();
+    return 1;
+  }
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    double value;
+    if (!json_parse_number(p, &value)) return 0;
+    *out = blaze_rt_box_number(value);
+    return 1;
+  }
+  return 0;
 }
 
 double blaze_rt_json_parse(double text) {
@@ -3420,96 +3766,175 @@ double blaze_rt_json_parse(double text) {
   return out;
 }
 
-static char* blaze_dyn_stringify(blaze_dyn* d);
+/* The text a walk of a value is building.
 
-static char* blaze_dyn_stringify_value(double value) {
+   A document is written front to back and its text is not known until the walk
+   has been, so the buffer grows as it goes, by half again each time, and every
+   part is copied into it once. Where the walk this replaces built each value's
+   text in a buffer of its own, measured that text with strlen, copied it into
+   its parent and freed it, a number in an array is now formatted into a word
+   of the stack and copied once. */
+typedef struct blaze_build_s {
+  char* text;
+  size_t length;
+  size_t capacity;
+} blaze_build;
+
+static void blaze_build_room(blaze_build* build, size_t extra) {
+  if (build->length + extra <= build->capacity) return;
+  size_t capacity = build->capacity ? build->capacity : 64;
+  while (capacity < build->length + extra) capacity = capacity + capacity / 2 + 64;
+  char* grown = (char*)realloc(build->text, capacity);
+  if (grown == NULL) blaze_rt_raise("out of memory");
+  build->text = grown;
+  build->capacity = capacity;
+}
+
+static void blaze_build_bytes(blaze_build* build, const char* text, size_t length) {
+  blaze_build_room(build, length + 1);
+  if (length > 0) memcpy(build->text + build->length, text, length);
+  build->length += length;
+  build->text[build->length] = '\\0';
+}
+
+static void blaze_build_char(blaze_build* build, char c) {
+  blaze_build_room(build, 2);
+  build->text[build->length] = c;
+  build->length += 1;
+  build->text[build->length] = '\\0';
+}
+
+/* Which bytes a JSON string writes as an escape: the quote, the backslash and
+   every character below a space. A text is mostly none of those, so this is
+   what a walk of one reads a byte at a time. */
+static const unsigned char json_escaped[256] = {
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+};
+
+/* Text as the bytes of the JSON of a string, with the quotes left to the
+   caller: the characters the grammar reserves are written as the escapes it
+   reserves for them, and the rest are copied as they are.
+
+   A text is written as itself and not as the JSON of itself only where a name
+   is not a JSON string at all, which is nowhere in a document: both a name and
+   a value are quoted, so both are escaped. This is the one place a document's
+   writer has to know the grammar rather than the shape of a value. */
+static void blaze_build_json_text(blaze_build* build, const char* text, size_t length) {
+  size_t at = 0;
+  while (at < length) {
+    size_t run = at;
+    while (run < length && !json_escaped[(unsigned char)text[run]]) run += 1;
+    if (run > at) {
+      blaze_build_bytes(build, text + at, run - at);
+      at = run;
+    }
+    if (at == length) return;
+    {
+      const unsigned char c = (unsigned char)text[at];
+      at += 1;
+      switch (c) {
+        case '"': blaze_build_bytes(build, "\\\\\\"", 2); break;
+        case '\\\\': blaze_build_bytes(build, "\\\\\\\\", 2); break;
+        case '\\b': blaze_build_bytes(build, "\\\\b", 2); break;
+        case '\\f': blaze_build_bytes(build, "\\\\f", 2); break;
+        case '\\n': blaze_build_bytes(build, "\\\\n", 2); break;
+        case '\\r': blaze_build_bytes(build, "\\\\r", 2); break;
+        case '\\t': blaze_build_bytes(build, "\\\\t", 2); break;
+        default: {
+          /* Every other character below a space is written as its own code,
+             four hexadecimal digits wide, which is the only form the grammar
+             has for it. */
+          static const char nibbles[] = "0123456789abcdef";
+          char escape[6] = { '\\\\', 'u', '0', '0', '0', '0' };
+          escape[4] = nibbles[(c >> 4) & 15];
+          escape[5] = nibbles[c & 15];
+          blaze_build_bytes(build, escape, 6);
+          break;
+        }
+      }
+    }
+  }
+}
+
+static void blaze_build_value(blaze_build* build, double value);
+
+/* What an object writes between the quotes of a name: a name is text, and text
+   is written as it is rather than as the JSON of itself. */
+static void blaze_build_name(blaze_build* build, double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
-  if (!d) {
-    char* buf = malloc(64); size_t n = blaze_rt_format_number(value, (unsigned char*)buf, 64); buf[n]=0; return buf;
+  if (d != NULL && d->kind == BLAZE_DYN_TEXT) {
+    if (d->text != NULL) blaze_build_json_text(build, d->text, d->count);
+    return;
   }
-  if (d->kind == BLAZE_DYN_BOOL) return blaze_dyn_strdup(d->number ? "true" : "false");
-  if (d->kind == BLAZE_DYN_TEXT) return blaze_dyn_strdup(d->text ? d->text : "");
-  if (d->kind == BLAZE_DYN_NUMBER) { char* buf=malloc(64); size_t n = blaze_rt_format_number(d->number, (unsigned char*)buf, 64); buf[n]=0; return buf; }
-  if (d->kind == BLAZE_DYN_NULL) return blaze_dyn_strdup("null");
-  if (d->kind == BLAZE_DYN_ARRAY || d->kind == BLAZE_DYN_OBJECT) return blaze_dyn_stringify(d);
-  return blaze_dyn_strdup("null");
+  blaze_build_value(build, value);
 }
 
-static char* blaze_dyn_stringify(blaze_dyn* d) {
-  if (d->kind == BLAZE_DYN_ARRAY) {
-    size_t cap = 64, len = 0;
-    char* out = malloc(cap);
-    out[len++] = '[';
-    for (size_t i = 0; i < d->count; i++) {
-      if (i) { if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
-      double h = ((double*)d->items)[i];
-      char* t = blaze_dyn_stringify_value(h);
-      blaze_dyn* id = blaze_dyn_lookup(h);
-      int isText = id && id->kind == BLAZE_DYN_TEXT;
-      size_t tl = strlen(t);
-      if (isText) {
-        if (len + tl + 4 >= cap) { cap = cap*2 + tl + 4; out = realloc(out, cap); }
-        out[len++] = '"';
-        memcpy(out+len, t, tl); len += tl;
-        out[len++] = '"';
-      } else {
-        if (len + tl + 1 >= cap) { cap = cap*2 + tl + 1; out = realloc(out, cap); }
-        memcpy(out+len, t, tl); len += tl;
-      }
-      free(t);
-    }
-    if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
-    out[len++] = ']';
-    out[len] = 0;
-    return out;
+static void blaze_build_value(blaze_build* build, double value) {
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (d == NULL) {
+    /* A number that was never boxed is carried as itself. */
+    char number[64];
+    const size_t written = blaze_rt_format_number(value, (unsigned char*)number, sizeof number);
+    blaze_build_bytes(build, number, written);
+    return;
   }
-  if (d->kind == BLAZE_DYN_OBJECT) {
-    size_t cap = 64, len = 0;
-    char* out = malloc(cap);
-    out[len++] = '{';
-    for (size_t i = 0; i < d->count; i++) {
-      if (i) { if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
-      double kh = ((double*)d->items)[i*2];
-      double vh = ((double*)d->items)[i*2+1];
-      char* kt = blaze_dyn_stringify_value(kh);
-      size_t ktl = strlen(kt);
-      /* key must be text; ensure quotes */
-      if (len + ktl + 4 >= cap) { cap = cap*2 + ktl + 4; out = realloc(out, cap); }
-      out[len++] = '"';
-      /* kt already unquoted payload for text? stringify_value for text returns payload without quotes */
-      memcpy(out+len, kt, ktl); len += ktl;
-      out[len++] = '"';
-      free(kt);
-      if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
-      out[len++] = ':';
-      blaze_dyn* vid = blaze_dyn_lookup(vh);
-      int visText = vid && vid->kind == BLAZE_DYN_TEXT;
-      char* vt = blaze_dyn_stringify_value(vh);
-      size_t vtl = strlen(vt);
-      if (visText) {
-        if (len + vtl + 4 >= cap) { cap = cap*2 + vtl + 4; out = realloc(out, cap); }
-        out[len++] = '"';
-        memcpy(out+len, vt, vtl); len += vtl;
-        out[len++] = '"';
-      } else {
-        if (len + vtl + 1 >= cap) { cap = cap*2 + vtl + 1; out = realloc(out, cap); }
-        memcpy(out+len, vt, vtl); len += vtl;
-      }
-      free(vt);
+  switch (d->kind) {
+    case BLAZE_DYN_BOOL:
+      if (d->number != 0.0) blaze_build_bytes(build, "true", 4);
+      else blaze_build_bytes(build, "false", 5);
+      return;
+    case BLAZE_DYN_NUMBER: {
+      char number[64];
+      const size_t written = blaze_rt_format_number(d->number, (unsigned char*)number, sizeof number);
+      blaze_build_bytes(build, number, written);
+      return;
     }
-    if (len + 2 >= cap) { cap += 2; out = realloc(out, cap); }
-    out[len++] = '}';
-    out[len] = 0;
-    return out;
+    case BLAZE_DYN_TEXT:
+      blaze_build_char(build, '"');
+      if (d->text != NULL) blaze_build_json_text(build, d->text, d->count);
+      blaze_build_char(build, '"');
+      return;
+    case BLAZE_DYN_ARRAY:
+      blaze_build_char(build, '[');
+      for (size_t i = 0; i < d->count; i += 1) {
+        if (i > 0) blaze_build_char(build, ',');
+        blaze_build_value(build, ((double*)d->items)[i]);
+      }
+      blaze_build_char(build, ']');
+      return;
+    case BLAZE_DYN_OBJECT:
+      blaze_build_char(build, '{');
+      for (size_t i = 0; i < d->count; i += 1) {
+        if (i > 0) blaze_build_char(build, ',');
+        blaze_build_char(build, '"');
+        blaze_build_name(build, ((double*)d->items)[i*2]);
+        blaze_build_char(build, '"');
+        blaze_build_char(build, ':');
+        blaze_build_value(build, ((double*)d->items)[i*2+1]);
+      }
+      blaze_build_char(build, '}');
+      return;
+    default:
+      blaze_build_bytes(build, "null", 4);
+      return;
   }
-  return blaze_dyn_strdup("null");
 }
 
+/* The JSON a dynamic value is written as.
+
+   The text the walk built is handed over as it stands rather than copied into
+   the value: it is the length of the document, and copying it is the one cost
+   of writing it that a walk could avoid. */
 double blaze_rt_json_stringify(double value) {
-  char* s = blaze_dyn_stringify_value(value);
-  double h = blaze_rt_box_string(s);
-  free(s);
-  return h;
+  blaze_build build = { NULL, 0, 0 };
+  blaze_build_value(&build, value);
+  if (build.text == NULL) return blaze_rt_box_string("");
+  return blaze_dyn_text_handle(build.text, build.length);
 }
 double blaze_rt_json_get(double obj, const char* field) {
   blaze_dyn* d = blaze_dyn_lookup(obj);
@@ -3617,10 +4042,14 @@ double blaze_rt_md5_digest(double hasher) {
   blaze_md5_ctx* ctx = (blaze_md5_ctx*)d->text;
   unsigned char digest[16];
   blaze_md5_final(digest, ctx);
-  char* hex = malloc(33);
-  for (int i=0;i<16;i++) sprintf(hex+i*2, "%02x", digest[i]);
+  /* The digest is written from a table rather than by sixteen calls to
+     sprintf: the formatter is general, and what this needs is one nibble of a
+     byte at a time. */
+  static const char nibbles[] = "0123456789abcdef";
+  char* hex = (char*)blaze_rt_dyn_pool_take(33, 1);
+  for (int i=0;i<16;i++) { hex[i*2] = nibbles[digest[i] >> 4]; hex[i*2+1] = nibbles[digest[i] & 15]; }
   hex[32]=0;
-  return blaze_rt_box_string(hex);
+  return blaze_dyn_text_handle(hex, 32);
 }
 
 void blaze_error_clear(void);
