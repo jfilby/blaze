@@ -1074,6 +1074,158 @@ test("the Nim adapter joins and clears strings as the C runtime does", async (t)
   assert.equal(out.stdout, "a\0b\ndone\n");
 });
 
+test("the Nim adapter holds a dictionary as the C runtime does", async (t) => {
+  if (!nimAvailable) {
+    t.skip("the Nim compiler is not installed");
+    return;
+  }
+  // A dict is lowered to the five dictionary entry points of the ABI, and the
+  // Nim adapter had none of them: every hosted build failed, because the host
+  // names every entry point so the linker keeps the ones a candidate calls.
+  // The probes below are one sequence of operations asked of both runtimes,
+  // and what is compared is the answers. A key that is absent is NaN, which
+  // is told apart from every value a key can hold; a key written twice is one
+  // entry; and handle 0 names no dictionary, exactly as it names no other
+  // dynamic value, so a read that found nothing cannot name the first value
+  // that was registered.
+  const operations = [
+    "len0",
+    "has0",
+    "get0",
+    "same",
+    "geta",
+    "len1",
+    "hasa",
+    "over",
+    "len2",
+    "len3",
+    "hasb",
+    "getx",
+    "hasx",
+    "len4",
+    "gete",
+    "lene",
+    "nulllen",
+    "nullhas",
+    "nullget",
+    "nullset",
+    "push",
+    "beyond",
+    "number",
+    "zero",
+  ];
+  const expected = `${operations.map((name) => `${name} 1`).join("\n")}\n`;
+  const cProbe = [
+    "#include <stdio.h>",
+    "#include <math.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "",
+    "static void show(const char* label, int yes) {",
+    '  printf("%s %d\\n", label, yes ? 1 : 0);',
+    "}",
+    "",
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    `  double d = ${RUNTIME_NAME}_dict_new();`,
+    `  show("len0", ${RUNTIME_NAME}_dict_len(d) == 0.0);`,
+    `  show("has0", ${RUNTIME_NAME}_dict_has(d, "a") == 0.0);`,
+    `  show("get0", isnan(${RUNTIME_NAME}_dict_get(d, "a")));`,
+    `  show("same", ${RUNTIME_NAME}_dict_set(d, "a", 15.0) == d);`,
+    `  show("geta", ${RUNTIME_NAME}_dict_get(d, "a") == 15.0);`,
+    `  show("len1", ${RUNTIME_NAME}_dict_len(d) == 1.0);`,
+    `  show("hasa", ${RUNTIME_NAME}_dict_has(d, "a") == 1.0);`,
+    `  ${RUNTIME_NAME}_dict_set(d, "a", 25.0);`,
+    `  show("over", ${RUNTIME_NAME}_dict_get(d, "a") == 25.0);`,
+    `  show("len2", ${RUNTIME_NAME}_dict_len(d) == 1.0);`,
+    `  ${RUNTIME_NAME}_dict_set(d, "b", 3.0);`,
+    `  show("len3", ${RUNTIME_NAME}_dict_len(d) == 2.0);`,
+    `  show("hasb", ${RUNTIME_NAME}_dict_has(d, "b") == 1.0);`,
+    `  show("getx", isnan(${RUNTIME_NAME}_dict_get(d, "x")));`,
+    `  show("hasx", ${RUNTIME_NAME}_dict_has(d, "x") == 0.0);`,
+    `  show("len4", ${RUNTIME_NAME}_dict_len(d) == 2.0);`,
+    `  ${RUNTIME_NAME}_dict_set(d, "", 7.0);`,
+    `  show("gete", ${RUNTIME_NAME}_dict_get(d, "") == 7.0);`,
+    `  show("lene", ${RUNTIME_NAME}_dict_len(d) == 3.0);`,
+    `  show("nulllen", ${RUNTIME_NAME}_dict_len(0.0) == 0.0);`,
+    `  show("nullhas", ${RUNTIME_NAME}_dict_has(0.0, "a") == 0.0);`,
+    `  show("nullget", isnan(${RUNTIME_NAME}_dict_get(0.0, "a")));`,
+    `  show("nullset", isnan(${RUNTIME_NAME}_dict_set(0.0, "a", 1.0)));`,
+    `  double array = ${RUNTIME_NAME}_dyn_array_new();`,
+    `  ${RUNTIME_NAME}_array_push(array, 42.0);`,
+    `  show("push", ${RUNTIME_NAME}_array_get(array, 0.0) == 42.0);`,
+    `  show("beyond", ${RUNTIME_NAME}_array_get(array, 5.0) == 0.0);`,
+    `  show("number", ${RUNTIME_NAME}_to_number(${RUNTIME_NAME}_array_get(array, 5.0)) == 0.0);`,
+    `  show("zero", ${RUNTIME_NAME}_to_number(0.0) == 0.0);`,
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const nimProbe = [
+    "proc show(label: string, yes: bool) =",
+    '  if yes: echo label, " 1" else: echo label, " 0"',
+    "",
+    "let d = blaze_rt_dict_new()",
+    'show("len0", blaze_rt_dict_len(d) == 0.0)',
+    'show("has0", blaze_rt_dict_has(d, "a") == 0.0)',
+    'show("get0", blaze_rt_dict_get(d, "a") != blaze_rt_dict_get(d, "a"))',
+    'show("same", blaze_rt_dict_set(d, "a", 15.0) == d)',
+    'show("geta", blaze_rt_dict_get(d, "a") == 15.0)',
+    'show("len1", blaze_rt_dict_len(d) == 1.0)',
+    'show("hasa", blaze_rt_dict_has(d, "a") == 1.0)',
+    'discard blaze_rt_dict_set(d, "a", 25.0)',
+    'show("over", blaze_rt_dict_get(d, "a") == 25.0)',
+    'show("len2", blaze_rt_dict_len(d) == 1.0)',
+    'discard blaze_rt_dict_set(d, "b", 3.0)',
+    'show("len3", blaze_rt_dict_len(d) == 2.0)',
+    'show("hasb", blaze_rt_dict_has(d, "b") == 1.0)',
+    'show("getx", blaze_rt_dict_get(d, "x") != blaze_rt_dict_get(d, "x"))',
+    'show("hasx", blaze_rt_dict_has(d, "x") == 0.0)',
+    'show("len4", blaze_rt_dict_len(d) == 2.0)',
+    'discard blaze_rt_dict_set(d, "", 7.0)',
+    'show("gete", blaze_rt_dict_get(d, "") == 7.0)',
+    'show("lene", blaze_rt_dict_len(d) == 3.0)',
+    'show("nulllen", blaze_rt_dict_len(0.0) == 0.0)',
+    'show("nullhas", blaze_rt_dict_has(0.0, "a") == 0.0)',
+    'show("nullget", blaze_rt_dict_get(0.0, "a") != blaze_rt_dict_get(0.0, "a"))',
+    'show("nullset", blaze_rt_dict_set(0.0, "a", 1.0) != blaze_rt_dict_set(0.0, "a", 1.0))',
+    "let array = blaze_rt_dyn_array_new()",
+    "discard blaze_rt_array_push(array, 42.0)",
+    'show("push", blaze_rt_array_get(array, 0.0) == 42.0)',
+    'show("beyond", blaze_rt_array_get(array, 5.0) == 0.0)',
+    'show("number", blaze_rt_to_number(blaze_rt_array_get(array, 5.0)) == 0.0)',
+    'show("zero", blaze_rt_to_number(0.0) == 0.0)',
+  ].join("\n");
+
+  const root = await scratch("blaze-dict-");
+  const plain = join(root, "plain");
+  await mkdir(plain);
+  await writeFile(join(plain, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(plain, `${RUNTIME_NAME}.c`), runtimeSourceSource(), "utf8");
+  await writeFile(join(plain, "probe.c"), cProbe, "utf8");
+  const built = run("gcc", ["-std=c11", "-O2", "-D_POSIX_C_SOURCE=200809L", "-o", "h", "probe.c", `${RUNTIME_NAME}.c`, "-lm"], {
+    cwd: plain,
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const fromPlain = run(join(plain, "h"), [], { cwd: plain, timeoutMs: 60_000 });
+  assert.equal(fromPlain.code, 0, fromPlain.stderr);
+  assert.equal(fromPlain.stdout, expected, "the C runtime holds a dictionary as the ABI states");
+
+  const hosted = join(root, "hosted");
+  await mkdir(hosted);
+  const source = join(hosted, "dict.nim");
+  await writeFile(source, `${generateRuntimeAdapterSource()}\n${nimProbe}\n`, "utf8");
+  const binary = join(hosted, "dict");
+  const compiled = run("nim", ["c", "--hints:off", "--warnings:off", "-d:release", `--nimcache:${join(hosted, "cache")}`, `-o:${binary}`, source], {
+    timeoutMs: 300_000,
+  });
+  assert.equal(compiled.code, 0, compiled.stderr);
+  const fromHosted = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(fromHosted.code, 0, fromHosted.stderr);
+  assert.equal(fromHosted.stdout, expected, "the Nim adapter holds a dictionary as the ABI states");
+});
+
 test("a block released inside an open region is not handed out again by the slab", async (t) => {
   if (!nimAvailable) {
     t.skip("the Nim compiler is not installed");

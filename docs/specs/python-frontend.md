@@ -171,7 +171,12 @@ breaks a string of one may not.
 A dict is an object, and its fields are read by their key: `d["key"]` is a
 field of the object the name holds, and not an element of a buffer of
 numbers. A dict has no fields of its own in Python — `d.key` is an attribute
-the language does not have — so a field read of one is refused.
+the language does not have — so a field read of one is refused. The runtime
+holds a dict as a string-keyed map, and the five entry points that reach it —
+`blaze_rt_dict_new`, `blaze_rt_dict_get`, `blaze_rt_dict_set`,
+`blaze_rt_dict_has` and `blaze_rt_dict_len` — are implemented by every
+runtime, because a hosted build names every entry point of the ABI whether the
+program reaches it or not.
 
 The length of a value written out is not read: `len("hello")` is the length of
 a text, and the compiler reads a length off the name it is written by, so a
