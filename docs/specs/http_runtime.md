@@ -96,6 +96,43 @@ while it has nothing to do: a thread that wakes, looks, and sleeps again. A
 server that idles for three seconds spends about twenty milliseconds of system
 time on it, against the ten a tick of ten milliseconds would spend.
 
+### The wake the tick used to be
+
+The tick was the *only* thing that ended the wait, because facil.io has no way
+to wake a loop that is waiting for an event from another thread: `fio_stop()`
+clears the flag the loop reads and there the stop waits for the tick. A program
+that serves ten requests and stops its server spends about 1.2 milliseconds
+waiting for the end of the tick, which is a fifth of what such a program spends
+on the whole run, and it is paid for a server that has already answered
+everything it was asked.
+
+The wait is a wait on a descriptor, so the adapter makes a pair of them with
+`socketpair`, gives one to the loop with `fio_attach_fd`, and writes a byte to
+the other where the server is stopped. The loop is woken, finds that it was
+asked to stop, and ends. The descriptor is closed once the loop it woke has
+ended.
+
+Measured on the benchmark's `./program 10`, with the phases timed from inside
+the program and sixty runs of each form taken:
+
+| The stop and the join after it | the usual run | the best run |
+|---|---|---|
+| the loop woken by the tick | 1.20 ms | 1.07 ms |
+| the loop woken by the descriptor | 0.89 ms | 0.18 ms |
+
+What is left of the wait is facil.io's defer thread pool: the loop runs on four
+threads by default, and a thread that has nothing to do sleeps for as long as
+134 milliseconds between looks at whether it was asked to stop. A program that
+says nothing about its server is given four of those threads, and a stop pays
+for them — the descriptor wakes the loop, and the loop then waits for the pool
+it started. The same program stopped with `-DFIO_DEFER_THROTTLE_LIMIT=125000`,
+so that no thread sleeps longer than an eighth of a millisecond, spent 0.30 ms
+on the stop instead of 0.89. That is written down here rather than fixed,
+because a thread that sleeps for less is a thread that wakes more while the
+server is idle, and because making the server one thread is a decision about
+how many requests it answers at once, and neither is a decision this spec makes
+for a program that stated nothing.
+
 ## TLS
 
 TLS is OpenSSL, and OpenSSL is a library the program loads before it runs and
@@ -112,6 +149,50 @@ So the TLS backend is chosen rather than assumed:
 A program that asks for a server that speaks TLS is a program the runtime was
 built for, so the compiler reads the question off the program: `http.serveTls`
 in the body of the program, or in the source of any file of it.
+
+### The transport a request is asked over
+
+The other half of the question is the requests the program makes: a client that
+asks a server over `https://` speaks TLS to it, and a client that asks one over
+`http://` does not. The URL a request names is where that is written, and the
+first version of the rule read it as a text the source spells out *in full* — a
+URL with nothing interpolated into it. The benchmark asks its server over
+
+```ts
+const api = `http://${host}:${port}/`;
+```
+
+which is a URL with two things interpolated into it, so the rule could not read
+it and gave the program the backend that can speak either. The program linked
+OpenSSL, loaded six megabytes of it before it ran, and paid about 1.3
+milliseconds of a seven millisecond run for a library it never called.
+
+The scheme is the part of a URL that decides the transport, and it is the part
+a program writes out in full even when the rest of the URL is put together
+while the program runs: `http://${host}:${port}/` is a request over plain text
+whatever the host and the port are. So the rule reads the scheme the URL
+begins with — the parts of a text that are written, up to the first that is
+computed — and a URL whose beginning is not written out is still a URL the
+compiler cannot decide on:
+
+| what the program writes | the runtime carries |
+|---|---|
+| `"http://127.0.0.1:8080/"` | no TLS |
+| `` `http://${host}:${port}/` `` | no TLS |
+| `` `https://${host}/` `` | TLS |
+| `` `${base}/${path}` `` | TLS |
+
+A URL a program names is read from the URL the name was bound to, so
+`const api = …; http.request(api, …)` is the request the name is. The body is
+walked twice for it: once for the URLs it binds to names and once for the calls
+it makes, because a name may be bound after the function that asks through it
+is written. A name the program may write again holds the URL the program chose
+rather than the one it was declared with, and that is a URL the compiler cannot
+read.
+
+The two changes together take the benchmark from 6.9 milliseconds to 5.4 on
+this machine, and the smallest of three hundred runs of each from 6.2 to 4.0:
+the library the program no longer loads is the larger half of it.
 
 The runtime that carries no TLS says so plainly rather than serving plain HTTP
 to a program that asked for another thing:
@@ -165,3 +246,42 @@ as a concatenation of two of them.
 
 The pieces are the same string either way: the text is the text, and the
 pieces it is written out of are how it was written rather than what it is.
+
+## What is left
+
+The benchmark's five and a half milliseconds, timed from inside the program
+with the smallest of sixty runs of each phase:
+
+| the phase | what it costs |
+|---|---|
+| the process, before `main` and after it | about 2.2 ms |
+| the ten requests | 1.1 ms |
+| the server's own creation and its listener | 0.36 ms |
+| the stop and the join | 0.29 ms |
+
+- **The process itself is the largest half.** A program that prints nothing
+  and exits costs 0.7 ms on this machine; this one costs 2.3 ms outside
+  everything it measures of itself, and the dynamic loader is only 50
+  microseconds of that. What is left is the pages of a binary of 355 KB, the
+  four thread stacks facil.io asks for, and the unmapping of the pool and the
+  table of connections at exit.
+
+- **The first request costs 0.58 ms and each of the next nine costs 0.065 ms.**
+  Most of the first is `getaddrinfo("localhost")`, which reads the files of the
+  resolver, asks it over netlink and sorts the addresses of the host by a rule
+  that probes the source address of both families: 90 microseconds in a program
+  of its own and 250 in the first thing this process does with it. A host that
+  is an address needs none of it (`AI_NUMERICHOST`), and the benchmark's host
+  is a name.
+
+- **A request is two thread handoffs.** The client of a program blocks on the
+  answer, and the answer is written by the loop on another thread: sixty-five
+  microseconds per request is what the two schedules and facil.io's parsing of
+  a request and its answer cost. A program that serves five hundred requests
+  spends thirty milliseconds in them, which is what the number is worth.
+
+- **The loop's threads.** The wake above leaves the defer threads' sleep as
+  the rest of the stop, and they are four because the machine has four cores.
+  A program that says nothing about its server is given them; see the tick
+  above for why that is not changed here.
+

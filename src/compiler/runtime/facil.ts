@@ -118,6 +118,7 @@ export function facilAdapterSource(): string {
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -547,6 +548,70 @@ static void blaze_http_on_upgrade(http_s *h, char *type, size_t length) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Waking the loop.                                                           */
+/* -------------------------------------------------------------------------- */
+
+/* The event loop waits for an event for a tick before it looks at what it was
+   asked to do, so a stop is noticed only when that wait is over: a program
+   that stops its server waits a millisecond for it, and a millisecond is a
+   fifth of what such a program spends. The wait is a wait on a descriptor, so
+   the stop writes a byte to one the loop watches and the loop looks at what it
+   was asked to do at once.
+
+   The byte says nothing but that there is something to look at. It is read and
+   dropped where the loop is woken, and the descriptor is not asked for another
+   event until it is given one, so a byte that is left unread is not a wait
+   that ends again and again. */
+static int blaze_http_wake_fds[2] = {-1, -1};
+
+static void blaze_http_wake_on_data(intptr_t uuid, fio_protocol_s *protocol) {
+  (void)uuid;
+  (void)protocol;
+  char bytes[32];
+  ssize_t read_bytes;
+  do {
+    read_bytes = read(blaze_http_wake_fds[0], bytes, sizeof(bytes));
+  } while (read_bytes > 0);
+}
+
+static fio_protocol_s blaze_http_wake_protocol = {.on_data = blaze_http_wake_on_data};
+
+/* Makes the pair of descriptors the loop is woken through, and gives one of
+   them to the loop. The pair is made once for the program, because the loop of
+   a server is the only thing that waits on it. A runtime that cannot make one
+   is a runtime whose stop is a tick late, which is what it was before. */
+static void blaze_http_wake_open(void) {
+  if (blaze_http_wake_fds[0] >= 0) return;
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, blaze_http_wake_fds) != 0) {
+    blaze_http_wake_fds[0] = -1;
+    blaze_http_wake_fds[1] = -1;
+    return;
+  }
+  /* The byte is read where the loop is woken, and a descriptor with nothing to
+     read is not a descriptor that holds the loop. */
+  int flags = fcntl(blaze_http_wake_fds[0], F_GETFL, 0);
+  if (flags >= 0) fcntl(blaze_http_wake_fds[0], F_SETFL, flags | O_NONBLOCK);
+  fio_attach_fd(blaze_http_wake_fds[0], &blaze_http_wake_protocol);
+}
+
+/* Wakes the loop, so that it looks at what it was asked to do now rather than
+   when the wait it is in is over. */
+static void blaze_http_wake_loop(void) {
+  if (blaze_http_wake_fds[1] < 0) return;
+  char byte = 0;
+  ssize_t written = write(blaze_http_wake_fds[1], &byte, 1);
+  (void)written;
+}
+
+/* Closes the pair, once the loop it woke has ended. */
+static void blaze_http_wake_close(void) {
+  if (blaze_http_wake_fds[0] >= 0) close(blaze_http_wake_fds[0]);
+  if (blaze_http_wake_fds[1] >= 0) close(blaze_http_wake_fds[1]);
+  blaze_http_wake_fds[0] = -1;
+  blaze_http_wake_fds[1] = -1;
+}
+
+/* -------------------------------------------------------------------------- */
 /* The server: start, run and stop.                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -609,6 +674,9 @@ static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
     server->tls = NULL;
     return -1;
   }
+  /* The loop the server runs on is woken through a descriptor of its own, so
+     that a stop is a stop at once rather than a stop at the end of a tick. */
+  blaze_http_wake_open();
   /* Every server answers every route with "Hello, World" unless a program
      registers its own routes. */
   blaze_http_route_register(server, "*", "*", blaze_http_default_handler);
@@ -756,6 +824,9 @@ void blaze_http_server_start_background(void *server) {
    server runs, which keeps the process alive to serve requests. */
 void blaze_http_server_join(void) {
   pthread_join(blaze_http_server_thread, NULL);
+  /* The loop has ended, so nothing waits on the pair that woke it, and the
+     descriptors are given back. */
+  blaze_http_wake_close();
   /* The loop has ended, so nothing reads the server any more: it is freed
      here, and not where the loop was stopped, because a request that was
      being answered when the loop was stopped is still reading it. */
@@ -785,8 +856,10 @@ void blaze_http_server_stop(void *server_raw) {
   /* The loop is asked to stop, and the server is freed where the loop ends:
      a request that was being answered when the loop was stopped is still
      reading the routes of the server, and freeing them there would leave it
-     reading memory that is gone. */
+     reading memory that is gone. The loop is woken so that it looks at the
+     request now: the wait it is in is a wait for an event, and this is one. */
   fio_stop();
+  blaze_http_wake_loop();
 }
 
 /* -------------------------------------------------------------------------- */

@@ -85,6 +85,66 @@ test("a program that speaks TLS in a function of another file is built with the 
   assert.equal(needs.tls, true, "a TLS server in another file is still a TLS server");
 });
 
+test("the scheme a URL begins with decides whether the runtime speaks TLS", () => {
+  // The scheme is the part of a URL that decides the transport, and it is the
+  // part a program writes out even when the rest of the URL is put together
+  // while the program runs. A URL written to begin with "http://" is a request
+  // over plain text whatever the host and the port are.
+  const source = [
+    "const host = \"localhost\";",
+    "const port = process.argv[2] || 8080;",
+    "const api = `http://${host}:${port}/`;",
+    "http.request(api, \"GET\", \"\", \"\");",
+    "",
+  ].join("\n");
+  const needs = httpRuntimeNeeds(bodyOf(source), [source]);
+  assert.equal(needs.tls, false, "a URL whose scheme is written out as http:// is a request over plain text");
+});
+
+test("a URL that is a name is read from the URL the name was bound to", () => {
+  // A program that makes a request usually names the URL first, and the name
+  // is bound after the call that asks through it: the program is read twice,
+  // once for what it binds and once for what it asks.
+  const source = [
+    "const answer = http.request(api, \"GET\", \"\", \"\");",
+    "const api = \"http://127.0.0.1:8080/\";",
+    "console.log(answer);",
+    "",
+  ].join("\n");
+  const needs = httpRuntimeNeeds(bodyOf(source), [source]);
+  assert.equal(needs.tls, false, "the name `api` is a URL over plain text");
+});
+
+test("a URL whose scheme is not written out is a URL the compiler cannot decide", () => {
+  // What is not written out may be anything, and a runtime that cannot decide
+  // is given the backend that can speak either: the other answer is a request
+  // that fails without a word.
+  const notWritten = [
+    "const base = `https://${process.argv[2]}/`;",
+    "http.request(base, \"GET\", \"\", \"\");",
+    "",
+  ].join("\n");
+  assert.equal(httpRuntimeNeeds(bodyOf(notWritten), [notWritten]).tls, true, "a scheme that is written as https:// speaks TLS");
+
+  const computed = [
+    "const base = process.argv[2];",
+    "const api = base + \"/\";",
+    "http.request(api, \"GET\", \"\", \"\");",
+    "",
+  ].join("\n");
+  assert.equal(httpRuntimeNeeds(bodyOf(computed), [computed]).tls, true, "a URL put together from a name the compiler cannot read may be one over TLS");
+
+  // A name the program may write again is a name that holds the URL the
+  // program chose, which is not the one it was declared with.
+  const written = [
+    "let api = \"http://127.0.0.1:8080/\";",
+    "http.request(api, \"GET\", \"\", \"\");",
+    "api = \"https://example.com/\";",
+    "",
+  ].join("\n");
+  assert.equal(httpRuntimeNeeds(bodyOf(written), [written]).tls, true, "a name that is written again holds nothing to read");
+});
+
 test("a limit the compiler cannot read is given the room facil.io would have given it", () => {
   // The limit is written in a function of another file, so the compiler cannot
   // read how many connections it states. A program that asked for a server
@@ -102,6 +162,22 @@ test("the adapter of a runtime without TLS says so rather than serving plain HTT
   const adapter = facilAdapterSource();
   assert.match(adapter, /#ifdef BLAZE_HTTP_TLS/, "the TLS server is behind the guard the runtime is built with");
   assert.match(adapter, /built without TLS/, "the runtime that carries no TLS says so");
+});
+
+test("a stop wakes the event loop rather than waiting for its tick", () => {
+  // The loop waits for an event for a tick before it looks at what it was
+  // asked to do, so a stop that waited for the tick costs the program a
+  // millisecond of every run. The stop writes to a descriptor the loop watches
+  // instead, and the loop looks at the request at once.
+  const adapter = facilAdapterSource();
+  assert.match(adapter, /socketpair\(AF_UNIX, SOCK_STREAM, 0, blaze_http_wake_fds\)/, "the loop is woken through a pair of descriptors");
+  assert.match(adapter, /fio_attach_fd\(blaze_http_wake_fds\[0\], &blaze_http_wake_protocol\)/, "one of the pair is given to the loop to watch");
+  assert.match(adapter, /fio_stop\(\);\n\s*blaze_http_wake_loop\(\);/, "the loop is asked to stop and then woken, so the stop is a stop at once");
+  assert.match(
+    adapter,
+    /pthread_join\(blaze_http_server_thread, NULL\);[\s\S]{0,300}?blaze_http_wake_close\(\);/,
+    "the pair is closed once the loop it woke has ended",
+  );
 });
 
 test("the pieces of a string that are written out are joined", () => {

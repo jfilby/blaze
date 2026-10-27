@@ -77,6 +77,14 @@ export function defaultHttpRuntimeNeeds(): HttpRuntimeNeeds {
   return { maxConnections: DEFAULT_HTTP_MAX_CONNECTIONS, tls: false };
 }
 
+/**
+ * What a URL says about the transport it is asked over: a URL written to begin
+ * with "http://" is a request over plain text, one written to begin with
+ * "https://" is a request over TLS, and one whose beginning is not written out
+ * says nothing the compiler can read.
+ */
+type UrlScheme = "plain" | "secure" | "unknown";
+
 /** What the walk of the program found, and what it is still looking for. */
 interface Reading {
   /** The needs the walk is filling in. */
@@ -87,6 +95,14 @@ interface Reading {
   readALimit: boolean;
   /** The room the limit the walk read asks for. */
   room: number;
+  /** What the URLs the program bound to names are, by name. A name a program
+   *  binds more than once, or writes again, holds nothing to read. */
+  schemes: Map<string, UrlScheme>;
+  /** Whether this walk is the one that binds names rather than the one that
+   *  reads calls. A name may be bound after the function that asks through it
+   *  is written, so the program is walked twice: once for what it binds, once
+   *  for what it asks. */
+  binding: boolean;
 }
 
 /**
@@ -99,10 +115,24 @@ interface Reading {
  * function of another file, and a source cannot say how many connections such
  * a server holds — so a program that states a limit the compiler cannot read
  * is given the room facil.io would have given it.
+ *
+ * The body is walked twice: once for the URLs it binds to names and once for
+ * the calls it makes. A name may be bound after the function that asks through
+ * it is written, and a request written through a name is a request over the
+ * transport the URL the name was bound to is over.
  */
 export function httpRuntimeNeeds(body: ProgramBody | undefined, sources: readonly string[]): HttpRuntimeNeeds {
-  const reading: Reading = { needs: defaultHttpRuntimeNeeds(), calls: 0, readALimit: false, room: 0 };
+  const reading: Reading = {
+    needs: defaultHttpRuntimeNeeds(),
+    calls: 0,
+    readALimit: false,
+    room: 0,
+    schemes: new Map(),
+    binding: true,
+  };
   if (body !== undefined) {
+    for (const statement of body.statements) readStatement(statement, reading);
+    reading.binding = false;
     for (const statement of body.statements) readStatement(statement, reading);
   }
   /* A server the program states a limit for, and a server the compiler could
@@ -174,7 +204,12 @@ function countMentions(source: string, callee: string): number {
 function readStatement(statement: ProgramStatement, reading: Reading): void {
   switch (statement.kind) {
     case "declare":
+      if (reading.binding) bindName(statement.name, statement.value, statement.mutable, reading.schemes);
+      readValue(statement.value, reading);
+      return;
     case "assign":
+      /* A name that is written again holds nothing the compiler can follow. */
+      if (reading.binding) reading.schemes.set(statement.name, "unknown");
       readValue(statement.value, reading);
       return;
     case "elementAssign":
@@ -295,20 +330,32 @@ function readValue(value: ProgramValue, reading: Reading): void {
 /**
  * Reads what a call says about the server of the program: a server that speaks
  * TLS, and a server that is told how many connections to hold.
+ *
+ * A walk that is binding names reads the values of the arguments and nothing
+ * the call says: what a call says is read once every name is bound, because a
+ * name may be bound after the function that asks through it is written.
  */
 function readCall(callee: string, args: readonly ProgramValue[], reading: Reading): void {
+  if (!reading.binding) readWhatTheCallSays(callee, args, reading);
+  for (const argument of args) readValue(argument, reading);
+}
+
+/** What a call says about the server of the program. */
+function readWhatTheCallSays(callee: string, args: readonly ProgramValue[], reading: Reading): void {
   if (callee === "http.serveTls") {
     reading.needs.tls = true;
   } else if (callee === "http.request" || callee === "fetch") {
     /* The URL a client request is made to decides whether the runtime needs
-       the TLS backend, and the URL is often a literal the source spells out:
-       "https://" speaks TLS and "http://" does not. A URL the source does not
-       spell — one read out of a file of configuration, or put together while
-       the program runs — is a URL the compiler cannot decide on, so the
-       runtime is given the backend that can speak either. A program whose
-       every URL is a literal it wrote keeps the decision it made. */
+       the TLS backend, and the scheme the URL begins with is what decides it:
+       "https://" speaks TLS and "http://" does not. The scheme is the part of
+       a URL a program writes out even when the rest of it is put together
+       while the program runs — `http://${host}:${port}/` is a request over
+       plain text whatever the host and the port are — so the decision is read
+       from the beginning of the URL and not from the whole of it. A URL whose
+       beginning is not written out is one the compiler cannot decide on, and
+       the runtime is given the backend that can speak either. */
     const url = args[0];
-    if (url === undefined || !writtenText(url)) reading.needs.tls = true;
+    if (url === undefined || schemeOf(url, reading.schemes) !== "plain") reading.needs.tls = true;
   } else if (callee === "http.serveSettings") {
     reading.calls += 1;
     const stated = args[1];
@@ -323,14 +370,49 @@ function readCall(callee: string, args: readonly ProgramValue[], reading: Readin
       }
     }
   }
-  for (const argument of args) readValue(argument, reading);
 }
 
-/** Whether a value is a text the source wrote out in full: every part of it
- *  is text as written, and nothing in it was computed while the program runs.
- *  A template string with nothing interpolated in it is still a text written
- *  out in full, and one with a name in it is not. */
-function writtenText(value: ProgramValue): boolean {
-  if (value.k !== "text") return false;
-  return value.parts.every((part) => part.k === "text");
+/**
+ * What the beginning of a URL says about the transport it is asked over.
+ *
+ * The scheme is the part of a URL that decides the transport, and it is the
+ * part a program writes out in full even when the rest of the URL is put
+ * together while the program runs. The parts of a text that are written, up to
+ * the first that is computed, are the beginning of the URL it is.
+ *
+ * A name is read from the URL it was bound to, because a program that asks for
+ * a URL names it first: `const api = \`http://${host}:${port}/\`` is a request
+ * over plain text, and the name `api` is how the request spells it.
+ */
+function schemeOf(value: ProgramValue, schemes: ReadonlyMap<string, UrlScheme>): UrlScheme {
+  if (value.k === "name") return schemes.get(value.name) ?? "unknown";
+  if (value.k !== "text") return "unknown";
+  let beginning = "";
+  for (const part of value.parts) {
+    if (part.k !== "text") break;
+    beginning += part.value;
+  }
+  if (beginning.startsWith("https://")) return "secure";
+  if (beginning.startsWith("http://")) return "plain";
+  return "unknown";
+}
+
+/**
+ * Remembers what a name holds, so that a request written through the name is
+ * read the way the URL it was bound to reads.
+ *
+ * Only a name that is written once holds something the compiler can follow: a
+ * name the program may write again is a name that holds the URL the program
+ * chose, which is not the one it was declared with.
+ */
+function bindName(name: string, value: ProgramValue, mutable: boolean, schemes: Map<string, UrlScheme>): void {
+  if (mutable) {
+    schemes.set(name, "unknown");
+    return;
+  }
+  const scheme = schemeOf(value, schemes);
+  const known = schemes.get(name);
+  /* Two declarations of one name are two scopes, and the call may be written
+     in either of them. */
+  schemes.set(name, known === undefined || known === scheme ? scheme : "unknown");
 }

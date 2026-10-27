@@ -319,10 +319,11 @@ test("the server answers two requests over one connection", async () => {
 });
 
 test("a program that closes its server does not wait for the event loop to tick", async () => {
-  // The event loop is stopped from another thread, and the thread that waits
-  // for an event is not woken by the request: it notices the request when the
-  // wait is over. A program that closes the server it started waits for that
-  // wait, so the tick the event loop waits for is what the program waits for.
+  // The event loop waits for an event before it looks at what it was asked to
+  // do, and the thread that waits is not woken by a request on another thread:
+  // it notices a stop when its wait is over. The adapter therefore writes to a
+  // descriptor the loop watches where the server is stopped, and the loop looks
+  // at the request at once rather than at the end of a tick.
   const binary = await buildProgram(
     `const port = 18141;\n` +
       `const server = http.createServer((req, res) => { res.writeHead(200); res.end("ok\\n"); });\n` +
