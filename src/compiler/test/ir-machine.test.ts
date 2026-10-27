@@ -255,6 +255,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
       "#include <stdbool.h>",
       "#include <stdint.h>",
       "#include <string.h>",
+      "#include \"blaze_rt.h\"",
       "extern int calls;",
       "extern double f(double v);",
       "extern double two(double, double);",
@@ -2231,7 +2232,7 @@ async function emitted(
   const directory = await scratch("blaze-census-");
   const objectPath = join(directory, "subject.o");
   await buildObject({ fn, contract: contracted(fn), target, callable: new Set(callable), objectPath });
-  return run("objdump", ["-d", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 }).stdout;
+  return run("objdump", ["-dr", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 }).stdout;
 }
 
 test("the arithmetic under an addition is written a pair of counters at a time", async () => {
@@ -3998,4 +3999,144 @@ test("the packed loop keeps the additions in the order the source wrote them", a
   assert.ok(additions >= 8, `eight quotients are added one at a time, found ${additions}`);
   assert.doesNotMatch(text, /\bhaddpd\b/, "no horizontal fold reorders the additions");
   assert.doesNotMatch(text, /\bvhaddpd\b/, "no horizontal fold reorders the additions");
+});
+
+/* -------------------------------------------------------------------------- */
+/* A wide kernel call and the slots it reads and writes                        */
+/* -------------------------------------------------------------------------- */
+
+const U256: SemanticType = { kind: "primitive", name: "u256" };
+const U64W: SemanticType = { kind: "primitive", name: "u64" };
+const WIDE_P = 115792089237316195423570985008687907853269984665640564039457584007908834671663n;
+
+/** A wide number built from its four 64 bit limbs, which is how one is written. */
+function wideOf(value: bigint): SemanticValue {
+  const args: SemanticValue[] = [];
+  for (let at = 0; at < 4; at += 1) {
+    args.push(number(((value >> BigInt(at * 64)) & 0xffffffffffffffffn).toString(), U64W));
+  }
+  return {
+    k: "call", type: U256,
+    call: {
+      callee: "u256_from_u64x4", builtin: true,
+      signature: { name: "u256_from_u64x4", symbol: "u256_from_u64x4", params: [{ name: "l0", type: "u64" }, { name: "l1", type: "u64" }, { name: "l2", type: "u64" }, { name: "l3", type: "u64" }], returns: "u256" },
+      args, argTypes: [U64W, U64W, U64W, U64W], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+/** A call of one of the modular kernels. */
+function modularCall(callee: string, left: SemanticValue, right: SemanticValue, mod: SemanticValue): SemanticValue {
+  return {
+    k: "call", type: U256,
+    call: {
+      callee, builtin: true,
+      signature: { name: callee, symbol: callee, params: [{ name: "left", type: "u256" }, { name: "right", type: "u256" }, { name: "mod", type: "u256" }], returns: "u256" },
+      args: [left, right, mod], argTypes: [U256, U256, U256], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+/** The hex limbs of a wide number, as the driver prints them. */
+function wideLimbs(value: bigint): string {
+  const limbs: string[] = [];
+  for (let at = 3; at >= 0; at -= 1) limbs.push(((value >> BigInt(at * 64)) & 0xffffffffffffffffn).toString(16));
+  return limbs.join(",");
+}
+
+/** A driver that calls the function and prints its four limbs in hex. */
+function wideDriver(name: string): string {
+  return `blaze_u256 answer = ${name}(); printf("%llx,%llx,%llx,%llx", (unsigned long long)answer.limbs[3], (unsigned long long)answer.limbs[2], (unsigned long long)answer.limbs[1], (unsigned long long)answer.limbs[0]);`;
+}
+
+test("a modular multiply by two is the doubling it is, and answers the same residue", async () => {
+  // The formulas of an elliptic curve double a point on every turn, and the
+  // multiply by two in them is the compiler's to answer with an addition. The
+  // answer is checked against the product modulo the curve's prime, so the
+  // rewrite is the same number and not just the same shape.
+  const value = 12345n;
+  const fn = optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(2n), wideOf(value), wideOf(WIDE_P))));
+  assert.equal(await lowered(fn, wideDriver), wideLimbs((2n * value) % WIDE_P));
+  const text = await emitted(fn);
+  assert.doesNotMatch(text, /u256_mul_mod/, "the multiply is not the kernel the code calls");
+  assert.match(text, /u256_add_mod/, "the doubling is the addition kernel");
+});
+
+test("a wide kernel answers four limbs, including the ones the reduction carried", async () => {
+  // A product wider than one limb is the case the special-prime reduction
+  // exists for, and the answer is read back limb by limb: a kernel that wrote
+  // only the low limb, or the compiler that loaded only it, would pass a
+  // one-limb test and fail this one.
+  const value = 0x0123456789abcdefn;
+  const fn = optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(value), wideOf(value), wideOf(WIDE_P))));
+  assert.equal(await lowered(fn, wideDriver), wideLimbs((value * value) % WIDE_P));
+  assert.match(await emitted(fn), /u256_mul_mod/, "the kernel is the one the runtime provides");
+});
+
+test("a modular multiply by a count the compiler does not answer with additions is the multiply it is", async () => {
+  // Eight is three doublings only if the doubling is written down once and read
+  // three times. Without a binding the chain is a tree of seven additions,
+  // which costs more than the multiply, so eight is left as the kernel's.
+  const value = 0xdeadbeefcafebaben;
+  const fn = optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(8n), wideOf(value), wideOf(WIDE_P))));
+  assert.equal(await lowered(fn, wideDriver), wideLimbs((8n * value) % WIDE_P));
+  assert.match(await emitted(fn), /u256_mul_mod/, "the multiply by eight is the kernel's");
+});
+
+/** A no-parameter function of a wide number that answers a value written out. */
+function wideSubjectOf(value: SemanticValue): SemanticFunction {
+  return {
+    name: "subject", symbol: "subject", params: [], returns: U256,
+    requires: [], ensures: [], effects: [], allocates: false, prints: false, readsArgv: false,
+    objects: {}, calls: [], entry: handsBack(value),
+  };
+}
+
+test("a wide kernel is handed the slots its operands live in and writes the slot it is bound to", async () => {
+  // A modular operation in a loop reads names that outlive the statement, so the
+  // address the kernel is handed can be the slot the name already sits in. The
+  // three constructors below write four limbs each; if the kernel copied its
+  // operands there would be twelve more stores before its call, and if it
+  // copied its answer back there would be four more after it. Neither copy
+  // changes what the program computes, and the answer is checked against the
+  // same arithmetic done a limb at a time.
+  const a = 0x0123456789abcdefn;
+  const b = 0xfedcba9876543210n;
+  const entry: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", line: 1, slot: { kind: "value", name: "a", mutable: false, type: U256 }, value: wideOf(a) },
+      { k: "let", line: 2, slot: { kind: "value", name: "b", mutable: false, type: U256 }, value: wideOf(b) },
+      { k: "let", line: 3, slot: { kind: "value", name: "p", mutable: false, type: U256 }, value: wideOf(WIDE_P) },
+      {
+        k: "let", line: 4, slot: { kind: "value", name: "r", mutable: false, type: U256 },
+        value: modularCall("u256_mul_mod", local("a", U256), local("b", U256), local("p", U256)),
+      },
+      {
+        k: "let", line: 5, slot: { kind: "value", name: "s", mutable: false, type: U256 },
+        value: modularCall("u256_add_mod", local("r", U256), local("a", U256), local("p", U256)),
+      },
+      {
+        k: "let", line: 6, slot: { kind: "value", name: "t", mutable: false, type: U256 },
+        value: modularCall("u256_add_mod", local("s", U256), local("b", U256), local("p", U256)),
+      },
+    ],
+    terminator: { k: "return", value: local("t", U256) },
+  };
+  const fn = optimizeSemanticFunction({
+    name: "subject", symbol: "subject", params: [], returns: U256,
+    requires: [], ensures: [], effects: [], allocates: false, prints: false, readsArgv: false,
+    objects: {}, calls: [], entry,
+  });
+  const product = (a * b) % WIDE_P;
+  const expected = (product + a + b) % WIDE_P;
+  assert.equal(await lowered(fn, wideDriver), wideLimbs(expected));
+  const text = await emitted(fn);
+  const beforeFirstCall = text.slice(0, text.indexOf("call"));
+  const stores = beforeFirstCall.match(/mov\s+%r(?:8|9|10|11),0x[0-9a-f]+\(%rsp\)/g) ?? [];
+  assert.equal(stores.length, 12, "the three constructors write four limbs each and the kernel is handed their slots, not copies");
+  assert.match(text, /u256_mul_mod/, "the product is the kernel's");
 });

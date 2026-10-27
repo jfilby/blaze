@@ -1858,3 +1858,86 @@ test("a sized buffer keeps the count its fold wrote and no element it never wrot
   assert.match(viewed, /local\[\[f64\]\] block/, "the view keeps the block it looks into");
   assert.doesNotMatch(viewed, /add\[usize\]/, "the view's offset is the folded sum");
 });
+
+/* -------------------------------------------------------------------------- */
+/* A modular multiply by a number the compiler can read                       */
+/* -------------------------------------------------------------------------- */
+
+const U256: SemanticType = { kind: "primitive", name: "u256" };
+
+/** A wide number built from two 64 bit halves, which is how one is written. */
+function wideFrom(low: string, high: string = "0"): SemanticValue {
+  return {
+    k: "call", type: U256,
+    call: {
+      callee: "u256_from_u64x2", builtin: true,
+      signature: { name: "u256_from_u64x2", symbol: "u256_from_u64x2", params: [{ name: "low", type: "u64" }, { name: "high", type: "u64" }], returns: "u256" },
+      args: [constOf(low, U64), constOf(high, U64)], argTypes: [U64, U64], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+/** A modular operation of the kernel the wide numbers are built on. */
+function modular(callee: "u256_mul_mod" | "u256_add_mod", left: SemanticValue, right: SemanticValue, mod: SemanticValue): SemanticValue {
+  return {
+    k: "call", type: U256,
+    call: {
+      callee, builtin: true,
+      signature: { name: callee, symbol: callee, params: [{ name: "left", type: "u256" }, { name: "right", type: "u256" }, { name: "mod", type: "u256" }], returns: "u256" },
+      args: [left, right, mod], argTypes: [U256, U256, U256], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+/** A function of two wide names and a wide modulus that answers the value. */
+function wideSubject(value: SemanticValue): SemanticFunction {
+  return fnOf(
+    { id: "entry", releases: [], terminator: { k: "return", value }, statements: [] },
+    U256,
+    [
+      { kind: "value", name: "x", mutable: false, type: U256 },
+      { kind: "value", name: "y", mutable: false, type: U256 },
+      { kind: "value", name: "p", mutable: false, type: U256 },
+    ],
+  );
+}
+
+test("a modular multiply by two is the doubling it is", () => {
+  // The formulas of an elliptic curve double on every turn, and five of the
+  // multiplies in one doubling are by a number the source wrote: 2, 3 and 8.
+  // A modular addition is the cheap kernel beside the multiply, so the product
+  // by two is written as the one addition that answers the same residue.
+  const doubled = printed(wideSubject(modular("u256_mul_mod", wideFrom("2"), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
+  assert.match(doubled, /u256_add_mod/);
+  assert.doesNotMatch(doubled, /u256_mul_mod/);
+  // The addition is `x + x`: the value appears on both sides.
+  assert.match(doubled, /arg\[u256\] local\[u256\] x arg\[u256\] local\[u256\] x/);
+});
+
+test("a modular multiply by three is two additions, and eight is left as the multiply", () => {
+  const times = (count: string): string => printed(wideSubject(modular("u256_mul_mod", wideFrom(count), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
+  const three = times("3");
+  assert.equal((three.match(/u256_add_mod/g) ?? []).length, 2, "3x is (x + x) + x");
+  assert.doesNotMatch(three, /u256_mul_mod/);
+  // Eight is three doublings only if the doubling is written down once and read
+  // three times. A value that is not bound is computed at every read, so the
+  // chain is a tree of seven additions — slower than the multiply it replaced.
+  assert.match(times("8"), /u256_mul_mod/);
+});
+
+test("a modular multiply of two wide numbers is left as the multiply it is", () => {
+  // Neither side is a number the compiler can count with, so the product is
+  // the one the kernel computes. A rewrite here would have to add a name to
+  // itself a number of times the compiler does not know.
+  const product = printed(wideSubject(modular("u256_mul_mod", { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "y" }, { k: "local", type: U256, name: "p" })));
+  assert.match(product, /u256_mul_mod/);
+  assert.doesNotMatch(product, /u256_add_mod/);
+});
+
+test("a modular multiply by one is the value it multiplies", () => {
+  const once = printed(wideSubject(modular("u256_mul_mod", wideFrom("1"), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
+  assert.doesNotMatch(once, /u256_mul_mod/);
+  assert.doesNotMatch(once, /u256_add_mod/);
+});

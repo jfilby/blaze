@@ -4187,8 +4187,18 @@ class Machine {
         // A wide number is not in the accumulator, so it is written down from
         // the working registers rather than from `rax`.
         if (isWideType(type)) {
-          this.wideValue(statement.value);
-          this.wideStore(this.bind(statement.slot.name, type));
+          const name = statement.slot.name;
+          // A binding whose value reads the name it is about to declare — a
+          // `let x = x` that shadows an outer x — is written before the name
+          // is declared, because the read is the outer one. Every other
+          // binding is declared first, which is what lets the kernel write its
+          // answer into the slot rather than into a temporary.
+          if (this.reads(statement.value, name)) {
+            this.wideValue(statement.value);
+            this.wideStore(this.bind(name, type));
+            return;
+          }
+          this.wideBind(name, this.bind(name, type), statement.value);
           return;
         }
         this.at(statement.value, type);
@@ -4212,8 +4222,7 @@ class Machine {
           );
         }
         if (isWideType(held.type)) {
-          this.wideValue(statement.value);
-          this.wideStore(held);
+          this.wideBind(statement.name, held, statement.value);
           return;
         }
         this.assign(statement.name, statement.op, statement.value);
@@ -8116,6 +8125,121 @@ class Machine {
   }
 
   /**
+   * The slot a wide value already sits in, or null when it has to be built.
+   *
+   * A name of a wide number lives in the frame as its four limbs and the
+   * runtime kernels take the address of a value, so a call whose argument is
+   * that name can be handed the address of the slot rather than a copy of the
+   * limbs: four loads and four stores that say nothing, on every wide call a
+   * loop makes. A name that is not wide has no four limbs to hand over, and a
+   * name the liveness pass pinned lives in a register and not in the frame at
+   * all — a wide number is never pinned, but the test is the one that keeps
+   * this true if that ever changes.
+   */
+  private wideLocalSlot(value: SemanticValue): Held | null {
+    if (value.k !== "local" || !isWideType(value.type)) return null;
+    const held = this.slot(value.name);
+    if (!isWideType(held.type) || held.register !== null) return null;
+    return held;
+  }
+
+  /**
+   * A slot whose four limbs hold a wide argument of a runtime kernel.
+   *
+   * The slot a name already lives in is used as it is; anything else is
+   * computed into a slot borrowed for the statement. The address the kernel is
+   * handed is the slot's either way.
+   *
+   * The slot is as wide as the call reads its arguments, and not as wide as the
+   * value happens to be: a kernel reads four limbs whatever the source wrote,
+   * so a machine word handed to one is widened into four limbs — and a slot
+   * reserved for the machine word would be the first limb and three of the
+   * frame beside it.
+   */
+  private wideArgument(value: SemanticValue, prefix: string, wide: SemanticType): Held {
+    const direct = this.wideLocalSlot(value);
+    if (direct !== null) return direct;
+    const held = this.hold(wide, prefix);
+    this.wideValue(value);
+    this.wideStore(held);
+    return held;
+  }
+
+  /**
+   * A wide call written with its answer in `out`, which is the slot the answer
+   * was going to be copied to anyway.
+   *
+   * A call whose answer is bound by the statement that makes it is the common
+   * case — every modular operation of a curve's formulas is one — and writing
+   * the answer straight to the binding's slot saves the four loads and four
+   * stores of copying it there.
+   *
+   * `u256_div` is not written this way: its kernel clears the quotient before
+   * it reads the dividend, so an answer written over an operand would clear
+   * the operand with it. The modular kernels read each limb before they write
+   * the limb over it, so the callers allow the aliasing the division does not.
+   */
+  private wideKernelCall(value: SemanticValue & { k: "call" }, out: Held): void {
+    const callee = value.call.callee;
+    if (callee === "u256_div") {
+      const left = this.wideArgument(value.call.args[0] as SemanticValue, "blaze_wide_left", value.type);
+      const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
+      this.code.leaMemReg(mem(RSP, out.offset), RDI);
+      this.code.leaMemReg(mem(RSP, left.offset), RSI);
+      this.code.leaMemReg(mem(RSP, right.offset), RDX);
+      this.library(`${RUNTIME_NAME}_u256_div`);
+      return;
+    }
+    const suffix = callee.slice("u256_".length);
+    const left = this.wideArgument(value.call.args[0] as SemanticValue, "blaze_wide_left", value.type);
+    const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
+    const mod = this.wideArgument(value.call.args[2] as SemanticValue, "blaze_wide_mod", value.type);
+    this.code.leaMemReg(mem(RSP, out.offset), RDI);
+    this.code.leaMemReg(mem(RSP, left.offset), RSI);
+    this.code.leaMemReg(mem(RSP, right.offset), RDX);
+    this.code.leaMemReg(mem(RSP, mod.offset), RCX);
+    this.library(`${RUNTIME_NAME}_u256_${suffix}`);
+  }
+
+  /** Whether a call is one of the wide kernels, whose answer is one slot. */
+  private isWideKernelCall(value: SemanticValue): value is SemanticValue & { k: "call" } {
+    if (value.k !== "call") return false;
+    const callee = value.call.callee;
+    if (callee === "u256_div") return true;
+    if (callee !== "u256_add_mod" && callee !== "u256_sub_mod" && callee !== "u256_mul_mod") return false;
+    return value.call.args.length === 3;
+  }
+
+  /** Whether an expression reads a name, anywhere inside it. */
+  private reads(value: SemanticValue, name: string): boolean {
+    let found = false;
+    walkValues(value, (one) => {
+      if (one.k === "local" && one.name === name) found = true;
+    });
+    return found;
+  }
+
+  /**
+   * A wide value bound to a slot: a kernel's answer is written into it, and
+   * anything else is computed and copied.
+   *
+   * The answer is not written over an operand of the same call, which is the
+   * one case the modular kernels do not allow: `x = (x * y) mod m` would hand
+   * the kernel the slot it writes and the slot it reads from at once, and
+   * whether that is the same program depends on the kernel's own order. The
+   * name is read out of the value rather than assumed, so the direct write is
+   * taken exactly where it is known to be the same answer.
+   */
+  private wideBind(name: string, held: Held, value: SemanticValue): void {
+    if (this.isWideKernelCall(value) && value.call.callee !== "u256_div" && !this.reads(value, name)) {
+      this.wideKernelCall(value, held);
+      return;
+    }
+    this.wideValue(value);
+    this.wideStore(held);
+  }
+
+  /**
    * A wide number written into the working registers.
    *
    * A literal is one instruction per limb, because a limb is a whole machine
@@ -8190,40 +8314,15 @@ class Machine {
           value.call.callee === "u256_sub_mod" ||
           value.call.callee === "u256_mul_mod"
         ) {
-          const suffix = value.call.callee.slice("u256_".length);
-          const mtype = value.type;
-          const out = this.hold(mtype, "blaze_wide_out");
-          const left = this.hold(mtype, "blaze_wide_left");
-          const right = this.hold(mtype, "blaze_wide_right");
-          const mod = this.hold(mtype, "blaze_wide_mod");
-          this.wideValue(value.call.args[0]);
-          this.wideStore(left);
-          this.wideValue(value.call.args[1]);
-          this.wideStore(right);
-          this.wideValue(value.call.args[2]);
-          this.wideStore(mod);
-          this.code.leaMemReg(mem(RSP, out.offset), RDI);
-          this.code.leaMemReg(mem(RSP, left.offset), RSI);
-          this.code.leaMemReg(mem(RSP, right.offset), RDX);
-          this.code.leaMemReg(mem(RSP, mod.offset), RCX);
-          this.library(`${RUNTIME_NAME}_u256_${suffix}`);
+          const out = this.hold(value.type, "blaze_wide_out");
+          this.wideKernelCall(value, out);
           this.wideLoad(out);
           return;
         }
         // Integer division: left / right.
         if (value.call.callee === "u256_div") {
-          const mtype = value.type;
-          const out = this.hold(mtype, "blaze_wide_out");
-          const left = this.hold(mtype, "blaze_wide_left");
-          const right = this.hold(mtype, "blaze_wide_right");
-          this.wideValue(value.call.args[0]);
-          this.wideStore(left);
-          this.wideValue(value.call.args[1]);
-          this.wideStore(right);
-          this.code.leaMemReg(mem(RSP, out.offset), RDI);
-          this.code.leaMemReg(mem(RSP, left.offset), RSI);
-          this.code.leaMemReg(mem(RSP, right.offset), RDX);
-          this.library(`${RUNTIME_NAME}_u256_div`);
+          const out = this.hold(value.type, "blaze_wide_out");
+          this.wideKernelCall(value, out);
           this.wideLoad(out);
           return;
         }

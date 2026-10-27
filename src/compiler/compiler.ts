@@ -60,7 +60,7 @@ import { buildObject as buildMachineObject, machineRefusal } from "./toolchain/i
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { usesTritonSource } from "./runtime/triton.ts";
-import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
+import { httpRuntimeNeeds, mentionsHttpModule } from "./runtime/http-needs.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import type { LiteralKeys } from "./semantics/program-objects.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
@@ -1320,7 +1320,7 @@ export async function runBuild(
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
     // HTTP programs need the facil runtime even when the user did not ask for
     // it: the generated code references blaze_http_* symbols.
-    if (runtimeKind === "none" && /\bhttp\b/.test(project.entry.source)) runtimeKind = "facil";
+    if (runtimeKind === "none" && mentionsHttpModule(project.entry.source)) runtimeKind = "facil";
     // A program that uses SQLite links the SQLite library beside the runtime
     // it runs on. A wasm module links no library at all, and a program hosted
     // by Nim is lowered by the host's own emitter, which knows no library, so
@@ -2063,7 +2063,7 @@ export async function runBuild(
           if (!threads.includes(threading)) threads.push(threading);
         }
       }
-      const isHttp = runtimeKind === "facil" || /\bhttp\b/.test(project.entry.source);
+      const isHttp = runtimeKind === "facil" || mentionsHttpModule(project.entry.source);
       const runner =
         backendKind === "wasm"
           ? (await buildProgramModule({

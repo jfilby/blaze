@@ -8,6 +8,8 @@
  * the two sides of it cannot drift.
  */
 
+import { withoutComments } from "../util/source.ts";
+
 export const SQLITE_NAME = "blaze_sqlite";
 
 /** One entry point of the SQLite ABI. */
@@ -200,7 +202,10 @@ export function isSqliteSymbol(symbol: string): boolean {
  * the source can be asked about.
  */
 export function usesSqliteSource(source: string): boolean {
-  return /\bsqlite\b/.test(source);
+  // The word is read from the code: a comment that mentions SQLite is prose
+  // about a program nobody runs, and linking the library for it is a cost the
+  // program pays without using it.
+  return /\bsqlite\b/.test(withoutComments(source));
 }
 
 const SQLITE_HEADER_PREAMBLE = `#ifndef BLAZE_SQLITE_H

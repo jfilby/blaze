@@ -40,7 +40,7 @@ import type {
   SemanticType,
   SemanticValue,
 } from "../core/semantic-ir.ts";
-import { hasCall, isInteger, isTextType, isUnsigned, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
+import { hasCall, isInteger, isTextType, isUnsigned, isWideType, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { restructureHotFunction } from "./restructure.ts";
@@ -404,6 +404,80 @@ function literalOf(value: SemanticValue): number | null {
 }
 
 /**
+ * The small whole number a wide value is written as, or null when it is not
+ * one the compiler can read.
+ *
+ * A wide number is written in three ways: as a literal that is widened to the
+ * width on use, and as one of the two constructors that build it from 64-bit
+ * limbs. A constant that is a limb or four of them is a number this pass can
+ * count with, and everything else — a name, a call that computes — is not.
+ */
+function smallWideOf(value: SemanticValue): number | null {
+  const small = (one: SemanticValue | undefined): number | null => {
+    if (one === undefined) return null;
+    const written = literalOf(one);
+    return written !== null && Number.isInteger(written) && written >= 0 ? written : null;
+  };
+  if (value.k === "const") return small(value);
+  if (value.k !== "call") return null;
+  if (value.call.callee === "u256_from_u64x2") {
+    const low = small(value.call.args[0]);
+    const high = small(value.call.args[1]);
+    return low !== null && high === 0 ? low : null;
+  }
+  if (value.call.callee === "u256_from_u64x4") {
+    const low = small(value.call.args[0]);
+    const rest = [small(value.call.args[1]), small(value.call.args[2]), small(value.call.args[3])];
+    return low !== null && rest.every((one) => one === 0) ? low : null;
+  }
+  return null;
+}
+
+/**
+ * `(k * x) mod m`, written as the additions it is, for the counts one
+ * addition or two answer.
+ *
+ * A modular multiply is the one operation in this IR that costs a 64-by-64
+ * product for each of sixteen limb pairs, and a small multiplier does not need
+ * one: `2 * x` is `x + x`, and a modular addition is the cheap kernel beside
+ * the multiply. The elliptic-curve code this was written for doubles a point
+ * on every turn, and two of the multiplies in that doubling are by 2 and 3.
+ *
+ * Only two and three are taken, and the reason is what a count above them
+ * costs without a binding to hold the doubling: `8 * x` is three doublings
+ * only if the first is written down once and read three times, and a value
+ * that is not bound is computed again at every read — so the three additions
+ * of the chain are seven additions of the tree, which is slower than the
+ * multiply it replaced. A count of four and above is left as the multiply.
+ *
+ * The rewrite is exact for every modulus: `k * x` is `x` added to itself `k`
+ * times, and a modular addition answers the same residue whether the additions
+ * are done one at a time or all at once.
+ */
+function modularMultiplyOf(
+  value: SemanticValue & { k: "call" },
+  multiplier: number,
+  other: SemanticValue,
+  mod: SemanticValue,
+): SemanticValue | null {
+  const addMod = (left: SemanticValue, right: SemanticValue): SemanticValue => ({
+    k: "call",
+    type: value.type,
+    call: {
+      ...value.call,
+      callee: "u256_add_mod",
+      signature: { ...value.call.signature, name: "u256_add_mod", symbol: "u256_add_mod" },
+      args: [left, right, mod],
+    },
+  });
+  if (multiplier === 0) return { k: "const", type: value.type, text: "0" };
+  if (multiplier === 1) return other;
+  if (multiplier === 2) return addMod(other, other);
+  if (multiplier === 3) return addMod(addMod(other, other), other);
+  return null;
+}
+
+/**
  * The text of a value that is written out in full, or null when it is built
  * at run time.
  */
@@ -627,6 +701,25 @@ function foldValue(value: SemanticValue): SemanticValue | null {
             return { ...value, op: "shl", right: { k: "const", type: value.right.type, text: String(exponent) } };
           }
         }
+      }
+      return null;
+    }
+    case "call": {
+      // A modular multiply by a number the compiler can read is the sum of
+      // that many copies, and the modular addition is the cheap kernel. The
+      // count is read from the side that is written out; the other side is the
+      // value being counted, and it has to be the wide number the answer is,
+      // because the additions are made at that width.
+      if (value.call.callee !== "u256_mul_mod" || !isWideType(value.type)) return null;
+      const [left, right, mod] = value.call.args;
+      if (left === undefined || right === undefined || mod === undefined) return null;
+      const writtenLeft = smallWideOf(left);
+      const writtenRight = smallWideOf(right);
+      if (writtenLeft !== null && isWideType(right.type)) {
+        return modularMultiplyOf(value, writtenLeft, right, mod);
+      }
+      if (writtenRight !== null && isWideType(left.type)) {
+        return modularMultiplyOf(value, writtenRight, left, mod);
       }
       return null;
     }

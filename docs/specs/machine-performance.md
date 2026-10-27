@@ -236,6 +236,46 @@ from the read-only data: `step += 1` is one addition and not a load of the
 literal, a copy and an addition. The copy is a move, and the move is the wait
 described above.
 
+### A wide kernel is handed the value it is given
+
+A wide number is four limbs, and the kernel that multiplies two of them is C in
+the runtime that takes the address of each. The lowering used to evaluate every
+argument into the working registers and then write it to a slot of the frame,
+which is four loads and four stores per argument that say nothing at all when
+the argument is a name that already lives in a slot: `dx` is four limbs in the
+frame, and `lea 0x40(%rsp), %rsi` is the address the kernel wants.
+
+The address of a name is therefore handed over as it is, and the only arguments
+that are copied are the ones the value computes. The answer is the same
+question: a modular operation bound by the statement that makes it —
+`let X3 = (r * r) mod P` — is written straight into the binding's slot rather
+than into a temporary and then copied to it, which is another eight instructions
+per operation. Two of the three kernels read each limb before writing the limb
+over it, so the answer may be written over an operand; the third is division,
+whose kernel clears the quotient before it reads the dividend, and its answer is
+still staged. A value that reads the name it is bound to is copied as well,
+because whether the aliasing is the same program then depends on the kernel's
+own order rather than on the lowering's.
+
+### A modular multiply by a small number is the addition it is
+
+`2 * x` modulo a prime is `x + x` modulo the same prime, and a modular addition
+is the cheap kernel beside the multiply: the multiply is sixteen 64 by 64 limb
+products and a reduction, and the addition is four adds and a conditional
+subtract. The optimizer writes a modular multiply by two or three as the
+additions it is, which is the rewrite that matters for a curve's formulas: a
+point doubling written in Jacobian coordinates multiplies by 2 and by 3, and two
+of the eleven multiplies in the doubling of `secp256k1`'s source are of that
+kind.
+
+Three is `(x + x) + x` and two is `x + x`. A count above three is left as the
+multiply it is, and the reason is not the arithmetic but the binding: eight is
+three doublings only if the first doubling is written once and read three times,
+and a value that is not bound is computed at every read, so a chain of three
+additions is a tree of seven. Seven modular additions are slower than the
+multiply they replaced. The count is read from the side the compiler can see,
+which is a literal or a `u256_from_u64x2`/`u256_from_u64x4` of literal limbs.
+
 ### An object literal that writes every field is not cleared
 
 An object literal writes its whole payload before any of it is read, so a block
@@ -375,6 +415,54 @@ callee is neither: the callee would return to the caller's caller, which is
 right for a tail call and wrong for every other, and the machine backend
 would have to know which is which at every call it writes.
 
+### The multiply the machine code calls
+
+The modular multiply of `secp256k1` is 58% of the program's instructions, and
+every one of them is a call into the runtime: the machine backend asks the
+kernel for the product and the reduction, and a call is what it writes. The
+kernel is not the problem — it is 532 instructions for sixteen limb products
+and a reduction, which is a great many, but it is the same instructions the C
+backend runs.
+
+What the call costs is the boundary. A kernel written into the machine code at
+the call site lets the compiler keep its operands in registers across the
+product and pipeline one multiply into the next. The special-prime kernel
+inlined into a loop that calls it was 1.58 times faster than the same kernel
+called, and 1.78 times faster than the generic entry the backend calls today;
+the margin is the boundary and not the arithmetic. Writing the 4 by 4 product
+and the special-prime reduction as x86-64 here is a change of about sixty
+instructions at each of twenty call sites, and the reduction of `2^256 - c` is
+the shape that makes it worth doing: a generic modulus would need the bit-by-bit
+reduction, which is not worth writing twenty times.
+
+Until then the kernel can be made faster on its own by about 12%, and that is
+worth less than it looks: the shape that is faster is the one that takes the
+special-prime path unconditionally, and the shape that is correct has to test
+for the modulus first. The test is what costs the 12%, so the gain is only
+there for a compiler that knows the modulus is a special prime — which is what
+a constant local would say, and the optimizer does not fold one into the call
+yet.
+
+### The division the inversion turns on
+
+The other fifth of `secp256k1` is the extended Euclidean inversion at the end,
+which is one `u256_div` per turn of the algorithm and 663k instructions of the
+program's 3.01M. The division is the restoring kind: one bit of the dividend per
+iteration, a shift of all four limbs, a comparison and a conditional subtract,
+which is 920 ns for a full-width pair and about eight cycles a bit. That is the
+right algorithm for a division the compiler cannot see the shape of, and the
+wrong one for the Euclid loop's, where both sides are wide and the quotient is
+small.
+
+A division by 64-bit estimates — Knuth's algorithm D — is a multiply and a
+correcting subtraction per limb instead of sixty-four iterations of the shift,
+and a 256 by 256 division becomes four of them. The test that would hold it is
+already written: `test/u256-kernel.test.ts` sweeps the quotient and remainder
+against `BigInt` limb by limb, over boundaries, full-width random pairs, small
+divisors and hand-traced cases. What the inversion would then cost is a
+division of the same width as the multiply, and the inversion stops being the
+second largest thing in the program.
+
 ## The measurements
 
 The programs are built with `node src/compiler/offline-build.ts <project>
@@ -441,3 +529,57 @@ with it. Four percent is not worth an unexplained difference in what a program
 computes, and the same four percent is the reason the *next* change to that
 function is worth measuring rather than reasoning about.
 
+
+### What the two changes were worth on `secp256k1`
+
+The benchmark is one scalar multiplication of the curve's generator, run as
+`./secp256k1 15`. It was built with `node src/compiler/cli.ts build
+--recompile` rather than `offline-build.ts`, because that harness refuses the
+program's entry: the class-to-object rewrite types the zero point's fields from
+the literals it was written with, and the same layout is then filled with
+`u256` values by the base point. A build repairs it and a harness does not, and
+the repair is a separate question from speed.
+
+The first change the benchmark needed was not arithmetic at all. The program's
+comments cite two URLs, and the compiler decided from the text of the file
+whether a program serves HTTP and whether it speaks TLS: `\bhttp\b` matched
+`http://hyperelliptic.org` in a comment, and `https://` matched the citation
+above it. The program was therefore linked against the facil.io server, the
+table of connections it sizes at startup, and OpenSSL, none of which it calls.
+The readers in `util/source.ts` take the comments out before the question is
+asked, and leave the literals because a URL in a string is a request the
+program makes and a URL in a comment is prose about one.
+
+| Form of `./secp256k1 15` | The binary | One run |
+|---|---|---|
+| before this round | 220,864 bytes, with libssl and libcrypto | 4.4 ms |
+| the runtime read from the code | 31,400 bytes, libm and libc only | 1.3 ms |
+
+That is 3.3 times the benchmark, and almost all of it is the two libraries and
+the server's startup rather than the curve. The program's own work was measured
+on its own — the machine object linked into a harness that calls `blaze_main`
+two hundred times, so the runtime's startup is one run and not two hundred:
+
+| Form of one scalar multiplication | Instructions (callgrind) | Two hundred turns |
+|---|---|---|
+| before this round | 3.46M | 105 ms |
+| the additions and the slots | 3.01M | 86 ms |
+
+The instruction count is worth reading by function, because it says where the
+saving came from and where it did not. The modular multiply fell from 2.03M to
+1.64M and the modular addition rose from 28k to 183k, which is the rewrite: the
+multiplies by 2 and by 3 became the cheap kernel, and the remaining multiplies
+are the ones that were not by a number the compiler could see. The program's own
+code — the calls, the operand copies and the branches between them — fell from
+375k to 157k, which is the slots: 218k instructions of the 3.46M were the twelve
+loads and twelve stores a kernel call spent on arguments the frame already held
+and on an answer it was about to copy. The extended Euclidean inversion at the
+end of the program is untouched at 663k, a fifth of what is left: it is a
+division per turn of the algorithm, and the division is the bit-by-bit kernel.
+
+The benchmark is worth one more note because it is about fidelity rather than
+speed: the rules that translate this program fix its scalar to a literal and
+read no argument, so `./secp256k1 15` performs one multiplication and ignores
+the `15`. The `[benchmark]` line names fifteen. Whatever the arithmetic is worth
+on one turn is what it is worth on the program as it stands today, and the
+fifteen are a separate fix.

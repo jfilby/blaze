@@ -42,7 +42,7 @@ import { buildProgramDriver } from "./toolchain/driver.ts";
 import { programLoweringOf } from "./compiler.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
 import { buildFacilRuntime } from "./runtime/facil.ts";
-import { httpRuntimeNeeds } from "./runtime/http-needs.ts";
+import { httpRuntimeNeeds, mentionsHttpModule } from "./runtime/http-needs.ts";
 import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { buildTritonLibrary } from "./runtime/triton-build.ts";
@@ -201,7 +201,7 @@ async function main(): Promise<void> {
   // writes the `blaze_http_*` calls the adapter answers. The runtime is built
   // for the program: how many connections its server may hold, and whether it
   // speaks TLS.
-  const isHttp = project.runtime === "facil" || /\bhttp\b/.test(source);
+  const isHttp = project.runtime === "facil" || mentionsHttpModule(source);
   const http = httpRuntimeNeeds(phase.body, [...phase.modules.map((module) => module.source), source]);
   const runtime = isHttp
     ? await buildFacilRuntime(work, "danger", target, http)

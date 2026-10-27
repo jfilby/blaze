@@ -27,6 +27,7 @@
  */
 
 import type { ProgramBody, ProgramStatement, ProgramValue } from "../semantics/module.ts";
+import { codeOnly, withoutComments } from "../util/source.ts";
 
 /**
  * The most connections the server of a program may hold at once, when the
@@ -112,7 +113,7 @@ export function httpRuntimeNeeds(body: ProgramBody | undefined, sources: readonl
      can read. */
   let mentions = 0;
   for (const source of sources) {
-    if (/\bhttp\.serveTls\b/.test(source)) reading.needs.tls = true;
+    if (/\bhttp\.serveTls\b/.test(codeOnly(source))) reading.needs.tls = true;
     /* A program that asks a server over "https://" speaks TLS to it, and the
        runtime it is given has to carry the library that speaks it. The URL is
        the question the program asks, and the source is where the question is
@@ -137,16 +138,36 @@ export function httpRuntimeNeeds(body: ProgramBody | undefined, sources: readonl
  * The rule is the one the SQLite facility uses: the word in the source is what
  * says so, because the verification has to decide from the source whether to
  * give the program a runtime that speaks TLS, and the rule has to be one the
- * source can be asked about.
+ * source can be asked about. The word is read from the code: a URL in a
+ * comment is prose about a request nobody makes.
  */
 export function speaksTlsToServer(source: string): boolean {
-  return /\bhttps:\/\//.test(source);
+  return /\bhttps:\/\//.test(withoutComments(source));
+}
+
+/**
+ * Whether a program names the HTTP facility.
+ *
+ * The question is asked of the code, not of the file: a comment that cites a
+ * URL is not a program that serves HTTP, and reading one as the other linked
+ * the server runtime and OpenSSL into programs that never call either. A
+ * string is not code either — a program that prints the word "http" is not a
+ * program that uses it.
+ *
+ * A `fetch` is the facility as much as an `http.` is: the driver writes the
+ * same `blaze_http_*` calls for it, and a program that asks one over a URL it
+ * wrote in a string was the case the word in the string used to catch by
+ * accident.
+ */
+export function mentionsHttpModule(source: string): boolean {
+  const code = codeOnly(source);
+  return /\bhttp\b/.test(code) || /\bfetch\s*\(/.test(code);
 }
 
 /** How many times a call is written in a source, mentions in a comment and all. */
 function countMentions(source: string, callee: string): number {
   const pattern = new RegExp(`\\b${callee.replace(/\./g, "\\.")}\\b`, "g");
-  return (source.match(pattern) ?? []).length;
+  return (codeOnly(source).match(pattern) ?? []).length;
 }
 
 /** Reads the HTTP calls a statement makes, and what it holds. */
