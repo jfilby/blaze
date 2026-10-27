@@ -112,37 +112,104 @@ li { margin: 0.35rem 0; }
 #intro li { margin: 0.5rem 0; }
 
 /* ---------- Repository link ---------- */
-/* The link to the source repository. It sits at the top of the home page
-   and spans the whole width, so it is the first thing a reader meets. */
+/* The banner that links to the source repository. It spans the whole width of
+   the home page, so it is the first thing a reader meets, and the whole
+   banner is the link: the icon, the text and the call to action all lead to
+   the same place. */
 .repo-banner {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem 1.25rem;
-  padding: 1rem 1.35rem;
-  border-radius: 12px;
-  background: #111827;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: 14px;
   border: 1px solid #1f2937;
+  background: linear-gradient(135deg, #111827 0%, #1c2942 100%);
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.repo-banner:hover,
+.repo-banner:focus-visible {
+  text-decoration: none;
+  border-color: #2f6fd0;
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.22);
+  transform: translateY(-1px);
+}
+.repo-banner:focus-visible { outline: 2px solid #0b5ed6; outline-offset: 3px; }
+
+/* The GitHub mark, in a rounded tile of its own so the banner reads as a card
+   with a logo rather than a block of dark text. */
+.repo-banner-icon {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   color: #ffffff;
 }
-.repo-banner:hover { background: #1f2937; text-decoration: none; }
-.repo-banner-text { display: flex; flex-direction: column; gap: 0.15rem; }
-.repo-banner-text strong { font-size: 1.05rem; color: #ffffff; }
-.repo-banner-text span { font-size: 0.9rem; color: #d1d5db; }
+.repo-banner-icon svg { width: 24px; height: 24px; display: block; fill: currentColor; }
+
+.repo-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.repo-banner-text > strong {
+  font-size: 1.05rem;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+/* The repository path is an address, so it is set as one. */
+.repo-banner-text > span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85rem;
+  color: #9ca3af;
+  overflow-wrap: anywhere;
+}
+
+/* The call to action. It looks like a button and moves with the banner, which
+   tells the reader the whole card is the link. */
 .repo-banner-cta {
   flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   padding: 0.5rem 1rem;
-  border-radius: 8px;
+  border-radius: 999px;
   background: #0b5ed6;
   color: #ffffff;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 700;
   white-space: nowrap;
+  transition: background 0.15s ease;
 }
 .repo-banner:hover .repo-banner-cta { background: #0a56c4; }
+.repo-banner-arrow { transition: transform 0.15s ease; }
+.repo-banner:hover .repo-banner-arrow { transform: translateX(3px); }
+
 @media (max-width: 600px) {
-  .repo-banner { flex-direction: column; align-items: flex-start; }
+  .repo-banner { flex-wrap: wrap; }
+  /* On a narrow screen the button takes its own row and the text may use the
+     full width beside the icon. */
+  .repo-banner-cta {
+    flex: 1 1 100%;
+    margin-left: 0;
+    justify-content: center;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .repo-banner,
+  .repo-banner-cta,
+  .repo-banner-arrow { transition: none; }
+  .repo-banner:hover { transform: none; }
+  .repo-banner:hover .repo-banner-arrow { transform: none; }
 }
 
 /* ---------- Chat ---------- */
