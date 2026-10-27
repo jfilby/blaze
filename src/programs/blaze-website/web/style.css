@@ -111,6 +111,40 @@ li { margin: 0.35rem 0; }
 #intro ol { margin-bottom: 0; }
 #intro li { margin: 0.5rem 0; }
 
+/* ---------- Repository link ---------- */
+/* The link to the source repository. It sits at the top of the home page
+   and spans the whole width, so it is the first thing a reader meets. */
+.repo-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.25rem;
+  padding: 1rem 1.35rem;
+  border-radius: 12px;
+  background: #111827;
+  border: 1px solid #1f2937;
+  color: #ffffff;
+}
+.repo-banner:hover { background: #1f2937; text-decoration: none; }
+.repo-banner-text { display: flex; flex-direction: column; gap: 0.15rem; }
+.repo-banner-text strong { font-size: 1.05rem; color: #ffffff; }
+.repo-banner-text span { font-size: 0.9rem; color: #d1d5db; }
+.repo-banner-cta {
+  flex: none;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  background: #0b5ed6;
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.repo-banner:hover .repo-banner-cta { background: #0a56c4; }
+@media (max-width: 600px) {
+  .repo-banner { flex-direction: column; align-items: flex-start; }
+}
+
 /* ---------- Chat ---------- */
 #chat { display: flex; flex-direction: column; gap: 0.75rem; }
 .chat-head {
