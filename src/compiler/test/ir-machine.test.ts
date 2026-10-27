@@ -74,7 +74,14 @@ function contracted(fn: SemanticFunction): FunctionContract {
     function: {
       name: fn.name,
       symbol: fn.symbol,
-      params: fn.params.map((param) => ({ name: param.name, type: typeTextOf(param) })),
+      params: fn.params.flatMap((param) => {
+      const type = typeTextOf(param);
+      const slot = param.kind === "value" || param.kind === "object" ? param : null;
+      const semanticType = slot === null ? null : slot.type;
+      const isSeq = semanticType !== null && (semanticType.kind === "array" || semanticType.kind === "slice" || semanticType.kind === "ptr" || semanticType.kind === "mask");
+      if (isSeq) return [{ name: param.name, type }, { name: `${param.name}_length`, type: "usize" }];
+      return [{ name: param.name, type }];
+    }),
       returns: typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns }),
     },
     requires: [],
@@ -459,7 +466,7 @@ test("an argument left where it is read out of the accumulator, not out of the s
     { kind: "value", name: "n", mutable: false, type: F64 },
   ]);
   // (2+1) + (5+1) + (7+1) + (9+1)
-  assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 4));`), "27");
+  assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 4, 4));`), "27");
 });
 
 test("an element the instruction carries is read before the other side's call writes its registers", async () => {
@@ -507,7 +514,7 @@ test("an element the instruction carries is read before the other side's call wr
     { kind: "value", name: "i", mutable: false, type: USIZE },
   ]);
   // `a[2]` is 7 and `f(1)` is 2.
-  assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 2UL));`), "9");
+  assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 4, 2UL));`), "9");
 });
 
 test("an argument the build gave a register of its own is read before that register is written", async () => {
@@ -837,7 +844,7 @@ test("a loop counts, walks and repeats as many times as the IR states", async ()
   ]);
   const walked = await lowered(
     walk,
-    (name) => `double v[3] = {1.5, 2.5, 4.0}; printf("%.17g", ${name}(v, 3));`,
+    (name) => `double v[3] = {1.5, 2.5, 4.0}; printf("%.17g", ${name}(v, 3, 3));`,
   );
   assert.equal(walked, "8");
 });
@@ -1312,7 +1319,7 @@ test("a truth is a truth: an empty string, an absent reference and a zero are al
       handsBack({ k: "select", type: F64, condition: entry.value, then: number("1"), otherwise: number("0") }),
       [{ kind: "value", name: "a", mutable: false, type: PTR }],
     );
-    const printed = await lowered(fn, (name) => `printf("%d", (int)${name}(${entry.argument ?? "(double*)0"}));`);
+    const printed = await lowered(fn, (name) => `printf("%d", (int)${name}(${entry.argument ?? "(double*)0"}, 0));`);
     assert.equal(printed, entry.expected, entry.name);
   }
 });
@@ -1434,7 +1441,7 @@ test("a branch on a comparison of floats is the comparison itself", async () => 
   const elements: SemanticSlot[] = [{ kind: "value", name: "p", mutable: false, type: PTR }];
   for (const relation of relations.filter((one) => one.op !== "eq" && one.op !== "ne")) {
     const op = relation.op as "lt" | "le" | "gt" | "ge";
-    const ask = (value: string): Promise<string> => lowered(subject(I32, branching({ k: "compare", type: BOOL, op, operand: F64, left: { k: "element", type: F64, of: local("p", PTR), index: number("0", USIZE) }, right: number("2") }), elements), (name) => `printf("%d", ${name}((double[]){${value}, 0.0}));`);
+    const ask = (value: string): Promise<string> => lowered(subject(I32, branching({ k: "compare", type: BOOL, op, operand: F64, left: { k: "element", type: F64, of: local("p", PTR), index: number("0", USIZE) }, right: number("2") }), elements), (name) => `printf("%d", ${name}((double[]){${value}, 0.0}, 2));`);
     assert.equal(await ask("1.0"), `${relation.below}`, `p[0] ${op} 2`);
     assert.equal(await ask("3.0"), `${relation.above}`, `p[0] ${op} 2 the other way`);
     assert.equal(await ask("2.0"), `${relation.equal}`, `p[0] ${op} 2 when equal`);
@@ -1684,7 +1691,7 @@ test("an element of an array is written and read at the width the element is", a
       value: { k: "arith", type: F64, op: "add", left: { k: "element", type: F64, of: local("a", PTR), index: number("1", USIZE) }, right: { k: "element", type: F64, of: local("a", PTR), index: number("2", USIZE) } },
     },
   }, [{ kind: "value", name: "a", mutable: false, type: PTR }, ...NUMBERS]);
-  assert.equal(await lowered(fn, (name) => `double v[3] = {0, 0, 0}; printf("%.17g", ${name}(v, 1.5, 4.0));`), "5.5");
+  assert.equal(await lowered(fn, (name) => `double v[3] = {0, 0, 0}; printf("%.17g", ${name}(v, 3, 1.5, 4.0));`), "5.5");
 });
 
 test("a call carries every argument where the convention puts it, past the registers too", async () => {
@@ -1849,7 +1856,7 @@ test("a name the build pinned into a register is read as an element index", asyn
     },
     [{ kind: "value", name: "values", mutable: false, type: PTR }],
   );
-  const printed = await lowered(fn, (name) => `{ double a[5] = {10,20,30,40,50}; printf("%.1f", ${name}(a)); }`);
+  const printed = await lowered(fn, (name) => `{ double a[5] = {10,20,30,40,50}; printf("%.1f", ${name}(a, 5)); }`);
   assert.equal(printed, "160.0", "the index is the value the program bound to it");
 });
 
@@ -1896,7 +1903,7 @@ test("a walk over an array keeps its index in a register", async () => {
   );
   // The sum is the answer either way, and a wrong index is the difference
   // between 10 and 40 for the array below.
-  const printed = await lowered(fn, (name) => `{ double a[4] = {10,20,30,40}; printf("%.1f", ${name}(a, 4)); }`);
+  const printed = await lowered(fn, (name) => `{ double a[4] = {10,20,30,40}; printf("%.1f", ${name}(a, 4, 4)); }`);
   assert.equal(printed, "100.0", "every element is walked exactly once");
 });
 
@@ -1969,7 +1976,7 @@ function dotDriver(turns: number): (name: string) => string {
   return (name) => [
     `  double a[${turns}], b[${turns}];`,
     ...a.map((value, at) => `  a[${at}] = ${value}; b[${at}] = ${b[at]};`),
-    `  printf("%g", ${name}(a, b, ${turns}));`,
+    `  printf("%g", ${name}(a, ${turns}, b, ${turns}, ${turns}));`,
   ].join("\n");
 }
 
@@ -2108,7 +2115,7 @@ function sumDriver(turns: number, a: readonly number[], b?: readonly number[]): 
     `  double a[${Math.max(turns, 1)}];`,
     ...a.map((value, at_) => `  a[${at_}] = ${value};`),
     ...(b === undefined ? [] : [`  double b[${Math.max(turns, 1)}];`, ...b.map((value, at_) => `  b[${at_}] = ${value};`)]),
-    `  printf("%.17g", ${name}(a${b === undefined ? "" : ", b"}, ${turns}));`,
+    `  printf("%.17g", ${name}(a, ${turns}${b === undefined ? "" : `, b, ${turns}`}, ${turns}));`,
   ].join("\n");
 }
 
@@ -2481,7 +2488,7 @@ function weightedDriver(turns: number): (name: string) => string {
   return (name) => [
     `  double a[${Math.max(turns, 1)}];`,
     ...Array.from({ length: Math.max(turns, 1) }, (_one, at_) => `  a[${at_}] = 1.0;`),
-    `  printf("%.17g", ${name}(a, ${turns}));`,
+    `  printf("%.17g", ${name}(a, ${turns}, ${turns}));`,
   ].join("\n");
 }
 
@@ -3100,7 +3107,7 @@ test("a comparison reads the element it is compared against where it lies", asyn
     `  double b[1];`,
     `  a[0] = ${Number.isNaN(left) ? "(0.0/0.0)" : left};`,
     `  b[0] = ${Number.isNaN(right) ? "(0.0/0.0)" : right};`,
-    `  printf("%d", ${name}(a, b, 0));`,
+    `  printf("%d", ${name}(a, 1, b, 1, 0));`,
   ].join("\n");
 
   for (const op of ["lt", "le", "gt", "ge", "eq", "ne"] as const) {
@@ -3256,7 +3263,7 @@ test("a counter of a loop over buffers keeps its register away from the buffers"
   );
   // Every array holds n at index n, so the five sums over eight are each 28.
   assert.equal(
-    await lowered(fn, (name) => `{ double a[8]={0,1,2,3,4,5,6,7}; printf("%g", ${name}(a,a,a,a,a)); }`),
+    await lowered(fn, (name) => `{ double a[8]={0,1,2,3,4,5,6,7}; printf("%g", ${name}(a, 8, a, 8, a, 8, a, 8, a, 8)); }`),
     "140",
     "five arrays of eight elements each",
   );
@@ -3398,7 +3405,7 @@ test("a counter the loop reads as a number is kept in a register", async () => {
     [{ kind: "value", name: "values", mutable: false, type: { kind: "array", of: F64, length: 8 } }, { kind: "value", name: "n", mutable: false, type: F64 }],
   );
   assert.equal(
-    await lowered(fn, (name) => `{ double a[8]={0,0,0,0,0,0,0,0}; printf("%g", ${name}(a, 8.0)); }`),
+    await lowered(fn, (name) => `{ double a[8]={0,0,0,0,0,0,0,0}; printf("%g", ${name}(a, 8, 8.0)); }`),
     "8",
     "the loop turns as many times as its bound says",
   );
@@ -3608,7 +3615,7 @@ test("a loop inside a loop that holds its bound leaves the bound alone", async (
   // Two turns of the outer loop, each summing the four elements of the array
   // doubled: twenty each, and forty in all.
   assert.equal(
-    await lowered(fn, (name) => `{ double a[4]={1,2,3,4}; printf("%g", ${name}(a, 2.0, 4.0)); }`),
+    await lowered(fn, (name) => `{ double a[4]={1,2,3,4}; printf("%g", ${name}(a, 4, 2.0, 4.0)); }`),
     "40",
     "the outer loop counts its turns and the inner one its own",
   );

@@ -38,6 +38,7 @@ import {
   isWideType,
   limbsOf as limbsOfName,
   isInteger,
+  isSequence,
   statementBlocksOf,
   statementValues,
   WIDE_LIMBS,
@@ -51,6 +52,7 @@ import {
   type SemanticCall,
   type SemanticFunction,
   type SemanticLoop,
+  type SemanticSlot,
   type SemanticStatement,
   type SemanticTerminator,
   type SemanticType,
@@ -2314,7 +2316,9 @@ class Machine {
   }
   private lastLiteral = "";
 
-  private readonly fn: SemanticFunction;
+  private fn: SemanticFunction;
+  /** Maps a sequence parameter's name to the name of its hidden length parameter. */
+  private arrayParamLengths = new Map<string, string>();
   /**
    * Whether this machine rounds a value to a whole number with an instruction of
    * its own, which is a fact about the target the build was asked for and not
@@ -2344,7 +2348,17 @@ class Machine {
   private readonly counterRegisters = new Map<string, number>();
 
   constructor(fn: SemanticFunction, contract: FunctionContract | undefined, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }) {
-    this.fn = fn;
+    const augmented: SemanticSlot[] = [];
+    for (const param of fn.params) {
+      augmented.push(param);
+      const type = slotType(param);
+      if (isSequence(type)) {
+        const lengthName = `${param.name}_length`;
+        this.arrayParamLengths.set(param.name, lengthName);
+        augmented.push({ kind: "value", name: lengthName, mutable: false, type: USIZE } as SemanticSlot);
+      }
+    }
+    this.fn = augmented.length === fn.params.length ? fn : { ...fn, params: augmented };
     this.rounds = rounds;
     this.poTParams = powerOfTwoParams;
     this.target = target;
@@ -6927,14 +6941,8 @@ class Machine {
           return;
         }
         // An array that reaches a function as a parameter carries its length
-        // beside it, and this backend does not carry that length: refuse, so
-        // the C backend, which does, lowers the function instead.
-        if (value.of.k === "local" && this.fn.params.some((p) => p.name === (value.of as { k: "local"; name: string }).name)) {
-          throw machineError(
-            `${this.fn.symbol} reads an element of an array parameter, which this backend has not written`,
-            "an array parameter is read by the C backend; build this function as C output",
-          );
-        }
+        // beside it; this backend now carries that length as a hidden parameter
+        // (see the constructor), so reading an element is pointer arithmetic.
         const element = elementTypeOf(value.of.type) ?? value.type;
         this.readFrom(element, this.addressOf(value.of, value.index, element));
         this.convert(element, value.type);
@@ -9104,6 +9112,13 @@ class Machine {
       this.code.movRegReg(RDI, RAX);
       this.library("strlen");
       return;
+    }
+    if (of.k === "local") {
+      const lengthName = this.arrayParamLengths.get(of.name);
+      if (lengthName !== undefined) {
+        this.value({ k: "local", type: USIZE, name: lengthName });
+        return;
+      }
     }
     throw machineError(
       `${this.fn.symbol} reads the length of an array, which no machine this compiler writes can answer`,

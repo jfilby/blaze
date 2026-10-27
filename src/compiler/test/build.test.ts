@@ -456,7 +456,7 @@ test("a C build delivers the C source the compiler verified", async () => {
   assert.ok(outcome.outputPath?.endsWith("output/input.c"));
 
   const source = await readFile(outcome.outputPath as string, "utf8");
-  assert.match(source, /float dotProduct\(float\* a, float\* b, size_t n\)/);
+  assert.match(source, /float dotProduct\(float\* a, size_t a_length, float\* b, size_t b_length, size_t n\)/);
 });
 
 test("reuse rebuilds from the stored implementation without asking the model", async () => {

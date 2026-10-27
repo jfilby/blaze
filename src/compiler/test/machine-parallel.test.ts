@@ -126,7 +126,13 @@ function contracted(fn: SemanticFunction): FunctionContract {
     function: {
       name: fn.name,
       symbol: fn.symbol,
-      params: fn.params.map((param) => ({ name: param.name, type: typeTextOf(param) })),
+      params: fn.params.flatMap((param) => {
+        const type = typeTextOf(param);
+        const semanticType = param.kind === "value" || param.kind === "object" ? param.type : null;
+        const isSeq = semanticType !== null && (semanticType.kind === "array" || semanticType.kind === "slice" || semanticType.kind === "ptr" || semanticType.kind === "mask");
+        if (isSeq) return [{ name: param.name, type }, { name: `${param.name}_length`, type: "usize" }];
+        return [{ name: param.name, type }];
+      }),
       returns: typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns }),
     },
     requires: [],
@@ -203,12 +209,12 @@ async function runOver(
     [
       "#include <stdio.h>",
       "#include <stdlib.h>",
-      `extern void ${symbolOf(contract)}(double* out, long long n);`,
+      `extern void ${symbolOf(contract)}(double* out, size_t out_length, long long n);`,
       "int main(void) {",
       `  long long n = ${count};`,
       "  double* out = (double*)malloc(n * 8);",
       "  for (long long i = 0; i < n; i++) out[i] = (double)i;",
-      `  ${symbolOf(contract)}(out, n);`,
+      `  ${symbolOf(contract)}(out, n, n);`,
       ...(check
         ? [
             "  for (long long i = 0; i < n; i++) {",
