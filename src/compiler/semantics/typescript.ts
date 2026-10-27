@@ -1335,6 +1335,35 @@ class TypeScriptParser {
     return this.readPostfix();
   }
 
+  /**
+   * `Deno.args` after it has been read, together with the argument or the
+   * length written after it. Deno hands a program the arguments alone and node
+   * counts the program and the file it runs before them, so the index of an
+   * argument is two more than the one the source wrote — the same shift the
+   * program frontend reads `Deno.args` with, so a name read in a function body
+   * and in the body of the program is the same argument.
+   */
+  private denoArguments(): Expression {
+    const shift: Expression = { k: "literal", text: "2" };
+    if (this.at("[")) {
+      this.next();
+      const index = this.readExpression();
+      this.expect("]");
+      return { k: "argv", index: { k: "binary", op: "+", left: index, right: shift } };
+    }
+    if (this.at(".") && this.peek(1).text === "length") {
+      this.next();
+      this.next();
+      return {
+        k: "binary",
+        op: "-",
+        left: { k: "call", name: ARGV_LENGTH, args: [] },
+        right: shift,
+      };
+    }
+    return { k: "argv", index: null };
+  }
+
   /** A primary, then any number of indexings, field reads, calls and updates. */
   private readPostfix(): Expression {
     let base = this.readPrimary();
@@ -1398,6 +1427,10 @@ class TypeScriptParser {
           base = this.fixed(base);
           continue;
         }
+        if (field.text === "toString" && this.at("(")) {
+          base = this.hexadecimal(base);
+          continue;
+        }
         if (field.text === "length" && base.k === "argv") {
           base = { k: "call", name: ARGV_LENGTH, args: [] };
           continue;
@@ -1439,6 +1472,36 @@ class TypeScriptParser {
       return of;
     }
     return { k: "fixed", of, digits: Number(digits.text) };
+  }
+
+  /**
+   * `x.toString(16)`: a number written as lowercase hexadecimal text.
+   *
+   * The radix is the one a program writes: sixteen. The digit count a `fixed`
+   * carries is negative for it, which is the marker the emitters read as "in
+   * base sixteen" (see `toText` in `toolchain/driver.ts`), so a function body
+   * and a program body write the same text for the same number.
+   */
+  private hexadecimal(of: Expression): Expression {
+    const open = this.next();
+    const radix = this.next();
+    if (radix.kind !== "number" || radix.text !== "16") {
+      this.report(
+        "toString writes a number as hexadecimal text",
+        `the radix is 16, as in x.toString(16); the source wrote "${radix.text}"`,
+        radix,
+      );
+      while (!this.at(")") && this.peek().kind !== "end") this.next();
+      this.expect(")");
+      return of;
+    }
+    if (!this.at(")")) this.report("x.toString(16) takes the one radix 16", `near "${this.peek().text}"`, this.peek());
+    this.expect(")");
+    if (of.k === "text" || of.k === "fixed") {
+      this.report("a number is what is written as hexadecimal text", "a string is already text; write it as it is", open);
+      return of;
+    }
+    return { k: "fixed", of, digits: -1 };
   }
 
   private readPrimary(): Expression {
@@ -1483,6 +1546,15 @@ class TypeScriptParser {
         this.next();
         this.next();
         return { k: "argv", index: null };
+      }
+      // `Deno.args` names the same command line under a host that hands over
+      // the arguments alone: node counts the program and the file it runs
+      // before them, so `Deno.args[i]` is argument `i + 2`, as it is in a
+      // program body (see the program frontend's `argv`).
+      if (token.text === "Deno" && this.at(".") && this.peek(1).text === "args") {
+        this.next();
+        this.next();
+        return this.denoArguments();
       }
       return { k: "ident", name: token.text };
     }

@@ -1393,16 +1393,18 @@ class FunctionBody {
       const left = this.decide(expression.left, line);
       const right = this.typed(expression.right, null, line);
       // They hand back one of their arms, so the IR states the type both arms
-      // are, while the layout pass calls the whole of it a truth.
+      // are, and so does the inferred type: `const n = +Deno.args[0] || 1`
+      // binds a number, not the truth the test of it would be.
+      const type = this.logicalType(left.value.type, right.value.type, line);
       return {
         value: {
           k: "logical",
-          type: this.logicalType(left.value.type, right.value.type, line),
+          type,
           op: op === "&&" ? "and" : "or",
           left: left.value,
           right: right.value,
         },
-        inferred: asType(BOOL),
+        inferred: asType(type),
       };
     }
     if (op === "??") {

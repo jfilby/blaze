@@ -555,89 +555,105 @@ test("the C backend lowers a wide operation to the kernel and answers it", async
   }
 });
 
-test("a wide argument to a call this backend has not written is refused", async () => {
-  // Every wide operation is written now, and every way a value crosses into or
-  // out of a function this compiler compiled itself is refused: a call it makes
-  // hands its arguments over in registers, and there are six registers the
-  // convention does not preserve and a wide number is four limbs, so a wide
-  // argument has nowhere to go that a value the callee can read.
+test("a wide argument to a compiled call is handed over in memory", async () => {
+  // A wide number is thirty-two bytes and the convention hands it over on the
+  // stack, in four slots, sixteen byte aligned. The call is emitted by this
+  // backend for a function C compiled, which is the same convention: the answer
+  // is `rdi` when the callee answers a wide number too, and no register is taken
+  // from the arguments that fit in one.
   //
-  // The refusal matters because the alternative is the default this backend has
-  // everywhere else: a table that answers eight bytes for a type it does not
-  // recognise. A wide argument given one of those is a pointer written where
-  // thirty-two bytes were promised, and the callee reads four words of the frame
-  // that were never written to them — a wrong answer from a build that reported
-  // success.
-  //
-  // Calling into this backend from C does work, because the convention hands such
-  // a value over in memory and `arrivals` reads it there; it is only a call this
-  // backend emits for itself that has no answer yet.
+  // The alternative is the default this backend has everywhere else: a table
+  // that answers eight bytes for a type it does not recognise. A wide argument
+  // given one of those is a pointer written where thirty-two bytes were
+  // promised, and the callee reads four words that were never written.
   const directory = await scratch("blaze-u256-call-");
+  const runtime = await buildStandaloneRuntime(directory);
   const WIDE: SemanticType = { kind: "primitive", name: "u256" };
   const VOID: SemanticType = { kind: "void" };
-  await assert.rejects(
-    () =>
-      buildMachineObject({
-        fn: {
-          name: "subject",
-          symbol: "subject",
-          params: [],
-          returns: VOID,
-          requires: [],
-          ensures: [],
-          effects: [],
-          allocates: false,
-          prints: false,
-          readsArgv: false,
-          objects: {},
-          calls: [{ callee: "callee", strategy: "call" }],
-          entry: {
-            id: "entry",
-            statements: [],
-            releases: [],
-            terminator: {
-              k: "return",
-              value: {
-                k: "call",
-                type: VOID,
-                call: {
-                  callee: "callee",
-                  signature: {
-                    name: "callee",
-                    symbol: "callee",
-                    params: [{ name: "a", type: "u256" }],
-                    returns: "void",
-                  },
-                  args: [{ k: "const", type: WIDE, text: "0x0123456789abcdeffedcba9876543210" }],
-                  argTypes: [WIDE],
-                  returns: VOID,
-                  effects: [],
-                  ownership: "borrowed",
-                  retain: false,
-                  builtin: false,
-                },
-              },
+  const value = 0x0123456789abcdef_fedcba9876543210n;
+  const object = join(directory, "subject.o");
+  const built = await buildMachineObject({
+    fn: {
+      name: "subject",
+      symbol: "subject",
+      params: [],
+      returns: VOID,
+      requires: [],
+      ensures: [],
+      effects: [],
+      allocates: false,
+      prints: false,
+      readsArgv: false,
+      objects: {},
+      calls: [{ callee: "callee", strategy: "call" }],
+      entry: {
+        id: "entry",
+        statements: [],
+        releases: [],
+        terminator: {
+          k: "return",
+          value: {
+            k: "call",
+            type: VOID,
+            call: {
+              callee: "callee",
+              signature: { name: "callee", symbol: "callee", params: [{ name: "a", type: "u256" }], returns: "void" },
+              args: [{ k: "const", type: WIDE, text: value.toString() }],
+              argTypes: [WIDE],
+              returns: VOID,
+              effects: [],
+              ownership: "borrowed",
+              retain: false,
+              builtin: false,
             },
           },
         },
-        contract: {
-          version: "1",
-          numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
-          function: { name: "subject", symbol: "subject", params: [], returns: "void" },
-          optimize: { primary: "latency", secondary: "size" },
-          effects: [],
-          memory: { reads: [], writes: [], aliasing: [] },
-          requires: [],
-          ensures: [],
-          definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
-        },
-        target: TARGET,
-        callable: new Set(["callee"]),
-        objectPath: join(directory, "subject.o"),
-      }),
-    /no single-register width/,
-    "a wide argument to a compiled call must be refused rather than narrowed",
+      },
+    },
+    contract: {
+      version: "1",
+      numeric: { floatingPoint: "ieee754", rounding: "nearest", fastMath: false },
+      function: { name: "subject", symbol: "subject", params: [], returns: "void" },
+      optimize: { primary: "latency", secondary: "size" },
+      effects: [],
+      memory: { reads: [], writes: [], aliasing: [] },
+      requires: [],
+      ensures: [],
+      definition: { statements: [], objects: {}, allocates: false, prints: false, readsArgv: false, calls: [] },
+    },
+    target: TARGET,
+    callable: new Set(["callee"]),
+    objectPath: object,
+  });
+  assert.ok(built.textSizeBytes > 0, "the object carries the code the call is");
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include <stdint.h>",
+      "#include \"blaze_rt.h\"",
+      "blaze_u256 handed;",
+      "void callee(blaze_u256 a) { handed = a; }",
+      "extern void subject(void);",
+      "int main(void) {",
+      "  subject();",
+      '  printf("%016llx%016llx%016llx%016llx\\n", (unsigned long long)handed.limbs[3], (unsigned long long)handed.limbs[2], (unsigned long long)handed.limbs[1], (unsigned long long)handed.limbs[0]);',
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
   );
+  const binary = join(directory, "subject");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(linked.code, 0, `a wide argument must link:\n${linked.stderr}`);
+  const ran = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(ran.code, 0, `a wide argument must run:\n${ran.stderr}`);
+  assert.equal(ran.stdout.trim(), hexadecimal(value), "the value the callee was handed");
 });
 
 /* ------------------------------------------------------------------------ */

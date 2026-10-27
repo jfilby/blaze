@@ -257,6 +257,36 @@ still staged. A value that reads the name it is bound to is copied as well,
 because whether the aliasing is the same program then depends on the kernel's
 own order rather than on the lowering's.
 
+### A wide number crosses a call the way the convention says
+
+A wide number is four limbs, and a function that answers one hands it back
+through a pointer its caller sets aside: the pointer arrives in `rdi` ahead of
+every argument, and the answer is four stores through it before the return. A
+caller that makes such a call writes the address of a slot it owns into `rdi`,
+and the arguments of that same width travel on the stack — four slots each,
+sixteen byte aligned — because no register file has room for thirty-two bytes
+beside five other arguments. An argument of a narrower width still takes the
+register it always took, and the wide argument before it takes none.
+
+The address a wide answer goes to is the slot the call was going to be copied
+into anyway when the call is what binds a name, so a lowered curve formula pays
+the call and not a copy after it. The one case the direct write is not taken is
+the call that reads the name it is bound to, which is the one case the kernel
+answers have the same rule for and for the same reason.
+
+A wide field of an object is written where the field is, from the limb
+registers, and read the same way: an object is a pointer, so the four limbs are
+four stores off it rather than a value the accumulator carries. The address of
+the object being filled is kept in a slot across a field's value, because a
+field whose value is a kernel call is written by a call that takes every
+register the caller holds nothing of.
+
+The text of a wide number is the runtime's formatter asked for base sixteen,
+which is what `x.toString(16)` is. A narrow whole number is widened into the
+same four limbs and asked for the same base; a fraction has no hexadecimal form
+here, and the C backend refuses the count of digits rather than writing the
+number without them.
+
 ### A modular multiply by a small number is the addition it is
 
 `2 * x` modulo a prime is `x + x` modulo the same prime, and a modular addition
@@ -532,13 +562,11 @@ function is worth measuring rather than reasoning about.
 
 ### What the two changes were worth on `secp256k1`
 
-The benchmark is one scalar multiplication of the curve's generator, run as
-`./secp256k1 15`. It was built with `node src/compiler/cli.ts build
---recompile` rather than `offline-build.ts`, because that harness refuses the
-program's entry: the class-to-object rewrite types the zero point's fields from
-the literals it was written with, and the same layout is then filled with
-`u256` values by the base point. A build repairs it and a harness does not, and
-the repair is a separate question from speed.
+The benchmark multiplies the curve's generator by the private key the program
+states, as many times as its argument says: `./secp256k1 15` is fifteen of them.
+It is built with `node src/compiler/cli.ts build --recompile`;
+`offline-build.ts` builds it too now, and the paragraph at the end of this
+section says why it did not before.
 
 The first change the benchmark needed was not arithmetic at all. The program's
 comments cite two URLs, and the compiler decided from the text of the file
@@ -554,11 +582,17 @@ program makes and a URL in a comment is prose about one.
 |---|---|---|
 | before this round | 220,864 bytes, with libssl and libcrypto | 4.4 ms |
 | the runtime read from the code | 31,400 bytes, libm and libc only | 1.3 ms |
+| the count the benchmark states | 39,608 bytes, the same two libraries | 9.3 ms |
 
-That is 3.3 times the benchmark, and almost all of it is the two libraries and
-the server's startup rather than the curve. The program's own work was measured
-on its own — the machine object linked into a harness that calls `blaze_main`
-two hundred times, so the runtime's startup is one run and not two hundred:
+The last row is the benchmark as its `[benchmark]` line writes it: fifteen
+scalar multiplications, where the row before it was the same binary ignoring the
+`15` and computing one. One run is 1.3 ms with the argument set to `1` and 9.3 ms
+with it set to `15`, so a multiplication is about 0.57 ms after the runtime is
+up, and the fifteen are the work the benchmark claims to do.
+
+The program's own work was measured on its own — the machine object linked into
+a harness that calls `blaze_main` two hundred times, so the runtime's startup is
+one run and not two hundred:
 
 | Form of one scalar multiplication | Instructions (callgrind) | Two hundred turns |
 |---|---|---|
@@ -577,9 +611,52 @@ and on an answer it was about to copy. The extended Euclidean inversion at the
 end of the program is untouched at 663k, a fifth of what is left: it is a
 division per turn of the algorithm, and the division is the bit-by-bit kernel.
 
-The benchmark is worth one more note because it is about fidelity rather than
-speed: the rules that translate this program fix its scalar to a literal and
-read no argument, so `./secp256k1 15` performs one multiplication and ignores
-the `15`. The `[benchmark]` line names fifteen. Whatever the arithmetic is worth
-on one turn is what it is worth on the program as it stands today, and the
-fifteen are a separate fix.
+### The fidelity of `./secp256k1 15`
+
+The rules that translate this program used to fix its scalar to a literal and
+read no argument, so the binary performed one multiplication and ignored the
+`15` its `[benchmark]` line names. What the rules do now is what the source
+says: `main` keeps its `const n = +Deno.args[0] || 1`, its counted loop and its
+`Point_multiply` call, and the loop runs the multiplication as many times as the
+argument asks. `./secp256k1 15` answers the point fifteen multiplications of the
+private key reach, and `./secp256k1 1` answers the one it reaches first; both
+agree with the source run by the host, which is what the compiler checks a
+program against.
+
+Getting there needed four things the backend and the frontend did not have, and
+each is a general one rather than a rewrite of this program:
+
+- `Deno.args[i]` is read by a function body, contract reader included, as the
+  `process.argv[i + 2]` it is. The reader refused the index on a member access,
+  so the translation replaced the form with a builtin that the host running the
+  source does not define.
+- A short circuit bound to a name holds the type of the arms it hands back, not
+  a truth: `const n = +Deno.args[0] || 1` bound a truth, and every loop over the
+  count was refused as a comparison of a number with a truth.
+- `x.toString(16)` is a number written in base sixteen, and the IR text form now
+  writes that count as `to_text@hex` and reads it back the same way. The machine
+  backend asks the runtime's wide formatter for the base; the C backend refuses
+  a count of digits rather than writing the number without them.
+- A wide number crosses a call the way the convention says, which is what lets
+  the multiplication and the inversion be functions rather than one inlined body:
+  a wide answer through a pointer, wide arguments on the stack, wide fields
+  written and read in place.
+
+The arithmetic lowering is still a source-level one, because a `bigint` is not
+a `u256`: `mod(a * b, p)` is two 256 bit factors and a 512 bit product, which
+the compiler's wide arithmetic does not express. What changed is where the
+lowering is written: the reductions of `mod` are the kernels in every expression
+of the program, the inversion's steps are taken modulo the order, and the
+multiplication's formulas are the source's own, so the loop and the count main
+reaches the multiplication with are the source's too. The one transcription
+error the lowering had is worth recording because it survived in the source for
+a while: the doubling of a point wrote `E * (D - x)` where the formula says
+`E * (D - X3)`, which negates the coordinate of the doubled point, and the
+point that follows is the negation of the answer.
+
+`offline-build.ts` builds this project now as well. It refused the entry before
+because the class-to-object rewrite typed the zero point's fields from the small
+literals and the base point's from wide ones, so two layouts of one name
+disagreed; the statics are gone from the lowered program, and the layout nothing
+reads does not have to agree with anything.
+

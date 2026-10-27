@@ -217,10 +217,20 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
   await writeFile(
     join(directory, "callee.c"),
     [
+      "#include \"blaze_rt.h\"",
       "struct Point { double x; double y; };",
       "int calls = 0;",
       "double f(double v) { calls++; return v + 1.0; }",
       "double g(struct Point* p) { calls++; return p->x + p->y; }",
+      // A function of two wide numbers, which is thirty-two bytes each and no
+      // register file's business: the convention hands them over on the stack
+      // and answers through a pointer the caller sets aside, which is the shape
+      // a program's own wide calls take.
+      "blaze_u256 wideAdd(blaze_u256 left, blaze_u256 right) {",
+      "  blaze_u256 out;",
+      "  for (int limb = 0; limb < 4; limb += 1) out.limbs[limb] = left.limbs[limb] + right.limbs[limb];",
+      "  return out;",
+      "}",
       // Two arguments in two registers, which is the smallest call whose first
       // argument register is also a register a value can be pinned in.
       "double two(double a, double b) { calls++; return 10.0 * a + b; }",
@@ -244,7 +254,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
     fn,
     contract,
     target,
-    callable: new Set(["f", "g", "h9", "two", "mix"]),
+    callable: new Set(["f", "g", "h9", "two", "mix", "wideAdd"]),
     objectPath: object,
   });
   assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
@@ -298,7 +308,7 @@ async function instructions(fn: SemanticFunction, target: TargetSpec = TARGET): 
     fn,
     contract: contracted(fn),
     target,
-    callable: new Set(["f", "g", "h9", "two", "mix"]),
+    callable: new Set(["f", "g", "h9", "two", "mix", "wideAdd"]),
     objectPath: object,
   });
   const listed = run("objdump", ["-d", "--no-show-raw-insn", object], { timeoutMs: 60_000 });
@@ -4139,4 +4149,138 @@ test("a wide kernel is handed the slots its operands live in and writes the slot
   const stores = beforeFirstCall.match(/mov\s+%r(?:8|9|10|11),0x[0-9a-f]+\(%rsp\)/g) ?? [];
   assert.equal(stores.length, 12, "the three constructors write four limbs each and the kernel is handed their slots, not copies");
   assert.match(text, /u256_mul_mod/, "the product is the kernel's");
+});
+
+/* -------------------------------------------------------------------------- */
+/* A wide answer from a call, and the objects a wide number lives in           */
+/* -------------------------------------------------------------------------- */
+
+const WIDE_LAYOUT: ObjectLayout = {
+  name: "WidePoint",
+  size: 64,
+  align: 8,
+  fields: [
+    { name: "x", type: "u256", offset: 0 },
+    { name: "y", type: "u256", offset: 32 },
+  ],
+};
+const WIDE_POINT: SemanticType = { kind: "ref", of: null, name: "WidePoint" };
+
+/** A call of `wideAdd`, which the callee's own translation unit answers. */
+function wideAddCall(left: SemanticValue, right: SemanticValue): SemanticValue {
+  return {
+    k: "call", type: U256,
+    call: {
+      callee: "wideAdd", builtin: false,
+      signature: {
+        name: "wideAdd",
+        symbol: "wideAdd",
+        params: [{ name: "left", type: "u256" }, { name: "right", type: "u256" }],
+        returns: "u256",
+      },
+      args: [left, right], argTypes: [U256, U256], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+/** A driver that calls a function of two wide numbers and prints the answer. */
+function wideCallDriver(name: string): string {
+  return (
+    "blaze_u256 a = {{2, 1, 0, 0}}; blaze_u256 b = {{4, 3, 0, 0}}; " +
+    `blaze_u256 answer = ${name}(a, b); ` +
+    'printf("%llx,%llx,%llx,%llx", (unsigned long long)answer.limbs[3], (unsigned long long)answer.limbs[2], (unsigned long long)answer.limbs[1], (unsigned long long)answer.limbs[0]);'
+  );
+}
+
+const WIDE_PARAMS: SemanticSlot[] = [
+  { kind: "value", name: "x", mutable: false, type: U256 },
+  { kind: "value", name: "y", mutable: false, type: U256 },
+];
+
+test("a wide answer comes back through the pointer its caller set aside", async () => {
+  // A u256 is thirty-two bytes, which no register returns: the convention hands
+  // the callee a pointer to where the answer goes, ahead of every argument, and
+  // the arguments of that size travel on the stack. The subject binds what the
+  // call answers to a name, so the answer is written into the binding's slot
+  // rather than copied to it from a temporary.
+  const fn = subject(
+    U256,
+    {
+      id: "entry",
+      statements: [
+        {
+          k: "let", line: 1, slot: { kind: "value", name: "r", mutable: false, type: U256 },
+          value: wideAddCall(local("x", U256), local("y", U256)),
+        },
+      ],
+      releases: [],
+      terminator: { k: "return", value: local("r", U256) },
+    },
+    WIDE_PARAMS,
+  );
+  assert.equal(await lowered(fn, wideCallDriver), wideLimbs(0x0000000000000004_0000000000000006n));
+});
+
+test("a wide field is written where the field is and read out of it", async () => {
+  // A field of four limbs is not a value the accumulator carries: it is written
+  // from the limb registers into the field's offset, and read back the same way.
+  // The object is built from the two parameters and read for the call beside
+  // it, so a field written into a copy of the object, or read at the wrong
+  // offset, answers a different sum.
+  const fn = subject(
+    U256,
+    {
+      id: "entry",
+      statements: [
+        {
+          k: "let", line: 1,
+          slot: { kind: "object", name: "p", mutable: false, type: WIDE_POINT },
+          value: {
+            k: "newObject", type: WIDE_POINT, layout: "WidePoint",
+            fields: [{ name: "x", value: local("x", U256) }, { name: "y", value: local("y", U256) }],
+          },
+        },
+      ],
+      releases: [],
+      terminator: {
+        k: "return",
+        value: wideAddCall(
+          { k: "loadField", type: U256, object: local("p", WIDE_POINT), layout: "WidePoint", field: "x" },
+          { k: "loadField", type: U256, object: local("p", WIDE_POINT), layout: "WidePoint", field: "y" },
+        ),
+      },
+    },
+    WIDE_PARAMS,
+    { WidePoint: WIDE_LAYOUT },
+  );
+  assert.equal(await lowered(fn, wideCallDriver), wideLimbs(0x0000000000000004_0000000000000006n));
+});
+
+test("a wide number written in base sixteen keeps the digits the source asked for", async () => {
+  // A part of a template string is measured and written by the text lowering,
+  // and reading through the conversion for the value alone dropped the digits:
+  // `x.toString(16)` printed the number the shortest writing gives it. The
+  // answer is the runtime's hexadecimal formatter's, which is the same one the
+  // source's own `toString(16)` writes.
+  const text = (value: SemanticValue): SemanticValue => ({
+    k: "text", type: TEXT,
+    parts: [{ k: "value", value: { k: "toText", type: TEXT, of: value, digits: -1 } }],
+  });
+  const fn = subject(TEXT, handsBack(text(local("x", U256))), [WIDE_PARAMS[0] as SemanticSlot]);
+  assert.equal(
+    await lowered(fn, (name) => `blaze_u256 x = {{255, 0, 0, 0}}; printf("%s", ${name}(x));`),
+    "ff",
+  );
+});
+
+test("a whole number narrowed to a machine word is written in base sixteen too", async () => {
+  // The widening is the same one a wide number is built from a machine word
+  // with: the word is the low limb and the three above it are nothing.
+  const text = (value: SemanticValue): SemanticValue => ({
+    k: "text", type: TEXT,
+    parts: [{ k: "value", value: { k: "toText", type: TEXT, of: value, digits: -1 } }],
+  });
+  const fn = subject(TEXT, handsBack(text(local("v", I64))), [{ kind: "value", name: "v", mutable: false, type: I64 }]);
+  assert.equal(await lowered(fn, (name) => `printf("%s", ${name}(255));`), "ff");
 });

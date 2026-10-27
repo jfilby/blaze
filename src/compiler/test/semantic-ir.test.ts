@@ -1290,3 +1290,37 @@ test("a number beside a text is the test, and the text is the value", () => {
   });
   assert.match(printSemanticProgram(plain.program), /logical_or\[f64\]/, "a number beside a number is a number");
 });
+
+test("a number written in base sixteen is text the text form writes and reads back", () => {
+  // `x.toString(16)` is a number in lowercase hexadecimal, which the IR states
+  // as a conversion with a negative count of digits. A printer that wrote that
+  // count as a number and a parser that read it as a count of digits disagreed
+  // on every function that wrote one, so the answer could not be read back.
+  const files = {
+    "main.ts": 'import { f } from "./lib.ts";\nconsole.log(f(255n));\n',
+    "lib.ts": "export function f(n: u256): string { return `${n.toString(16)}`; }\n",
+  };
+  const phase = phaseOf("typescript", files, "main.ts");
+  const printed = printSemanticFunction(semanticsOf(phase).f as SemanticFunction);
+  assert.match(printed, /to_text@hex/, "the count a hexadecimal form is written at is `hex`");
+  assert.equal(printSemanticFunction(parseSemanticFunction(printed, phase.program)), printed);
+});
+
+test("the count a program reads from its command line is a number and not a truth", () => {
+  // `+Deno.args[0] || 1` binds the number the command line said, or one. The
+  // short circuit hands back one of its arms, so the name holds the arm's type:
+  // reading it as a truth made `i < n` a comparison of a number with a truth,
+  // and every loop over a count read from the command line was refused.
+  const source = [
+    "function main(): void {",
+    "  const n = +Deno.args[0] || 1;",
+    "  for (let i = 0; i < n; i++) { console.log(`x`); }",
+    "}",
+    "main();",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const printed = printSemanticFunction(semanticsOf(phase).main as SemanticFunction);
+  assert.match(printed, /reads_argv yes/, "the command line is what the count is read from");
+  assert.match(printed, /let value\[f64\] n/, "the count is the number the argument says");
+});

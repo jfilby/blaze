@@ -658,3 +658,69 @@ test("a power is a floating value, whatever the operands are", async () => {
   assert.deepEqual(semanticFunctionProblems(subject(F64, handsBack(power(F64)))), []);
 });
 
+
+/* -------------------------------------------------------------------------- */
+/* A wide number a function computes and the text it is written as             */
+/* -------------------------------------------------------------------------- */
+
+const U256: SemanticType = { kind: "primitive", name: "u256" };
+const U64C: SemanticType = { kind: "primitive", name: "u64" };
+const WIDE_PRIME = 115792089237316195423570985008687907853269984665640564039457584007908834671663n;
+
+/** A wide number built from its four limbs. */
+function wideOf(value: bigint): SemanticValue {
+  const args: SemanticValue[] = [];
+  for (let at = 0; at < 4; at += 1) {
+    args.push({ k: "const", type: U64C, text: ((value >> BigInt(at * 64)) & 0xffffffffffffffffn).toString() });
+  }
+  return {
+    k: "call", type: U256,
+    call: {
+      callee: "u256_from_u64x4", builtin: true,
+      signature: { name: "u256_from_u64x4", symbol: "u256_from_u64x4", params: [{ name: "l0", type: "u64" }, { name: "l1", type: "u64" }, { name: "l2", type: "u64" }, { name: "l3", type: "u64" }], returns: "u256" },
+      args, argTypes: [U64C, U64C, U64C, U64C], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+/** A call of one of the modular kernels. */
+function modularCall(callee: string, left: SemanticValue, right: SemanticValue, mod: SemanticValue): SemanticValue {
+  return {
+    k: "call", type: U256,
+    call: {
+      callee, builtin: true,
+      signature: { name: callee, symbol: callee, params: [{ name: "left", type: "u256" }, { name: "right", type: "u256" }, { name: "mod", type: "u256" }], returns: "u256" },
+      args: [left, right, mod], argTypes: [U256, U256, U256], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+test("a product reduced modulo a wide prime is the kernel the runtime answers", async () => {
+  // C has no arithmetic over four limbs, so the modular multiply is the kernel:
+  // the operands are bound to names first, because an operand may be a call and
+  // one written into the argument list would run once per mention. The answer
+  // is checked against the same product done in arbitrary precision.
+  const left = 0x0123456789abcdef_fedcba9876543210n;
+  const right = 0xfedcba9876543210_0123456789abcdefn;
+  const fn = subject(U256, handsBack(modularCall("u256_mul_mod", wideOf(left), wideOf(right), wideOf(WIDE_PRIME))));
+  const driver = (name: string): string =>
+    `blaze_u256 answer = ${name}(); printf("%llx,%llx,%llx,%llx", (unsigned long long)answer.limbs[3], (unsigned long long)answer.limbs[2], (unsigned long long)answer.limbs[1], (unsigned long long)answer.limbs[0]);`;
+  const product = (left * right) % WIDE_PRIME;
+  const limbs: string[] = [];
+  for (let at = 3; at >= 0; at -= 1) limbs.push(((product >> BigInt(at * 64)) & 0xffffffffffffffffn).toString(16));
+  assert.equal(await lowered(fn, driver), limbs.join(","));
+  assert.match(generateFunctionC(fn), /blaze_rt_u256_mul_mod/);
+});
+
+test("a number written in base sixteen is refused rather than written in base ten", () => {
+  // This backend writes a number with the one formatter it has, which writes
+  // the shortest text of it. A body that asks for the digits the source asked
+  // for is refused rather than answered with `255` where the source says `ff`.
+  const fn = subject(TEXT, handsBack({
+    k: "text", type: TEXT,
+    parts: [{ k: "value", value: { k: "toText", type: TEXT, of: { k: "const", type: F64, text: "255" }, digits: -1 } }],
+  }));
+  assert.throws(() => generateFunctionC(fn), /cannot do/);
+});

@@ -46,6 +46,7 @@ import {
   isUnsigned,
   slotType,
   typeEquals,
+  typeText,
   valueKind,
   type CompareOp,
   type SemanticBlock,
@@ -299,6 +300,13 @@ const OBJECT_POINTER = R15;
  * indistinguishable from a scalar the body had just produced.
  */
 const WIDE_WORK: readonly number[] = [R8, R9, R10, R11];
+
+/**
+ * The wide type a whole number is widened into when it is written in base
+ * sixteen: the runtime's formatter takes four limbs, and a machine word is the
+ * low one of them with three of nothing above it.
+ */
+const WIDE_UNSIGNED: SemanticType = { kind: "primitive", name: "u256" };
 
 /**
  * How a comparison of two whole numbers is spelled as a condition the machine
@@ -2237,8 +2245,13 @@ class Machine {
   private temporaries = 0;
   /** Slots bound for the statements being written and not yet handed back. */
   private readonly borrowed: Held[] = [];
-  /** Slots handed back, which the next statement that needs one takes. */
-  private readonly spareSlots: number[] = [];
+  /**
+   * Slots handed back, which the next statement that needs one takes, with the
+   * room each of them has: a value of thirty-two bytes is not written into the
+   * eight a pointer was handed back in, because the frame around it holds what
+   * the next name lives in.
+   */
+  private readonly spareSlots: { offset: number; bytes: number }[] = [];
   /** The register a name that never changes is in, by the name it is declared as. */
   private readonly pinned = new Map<string, number>();
   /** The registers the prologue pushes and the epilogue reads back, in that order. */
@@ -2720,7 +2733,10 @@ class Machine {
     // A value in a register is not in the frame, so the slot that reads and
     // writes go through it is not reserved: its distance is zero, which is the
     // first slot's own address, and it is never read.
-    const offset = where === null ? (this.spareSlots.pop() ?? this.reserve(Math.max(frameBytes(type), 8))) : 0;
+    const need = Math.max(frameBytes(type), 8);
+    const spare = where === null ? this.spareSlots.findIndex((slot) => slot.bytes >= need) : -1;
+    const offset =
+      where !== null ? 0 : spare >= 0 ? (this.spareSlots.splice(spare, 1)[0] as { offset: number }).offset : this.reserve(need);
     this.heldCount += 1;
     const held: Held = { id: this.heldCount, offset, type, register: where, index: null, constant: null };
     this.slots.set(name, held);
@@ -2735,7 +2751,7 @@ class Machine {
    * what the next statement that wants a frame slot will take.
    */
   private freeSlot(held: Held): void {
-    if (held.register === null) this.spareSlots.push(held.offset);
+    if (held.register === null) this.spareSlots.push({ offset: held.offset, bytes: Math.max(frameBytes(held.type), 8) });
     else this.giveSpareVector(held.register);
   }
 
@@ -2747,7 +2763,7 @@ class Machine {
   private freeSlotsSince(mark: number): void {
     for (let at = this.borrowed.length - 1; at >= mark; at -= 1) {
       const held = this.borrowed[at];
-      if (held.register === null) this.spareSlots.push(held.offset);
+      if (held.register === null) this.spareSlots.push({ offset: held.offset, bytes: Math.max(frameBytes(held.type), 8) });
       else this.giveSpareVector(held.register);
     }
     this.borrowed.length = mark;
@@ -8235,6 +8251,14 @@ class Machine {
       this.wideKernelCall(value, held);
       return;
     }
+    // A function that answers a wide number writes it through the address it
+    // is handed, so the binding's own slot is the address when nothing in the
+    // call reads the name — the same saving the kernels take, for the same
+    // reason: the answer was going to be copied there anyway.
+    if (value.k === "call" && !value.call.builtin && isWideType(value.type) && !this.reads(value, name)) {
+      this.callValue(value.call, value.type, held);
+      return;
+    }
     this.wideValue(value);
     this.wideStore(held);
   }
@@ -8279,6 +8303,17 @@ class Machine {
       case "arith":
         this.wideArithmetic(value);
         return;
+      case "loadField": {
+        // A wide field is four limbs at the field's offset of the object the
+        // read is written of, so the object is read into a register and each
+        // limb is read from where the field holds it.
+        const offset = this.field(value.layout, value.field).offset;
+        this.value(value.object);
+        for (let limb = 0; limb < this.limbsOf(value.type); limb += 1) {
+          this.code.movRegMemSized(WIDE_WORK[limb], mem(RAX, offset + limb * LIMB_BYTES), 8, false);
+        }
+        return;
+      }
       case "unary":
         this.wideUnary(value);
         return;
@@ -8326,10 +8361,15 @@ class Machine {
           this.wideLoad(out);
           return;
         }
-        throw machineError(
-          `a wide number is not built from a call to ${value.call.callee}`,
-          "a wide number is a literal, a name, or the answer to an operation on two of those, and u256_from_u64x2 builds one from two u64 halves",
-        );
+        // Any other function that answers a wide number: the convention hands
+        // a value of that size back through memory, so a slot of this body's
+        // frame is where the answer goes and its address is the first argument.
+        // The callee takes it out of `rdi` before it binds anything (see
+        // `parameters`), so the two sides agree on where the answer is.
+        const out = this.hold(value.type, "blaze_wide_call");
+        this.callValue(value.call, value.type, out);
+        this.wideLoad(out);
+        return;
       }
       default:
         throw machineError(
@@ -9247,9 +9287,14 @@ class Machine {
    * just counted.
    */
   private asTextPart(value: SemanticValue, measured: Held | null): boolean {
+    // The digits asked for are the outer wrapper's: a part written as
+    // `${x.toString(16)}` is a number in base sixteen, and reading through the
+    // wrapper for the value alone wrote the number the way the shortest writing
+    // of it goes — `255` where the source says `ff`.
+    const digits = value.k === "toText" ? value.digits : null;
     let inner = value;
     while (inner.k === "toText") inner = inner.of;
-    return this.asText(inner, measured);
+    return this.asText(inner, measured, digits);
   }
 
   /**
@@ -9319,13 +9364,24 @@ class Machine {
       this.code.bind(end);
       return true;
     }
-    if (isWideType(value.type)) {
-      const slot = this.hold(value.type, "blaze_wide_text");
-      this.wideValue(value);
+    if (digits !== null && digits < 0 && isFloatType(value.type)) {
+      throw machineError(
+        `${this.fn.symbol} writes a fraction in hexadecimal, which this backend cannot do`,
+        "a hexadecimal form is written for a whole number; convert the value to one first",
+      );
+    }
+    if (isWideType(value.type) || (digits !== null && digits < 0 && isInteger(value.type))) {
+      // A wide number is printed from its four limbs, and a narrow whole number
+      // written in base sixteen is widened into the same four so one formatter
+      // writes both.
+      const base = digits !== null && digits < 0 ? 16 : 10;
+      const slot = this.hold(isWideType(value.type) ? value.type : WIDE_UNSIGNED, "blaze_wide_text");
+      if (isWideType(value.type)) this.wideValue(value);
+      else this.wideFrom(value);
       this.wideStore(slot);
       const buffer = this.scratch(80, "blaze_wide_text_buffer");
       this.code.leaMemReg(mem(RSP, slot.offset), RDI);
-      this.code.movRegImm(RSI, 16n);
+      this.code.movRegImm(RSI, BigInt(base));
       this.code.lea(RDX, frame(buffer));
       this.code.movRegImm(RCX, 80n);
       this.library("blaze_rt_u256_format");
@@ -9824,6 +9880,22 @@ class Machine {
     for (const written of value.fields) {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
+      if (isWideType(type)) {
+        // A wide field is four limbs written where the field is, not a value
+        // the accumulator carries. The address is kept in a slot across the
+        // value's own computation, because that value may be a kernel call and
+        // a call takes every register the caller holds nothing of.
+        const address = this.hold(POINTER, "blaze_wide_field");
+        if (register !== null) this.code.movRegReg(RAX, register);
+        else this.code.movRegMem(RAX, frame(where));
+        this.store(address);
+        this.wideValue(written.value);
+        this.code.movRegMem(RCX, frame(address.offset));
+        for (let limb = 0; limb < this.limbsOf(type); limb += 1) {
+          this.code.movMemRegSized(mem(RCX, field.offset + limb * LIMB_BYTES), WIDE_WORK[limb], 8);
+        }
+        continue;
+      }
       this.at(written.value, type);
       // The register the object is filled in is read back out of the frame only
       // where the value written into the field takes it. A value that allocates
@@ -9848,7 +9920,7 @@ class Machine {
   /* Calls                                                                  */
   /* -------------------------------------------------------------------------- */
 
-  private callValue(call: SemanticCall, wanted: SemanticType | null): void {
+  private callValue(call: SemanticCall, wanted: SemanticType | null, sret: Held | null = null): void {
     if (call.builtin) {
       this.builtin(call);
       if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
@@ -9891,9 +9963,13 @@ class Machine {
     // A last argument that carries a length is not one a call can leave in the
     // register it takes: reading the length beside it would write over it.
     const trailing = last >= 0 && lengths[last] !== null;
-    const spilling = firstArgumentOnStack(handed);
+    // A wide argument is handed over on the stack, so neither shortcut below
+    // holds: the register an argument is read into is not the one its position
+    // alone says, and the last argument is not the one in the accumulator.
+    const wideArguments = types.some((type) => isWideType(type));
+    const spilling = wideArguments ? -1 : firstArgumentOnStack(handed);
     const intoLast =
-      trailing || spilling !== handed.length
+      wideArguments || trailing || spilling !== handed.length
         ? undefined
         : lastArgumentRegister(handed, handed.length - 1);
     let fresh = -1;
@@ -9910,6 +9986,15 @@ class Machine {
         // one is already the register the call takes a reference in — the two
         // types are written differently and are the same word.
         if (isReference(held.type) && isReference(type)) return held;
+      }
+      // A wide argument is not a value the accumulator carries: it is four
+      // limbs, so it is computed into a slot and copied from there to the
+      // stack the convention hands it over on.
+      if (isWideType(type)) {
+        const held = this.hold(type, "blaze_wide_argument");
+        this.wideValue(argument);
+        this.wideStore(held);
+        return held;
       }
       // Reading the last argument straight into the register it is taken in
       // writes that register before any of the other arguments are in place, so
@@ -9936,15 +10021,40 @@ class Machine {
       return held;
     });
     const args: (Held | null)[] = [];
+    if (sret !== null) args.push(this.resultAddress(sret));
     for (const [at, held] of evaluated.entries()) {
       args.push(held);
       const length = lengths[at];
       if (length !== null) args.push(length);
     }
-    this.callSymbol(call.signature.symbol, args, call.returns, fresh, placed);
+    // A wide answer's address is the first argument, so no argument is in the
+    // register the callee reads it in: the two shortcuts below are the ones a
+    // call without one takes, and passing the indices through would leave a
+    // value the callee reads from the wrong register.
+    const shift = sret === null && !wideArguments ? 0 : 1;
+    this.callSymbol(
+      call.signature.symbol,
+      args,
+      call.returns,
+      shift === 0 ? fresh : -1,
+      shift === 0 ? placed : -1,
+    );
+    if (sret !== null) return;
     if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
   }
 
+  /**
+   * The address of the slot a wide answer is written to, as the value of the
+   * first argument. The address is written down rather than left in a register
+   * because the arguments are evaluated after it, and an argument is free to
+   * use every scratch register the accumulator is.
+   */
+  private resultAddress(out: Held): Held {
+    const pointer = this.hold(POINTER, "blaze_wide_result_address");
+    this.code.leaMemReg(mem(RSP, out.offset), RAX);
+    this.store(pointer);
+    return pointer;
+  }
 
   /**
    * A value that is nothing but reads, read straight into the register the
@@ -10295,21 +10405,35 @@ class Machine {
    */
   private callSymbol(symbol: string, args: readonly (Held | null)[], returns: SemanticType, fresh = -1, placed = -1): void {
     this.external(symbol);
-    const onStack: Held[] = [];
+    const onStack: { held: Held; slot: number }[] = [];
     const registers: { register: number; held: Held; at: number }[] = [];
     let general = 0;
     let floating = 0;
+    let stack = 0;
+    let exhausted = false;
     for (const [at, argument] of args.entries()) {
       if (argument === null) continue;
+      // A wide number is thirty-two bytes, and the convention hands it over on
+      // the stack in four slots, sixteen byte aligned, rather than in a
+      // register file that has no room for it. It takes no register of its own,
+      // so every argument after it is handed over exactly as it would have been
+      // without it.
+      if (isWideType(argument.type)) {
+        if (stack % 2 !== 0) stack += 1;
+        onStack.push({ held: argument, slot: stack });
+        stack += this.limbsOf(argument.type);
+        continue;
+      }
       // The registers are handed out in the order the arguments are written, and
       // an argument that has none left is on the stack with every argument after
       // it, whichever class those are. An argument already in its own register
       // still takes one, so that the counts below are the ones the convention
       // hands out.
-      const register =
-        onStack.length > 0 ? undefined : isFloatType(argument.type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
+      const register = exhausted ? undefined : isFloatType(argument.type) ? SSE_ARGUMENTS[floating] : INTEGER_ARGUMENTS[general];
       if (register === undefined) {
-        onStack.push(argument);
+        exhausted = true;
+        onStack.push({ held: argument, slot: stack });
+        stack += 1;
         continue;
       }
       if (isFloatType(argument.type)) floating += 1;
@@ -10326,16 +10450,26 @@ class Machine {
     // the same alignment at the call as it is everywhere else in the body, which
     // is what every function the C library was compiled for assumes of the call
     // it is entered by.
-    const slots = Math.ceil(onStack.length / 2) * 2;
-    onStack.forEach((argument, at) => {
-      this.load(argument);
+    const slots = Math.ceil(stack / 2) * 2;
+    for (const { held, slot: at } of onStack) {
+      if (isWideType(held.type)) {
+        // A wide argument is four limbs the callee reads out of four slots, and
+        // there is no instruction that moves four words: each limb is written
+        // where the callee's own copy of it reads.
+        this.wideLoad(held);
+        for (let limb = 0; limb < this.limbsOf(held.type); limb += 1) {
+          this.code.movMemRegSized(mem(RSP, (at + limb) * 8 - slots * 8), WIDE_WORK[limb], 8);
+        }
+        continue;
+      }
+      this.load(held);
       const address = mem(RSP, at * 8 - slots * 8);
-      if (isFloatType(argument.type)) {
-        this.code.movsStore(address, XMM0, widthOf(argument.type) === 4);
-        return;
+      if (isFloatType(held.type)) {
+        this.code.movsStore(address, XMM0, widthOf(held.type) === 4);
+        continue;
       }
       this.code.movMemReg(address, RAX);
-    });
+    }
     // The moves that fill the argument registers, each with the register its
     // value is read out of: the one the build pinned it in, the accumulator a
     // call before this one left it in, or null where it is read out of the
@@ -10420,7 +10554,7 @@ class Machine {
     if (slots > 0) this.code.aluImm("sub", RSP, slots * 8);
     this.code.call(symbol);
     if (slots > 0) this.code.aluImm("add", RSP, slots * 8);
-    if (returns.kind !== "void" && !isFloatType(returns)) this.normalize(returns);
+    if (returns.kind !== "void" && !isFloatType(returns) && !isWideType(returns)) this.normalize(returns);
   }
 
   /**
@@ -10548,8 +10682,20 @@ class Machine {
    */
   private convert(from: SemanticType, to: SemanticType): void {
     if (to.kind === "void") return;
+    if (typeEquals(from, to)) return;
     if (isTextType(from) || isTextType(to) || isReference(from) || isReference(to)) return;
     if (!isNumber(from) || !isNumber(to)) return;
+    // Two wide types are the same four limbs, so one is the other as it is. A
+    // wide type and a machine word are not: a limb is not the number, and the
+    // three limbs above it are either the sign or nothing, which the widening
+    // says and no conversion of the accumulator can.
+    if (isWideType(from) && isWideType(to)) return;
+    if (isWideType(from) || isWideType(to)) {
+      throw machineError(
+        `a ${typeText(from)} is converted to a ${typeText(to)}, which this backend has no single instruction for`,
+        "a wide number is four limbs: a machine word is widened into one and a wide number is copied between slots, and neither is a conversion of the accumulator",
+      );
+    }
     if (isFloatType(from) && isFloatType(to)) {
       // The opcode's prefix names the precision the value is read at, so it is
       // the source's width and not the destination's.

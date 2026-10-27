@@ -855,11 +855,40 @@ class FunctionEmitter {
     if (call.callee === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
     if (call.callee === "u256_from_u64x2") {
       const out = this.temporary("blaze_wide");
-      return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x2(&${out}, ${args[0]}, ${args[1]}); ${out}; })`;
+      return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x2(&${out}, ${args[0]}, ${args[1]}); ${out}; })`;
     }
     if (call.callee === "u256_from_u64x4") {
       const out = this.temporary("blaze_wide");
-      return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}); ${out}; })`;
+      return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}); ${out}; })`;
+    }
+    // A modular kernel answers a wide number through a pointer, and there is no
+    // C operator that computes one: the operands are bound to names first, since
+    // an operand may be a call and one written into the argument list would run
+    // once per mention.
+    if (call.callee === "u256_add_mod" || call.callee === "u256_sub_mod" || call.callee === "u256_mul_mod") {
+      const out = this.temporary("blaze_wide");
+      const left = this.temporary("blaze_wide");
+      const right = this.temporary("blaze_wide");
+      const mod = this.temporary("blaze_wide");
+      const kernel = call.callee.slice("u256_".length);
+      return (
+        `({ blaze_u256 ${out}; ` +
+        `const blaze_u256 ${left} = ${args[0]}; ` +
+        `const blaze_u256 ${right} = ${args[1]}; ` +
+        `const blaze_u256 ${mod} = ${args[2]}; ` +
+        `${RUNTIME_NAME}_u256_${kernel}(&${out}, &${left}, &${right}, &${mod}); ${out}; })`
+      );
+    }
+    if (call.callee === "u256_div") {
+      const out = this.temporary("blaze_wide");
+      const left = this.temporary("blaze_wide");
+      const right = this.temporary("blaze_wide");
+      return (
+        `({ blaze_u256 ${out}; ` +
+        `const blaze_u256 ${left} = ${args[0]}; ` +
+        `const blaze_u256 ${right} = ${args[1]}; ` +
+        `${RUNTIME_NAME}_u256_div(&${out}, &${left}, &${right}); ${out}; })`
+      );
     }
     if (call.callee === "fetch" || call.callee === "http.request") {
       const url = this.expression(call.args[0], null, depth);
@@ -1130,6 +1159,17 @@ class FunctionEmitter {
       case "text":
         return this.text(value, depth);
       case "toText": {
+        // A number written at a fixed count of digits, or in base sixteen, is
+        // not the shortest text of it: the runtime's formatter is asked for the
+        // writing the source asked for, and this backend asks for the shortest
+        // one. A body that asks for the other is refused here rather than
+        // written as the number without them.
+        if (value.digits !== null) {
+          throw backendError(
+            `${this.fn.symbol} writes a number with the digits the source asked for, which this backend cannot do`,
+            "the C this backend writes a function body as has one formatter, and it writes the shortest text of a number",
+          );
+        }
         const name = this.temporary("blaze_text");
         this.asText(value.of, depth, name);
         return name;
@@ -1702,6 +1742,16 @@ class FunctionEmitter {
    * all, depending on which way the compiler read them.
    */
   private asText(value: SemanticValue, depth: number, name: string): string {
+    // A number written at a fixed count of digits or in base sixteen is not the
+    // shortest text of it, and this backend writes the shortest one: a body
+    // that asks for the digits the source asked for is refused here rather than
+    // answered with `255` where the source says `ff`.
+    if (value.k === "toText" && value.digits !== null) {
+      throw backendError(
+        `${this.fn.symbol} writes a number with the digits the source asked for, which this backend cannot do`,
+        "the C this backend writes a function body as has one formatter, and it writes the shortest text of a number",
+      );
+    }
     // A conversion is text by its own type, so handed whole it would be read as
     // a string that arrives without a length and measured for one. What it
     // wraps is what knows how long the text is.
