@@ -943,25 +943,32 @@ proc blaze_rt_raise*(message: cstring) {.exportc, cdecl, noreturn.} =
 ## below: a small number that names one value.
 type
   BlazeDynKind = enum
-    dynNull, dynNumber, dynBool, dynText, dynArray, dynObject, dynHasher
+    dynNull, dynNumber, dynBool, dynText, dynArray, dynObject, dynHasher, dynDict
 
   BlazeDyn = object
     kind: BlazeDynKind
     number: float64
     text: cstring
     items: seq[float64]
+    entries: seq[(string, float64)]
 
 var blazeDynValues: seq[BlazeDyn] = @[]
 
 proc blazeDynRegister(value: BlazeDyn): float64 =
+  ## A value the runtime holds, and the handle that names it. Handle 0 names
+  ## nothing at all, exactly as the C runtime reserves it: a read of an
+  ## element that is not there, or of a field that is not there, answers the
+  ## zero that names no value, and a value that was registered has to be told
+  ## apart from that answer. Handles therefore count from one.
   blazeDynValues.add value
-  float64(blazeDynValues.len - 1)
+  float64(blazeDynValues.len)
 
 proc blazeDynIndex(handle: float64): int =
   ## The index of the value a handle names, or -1 where it names none. A
-  ## handle is an index, so a number that is not one names no value at all.
-  if handle < 0.0 or handle != floor(handle): return -1
-  let index = int(handle)
+  ## handle is a position, so a number that is not one names no value at all,
+  ## and neither does 0, which is reserved for the answer that has no value.
+  if handle < 1.0 or handle != floor(handle): return -1
+  let index = int(handle) - 1
   if index >= blazeDynValues.len: return -1
   index
 
@@ -1060,7 +1067,7 @@ proc blaze_rt_array_push*(array, value: float64): float64 {.exportc, cdecl.} =
   if index < 0 or blazeDynValues[index].kind != dynArray:
     index = blazeDynIndex(blazeDynRegister BlazeDyn(kind: dynArray))
   blazeDynValues[index].items.add value
-  float64(index)
+  float64(index + 1)
 
 proc blaze_rt_array_get*(array, index: float64): float64 {.exportc, cdecl.} =
   ## One element of the array, or nothing where the array holds no such one.
@@ -1102,6 +1109,72 @@ proc blaze_rt_json_get*(obj: float64, field: cstring): float64 {.exportc, cdecl.
       return item.items[position + 1]
     position += 2
   0.0
+
+## ---------------------------------------------------------------------- ##
+## Dictionaries                                                            ##
+## ---------------------------------------------------------------------- ##
+
+## A dictionary is a value the runtime holds, the way an array is, so its
+## handle comes from the same table. The entries are kept in the order they
+## were first written, and a key is the text as an owned copy: a program may
+## write a key from a block that goes away, and reading the dictionary back
+## afterwards must still find it.
+
+proc blazeDictIndex(dict: float64): int =
+  ## The index of the dictionary a handle names, or -1 where it names no
+  ## dictionary: a handle of another kind names nothing here.
+  let at = blazeDynIndex(dict)
+  if at < 0 or blazeDynValues[at].kind != dynDict: return -1
+  at
+
+proc blazeDictFind(at: int, key: string): int =
+  ## The entry a key names in the dictionary at that index, or -1 where the
+  ## dictionary holds no such entry.
+  let entries = blazeDynValues[at].entries
+  for position in 0 ..< entries.len:
+    if entries[position][0] == key: return position
+  -1
+
+proc blaze_rt_dict_new*(): float64 {.exportc, cdecl.} =
+  ## An empty dictionary, held by the runtime like an array is.
+  blazeDynRegister BlazeDyn(kind: dynDict)
+
+proc blaze_rt_dict_get*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+  ## The value a key holds, or NaN where the dictionary holds no such key. A
+  ## key that is absent is a thing of its own, and a NaN is told apart from
+  ## every value a key can hold, which is what the C runtime answers.
+  let at = blazeDictIndex(dict)
+  if at < 0 or key == nil: return NaN
+  let position = blazeDictFind(at, $key)
+  if position < 0: return NaN
+  blazeDynValues[at].entries[position][1]
+
+proc blaze_rt_dict_has*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+  ## Whether a key holds a value, answered as 1 or 0.
+  let at = blazeDictIndex(dict)
+  if at < 0 or key == nil: return 0.0
+  if blazeDictFind(at, $key) >= 0: 1.0 else: 0.0
+
+proc blaze_rt_dict_set*(dict: float64, key: cstring, value: float64): float64 {.exportc, cdecl.} =
+  ## A value written under a key, and the dictionary handed back. A key the
+  ## dictionary already holds is written over where it stands, so the count of
+  ## entries does not change; a key it does not hold is added after the ones
+  ## it has.
+  let at = blazeDictIndex(dict)
+  if at < 0 or key == nil: return NaN
+  let text = $key
+  let position = blazeDictFind(at, text)
+  if position >= 0:
+    blazeDynValues[at].entries[position][1] = value
+  else:
+    blazeDynValues[at].entries.add (text, value)
+  dict
+
+proc blaze_rt_dict_len*(dict: float64): float64 {.exportc, cdecl.} =
+  ## How many entries the dictionary holds.
+  let at = blazeDictIndex(dict)
+  if at < 0: return 0.0
+  float64(blazeDynValues[at].entries.len)
 
 proc blaze_rt_random*(): float64 {.exportc, cdecl.} =
   ## A pseudo-random double in [0, 1), which is what the C runtime answers.
