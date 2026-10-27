@@ -1491,12 +1491,24 @@ export class Encoder {
     this.word(0);
   }
 
-  /** A float kept in a register, which is a move of the whole register. */
+  /**
+   * A float kept in a register, which is a move of the whole register.
+   *
+   * The move is `MOVAPD`/`MOVAPS` rather than `MOVSD`/`MOVSS`. The scalar forms
+   * keep the half above the value as it was, so they wait for whatever last
+   * wrote the destination as well as for the source — and in a loop the
+   * destination is usually the accumulator, which the turn before left the
+   * quotient of a division in. That waits for a division to answer before the
+   * loop's next addition can be written, which is a chain of the divider's
+   * latency per turn. The parallel move writes the whole register and depends
+   * on the source alone, and nothing in this backend reads the half above a
+   * scalar.
+   */
   movsMove(destination: number, source: number, single: boolean): void {
-    this.precision(single);
+    if (!single) this.byte(0x66);
     this.rex(false, destination, source);
     this.byte(0x0f);
-    this.byte(0x10);
+    this.byte(0x28);
     this.modrm(source, destination);
   }
 

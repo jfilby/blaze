@@ -18,6 +18,15 @@ loop over an array, ten million times.
 | `hotbench` | the same loop over an array, ten million times | 35.9 ms | 16.7 ms | 16.4 ms |
 | `arrbench` | an array of two million doubles, summed and multiplied | 35.7 ms | 20.9 ms | 20.6 ms |
 | `binarytrees` | the benchmark program: recursion and allocation | 108.4 ms | 103.5 ms | — |
+| `spectral_norm` | the benchmark program: 90 million divisions by a counting weight | 123 ms | 84 ms | — |
+
+`spectral_norm` is at the speed of its divisions: 90 million of them in 84 ms
+is about four cycles each on two physical cores of the machine below, which is
+what the divider answers one in. The turn is eight instructions and the
+divider is four of its cycles, so what is left to win there is the divider and
+nothing else — which is what the AVX-512 form of the loop is for, and that form
+is the reason the target on this machine does not reach it: it has no AVX-512.
+
 
 The last column is `gcc -O2` on the same program, which is what the C
 backend's code is compiled by. The machine backend is at parity with it on the
@@ -174,6 +183,59 @@ number, and the arithmetic of the turn has to be exact over the whole of the
 range the counter takes — so the bound has to be a number the program wrote
 out.
 
+### The weight of a counted turn, and the step that moves it, are in registers
+
+A turn that divides by a weight the counter decides — the triangular number a
+spectral norm divides by — is a weight counted rather than computed: the turn
+divides by the weight the turn before it divided by, moved by the step of the
+progression. That is two running values, the weight and its step, and both are
+read on every turn.
+
+Kept in the frame, each of them is a store and a load per turn. Worse, the load
+of the step is the first half of the addition that steps the weight, so the
+chain the divisor waits on runs through the store-to-load forwarding of the
+turn before: about nine cycles on a machine whose divider answers a turn in
+four.
+
+`reserveWeightedRegisters` asks `weightedPlan` — the same pass that rewrites the
+loop — which loops the lowering will weight, and keeps a pair of vector
+registers for each before any name is weighed. A pair either both live in
+registers or the loop keeps the form it was written with; a weight in a
+register and a step in the frame is the case that is slower than neither.
+
+**`spectral_norm` went from 123 ms to 84 ms** on the machine below with this
+change and the one after it, and the turn went from a store and two loads of
+its own running values to none.
+
+### A scalar in a register is moved as the whole register
+
+`MOVSD` and `MOVSS` between two registers keep the half of the destination
+above the value as they found it, so they wait for whatever last wrote the
+destination as well as for what they read. In a loop the destination is usually
+the accumulator, holding the quotient of the division the turn before wrote, so
+the move waits for a division to answer — and the turn's next addition waits on
+the move. The instruction is a chain of the divider's latency per turn.
+
+`MOVAPD` and `MOVAPS` write the whole register and depend on the source alone,
+which is the same fix as the `PXOR` before a conversion and for the same
+reason. Nothing in this backend reads the half above a scalar: a value in a
+register is written by the arithmetic that produced it and stored by a store
+that names its width.
+
+This is what made the registers above pay. On their own, moving the weight and
+the step into registers was *slower* than leaving them in the frame — 166 ms
+against 344 ms in the other direction — because every step of the weight
+waited for the turn's division through the merge of the accumulator's half.
+
+### A compound assignment carries a value that is already somewhere
+
+`total += step` where `step` is in a register is the one addition whose source
+is that register; it does not have to be copied into the accumulator first. The
+same goes for a number the program wrote out, which the instruction carries
+from the read-only data: `step += 1` is one addition and not a load of the
+literal, a copy and an addition. The copy is a move, and the move is the wait
+described above.
+
 ## What is left
 
 ### The strength reduction over a bound the program wrote
@@ -230,3 +292,27 @@ The programs are built with `node src/compiler/offline-build.ts <project>
 timed with `hyperfine`. A change to the backend is measured by building both
 before and after and running them alternately, because the machine this was
 measured on is not quiet.
+
+The `spectral_norm` timings above are wall time on the whole benchmark, which
+`[benchmark]` in its `blaze.toml` runs as `./spectral_norm 1500`. The turn is
+measured on its own by building once and repeating the run: 90 million turns
+of the inner loop, which is what the ten passes of the two kernels make.
+
+An instruction count is worth more than a stopwatch on a machine like this one.
+`valgrind --tool=callgrind` answers how many instructions a program ran, and the
+two forms of the weighted loop differ there by the two instructions a turn is
+short — which says the change did what it was meant to before any clock is
+asked. What the clocks then said is what the registers were worth:
+
+| Form of the weighted turn | Inner loop | Single thread | Four threads |
+|---|---|---|---|
+| weight and step in the frame | 11 instructions | 344 ms | 123 ms |
+| weight and step in registers, `MOVSD` moves | 11 instructions | 664 ms | 203 ms |
+| weight and step in registers, `MOVAPD` moves | 11 instructions | 166 ms | 84 ms |
+| the above, with the compound assignments carrying their value | 8 instructions | 164 ms | 83 ms |
+
+The second row is the one worth keeping: the registers are only worth having
+when the moves into and out of them do not wait on the division of the turn
+before, and the form that puts them in registers *without* that is twice as slow
+as leaving them in the frame.
+

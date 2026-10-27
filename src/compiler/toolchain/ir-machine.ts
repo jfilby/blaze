@@ -2426,6 +2426,18 @@ class Machine {
   private readonly spareBounds: number[] = [];
 
   /**
+   * The vector registers a loop the lowering weights keeps its weight and its
+   * step in, taken by the register pass before any name is weighed.
+   *
+   * A weight is read and stepped on every turn of its loop, and its step is read
+   * on every turn too. Kept in the frame, each of them is a store and a load per
+   * turn, and the load of the step is the first half of the addition that steps
+   * the weight — which is the chain the turn's divisor waits on. Two registers
+   * take the whole of it off the memory.
+   */
+  private readonly spareWeighted: number[] = [];
+
+  /**
    * Every register the bounds of this function's loops may be held in, whether
    * a loop has taken one of them yet or not.
    *
@@ -2571,6 +2583,40 @@ class Machine {
     if (deepest === 0) return [];
     const free = CALLEE_SAVED.filter((register) => !taken.has(register));
     return free.slice(0, Math.min(deepest, INDEX_REGISTERS));
+  }
+
+  /**
+   * The registers the weight and the step of a loop the lowering weights are
+   * held in, two for every such loop that is open at once.
+   *
+   * The shape is asked of `weightedPlan`, the same pass that rewrites the loop,
+   * so the registers are kept for exactly the loops that will want them. A loop
+   * inside another that is also weighted needs its own pair: the outer weight is
+   * still being stepped while the inner loop turns.
+   */
+  private reserveWeightedRegisters(taken: ReadonlySet<number>): number[] {
+    let deepest = 0;
+    const turning = (body: SemanticBlock, depth: number): void => {
+      for (const statement of body.statements) {
+        if (statement.k === "loop") {
+          const loop = statement.loop;
+          if (loop.kind === "counted" && this.weightedPlan(loop) !== null) deepest = Math.max(deepest, depth + 1);
+          turning(loop.body, depth + 1);
+          continue;
+        }
+        for (const inner of statementBlocksOf(statement)) turning(inner, depth);
+      }
+    };
+    turning(this.fn.entry, 0);
+    if (deepest === 0) return [];
+    const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
+    return free.slice(Math.max(free.length - Math.min(deepest * 2, free.length), 0));
+  }
+
+  /** One of the registers kept above, or null when none is left. */
+  private takeWeightedVector(): number | null {
+    const register = this.spareWeighted.pop();
+    return register === undefined ? null : register;
   }
 
   /** One of the registers above, given back to whatever needs one next. */
@@ -2748,7 +2794,10 @@ class Machine {
    */
   private boundElementsOf(value: SemanticValue): bigint | Held | null {
     if (value.k !== "buffer") {
-      if (value.k === "local" && value.type.kind === "array") {
+      // A name holds the count it was bound with whatever the array it holds is
+      // spelled as: a slice and an array are both a pointer and a length here,
+      // which is why the C backend declares a `_length` beside either.
+      if (value.k === "local" && isSequence(value.type)) {
         return this.arrayCounts.get(this.names.read(value.name)) ?? null;
       }
       return null;
@@ -2763,6 +2812,40 @@ class Machine {
     const emitted = this.names.read(name);
     if (count === null) this.arrayCounts.delete(emitted);
     else this.arrayCounts.set(emitted, count);
+  }
+
+  /**
+   * The length a sequence argument is handed over with, which is the hidden
+   * parameter that follows the pointer in the callee's convention.
+   *
+   * Three forms settle the count, the same three the C backend settles it in:
+   * a parameter of this function answers with the length it was handed, an
+   * array this function bound answers with the count it was bound with, and a
+   * value that names either answers with theirs. A sequence none of the three
+   * settles is refused, and the function is lowered by the C backend, which
+   * carries every length as an argument of its own.
+   */
+  private lengthArgument(value: SemanticValue): Held {
+    if (value.k === "local") {
+      const hidden = this.arrayParamLengths.get(value.name);
+      if (hidden !== undefined) return this.slot(hidden);
+    }
+    const count = this.boundElementsOf(value);
+    if (count === null) {
+      throw machineError(
+        `${this.fn.symbol} hands over an array whose length it cannot settle`,
+        "an array argument carries its length beside it, and the C backend carries it as an argument",
+      );
+    }
+    // A count written out is laid down the way the C backend writes it: a
+    // whole number of its own, in the slot the call reads it out of.
+    if (typeof count === "bigint") {
+      this.at({ k: "const", type: USIZE, text: count.toString() }, USIZE);
+      const held = this.hold(USIZE, "blaze_length");
+      this.store(held);
+      return held;
+    }
+    return count;
   }
 
   private heldElements(count: SemanticValue): Held {
@@ -3059,6 +3142,17 @@ class Machine {
       this.pinnedRegisters.push(register);
       this.spareIndexes.push(register);
     }
+    // A loop this pass will weight keeps two vector registers for its weight and
+    // its step, taken before any name is weighed for the same reason the
+    // counters are: a register a name already holds is one the weight would have
+    // to share or go without, and going without is a store and a load per turn.
+    const weighted = new Set<number>();
+    for (const register of this.reserveWeightedRegisters(new Set([...this.pinned.values(), ...reserved]))) {
+      weighted.add(register);
+      reserved.add(register);
+      this.pinnedVectors.push({ register, offset: 0, single: false });
+      this.spareWeighted.push(register);
+    }
     // The first register of a pool that is free over every place the name is
     // live, or null when every one of them is spoken for. Two names whose runs
     // never meet are never both live, so either register will do.
@@ -3295,7 +3389,7 @@ class Machine {
     // an expression holds one side while the other side — which may be the call
     // — is written. A function that computes nothing in floats reserves none,
     // which is what keeps the prologue of a small one free of them.
-    for (const register of this.reserveTemporaryVectors(new Set(this.pinned.values()))) {
+    for (const register of this.reserveTemporaryVectors(new Set([...this.pinned.values(), ...weighted]))) {
       this.pinnedVectors.push({ register, offset: 0, single: false });
       this.spareVectors.push(register);
     }
@@ -3303,7 +3397,7 @@ class Machine {
     // taken from what the expressions of the body have not taken: a bound is
     // held for as long as its loop runs, and the body borrows its registers one
     // at a time.
-    for (const register of this.reserveBoundRegisters(new Set([...this.pinned.values(), ...this.spareVectors]))) {
+    for (const register of this.reserveBoundRegisters(new Set([...this.pinned.values(), ...this.spareVectors, ...weighted]))) {
       this.pinnedVectors.push({ register, offset: 0, single: false });
       this.spareBounds.push(register);
       this.boundRegisters.push(register);
@@ -4111,7 +4205,7 @@ class Machine {
         // A name that holds an array and is bound again is bound with the
         // count the new value holds — the same question a binding asks,
         // because a fill written after this one walks the array as it is now.
-        if (held.type.kind === "array") {
+        if (isSequence(held.type)) {
           this.rememberElements(
             statement.name,
             statement.op === "=" ? this.boundElementsOf(statement.value) : null,
@@ -4411,6 +4505,22 @@ class Machine {
         return;
       }
     }
+    // A float a name is added to is the one instruction that carries it: a
+    // number written out lives in the read-only data the instruction reaches,
+    // and a name the build gave a register of its own is where it lies. The
+    // general form copies either into the accumulator first, which is a move the
+    // turn of a loop pays on every turn — and a move waits on whatever the turn
+    // before left in the accumulator, which is usually the quotient of its own
+    // division.
+    if (
+      target.register !== null &&
+      isFloatType(target.type) &&
+      !isWideType(target.type) &&
+      this.operatesOnRegister(operation, target.type) &&
+      this.compoundWithFloat(operation, target, value)
+    ) {
+      return;
+    }
     this.at(value, target.type);
     // A name the build gave a register of its own is written in that register:
     // the value the name is given is in the accumulator and the name's own value
@@ -4500,6 +4610,43 @@ class Machine {
     }
     this.normalizeArithmetic(type, register);
     this.accumulator = null;
+  }
+
+  /**
+   * A compound assignment of a float whose other side needs no accumulator,
+   * written as the one instruction that carries it.
+   *
+   * A number the program wrote out is in the read-only data, which the
+   * instruction reaches as its own operand. A name the build gave a register of
+   * its own is where it lies, and the instruction names that register. Either is
+   * one instruction; the general form copies the value into the accumulator
+   * first, and the copy is a move that waits on whatever the turn before left in
+   * the accumulator — on the turn of a loop that is the quotient of its own
+   * division, which is the whole of what the loop waits for.
+   *
+   * The two sides have to be the same number: the instruction is read at one
+   * precision, so a value of another width is a conversion rather than an
+   * operand and is left to the general form.
+   */
+  private compoundWithFloat(operation: Arithmetic, target: Held, value: SemanticValue): boolean {
+    const register = target.register as number;
+    const single = widthOf(target.type) === 4;
+    if (value.k === "local") {
+      const held = this.slot(value.name);
+      if (held.register === null || isWideType(held.type) || !typeEquals(held.type, target.type)) return false;
+      this.code.sse(operation as "add" | "sub" | "mul", register, held.register, single);
+    } else if (value.k === "const" && isFloatType(value.type) && widthOf(value.type) === widthOf(target.type)) {
+      const label = this.floatLiteral(floatBits(Number(decimalText(value.text)), single));
+      this.code.sseMemLabel(operation as "add" | "sub" | "mul", register, label, single);
+    } else {
+      return false;
+    }
+    this.normalizeArithmetic(target.type, register);
+    // The answer went into the register the name is kept in, so nothing the
+    // accumulator was noted as holding at the turn of this statement is what it
+    // holds now.
+    this.accumulator = null;
+    return true;
   }
 
   /**
@@ -5687,28 +5834,21 @@ class Machine {
   }
 
   /**
-   * A turn whose divisor is a weight the counter decides, written with that
-   * weight counted rather than computed.
+   * The shape `weighted` rewrites, settled without writing anything.
    *
-   * The divisor of a spectral norm's turn is a triangular number of the sum of
-   * the two indices: `((i + j) * (i + j + 1)) >>> 1 + i + 1`. As a function of
-   * one index with the other fixed, that is an arithmetic progression whose
-   * step is that sum plus one — so a turn divides by the weight the turn
-   * before it divided by, moved by one step, and the product, the shift and
-   * the conversions of the weight are one addition instead.
-   *
-   * The weight is maintained as a double, and the maintaining is exact where
-   * the weight is read: a double holds a whole number exactly up to two to the
-   * fifty-third, and the weight this keeps is the number the fast path
-   * computed so long as no truncation of it has happened — which the test in
-   * the condition accounts for. The value the select answers when the test
-   * does not hold is the one the slow path wrote, and the weight a turn the
-   * test failed under left behind is a value nothing reads.
+   * It is a step of its own so that the register pass can ask which loops the
+   * lowering will weight *before* it hands out registers: the weight and the
+   * step each want a vector register of their own, and a register already given
+   * to a name is one the weight would have to share or go without.
    */
-  private weighted(loop: Extract<SemanticLoop, { kind: "counted" }>): {
-    guarded: Extract<SemanticLoop, { kind: "counted" }>;
-    lean: Extract<SemanticLoop, { kind: "counted" }> | null;
-    hoisted: SemanticValue | null;
+  private weightedPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): {
+    statement: Extract<SemanticStatement, { k: "set" }>;
+    lets: Map<string, SemanticValue>;
+    statements: readonly SemanticStatement[];
+    accumulation: number;
+    counted: NonNullable<ReturnType<typeof triangularOf>>;
+    select: Extract<SemanticValue, { k: "select" }>;
+    otherwise: SemanticValue;
   } | null {
     const type = loop.type;
     if (type.kind !== "primitive" || type.name !== "i64") return null;
@@ -5771,20 +5911,51 @@ class Machine {
     for (let round = 0; round < 8 && lets.size > 0; round += 1) {
       otherwise = substituteLocals(otherwise, lets);
     }
+    return { statement, lets, statements, accumulation, counted, select, otherwise };
+  }
+
+  /**
+   * A turn whose divisor is a weight the counter decides, written with that
+   * weight counted rather than computed.
+   *
+   * The divisor of a spectral norm's turn is a triangular number of the sum of
+   * the two indices: `((i + j) * (i + j + 1)) >>> 1 + i + 1`. As a function of
+   * one index with the other fixed, that is an arithmetic progression whose
+   * step is that sum plus one — so a turn divides by the weight the turn
+   * before it divided by, moved by one step, and the product, the shift and
+   * the conversions of the weight are one addition instead.
+   *
+   * The weight is maintained as a double, and the maintaining is exact where
+   * the weight is read: a double holds a whole number exactly up to two to the
+   * fifty-third, and the weight this keeps is the number the fast path
+   * computed so long as no truncation of it has happened — which the test in
+   * the condition accounts for. The value the select answers when the test
+   * does not hold is the one the slow path wrote, and the weight a turn the
+   * test failed under left behind is a value nothing reads.
+   */
+  private weighted(loop: Extract<SemanticLoop, { kind: "counted" }>): {
+    guarded: Extract<SemanticLoop, { kind: "counted" }>;
+    lean: Extract<SemanticLoop, { kind: "counted" }> | null;
+    hoisted: SemanticValue | null;
+  } | null {
+    const plan = this.weightedPlan(loop);
+    if (plan === null) return null;
+    const { statement, statements, accumulation, counted, select, otherwise } = plan;
     // The weight is named once, held across the loop, and stepped after the
     // turn has divided by it. The name is the slot's own: the IR below reads
     // it as a value of its own, and nothing else of the body ever declares it.
-    // A float of a loop this long is worth a register of its own where one is
-    // free, which is what keeps the value off the frame on every turn of the
-    // loop; a register that is spoken for leaves it where a slot was.
+    // A float of a loop this long is worth a register of its own, and the
+    // register pass reserved a pair of them for exactly this loop before any
+    // name was weighed: a register that is spoken for leaves the value in the
+    // frame, where a step costs a store and a load on every turn.
     const weightName = this.names.reserve("blaze_triangular");
-    const weight = this.reserveSlot(NUMBER, "blaze_triangular", true, null, weightName);
+    const weight = this.reserveSlot(NUMBER, "blaze_triangular", true, this.takeWeightedVector(), weightName);
     // The step is a second held value beside the weight. It starts where the
     // first turn's step is — the sum at the loop's first value, moved by one —
     // and every turn hands what it held to the weight before moving itself,
     // which is the same number the derivation below it used to write.
     const stepName = this.names.reserve("blaze_triangular_step");
-    const step = this.reserveSlot(NUMBER, "blaze_triangular_step", true, null, stepName);
+    const step = this.reserveSlot(NUMBER, "blaze_triangular_step", true, this.takeWeightedVector(), stepName);
     // The reach of the weight: the sum the turns move may not pass the value
     // the whole-number path's own arithmetic is exact at. The comparison is
     // read at sixty-four bits, where the sum of two counters and the bias
@@ -9564,12 +9735,38 @@ class Machine {
     // only when nothing goes on the stack, because the arguments that do are
     // written out through the very registers the rest are read into.
     const types = call.args.map((argument, at) => call.argTypes[at] ?? argument.type);
-    const spilling = firstArgumentOnStack(types);
+    // A parameter that is a sequence is handed its length beside its pointer:
+    // the hidden parameter the callee's prologue reads. The length is read
+    // here, before any argument, because a length is a value the call reads and
+    // the arguments are what the registers are filled with.
+    const declared = call.signature.params;
+    const carries = (at: number): boolean => {
+      const parameter = declared[at];
+      return parameter !== undefined && isSequence(parseType(parameter.type));
+    };
+    const lengths = call.args.map((argument, at) => (carries(at) ? this.lengthArgument(argument) : null));
+    // The arguments as the callee reads them: a length is an argument of its
+    // own, so the list the registers are handed out over is the source's
+    // arguments with a whole number beside every sequence.
+    const handed: SemanticType[] = [];
+    const handedAt: number[] = [];
+    for (const [at, type] of types.entries()) {
+      handedAt.push(handed.length);
+      handed.push(type);
+      if (lengths[at] !== null) handed.push(USIZE);
+    }
     const last = call.args.length - 1;
-    const intoLast = spilling === call.args.length ? lastArgumentRegister(types, last) : undefined;
+    // A last argument that carries a length is not one a call can leave in the
+    // register it takes: reading the length beside it would write over it.
+    const trailing = last >= 0 && lengths[last] !== null;
+    const spilling = firstArgumentOnStack(handed);
+    const intoLast =
+      trailing || spilling !== handed.length
+        ? undefined
+        : lastArgumentRegister(handed, handed.length - 1);
     let fresh = -1;
     let placed = -1;
-    const args: (Held | null)[] = call.args.map((argument, at) => {
+    const evaluated: (Held | null)[] = call.args.map((argument, at) => {
       const type = types[at];
       // An argument that is a name read at the type the parameter takes is the
       // slot itself: the register the call takes it in is filled from there
@@ -9596,16 +9793,22 @@ class Machine {
             otherAt !== at && other.k === "local" && this.slot(other.name).register === intoLast,
         );
       if (at === last && intoLast !== undefined && !pinnedHere && this.readIntoRegister(argument, intoLast, type)) {
-        placed = at;
+        placed = handedAt[at] as number;
         return null;
       }
-      const untouched = at === last && spilling === call.args.length;
-      if (untouched) fresh = at;
+      const untouched = at === last && !trailing && spilling === handed.length;
+      if (untouched) fresh = handedAt[at] as number;
       this.at(argument, type);
       const held = this.hold(type, "blaze_argument");
       if (!untouched) this.store(held);
       return held;
     });
+    const args: (Held | null)[] = [];
+    for (const [at, held] of evaluated.entries()) {
+      args.push(held);
+      const length = lengths[at];
+      if (length !== null) args.push(length);
+    }
     this.callSymbol(call.signature.symbol, args, call.returns, fresh, placed);
     if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);
   }

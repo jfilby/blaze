@@ -146,10 +146,16 @@ const FLOAT_CASES: readonly Case[] = [
   { name: "read xmm15 as a double into rax", build: (e) => e.cvtFloatToInt(RAX, XMM15, false, true), want: "cvttsd2si %xmm15,%rax" },
   // A register-to-register float move has the destination in the register field
   // and the source in the operand field, so the extension bits follow those.
-  { name: "move xmm0 into xmm8", build: (e) => e.movsMove(XMM8, XMM0, false), want: "movsd %xmm0,%xmm8" },
-  { name: "move xmm10 into xmm0", build: (e) => e.movsMove(XMM0, XMM10, true), want: "movss %xmm10,%xmm0" },
-  { name: "move xmm15 into xmm0", build: (e) => e.movsMove(XMM0, XMM15, false), want: "movsd %xmm15,%xmm0" },
-  { name: "move xmm0 into xmm15", build: (e) => e.movsMove(XMM15, XMM0, false), want: "movsd %xmm0,%xmm15" },
+  //
+  // The move is the parallel one and not the scalar one: `MOVSD`/`MOVSS` keep
+  // the half above the value as it was, so they wait for whatever last wrote
+  // the destination — in a loop that is the accumulator, holding the quotient
+  // of the turn before, and the turn waits for a division that way. `MOVAPD`
+  // and `MOVAPS` write the whole register and depend on the source alone.
+  { name: "move xmm0 into xmm8", build: (e) => e.movsMove(XMM8, XMM0, false), want: "movapd %xmm0,%xmm8" },
+  { name: "move xmm10 into xmm0", build: (e) => e.movsMove(XMM0, XMM10, true), want: "movaps %xmm10,%xmm0" },
+  { name: "move xmm15 into xmm0", build: (e) => e.movsMove(XMM0, XMM15, false), want: "movapd %xmm15,%xmm0" },
+  { name: "move xmm0 into xmm15", build: (e) => e.movsMove(XMM15, XMM0, false), want: "movapd %xmm0,%xmm15" },
   { name: "add xmm0 into xmm8", build: (e) => e.sse("add", XMM8, XMM0, false), want: "addsd %xmm0,%xmm8" },
   { name: "multiply xmm0 into xmm15", build: (e) => e.sse("mul", XMM15, XMM0, false), want: "mulsd %xmm0,%xmm15" },
   { name: "compare xmm8 with xmm0", build: (e) => e.sseCompare(XMM8, XMM0, false, true), want: "ucomisd %xmm0,%xmm8" },
@@ -160,7 +166,7 @@ const FLOAT_CASES: readonly Case[] = [
   { name: "read a float literal into xmm10", build: (e) => e.movsLoadLabel(XMM10, "Lblaze", false), want: "movsd 0x0(%rip),%xmm10" },
   { name: "add a float literal into xmm15", build: (e) => e.sseMemLabel("add", XMM15, "Lblaze", false), want: "addsd 0x0(%rip),%xmm15" },
   { name: "take the address of a literal into r12", build: (e) => e.leaLabel(R12, "Lblaze"), want: "lea 0x0(%rip),%r12" },
-  { name: "move xmm1 into xmm0", build: (e) => e.movsMove(XMM0, XMM1, false), want: "movsd %xmm1,%xmm0" },
+  { name: "move xmm1 into xmm0", build: (e) => e.movsMove(XMM0, XMM1, false), want: "movapd %xmm1,%xmm0" },
 ];
 
 /** The registers below eight must keep naming themselves. */

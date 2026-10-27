@@ -2501,6 +2501,59 @@ function weightedReference(turns: number): number {
   return total;
 }
 
+/**
+ * The text of the loop an instruction stands in: from the place the loop's own
+ * back edge jumps to, to that jump.
+ *
+ * Reading a loop out of a listing rather than counting a pattern over the whole
+ * of it is what lets a test say what is *not* in the loop: a store to the frame
+ * somewhere in a function is ordinary, and a store to the frame inside the loop
+ * that turns a million times is the thing worth refusing.
+ */
+function loopAround(listing: string, instruction: RegExp): string {
+  const lines = listing.split("\n");
+  const at = lines.findIndex((line) => instruction.test(line));
+  assert.notEqual(at, -1, "the listing holds the instruction the loop is looked for by");
+  for (let index = at; index < lines.length; index += 1) {
+    const jump = /jmp\s+([0-9a-f]+)\s+</.exec(lines[index] as string);
+    if (jump === null) continue;
+    const head = lines.findIndex((line) => new RegExp(`^\\s*${jump[1]}:`).test(line));
+    if (head === -1 || head > index) continue;
+    return lines.slice(head, index + 1).join("\n");
+  }
+  return assert.fail("the instruction is not inside a loop");
+}
+
+test("the weight and the step that moves it are kept in registers", async () => {
+  // The divisor of a weighted turn is maintained: `weight += step` and
+  // `step += 1`. Kept in the frame, each of those is a store and a load on every
+  // turn, and the load of the step is the first half of the addition that steps
+  // the weight — the chain the division of the turn waits on. The register pass
+  // reserves a pair of registers for exactly the loop the lowering weights, so
+  // the loop that divides by the weight touches the frame for nothing on its
+  // turns.
+  const listing = await emitted(weightedSubject());
+  const lean = loopAround(listing, /divsd/);
+  assert.doesNotMatch(
+    lean,
+    /movsd\s+[^\n]*\(%rsp\)/,
+    "no double is read out of the frame on a turn of the loop",
+  );
+  assert.doesNotMatch(
+    lean,
+    /mov[sd]s?\s+%xmm\d+,\s*(0x[0-9a-f]+)?\(%rsp\)/,
+    "no double is written to the frame on a turn of the loop",
+  );
+  // The step is the other side of the addition that steps the weight, and it is
+  // the register it lies in that the instruction names. One added to the step is
+  // a number the program wrote out, so the instruction carries it from the
+  // read-only data. The general form would copy each of them into the
+  // accumulator first, and that copy waits on whatever the turn before left
+  // there — the quotient of its own division.
+  assert.match(lean, /addsd\s+%xmm\d+,%xmm\d+/, "the step is added where the register holds it");
+  assert.match(lean, /addsd\s+0x[0-9a-f]+\(%rip\),%xmm\d+/, "one is added out of the read-only data");
+});
+
 test("a weight's guards are asked of the loop's ends, and the turns branch on the answer", async () => {
   // The turns of a bound within the reach take the fast arm from the first to
   // the last; the turns of a bound past it take the slow arm the whole way.
@@ -3037,7 +3090,7 @@ test("a name given a value is not read back out of the register it was given", a
   // — and is answered by a copy that is owed.
   assert.match(
     instructions,
-    /roundsd[^\n]*\n[^\n]*movsd\s+%xmm0,%xmm3[^\n]*\n[^\n]*mulsd/,
+    /roundsd[^\n]*\n[^\n]*movapd\s+%xmm0,%xmm3[^\n]*\n[^\n]*mulsd/,
     "the read that follows the write is answered without copying the value out of its own register",
   );
   assert.equal(
@@ -3281,9 +3334,13 @@ test("a compound assignment is written in the register the name has", async () =
   // what puts it in one: a name the census does not weigh is left in the frame
   // and the general form is what is written for it.
   const cases: { name: string; op: SemanticAssignOp; type: SemanticType; start: string; value: string; expected: string; written: RegExp }[] = [
-    { name: "a float added", op: "+=", type: F64, start: "10", value: "3", expected: "25", written: /addsd\s+%xmm0,%xmm\d+/ },
-    { name: "a float taken away", op: "-=", type: F64, start: "10", value: "3", expected: "-5", written: /subsd\s+%xmm0,%xmm\d+/ },
-    { name: "a float multiplied", op: "*=", type: F64, start: "10", value: "3", expected: "2430", written: /mulsd\s+%xmm0,%xmm\d+/ },
+    // A number the program wrote out is the instruction's own operand, read from
+    // the read-only data: it never passes through the accumulator, so what is
+    // written is the one instruction with the literal beside it as well as the
+    // one with the accumulator.
+    { name: "a float added", op: "+=", type: F64, start: "10", value: "3", expected: "25", written: /addsd\s+(%xmm0|0x[0-9a-f]+\(%rip\)),%xmm\d+/ },
+    { name: "a float taken away", op: "-=", type: F64, start: "10", value: "3", expected: "-5", written: /subsd\s+(%xmm0|0x[0-9a-f]+\(%rip\)),%xmm\d+/ },
+    { name: "a float multiplied", op: "*=", type: F64, start: "10", value: "3", expected: "2430", written: /mulsd\s+(%xmm0|0x[0-9a-f]+\(%rip\)),%xmm\d+/ },
     { name: "a whole number added", op: "+=", type: I64, start: "10", value: "3", expected: "25", written: /add\s+(\$0x3|%rax),%r[a-z0-9]+/ },
     { name: "a whole number taken away", op: "-=", type: I64, start: "10", value: "3", expected: "-5", written: /sub\s+(\$0x3|%rax),%r[a-z0-9]+/ },
     { name: "a whole number multiplied", op: "*=", type: I64, start: "10", value: "3", expected: "2430", written: /imul\s+(\$0x3|%rax),%r[a-z0-9]+/ },
