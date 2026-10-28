@@ -485,7 +485,7 @@ would have to know which is which at every call it writes.
 
 ### The multiply the machine code calls
 
-The modular multiply of `secp256k1` is now 62% of the program's instructions,
+The modular multiply of `secp256k1` is now 56% of the program's instructions,
 and it is still a call into the runtime: the machine backend asks the kernel
 for the product and the reduction, and a call is what it writes. The kernel is
 about 275 instructions for sixteen limb products and a reduction, and the call
@@ -527,17 +527,51 @@ and hand-traced cases. A division of a full-width pair fell from about 5,170
 instructions to about 300, the inversion's share of the program fell from 31%
 to 4%, and the inversion stopped being the second largest thing in the program.
 
-### The remaining multiplication count
+### A scalar multiplication, a window at a time
 
-What is left is not the cost of a product but how many of them the scalar
-multiplication asks for: 256 doublings and 128 additions, where the doubling is
-nine modular multiplies and the addition sixteen. Two changes would take a
-further quarter each, and both are algorithmic rather than arithmetic: a
-4 bit window on the scalar would replace 128 additions with about 64, and the
-endomorphism the source already describes would halve the doublings. The
-endomorphism branch is the one the source-level lowering still removes — its
-scalar split uses destructuring the frontend does not read yet — so the
-compiler is the thing to extend before the kernel is.
+What is left after the modular arithmetic is not the cost of a product but how
+many of them the scalar multiplication asks for, and the multiplication walks
+the scalar one bit at a time: 256 doublings and, for a scalar of random bits,
+128 additions. An addition of Jacobian points is sixteen limb products where a
+doubling is nine, so the additions are nearly half of the products the whole
+multiplication runs.
+
+`semantics/optimize-ir.ts` now rewrites that loop as a window of four bits. The
+multiples `2P` through `15P` are built once, from each other, and every turn of
+the loop then doubles the accumulator four times and adds the one multiple the
+next nibble names. The doublings stay at 256; the additions fall from 128 to
+the 64 nibbles, and one of those adds nothing when the nibble is zero.
+
+The table is why the window pays: seven doublings and seven additions build the
+fourteen multiples, and the additions the window removes are 64 points, which
+is 64 times sixteen limb products against 175 products for the table. The
+multiplication fell from 1.93M instructions to 1.62M and `./program 15` from
+about 9 ms to about 7.5 ms, which is the 16% the arithmetic predicts.
+
+The pass recognizes the shape rather than a name: a `while` whose test is a
+`u256` name against zero, whose body adds a point to the accumulator when the
+name's low bit is set, doubles the point and shifts the name down, and whose
+accumulator starts at the identity — the point with `x` and `z` zero. A loop
+whose accumulator starts anywhere else is left exactly as it was written,
+because a window starts from the same accumulator and doubles it on every
+turn: anything but the identity would be multiplied by two to the width of the
+scalar on the way. It also needs the point operations the loop calls to be the
+group operations they are named for; the shape and the identity are what the
+compiler can prove, and a pair of methods that are not those operations is not
+a pair the compiler can tell apart.
+
+### The endomorphism the source still describes
+
+The other change the source describes is the one still not compiled: the
+endomorphism would split the scalar into two halves and halve the doublings,
+which is the largest remaining factor. It is blocked by more than the
+destructuring in its branch. The split computes `divNearest(b2 * k, n)` where
+`b2` is about 2^128 and `k` is the scalar, so the product is up to 384 bits and
+the quotient is about 128 — a shape the wide arithmetic of the IR does not
+have. Every wide value is 256 bits, and the kernels answer a product modulo a
+modulus rather than the high half of the product a division needs. Enabling the
+branch therefore needs a wide product-and-quotient operation in the IR and in
+the runtime first; the frontend's destructuring is the smaller half.
 
 ## The measurements
 
@@ -672,14 +706,16 @@ this round made and the rest is not read across the two.
 | the division by 64 bit limbs | 2.98M | 1.42 times fewer |
 | the modulus read, and the additions and subtractions written out | 2.02M | 2.09 times fewer |
 | the reduction folded into the special entry | 1.93M | 2.19 times fewer |
+| the scalar walked four bits at a time | 1.62M | 2.61 times fewer |
 
-By function, the modular multiply fell from 1.68M to 1.20M — the special entry
-plus the inlined reduction — the modular addition fell from 268k to none and
-the modular subtraction from 376k to 39k, which are the limb chains they became,
-and the division fell from 1.33M to 78k. The count is worth more than the clock
-here: `./program 15` went from about 22 ms to about 11 ms on the machine this
-was recorded on, which is 2 times, and that machine's run-to-run spread is wide
-enough that the instruction count is the half that is worth quoting.
+By function, the modular multiply fell from 1.68M to 913k — the special entry,
+the inlined reduction and the additions the window removed — the modular
+addition fell from 268k to none and the modular subtraction from 376k to 42k,
+which are the limb chains they became, and the division fell from 1.33M to 85k.
+The count is worth more than the clock here: `./program 15` went from about
+22 ms to about 7.5 ms on the machine this was recorded on, which is nearly 3
+times, and that machine's run-to-run spread is wide enough that the instruction
+count is the half that is worth quoting.
 
 ### The fidelity of `./secp256k1 15`
 

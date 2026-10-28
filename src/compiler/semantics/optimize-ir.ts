@@ -31,6 +31,7 @@
 
 import type {
   SemanticBlock,
+  SemanticCall,
   SemanticFunction,
   SemanticLoop,
   SemanticProgram,
@@ -1268,6 +1269,290 @@ function countedNumber(value: SemanticValue): number | null {
 /** A whole number written out at a type, which is what a bound and a step become. */
 function integerAt(type: SemanticType, value: number): SemanticValue {
   return { k: "const", type, text: asText(value) };
+}
+
+/* -------------------------------------------------------------------------- */
+/* A scalar multiplication, a window at a time                                 */
+/* -------------------------------------------------------------------------- */
+
+/** The bits one window of a scalar multiplication holds. */
+const WINDOW_BITS = 4;
+/** The shift of the highest nibble of a 256 bit scalar. */
+const WINDOW_TOP_SHIFT = 256 - WINDOW_BITS;
+/** The nibbles one window walks. */
+const WINDOW_DIGITS = 1 << WINDOW_BITS;
+
+/** Whether a value is a zero the source wrote out, at any whole width. */
+function isWrittenZero(value: SemanticValue): boolean {
+  return value.k === "const" && /^[+]?0+$/.test(value.text.trim());
+}
+
+/** Whether a value is a whole number written out as this one. */
+function isWrittenNumber(value: SemanticValue, wanted: number): boolean {
+  if (value.k !== "const") return false;
+  const written = asNumber(value.text);
+  return written !== null && written === wanted;
+}
+
+/**
+ * Whether a value is the identity of the points of a curve.
+ *
+ * The identity of Jacobian coordinates is the point whose `x` and `z` are both
+ * zero, and `y` is whatever the source wrote. It arrives one of two ways: as an
+ * object built from those fields, or as a constructor called with them, whose
+ * parameters are named for the coordinates they become. A call of no arguments
+ * is looked through once, because the zero point is a name a program declares
+ * as `new Point(0, 1, 0)` inside a function of its own.
+ */
+function isPointIdentity(value: SemanticValue, callees: Callees, depth = 0): boolean {
+  if (value.k === "newObject") {
+    const x = value.fields.find((field) => field.name === "x");
+    const z = value.fields.find((field) => field.name === "z");
+    return x !== undefined && z !== undefined && isWrittenZero(x.value) && isWrittenZero(z.value);
+  }
+  if (value.k !== "call") return false;
+  const params = value.call.signature.params;
+  if (params.length === 3 && params[0]?.name === "x" && params[2]?.name === "z") {
+    const x = value.call.args[0];
+    const z = value.call.args[2];
+    return x !== undefined && z !== undefined && isWrittenZero(x) && isWrittenZero(z);
+  }
+  if (value.call.args.length !== 0 || depth >= 2) return false;
+  const callee = callees.get(value.call.callee);
+  if (callee === undefined || callee.entry.statements.length > 0) return false;
+  const end = callee.entry.terminator;
+  return end.k === "return" && end.value !== null && isPointIdentity(end.value, callees, depth + 1);
+}
+
+/**
+ * The double-and-add loop of one scalar multiplication, as a window at a time.
+ *
+ * The source of a curve's multiplication walks the scalar one bit at a time:
+ * on every turn it doubles the point and adds it to the accumulator when the
+ * bit is set. That is 256 doublings and, for a scalar of random bits, 128
+ * additions — and an addition of Jacobian points is sixteen limb products
+ * where a doubling is nine, so the additions are nearly half of what the
+ * multiplication costs.
+ *
+ * A window is the same arithmetic with four bits decided at once. The
+ * multiples `2P` through `15P` are built once, by doubling and adding the point
+ * the loop already holds, and each turn of the loop then doubles the
+ * accumulator four times and adds the one multiple the next nibble names. The
+ * doublings are the same 256; the additions fall to the 64 turns, and one of
+ * those adds nothing when the nibble is zero.
+ *
+ * The pattern the pass recognizes is the shape the source writes, not a name:
+ * a `while` whose test is a scalar against zero, whose body adds a point to
+ * the accumulator when the low bit of the scalar is set, doubles the point and
+ * shifts the scalar down. The accumulator has to start at the identity,
+ * because a windowed loop starts from the accumulator the source started from
+ * and doubles it the same 256 times: a nonzero start would be multiplied by
+ * two to the power of the width on the way.
+ *
+ * The answer is the same point, because a window is the distributive law over
+ * the bits it holds: `4 * p + d` is the four doublings and the one addition,
+ * and the nibbles of the scalar are the scalar.
+ */
+function windowedScalarMultiplication(body: Body, callees: Callees): boolean {
+  const taken = new Set<string>(body.params.map((param) => param.name));
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    taken.add(block.id);
+    for (const statement of block.statements) if (statement.k === "let") taken.add(statement.slot.name);
+  }
+  let changed = false;
+  const walk = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+    if (windowOne(block, taken, callees)) changed = true;
+  };
+  walk(body.entry);
+  return changed;
+}
+
+/** One loop rewritten as a window, or false when the block holds no such loop. */
+function windowOne(block: SemanticBlock, taken: Set<string>, callees: Callees): boolean {
+  const at = block.statements.length - 1;
+  const statement = block.statements[at];
+  if (statement === undefined || statement.k !== "loop" || statement.loop.kind !== "while") return false;
+  const loop = statement.loop;
+  if (at < 3) return false;
+  if (block.terminator.k !== "return" || block.terminator.value === null) return false;
+  if (block.terminator.value.k !== "local") return false;
+  const pName = block.terminator.value.name;
+
+  const declarations = block.statements.slice(at - 3, at);
+  if (declarations.some((one) => one.k !== "let")) return false;
+  const declared = new Map<string, Extract<SemanticStatement, { k: "let" }>>();
+  for (const one of declarations) {
+    if (one.k === "let") declared.set(one.slot.name, one);
+  }
+  const pLet = declared.get(pName);
+  if (pLet === undefined || !isPointIdentity(pLet.value, callees)) return false;
+
+  const body = loop.body;
+  if (body.releases.length > 0 || body.terminator.k !== "next" || body.statements.length !== 3) return false;
+  const condition = body.statements.find((one) => one.k === "if");
+  const writes = body.statements.filter((one) => one.k === "set");
+  if (condition === undefined || condition.k !== "if" || writes.length !== 2) return false;
+
+  const doubleSet = writes.find((one) => {
+    if (one.k !== "set" || one.value.k !== "call" || one.value.call.args.length !== 1) return false;
+    const argument = one.value.call.args[0];
+    return argument !== undefined && argument.k === "local" && argument.name === one.name;
+  });
+  if (doubleSet === undefined || doubleSet.value.k !== "call") return false;
+  const dName = doubleSet.name;
+  const dLet = declared.get(dName);
+  if (pLet.slot.kind !== "object" || dLet === undefined || dLet.slot.kind !== "object") return false;
+  const pType = pLet.slot.type;
+  if (pType.kind !== "ref" || !typeEquals(dLet.slot.type, pType)) return false;
+
+  const shiftSet = writes.find((one) => one.k === "set" && one !== doubleSet);
+  if (shiftSet === undefined || shiftSet.value.k !== "arith" || shiftSet.value.op !== "shr") return false;
+  if (shiftSet.value.left.k !== "local" || shiftSet.value.left.name !== shiftSet.name) return false;
+  if (!isWrittenNumber(shiftSet.value.right, 1)) return false;
+  const nName = shiftSet.name;
+  const nLet = declared.get(nName);
+  if (nLet === undefined || nLet.slot.kind !== "value") return false;
+  if (nLet.slot.type.kind !== "primitive" || nLet.slot.type.name !== "u256") return false;
+  const nType = nLet.slot.type;
+
+  if (!comparesZero(loop.condition, nName, "gt")) return false;
+  if (condition.otherwise !== null || condition.then.releases.length > 0) return false;
+  if (condition.then.terminator.k !== "next" || condition.then.statements.length !== 1) return false;
+  const addSet = condition.then.statements[0];
+  if (addSet === undefined || addSet.k !== "set" || addSet.name !== pName) return false;
+  if (addSet.value.k !== "call" || addSet.value.call.args.length !== 2) return false;
+  const [left, right] = addSet.value.call.args;
+  if (left === undefined || right === undefined || left.k !== "local" || right.k !== "local") return false;
+  if (left.name !== pName || right.name !== dName) return false;
+  if (!conditionalOnLowBit(condition.condition, nName)) return false;
+  if (!typeEquals(addSet.value.type, pType) || !typeEquals(doubleSet.value.type, pType)) return false;
+
+  const addCall = addSet.value.call;
+  const doubleCall = doubleSet.value.call;
+  const line = statement.line;
+  const i64: SemanticType = { kind: "primitive", name: "i64" };
+  const local = (name: string, type: SemanticType): SemanticValue => ({ k: "local", type, name });
+  const callOf = (call: SemanticCall, args: SemanticValue[]): SemanticValue => ({
+    k: "call",
+    type: call.returns,
+    call: { ...call, args, argTypes: args.map((argument) => argument.type) },
+  });
+
+  // The multiples the window names. An even one is the double of half of it and
+  // an odd one is the even one before it plus the point itself, so every
+  // multiple is built from multiples already written down.
+  const multiples: string[] = new Array(WINDOW_DIGITS).fill("");
+  multiples[1] = dName;
+  const tableLets: SemanticStatement[] = [];
+  const tableNames: string[] = [];
+  for (let digit = 2; digit < WINDOW_DIGITS; digit += 1) {
+    const name = freshName(taken, "windowMultiple");
+    const value = digit % 2 === 0
+      ? callOf(doubleCall, [local(multiples[digit / 2] as string, pType)])
+      : callOf(addCall, [local(multiples[digit - 1] as string, pType), local(dName, pType)]);
+    multiples[digit] = name;
+    tableNames.push(name);
+    tableLets.push({ k: "let", slot: { kind: "object", name, mutable: false, type: pType }, value, line });
+  }
+
+  const shiftName = freshName(taken, "windowShift");
+  const shiftLet: SemanticStatement = {
+    k: "let",
+    slot: { kind: "value", name: shiftName, mutable: true, type: i64 },
+    value: { k: "const", type: i64, text: asText(WINDOW_TOP_SHIFT) },
+    line,
+  };
+  const shift = local(shiftName, i64);
+  const digitName = freshName(taken, "windowDigit");
+  const digit = local(digitName, nType);
+
+  const statements: SemanticStatement[] = [];
+  for (let doubling = 0; doubling < WINDOW_BITS; doubling += 1) {
+    statements.push({ k: "set", name: pName, op: "=", value: callOf(doubleCall, [local(pName, pType)]), line });
+  }
+  statements.push({
+    k: "let",
+    slot: { kind: "value", name: digitName, mutable: false, type: nType },
+    value: {
+      k: "arith",
+      type: nType,
+      op: "and",
+      left: { k: "arith", type: nType, op: "shr", left: local(nName, nType), right: shift },
+      right: { k: "const", type: i64, text: asText(WINDOW_DIGITS - 1) },
+    },
+    line,
+  });
+  for (let value = 1; value < WINDOW_DIGITS; value += 1) {
+    statements.push({
+      k: "if",
+      condition: {
+        k: "compare",
+        type: BOOL,
+        op: "eq",
+        operand: nType,
+        left: digit,
+        right: { k: "const", type: i64, text: asText(value) },
+      },
+      then: {
+        id: freshName(taken, "windowBlock"),
+        releases: [],
+        statements: [{
+          k: "set",
+          name: pName,
+          op: "=",
+          value: callOf(addCall, [local(pName, pType), local(multiples[value] as string, pType)]),
+          line,
+        }],
+        terminator: { k: "next" },
+      },
+      otherwise: null,
+      line,
+    });
+  }
+  statements.push({
+    k: "set",
+    name: shiftName,
+    op: "=",
+    value: { k: "arith", type: i64, op: "sub", left: shift, right: { k: "const", type: i64, text: asText(WINDOW_BITS) } },
+    line,
+  });
+
+  body.statements = statements;
+  body.releases = [];
+  body.terminator = { k: "next" };
+  loop.condition = {
+    k: "compare",
+    type: BOOL,
+    op: "ge",
+    operand: i64,
+    left: shift,
+    right: { k: "const", type: i64, text: "0" },
+  };
+
+  // The multiples are the block's own allocations and the loop is the last
+  // thing it holds, so they are freed on the way out, innermost declared first.
+  for (const name of tableNames) block.releases.unshift(name);
+  block.statements.splice(at, 0, ...tableLets, shiftLet);
+  return true;
+}
+
+/** Whether a condition is a name compared with zero, in one direction. */
+function comparesZero(value: SemanticValue, name: string, op: "gt" | "ne"): boolean {
+  if (value.k !== "compare" || value.op !== op) return false;
+  if (value.left.k === "local" && value.left.name === name) return isWrittenZero(value.right);
+  if (value.right.k === "local" && value.right.name === name) return isWrittenZero(value.left);
+  return false;
+}
+
+/** Whether a condition is the low bit of a name being set. */
+function conditionalOnLowBit(value: SemanticValue, name: string): boolean {
+  if (value.k !== "compare" || (value.op !== "ne" && value.op !== "gt")) return false;
+  const bit = (one: SemanticValue): boolean =>
+    one.k === "arith" && one.op === "and" && one.left.k === "local" && one.left.name === name && isWrittenNumber(one.right, 1);
+  return (bit(value.left) && isWrittenZero(value.right)) || (bit(value.right) && isWrittenZero(value.left));
 }
 
 /**
@@ -2884,6 +3169,11 @@ function optimizeBody(body: Body, callees: Callees): void {
     // binding that carries the shift down is one it can read.
     if (maskLimbResidues(body)) changed = true;
     if (pruneAll(body)) changed = true;
+    // A scalar multiplication written a bit at a time is the one loop here
+    // whose rewrite is a different algorithm rather than a cheaper spelling of
+    // the same one, so it goes before the passes that move the loop's own
+    // statements around and after the fold that gives its ends their values.
+    if (windowedScalarMultiplication(body, callees)) changed = true;
     if (hoistLoopInvariants(body)) changed = true;
     // A loop whose body has nothing left to do once a name settles is left at
     // that turn before the loops are counted and written out: unrolling one

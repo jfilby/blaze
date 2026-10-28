@@ -1958,3 +1958,125 @@ test("a modular multiply by one is the value it multiplies", () => {
   assert.doesNotMatch(once, /u256_mul_mod/);
   assert.doesNotMatch(once, /u256_add_mod/);
 });
+
+/* -------------------------------------------------------------------------- */
+/* A scalar multiplication, a window at a time                                 */
+/* -------------------------------------------------------------------------- */
+
+const POINT_REF: SemanticType = { kind: "ref", of: null, name: "Point" };
+
+/** A call of a point's constructor with the coordinates written out. */
+function pointConstructor(x: string, y: string, z: string): SemanticValue {
+  const param = (name: string): { name: string; type: string } => ({ name, type: "u256" });
+  return {
+    k: "call",
+    type: POINT_REF,
+    call: {
+      callee: "Point", builtin: false,
+      signature: { name: "Point", symbol: "Point", params: [param("x"), param("y"), param("z")], returns: "ref<Point>" },
+      args: [constOf(x, U256), constOf(y, U256), constOf(z, U256)],
+      argTypes: [U256, U256, U256], returns: POINT_REF,
+      effects: [], ownership: "owned", retain: false,
+    },
+  };
+}
+
+/** A call of a point operation, which is the object's own method. */
+function pointCall(callee: string, args: SemanticValue[]): SemanticValue {
+  return {
+    k: "call",
+    type: POINT_REF,
+    call: {
+      callee, builtin: false,
+      signature: {
+        name: callee, symbol: callee,
+        params: args.map((_, at) => ({ name: at === 0 ? "self" : "other", type: "ref<Point>" })),
+        returns: "ref<Point>",
+      },
+      args, argTypes: args.map(() => POINT_REF), returns: POINT_REF,
+      effects: [], ownership: "owned", retain: false,
+    },
+  };
+}
+
+/**
+ * `multiplyUnsafe` written the way the source writes it: double the point every
+ * turn, add it to the accumulator when the scalar's low bit is set, shift the
+ * scalar down. The accumulator starts at the identity unless `start` says
+ * otherwise.
+ */
+function scalarMultiplySubject(start: SemanticValue = pointConstructor("0", "1", "0")): SemanticFunction {
+  const point = (name: string): SemanticValue => ({ k: "local", type: POINT_REF, name });
+  const whole = (name: string): SemanticValue => ({ k: "local", type: U256, name });
+  const zero: SemanticValue = { k: "const", type: I64, text: "0" };
+  const one: SemanticValue = { k: "const", type: I64, text: "1" };
+  const loop: SemanticStatement = {
+    k: "loop",
+    line: 4,
+    loop: {
+      kind: "while", header: "header", exit: "exit",
+      condition: { k: "compare", type: BOOL, op: "gt", operand: U256, left: whole("n"), right: zero },
+      body: {
+        id: "body", releases: [], terminator: { k: "next" },
+        statements: [
+          {
+            k: "if", line: 5,
+            condition: {
+              k: "compare", type: BOOL, op: "ne", operand: U256,
+              left: { k: "arith", type: U256, op: "and", left: whole("n"), right: one },
+              right: zero,
+            },
+            then: {
+              id: "addBlock", releases: [], terminator: { k: "next" },
+              statements: [{ k: "set", line: 5, name: "p", op: "=", value: pointCall("add", [point("p"), point("d")]) }],
+            },
+            otherwise: null,
+          },
+          { k: "set", line: 6, name: "d", op: "=", value: pointCall("double", [point("d")]) },
+          { k: "set", line: 7, name: "n", op: "=", value: { k: "arith", type: U256, op: "shr", left: whole("n"), right: one } },
+        ],
+      },
+    },
+  };
+  return fnOf(
+    {
+      id: "entry", releases: [],
+      statements: [
+        { k: "let", line: 1, slot: { kind: "value", name: "n", mutable: true, type: U256 }, value: whole("scalar") },
+        { k: "let", line: 2, slot: { kind: "object", name: "p", mutable: true, type: POINT_REF }, value: start },
+        { k: "let", line: 3, slot: { kind: "object", name: "d", mutable: true, type: POINT_REF }, value: point("self") },
+        loop,
+      ],
+      terminator: { k: "return", value: point("p") },
+    },
+    POINT_REF,
+    [
+      { kind: "object", name: "self", mutable: false, type: POINT_REF },
+      { kind: "value", name: "scalar", mutable: false, type: U256 },
+    ],
+  );
+}
+
+test("a scalar multiplication written a bit at a time is written a window at a time", () => {
+  // The bit loop doubles the accumulator and adds the point on one turn in two.
+  // A window decides four bits at once: the multiples are built once, the four
+  // doublings are still there, and the additions fall to the turns of the loop.
+  const text = printed(scalarMultiplySubject());
+  assert.doesNotMatch(text, /shr\[u256\] local\[u256\] n const\[i64\] 1/, "the scalar is not walked a bit at a time");
+  assert.match(text, /const\[i64\] 252/, "the window starts at the top nibble of a 256 bit scalar");
+  assert.match(text, /windowShift1 = \[sub\[i64\] local\[i64\] windowShift1 const\[i64\] 4\]/, "a turn moves down one nibble");
+  assert.equal((text.match(/call\[ref<Point>\] double /g) ?? []).length, 11, "the seven multiples of the table and the four doublings of a turn");
+  assert.equal((text.match(/call\[ref<Point>\] add /g) ?? []).length, 22, "the seven odd multiples of the table and the fifteen additions a nibble selects");
+  assert.equal((text.match(/if \[eq\[bool\] u256 local\[u256\] windowDigit1 const\[i64\] /g) ?? []).length, 15, "a nibble selects one of the fifteen multiples");
+});
+
+test("a scalar multiplication whose accumulator does not start at the identity is left as it is", () => {
+  // A window starts from the accumulator the source started from and doubles it
+  // on every turn, so a starting point other than the identity would be
+  // multiplied by two to the power of the scalar's width. The identity is the
+  // point whose x and z are zero; anything else is a loop the window cannot
+  // rewrite.
+  const text = printed(scalarMultiplySubject(pointCall("double", [{ k: "local", type: POINT_REF, name: "self" }])));
+  assert.match(text, /shr\[u256\] local\[u256\] n const\[i64\] 1/, "the bit loop is the one the source wrote");
+  assert.doesNotMatch(text, /windowShift1/, "no window was built");
+});

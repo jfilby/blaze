@@ -4421,3 +4421,28 @@ test("a promise handle is the number its address is, where the runtime reads it 
   assert.equal(result.code, 0, `the machine code must run:\n${result.stderr}`);
   assert.equal(result.stdout.trim(), "6.0");
 });
+
+test("the secp256k1 multiplication answers the points the source reaches, a window at a time", async () => {
+  // The whole benchmark, lowered by the rule-based half of the build with no
+  // model in it: the multiplication is the one the source writes, and the
+  // optimizer rewrites its bit loop as a window of four bits. The answers are
+  // the points Deno prints for the same source and the same count, so a window
+  // that names the wrong multiple, or that starts from a point that is not the
+  // identity, is a different point here.
+  const compiler = new URL("..", import.meta.url).pathname;
+  const project = new URL("../../benchmarks/machine_backend/secp256k1/", import.meta.url).pathname;
+  const work = await scratch("blaze-secp-window-");
+  const built = run("node", ["offline-build.ts", project, work], { cwd: compiler, timeoutMs: 600_000 });
+  assert.equal(built.code, 0, `the benchmark must build:\n${built.stderr}`);
+  const binary = join(work, "program");
+  const expected: readonly [string, string][] = [
+    ["1", "bac4db182bd8e59da66ec3b0e1759a102ff7308a916cccb51c68253d4bf32c16,a6bf6c1c8c9261f65983cfb987e0e8b4b8a7cc34376454b27f5adf7e36dc15d0"],
+    ["3", "1ac0065aab87b679a02159b6616e9df339711031dada7cdc63344b3df4aea179,283d854f98c2aa65f1fe04088fc2df92acad7d885146e65f2270466a87157537"],
+    ["5", "cbcd7ddf696e223ea579ec797410b84b0da5b2e3b72f95c12d52971f34e23c03,9ab3948c53cdf313e1d2e92d33f4c2c326921ec7782f90115c757ce9855fd0ac"],
+  ];
+  for (const [count, point] of expected) {
+    const ran = run(binary, [count], { timeoutMs: 120_000 });
+    assert.equal(ran.code, 0, `the benchmark must run:\n${ran.stderr}`);
+    assert.equal(ran.stdout.trim(), point, `${count} multiplication(s) reach the point the source does`);
+  }
+});
