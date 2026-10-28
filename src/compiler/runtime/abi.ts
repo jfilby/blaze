@@ -2202,8 +2202,12 @@ static const char* blaze_rt_last_message = "";
    this will run on and small enough to sit there. */
 #define BLAZE_RT_PARALLEL_PARTS 64
 
-${guarded ? `static void blaze_rt_refuse(const char* what) {
-  fprintf(stderr, "blaze: %s\\n", what);
+${guarded ? `/* A refusal is the runtime saying a value is not one it may use, which is a
+   fault in the candidate rather than the source ending. It is written with a
+   prefix of its own so a probe can tell it apart from a raise, whose message
+   the source wrote and whose ending is a program's own. */
+static void blaze_rt_refuse(const char* what) {
+  fprintf(stderr, "blaze: internal: %s\\n", what);
   exit(2);
 }` : "/* A danger build: this runtime does not check what it is handed, so it has nothing to refuse. */"}
 
@@ -2226,7 +2230,7 @@ ${guarded ? `  if (header->magic != BLAZE_RT_MAGIC) blaze_rt_refuse("not a live 
    corrupting the heap. */
 static size_t blaze_rt_array_bytes(size_t count, size_t elementSize${guarded ? ", const char* who" : ""}) {
 ${guarded ? `  if (elementSize != 0 && count > BLAZE_RT_MAX_ALLOCATION / elementSize) {
-    fprintf(stderr, "blaze: %s: request too large\\n", who);
+    fprintf(stderr, "blaze: internal: %s: request too large\\n", who);
     exit(2);
   }` : ""}
   return count * elementSize;

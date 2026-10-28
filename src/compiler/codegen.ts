@@ -1135,7 +1135,13 @@ export function probeFault(result: RunResult): string | null {
   // A raise is a way the source can end too: the runtime reports it on the
   // standard error and exits two. The probe asks whether the candidate ran,
   // and the program it belongs to is what settles what it computes.
-  if (result.code === 2 && /^blaze: /m.test(result.stderr)) return null;
+  //
+  // A refusal is not a raise. The runtime's own guards — a pointer that was
+  // never handed out, a corrupt header, an allocation past the limit — say the
+  // candidate broke the runtime it runs on, and that is a candidate that did
+  // not run at all. The prefix is what tells the two apart, because the text
+  // of a raise is the source's and may say anything.
+  if (result.code === 2 && /^blaze: /m.test(result.stderr) && !/^blaze: internal: /m.test(result.stderr)) return null;
   if (result.code !== 0) return `the candidate exited with status ${result.code}`;
   return null;
 }
