@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { verifyProgram } from "../toolchain/verify-program.ts";
+import { servesHttp, verifyProgram } from "../toolchain/verify-program.ts";
 import { scratch } from "./scratch.ts";
 
 const SOURCE = [
@@ -34,6 +34,17 @@ async function source(): Promise<{ path: string; directory: string }> {
   await writeFile(path, SOURCE, "utf8");
   return { path, directory };
 }
+
+test("a comment or a string that names HTTP is not a program that serves it", () => {
+  // The deadline a program is given is five seconds when it serves HTTP,
+  // because a server runs until it is stopped. A comment that cites a URL and
+  // a program that prints the word were read as servers too, so a computation
+  // that took longer than five seconds was reported as one that did not
+  // finish. The word is read from the code, where a server call is.
+  assert.equal(servesHttp("// served over http in the paper\nconsole.log(1);\n"), false);
+  assert.equal(servesHttp('console.log("http is a protocol");\n'), false);
+  assert.equal(servesHttp("http.serve(8080);\n"), true);
+});
 
 test("a program that prints what its source prints is the program the source is", async () => {
   const { path, directory } = await source();

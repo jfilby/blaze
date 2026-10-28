@@ -25,7 +25,22 @@ import { join } from "node:path";
 import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import { usesSqliteSource } from "../runtime/sqlite.ts";
+import { codeOnly } from "../util/source.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
+
+/**
+ * Whether a program is one that serves HTTP, whose run may outlive what it
+ * prints.
+ *
+ * The question is asked of the code, not of the file: a comment that cites a
+ * URL is prose, and a program that prints the word "http" is not a program
+ * that serves it. Reading a mention in either as a server gave every such
+ * program the server's five second deadline, which turned a program that
+ * computes for longer than that into a verification that "did not finish".
+ */
+export function servesHttp(source: string): boolean {
+  return /\bhttp\b/.test(codeOnly(source));
+}
 
 /**
  * The language a source is checked against: the command that runs it and the
@@ -336,7 +351,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // source that cannot run at all. The preludes are the ones a TypeScript
   // source needs: a source of another language is run as it is.
   const deno = readFileSync(request.sourcePath, "utf8");
-  const httpSource = /\bhttp\b/.test(deno);
+  const httpSource = servesHttp(deno);
   const sqliteSource = usesSqliteSource(deno);
   // The preludes are the ones node needs, and a source of another language is
   // run as it is.
@@ -368,8 +383,9 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // without bound is then refused by its allocator, which says what it was
   // doing, rather than killed by a system that has run out of memory and takes
   // the build with it.
-  const isHttpSource = /\bhttp\b/.test(readFileSync(request.sourcePath, "utf8"));
-  const binaryTimeout = isHttpSource ? 5_000 : 120_000;
+  // A server may run until it is stopped, so its deadline is the short one a
+  // server is given; everything else gets the deadline a computation is given.
+  const binaryTimeout = httpSource ? 5_000 : 120_000;
   const binary = run(request.runner.command, [...request.runner.args, ...arguments_], {
     cwd: request.directory,
     timeoutMs: binaryTimeout,
