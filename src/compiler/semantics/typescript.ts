@@ -775,22 +775,16 @@ function localNames(tokens: readonly Token[]): Set<string> {
  */
 function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean {
   if (state.size === 0) return false;
-  // A name the function declares is its own, whatever the file calls it: a
-  // parameter spelled like a value the program holds is the parameter, and the
-  // function that reads it needs no scope to read it from.
-  const local = declaredNames(fn);
+  // A name a function declares is its own only where the scope that declares it
+  // is around the read: a parameter named like a value the program holds is the
+  // parameter, and a name declared inside a block is that block's. A read no
+  // scope binds is the file's value, and the function that reads it is read
+  // where the program runs.
   let found = false;
-  walkFunction(fn, (name) => {
-    if (!local.has(name) && state.has(name)) found = true;
+  walkFunction(fn, (name, bound) => {
+    if (!bound && state.has(name)) found = true;
   });
   return found;
-}
-
-/** Every name a function binds: its parameters, its declarations and the names it counts with. */
-function declaredNames(fn: TypeScriptFunction): Set<string> {
-  const names = new Set<string>(fn.params.map((param) => param.name));
-  walkFunction(fn, () => {}, undefined, (name) => names.add(name));
-  return names;
 }
 
 /** Every function a body calls, by the name the source wrote. */
@@ -803,14 +797,19 @@ function callsOf(fn: TypeScriptFunction): Set<string> {
 /**
  * Every name a function body reads, and every function it calls, in the order
  * the body writes them. One walk answers both questions, so a name and a call
- * are found by the same reading of the body.
+ * are found by the same reading of the body. Each read says whether a scope of
+ * the function binds the name, because a name the body declares is not the
+ * file's value outside the scope that declares it.
  */
 function walkFunction(
   fn: TypeScriptFunction,
-  onName: (text: string) => void,
+  onName: (text: string, bound: boolean) => void,
   onCall: (name: string) => void = () => {},
-  onDeclare: (name: string) => void = () => {},
 ): void {
+  // The scopes around the read, innermost last. A parameter is in every one of
+  // them; a block, a loop and a catch arm add their own.
+  const scopes: Set<string>[] = [new Set(fn.params.map((param) => param.name))];
+  const bound = (name: string): boolean => scopes.some((scope) => scope.has(name));
   const read = (expression: Expression | null): void => {
     if (expression === null) return;
     switch (expression.k) {
@@ -819,13 +818,13 @@ function walkFunction(
       case "null":
         return;
       case "ident":
-        onName(expression.name);
+        onName(expression.name, bound(expression.name));
         return;
       case "argv":
         read(expression.index);
         return;
       case "length":
-        onName(expression.buffer);
+        onName(expression.buffer, bound(expression.buffer));
         return;
       case "index":
         read(expression.base);
@@ -872,34 +871,40 @@ function walkFunction(
         read(expression.otherwise);
         return;
       case "update":
-        onName(expression.name);
+        onName(expression.name, bound(expression.name));
         return;
     }
   };
   const statements = (body: readonly Statement[]): void => {
+    // The body is a scope of its own: a name it declares is not bound before
+    // the declaration and not bound after the block that declares it.
+    scopes.push(new Set());
     for (const statement of body) {
       switch (statement.kind) {
         case "declare":
-          onDeclare(statement.name);
           read(statement.init);
+          scopes[scopes.length - 1].add(statement.name);
           break;
         case "loop":
-          onDeclare(statement.variable);
           read(statement.from);
           read(statement.to);
           read(statement.step);
+          // The loop variable is bound by the loop, not by the function, so a
+          // read after the loop is a read of the value around it.
+          scopes.push(new Set([statement.variable]));
           statements(statement.body);
+          scopes.pop();
           break;
         case "assign":
-          onName(statement.target);
+          onName(statement.target, bound(statement.target));
           read(statement.value);
           break;
         case "memberAssign":
-          onName(statement.base);
+          onName(statement.base, bound(statement.base));
           read(statement.value);
           break;
         case "update":
-          onName(statement.name);
+          onName(statement.name, bound(statement.name));
           break;
         case "result":
           read(statement.value);
@@ -918,29 +923,36 @@ function walkFunction(
           statements(statement.body);
           break;
         case "forOf":
-          onDeclare(statement.variable);
-          onName(statement.of);
+          onName(statement.of, bound(statement.of));
+          // The element a `for-of` binds is the loop's own name.
+          scopes.push(new Set([statement.variable]));
           statements(statement.body);
+          scopes.pop();
           break;
         case "print":
         case "expression":
           read(statement.value);
           break;
         case "indexAssign":
-          onName(statement.buffer);
+          onName(statement.buffer, bound(statement.buffer));
           read(statement.index);
           read(statement.value);
           break;
         case "try":
-          if (statement.catchParam !== null) onDeclare(statement.catchParam);
           statements(statement.body);
-          if (statement.catchBody !== null) statements(statement.catchBody);
+          if (statement.catchBody !== null) {
+            // The catch parameter is bound by the arm it catches in.
+            scopes.push(new Set(statement.catchParam === null ? [] : [statement.catchParam]));
+            statements(statement.catchBody);
+            scopes.pop();
+          }
           if (statement.finallyBody !== null) statements(statement.finallyBody);
           break;
         default:
           break;
       }
     }
+    scopes.pop();
   };
   for (const param of fn.params) if (param.default !== undefined) read(param.default);
   statements(fn.body);

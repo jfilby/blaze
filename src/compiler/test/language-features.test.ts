@@ -195,6 +195,26 @@ test("a parameter named like a value the program holds is the parameter", () => 
   assert.ok(functions["bump"], "the parameter is the function's own name, not the file's value");
 });
 
+test("a name a block declares is that block's, not the whole function's", async () => {
+  // A function that declares `total` in one arm still reads the file's
+  // `total` outside it. Counting every declaration a function writes as its
+  // own classified the function as a module function, which then had no scope
+  // for the value it read: the build refused a program the source wrote.
+  const source = [
+    "const total = Math.floor(2.5);",
+    "function read(x: number): number {",
+    "  if (x > 0) { const total = 100; }",
+    "  return total;",
+    "}",
+    "console.log(read(1));",
+    "console.log(read(0));",
+    "",
+  ].join("\n");
+  const functions = phaseOf("typescript", { "main.ts": source }, "main.ts").program.files[0]?.functions ?? {};
+  assert.deepEqual(Object.keys(functions), [], "the function reads the value the program holds");
+  assert.equal(await agreesWithNode(source), "2\n2\n");
+});
+
 test("a name a function declares is not the file's constant", async () => {
   // A parameter spelled like a constant of the file is the parameter: the
   // constant is not read where the body declared its own name.
