@@ -246,6 +246,15 @@ test("the modules a kernel is written with are the ones the compiler knows", () 
   assert.match(refused, /renaming an import is not supported/);
 });
 
+test("renaming an imported function is refused where it is written", () => {
+  // A name imported under another name binds a name the compiler does not
+  // read, and it is refused as the rename it is. The alias used to be left
+  // where it was written, so the refusal was a statement diagnostic about
+  // "as" instead of the rename the source wrote.
+  const refused = diagnostic(() => pythonFrontend.analyze("from helpers import dot as cross\n", "kernel.py"));
+  assert.match(refused, /renaming an import is not supported/);
+});
+
 test("a kernel the subset carries is read with its decorator, its constant and its calls", () => {
   const source = [
     "import triton",

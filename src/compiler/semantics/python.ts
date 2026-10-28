@@ -1016,8 +1016,11 @@ class PythonParser {
         break;
       }
       this.next();
-      if (name.text === "as") {
+      if (this.at("as")) {
         this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
+        // The alias is read even though it is refused, so the rest of the
+        // statement is not read as a statement of its own.
+        this.next();
         const alias = this.peek();
         if (alias.kind === "name") this.next();
       }
