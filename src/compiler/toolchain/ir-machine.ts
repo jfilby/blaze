@@ -2066,6 +2066,50 @@ function bmi2OnItsOwn(target: TargetSpec): boolean {
   return target.cpu !== "" && CPU_HAS_BMI2.test(target.cpu);
 }
 
+/** The value of a wide constant the source wrote out, or null for anything
+ *  the backend cannot read as one.
+ *
+ * A wide constant arrives two ways: as the literal the optimizer folded, and
+ * as the two constructors that build one from its 64 bit limbs. Both are
+ * values the compiler knows, so both count. */
+function wideConstantOf(value: SemanticValue): bigint | null {
+  if (value.k === "const") return isWideType(value.type) ? integerLiteral(value.text) : null;
+  if (value.k !== "call" || !isWideType(value.type)) return null;
+  const callee = value.call.callee;
+  if (callee !== "u256_from_u64x2" && callee !== "u256_from_u64x4") return null;
+  let whole = 0n;
+  for (let at = 0; at < value.call.args.length; at += 1) {
+    const limb = value.call.args[at] as SemanticValue;
+    const part = limb.k === "const" ? integerLiteral(limb.text) : null;
+    if (part === null || part < 0n || part >= (1n << 64n)) return null;
+    whole |= part << BigInt(at * 64);
+  }
+  return whole;
+}
+
+/**
+ * `c` when a value is the modulus of a special prime — `2^256 - c` with `c`
+ * below `2^64` — and null otherwise.
+ *
+ * A special prime is one whose reduction is a multiply of the high limbs by
+ * one word rather than the general bit-by-bit reduction, and the modulus is
+ * the only thing that decides it. The value is a constant here, so the
+ * decision is the compiler's: the kernel call is the specialised one, the
+ * additions are written out as the four limb chains they are, and nothing at
+ * run time tests, branches on, or recomputes which kind of modulus it holds.
+ *
+ * `c` is below `2^64` because that is the shape whose folding is a fixed
+ * number of limb passes: `high * c` stays within five limbs and the top limb
+ * it leaves folds twice at most. A modulus with a wider complement keeps the
+ * general kernel, which is correct for every modulus below `2^256`.
+ */
+function specialPrimeC(value: SemanticValue): bigint | null {
+  const modulus = wideConstantOf(value);
+  if (modulus === null || modulus <= 0n || modulus >= (1n << 256n)) return null;
+  const c = (1n << 256n) - modulus;
+  return c < (1n << 64n) ? c : null;
+}
+
 /** The cpu names that carry BMI2, which is every processor gcc has accepted as
  *  a `-march` from Haswell on, plus the feature levels that name it directly. */
 const CPU_HAS_BMI2: RegExp =
@@ -8206,6 +8250,31 @@ class Machine {
       this.library(`${RUNTIME_NAME}_u256_div`);
       return;
     }
+    // A modulus the compiler has read is a modulus whose reduction is known:
+    // the product is reduced by a word rather than by the general reduction,
+    // and an addition and a subtraction are the limb chains they are rather
+    // than a call that works out which kind of modulus it was handed.
+    if (callee === "u256_add_mod" || callee === "u256_sub_mod" || callee === "u256_mul_mod") {
+      const c = specialPrimeC(value.call.args[2] as SemanticValue);
+      if (c !== null) {
+        if (callee === "u256_add_mod") {
+          this.wideAddModSpecial(value, out, c);
+          return;
+        }
+        if (callee === "u256_sub_mod") {
+          this.wideSubModSpecial(value, out, c);
+          return;
+        }
+        const left = this.wideArgument(value.call.args[0] as SemanticValue, "blaze_wide_left", value.type);
+        const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
+        this.code.leaMemReg(mem(RSP, out.offset), RDI);
+        this.code.leaMemReg(mem(RSP, left.offset), RSI);
+        this.code.leaMemReg(mem(RSP, right.offset), RDX);
+        this.code.movRegImm(RCX, c);
+        this.library(`${RUNTIME_NAME}_u256_mul_mod_special`);
+        return;
+      }
+    }
     const suffix = callee.slice("u256_".length);
     const left = this.wideArgument(value.call.args[0] as SemanticValue, "blaze_wide_left", value.type);
     const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
@@ -8215,6 +8284,89 @@ class Machine {
     this.code.leaMemReg(mem(RSP, right.offset), RDX);
     this.code.leaMemReg(mem(RSP, mod.offset), RCX);
     this.library(`${RUNTIME_NAME}_u256_${suffix}`);
+  }
+
+  /**
+   * `(left + right) mod 2^256 - c`, in the four limb chain the sum is.
+   *
+   * Both operands are residues, so the sum is below twice the modulus. The
+   * carry out of the top limb is the 2^256 the sum went past, which is c
+   * modulo this modulus: adding c to what is left brings the answer back
+   * below it, and it cannot carry again because what is left is more than 2c
+   * under 2^256. A sum that did not carry is below twice the modulus, so it
+   * needs at most the one subtraction of the modulus that follows.
+   */
+  private wideAddModSpecial(value: SemanticValue & { k: "call" }, out: Held, c: bigint): void {
+    const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
+    this.wideValue(value.call.args[0] as SemanticValue);
+    this.code.aluRegMem("add", WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+    for (let limb = 1; limb < 4; limb += 1) {
+      this.code.aluRegMem("adc", WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+    }
+    const carried = this.code.label("LwideCarried");
+    const done = this.code.label("LwideAddDone");
+    this.code.jcc("ae", carried);
+    // The sum carried: what is left plus c is the answer, already below the
+    // modulus. The carry out of the low limb is spent on a register that is
+    // zero before the addition, because the accumulator is cleared with an
+    // `xor` and a flags-writing instruction between the two halves of the chain
+    // would drop the carry it is carrying.
+    this.code.alu("xor", RDX, RDX, false);
+    this.code.movRegImm(RAX, c);
+    this.code.alu("add", WIDE_WORK[0], RAX, true);
+    for (let limb = 1; limb < 4; limb += 1) this.code.alu("adc", WIDE_WORK[limb], RDX, true);
+    this.wideStore(out);
+    this.code.jmp(done);
+    this.code.bind(carried);
+    // The sum did not carry. The sum is written down first because it is the
+    // answer when the subtraction of the modulus borrows.
+    this.wideStore(out);
+    this.subtractModulus(c);
+    this.code.jcc("b", done);
+    this.wideStore(out);
+    this.code.bind(done);
+  }
+
+  /**
+   * `(left - right) mod 2^256 - c`, in the four limb chain the difference is.
+   *
+   * A difference that did not borrow is a residue below the modulus. A
+   * difference that borrowed is the answer plus 2^256, so subtracting c, which
+   * is 2^256 modulo the modulus, is the answer itself.
+   */
+  private wideSubModSpecial(value: SemanticValue & { k: "call" }, out: Held, c: bigint): void {
+    const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
+    this.wideValue(value.call.args[0] as SemanticValue);
+    this.code.aluRegMem("sub", WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+    for (let limb = 1; limb < 4; limb += 1) {
+      this.code.aluRegMem("sbb", WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+    }
+    const done = this.code.label("LwideSubDone");
+    this.code.jcc("ae", done);
+    // The borrow was `2^256`, which is c modulo this modulus, so c is taken
+    // off the chain. The register the borrow is spent on is zeroed before the
+    // subtraction, because clearing it after would clear the borrow too.
+    this.code.alu("xor", RDX, RDX, false);
+    this.code.movRegImm(RAX, c);
+    this.code.alu("sub", WIDE_WORK[0], RAX, true);
+    for (let limb = 1; limb < 4; limb += 1) this.code.alu("sbb", WIDE_WORK[limb], RDX, true);
+    this.code.bind(done);
+    this.wideStore(out);
+  }
+
+  /** The four limbs in the working registers minus `2^256 - c`, leaving the
+   *  borrow in the carry flag.
+   *
+   * No limb of a special prime's modulus is zero — the low one is `2^64 - c`
+   * and the three above it are all ones — so loading one is a move and never
+   * the `xor` the lowering uses to write a zero, which would clear the borrow
+   * the chain is carrying. */
+  private subtractModulus(c: bigint): void {
+    const modulus = (1n << 256n) - c;
+    for (let limb = 0; limb < 4; limb += 1) {
+      this.code.movRegImm(RAX, (modulus >> BigInt(limb * 64)) & 0xffffffffffffffffn);
+      this.code.alu(limb === 0 ? "sub" : "sbb", WIDE_WORK[limb], RAX, true);
+    }
   }
 
   /** Whether a call is one of the wide kernels, whose answer is one slot. */

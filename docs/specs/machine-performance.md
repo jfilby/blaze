@@ -302,9 +302,47 @@ Three is `(x + x) + x` and two is `x + x`. A count above three is left as the
 multiply it is, and the reason is not the arithmetic but the binding: eight is
 three doublings only if the first doubling is written once and read three times,
 and a value that is not bound is computed at every read, so a chain of three
-additions is a tree of seven. Seven modular additions are slower than the
-multiply they replaced. The count is read from the side the compiler can see,
-which is a literal or a `u256_from_u64x2`/`u256_from_u64x4` of literal limbs.
+additions is a tree of seven. The count is read from the side the compiler can
+see, which is a literal or a `u256_from_u64x2`/`u256_from_u64x4` of literal
+limbs.
+
+The other side is read for the same reason. The answer is that side written
+once or twice, so doubling a value that itself computes something is two copies
+of every operation in it. `2 * ((x + y) - z)` is therefore left as the multiply
+it is; only a name, a literal, or a wide constant built from its limbs is free
+to write twice. A curve's doubling multiplies a name by two, and the one
+compound operand it has — the square of `x + y` — is left alone.
+
+### A modulus the compiler read is the arithmetic of that prime
+
+The modular kernels take the modulus as an argument, so the general entry works
+out on every call whether it was handed a special prime: it sets the top bit,
+negates the four limbs to get `c`, and checks that the complement fits in one
+word. That is the right thing for a modulus nothing knows, and the wrong thing
+for one the source wrote out — and the optimizer hands the backend the modulus
+as a constant, so the decision can be the compiler's instead.
+
+When the third argument of `u256_mul_mod` is a wide constant `2^256 - c` with
+`c` below `2^64`, the machine backend:
+
+- calls `blaze_rt_u256_mul_mod_special` with `c` as an immediate, which is the
+  same reduction without the test and without rebuilding `c` from the modulus;
+- writes `u256_add_mod` as the four limb addition it is, plus the two things
+  the shape says: a carry is `2^256`, which is `c` modulo this modulus, and a
+  sum that did not carry is below twice the modulus, so one subtraction settles
+  it;
+- writes `u256_sub_mod` as the four limb difference it is, plus `c` where the
+  difference borrowed. A difference of two residues that did not borrow is
+  already below the modulus, so it needs no subtraction at all.
+
+The arithmetic is still the runtime's when the modulus is a name, or when the
+complement does not fit in a word. The C backend keeps the general entry for
+both shapes, because it has no rule that folds a modulus into the call.
+
+The reduction itself is inlined into the special entry (`always_inline`), which
+is worth the 5% it costs the general entry: `mul_mod_special` was a call of 123
+instructions beside the 183 the product takes, and folding it in leaves the
+compiler free to keep the limbs of one pass in registers across the next.
 
 ### An object literal that writes every field is not cleared
 
@@ -447,51 +485,59 @@ would have to know which is which at every call it writes.
 
 ### The multiply the machine code calls
 
-The modular multiply of `secp256k1` is 58% of the program's instructions, and
-every one of them is a call into the runtime: the machine backend asks the
-kernel for the product and the reduction, and a call is what it writes. The
-kernel is not the problem — it is 532 instructions for sixteen limb products
-and a reduction, which is a great many, but it is the same instructions the C
-backend runs.
+The modular multiply of `secp256k1` is now 62% of the program's instructions,
+and it is still a call into the runtime: the machine backend asks the kernel
+for the product and the reduction, and a call is what it writes. The kernel is
+about 275 instructions for sixteen limb products and a reduction, and the call
+boundary is not where most of them are.
 
-What the call costs is the boundary. A kernel written into the machine code at
-the call site lets the compiler keep its operands in registers across the
-product and pipeline one multiply into the next. The special-prime kernel
-inlined into a loop that calls it was 1.58 times faster than the same kernel
-called, and 1.78 times faster than the generic entry the backend calls today;
-the margin is the boundary and not the arithmetic. Writing the 4 by 4 product
-and the special-prime reduction as x86-64 here is a change of about sixty
-instructions at each of twenty call sites, and the reduction of `2^256 - c` is
-the shape that makes it worth doing: a generic modulus would need the bit-by-bit
-reduction, which is not worth writing twenty times.
+What the call costs beyond the arithmetic is the boundary. A kernel written
+into the machine code at the call site lets the compiler keep its operands in
+registers across the product and pipeline one multiply into the next. The
+special-prime kernel inlined into a loop that calls it was 1.58 times faster
+than the same kernel called; that measurement was taken against the general
+entry, and the special entry this round added has already taken the modulus
+test and the rebuild of `c` out of the boundary. What is left to win by writing
+the 4 by 4 product as x86-64 here is the register traffic around it, not the
+arithmetic, and the reduction of `2^256 - c` is the shape that makes it worth
+doing: a generic modulus would need the bit-by-bit reduction, which is not
+worth writing at twenty call sites.
 
-Until then the kernel can be made faster on its own by about 12%, and that is
-worth less than it looks: the shape that is faster is the one that takes the
-special-prime path unconditionally, and the shape that is correct has to test
-for the modulus first. The test is what costs the 12%, so the gain is only
-there for a compiler that knows the modulus is a special prime — which is what
-a constant local would say, and the optimizer does not fold one into the call
-yet.
+The shape the kernel does have now is the one the previous round priced: the
+special-prime reduction taken unconditionally, chosen by a compiler that folded
+the modulus into the call. That was the 12% that looked small, and it is 12% of
+every product in a program that no longer has to prove which kind of modulus it
+holds on each one.
 
 ### The division the inversion turns on
 
-The other fifth of `secp256k1` is the extended Euclidean inversion at the end,
-which is one `u256_div` per turn of the algorithm and 663k instructions of the
-program's 3.01M. The division is the restoring kind: one bit of the dividend per
-iteration, a shift of all four limbs, a comparison and a conditional subtract,
-which is 920 ns for a full-width pair and about eight cycles a bit. That is the
-right algorithm for a division the compiler cannot see the shape of, and the
-wrong one for the Euclid loop's, where both sides are wide and the quotient is
-small.
+The extended Euclidean inversion at the end of `secp256k1` used to be the
+second largest thing in the program. Its divisions alone were 1.33M
+instructions of the program's 4.22M, because the division was the restoring
+kind — one bit of the dividend per iteration, a shift of all four limbs, a
+comparison and a conditional subtract. That is the right algorithm for a
+division whose operands are unknown and the wrong one for the Euclid loop's,
+where both sides are wide and the quotient is small.
 
-A division by 64-bit estimates — Knuth's algorithm D — is a multiply and a
-correcting subtraction per limb instead of sixty-four iterations of the shift,
-and a 256 by 256 division becomes four of them. The test that would hold it is
-already written: `test/u256-kernel.test.ts` sweeps the quotient and remainder
-against `BigInt` limb by limb, over boundaries, full-width random pairs, small
-divisors and hand-traced cases. What the inversion would then cost is a
-division of the same width as the multiply, and the inversion stops being the
-second largest thing in the program.
+The kernel is now Knuth's algorithm D: a limb of the quotient per turn, an
+estimate from the top two limbs of the divisor, and at most two correcting
+subtractions. The 256 by 256 sweep in `test/u256-kernel.test.ts` holds it to
+`BigInt` limb by limb over boundaries, full-width random pairs, small divisors
+and hand-traced cases. A division of a full-width pair fell from about 5,170
+instructions to about 300, the inversion's share of the program fell from 31%
+to 4%, and the inversion stopped being the second largest thing in the program.
+
+### The remaining multiplication count
+
+What is left is not the cost of a product but how many of them the scalar
+multiplication asks for: 256 doublings and 128 additions, where the doubling is
+nine modular multiplies and the addition sixteen. Two changes would take a
+further quarter each, and both are algorithmic rather than arithmetic: a
+4 bit window on the scalar would replace 128 additions with about 64, and the
+endomorphism the source already describes would halve the doublings. The
+endomorphism branch is the one the source-level lowering still removes — its
+scalar split uses destructuring the frontend does not read yet — so the
+compiler is the thing to extend before the kernel is.
 
 ## The measurements
 
@@ -610,6 +656,30 @@ loads and twelve stores a kernel call spent on arguments the frame already held
 and on an answer it was about to copy. The extended Euclidean inversion at the
 end of the program is untouched at 663k, a fifth of what is left: it is a
 division per turn of the algorithm, and the division is the bit-by-bit kernel.
+
+### What the modulus and the division were worth on `secp256k1`
+
+The measurements below are of the tree this round started from and are the same
+method: `node src/compiler/offline-build.ts <project> <work>`, then
+`valgrind --tool=callgrind ./program 1`, which is one scalar multiplication of
+fifteen in the benchmark. The tree's own count is larger than the 3.01M of the
+section above because the tree is not the same one; the ratios are the change
+this round made and the rest is not read across the two.
+
+| Form of one scalar multiplication | Instructions (callgrind) | Against the start |
+|---|---|---|
+| the tree this round started from | 4.22M | — |
+| the division by 64 bit limbs | 2.98M | 1.42 times fewer |
+| the modulus read, and the additions and subtractions written out | 2.02M | 2.09 times fewer |
+| the reduction folded into the special entry | 1.93M | 2.19 times fewer |
+
+By function, the modular multiply fell from 1.68M to 1.20M — the special entry
+plus the inlined reduction — the modular addition fell from 268k to none and
+the modular subtraction from 376k to 39k, which are the limb chains they became,
+and the division fell from 1.33M to 78k. The count is worth more than the clock
+here: `./program 15` went from about 22 ms to about 11 ms on the machine this
+was recorded on, which is 2 times, and that machine's run-to-run spread is wide
+enough that the instruction count is the half that is worth quoting.
 
 ### The fidelity of `./secp256k1 15`
 

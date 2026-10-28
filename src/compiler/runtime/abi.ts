@@ -509,6 +509,9 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "void blaze_rt_u256_add_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
+  "void blaze_rt_u256_mul_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c)",
+  "void blaze_rt_u256_add_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c)",
+  "void blaze_rt_u256_sub_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c)",
   "void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_redc(blaze_u256* out, const blaze_u256* T_hi, const blaze_u256* T_lo, const blaze_u256* mod, uint64_t pinv)",
@@ -797,6 +800,32 @@ void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256
   *out = accumulator;
 }
 
+/* The full 512 bit product of two 256 bit values, in eight limbs, low first.
+   The columns above the top limb are kept rather than dropped: a modular
+   multiply reduces them instead of discarding them. */
+static void blaze_u256_product(uint64_t prod[8], const blaze_u256* left, const blaze_u256* right) {
+  for (unsigned i = 0; i < 8; i += 1) prod[i] = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    unsigned __int128 carry = 0;
+    for (unsigned j = 0; j < 4; j += 1) {
+      const unsigned __int128 product =
+        (unsigned __int128)left->limbs[i] * right->limbs[j] + prod[i + j] + carry;
+      prod[i + j] = (uint64_t)product;
+      carry = product >> 64;
+    }
+    prod[i + 4] = (uint64_t)carry;
+  }
+}
+
+/* The modulus a special prime names: 2^256 - c. A special prime is above
+   2^255, which is the same thing as c being below 2^255. */
+static void blaze_u256_mod_of_c(blaze_u256* mod, uint64_t c) {
+  mod->limbs[0] = (uint64_t)0u - c;
+  mod->limbs[1] = 0xffffffffffffffffu;
+  mod->limbs[2] = 0xffffffffffffffffu;
+  mod->limbs[3] = 0xffffffffffffffffu;
+}
+
 /* For a modulus of the form 2^256 - c with c < 2^64 (e.g. secp256k1's
    P = 2^256 - 2^32 - 977), 2^256 ≡ c (mod mod). A 512-bit value
    high * 2^256 + low therefore reduces to (high * c + low) mod mod.
@@ -805,7 +834,7 @@ void blaze_rt_u256_mul(blaze_u256* out, const blaze_u256* left, const blaze_u256
    (top * 2^256 ≡ top * c) terminates in at most three iterations, then one
    final conditional subtraction of mod. This replaces 512 bit-by-bit shift
    and compare iterations with a handful of limb operations. */
-static void mul_mod_special(blaze_u256* out, const uint64_t prod[8], const blaze_u256* mod, uint64_t c) {
+static __attribute__((always_inline)) inline void mul_mod_special(blaze_u256* out, const uint64_t prod[8], const blaze_u256* mod, uint64_t c) {
   uint64_t t[5] = {0, 0, 0, 0, 0};
   /* t = high * c, schoolbook with c as a single limb. */
   for (unsigned i = 0; i < 4; i += 1) {
@@ -861,17 +890,7 @@ static void mul_mod_special(blaze_u256* out, const uint64_t prod[8], const blaze
    reduction applies. Both are sound for any modulus below 2^256. */
 void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
   uint64_t prod[8];
-  for (unsigned i = 0; i < 8; i += 1) prod[i] = 0;
-  for (unsigned i = 0; i < 4; i += 1) {
-    unsigned __int128 carry = 0;
-    for (unsigned j = 0; j < 4; j += 1) {
-      const unsigned __int128 product =
-        (unsigned __int128)left->limbs[i] * right->limbs[j] + prod[i + j] + carry;
-      prod[i + j] = (uint64_t)product;
-      carry = product >> 64;
-    }
-    prod[i + 4] = (uint64_t)carry;
-  }
+  blaze_u256_product(prod, left, right);
   /* Fast path for special primes: mod > 2^255 and c = 2^256 - mod < 2^64. */
   if ((mod->limbs[3] >> 63) != 0) {
     /* c = 2^256 - mod = ~mod + 1 (two's complement). */
@@ -1097,6 +1116,69 @@ void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_
   }
 }
 
+/* The three modular operations again, for a modulus the compiler has proved is
+   a special prime. The modulus is not passed: \`c\` is, and 2^256 - c is rebuilt
+   from it. That is the one thing the general entry has to work out on every
+   call: with c in hand the folding of a high limb is a fixed number of limb
+   passes when c is small, so nothing here tests, branches on, or recomputes
+   it.
+
+   These are not part of the language's ABI: only a lowering that folded a
+   constant modulus into the call reaches them, and the C backend keeps the
+   general entry because it has no rule that folds one. */
+void blaze_rt_u256_mul_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c) {
+  uint64_t prod[8];
+  blaze_u256_product(prod, left, right);
+  blaze_u256 mod;
+  blaze_u256_mod_of_c(&mod, c);
+  mul_mod_special(out, prod, &mod, c);
+}
+
+void blaze_rt_u256_add_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c) {
+  unsigned __int128 carry = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 sum = (unsigned __int128)left->limbs[i] + right->limbs[i] + carry;
+    out->limbs[i] = (uint64_t)sum;
+    carry = sum >> 64;
+  }
+  if (carry != 0) {
+    /* The sum went past 2^256, which is c modulo this modulus. Both sides are
+       below the modulus, so what is left below 2^256 is more than 2c under it:
+       adding c once cannot overflow and cannot reach the modulus. */
+    unsigned __int128 added = c;
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 sum = (unsigned __int128)out->limbs[i] + added;
+      out->limbs[i] = (uint64_t)sum;
+      added = sum >> 64;
+    }
+    return;
+  }
+  blaze_u256 mod;
+  blaze_u256_mod_of_c(&mod, c);
+  if (!blaze_rt_u256_less(out, &mod)) {
+    blaze_rt_u256_sub(out, out, &mod);
+  }
+}
+
+void blaze_rt_u256_sub_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c) {
+  unsigned __int128 borrow = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 difference = (unsigned __int128)left->limbs[i] - right->limbs[i] - borrow;
+    out->limbs[i] = (uint64_t)difference;
+    borrow = (difference >> 64) & 1u;
+  }
+  /* No borrow is a difference of two residues, which is already below the
+     modulus. A borrow is the negative difference plus 2^256, so subtracting c
+     turns it into the negative difference plus the modulus. */
+  if (borrow != 0) {
+    unsigned __int128 taken = c;
+    for (unsigned i = 0; i < 4; i += 1) {
+      const unsigned __int128 difference = (unsigned __int128)out->limbs[i] - taken;
+      out->limbs[i] = (uint64_t)difference;
+      taken = (difference >> 64) & 1u;
+    }
+  }
+}
 
 void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right) {
   for (unsigned i = 0; i < 4; i += 1) out->limbs[i] = left->limbs[i] & right->limbs[i];
@@ -1223,73 +1305,147 @@ static int blaze_u256_is_zero(const blaze_u256* value) {
   return (value->limbs[0] | value->limbs[1] | value->limbs[2] | value->limbs[3]) == 0u;
 }
 
-/* How many bits a value holds above its lowest one, which is the position of its
-   most significant set bit. A zero holds none and answers 0, and the divide
-   below reads that as the count of turns it has left to run.
-
-   The limbs are walked from the top down, because the top limb holds the most
-   significant bits: the first limb that is not zero is the one that decides the
-   width, and no limb below it can raise it. Walking up from the bottom instead
-   stops at the first non-zero limb and answers the width of the lowest one,
-   which for a value whose bottom limb is all ones and whose top limb is not
-   said 64 bits rather than 256 — and every quotient of that value came back
-   empty. */
-static int blaze_u256_bits(const blaze_u256* value) {
-  for (unsigned i = 4; i-- > 0;) {
-    const uint64_t limb = value->limbs[i];
-    if (limb == 0u) continue;
-    int top = 0;
-    for (unsigned bit = 0; bit < 64u; bit += 1) {
-      if ((limb >> bit) & 1u) top = (int)bit + 1;
-    }
-    return (int)(i * 64u) + top;
-  }
-  return 0;
+/* The leading zeroes in one limb, which is what normalises a divisor for the
+   long division below. The builtin is the instruction the machine has for it,
+   and a limb that is zero is never asked, because only the top limb of a
+   divisor is, and the top limb of a divisor is not zero. */
+static unsigned blaze_u256_leading_zeroes(uint64_t value) {
+  return (unsigned)__builtin_clzll(value);
 }
 
-/* Restoring division, written here rather than beside the multiplication it is
-   the counterpart of because it is the only operation in this file that calls
-   \`blaze_rt_u256_less\`, and that is written below the arithmetic. A call to a
-   function that is not declared yet is a call on an implicit declaration, which
-   C99 removed and which answers from whatever the compiler assumed: the divide
-   was written beside the multiply and returned a quotient of zero for nearly
-   every input, because the comparison it asked was not the one it ran.
+/* Long division by 64 bit limbs, Knuth's algorithm D.
 
-   The invariant the loop rests on is that what is left is always below the
-   divisor: each turn moves it up by one bit and subtracts the divisor only where
-   the divisor still fits under it. That is why this is not the shorter form
-   subtracting \`divisor << step\` from the whole dividend — that one leaves the
-   whole dividend in the remainder, which reaches the divisor's own width as
-   soon as the divisor is a whole number of limbs wide and a 256 bit value
-   cannot hold it. Holding what is left below the divisor keeps the move up to
-   one limb plus the one bit the subtraction cannot consume. */
+   The division this replaces took one bit of the dividend per turn: a shift of
+   all four limbs, a comparison and a conditional subtraction, which is about
+   sixty-four turns for a full width pair and eight cycles a bit. That is the
+   right shape for a division whose operands are unknown, and the wrong one for
+   the shape most of this program's divisions have, where both sides are wide
+   and the quotient is small.
+
+   This algorithm answers a limb of the quotient per turn, estimating it from
+   the top two limbs of the divisor and correcting the estimate at most twice.
+   Four limbs of dividend by four of divisor is four estimates, four 128 bit
+   divides and four multiply-subtract passes, rather than 256 shifts.
+
+   Normalising the divisor so its top bit is set is what makes the estimate
+   close: with the top limb below 2^63 an estimate can be too large by more than
+   one, and the correction loop would have to run a whole limb wide. The
+   dividend is shifted by the same count and shifted back at the end.
+
+   The quotient and remainder are still the truncating pair the language says
+   they are, and a zero divisor still answers zero for both, which is what an
+   operation with no way to raise can answer. */
 static void blaze_u256_divmod(blaze_u256* quotient, blaze_u256* remainder, const blaze_u256* left, const blaze_u256* right) {
   *quotient = blaze_u256_zero();
   *remainder = blaze_u256_zero();
   if (blaze_u256_is_zero(right)) return;
-  blaze_u256 rest = blaze_u256_zero();
-  for (int step = blaze_u256_bits(left) - 1; step >= 0; step -= 1) {
-    /* What is left moves up one bit and takes the dividend's bit at the bottom.
-       A shift by the full width of a limb is undefined in C, so each limb takes
-       the top bit of the one below it rather than being shifted as a number.
 
-       The top bit of the top limb falls off the end when the whole is shifted:
-       that is the 256th bit, which cannot be held. When it is set the shifted
-       value is at least 2^256, which is greater than any divisor below 2^256,
-       so the subtraction always happens and the lost bit is exactly what makes
-       the comparison come out right. */
-    const int overflow = (int)((rest.limbs[3] >> 63) & 1u);
-    rest.limbs[3] = (rest.limbs[3] << 1) | (rest.limbs[2] >> 63);
-    rest.limbs[2] = (rest.limbs[2] << 1) | (rest.limbs[1] >> 63);
-    rest.limbs[1] = (rest.limbs[1] << 1) | (rest.limbs[0] >> 63);
-    rest.limbs[0] = (rest.limbs[0] << 1) | ((left->limbs[step / 64] >> (step % 64)) & 1u);
-    const int subtract = overflow || !blaze_rt_u256_less(&rest, right);
-    if (subtract) {
-      blaze_rt_u256_sub(&rest, &rest, right);
-      quotient->limbs[step / 64] |= (uint64_t)1u << (unsigned)(step % 64);
+  /* The limbs of each side that hold a value. A zero is one limb of zero. */
+  unsigned n = 4;
+  while (n > 1 && right->limbs[n - 1] == 0u) n -= 1;
+  unsigned m = 4;
+  while (m > 1 && left->limbs[m - 1] == 0u) m -= 1;
+  if (m < n || (m == n && blaze_rt_u256_less(left, right))) {
+    *remainder = *left;
+    return;
+  }
+
+  /* A one limb divisor is the schoolbook case: one 128 bit divide per limb,
+     most significant first, carrying the remainder into the next. */
+  if (n == 1) {
+    const uint64_t divisor = right->limbs[0];
+    unsigned __int128 rest = 0;
+    for (unsigned i = m; i-- > 0;) {
+      const unsigned __int128 current = (rest << 64) | left->limbs[i];
+      quotient->limbs[i] = (uint64_t)(current / divisor);
+      rest = current % divisor;
+    }
+    remainder->limbs[0] = (uint64_t)rest;
+    return;
+  }
+
+  /* Normalise both sides left so the divisor's top bit is set. A shift of the
+     full width of a limb is undefined, so the zero shift is the copy and not a
+     shift by sixty-four. */
+  const unsigned shift = blaze_u256_leading_zeroes(right->limbs[n - 1]);
+  uint64_t v[4] = {0u, 0u, 0u, 0u};
+  uint64_t u[5] = {0u, 0u, 0u, 0u, 0u};
+  if (shift == 0u) {
+    for (unsigned i = 0; i < n; i += 1) v[i] = right->limbs[i];
+    for (unsigned i = 0; i < m; i += 1) u[i] = left->limbs[i];
+  } else {
+    for (unsigned i = n - 1; i > 0; i -= 1) {
+      v[i] = (right->limbs[i] << shift) | (right->limbs[i - 1] >> (64u - shift));
+    }
+    v[0] = right->limbs[0] << shift;
+    u[m] = left->limbs[m - 1] >> (64u - shift);
+    for (unsigned i = m - 1; i > 0; i -= 1) {
+      u[i] = (left->limbs[i] << shift) | (left->limbs[i - 1] >> (64u - shift));
+    }
+    u[0] = left->limbs[0] << shift;
+  }
+
+  const unsigned __int128 base = (unsigned __int128)1u << 64;
+  const uint64_t top = v[n - 1];
+  const uint64_t next = v[n - 2];
+  for (unsigned j = m - n + 1; j-- > 0;) {
+    /* The estimate is the top two limbs of the window over the divisor's top
+       limb. It is one limb wide, so an estimate at or above the base is
+       clamped to the largest limb: the true quotient limb cannot reach the
+       base, and the correction below walks down from there. */
+    const unsigned __int128 window = ((unsigned __int128)u[j + n] << 64) | u[j + n - 1];
+    unsigned __int128 estimate = window / top;
+    unsigned __int128 rest = window % top;
+    if (estimate >= base) {
+      estimate = (unsigned __int128)0xffffffffffffffffu;
+      rest = window - estimate * top;
+    }
+    /* The estimate is at most two too large. The multiply by the second limb
+       decides most of it, and the correction stops as soon as the rest is a
+       full limb, because past that the comparison cannot say anything. */
+    while (rest < base && estimate * next > ((rest << 64) | u[j + n - 2])) {
+      estimate -= 1;
+      rest += top;
+    }
+    /* Subtract the estimate times the divisor from the window. The borrow out
+       of the top limb is the estimate having been one too large, and the
+       divisor is added back once in that case. */
+    unsigned __int128 carry = 0;
+    unsigned __int128 borrow = 0;
+    for (unsigned i = 0; i < n; i += 1) {
+      const unsigned __int128 product = estimate * v[i] + carry;
+      carry = product >> 64;
+      const unsigned __int128 difference = (unsigned __int128)u[j + i] - (uint64_t)product - borrow;
+      u[j + i] = (uint64_t)difference;
+      borrow = (difference >> 64) & 1u;
+    }
+    const unsigned __int128 difference = (unsigned __int128)u[j + n] - carry - borrow;
+    u[j + n] = (uint64_t)difference;
+    borrow = (difference >> 64) & 1u;
+    if (borrow != 0) {
+      estimate -= 1;
+      unsigned __int128 added = 0;
+      for (unsigned i = 0; i < n; i += 1) {
+        const unsigned __int128 sum = (unsigned __int128)u[j + i] + v[i] + added;
+        u[j + i] = (uint64_t)sum;
+        added = sum >> 64;
+      }
+      u[j + n] = (uint64_t)((unsigned __int128)u[j + n] + added);
+    }
+    quotient->limbs[j] = (uint64_t)estimate;
+  }
+
+  /* Shift the remainder back down by the count the dividend was moved up by.
+     The top limb of the window is zero once the loop ends, because what is
+     left is below the divisor and the divisor is below one limb above its own
+     width. */
+  if (shift == 0u) {
+    for (unsigned i = 0; i < n; i += 1) remainder->limbs[i] = u[i];
+  } else {
+    for (unsigned i = 0; i < n; i += 1) {
+      remainder->limbs[i] = (u[i] >> shift) | (u[i + 1] << (64u - shift));
     }
   }
-  *remainder = rest;
 }
 
 /* A division by zero answers zero. The language has no way to raise, so there

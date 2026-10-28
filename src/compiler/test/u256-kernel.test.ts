@@ -166,3 +166,86 @@ test("the u256 quotient and remainder agree with BigInt over the whole sweep", a
   }
   assert.equal(pairs.length, 668, `the sweep is the full sweep, ${pairs.length} pairs`);
 });
+
+/** A C harness over the special-prime kernels, driven by two operands and the
+ *  complement of the modulus on the command line. */
+const SPECIAL_HARNESS = `
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include "${RUNTIME_NAME}.h"
+
+static void write_u256(blaze_u256 value) {
+  for (int i = 3; i >= 0; i -= 1) printf("%016llx", (unsigned long long)value.limbs[i]);
+}
+
+static blaze_u256 read_u256(const char* hex) {
+  blaze_u256 value;
+  for (int limb = 0; limb < 4; limb += 1) {
+    uint64_t accumulator = 0;
+    for (int j = 0; j < 16; j += 1) {
+      const char digit = hex[limb * 16 + j];
+      const unsigned nibble = (digit >= '0' && digit <= '9') ? (unsigned)(digit - '0') : (unsigned)(digit - 'a' + 10);
+      accumulator = (accumulator << 4) | (uint64_t)nibble;
+    }
+    value.limbs[3 - limb] = accumulator;
+  }
+  return value;
+}
+
+int main(int argc, char** argv) {
+  blaze_u256 left = read_u256(argv[1]);
+  blaze_u256 right = read_u256(argv[2]);
+  const uint64_t c = strtoull(argv[3], NULL, 10);
+  blaze_u256 out;
+  blaze_rt_u256_add_mod_special(&out, &left, &right, c);
+  printf("add "); write_u256(out); printf("\\n");
+  blaze_rt_u256_sub_mod_special(&out, &left, &right, c);
+  printf("sub "); write_u256(out); printf("\\n");
+  blaze_rt_u256_mul_mod_special(&out, &left, &right, c);
+  printf("mul "); write_u256(out); printf("\\n");
+  return 0;
+}
+`;
+
+test("the special-prime kernels agree with BigInt over the whole sweep", async () => {
+  // The modulus of a special prime is 2^256 - c, and the three operations the
+  // lowering reaches for one are entries of their own rather than the general
+  // kernel. They are only sound if they answer the same residue as the
+  // general entry, so the sweep is the same one the division is held to,
+  // reduced below each modulus and compared over the whole numbers. The
+  // complements include the shape secp256k1's P has, a word at its limit, and
+  // the odd values between them.
+  const directory = await scratch("blaze-u256-special-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("danger"), "utf8");
+  await writeFile(join(directory, "harness.c"), SPECIAL_HARNESS, "utf8");
+  const binary = join(directory, "harness");
+  const built = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "harness.c"), join(directory, "runtime.c"), "-o", binary],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(built.code, 0, built.stderr);
+
+  const complements = [(1n << 32n) + 977n, 1n, 3n, 5n, 0xffffffffffffffffn];
+  const values = [...cases(), ...randoms(160, 256n)];
+  for (const c of complements) {
+    const modulus = (1n << 256n) - c;
+    const reduced = values.map((value) => value % modulus);
+    const pairs: [bigint, bigint][] = [];
+    for (let i = 0; i + 1 < reduced.length; i += 2) pairs.push([reduced[i]!, reduced[i + 1]!]);
+    for (const value of reduced) pairs.push([value, value]);
+    for (const [left, right] of pairs) {
+      const result = run(binary, [digits(left), digits(right), c.toString()], { timeoutMs: 60_000 });
+      assert.equal(result.code, 0, result.stderr);
+      const [addLine, subLine, mulLine] = result.stdout.trim().split("\n");
+      const add = BigInt(`0x${addLine!.slice(4)}`);
+      const sub = BigInt(`0x${subLine!.slice(4)}`);
+      const mul = BigInt(`0x${mulLine!.slice(4)}`);
+      assert.equal(add, (left + right) % modulus, `the sum of ${digits(left)} and ${digits(right)} modulo 2^256 - ${c}`);
+      assert.equal(sub, ((left - right) % modulus + modulus) % modulus, `the difference of ${digits(left)} and ${digits(right)} modulo 2^256 - ${c}`);
+      assert.equal(mul, (left * right) % modulus, `the product of ${digits(left)} and ${digits(right)} modulo 2^256 - ${c}`);
+    }
+  }
+});

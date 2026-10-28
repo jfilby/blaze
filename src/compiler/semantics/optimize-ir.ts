@@ -472,6 +472,13 @@ function modularMultiplyOf(
   });
   if (multiplier === 0) return { k: "const", type: value.type, text: "0" };
   if (multiplier === 1) return other;
+  // The answer is the other side written once or twice, so the rewrite is only
+  // a saving when writing it twice is free: a name is read, a literal is laid
+  // down, and a wide constant built from its limbs is the limbs it is written
+  // with. Anything computed would be computed again at every copy, so a
+  // product by two of a sum would be two copies of the sum and every operation
+  // in it — slower than the one product it replaced.
+  if (other.k !== "local" && other.k !== "const" && smallWideOf(other) === null) return null;
   if (multiplier === 2) return addMod(other, other);
   if (multiplier === 3) return addMod(addMod(other, other), other);
   return null;

@@ -1936,6 +1936,23 @@ test("a modular multiply of two wide numbers is left as the multiply it is", () 
   assert.doesNotMatch(product, /u256_add_mod/);
 });
 
+test("a modular multiply by two of a computed value is not two copies of it", () => {
+  // `2 * ((x + y) - z)` written as additions would be the sum and the
+  // difference twice, because the value is not bound to a name, and two copies
+  // of a chain of kernels is more work than the one multiply the source wrote.
+  // Only a value that is free to write twice — a name, a literal, or a wide
+  // constant built from its limbs — is doubled.
+  const computed = modular(
+    "u256_add_mod",
+    { k: "local", type: U256, name: "x" },
+    { k: "local", type: U256, name: "y" },
+    { k: "local", type: U256, name: "p" },
+  );
+  const doubled = printed(wideSubject(modular("u256_mul_mod", wideFrom("2"), computed, { k: "local", type: U256, name: "p" })));
+  assert.match(doubled, /u256_mul_mod/, "the product by two stays the multiply it is");
+  assert.equal((doubled.match(/u256_add_mod/g) ?? []).length, 1, "the sum inside it is written once, not once per copy");
+});
+
 test("a modular multiply by one is the value it multiplies", () => {
   const once = printed(wideSubject(modular("u256_mul_mod", wideFrom("1"), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
   assert.doesNotMatch(once, /u256_mul_mod/);

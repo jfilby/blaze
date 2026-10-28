@@ -4071,7 +4071,11 @@ test("a modular multiply by two is the doubling it is, and answers the same resi
   assert.equal(await lowered(fn, wideDriver), wideLimbs((2n * value) % WIDE_P));
   const text = await emitted(fn);
   assert.doesNotMatch(text, /u256_mul_mod/, "the multiply is not the kernel the code calls");
-  assert.match(text, /u256_add_mod/, "the doubling is the addition kernel");
+  // The modulus is the curve's prime, which the compiler read, so the
+  // doubling is not a call at all: it is the four limb chain and the carry it
+  // spends, written where the addition is.
+  assert.doesNotMatch(text, /u256_add_mod/, "the doubling is not a call");
+  assert.match(text, /^\s+[0-9a-f]+:\s+adc\s/m, "the doubling carries through its limbs");
 });
 
 test("a wide kernel answers four limbs, including the ones the reduction carried", async () => {
@@ -4093,6 +4097,61 @@ test("a modular multiply by a count the compiler does not answer with additions 
   const fn = optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(8n), wideOf(value), wideOf(WIDE_P))));
   assert.equal(await lowered(fn, wideDriver), wideLimbs((8n * value) % WIDE_P));
   assert.match(await emitted(fn), /u256_mul_mod/, "the multiply by eight is the kernel's");
+});
+
+test("a modulus the compiler reads is lowered to the arithmetic of that prime", async () => {
+  // P is 2^256 - c with c below 2^64, which is the shape whose reduction is a
+  // word rather than the general bit-by-bit one. The modulus is a constant, so
+  // the compiler is what knows it: a product is the special entry, and an
+  // addition and a subtraction are the four limb chains they are rather than a
+  // call that works out which kind of modulus it was handed. The answers are
+  // checked against the same arithmetic over the whole numbers, so a shape
+  // that is faster and wrong is not a shape this test accepts.
+  // Two pairs: the first carries out of the sum and needs the modulus folded
+  // back in, the second subtracts a larger residue from a smaller one and
+  // borrows. The limb chains spend a carry and a borrow, and a lowering that
+  // cleared the register the carry travels on after the addition that set it
+  // would answer the first pair wrong.
+  const pairs: readonly (readonly [bigint, bigint])[] = [
+    [WIDE_P - 1n, WIDE_P - 2n],
+    [1n, WIDE_P - 1n],
+  ];
+  for (const [a, b] of pairs) {
+    const sum = await lowered(optimizeSemanticFunction(wideSubjectOf(modularCall("u256_add_mod", wideOf(a), wideOf(b), wideOf(WIDE_P)))), wideDriver);
+    assert.equal(sum, wideLimbs((a + b) % WIDE_P), `the sum of ${a} and ${b}`);
+    const difference = await lowered(optimizeSemanticFunction(wideSubjectOf(modularCall("u256_sub_mod", wideOf(a), wideOf(b), wideOf(WIDE_P)))), wideDriver);
+    assert.equal(difference, wideLimbs(((a - b) % WIDE_P + WIDE_P) % WIDE_P), `the difference of ${a} and ${b}`);
+  }
+  const sumText = await emitted(optimizeSemanticFunction(wideSubjectOf(modularCall("u256_add_mod", wideOf(1n), wideOf(WIDE_P - 1n), wideOf(WIDE_P)))));
+  assert.doesNotMatch(sumText, /u256_add_mod/, "a modular addition of a constant prime is the limb chain it is");
+  const differenceText = await emitted(optimizeSemanticFunction(wideSubjectOf(modularCall("u256_sub_mod", wideOf(1n), wideOf(WIDE_P - 1n), wideOf(WIDE_P)))));
+  assert.doesNotMatch(differenceText, /u256_sub_mod/, "a modular subtraction of a constant prime is the limb chain it is");
+
+  const a = 0x0123456789abcdeffedcba9876543210fedcba98765432100123456789abcdefn;
+  const b = 0x0fedcba9876543210123456789abcdef0123456789abcdef0fedcba987654321n;
+  const product = await lowered(optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(a), wideOf(b), wideOf(WIDE_P)))), wideDriver);
+  assert.equal(product, wideLimbs((a * b) % WIDE_P));
+  const productText = await emitted(optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(a), wideOf(b), wideOf(WIDE_P)))));
+  assert.match(productText, /u256_mul_mod_special/, "the product is the reduction for a special prime");
+});
+
+test("a modulus that is not a constant keeps the general kernel", async () => {
+  // The lowering may only take the special shape when the modulus is a value
+  // the compiler read. A modulus that is a name is any modulus, so the entry
+  // the runtime provides for every modulus is the one to call.
+  const value = 0x0123456789abcdefn;
+  const fn = optimizeSemanticFunction({
+    name: "subject", symbol: "subject", params: [{ kind: "value", name: "p", mutable: false, type: U256 }], returns: U256,
+    requires: [], ensures: [], effects: [], allocates: false, prints: false, readsArgv: false,
+    objects: {}, calls: [],
+    entry: {
+      id: "entry", releases: [],
+      statements: [],
+      terminator: { k: "return", value: modularCall("u256_mul_mod", wideOf(value), wideOf(value), local("p", U256)) },
+    },
+  });
+  assert.match(await emitted(fn), /u256_mul_mod\b/, "the general entry is the one a modulus the compiler did not read reaches");
+  assert.doesNotMatch(await emitted(fn), /u256_mul_mod_special/, "a modulus that is a name is not proved to be a special prime");
 });
 
 /** A no-parameter function of a wide number that answers a value written out. */
