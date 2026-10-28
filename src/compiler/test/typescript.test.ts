@@ -420,12 +420,16 @@ test("a string that is never closed is reported instead of read again and again"
 
 test("a quote an escape covers does not end the string", () => {
   // The escape has to be read before the string is closed, or the token ends
-  // at the escaped quote and everything after it is read as a new statement.
+  // at the escaped quote and the rest of the string is read as a new
+  // statement. The construct after it is refused on the line it is written on.
   const message = diagnostic(() =>
-    typescript.analyze('export function f(x: number): number {\n  const s = "a\\"b";\n  return x;\n}\n', "main.ts"),
+    typescript.analyze(
+      'export function f(x: number): number {\n  const s = "a\\"b";\n  switch (x) {}\n  return x;\n}\n',
+      "main.ts",
+    ),
   );
-  assert.match(message, /line 2: a quoted string is not a value/);
-  assert.doesNotMatch(message, /line 3/);
+  assert.match(message, /line 3: "switch" is not supported/);
+  assert.doesNotMatch(message, /line 2/);
 });
 
 test("a string that spans lines moves the line every later diagnostic names", () => {

@@ -1132,6 +1132,10 @@ export function probeFault(result: RunResult): string | null {
   if (result.timedOut) return `the candidate did not return within ${PROBE_TIMEOUT_MS / 1000} seconds`;
   if (result.spawnError !== undefined) return `the probe did not start: ${result.spawnError}`;
   if (result.signal !== null) return `the candidate was killed by ${result.signal}`;
+  // A raise is a way the source can end too: the runtime reports it on the
+  // standard error and exits two. The probe asks whether the candidate ran,
+  // and the program it belongs to is what settles what it computes.
+  if (result.code === 2 && /^blaze: /m.test(result.stderr)) return null;
   if (result.code !== 0) return `the candidate exited with status ${result.code}`;
   return null;
 }

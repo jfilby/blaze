@@ -336,6 +336,14 @@ test("a run that never started is told apart from a run that finished", () => {
   assert.equal(clean.code, 0);
   assert.equal(clean.spawnError, undefined);
   assert.equal(clean.timedOut, false);
+
+  // A raise is how a source function that throws ends too: the runtime is the
+  // one that reports it, and the probe does not call that a failure to run.
+  const raised = run("sh", ["-c", "printf 'blaze: bad scalar\\n' >&2; exit 2"], { timeoutMs: 10_000 });
+  assert.equal(probeFault(raised), null);
+  // An exit two with no message from the runtime is still a run that failed.
+  const failed = run("sh", ["-c", "exit 2"], { timeoutMs: 10_000 });
+  assert.equal(probeFault(failed), "the candidate exited with status 2");
 });
 
 test("a deadline stops a program that refuses to be stopped", () => {

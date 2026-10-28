@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { desugar, modularValue, rewriteModularArithmetic } from "../semantics/typescript-desugar.ts";
+import { lowerWideArithmetic, modularValue, rewriteModularArithmetic } from "../semantics/typescript-wide-lowering.ts";
 
 const P = 115792089237316195423570985008687907853269984665640564039457584007908834671663n;
 
@@ -115,6 +115,16 @@ test("the modulus a call states is the one its kernels are handed", () => {
   assert.equal(answerOf(rewritten, { x, u, q, modulo }, modulo), sourceMod(x - u * q, modulo));
 });
 
+test("a square is the product the kernel reduces, not a value that wraps first", () => {
+  // `x ** 2n` outside a reduction is a product wider than the width, so the
+  // kernel is what computes it before the remainder sees it.
+  const rewritten = modularValue("x ** 2n", "P");
+  assert.match(rewritten, /^u256_mul_mod\(x, x, P\)$/);
+  const x = 0x0123456789abcdef_fedcba9876543210n;
+  assert.equal(answerOf(rewritten, { x }), (x * x) % P);
+  assert.equal(rewriteModularArithmetic("mod(X1 ** 2n)"), `(u256_mul_mod(X1, X1, ${P}n))`);
+});
+
 test("a value that is not one of the operators is a residue the formula already holds", () => {
   // Every operand of the curve's own arithmetic is below the modulus, which is
   // the invariant the formulas are written under; reducing one again would be a
@@ -125,11 +135,12 @@ test("a value that is not one of the operators is a residue the formula already 
 
 test("the whole source has every reduction written as the kernels, and none as a remainder", () => {
   const source = readFileSync(new URL("../../benchmarks/machine_backend/secp256k1/1.ts", import.meta.url).pathname, "utf8");
-  const rewritten = desugar(source);
-  // The declaration of `mod` is not a call of it, and a call left anywhere is a
-  // reduction the machine would compute as `%` — the product's high half gone
-  // before the remainder saw it.
-  assert.doesNotMatch(rewritten, /(?<![A-Za-z0-9_])mod\s*\(/, "no `mod(...)` call is left");
+  const rewritten = lowerWideArithmetic(source);
+  // The call of `mod` is what must be gone; the declaration is the function
+  // the source wrote, and a call left anywhere is a reduction the machine
+  // would compute as `%` — the product's high half gone before the remainder
+  // saw it.
+  assert.doesNotMatch(rewritten, /(?<!function )(?<![A-Za-z0-9_])mod\s*\(/, "no `mod(...)` call is left");
   assert.match(rewritten, /u256_mul_mod\(Z1, Z1, /, "the square of a coordinate is the kernel's");
   assert.match(rewritten, /u256_mul_mod\(invZ, invZ, /, "the inverse's square is reduced before the coordinate uses it");
   assert.match(rewritten, /u256_sub_mod\(D, X3, /, "the doubling subtracts the point it computed from D");
@@ -142,10 +153,11 @@ test("the lowered program keeps the source's loop over the command line's count"
   // multiplication and a count written into the source, so `./secp256k1 15` and
   // `./secp256k1 1` computed the same point.
   const source = readFileSync(new URL("../../benchmarks/machine_backend/secp256k1/1.ts", import.meta.url).pathname, "utf8");
-  const rewritten = desugar(source);
+  const rewritten = lowerWideArithmetic(source);
   assert.match(rewritten, /const n = \+Deno\.args\[0\] \|\| 1;/, "the count is the argument the source reads");
   assert.match(rewritten, /for \(let i = 0; i < n; i\+\+\) \{/, "the loop is the source's own");
-  assert.match(rewritten, /let point = new Point\(/, "the point starts as the class's own constructor");
+  assert.match(rewritten, /const G = new Point\(/, "the point is the class's own constructor");
+  assert.match(rewritten, /let point = G;/, "the point starts at the constant the source wrote");
   assert.match(rewritten, /point = point\.multiply\(/, "each turn multiplies the point the turn before answered");
   assert.match(rewritten, /console\.log\(`\$\{point\.x\.toString\(16\)\},\$\{point\.y\.toString\(16\)\}`\)/, "the print is the source's own");
   assert.match(rewritten, /class Point \{/, "the source's class is kept for the frontend");
@@ -159,7 +171,7 @@ test("the lowered inversion takes every step modulo the curve's order", () => {
   // is written as residues: `x - u * q` wraps unless the whole step is taken
   // modulo the order, and a wrapped step is a different inverse.
   const source = readFileSync(new URL("../../benchmarks/machine_backend/secp256k1/1.ts", import.meta.url).pathname, "utf8");
-  const rewritten = desugar(source);
+  const rewritten = lowerWideArithmetic(source);
   assert.match(rewritten, /u256_sub_mod\(x, u256_mul_mod\(u, q, modulo\), modulo\)/);
   assert.match(rewritten, /u256_sub_mod\(y, u256_mul_mod\(v, q, modulo\), modulo\)/);
 });

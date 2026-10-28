@@ -350,7 +350,11 @@ function resolveBody(records: ModuleRecord[], entryPath: string): ProgramBody | 
         `line ${record.analysis.body[0].line}: only the entry module ${entryPath} runs; a file the program imports is a library of functions`,
       );
     }
-    body = { file: record.path, statements: record.analysis.body };
+    body = {
+      file: record.path,
+      statements: record.analysis.body,
+      ...(record.analysis.wideBigint === true ? { wideBigint: true } : {}),
+    };
   }
   return body;
 }

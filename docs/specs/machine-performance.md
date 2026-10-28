@@ -748,23 +748,35 @@ each is a general one rather than a rewrite of this program:
   a wide answer through a pointer, wide arguments on the stack, wide fields
   written and read in place.
 
-The arithmetic lowering is partly the compiler's own and partly a source-level
-one. The compiler folds a constant `bigint` expression at the width the answer
-is held at, writes a power of a whole number as the products it is, tests a wide
-condition against zero, and lowers a `u256` remainder over a sum, difference or
-product to the kernels that reduce without an intermediate the width cannot
-hold. What is still a source-level lowering is the call of `mod` itself: its
-parameter is a `bigint` at the width a bigint is, and the product the call hands
-it is wider than that, so the call has to be opened where the source wrote it
-before the compiler can see the remainder. What changed is where the lowering is
-written: the reductions of `mod` are the kernels in every expression of the
-program, the inversion's steps are taken modulo the order, and the
-multiplication's formulas are the source's own, so the loop and the count main
-reaches the multiplication with are the source's too. The one transcription
-error the lowering had is worth recording because it survived in the source for
-a while: the doubling of a point wrote `E * (D - x)` where the formula says
-`E * (D - X3)`, which negates the coordinate of the doubled point, and the
-point that follows is the negation of the answer.
+The arithmetic lowering is mostly the compiler's own now. The frontend reads
+destructuring, defaults, classes, `instanceof`, `throw`, `typeof`, unions and
+quoted strings, and its `bigint` annotations are held at the width the file's
+own values reach, so the source needs no text rewrite for any of them. The
+compiler folds a constant `bigint` expression at the width the answer is held
+at, writes a power of a whole number as the products it is, tests a wide
+condition against zero, and lowers a `u256` remainder over a sum, difference,
+product or power to the kernels that reduce without an intermediate the width
+cannot hold.
+
+Three pieces of arithmetic remain a source-level lowering. A call of `mod`
+reduces a mathematical value: its product can be 512 bits while the operand it
+was handed is 256, so the call has to be opened where the source wrote it before
+the compiler can see the remainder. `invZ2` is a square of a residue that is
+read as a residue, so it is reduced before the coordinate multiplies it. And
+`invert` is the extended Euclidean algorithm over signed integers, whose steps
+are residues taken modulo the order. The endomorphism branch is the fourth, and
+it is not a language gap: its split computes a 384 bit quotient the 256 bit IR
+does not hold, so the double-and-add branch beside it is the algorithm the
+program is compiled with.
+
+What changed is where the lowering is written: the reductions of `mod` are the
+kernels in every expression of the program, the inversion's steps are taken
+modulo the order, and the multiplication's formulas are the source's own, so the
+loop and the count main reaches the multiplication with are the source's too.
+The one transcription error the lowering had is worth recording because it
+survived in the source for a while: the doubling of a point wrote `E * (D - x)`
+where the formula says `E * (D - X3)`, which negates the coordinate of the
+doubled point, and the point that follows is the negation of the answer.
 
 `offline-build.ts` builds this project now as well. It refused the entry before
 because the class-to-object rewrite typed the zero point's fields from the small

@@ -103,6 +103,8 @@ export type Statement =
   | { kind: "memberAssign"; base: string; field: string; op: AssignOperator; value: Expression; line: number }
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; line: number }
   | { kind: "result"; value: Expression; line: number }
+  /** A value the source raises: the program ends here and answers nothing. */
+  | { kind: "throw"; value: Expression; line: number }
   | { kind: "if"; condition: Expression; then: Statement[]; otherwise: Statement[]; line: number }
   | { kind: "while"; condition: Expression; body: Statement[]; line: number }
   | { kind: "doWhile"; condition: Expression; body: Statement[]; line: number }

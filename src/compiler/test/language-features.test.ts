@@ -1,5 +1,5 @@
 /**
- * The language features a source may use without a desugaring pass: a default
+ * The language features a source may use without a source rewrite: a default
  * parameter, a result a function does not state, and a constant a function
  * reads from the file it was written in.
  *
@@ -149,4 +149,88 @@ test("a default that calls is evaluated once, with the receiver still intact", a
     "",
   ].join("\n"));
   assert.equal(output.trim(), "12");
+});
+
+test("an object and an array pattern are the declarations they bind", async () => {
+  // A pattern reads its value once where the value is a call, and each name is
+  // the field or the element the source asked for.
+  const output = await agreesWithNode([
+    "class P { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } }",
+    "function sum(p: P): number { const { x, y } = p; return x + y; }",
+    "function swapped(): number { let a = 1; let b = 2; [a, b] = [b, a]; return a * 10 + b; }",
+    "console.log(sum(new P(3, 4)));",
+    "console.log(swapped());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7\n21");
+});
+
+test("a throw is the program ending where the source raises it", async () => {
+  // The raised value is text nothing observes, and the block after it is not
+  // code anything reaches: a function declared to return a number still
+  // returns on the path that does not raise.
+  const output = await agreesWithNode([
+    "function guarded(n: number): number {",
+    "  if (n < 0) throw new Error(`negative ${n}`);",
+    "  return n;",
+    "}",
+    "console.log(guarded(5));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "5");
+});
+
+test("a quoted string is the text it holds, and BigInt reads the digits", async () => {
+  // `BigInt('0x...')` is the value the digits name, and a quote is the text
+  // it was written with whichever quote the source used.
+  const digits = "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const output = await agreesWithNode([
+    `function wide(): bigint { return BigInt('0x${digits}'); }`,
+    "console.log(wide().toString(16));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), digits);
+});
+
+test("typeof reads the type a name is declared at, and the dead arm is not compiled", async () => {
+  // `typeof` is answered from the declared type, so a branch that says the
+  // other type cannot be reached is not a construct the build refuses. The
+  // `Number.isSafeInteger` call in it is text the dead arm holds.
+  const output = await agreesWithNode([
+    "function whose(num: number | bigint): number {",
+    "  if (typeof num === 'number' && num > 0 && Number.isSafeInteger(num)) return 1;",
+    "  if (typeof num === 'bigint') return 2;",
+    "  return 3;",
+    "}",
+    "console.log(whose(3n));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2");
+});
+
+test("a bigint annotation is the width the file's own values reach", async () => {
+  // The language's bigint is arbitrary precision. A file whose values reach
+  // past the machine word holds its bigints at the wide whole number, so the
+  // annotation is the width its values are.
+  const wide = "0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const output = await agreesWithNode([
+    `function addWide(a: bigint, b: bigint): bigint { return a + b; }`,
+    `console.log(addWide(${wide}n, 1n).toString(16));`,
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), (BigInt(wide) + 1n).toString(16));
+});
+
+test("a constant instance read once is the constructor where it is read", async () => {
+  // An object has an identity, so a constructor is inline-able only where the
+  // file reads the name once. It is then the same object the source made, and
+  // a function that reads it needs no scope to read it from.
+  const output = await agreesWithNode([
+    "class Point { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } }",
+    "const G = new Point(3, 4);",
+    "function sum(): number { return G.x + G.y; }",
+    "console.log(sum());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7");
 });

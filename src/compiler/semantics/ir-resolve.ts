@@ -4237,7 +4237,7 @@ class ProgramResolver {
       return { kind: "ref", of: null };
     }
     try {
-      return mapTypeScriptType(text, `line ${line} of ${this.body.file}`);
+      return mapTypeScriptType(text, `line ${line} of ${this.body.file}`, this.body.wideBigint === true);
     } catch (error) {
       if (!(error instanceof CompilerError)) throw error;
       throw programError(error.message, this.body, line, error.detail ?? undefined);
@@ -5261,6 +5261,12 @@ class ProgramLowering {
   private compared(left: DraftValue, right: DraftValue): TypeExpr {
     const here = primitive(draftType(left));
     const there = primitive(draftType(right));
+    // A comparison states the width both sides are read at, and a literal with
+    // no type of its own is read at the width beside it: `0 < curve.n` over a
+    // `u256` is a comparison of two wide numbers, not of a double and a wide
+    // number.
+    if (here !== null && isWide(here)) return numeric(here);
+    if (there !== null && isWide(there)) return numeric(there);
     const pair = commonNumber(here === null ? null : numeric(here), there === null ? null : numeric(there));
     if (pair !== null && pair.kind === "primitive" && isWide(pair.name)) return numeric(pair.name);
     return isBigint(left) && isBigint(right) ? numeric(BIGINT_TYPE) : this.operand;

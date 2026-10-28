@@ -707,6 +707,16 @@ class FunctionBody {
         this.frame().block.terminator = { k: "return", value };
         return;
       }
+      case "throw": {
+        // An error the source raises ends the program: a finally runs before
+        // the block leaves, and what follows it is not code anything reaches.
+        const written = this.typed(statement.value, null, statement.line).value;
+        const message = isText(written.type) ? written : { k: "toText" as const, type: TEXT, of: written, digits: null };
+        this.finallysWritten();
+        this.write({ k: "raise", message, line: statement.line });
+        this.frame().block.terminator = { k: "unreachable" };
+        return;
+      }
       case "if": {
         const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
         const then = this.arm(statement.then, this.frame().loop);
@@ -1460,8 +1470,14 @@ class FunctionBody {
     }
     const ordering = COMPARISONS[op];
     if (ordering !== null) {
+      // A comparison is read at one width, and a literal written beside a wide
+      // number is read at that width: `0 < curve.n` is a comparison of two wide
+      // numbers.
+      const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
+      const leftValue = wide === null ? left.value : this.widenLiteral(left.value, wide);
+      const rightValue = wide === null ? right.value : this.widenLiteral(right.value, wide);
       return {
-        value: { k: "compare", type: BOOLEAN, op: ordering, operand: this.operand(left.value, right.value), left: left.value, right: right.value },
+        value: { k: "compare", type: BOOLEAN, op: ordering, operand: this.operand(leftValue, rightValue), left: leftValue, right: rightValue },
         inferred: asType(BOOL),
       };
     }
@@ -1474,14 +1490,17 @@ class FunctionBody {
           `a string is only compared with a string, and with another string for ===`,
         );
       }
+      const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
+      const leftValue = wide === null ? left.value : this.widenLiteral(left.value, wide);
+      const rightValue = wide === null ? right.value : this.widenLiteral(right.value, wide);
       return {
         value: {
           k: "compare",
           type: BOOLEAN,
           op: op === "==" || op === "===" ? "eq" : "ne",
-          operand: text ? TEXT : this.operand(left.value, right.value),
-          left: text ? this.asText(left.value) : left.value,
-          right: text ? this.asText(right.value) : right.value,
+          operand: text ? TEXT : this.operand(leftValue, rightValue),
+          left: text ? this.asText(leftValue) : leftValue,
+          right: text ? this.asText(rightValue) : rightValue,
         },
         inferred: asType(BOOL),
       };
@@ -1537,7 +1556,7 @@ class FunctionBody {
     // small constant, and refused otherwise. A double's power is what the
     // library answers, and a wide number is not one.
     if (op === "**") {
-      const power = this.power(left.value, right.value);
+      const power = this.power(left.value, right.value, line);
       if (power !== null) return power;
       if (isInteger(left.value.type) || isInteger(right.value.type)) {
         throw this.error(
@@ -1591,7 +1610,7 @@ class FunctionBody {
    * each count of a small exponent — `x ** 2n` is `x * x` — because a power of
    * a whole number is a product of them and the kernels have no wide power.
    */
-  private power(base: SemanticValue, exponent: SemanticValue): Typed | null {
+  private power(base: SemanticValue, exponent: SemanticValue, line: number): Typed | null {
     const count = exponent.k === "const" ? wholeText(exponent.text) : null;
     if (count === null || count < 0n) return null;
     // A bigint and a number are not mixed, and a power is where that rule is
@@ -1609,20 +1628,28 @@ class FunctionBody {
       if (constant === null) return null;
       return { value: constant, inferred: asType(type) };
     }
-    // A base that computes something would run again for every factor, and the
-    // body said it once. A name is a read, and a read has no side effect, and
-    // the count of factors a read is written out for is small.
-    if (base.k !== "local" || count > 64n) return null;
+    if (count > 64n) return null;
     if (count === 0n) {
       const one = wholeConstant(1n, isWideType(base.type) ? wholeType("u256") : I64);
       if (one === null) return null;
       return { value: one, inferred: asType(one.type) };
     }
-    let product: SemanticValue = base;
-    for (let factor = 1n; factor < count; factor += 1n) {
-      product = { k: "arith", type: base.type, op: "mul", left: product, right: base };
+    // A base that computes something would run again for every factor, and the
+    // body said it once. It is read once into a name of its own first, and the
+    // products are of that name: a sum written as the base of a power is
+    // evaluated once, as it is in the language.
+    let value = base;
+    if (base.k !== "local") {
+      const name = this.generated("t");
+      const slot: SemanticSlot = { kind: "value", name, mutable: false, type: base.type };
+      this.write({ k: "let", slot, value: base, line });
+      value = { k: "local", type: base.type, name };
     }
-    return { value: product, inferred: asType(base.type) };
+    let product: SemanticValue = value;
+    for (let factor = 1n; factor < count; factor += 1n) {
+      product = { k: "arith", type: value.type, op: "mul", left: product, right: value };
+    }
+    return { value: product, inferred: asType(value.type) };
   }
 
   /**
@@ -1969,6 +1996,18 @@ class FunctionBody {
   /** The type two values are compared as, which is the one number they share. */
   private operand(left: SemanticValue, right: SemanticValue): SemanticType {
     return commonNumber(left.type, right.type) ?? F64;
+  }
+
+  /**
+   * A whole number written out, read at the wide width its neighbour is: the
+   * literal is the value it names, and the kernel takes two wide numbers.
+   */
+  private widenLiteral(value: SemanticValue, type: SemanticType): SemanticValue {
+    if (!isWideType(type) || isWideType(value.type)) return value;
+    if (value.k !== "const") return value;
+    const number = wholeText(value.text);
+    if (number === null || number < 0n) return value;
+    return { k: "const", type, text: value.text };
   }
 
   /* ---------------------------------------------------------------------- */

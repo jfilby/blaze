@@ -1,6 +1,12 @@
 /**
- * Source-level normalisation for TypeScript constructs the program frontend
- * does not read directly.
+ * The source-level arithmetic lowering the wide-number IR does not hold.
+ *
+ * Everything a language construct needs is read by the frontend: destructuring,
+ * defaults, classes, `instanceof`, `throw`, `typeof`, unions, string literals
+ * and squares are parsed and lowered directly. What remains here is the part
+ * that is arithmetic rather than syntax: a `mod` over a mathematical value is
+ * the modular kernels, the inversion's steps are taken modulo the order, and
+ * the endomorphism branch asks for a 384 bit quotient the IR does not hold.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -149,7 +155,16 @@ function splitModularValue(
       continue;
     }
     if (character === "*") {
-      if (text[index - 1] === "*" || text[index + 1] === "*" || text[index + 1] === "=") continue;
+      if (text[index + 1] === "*") {
+        // `**` binds tighter than `*` and associates to the right, so the
+        // leftmost one is the outermost power.
+        if (expectValue) continue;
+        if (chosen === null || chosen.precedence >= 3) chosen = { at: index, op: "**", precedence: 3 };
+        index += 1;
+        expectValue = true;
+        continue;
+      }
+      if (text[index - 1] === "*" || text[index + 1] === "=") continue;
       if (expectValue) continue;
       if (chosen === null || chosen.precedence >= 2) chosen = { at: index, op: "*", precedence: 2 };
       expectValue = true;
@@ -160,7 +175,8 @@ function splitModularValue(
   }
   if (chosen === null) return null;
   const split = chosen as { at: number; op: string };
-  return { op: split.op, left: text.slice(0, split.at), right: text.slice(split.at + 1), negated: false };
+  const width = split.op === "**" ? 2 : 1;
+  return { op: split.op, left: text.slice(0, split.at), right: text.slice(split.at + width), negated: false };
 }
 
 /**
@@ -177,16 +193,39 @@ function splitModularValue(
  * `mod` calls are rewritten first, so `mod(mod(a * b) - c, p)` sees the
  * reduction of `a * b` as the atom it is.
  */
-export function modularValue(text: string, modulus: string): string {
+function modularValueOrNull(text: string, modulus: string): string | null {
   let value = text.trim();
   while (value.startsWith("+")) value = value.slice(1).trim();
   const inner = unwrap(value);
-  if (inner !== value) return modularValue(inner, modulus);
+  if (inner !== value) return modularValueOrNull(inner, modulus);
   const split = splitModularValue(value);
   if (split !== null) {
-    if (split.negated) return `u256_sub_mod(0n, ${modularValue(split.right, modulus)}, ${modulus})`;
+    if (split.op === "**") {
+      // A power of a residue is not a residue: `x ** 2n` is a product wider
+      // than the width, so it is the kernel's product, one per multiplication.
+      const exponent = /^(?:0[xX][0-9a-fA-F]+|\d+)n?$/.test(split.right.trim())
+        ? BigInt(split.right.trim().replace(/n$/, ""))
+        : null;
+      if (exponent === null || exponent < 0n || exponent > 64n) return null;
+      const base = modularValueOrNull(split.left, modulus);
+      if (base === null) return null;
+      if (exponent === 0n) return "1n";
+      let product = base;
+      for (let turn = 1n; turn < exponent; turn += 1n) {
+        product = `u256_mul_mod(${product}, ${base}, ${modulus})`;
+      }
+      return product;
+    }
+    if (split.negated) {
+      const right = modularValueOrNull(split.right, modulus);
+      return right === null ? null : `u256_sub_mod(0n, ${right}, ${modulus})`;
+    }
     const kernel = MODULAR_KERNEL[split.op] as string;
-    return `${kernel}(${modularValue(split.left, modulus)}, ${modularValue(split.right, modulus)}, ${modulus})`;
+    const left = modularValueOrNull(split.left, modulus);
+    if (left === null) return null;
+    const right = modularValueOrNull(split.right, modulus);
+    if (right === null) return null;
+    return `${kernel}(${left}, ${right}, ${modulus})`;
   }
   if (isModularKernel(value)) return value;
   // A value that is not built from the operators is one the formula already
@@ -194,6 +233,18 @@ export function modularValue(text: string, modulus: string): string {
   // below the modulus, which is what the formulas' own invariant says. Writing
   // `% modulus` here would reduce a number that is already reduced, and a
   // remainder is the most expensive thing a large integer kernel does.
+  return value;
+}
+
+/**
+ * One value of a `mod` call, as the modular kernels that compute it.
+ *
+ * A value the kernels cannot state is refused here rather than answered with
+ * something else: a power of a non-constant exponent has no product to write.
+ */
+export function modularValue(text: string, modulus: string): string {
+  const value = modularValueOrNull(text, modulus);
+  if (value === null) throw new Error(`the modular kernels cannot reduce "${text.trim()}"`);
   return value;
 }
 
@@ -211,11 +262,21 @@ export function rewriteModularArithmetic(source: string): string {
   let text = source;
   for (;;) {
     const calls = modCalls(text);
-    if (calls.length === 0) return text;
-    const call = calls[calls.length - 1] as ModCall;
-    const modulus = (call.args[1] ?? CURVE_P).trim() || CURVE_P;
-    const reduced = call.args[0] === undefined ? "0n" : modularValue(call.args[0], modulus);
-    text = `${text.slice(0, call.start)}(${reduced})${text.slice(call.end)}`;
+    // The last call whose value the kernels can state is the one rewritten
+    // next: a call around it reads the kernel it became, and a value with no
+    // arithmetic in it is the residue the formula already holds.
+    let chosen: { call: ModCall; reduced: string } | null = null;
+    for (let index = calls.length - 1; index >= 0; index -= 1) {
+      const call = calls[index] as ModCall;
+      const modulus = (call.args[1] ?? CURVE_P).trim() || CURVE_P;
+      const reduced = modularValueOrNull(call.args[0] === undefined ? "0n" : call.args[0], modulus);
+      if (reduced !== null) {
+        chosen = { call, reduced };
+        break;
+      }
+    }
+    if (chosen === null) return text;
+    text = `${text.slice(0, chosen.call.start)}(${chosen.reduced})${text.slice(chosen.call.end)}`;
   }
 }
 
@@ -337,82 +398,43 @@ function splitTopLevelArgs(s: string): string[] {
   return parts.map((p) => p.trim());
 }
 
-export function desugar(source: string): string {
+export function lowerWideArithmetic(source: string): string {
   // Drop line comments: the rewrites below are written over the text, and a
   // comment that mentions a call is text they would read as one.
   source = source.replace(/\/\/.*$/gm, "");
 
-  source = source.replace(/        \}\n[ \t]*const __se = splitScalarEndo[\s\S]*?return JacobianPoint_add\(k1p, k2p\);/, "        }");
-    source = source.replace("        const __se = splitScalarEndo(n);", "        const __se = null;");
-  source = source.replace("splitScalarEndo", "splitScalarEndo_unused");
-  // The endomorphism branch is not compiled: it splits the scalar with a
-  // function the source does not need for the multiplication this program runs,
-  // and its destructuring is not part of the subset. The branch above it is the
-  // double-and-add the lowered multiplication uses.
+  // The endomorphism branch splits the scalar into two 128 bit halves. The
+  // split computes `divNearest(b2 * k, n)`, whose product is 384 bits and
+  // whose quotient the 256 bit IR does not hold; the double-and-add branch
+  // beside it is the multiplication this program runs, so the branch that
+  // says which algorithm is selected is rewritten to the one the compiler
+  // can lower. This is a choice of algorithm, not a language construct the
+  // frontend is missing.
   source = source.replace(
     /if \(!USE_ENDOMORPHISM\) \{([\s\S]*?)return p;\s*\}\s*let \{ k1neg[\s\S]*?return k1p\.add\(k2p\);/,
     "$1 return p;",
   );
-  source = source.replace(/scalar: bigint/g, "scalar: u256");
-  source = source.replace(/: bigint/g, ": u256");
-  source = source.replace(/function normalizeScalar\(num: bigint\): bigint {/g, "function normalizeScalar(num: u256): u256 {");
-  source = source.replace(/let n = normalizeScalar\(scalar\);/g, "let n: u256 = normalizeScalar(scalar);");
-  // `main` starts at the const the file wrote, which is a value the program holds
-  // rather than a constant: the object is the one the constructor builds.
-  source = source.replace(/let point = G;/g, "let point = new Point(55066263022277343669578718895168534326250603453777594175500187360389116729240n, 32670510020758816978083085130507043184471273380659243275938904335757337482424n);");
-  // Remove dead USE_ENDOMORPHISM declaration (its comparison is not supported in the contract language).
-  source = source.replace(/const USE_ENDOMORPHISM = CURVE\.a === 0n;\n/g, "");
-  source = source.replace(/USE_ENDOMORPHISM\b/g, "true");
-  // Remove the now-orphaned `const true = 0n === 0n;` if the declaration wasn't caught above.
-  source = source.replace(/const true = 0n === 0n;\n/g, "");
-
-
-
-  // normalizeScalar number branch.
-  source = source.replace(/if \(typeof num === 'number' && num > 0 && Number\.isSafeInteger\(num\)\) return BigInt\(num\);\n/g, "");
-  source = source.replace(/typeof num === 'bigint'/g, "true");
-
-  source = source.replace(/num: number \| bigint/g, "num: u256");
-  source = source.replace(/if \(true && isWithinCurveOrder\(num\)\) return num;/g, "return num;");
-  source = source.replace(/function normalizeScalar\(num: u256\): bigint {/g, "function normalizeScalar(num: u256): u256 {");
-
-  // Remove instanceof guard.
-  source = source.replace(/if \(!\(other instanceof JacobianPoint\)\) \{\s*throw new TypeError\('JacobianPoint#add: expected JacobianPoint'\);\s*\}/g, "");
-
-  // Classes are read by the frontend: a constructor is a function returning an
-  // object, and methods take the instance they were called on. The source's
-  // classes stay as classes.
-
-  // Squares.
-  source = source.replace(/(self\.[A-Za-z_]\w*|this\.[A-Za-z_]\w*|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\*\*\s*2n/g, "$1 * $1");
-  source = source.replace(/\(X1 \+ B\)\s*\*\*\s*2n/g, "(X1 + B) * (X1 + B)");
-  // A square of a field element is a `u256`: the unreduced square of a
-  // twenty-five byte residue is wider than the type, so it is reduced before
-  // it is multiplied by the coordinate.
-  source = source.replace(/const invZ2 = invZ \* invZ;/g, "const invZ2 = mod(invZ * invZ);");
-
+  // The split is unreachable now, and the 384 bit arithmetic it is written
+  // in is not what the IR holds, so the declaration is removed with the
+  // branch that used it.
   source = source.replace(/function splitScalarEndo[\s\S]*?^\}\n/m, "");
-  // `throw` is a refused keyword: the parser skips too far when it meets one
-  // inside a nested block, which skips past the remaining function
-  // declarations. The thrown errors are precondition checks that cannot fire in
-  // normal operation, so replacing them with a no-op is sound.
-  source = source.replace(/throw[^;]*;/g, "0;");
-  // `invert` is the Euclidean GCD, and every step of it is a modular operation:
-  // a residue minus a residue times a quotient, which wraps unless the whole
-  // step is taken modulo the curve order.
+
+  // `invZ2` is the square of a residue and is read as one: the unreduced
+  // square is wider than 256 bits, so it is reduced before the coordinate
+  // multiplies it.
+  source = source.replace(/const invZ2 = invZ \*\* 2n;/g, "const invZ2 = mod(invZ * invZ);");
+
+  // `invert` is the extended Euclidean algorithm over signed arbitrary
+  // precision integers. Every step of it is a modular operation -- a residue
+  // minus a residue times a quotient, taken modulo the curve order -- so it
+  // is written as exactly that, which is the same number the source computes
+  // and is what the machine's kernels answer without wrapping.
   source = replaceFunctionBody(source, "invert", INVERT_BODY);
-  // The source's `mod(a, b)` is a reduction over 256 bit numbers, so the
+
+  // The source's `mod(a, b)` is a reduction over mathematical values, so the
   // operations inside a call of it are the modular kernels rather than `%`:
-  // the product of two reductions needs 512 bits and a `%` of the wrapped
-  // product is not the product modulo the curve order.
+  // the product of two 256 bit numbers needs 512 bits, and a `%` of the
+  // wrapped product is not the product modulo the curve order.
   source = rewriteModularArithmetic(source);
-  // `mod`, `isWithinCurveOrder` and `divNearest` are dead once the calls of
-  // them are kernels: `normalizeScalar` is the identity and the endomorphism
-  // split is not compiled. Removing them keeps the build from lowering
-  // functions the program never runs.
-  source = source.replace(/function mod[\s\S]*?^\}\n/m, "");
-  source = source.replace(/function isWithinCurveOrder[\s\S]*?^\}\n/m, "");
-  source = source.replace(/function divNearest[^\}]*\}/, "");
   return source;
 }
-

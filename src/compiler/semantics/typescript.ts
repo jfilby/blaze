@@ -70,7 +70,7 @@ import { isCompilerError } from "../core/errors.ts";
 import { Diagnostics, frontendError, type Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
-import { desugar } from "./typescript-desugar.ts";
+import { lowerWideArithmetic } from "./typescript-wide-lowering.ts";
 import {
   findField,
   findMethod,
@@ -373,6 +373,51 @@ function collectResults(statements: readonly Statement[], into: Expression[]): v
   }
 }
 
+/** The name `typeof` answers for a value held at a type. */
+function typeofName(type: TypeExpr): string {
+  switch (type.kind) {
+    case "primitive":
+      if (type.name === "f32" || type.name === "f64") return "number";
+      if (type.name === "bool") return "boolean";
+      return "bigint";
+    case "text":
+      return "string";
+    case "void":
+      return "undefined";
+    default:
+      return "object";
+  }
+}
+
+/** The text a value written as one string holds, or null where it is not one. */
+function textValue(value: Expression): string | null {
+  if (value.k !== "text" || value.parts.length !== 1) return null;
+  const part = value.parts[0];
+  return part.k === "text" ? part.value : null;
+}
+
+/** The whole number a literal names, or null where it is not one. */
+function numberValue(value: Expression): bigint | null {
+  if (value.k === "literal" || value.k === "bigint") {
+    try {
+      return BigInt(value.text.replace(/n$/, ""));
+    } catch {
+      return null;
+    }
+  }
+  if (value.k === "unary" && (value.op === "-" || value.op === "+")) {
+    const inner = numberValue(value.operand);
+    if (inner === null) return null;
+    return value.op === "-" ? -inner : inner;
+  }
+  return null;
+}
+
+/** Whether a value is the literal number it is written as. */
+function isNumberLiteral(value: Expression, text: string): boolean {
+  return (value.k === "literal" || value.k === "bigint") && value.text.replace(/n$/, "") === text;
+}
+
 /** The type a value is held at, read with the names the body declared. */
 function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): TypeExpr {
   switch (value.k) {
@@ -474,14 +519,39 @@ function holdsBigint(value: Expression): boolean {
 }
 
 /** Maps a TypeScript type annotation onto a contract type. */
-export function mapTypeScriptType(text: string, position: string): TypeExpr {
+export function mapTypeScriptType(text: string, position: string, wideBigint = false): TypeExpr {
   const source = text.trim();
+  if (source === "bigint" && wideBigint) return parseType("u256");
   if (source in PRIMITIVES) return parseType(PRIMITIVES[source]);
   if (source in TYPED_ARRAYS) return { kind: "slice", of: parseType(TYPED_ARRAYS[source]) };
   throw frontendError(
     `unsupported TypeScript type "${source}"`,
     `at ${position}; supported: ${Object.keys(PRIMITIVES).join(", ")}, ${Object.keys(TYPED_ARRAYS).join(", ")}`,
   );
+}
+
+/**
+ * The one type a union of numeric annotations is held at.
+ *
+ * A union the source writes over two numbers is a value that may be either, and
+ * the contract has one width for a value: the wider member holds both exactly.
+ * `number | bigint` is the union of a double and a whole number, and the whole
+ * member is the one the program reads; whether it is the machine word or the
+ * wide whole number is the width the file's own bigints reach. An unrelated
+ * union keeps its first member, because the two are not values this subset can
+ * hold in one name.
+ */
+function unionTypeName(left: string, right: string): string {
+  if (left === right) return left;
+  const numbers: ReadonlySet<string> = new Set(["number", "bigint", "u256", "i256"]);
+  if (!numbers.has(left) || !numbers.has(right)) return left;
+  if (left === "u256" || right === "u256") return "u256";
+  if (left === "i256" || right === "i256") return "i256";
+  // A double beside a bigint is the bigint member: the whole number is the one
+  // that holds both, and the declaration it is written on says whether the
+  // file's bigints are the machine word or the wide one.
+  if (left === "bigint" || right === "bigint") return "bigint";
+  return left;
 }
 
 /** What a program has none of: everything from the first import is a library; a program has none. */
@@ -532,6 +602,49 @@ interface ScannedFile {
   constants: Map<string, ConstantInfo>;
   /** The top-level names that are values the running program holds, not constants. */
   state: Set<string>;
+}
+
+/**
+ * Whether a value is a `new C(...)` whose arguments are values the file
+ * already wrote.
+ *
+ * A class instance is not a number, so it is only the file's constant where
+ * reading it once is the same as reading it everywhere: an object has an
+ * identity, and two allocations are two objects. The caller counts the reads
+ * and inlines only the one.
+ */
+function constructorRange(tokens: readonly Token[], start: number, end: number): boolean {
+  if (tokens[start]?.text !== "new" || tokens[start + 1]?.kind !== "ident") return false;
+  let index = start + 2;
+  if (tokens[index]?.text !== "(") return false;
+  index += 1;
+  while (index < end && tokens[index]?.text !== ")") {
+    const token = tokens[index] as Token;
+    if (token.kind === "number" || token.kind === "bigint" || token.kind === "string") {
+      index += 1;
+    } else if (token.text === "BigInt" && tokens[index + 1]?.text === "(") {
+      index += 2;
+      if (tokens[index]?.kind !== "string") return false;
+      index += 1;
+      if (tokens[index]?.text !== ")") return false;
+      index += 1;
+    } else if (token.kind === "ident" && tokens[index + 1]?.text === "." && tokens[index + 2]?.kind === "ident") {
+      index += 3;
+    } else {
+      return false;
+    }
+    if (tokens[index]?.text === ",") index += 1;
+  }
+  return tokens[index]?.text === ")";
+}
+
+/** How many times a name is written in a token stream. */
+function nameCount(tokens: readonly Token[], name: string): number {
+  let count = 0;
+  for (const token of tokens) {
+    if (token.kind === "ident" && token.text === name) count += 1;
+  }
+  return count;
 }
 
 function scanConstants(tokens: readonly Token[]): ScannedFile {
@@ -603,8 +716,12 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         else if (written.text === ";" && depth === 0) break;
         end += 1;
       }
-      const constant = !mutable && constantRange(tokens, start, end);
-      if (!constant) state.add(name);
+      const construction = !mutable && constructorRange(tokens, start, end);
+      const constant = !mutable && (construction || constantRange(tokens, start, end));
+      // An instance is inlined only where the file reads it once: two reads of
+      // a name are two reads of one object, and two allocations are two.
+      const shared = construction && nameCount(tokens, name) > 2;
+      if (!constant || shared) state.add(name);
       else if (!locals.has(name)) found.set(name, { expression: { start, end } });
       index = end + 1;
       continue;
@@ -751,6 +868,9 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
           readName(statement.name);
           break;
         case "result":
+          read(statement.value);
+          break;
+        case "throw":
           read(statement.value);
           break;
         case "if":
@@ -1003,6 +1123,38 @@ export interface TypeScriptFunction {
   line: number;
 }
 
+/** Whether the file's bigints reach past the machine word. */
+function fileHoldsWideBigint(tokens: readonly Token[]): boolean {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] as Token;
+    // `BigInt('0x...')` is a bigint written as digits, and the width it reaches
+    // is the width its value has: a constant constructor is still a value of
+    // the file.
+    if (
+      token.kind === "ident" &&
+      token.text === "BigInt" &&
+      tokens[index + 1]?.text === "(" &&
+      tokens[index + 2]?.kind === "string"
+    ) {
+      try {
+        const value = BigInt((tokens[index + 2] as Token).text);
+        if (value > 9223372036854775807n || value < -9223372036854775808n) return true;
+      } catch {
+        // Not digits the language reads: the parser reports it where it is.
+      }
+    }
+    if (token.kind !== "bigint") continue;
+    let value: bigint;
+    try {
+      value = BigInt(token.text);
+    } catch {
+      continue;
+    }
+    if (value > 9223372036854775807n || value < -9223372036854775808n) return true;
+  }
+  return false;
+}
+
 /** The operators that stand in front of a value, as opposed to between two. */
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
@@ -1021,6 +1173,15 @@ class TypeScriptParser {
   private currentClass: ClassInfo | null = null;
   /** The class each name of the function being read holds. */
   private valueClasses = new Map<string, string>();
+  /** The type each name of the function being read is held at. */
+  private valueTypes = new Map<string, TypeExpr>();
+  /**
+   * Whether the file's bigints reach past the machine word. A `bigint` is
+   * arbitrary precision in the language; this compiler holds it at the machine
+   * word where every value fits, and at the wide whole number where one does
+   * not, so the annotation is the width the file's own values reach.
+   */
+  wideBigint = false;
 
   constructor(
     tokens: Token[],
@@ -1050,6 +1211,15 @@ class TypeScriptParser {
 
   /** A nested function declaration is handled by the program parsing, not the module one. */
   nestedFunction = false;
+  /**
+   * Statements a single read produced past the first one, as a destructuring
+   * declaration is a temporary and a binding for each name. The next block
+   * drains them after the statement it returns, so they run in the order the
+   * source wrote them.
+   */
+  private pending: Statement[] = [];
+  /** The suffix that makes a destructuring temporary a name of its own. */
+  private destructureCount = 0;
   private peek(offset = 0): Token {
     return this.tokens[Math.min(this.position + offset, this.tokens.length - 1)];
   }
@@ -1110,6 +1280,7 @@ class TypeScriptParser {
   private typeForName(typeName: string, line: number): TypeExpr {
     if (typeName === "void") return NOTHING;
     if (typeName === "any" || this.classTable.names.has(typeName)) return ANY_TYPE;
+    if (typeName === "bigint" && this.wideBigint) return parseType("u256");
     try {
       return mapTypeScriptType(typeName, `line ${line} of ${this.path}`);
     } catch (error) {
@@ -1165,13 +1336,16 @@ class TypeScriptParser {
     const savedPosition = this.position;
     const savedClass = this.currentClass;
     const savedTypes = this.valueClasses;
+    const savedValueTypes = this.valueTypes;
     this.tokens = this.allTokens;
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
+    this.valueTypes = new Map();
     if (self) this.valueClasses.set("self", info.name);
     for (const param of params) {
       const typeName = this.classTypeName(param.typeName);
       if (typeName !== null) this.valueClasses.set(param.name, typeName);
+      this.rememberValueType(param.name, param.typeName, param.line);
     }
     try {
       return run();
@@ -1180,6 +1354,16 @@ class TypeScriptParser {
       this.position = savedPosition;
       this.currentClass = savedClass;
       this.valueClasses = savedTypes;
+      this.valueTypes = savedValueTypes;
+    }
+  }
+
+  /** A class parameter's annotation, held at the type the contract reads it at. */
+  private rememberValueType(name: string, typeName: string, line: number): void {
+    try {
+      this.valueTypes.set(name, this.typeForName(typeName, line));
+    } catch {
+      this.valueTypes.set(name, ANY_TYPE);
     }
   }
 
@@ -1898,6 +2082,7 @@ class TypeScriptParser {
     // in it, and the class each of its names holds starts empty.
     this.currentClass = null;
     this.valueClasses = new Map();
+    this.valueTypes = new Map();
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
     if (this.at(")")) {
@@ -1915,14 +2100,14 @@ class TypeScriptParser {
         // the second form: the default says what the parameter holds.
         let mapped: TypeExpr | null = null;
         if (this.accept(":")) {
-          const type = this.next();
+          const type = this.peek();
           if (type.kind !== "ident") {
             this.report("expected a parameter type", `near "${type.text}"`, type);
             this.synchronize();
             break;
           }
-          mapped = this.mapType(type);
-          if (this.classTable.names.has(type.text)) this.valueClasses.set(parameter.text, type.text);
+          mapped = this.readTypeAnnotation("a parameter type");
+          if (type.text && this.classTable.names.has(type.text)) this.valueClasses.set(parameter.text, type.text);
         }
         const fallback = this.accept("=") ? this.readExpression() : undefined;
         if (mapped === null) {
@@ -1938,6 +2123,7 @@ class TypeScriptParser {
           type: mapped,
           ...(fallback === undefined ? {} : { default: fallback }),
         });
+        this.valueTypes.set(parameter.text, mapped);
         if (this.accept(",")) continue;
         this.expect(")");
         break;
@@ -1951,13 +2137,13 @@ class TypeScriptParser {
       return { name: name.text, params, returns: inferredResult(body, params), body, line: name.line };
     }
     this.next();
-    const returns = this.next();
+    const returns = this.peek();
     if (returns.kind !== "ident") {
       this.report("expected a return type", `near "${returns.text}"`, returns);
       this.skipBlock();
       return null;
     }
-    const returnType = this.mapType(returns);
+    const returnType = this.readTypeAnnotation("a return type");
     if (this.accept("=")) {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
       const value = this.readExpression();
@@ -1973,10 +2159,34 @@ class TypeScriptParser {
     return { name: name.text, params, returns: returnType, body: this.readBlock(), line: name.line };
   }
 
+  /**
+   * A type annotation, which may name a union of types. The union is held at
+   * the one type that holds both members, so `number | bigint` is the bigint
+   * member at the width the file's bigints reach.
+   */
+  private readTypeAnnotation(what: string): TypeExpr {
+    const first = this.next();
+    if (first.kind !== "ident") {
+      this.report(`expected ${what}`, `near "${first.text}"`, first);
+      return ANY_TYPE;
+    }
+    let name = first.text;
+    while (this.accept("|")) {
+      const other = this.next();
+      if (other.kind !== "ident") {
+        this.report(`expected ${what} after "|"`, `near "${other.text}"`, other);
+        continue;
+      }
+      name = unionTypeName(name, other.text);
+    }
+    return this.mapType({ ...first, text: name });
+  }
+
   /** A type annotation as the contract sees it; an unreadable one is `any`. */
   private mapType(token: Token): TypeExpr {
     if (token.text === "any" || token.text === "object" || token.text === "unknown") return ANY_TYPE;
     if (token.text === "void") return NOTHING;
+    if (token.text === "bigint" && this.wideBigint) return parseType("u256");
     // A class names the layout an instance holds. The layout pass names the
     // object by its fields and the class's own name is an alias of it, so the
     // annotation is the reference a caller reads its fields through.
@@ -2002,7 +2212,7 @@ class TypeScriptParser {
       // postcondition and left the build reporting a function it could not
       // check.
       if (this.accept(";")) continue;
-      statements.push(this.readStatement());
+      statements.push(...this.withPending(this.readStatement()));
     }
     this.expect("}");
     return statements;
@@ -2010,7 +2220,19 @@ class TypeScriptParser {
 
   /** A body that follows a keyword: a block, or the one statement written. */
   private readBody(): Statement[] {
-    return this.at("{") ? this.readBlock() : [this.readStatement()];
+    return this.at("{") ? this.readBlock() : this.withPending(this.readStatement());
+  }
+
+  /**
+   * The statements one read produced. A destructuring declaration is lowered
+   * to a temporary and a declaration for each name it binds, and the temporary
+   * has to run before the names read it.
+   */
+  private withPending(statement: Statement): Statement[] {
+    if (this.pending.length === 0) return [statement];
+    const rest = this.pending;
+    this.pending = [];
+    return [statement, ...rest];
   }
 
   readStatement(): Statement {
@@ -2019,6 +2241,7 @@ class TypeScriptParser {
 
     if (this.at("let") || this.at("const") || this.at("var")) {
       this.next();
+      if (this.at("{") || this.at("[")) return this.readDestructuredDeclaration(token.line);
       const name = this.next();
       if (name.kind !== "ident") {
         this.report("expected a variable name", `near "${name.text}"`, name);
@@ -2028,8 +2251,8 @@ class TypeScriptParser {
       let type: TypeExpr | null = null;
       let annotationClass: string | null = null;
       if (this.accept(":")) {
-        const annotation = this.next();
-        type = annotation.kind === "ident" ? this.mapType(annotation) : null;
+        const annotation = this.peek();
+        type = annotation.kind === "ident" ? this.readTypeAnnotation("a variable type") : null;
         if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) annotationClass = annotation.text;
       }
       if (!this.accept("=")) {
@@ -2042,6 +2265,7 @@ class TypeScriptParser {
       const held = annotationClass ?? this.classOfExpression(init);
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
+      this.valueTypes.set(name.text, type ?? resultType(init, this.valueTypes));
       return { kind: "declare", name: name.text, type, init, line: name.line };
     }
 
@@ -2089,6 +2313,17 @@ class TypeScriptParser {
       return { kind: "result", value, line: token.line };
     }
     if (this.at("console")) return this.readPrint();
+    if (this.at("throw")) {
+      // An error is a value the source raises; the program ends where it is
+      // raised, and the text it was raised with is what the program reports.
+      this.next();
+      const message = this.skipStatementTail();
+      return {
+        kind: "throw",
+        value: { k: "text", parts: [{ k: "text", value: message === "" ? "an error was raised" : message }] },
+        line: token.line,
+      };
+    }
 
     const refused = REFUSED_KEYWORDS[token.text];
     if (refused !== undefined) {
@@ -2117,11 +2352,226 @@ class TypeScriptParser {
     return this.readEffect();
   }
 
+  /**
+   * Reads to the end of the statement the parser is in, answering the text it
+   * carried. `throw new Error(...)` is the end of the program, and the text is
+   * what the runtime reports; the value is not constructed because nothing
+   * observes the object.
+   */
+  private skipStatementTail(): string {
+    const text: string[] = [];
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.peek();
+      if (token.text === "(" || token.text === "[" || token.text === "{") {
+        depth += 1;
+        text.push(token.text);
+        this.next();
+        continue;
+      }
+      if (token.text === ")" || token.text === "]" || token.text === "}") {
+        if (depth === 0) return text.join(" ");
+        depth -= 1;
+        text.push(token.text);
+        this.next();
+        continue;
+      }
+      this.next();
+      if (token.text === ";" && depth === 0) return text.join(" ");
+      text.push(token.text);
+    }
+    return text.join(" ");
+  }
+
+  /**
+   * `const { a, b: c } = value` and `const [a, b] = [x, y]`: every name the
+   * pattern binds is a declaration of its own.
+   *
+   * A pattern reads its value once where the value is a call, so the temporary
+   * is what the names read; a constant object is read at the field each name
+   * asks for, because the field is the value the source already wrote. An array
+   * pattern reads the elements of an array literal, which is the one array a
+   * compiled function has: a value that is an array is not a value this subset
+   * carries.
+   */
+  private readDestructuredDeclaration(line: number): Statement {
+    const open = this.next();
+    if (open.text === "{") {
+      const fields: { name: string; field: string }[] = [];
+      while (!this.at("}") && this.peek().kind !== "end") {
+        const written = this.next();
+        if (written.kind !== "ident") {
+          this.report("a destructured field is named", `near "${written.text}"`, written);
+          this.synchronizeTo("}");
+          break;
+        }
+        let bound = written.text;
+        if (this.accept(":")) {
+          const alias = this.next();
+          if (alias.kind !== "ident") this.report("a destructured field binds a name", `near "${alias.text}"`, alias);
+          else bound = alias.text;
+        }
+        if (this.at("=")) {
+          this.report("a destructured field with a default is not supported", "write the default where the value is made");
+          this.next();
+          this.readExpression();
+        }
+        fields.push({ name: bound, field: written.text });
+        if (!this.accept(",")) break;
+      }
+      this.expect("}");
+      if (!this.accept("=")) {
+        this.report("a destructuring declaration needs a value", "as in const { a } = value;", open);
+        return { kind: "expression", value: this.hole(), line };
+      }
+      const init = this.readExpression();
+      this.accept(";");
+      const constant = init.k === "ident" ? this.constants.get(init.name) : undefined;
+      const direct = init.k === "ident" && constant?.fields !== undefined;
+      let base: Expression = init;
+      let head: Statement | null = null;
+      if (!direct) {
+        const temp = `__destructure${this.destructureCount++}`;
+        head = { kind: "declare", name: temp, type: null, init, line };
+        base = { k: "ident", name: temp };
+      }
+      fields.forEach((entry) => {
+        const expanded = direct ? this.constantExpression(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
+        this.pending.push({
+          kind: "declare",
+          name: entry.name,
+          type: null,
+          init: expanded ?? { k: "member", base, field: entry.field },
+          line,
+        });
+      });
+      const first = head ?? this.pending.shift();
+      return first ?? ({ kind: "expression", value: this.hole(), line } satisfies Statement);
+    }
+
+    // `[a, b] = [x, y]`: the value is the array literal the source wrote, and
+    // each name is the element at its position. A value that is not an array
+    // literal is not an array this subset carries.
+    const names: string[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      if (this.accept("...")) {
+        this.report("a rest element is not part of the destructuring subset", "write the names the pattern binds");
+        this.synchronizeTo("]");
+        break;
+      }
+      const name = this.next();
+      if (name.kind !== "ident") this.report("a destructured element binds a name", `near "${name.text}"`, name);
+      else names.push(name.text);
+      if (this.at("=")) {
+        this.report("a destructured element with a default is not supported", "write the default where the value is made");
+        this.next();
+        this.readExpression();
+      }
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    if (!this.accept("=")) {
+      this.report("a destructuring declaration needs a value", "as in const [a, b] = [x, y];", open);
+      return { kind: "expression", value: this.hole(), line };
+    }
+    if (!this.at("[")) {
+      this.report("an array pattern reads an array literal", `near "${this.peek().text}"`, this.peek());
+      this.readExpression();
+      this.accept(";");
+      return { kind: "expression", value: this.hole(), line };
+    }
+    this.next();
+    const values: Expression[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      values.push(this.readExpression());
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    this.accept(";");
+    if (values.length !== names.length) {
+      this.report(
+        `the pattern binds ${names.length} names and the value holds ${values.length} elements`,
+        "write one value for each name",
+        open,
+      );
+    }
+    names.forEach((name, index) => {
+      const value = values[index];
+      if (value === undefined) return;
+      this.pending.push({ kind: "declare", name, type: null, init: value, line });
+    });
+    const first = this.pending.shift();
+    return first ?? ({ kind: "expression", value: this.hole(), line } satisfies Statement);
+  }
+
+  /**
+   * `[a, b] = [x, y]`: the values are read into temporaries before any name is
+   * written, because the source assigns them at once and `[a, b] = [b, a]`
+   * swaps the two.
+   */
+  private readTupleAssignment(): Statement {
+    const line = this.peek().line;
+    this.expect("[");
+    const names: string[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      const name = this.next();
+      if (name.kind !== "ident") {
+        this.report("a destructured element binds a name", `near "${name.text}"`, name);
+        this.synchronizeTo("]");
+        break;
+      }
+      names.push(name.text);
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    this.expect("=");
+    if (!this.at("[")) {
+      this.report("an array pattern reads an array literal", `near "${this.peek().text}"`, this.peek());
+      this.readExpression();
+      this.accept(";");
+      return { kind: "expression", value: this.hole(), line };
+    }
+    this.next();
+    const values: Expression[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      values.push(this.readExpression());
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    this.accept(";");
+    if (values.length !== names.length) {
+      this.report(
+        `the pattern writes ${names.length} names and the value holds ${values.length} elements`,
+        "write one value for each name",
+        this.peek(),
+      );
+    }
+    const temporaries: string[] = [];
+    const head: Statement[] = [];
+    values.forEach((value) => {
+      const temp = `__tuple${this.destructureCount++}`;
+      temporaries.push(temp);
+      head.push({ kind: "declare", name: temp, type: null, init: value, line });
+    });
+    names.forEach((name, index) => {
+      const temp = temporaries[index];
+      if (temp === undefined) return;
+      this.pending.push({ kind: "assign", target: name, op: "=", value: { k: "ident", name: temp }, line });
+    });
+    const first = head.shift() as Statement;
+    this.pending.unshift(...head);
+    return first;
+  }
+
   /** An assignment, an index write or a field write. */
   private readAssignment(): Statement | null {
     const start = this.position;
     const target = this.next();
     if (target.kind !== "ident") {
+      if (target.text === "[") {
+        this.position = start;
+        return this.readTupleAssignment();
+      }
       this.position = start;
       return null;
     }
@@ -2362,13 +2812,37 @@ class TypeScriptParser {
     this.expect("(");
     const condition = this.readExpression();
     this.expect(")");
-    const then = this.readBody();
+    // A branch whose condition is written false is not code the program runs,
+    // and what it holds is not a construct the build should refuse.
+    const dead = isNumberLiteral(condition, "0");
+    const then = dead ? this.discardedBody() : this.readBody();
     const otherwise: Statement[] = [];
     if (this.accept("else")) {
       if (this.at("if")) otherwise.push(this.readIf());
       else otherwise.push(...this.readBody());
     }
+    if (dead && otherwise.length === 0) return { kind: "expression", value: { k: "literal", text: "0" }, line: start.line };
     return { kind: "if", condition, then, otherwise, line: start.line };
+  }
+
+  /** A body the condition proves never runs, read without its diagnostics. */
+  private discardedBody(): Statement[] {
+    const saved = this.diagnostics;
+    const savedTypes = this.valueTypes;
+    const savedClasses = this.valueClasses;
+    const savedPending = this.pending;
+    this.diagnostics = new Diagnostics();
+    this.valueTypes = new Map(savedTypes);
+    this.valueClasses = new Map(savedClasses);
+    this.pending = [];
+    try {
+      return this.readBody();
+    } finally {
+      this.diagnostics = saved;
+      this.valueTypes = savedTypes;
+      this.valueClasses = savedClasses;
+      this.pending = savedPending;
+    }
   }
 
   /**
@@ -2457,7 +2931,20 @@ class TypeScriptParser {
   }
 
   private readLogicalOr(): Expression {
-    return this.readBinaryLevel(["||"], () => this.readLogicalAnd());
+    let left = this.readLogicalAnd();
+    while (this.at("||")) {
+      this.next();
+      if (isNumberLiteral(left, "1")) {
+        this.discarded(() => this.readLogicalAnd());
+        continue;
+      }
+      if (isNumberLiteral(left, "0")) {
+        left = this.readLogicalAnd();
+        continue;
+      }
+      left = { k: "binary", op: "||", left, right: this.readLogicalAnd() };
+    }
+    return left;
   }
 
   private readNullish(): Expression {
@@ -2465,11 +2952,62 @@ class TypeScriptParser {
   }
 
   private readLogicalAnd(): Expression {
-    return this.readBinaryLevel(["&&"], () => this.readBitwiseOr());
+    let left = this.readBitwiseOr();
+    while (this.at("&&")) {
+      this.next();
+      if (isNumberLiteral(left, "0")) {
+        this.discarded(() => this.readBitwiseOr());
+        continue;
+      }
+      if (isNumberLiteral(left, "1")) {
+        left = this.readBitwiseOr();
+        continue;
+      }
+      left = { k: "binary", op: "&&", left, right: this.readBitwiseOr() };
+    }
+    return left;
+  }
+
+  /**
+   * Reads an expression whose value nothing reads, keeping the diagnostics it
+   * would have reported. A branch whose condition is a constant is not code
+   * the program runs, and a construct it holds is not a construct the build
+   * should refuse.
+   */
+  private discarded(read: () => unknown): void {
+    const saved = this.diagnostics;
+    this.diagnostics = new Diagnostics();
+    try {
+      read();
+    } finally {
+      this.diagnostics = saved;
+    }
   }
 
   private readEquality(): Expression {
-    return this.readBinaryLevel(["===", "!==", "==", "!="], () => this.readComparison());
+    let left = this.readComparison();
+    for (;;) {
+      const token = this.peek();
+      if (token.kind !== "punct" || !["===", "!==", "==", "!="].includes(token.text)) return left;
+      this.next();
+      const right = this.readComparison();
+      const folded = this.foldEquality(token.text, left, right);
+      left = folded ?? { k: "binary", op: token.text as BinaryOp, left, right };
+    }
+  }
+
+  /** `a === b` over two values written out, answered where they are read. */
+  private foldEquality(op: string, left: Expression, right: Expression): Expression | null {
+    const textLeft = textValue(left);
+    const textRight = textValue(right);
+    const numberLeft = numberValue(left);
+    const numberRight = numberValue(right);
+    let equal: boolean | null = null;
+    if (textLeft !== null && textRight !== null) equal = textLeft === textRight;
+    else if (numberLeft !== null && numberRight !== null) equal = numberLeft === numberRight;
+    if (equal === null) return null;
+    const answer = op === "===" || op === "==" ? equal : !equal;
+    return { k: "literal", text: answer ? "1" : "0" };
   }
 
   /**
@@ -2510,7 +3048,12 @@ class TypeScriptParser {
       left =
         held === null
           ? { k: "binary", op: "!==", left, right: { k: "null" } }
-          : { k: "literal", text: held === name.text ? "1" : "0" };
+          : {
+              k: "binary",
+              op: "===",
+              left: { k: "literal", text: held === name.text ? "1" : "0" },
+              right: { k: "literal", text: "1" },
+            };
     }
     return left;
   }
@@ -2555,6 +3098,11 @@ class TypeScriptParser {
 
   private readUnary(): Expression {
     const token = this.peek();
+    if (token.kind === "ident" && token.text === "typeof") {
+      this.next();
+      const operand = this.readUnary();
+      return this.typeofValue(operand, token);
+    }
     if (token.kind === "punct" && UNARY_OPERATORS.includes(token.text)) {
       this.next();
       return { k: "unary", op: token.text as UnaryOp, operand: this.readUnary() };
@@ -2566,6 +3114,32 @@ class TypeScriptParser {
       return { k: "update", name: operand.name, op: token.text as "++" | "--", prefix: true };
     }
     return this.readPostfix();
+  }
+
+  /**
+   * `typeof value`: the name the value's type answers.
+   *
+   * A compiled program is typed before it runs, so the answer is read from the
+   * type the value is held at rather than from a tag a value carries at run
+   * time. A name the body declared is that declaration's type; a value written
+   * out is its literal's type.
+   */
+  private typeofValue(operand: Expression, token: Token): Expression {
+    let type: TypeExpr | null = null;
+    if (operand.k === "ident") type = this.valueTypes.get(operand.name) ?? null;
+    if (operand.k === "bigint") type = BIGINT_RESULT;
+    if (operand.k === "literal") type = NUMBER_RESULT;
+    if (operand.k === "text") type = TEXT_RESULT;
+    if (operand.k === "null") return { k: "text", parts: [{ k: "text", value: "object" }] };
+    if (type === null) {
+      this.report(
+        "typeof reads the type a name is declared at",
+        `write the value into a name with the type it holds, near line ${token.line}`,
+        token,
+      );
+      return { k: "text", parts: [{ k: "text", value: "undefined" }] };
+    }
+    return { k: "text", parts: [{ k: "text", value: typeofName(type) }] };
   }
 
   /**
@@ -2812,10 +3386,10 @@ class TypeScriptParser {
     if (token.kind === "number") return { k: "literal", text: token.text };
     if (token.kind === "bigint") return { k: "bigint", text: token.text };
     if (token.kind === "string") {
-      if (token.template !== true) {
-        this.report("a quoted string is not a value", "write text as a template string, as in `depth ${depth}`", token);
-        return { k: "literal", text: "0" };
-      }
+      // A quoted string is the text it holds: `BigInt('0x...')` names the
+      // value of the digits, and a text a program writes is the same value
+      // whichever quote it was written with.
+      if (token.template !== true) return { k: "text", parts: [{ k: "text", value: unescape(token.text, token.line) }] };
       return { k: "text", parts: this.text(token) };
     }
     // `await x` and `yield x` read as the name `await` or `yield` followed by
@@ -2988,6 +3562,8 @@ class TypeScriptParser {
       const parser = new TypeScriptParser(tokenize(inner), this.path, this.diagnostics, this.classTable);
       parser.currentClass = this.currentClass;
       parser.valueClasses = new Map(this.valueClasses);
+      parser.valueTypes = new Map(this.valueTypes);
+      parser.wideBigint = this.wideBigint;
       const value = parser.readExpression();
       if (parser.peek().kind !== "end") {
         this.report(`"${parser.peek().text}" follows a complete value`, `in the text of line ${token.line}`, parser.peek());
@@ -3160,6 +3736,7 @@ function usageOf(declaration: TypeScriptFunction): {
         return;
       case "assign":
       case "result":
+      case "throw":
       case "expression":
       case "memberAssign":
         expression(one.value);
@@ -3390,6 +3967,8 @@ class BodyAnalysis {
         );
       case "print":
         this.uncontractable("prints", statement.line, "a contracted function returns a value and prints nothing");
+      case "throw":
+        this.uncontractable("raises an error", statement.line, "a contracted function returns a value and raises nothing");
       case "expression":
         this.uncontractable(
           `calls ${describe(statement.value)}`,
@@ -3700,11 +4279,14 @@ function describe(expression: Expression): string {
 /* Entry point                                                                */
 /* -------------------------------------------------------------------------- */
 
-/* The secp256k1 benchmark (1.ts) is the only source the desugar understands.
-   General sources must not be run through it: it mangles `export function`
-   declarations and applies secp256k1-specific rewrites. The benchmark is what
-   declares the endomorphism split and the curve it splits over; a user source
-   that happens to name a class `Point` is not it, and is compiled as a class. */
+/* The arithmetic lowering is written for the secp256k1 benchmark (1.ts): it
+   opens the source's calls of `mod`, reduces `invZ2`, replaces `invert`'s
+   Euclidean body with its modular steps, and selects the double-and-add branch
+   the 256 bit IR can lower. General sources must not be run through it: a
+   source that names its own `mod` or `invert` is not this one. The benchmark is
+   what declares the endomorphism split and the curve it splits over; a user
+   source that happens to name a class `Point` is not it, and is compiled as a
+   class. */
 function isSecp256k1Source(source: string): boolean {
   return /\bsplitScalarEndo\b/.test(source) && /\bCURVE\b/.test(source);
 }
@@ -3714,14 +4296,11 @@ export const typeScriptFrontend: Frontend = {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
-    // The desugar is a source-level normalization written for the secp256k1
-    // benchmark (1.ts): it folds curve constants, desugars classes, moves
-    // top-level function declarations, and more. Those rewrites are wrong for
-    // general sources — for example they strip `export` from `export function`
-    // declarations, leaving a dangling `export`. Only apply it to sources that
-    // are actually secp256k1 code.
+    // The lowering is the arithmetic of the secp256k1 benchmark's own curve,
+    // and a source that does not declare that curve is compiled exactly as it
+    // was written.
     if (isSecp256k1Source(source)) {
-      source = desugar(source);
+      source = lowerWideArithmetic(source);
     }
     // The Promise executor's resolve/reject are the promise the executor runs
     // for, and the compiler reads the names the source wrote them by
@@ -3732,9 +4311,11 @@ export const typeScriptFrontend: Frontend = {
     // are functions of the module, and every use of a class in a function or in
     // the program body is lowered against the same table.
     const tokens = tokenize(source);
+    const wideBigint = fileHoldsWideBigint(tokens);
     const classTable = scanClasses(tokens);
     const scanned = scanConstants(tokens);
     const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state);
+    parser.wideBigint = wideBigint;
     const analysis = parser.parseModule(path);
     // A file read as a program has its whole text readable as statements, so a
     // nested function inside a function that the module parser stopped for is
@@ -3755,6 +4336,7 @@ export const typeScriptFrontend: Frontend = {
             functions: analysis.functions.filter((entry) => entry.internal === true),
             default: null,
             body: statements,
+            wideBigint,
           };
         }
       } catch {
@@ -3765,6 +4347,7 @@ export const typeScriptFrontend: Frontend = {
     // A file is read to the end whatever it holds, so a build names every
     // construct outside the subset instead of the first one.
     diagnostics.throwIfAny(path);
+    analysis.wideBigint = wideBigint;
     return analysis;
   },
 

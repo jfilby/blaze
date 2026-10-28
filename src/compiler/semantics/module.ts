@@ -202,6 +202,12 @@ export interface ProgramFunction {
 export interface ProgramBody {
   file: string;
   statements: ProgramStatement[];
+  /**
+   * Whether the file's bigints reach past the machine word. A `bigint`
+   * annotation is then the wide whole number, as it is in a function of the
+   * same file.
+   */
+  wideBigint?: boolean;
 }
 
 /** Everything one source file says about itself. */
@@ -218,6 +224,9 @@ export interface ModuleAnalysis {
    * functions, and code in it would never run.
    */
   body: ProgramStatement[];
+  /** Whether the file's bigints reach past the machine word, so a `bigint`
+   *  annotation in a program function is the wide whole number. */
+  wideBigint?: boolean;
   /**
    * True when the body is only the language's entry guard, which names the
    * entry module and runs nowhere else. Python writes
