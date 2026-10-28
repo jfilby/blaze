@@ -1891,6 +1891,18 @@ function modular(callee: "u256_mul_mod" | "u256_add_mod", left: SemanticValue, r
   };
 }
 
+/** A call of a wide function that does something the rewrite must not repeat or drop. */
+function effectfulWide(callee: string): SemanticValue {
+  return {
+    k: "call", type: U256,
+    call: {
+      callee, builtin: false,
+      signature: { name: callee, symbol: callee, params: [], returns: "u256" },
+      args: [], argTypes: [], returns: U256, effects: ["memory"], ownership: "none", retain: false,
+    },
+  };
+}
+
 /** A function of two wide names and a wide modulus that answers the value. */
 function wideSubject(value: SemanticValue): SemanticFunction {
   return fnOf(
@@ -1962,6 +1974,26 @@ test("a modular multiply by one is the value it multiplies", () => {
   const once = printed(wideSubject(modular("u256_mul_mod", wideFrom("1"), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
   assert.doesNotMatch(once, /u256_mul_mod/);
   assert.doesNotMatch(once, /u256_add_mod/);
+});
+
+test("a modular multiply reads its modulus as many times as the source did", () => {
+  // The modulus is written into every addition the rewrite makes and dropped
+  // by a product by zero or one. A modulus that computes something would be
+  // computed once per addition, or not at all, where the source computed it
+  // once: it stays the kernel's multiply.
+  const x: SemanticValue = { k: "local", type: U256, name: "x" };
+  for (const count of ["0", "1", "2", "3", "8"]) {
+    const written = printed(wideSubject(modular("u256_mul_mod", wideFrom(count), x, effectfulWide("modulus"))));
+    assert.match(written, /u256_mul_mod/, `a ${count}x product keeps a modulus it cannot read twice`);
+  }
+});
+
+test("a modular multiply by zero keeps a value that does something", () => {
+  // The product answers zero whatever the other side is, but the other side is
+  // still computed where the source computed it. Only a value with nothing to
+  // drop may be rewritten.
+  const written = printed(wideSubject(modular("u256_mul_mod", wideFrom("0"), effectfulWide("sideEffect"), { k: "local", type: U256, name: "p" })));
+  assert.match(written, /u256_mul_mod/);
 });
 
 test("a count past the chain's limit is left as the multiply it is", () => {

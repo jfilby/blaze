@@ -473,7 +473,17 @@ function modularMultiplyOf(
       args: [left, right, mod],
     },
   });
-  if (multiplier === 0) return { k: "const", type: value.type, text: "0" };
+  // The modulus is written into every addition the rewrite makes, and a
+  // product by zero or one drops it. A modulus that computes something is not
+  // a value the rewrite may read a different number of times than the source
+  // did, so it is only rewritten when reading it again is free.
+  if (!isSafeToCompute(mod)) return null;
+  if (multiplier === 0) {
+    // The product by zero is no value at all, so the other side is no longer
+    // computed where it was: only a value with nothing to drop is rewritten.
+    if (!isSafeToCompute(other)) return null;
+    return { k: "const", type: value.type, text: "0" };
+  }
   if (multiplier === 1) return other;
   // The answer is the other side written once or twice, so the rewrite is only
   // a saving when writing it twice is free: a name is read, a literal is laid
@@ -546,6 +556,10 @@ function chainOf(
   if (left === undefined || right === undefined || mod === undefined) return null;
   const count = smallCountOf(left) ?? smallCountOf(right);
   if (count === null) return null;
+  // Every addition in the chain reads the modulus, so a modulus that computes
+  // something would be computed once per step instead of the once the source
+  // wrote.
+  if (!isSafeToCompute(mod)) return null;
   const other = smallCountOf(left) !== null ? right : left;
   // The side is computed once, so it has to be a value that may be computed
   // where the multiply was: a read through an object is not one, because the
