@@ -9403,10 +9403,13 @@ class Machine {
    * default handler itself, so nothing else is needed. `blaze_http_server_run`
    * never returns. */
   private httpServe(call: SemanticCall): void {
-    // The port is read into the accumulator, then moved to RDI (first argument).
+    // The port is read into the accumulator, then moved to RSI (the second
+    // argument). The host is the first argument, and a server the program did
+    // not name an address for listens on every address.
     this.at(call.args[0], USIZE);
-    this.code.movRegReg(RDI, RAX);
-    // blaze_http_server_new(port) -> server handle in RAX.
+    this.code.movRegReg(RSI, RAX);
+    this.code.alu("xor", RDI, RDI, false);
+    // blaze_http_server_new(host, port) -> server handle in RAX.
     this.external("blaze_http_server_new");
     this.code.call("blaze_http_server_new");
     // blaze_http_server_run(server) — never returns.

@@ -1068,11 +1068,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "array.length":
         return `${RUNTIME_NAME}_array_length(${argument(0)})`;
       case "http.serve":
-        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+        return `({ void *blaze_http_srv = blaze_http_server_new(NULL, (uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.serveSettings":
-        return `({ void *blaze_http_srv = blaze_http_server_new_settings((uint16_t)${argument(0)}, (intptr_t)${argument(1)}, (size_t)${argument(2)}, (size_t)${argument(3)}, (uint8_t)${argument(4)}, (int)${argument(5)}, (int)${argument(6)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+        return `({ void *blaze_http_srv = blaze_http_server_new_settings(NULL, (uint16_t)${argument(0)}, (intptr_t)${argument(1)}, (size_t)${argument(2)}, (size_t)${argument(3)}, (uint8_t)${argument(4)}, (int)${argument(5)}, (int)${argument(6)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.serveTls":
-        return `({ void *blaze_http_srv = blaze_http_server_new_tls((uint16_t)${argument(0)}, ${argument(1)}, ${argument(2)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
+        return `({ void *blaze_http_srv = blaze_http_server_new_tls(NULL, (uint16_t)${argument(0)}, ${argument(1)}, ${argument(2)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.createServer": {
         const cb = call.args[0];
         let trampoline = "0.0";
@@ -1242,11 +1242,14 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         }
         const handler = `((void(*)(void*, void*)) (uintptr_t) ${argument(0)})`;
         /* blaze_http_server_new binds the listening socket before it returns, so
-           the listener is ready when the callback runs. The event loop runs on a
-           detached background thread, so server.listen returns and the callback —
+           the listener is ready when the callback runs. The host is the second
+           argument of the call the program wrote, and an empty one — or the
+           host of a server the program did not name — listens on every
+           address, IPv6 and IPv4 alike. The event loop runs on a detached
+           background thread, so server.listen returns and the callback —
            and anything after it, such as server.close — can run without
            deadlocking against a server that never started. */
-        return `({ void *blaze_http_srv = blaze_http_server_new((uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); blaze_http_server_start_background(blaze_http_srv); ${invoke}; blaze_http_server_join(); 0.0; })`;
+        return `({ void *blaze_http_srv = blaze_http_server_new(${argument(2)}, (uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); blaze_http_server_start_background(blaze_http_srv); ${invoke}; blaze_http_server_join(); 0.0; })`;
       }
       case "Promise": {
         const cb = call.args[0];

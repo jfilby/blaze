@@ -175,6 +175,10 @@ typedef struct blaze_http_server_s {
   intptr_t uuid;
   int bound;
   uint16_t port;
+  /* The address the server listens on, as it was given. An empty host listens
+     on every address, and a host may be an IPv6 address ("::1") or a name
+     ("localhost"). */
+  char host[256];
   size_t route_count;
   char *methods[BLAZE_HTTP_MAX_ROUTES];
   char *paths[BLAZE_HTTP_MAX_ROUTES];
@@ -627,10 +631,19 @@ static int blaze_http_server_default_threads(void) {
   return (int)cores;
 }
 
-/* Allocates a server and the lock its stop waits on. */
-static blaze_http_server_t *blaze_http_server_alloc(uint16_t port) {
+/* Allocates a server and the lock its stop waits on. The host is copied, so
+   that the text the program handed over does not have to outlive the call. */
+static blaze_http_server_t *blaze_http_server_alloc(const char *host, uint16_t port) {
   blaze_http_server_t *server = (blaze_http_server_t *)calloc(1, sizeof(*server));
   if (!server) return NULL;
+  if (host != NULL) {
+    size_t host_len = strlen(host);
+    if (host_len >= sizeof(server->host)) {
+      free(server);
+      return NULL;
+    }
+    memcpy(server->host, host, host_len + 1);
+  }
   server->port = port;
   pthread_mutex_init(&server->lock, NULL);
   pthread_cond_init(&server->cond, NULL);
@@ -654,21 +667,44 @@ static void blaze_http_server_free(blaze_http_server_t *server) {
   free(server);
 }
 
+/* Listens on one address and port with the settings the server carries.
+   Returns the facil.io uuid, or -1 when that address could not be bound. */
+static intptr_t blaze_http_server_listen_on(blaze_http_server_t *server,
+                                            const char *port_str,
+                                            const char *binding) {
+  return http_listen(port_str, binding, .on_request = blaze_http_on_request,
+                     .on_upgrade = blaze_http_on_upgrade,
+                     .udata = server,
+                     .max_body_size = server->max_body_size,
+                     .max_header_size = server->max_header_size,
+                     .max_clients = server->max_clients,
+                     .timeout = server->timeout,
+                     .tls = server->tls);
+}
+
 /* Applies the server's stored limits, timeout and TLS settings to a listening
    socket, binds it, and registers the default "Hello, World" route. Returns
-   the facil.io uuid, or -1 when the port could not be bound. */
+   the facil.io uuid, or -1 when the address and port could not be bound. */
 static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
   char port_str[8];
   __builtin_snprintf(port_str, sizeof(port_str), "%u", (unsigned)server->port);
 
-  intptr_t uuid = http_listen(port_str, NULL, .on_request = blaze_http_on_request,
-                              .on_upgrade = blaze_http_on_upgrade,
-                              .udata = server,
-                              .max_body_size = server->max_body_size,
-                              .max_header_size = server->max_header_size,
-                              .max_clients = server->max_clients,
-                              .timeout = server->timeout,
-                              .tls = server->tls);
+  /* A server that was given no address listens on every address of both
+     families. The unspecified IPv6 address covers both on a machine where an
+     IPv6 socket accepts IPv4 connections, so the IPv4 wildcard is bound as
+     well: a machine where the two are separate sockets, or one that has no
+     IPv6 at all, is served by the two listeners rather than by neither. A
+     bind that fails because the other listener already holds the port is the
+     bind that had nothing left to add. */
+  intptr_t uuid = -1;
+  if (server->host[0] != '\0') {
+    uuid = blaze_http_server_listen_on(server, port_str, server->host);
+  } else {
+    intptr_t ipv6 = blaze_http_server_listen_on(server, port_str, "::");
+    intptr_t ipv4 = blaze_http_server_listen_on(server, port_str, "0.0.0.0");
+    if (ipv6 != -1) uuid = ipv6;
+    else if (ipv4 != -1) uuid = ipv4;
+  }
   if (uuid == -1) {
     if (server->tls) fio_tls_destroy(server->tls);
     server->tls = NULL;
@@ -683,8 +719,8 @@ static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
   return uuid;
 }
 
-void *blaze_http_server_new(uint16_t port) {
-  blaze_http_server_t *server = blaze_http_server_alloc(port);
+void *blaze_http_server_new(const char *host, uint16_t port) {
+  blaze_http_server_t *server = blaze_http_server_alloc(host, port);
   if (!server) return NULL;
   /* Zero settings mean "use facil.io's defaults"; the event loop runs on as
      many threads as the machine has cores to run them on, and there is one
@@ -703,14 +739,15 @@ void *blaze_http_server_new(uint16_t port) {
   return server;
 }
 
-void *blaze_http_server_new_settings(uint16_t port,
+void *blaze_http_server_new_settings(const char *host,
+                                     uint16_t port,
                                      intptr_t max_clients,
                                      size_t max_body_size,
                                      size_t max_header_size,
                                      uint8_t timeout,
                                      int threads,
                                      int workers) {
-  blaze_http_server_t *server = blaze_http_server_alloc(port);
+  blaze_http_server_t *server = blaze_http_server_alloc(host, port);
   if (!server) return NULL;
   server->max_clients = max_clients;
   server->max_body_size = max_body_size;
@@ -730,9 +767,9 @@ void *blaze_http_server_new_settings(uint16_t port,
   return server;
 }
 
-void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key) {
+void *blaze_http_server_new_tls(const char *host, uint16_t port, const char *cert, const char *key) {
 #ifdef BLAZE_HTTP_TLS
-  blaze_http_server_t *server = blaze_http_server_alloc(port);
+  blaze_http_server_t *server = blaze_http_server_alloc(host, port);
   if (!server) return NULL;
   server->cert = cert;
   server->key = key;
@@ -754,6 +791,7 @@ void *blaze_http_server_new_tls(uint16_t port, const char *cert, const char *key
      does not speak it. A program that asks for a server that speaks TLS is a
      program the runtime was not built for, and saying so is better than
      serving plain HTTP to a program that asked for another thing. */
+  (void)host;
   (void)port;
   (void)cert;
   (void)key;
@@ -1485,20 +1523,48 @@ const char *blaze_http_client_request(const char *url, const char *method,
     port = 443;
   }
 
-  /* host */
+  /* The authority ends where the path begins, and a request with no path
+     names the root. */
   const char *slash = strchr(p, '/');
-  size_t p_len = slash ? (size_t)(slash - p) : strlen(p);
-  if (p_len >= sizeof(host)) p_len = sizeof(host) - 1;
-  memcpy(host, p, p_len);
-  host[p_len] = '\\0';
+  const char *authority_end = slash != NULL ? slash : p + strlen(p);
 
-  /* port */
-  char *colon = strchr(host, ':');
-  if (colon) {
-    *colon = '\\0';
-    port = atoi(colon + 1);
-    if (port <= 0) port = secure ? 443 : 80;
+  /* The host and the port. An IPv6 address is written between brackets, as in
+     "http://[::1]:8080/", because the address has colons of its own and the
+     colon before the port would otherwise be read as one of them. The host is
+     kept without its brackets, because that is the text the resolver is
+     given; the authority is kept as written, because that is the value of the
+     Host header. */
+  char authority[512];
+  size_t authority_len = (size_t)(authority_end - p);
+  if (authority_len >= sizeof(authority)) return NULL;
+  memcpy(authority, p, authority_len);
+  authority[authority_len] = '\\0';
+
+  const char *host_begin = p;
+  const char *host_end = authority_end;
+  if (p < authority_end && *p == '[') {
+    const char *close = memchr(p, ']', (size_t)(authority_end - p));
+    if (close == NULL) return NULL;
+    host_begin = p + 1;
+    host_end = close;
+    if (close + 1 < authority_end) {
+      if (close[1] != ':') return NULL;
+      port = atoi(close + 2);
+      if (port <= 0 || port > 65535) port = secure ? 443 : 80;
+    }
+  } else {
+    const char *colon = memchr(p, ':', (size_t)(authority_end - p));
+    if (colon != NULL) {
+      host_end = colon;
+      port = atoi(colon + 1);
+      if (port <= 0 || port > 65535) port = secure ? 443 : 80;
+    }
   }
+
+  size_t host_len = (size_t)(host_end - host_begin);
+  if (host_len == 0 || host_len >= sizeof(host)) return NULL;
+  memcpy(host, host_begin, host_len);
+  host[host_len] = '\\0';
 
   /* path */
   if (slash) {
@@ -1510,7 +1576,7 @@ const char *blaze_http_client_request(const char *url, const char *method,
   char reqbuf[16384];
   int req_len = snprintf(reqbuf, sizeof(reqbuf),
     "%s %s HTTP/1.1\\r\\nHost: %s\\r\\nConnection: keep-alive\\r\\n",
-    method, path, host);
+    method, path, authority);
   /* snprintf answers the length it would have written, which is longer than
      the buffer when the request does not fit in it. The length is the length
      the buffer holds and no more, or the next write would start past the end

@@ -44,7 +44,7 @@ export const DEFAULT_HTTP_MAX_CONNECTIONS = 4096;
 
 /**
  * The room a server needs beyond the connections it says it will hold: the
- * listening socket, the files the program opened beside it, and the sockets
+ * listening sockets, the files the program opened beside it, and the sockets
  * the runtime keeps for itself.
  */
 const HTTP_CONNECTION_SLACK = 64;

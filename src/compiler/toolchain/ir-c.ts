@@ -1003,7 +1003,7 @@ class FunctionEmitter {
     const port = this.expression(call.args[0], USIZE, depth);
     const server = this.temporary("blaze_http_server");
     this.write([
-      `${pad(depth)}void *${server} = blaze_http_server_new((uint16_t)${port});`,
+      `${pad(depth)}void *${server} = blaze_http_server_new(NULL, (uint16_t)${port});`,
       `${pad(depth)}blaze_http_route_register(${server}, "*", "*", blaze_http_default_handler);`,
       `${pad(depth)}blaze_http_server_run(${server});`,
     ]);

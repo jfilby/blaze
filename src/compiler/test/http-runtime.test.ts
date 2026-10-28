@@ -43,6 +43,13 @@ test("the HTTP ABI declares the client request entry", () => {
   assert.ok(header.includes("blaze_http_client_request"), "blaze_http_client_request must be declared in the HTTP header");
 });
 
+test("the HTTP server ABI takes the address it listens on", () => {
+  const header = httpHeaderSource();
+  assert.match(header, /void\* blaze_http_server_new\(const char\* host, uint16_t port\)/);
+  assert.match(header, /void\* blaze_http_server_new_settings\(const char\* host, uint16_t port,/);
+  assert.match(header, /void\* blaze_http_server_new_tls\(const char\* host, uint16_t port,/);
+});
+
 test("facil is a known runtime kind", () => {
   assert.ok(RUNTIME_KINDS.includes("facil"), "facil is a runtime kind");
   assert.equal(RUNTIME_TITLES["facil"], "the facil.io HTTP server runtime");

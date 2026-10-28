@@ -35,9 +35,12 @@ export const HTTP_ABI: readonly HttpEntry[] = [
   httpEntry(
     "blaze_http_server_new",
     "void*",
-    [["port", "uint16_t"]],
-    "Creates an HTTP server listening on a port.",
-    "Returns an owned server handle; a null handle means the port could not be bound.",
+    [
+      ["host", "const char*"],
+      ["port", "uint16_t"],
+    ],
+    "Creates an HTTP server listening on a host and a port. A null or empty host listens on every address, IPv6 and IPv4 alike.",
+    "Returns an owned server handle; a null handle means the host and port could not be bound.",
   ),
   httpEntry(
     "blaze_http_server_run",
@@ -142,6 +145,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     "blaze_http_server_new_settings",
     "void*",
     [
+      ["host", "const char*"],
       ["port", "uint16_t"],
       ["max_clients", "intptr_t"],
       ["max_body_size", "size_t"],
@@ -150,19 +154,20 @@ export const HTTP_ABI: readonly HttpEntry[] = [
       ["threads", "int"],
       ["workers", "int"],
     ],
-    "Creates an HTTP server with resource limits, a connection timeout and a thread/worker count.",
-    "Returns an owned server handle; a null handle means the port could not be bound.",
+    "Creates an HTTP server on a host and a port, with resource limits, a connection timeout and a thread/worker count. A null or empty host listens on every address, IPv6 and IPv4 alike.",
+    "Returns an owned server handle; a null handle means the host and port could not be bound.",
   ),
   httpEntry(
     "blaze_http_server_new_tls",
     "void*",
     [
+      ["host", "const char*"],
       ["port", "uint16_t"],
       ["cert", "const char*"],
       ["key", "const char*"],
     ],
-    "Creates an HTTPS (TLS) server listening on a port.",
-    "Returns an owned server handle; a null handle means the port could not be bound or TLS could not be initialized.",
+    "Creates an HTTPS (TLS) server on a host and a port. A null or empty host listens on every address, IPv6 and IPv4 alike.",
+    "Returns an owned server handle; a null handle means the host and port could not be bound or TLS could not be initialized.",
   ),
   httpEntry(
     "blaze_http_client_request",

@@ -66,11 +66,13 @@ async function startServer(binary: string): Promise<import("node:child_process")
   return server;
 }
 
-/** Curl a port, retrying while the server is starting up. */
-async function curlPort(port: number): Promise<string> {
+/** Curl a port, retrying while the server is starting up. The authority is
+ *  the host part of the URL, written as a URL writes it: an IPv6 address is
+ *  between brackets, as in "[::1]". */
+async function curlPort(port: number, authority = "localhost"): Promise<string> {
   let lastError = "";
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const result = run("curl", ["-s", "--max-time", "2", `http://localhost:${port}/`], { timeoutMs: 5_000 });
+    const result = run("curl", ["-s", "--max-time", "2", `http://${authority}:${port}/`], { timeoutMs: 5_000 });
     if (result.code === 0 && result.stdout.length > 0) return result.stdout;
     lastError = result.stderr.trim();
     await new Promise((r) => setTimeout(r, 250));
@@ -103,10 +105,10 @@ test("machine backend serves HTTP with --runtime facil", async () => {
 });
 
 /** A program that uses http.createServer + server.listen with a custom response. */
-function createServerSource(port: number): string {
+function createServerSource(port: number, host = "127.0.0.1"): string {
   return `const port = ${port};\n` +
     `const server = http.createServer((req, res) => { res.writeHead(200); res.end("custom response\\n"); });\n` +
-    `server.listen(port, "127.0.0.1", () => {});\n`;
+    `server.listen(port, "${host}", () => {});\n`;
 }
 
 test("C backend serves custom response with http.createServer and server.listen", async () => {
@@ -131,6 +133,71 @@ test("machine backend serves custom response with http.createServer and server.l
     assert.equal(body, "custom response\n", "machine backend answered with custom response from createServer");
   } finally {
     server.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+test("C backend serves a server bound to an IPv6 address", async () => {
+  const port = 18111;
+  const binary = await buildHttpBinary("c", createServerSource(port, "::1"));
+  const server = await startServer(binary);
+  try {
+    const body = await curlPort(port, "[::1]");
+    assert.equal(body, "custom response\n", "C backend answered an IPv6 request");
+  } finally {
+    server.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+test("machine backend serves a server bound to an IPv6 address", async () => {
+  const port = 18112;
+  const binary = await buildHttpBinary("machine", createServerSource(port, "::1"));
+  const server = await startServer(binary);
+  try {
+    const body = await curlPort(port, "[::1]");
+    assert.equal(body, "custom response\n", "machine backend answered an IPv6 request");
+  } finally {
+    server.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+test("a server that names no address serves IPv4 and IPv6 alike", async () => {
+  const port = 18113;
+  const binary = await buildHttpBinary("c", `const port = ${port};\nhttp.serve(port);\n`);
+  const server = await startServer(binary);
+  try {
+    assert.equal(await curlPort(port, "127.0.0.1"), "Hello, World\n", "the server answered over IPv4");
+    assert.equal(await curlPort(port, "[::1]"), "Hello, World\n", "the server answered over IPv6");
+  } finally {
+    server.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
+/** A program that asks a server at an IPv6 address, written as a URL writes it. */
+function ipv6ClientSource(port: number): string {
+  return `const port = ${port};\n` +
+    `const req = http.request(\`http://[::1]:\${port}/\`, { method: "GET" }, (res) => {\n` +
+    `  var content = "";\n` +
+    `  res.on("data", (chunk) => { content += chunk; });\n` +
+    `  res.on("end", () => { console.log(content); });\n` +
+    `});\n` +
+    `req.end();\n`;
+}
+
+test("C backend asks a server at an IPv6 address", async () => {
+  const port = 18114;
+  const server = await buildHttpBinary("c", createServerSource(port, "::1"));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("c", ipv6ClientSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.equal(answered.stdout.trim(), "custom response", "the client read the response over IPv6");
+  } finally {
+    running.kill();
     await new Promise((r) => setTimeout(r, 300));
   }
 });
@@ -192,6 +259,18 @@ test("server.listen starts the event loop in the background and server.close sto
   assert.match(written, /blaze_http_server_start_background/, "server.listen starts the event loop on a background thread");
   assert.match(written, /blaze_http_server_join/, "server.listen joins the background thread so the callback can stop it");
   assert.match(written, /blaze_http_server_stop\(blaze_http_server_held\(\)\)/, "server.close stops the server the adapter holds");
+});
+
+test("server.listen hands the host it was given to the runtime", () => {
+  const source = `const port = 18115;\n` +
+    `const server = http.createServer((req, res) => { res.writeHead(200); res.end("ok\\n"); });\n` +
+    `server.listen(port, "::1", () => {});\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(
+    written,
+    /blaze_http_server_new\("::1", \(uint16_t\)port\)/,
+    "the host of server.listen is the address the server binds",
+  );
 });
 
 test("http.request lowers to blaze_http_client_request", () => {

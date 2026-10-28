@@ -225,6 +225,31 @@ connection to a host is opened as soon as the first one was. A lookup that
 failed is not kept: a host that does not answer yet may answer later, and a
 program that gave up on it the first time would never reach it at all.
 
+## The addresses a server answers on
+
+A server may be told the address it listens on: the second argument of
+`server.listen(port, host, callback)` is the host, and an IPv6 address is
+written as it is written in a URL, between brackets — `server.listen(8080,
+"::1", …)` names the IPv6 loopback and `server.listen(8080, "127.0.0.1", …)`
+the IPv4 one. The runtime copies the host before it binds, so the text the
+program wrote is not needed after the call.
+
+A server the program names no address for — `http.serve`, `http.serveTls`, or
+a `server.listen` whose host is empty — listens on every address of both
+families. The adapter binds the unspecified IPv6 address and the IPv4
+wildcard. On a machine where an IPv6 socket accepts IPv4 connections the
+second bind finds the port already held, and the first listener serves both;
+on a machine where the two are separate sockets, or where IPv6 is not there
+at all, the listeners that did bind serve the families they are. A bind that
+fails because another listener already holds the port is the bind that had
+nothing left to add.
+
+The client writes an address the same way a URL does. A request to
+`http://[::1]:8080/` is made to the IPv6 loopback, and the `Host` header of
+the request carries the authority as the URL wrote it: `[::1]:8080`. The
+brackets belong to the header and not to the address, so the resolver and
+the certificate check are given the address itself.
+
 ## What the compiler writes out of a string
 
 A string the program builds is a list of pieces, and a backend writes it out
