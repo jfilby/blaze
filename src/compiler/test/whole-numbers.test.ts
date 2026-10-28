@@ -98,7 +98,13 @@ async function linked(source: string): Promise<{ directory: string; binary: stri
 }
 
 test("a function every caller hands whole numbers to computes in whole numbers", () => {
-  const c = written(programOf("  for (let i = 0; i < reach; i += 1) console.log(triangle(i, i));"));
+  // Two calls, so the two call sites are what the whole-number pass reads: a
+  // single call is a call the optimiser may write out into its caller, and then
+  // there is no call left to read the parameters of.
+  const c = written(programOf([
+    "  for (let i = 0; i < reach; i += 1) console.log(triangle(i, i));",
+    "  for (let j = 0; j < reach; j += 1) console.log(triangle(j, j));",
+  ].join("\n")));
 
   // The parameters are whole numbers now, so the function is declared with them
   // and its callers hand their counters over without converting them first.
@@ -111,9 +117,12 @@ test("a function every caller hands whole numbers to computes in whole numbers",
   const arm = c.slice(c.indexOf("\nstatic double triangle(int64_t"));
   assert.match(arm, /\+ 33554432ULL\) <= 67108864ULL/);
   // The shift is a whole-number shift of a whole-number product, and the answer
-  // is read as the double the caller is waiting for.
+  // is read as the double the caller is waiting for. The sum the product is
+  // made of is one the commoner may bind and read twice, so the assertion takes
+  // the name it is bound to as well as the sum written out twice.
   assert.match(arm, /return \(double\)\(\(\(\(int64_t\)/);
-  assert.match(arm, /\(uint32_t\)\(\(\(x \+ y\) \* \(\(x \+ y\) \+ 1LL\)\)\) >> /);
+  const sum = String.raw`(?:common\w+|\(x \+ y\))`;
+  assert.match(arm, new RegExp(String.raw`\(uint32_t\)\(\(${sum} \* \(${sum} \+ 1LL\)\)\) >> `));
   // The arm the reach refuses is the one the source wrote, unchanged.
   assert.match(arm, /common\w+ = \(x \+ y\);/);
 });

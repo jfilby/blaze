@@ -1429,6 +1429,26 @@ function captureValue(param: string, capture: SemanticType, bundle: string): str
   return `(${bundle}.number)`;
 }
 
+/** Whether a parameter type is a buffer, whose length travels beside it. */
+function isBufferParameter(type: string): boolean {
+  if (type === "text" || type === "boxedtext") return false;
+  const parsed = parseType(type);
+  return parsed.kind === "slice" || parsed.kind === "array" || parsed.kind === "ptr";
+}
+
+/**
+ * The arguments a captured value is handed to the function by.
+ *
+ * A buffer is one value and its length is another: the function is compiled
+ * with the length as the parameter that follows the pointer, and the bundle
+ * the capture travels in carries it in the number beside the address. A value
+ * that is not a buffer is the one argument it is.
+ */
+function captureArguments(param: string, capture: SemanticType, bundle: string): string[] {
+  const value = captureValue(param, capture, bundle);
+  return isBufferParameter(param) ? [value, `(size_t)(${bundle}.number)`] : [value];
+}
+
 /**
  * The names the captures of a handler are held under, one for each of them.
  *
@@ -4329,8 +4349,8 @@ class ProgramLowering {
           const captured = draft.signature.params.slice(draft.params.length);
           const args = [
             ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
-            ...captured.map((param, index) =>
-              captureValue(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
+            ...captured.flatMap((param, index) =>
+              captureArguments(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
             ),
           ].join(", ");
           const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
@@ -4343,10 +4363,10 @@ class ProgramLowering {
         // event — so the names the arrow captured are read out of the bundle
         // it is handed beside it, one for each of them.
         const args = draft.signature.params
-          .map((param, index) =>
+          .flatMap((param, index) =>
             index < draft.params.length
-              ? callbackValue(param.type, index === 0 ? "p0" : "0")
-              : captureValue(
+              ? [callbackValue(param.type, index === 0 ? "p0" : "0")]
+              : captureArguments(
                   param.type,
                   draft.captured[index - draft.params.length]?.type ?? param.type,
                   `((blaze_capture_t *)p1)[${index - draft.params.length}]`,
@@ -4373,8 +4393,8 @@ class ProgramLowering {
           const captured = draft.signature.params.slice(draft.params.length);
           const args = [
             ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
-            ...captured.map((param, index) =>
-              captureValue(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
+            ...captured.flatMap((param, index) =>
+              captureArguments(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
             ),
           ].join(", ");
           const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
@@ -5341,7 +5361,11 @@ class ProgramLowering {
       ownership: call.name === SHARED ? "owned" : ownership(call.returns),
       retain: false,
       builtin: call.builtin,
-      grid: call.grid === undefined ? undefined : this.value(call.grid, null, line),
+      // A grid launch is the call a kernel is launched with, and it is written
+      // only where it was stated: an ordinary call has no grid, and a property
+      // holding `undefined` is not the same value as one that says nothing
+      // when the IR is compared against what the text reads back.
+      ...(call.grid === undefined ? {} : { grid: this.value(call.grid, null, line) }),
     };
   }
 

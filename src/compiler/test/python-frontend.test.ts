@@ -561,6 +561,33 @@ test("list concatenation of constants in a function is uncontractable", () => {
   assert.match(refused, /contract states no postcondition/);
 });
 
+test("a function whose result the contract language cannot state is contracted by what it does", () => {
+  // The contract language states `+ - * /` and the comparisons, and Python's
+  // floor division, power and remainder are not among them. Writing one into
+  // the postcondition would refuse the parser, so the body is contracted by
+  // what it does instead of by an expression.
+  const phase = phaseOf(
+    "python",
+    {
+      "main.py": [
+        "def identity(x: int) -> int:",
+        "    return x",
+        "",
+        "def floor(x: int, y: int) -> int:",
+        "    return x // y",
+        "",
+        "def power(x: float, y: float) -> float:",
+        "    return x ** y",
+        "",
+      ].join("\n"),
+    },
+    "main.py",
+  );
+  const functions = phase.program.files[0].functions;
+  assert.deepEqual(functions.floor.ensures, []);
+  assert.deepEqual(functions.power.ensures, []);
+});
+
 test("a chained slice in a function body", () => {
   const phase = phaseOf("python", { "main.py": "def f(a: list[int]) -> int:\n    return a[1:3][0]\n" }, "main.py");
   const contract = phase.program.files[0].functions["f"];

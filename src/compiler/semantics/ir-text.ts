@@ -385,7 +385,11 @@ function callText(call: SemanticCall): string {
     .map((argument, position) => `arg[${typeText(call.argTypes[position])}] ${printSemanticValue(argument)}`)
     .join(" ");
   const retain = call.retain ? "yes" : "no";
-  return `${call.callee} [${args}] ownership=${call.ownership} retain=${retain}`;
+  // A kernel launch carries the grid it is launched on, and an ordinary call
+  // carries nothing: the text states which of the two the call is, so reading
+  // it back answers the call the program made.
+  const grid = call.grid === undefined ? "" : ` grid[${printSemanticValue(call.grid)}]`;
+  return `${call.callee} [${args}] ownership=${call.ownership} retain=${retain}${grid}`;
 }
 
 /** A value as the IR states it: the operation, the type, and what it is made of. */
@@ -1418,6 +1422,16 @@ class IrScanner {
     this.keyword("retain");
     this.expect("=");
     const retain = this.oneOf(this.word(), FLAGS);
+    // A grid launch is written after the ownership flags, and an ordinary call
+    // says nothing more: the grid is what the kernel is launched on, and a call
+    // without one is a call.
+    let grid: SemanticValue | undefined;
+    if (this.peekWord() === "grid") {
+      this.keyword("grid");
+      this.expect("[");
+      grid = this.value();
+      this.expect("]");
+    }
     return {
       callee,
       signature: bound.signature,
@@ -1428,6 +1442,7 @@ class IrScanner {
       ownership,
       retain: retain === "yes",
       builtin: bound.builtin,
+      ...(grid === undefined ? {} : { grid }),
     };
   }
 

@@ -450,6 +450,26 @@ test("a program round trips through the text a model may write it in", () => {
   assert.deepEqual(read.entry.releases, program.entry.releases);
 });
 
+test("a kernel launch says the grid it is launched on, and reads it back", () => {
+  const { program, contract } = resolved({
+    "main.ts": ['import { sum } from "./sum.ts";', "sum(1, 2);", ""].join("\n"),
+    "sum.ts": "export function sum(a: number, b: number): number {\n  return a + b;\n}\n",
+  });
+  const call = program.entry.statements.find(
+    (statement): statement is Extract<(typeof program.entry.statements)[number], { k: "call" }> => statement.k === "call",
+  );
+  assert.ok(call !== undefined, "the program calls sum");
+  // A kernel launch is a call with a grid, and the text states it: a body the
+  // compiler writes out and a reviewer reads back is the same launch, and not a
+  // call whose grid was dropped on the way through the text.
+  call.call.grid = { k: "const", type: { kind: "primitive", name: "u64" }, text: "1" };
+
+  const printed = printSemanticProgram(program);
+  assert.match(printed, /grid\[const\[u64\] 1\]/);
+  const read = parseSemanticProgram(printed, contract);
+  assert.deepEqual(read.entry.statements, program.entry.statements);
+});
+
 test("a function the program declares is read back whole, body and all", () => {
   // A function of a program is a body the IR holds, not a signature: the text
   // carries it whole so that a review of the program is shown what it does, and

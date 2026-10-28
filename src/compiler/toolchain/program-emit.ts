@@ -448,12 +448,21 @@ class ProgramEmitter {
   /** One function the program declared, as the target writes a function. */
   private function(fn: SemanticFunction): string[] {
     this.names.enter();
-    const parameters = fn.params.map((param) => {
+    const parameters = fn.params.flatMap((param) => {
       const type = slotType(param);
       const emitted = this.names.declare(param.name, type);
       const boxed = param.kind === "text" && (param as { boxed?: boolean }).boxed === true;
       if (boxed) this.boxedTexts.add(param.name);
-      return { name: emitted, type: boxed ? "boxedtext" : contractText(type) };
+      const listed = [{ name: emitted, type: boxed ? "boxedtext" : contractText(type) }];
+      // An array parameter carries its length beside it, which the body reads
+      // under the parameter's own name and `_length`. The call writes that
+      // length as the argument that follows the pointer, so the definition has
+      // to take it too: a definition that took only the pointer is one the call
+      // it is written with does not match.
+      if (!boxed && (type.kind === "slice" || type.kind === "array" || type.kind === "ptr")) {
+        listed.push({ name: `${emitted}_length`, type: "usize" });
+      }
+      return listed;
     });
     this.lines = [];
     this.depth = 1;

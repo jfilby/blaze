@@ -2188,7 +2188,7 @@ class PythonParser {
           return value;
         }
         this.next();
-        if (this.at("(") && !(value.k === "name" && (value.name === "tl" || value.name === "math" || value.name === "sys"))) {
+        if (this.at("(") && !isModulePath(value)) {
           this.next();
           const args: PyValue[] = [value];
           if (!this.at(")")) {
@@ -3558,6 +3558,21 @@ function dottedName(value: PyValue): string {
   return "";
 }
 
+/**
+ * Whether a field access chain is rooted at a module rather than at a value.
+ *
+ * `tl.math.exp` is one name of one function in a module, and not the method
+ * `exp` of an object `tl.math`: the chain is read as the dotted name it is so
+ * that the frontend knows which builtin the source asked for. A chain rooted at
+ * a value the program holds, such as `req.path`, is a field of that value and
+ * may be a method call, which is the other reading of `name(args)`.
+ */
+function isModulePath(value: PyValue): boolean {
+  if (value.k === "name") return value.name === "tl" || KNOWN_MODULES.has(value.name);
+  if (value.k === "field") return isModulePath(value.base);
+  return false;
+}
+
 function isTritonBuiltin(name: string): boolean {
   if (name.startsWith("tl.")) {
     if (name === "tl.where") return true;
@@ -4027,8 +4042,15 @@ class Uncontractable extends Error {
 /**
  * The operators the contract language states a result with. A Python body
  * that uses one the contract language has not states no postcondition.
+ *
+ * The list is the grammar `contract.ts` reads, and not every operator Python
+ * has: a floor division (`//`), a power (`**`) and a remainder (`%`) are
+ * operations the contract language has no operator for. Writing one into a
+ * postcondition is a build refused by the parser for a character it cannot
+ * read, so a body using one is contracted by what it does instead, as a body
+ * that branches or calls already is.
  */
-const CONTRACT_OPERATORS: readonly string[] = ["+", "-", "*", "**", "//", "%", "==", "!=", "<", "<=", ">", ">="];
+const CONTRACT_OPERATORS: readonly string[] = ["+", "-", "*", "/", "==", "!=", "<", "<=", ">", ">="];
 
 /**
  * The expression the result must equal, or null when the body has none: a

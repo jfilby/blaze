@@ -1554,7 +1554,14 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    */
   private captureEntry(capture: CaptureRef): string {
     if (isCarriedAsAddress(capture.type)) {
-      return `(blaze_capture_t){ .pointer = (void *)(uintptr_t)(${capture.name}), .number = 0.0 }`;
+      // A buffer is carried as the address of its first element, and it also
+      // carries its length in the number beside it: an array parameter of a
+      // compiled function is handed its length as the argument after the
+      // pointer, and the trampoline that calls the function reads it from here.
+      const carriesLength =
+        capture.type.kind === "slice" || capture.type.kind === "array" || capture.type.kind === "ptr";
+      const length = carriesLength ? `(double)(${capture.name}_length)` : "0.0";
+      return `(blaze_capture_t){ .pointer = (void *)(uintptr_t)(${capture.name}), .number = ${length} }`;
     }
     return `(blaze_capture_t){ .pointer = NULL, .number = (double)(${capture.name}) }`;
   }

@@ -760,7 +760,15 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         );
       }
       const value = programValue(one.value, bindings);
-      bound(bindings, one.name, one.value);
+      // An assignment states a new value for the name, and whether that value
+      // may be read out of the binding is a question about the name it writes:
+      // a plain assignment binds the value the source wrote, and a compound one
+      // does not, because `x += 1` is not `x = 1` and binding it to the right
+      // side would answer a number the program never held. The block that holds
+      // the write invalidates what it wrote when it ends, so a loop or a branch
+      // cannot leave a value behind that only one turn or one arm computed.
+      if (one.op === "=") bound(bindings, one.name, one.value);
+      else forget(bindings, one.name);
       return { kind: "assign", name: one.name, op: operator, value, line: one.line };
     }
     case "storeElement": {
@@ -918,23 +926,24 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     }
     case "return":
       return { kind: "result", value: programValue(one.value ?? { k: "none" }, bindings), line: one.line };
-    case "if":
+    case "if": {
       conditionIsBoolean(one.condition, one.line);
-      return {
-        kind: "if",
-        condition: programValue(one.condition, bindings),
-        then: one.then.map((inside) => statement(inside, bindings)),
-        otherwise: one.otherwise.map((inside) => statement(inside, bindings)),
-        line: one.line,
-      };
-    case "while":
+      const condition = programValue(one.condition, bindings);
+      // The two arms are lowered against the names the `if` was written with,
+      // and neither sees what the other wrote: only one of them runs.
+      const thenScope = cloneBindings(bindings);
+      const otherwiseScope = cloneBindings(bindings);
+      const then = one.then.map((inside) => statement(inside, thenScope));
+      const otherwise = one.otherwise.map((inside) => statement(inside, otherwiseScope));
+      invalidate(bindings, thenScope);
+      invalidate(bindings, otherwiseScope);
+      return { kind: "if", condition, then, otherwise, line: one.line };
+    }
+    case "while": {
       conditionIsBoolean(one.condition, one.line);
-      return {
-        kind: "while",
-        condition: programValue(one.condition, bindings),
-        body: one.body.map((inside) => statement(inside, bindings)),
-        line: one.line,
-      };
+      const condition = programValue(one.condition, bindings);
+      return { kind: "while", condition, body: branch(one.body, bindings), line: one.line };
+    }
     case "for":
       return {
         kind: "for",
@@ -945,7 +954,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         down: false,
         type: null,
         step: one.step === null ? null : programValue(one.step, bindings),
-        body: one.body.map((inside) => statement(inside, bindings)),
+        body: branch(one.body, bindings),
         line: one.line,
       };
     case "break":
@@ -960,7 +969,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       // A compiled program cannot raise, so there is nothing to catch: the
       // body runs and the block that catches is not read. The block that runs
       // whatever happens does run, and it runs after the body.
-      const body = [...one.body, ...(one.finallyBody ?? [])].map((inside) => statement(inside, bindings));
+      const body = branch([...one.body, ...(one.finallyBody ?? [])], bindings);
       return { kind: "block", body, line: one.line };
     }
     case "call": {
@@ -1003,6 +1012,40 @@ function bound(bindings: Bindings, name: string, value: PyValue): void {
     bindings.dicts.delete(name);
   }
   bindings.values.set(name, value);
+}
+
+/** A name whose value the body no longer knows: it is read as the name it is. */
+function forget(bindings: Bindings, name: string): void {
+  bindings.values.delete(name);
+  bindings.dicts.delete(name);
+}
+
+/**
+ * What a block did to the names around it.
+ *
+ * A block may run no times, once, or many times, and what it wrote is not the
+ * value the name holds when the block ends: a loop's every turn writes the
+ * same names, and an arm of a branch writes the names only that arm writes.
+ * The block is lowered against a copy of the bindings, and every name the copy
+ * answers differently is forgotten by the block that holds it, so what the
+ * program reads after a loop or a branch is the name, not the last value a
+ * turn happened to compute.
+ */
+function invalidate(bindings: Bindings, after: Bindings): void {
+  for (const name of new Set([...bindings.values.keys(), ...after.values.keys()])) {
+    if (bindings.values.get(name) !== after.values.get(name)) forget(bindings, name);
+  }
+  for (const name of new Set([...bindings.dicts.keys(), ...after.dicts.keys()])) {
+    if (bindings.dicts.get(name) !== after.dicts.get(name)) forget(bindings, name);
+  }
+}
+
+/** The statements of a block, lowered against a copy of the names around it. */
+function branch(body: readonly PyStatement[], bindings: Bindings): ProgramStatement[] {
+  const scoped = cloneBindings(bindings);
+  const lowered = body.map((inside) => statement(inside, scoped));
+  invalidate(bindings, scoped);
+  return lowered;
 }
 
 /** Whether a value is the command line of a Python program. */

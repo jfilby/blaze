@@ -304,6 +304,43 @@ test("a loop of a program counts over a range", async () => {
   assert.equal(delivered.stdout, "10\n");
 });
 
+test("a name a loop accumulates is read on every turn as the name it is", async () => {
+  // The value a compound assignment writes is the old value and the right
+  // side, and not the right side alone. A binding that answers the right side
+  // would read `total += i` as `total = i`, and the program would print the
+  // counter on every turn instead of the running sum.
+  const source = [
+    "total = 0",
+    "for i in range(4):",
+    "    total += i",
+    "    print(total)",
+    "",
+  ].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "0\n1\n3\n6\n");
+});
+
+test("a name an arm of a branch writes is read as the name it is after the branch", async () => {
+  // Only one arm runs, and the arm that does not run writes nothing: a value
+  // read out of the arm that was lowered last would answer what the source
+  // wrote in a branch the program never took.
+  const source = [
+    "x = 1",
+    "if x == 2:",
+    "    x = 5",
+    "print(x)",
+    "",
+  ].join("\n");
+  const { binary, original } = await deliver(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, "1\n");
+});
+
 test("a list of a program is a buffer of what it holds, and an f-string is text", async () => {
   const source = ["a = [1.0, 2.0, 3.0]", "print(a[1])", 'print(f"{a[1]} items")', ""].join("\n");
   const { binary, original } = await deliver(source);
