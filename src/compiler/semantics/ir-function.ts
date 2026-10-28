@@ -60,7 +60,8 @@ import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor } from "./language.ts";
 import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
-import { isInteger, isNumber, isWhole, isWide, wholeOf } from "../core/semantic-ir.ts";
+import { isInteger, isNumber, isWhole, isWide, isWideType, wholeOf } from "../core/semantic-ir.ts";
+import { foldWhole, modularReduction, wholeConstant, wholePower, wholeText, wholeType } from "./whole-arithmetic.ts";
 import type { Inferred } from "./objects.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 
@@ -707,7 +708,7 @@ class FunctionBody {
         return;
       }
       case "if": {
-        const condition = this.typed(statement.condition, null, statement.line).value;
+        const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
         const then = this.arm(statement.then, this.frame().loop);
         const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop);
         this.write({ k: "if", condition, then, otherwise, line: statement.line });
@@ -783,7 +784,7 @@ class FunctionBody {
         return;
       }
       case "while": {
-        const condition = this.typed(statement.condition, null, statement.line).value;
+        const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
         const { target, ...info } = this.loop(statement.body);
         // `while (true)` never leaves its body through the loop's exit, so
         // nothing written after it is reachable — unless the body leaves the
@@ -802,7 +803,7 @@ class FunctionBody {
         return;
       }
       case "doWhile": {
-        const condition = this.typed(statement.condition, null, statement.line).value;
+        const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
         this.write({ k: "loop", loop: { kind: "doWhile", condition, ...this.loop(statement.body) }, line: statement.line });
         return;
       }
@@ -1171,7 +1172,7 @@ class FunctionBody {
       case "unary":
         return this.unary(expression, expect, line);
       case "conditional": {
-        const condition = this.typed(expression.condition, null, line).value;
+        const condition = this.truth(this.typed(expression.condition, null, line).value);
         const then = this.typed(expression.then, expect, line);
         const otherwise = this.typed(expression.otherwise, expect, line);
         return {
@@ -1283,6 +1284,13 @@ class FunctionBody {
 
   /** A call, or the one builtin that is an operation rather than a call. */
   private call(expression: Expression & { k: "call" }, line: number): Typed {
+    // `BigInt(x)` is the whole number a value names, and a literal argument is
+    // a value the compiler already holds: folding it is what lets a constant
+    // expression be written the way the language writes one, `2n ** BigInt(8n)`.
+    if (expression.name === "BigInt") {
+      const folded = this.bigIntCall(expression);
+      if (folded !== null) return folded;
+    }
     const builtin = builtinFor(expression.name);
     if (builtin !== null) {
       this.builtinArity(expression.name, builtin, expression.args.length, line);
@@ -1517,9 +1525,163 @@ class FunctionBody {
           ? wholeResult(left.inferred, right.inferred)
           : numeric(left.inferred, right.inferred);
     const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
+    // A power of whole numbers is a whole number: it is folded where both sides
+    // are constant, written out as the products it is where the exponent is a
+    // small constant, and refused otherwise. A double's power is what the
+    // library answers, and a wide number is not one.
+    if (op === "**") {
+      const power = this.power(left.value, right.value);
+      if (power !== null) return power;
+      if (isInteger(left.value.type) || isInteger(right.value.type)) {
+        throw this.error(
+          '"**" needs numbers',
+          line,
+          "a power is a double's operation; over whole numbers write the products out, or keep the exponent small and constant",
+        );
+      }
+    }
+    const folded = this.foldedValue(arithmetic, left.value, right.value, type);
+    if (folded !== null) return folded;
+    // A wide remainder is the kernels' answer, not the machine's: the product
+    // of two 256 bit numbers does not fit in one, and a `%` of the low half is
+    // a different number from the remainder of the whole.
+    if (arithmetic === "mod" && type.kind === "primitive" && type.name === "u256") {
+      const reduced = modularReduction(left.value, right.value, (name, args) => this.wideKernel(name, args));
+      if (reduced !== null) return { value: reduced, inferred: asType(type) };
+    }
     return {
       value: { k: "arith", type, op: arithmetic, left: left.value, right: right.value },
       inferred: asType(type),
+    };
+  }
+
+  /** A `BigInt(...)` of a value written out, answered here rather than at a
+   * runtime that has no such call. */
+  private bigIntCall(expression: Expression & { k: "call" }): Typed | null {
+    if (expression.args.length !== 1) return null;
+    const argument = expression.args[0] as Expression;
+    const text = argument.k === "literal"
+      ? argument.text
+      : argument.k === "text" && argument.parts.length === 1 && argument.parts[0].k === "text"
+        ? argument.parts[0].value
+        : null;
+    if (text === null) return null;
+    const value = wholeText(text);
+    if (value === null) return null;
+    const fits = value <= 9223372036854775807n && value >= -9223372036854775808n;
+    const type = fits ? I64 : wholeType("u256");
+    const constant = wholeConstant(value, type);
+    if (constant === null) return null;
+    return { value: constant, inferred: asType(type) };
+  }
+
+  /**
+   * The value of a power of whole numbers, or null where it is not one this
+   * body can answer.
+   *
+   * A constant base and a constant exponent are folded exactly, at the width
+   * that holds the answer. A base the body reads is multiplied by itself for
+   * each count of a small exponent — `x ** 2n` is `x * x` — because a power of
+   * a whole number is a product of them and the kernels have no wide power.
+   */
+  private power(base: SemanticValue, exponent: SemanticValue): Typed | null {
+    const count = exponent.k === "const" ? wholeText(exponent.text) : null;
+    if (count === null || count < 0n) return null;
+    // A bigint and a number are not mixed, and a power is where that rule is
+    // easiest to miss: `2n ** 3` is a bigint raised by a number, which the
+    // language raises on rather than reading one as the other.
+    if (!isInteger(base.type) || !isInteger(exponent.type)) return null;
+    if (base.k === "const") {
+      const value = wholeText(base.text);
+      if (value === null) return null;
+      const exact = wholePower(value, count);
+      if (exact === null) return null;
+      const wide = isWideType(base.type) || exact > 9223372036854775807n || exact < -9223372036854775808n;
+      const type = wide ? wholeType("u256") : I64;
+      const constant = wholeConstant(exact, type);
+      if (constant === null) return null;
+      return { value: constant, inferred: asType(type) };
+    }
+    // A base that computes something would run again for every factor, and the
+    // body said it once. A name is a read, and a read has no side effect, and
+    // the count of factors a read is written out for is small.
+    if (base.k !== "local" || count > 64n) return null;
+    if (count === 0n) {
+      const one = wholeConstant(1n, isWideType(base.type) ? wholeType("u256") : I64);
+      if (one === null) return null;
+      return { value: one, inferred: asType(one.type) };
+    }
+    let product: SemanticValue = base;
+    for (let factor = 1n; factor < count; factor += 1n) {
+      product = { k: "arith", type: base.type, op: "mul", left: product, right: base };
+    }
+    return { value: product, inferred: asType(base.type) };
+  }
+
+  /**
+   * A whole-number operation on two constants, answered here rather than by
+   * the target.
+   *
+   * The answer is the one the type holds, so a fold and the code the same
+   * operation would have been lowered to agree. A text that is not a whole
+   * number, or an operation whose answer the type cannot state (a division by
+   * zero), is left to the ordinary path.
+   */
+  private foldedValue(op: ArithOp, left: SemanticValue, right: SemanticValue, type: SemanticType): Typed | null {
+    if (left.k !== "const" || right.k !== "const") return null;
+    if (type.kind !== "primitive" || !isWhole(type.name)) return null;
+    if (!isInteger(left.type) || !isInteger(right.type)) return null;
+    const first = wholeText(left.text);
+    const second = wholeText(right.text);
+    if (first === null || second === null) return null;
+    const value = foldWhole(op, first, second, type.name);
+    if (value === null) return null;
+    const constant = wholeConstant(value, type);
+    if (constant === null) return null;
+    return { value: constant, inferred: asType(type) };
+  }
+
+  /** A call of one of the wide modular kernels, as the builtin it is. */
+  private wideKernel(name: string, args: readonly SemanticValue[]): SemanticValue | null {
+    const builtin = builtinFor(name);
+    if (builtin === null) return null;
+    return {
+      k: "call",
+      type: builtin.returns,
+      call: this.semanticCall(
+        name,
+        {
+          name,
+          symbol: name,
+          params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+          returns: contractText(builtin.returns),
+        },
+        args,
+        builtin.returns,
+        [],
+        true,
+        builtin.params,
+      ),
+    };
+  }
+
+  /**
+   * A value as the truth a branch tests.
+   *
+   * A machine word is a truth as it stands — zero is false and everything else
+   * is true — and so is the accumulator a target branches on. A wide number is
+   * four limbs and is not: it is compared with zero, which is the test the
+   * source wrote with `!== 0n`.
+   */
+  private truth(value: SemanticValue): SemanticValue {
+    if (!isWideType(value.type)) return value;
+    return {
+      k: "compare",
+      type: BOOLEAN,
+      op: "ne",
+      operand: value.type,
+      left: value,
+      right: { k: "const", type: value.type, text: "0" },
     };
   }
 
@@ -1555,6 +1717,22 @@ class FunctionBody {
         // `!a` asks whether a reference is nothing, which is the null test and
         // not its negation: `!node.left` is the arm a leaf takes.
         return { value: { k: "isNull", type: BOOLEAN, operand: operand.value, negate: false }, inferred: asType(BOOL) };
+      }
+      if (isInteger(operand.value.type)) {
+        // A whole number is a truth as it stands, and a negation asks whether
+        // it is zero. A wide number is four limbs and has no truth of its own,
+        // so the test is written as the comparison both kinds answer.
+        return {
+          value: {
+            k: "compare",
+            type: BOOLEAN,
+            op: "eq",
+            operand: operand.value.type,
+            left: operand.value,
+            right: { k: "const", type: operand.value.type, text: "0" },
+          },
+          inferred: asType(BOOL),
+        };
       }
       throw this.error(
         `negates a ${typeText(operand.value.type)}, which is not a truth`,

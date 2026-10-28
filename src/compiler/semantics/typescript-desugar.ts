@@ -258,14 +258,6 @@ const INVERT_BODY = `{
     return x % modulo;
 }`;
 
-function computeBigIntLiteral(text: string): string {
-  try {
-    return BigInt(text).toString() + "n";
-  } catch {
-    return "BigInt('" + text + "')";
-  }
-}
-
 function matchBrace(source: string, openIndex: number): number {
   let depth = 0;
   let i = openIndex;
@@ -393,8 +385,6 @@ export function desugar(source: string): string {
   // Drop line comments.
   source = source.replace(/\/\/.*$/gm, "");
 
-  // Fold curve constants.
-  source = source.replace(/2n \*\* 256n - 2n \*\* 32n - 977n/g, (2n ** 256n - 2n ** 32n - 977n).toString() + "n");
   source = source.replace(/CURVE\.beta/g, "55594575648329892869085402983802832744385952214688224221778511981742606582254n");
   source = source.replace(/CURVE\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
   source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
@@ -422,9 +412,6 @@ export function desugar(source: string): string {
   // `Point.multiply` answers the affine point its chain ends at, which is the
   // type the call site holds it at.
   source = source.replace(/multiply\(scalar: u256\) \{/g, "multiply(scalar: u256): Point {");
-  // A bit test written as the value of a mask is a comparison in the IR: the
-  // condition a branch takes is a truth, and a `u256` mask is not one.
-  source = source.replace(/if \(([A-Za-z_$][\w$]*) & 1n\)/g, "if (($1 & 1n) !== 0n)");
   source = source.replace(/const m = x - u \* q;/g, "const m: u256 = x - u * q;");
   source = source.replace(/const n = y - v \* q;/g, "const n: u256 = y - v * q;");
   source = source.replace(/function isWithinCurveOrder\(num: bigint\)/g, "function isWithinCurveOrder(num: u256)");
@@ -434,20 +421,13 @@ export function desugar(source: string): string {
   source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
   source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
   source = source.replace(/let point = G;/g, "let point = new Point(55066263022277343669578718895168534326250603453777594175500187360389116729240n, 32670510020758816978083085130507043184471273380659243275938904335757337482424n);");
-  source = source.replace(/(?<!const )POW_2_128\b/g, "340282366920938463463374607431768211456n");
   // Remove dead USE_ENDOMORPHISM declaration (its comparison is not supported in the contract language).
   source = source.replace(/const USE_ENDOMORPHISM = CURVE\.a === 0n;\n/g, "");
   source = source.replace(/USE_ENDOMORPHISM\b/g, "true");
   // Remove the now-orphaned `const true = 0n === 0n;` if the declaration wasn't caught above.
   source = source.replace(/const true = 0n === 0n;\n/g, "");
-  source = source.replace(/2n \*\* 256n - 432420386565659656852420866394968145599n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
 
-  // BigInt constants -> bigint literals.
-  source = source.replace(/BigInt\('([^']*)'\)/g, (_, s) => computeBigIntLiteral(s));
-  source = source.replace(/BigInt\((\d+)\)/g, (_, n) => n + "n");
 
-  // POWER_2_128.
-  source = source.replace(/2n \*\* 128n/g, (2n ** 128n).toString() + "n");
 
   // normalizeScalar number branch.
   source = source.replace(/if \(typeof num === 'number' && num > 0 && Number\.isSafeInteger\(num\)\) return BigInt\(num\);\n/g, "");

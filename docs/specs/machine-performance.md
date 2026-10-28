@@ -642,11 +642,17 @@ each is a general one rather than a rewrite of this program:
   a wide answer through a pointer, wide arguments on the stack, wide fields
   written and read in place.
 
-The arithmetic lowering is still a source-level one, because a `bigint` is not
-a `u256`: `mod(a * b, p)` is two 256 bit factors and a 512 bit product, which
-the compiler's wide arithmetic does not express. What changed is where the
-lowering is written: the reductions of `mod` are the kernels in every expression
-of the program, the inversion's steps are taken modulo the order, and the
+The arithmetic lowering is partly the compiler's own and partly a source-level
+one. The compiler folds a constant `bigint` expression at the width the answer
+is held at, writes a power of a whole number as the products it is, tests a wide
+condition against zero, and lowers a `u256` remainder over a sum, difference or
+product to the kernels that reduce without an intermediate the width cannot
+hold. What is still a source-level lowering is the call of `mod` itself: its
+parameter is a `bigint` at the width a bigint is, and the product the call hands
+it is wider than that, so the call has to be opened where the source wrote it
+before the compiler can see the remainder. What changed is where the lowering is
+written: the reductions of `mod` are the kernels in every expression of the
+program, the inversion's steps are taken modulo the order, and the
 multiplication's formulas are the source's own, so the loop and the count main
 reaches the multiplication with are the source's too. The one transcription
 error the lowering had is worth recording because it survived in the source for

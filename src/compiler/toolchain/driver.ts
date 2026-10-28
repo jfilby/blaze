@@ -980,6 +980,15 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const out = "blaze_wide";
         return `({ ${RUNTIME_NAME}_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${argument(0)}, ${argument(1)}, ${argument(2)}, ${argument(3)}); ${out}; })`;
       }
+      // The three modular operations: each is the kernel that reduces without
+      // an intermediate the width cannot hold. A program body writes one where
+      // the IR fused a wide `%` over an operation.
+      case "u256_add_mod":
+        return this.wideAddMod(argument(0), argument(1), argument(2), call.returns);
+      case "u256_sub_mod":
+        return this.wideSubMod(argument(0), argument(1), argument(2), call.returns);
+      case "u256_mul_mod":
+        return this.wideMulMod(argument(0), argument(1), argument(2), call.returns);
       case "parseInt": {
         // A text argument is the number its text states, so the runtime boxes
         // the pointer it carries and reads the number out of it; a dynamic

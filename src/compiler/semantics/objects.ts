@@ -19,6 +19,7 @@ import { CompilerError } from "../core/errors.ts";
 import type { FileContract, FunctionContract, ObjectLayout, PrimitiveTypeName, TypeExpr } from "../core/types.ts";
 import { isWhole, isWide, LIMB_BYTES, limbsOf } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
+import { wholeText } from "./whole-arithmetic.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 import type { LiteralKeys } from "./program-objects.ts";
 import type { ProgramValue } from "./module.ts";
@@ -28,6 +29,30 @@ const POINTER_SIZE = 8;
 
 export const F64: TypeExpr = { kind: "primitive", name: "f64" };
 export const I64: TypeExpr = { kind: "primitive", name: "i64" };
+/** The wide number a whole value too large for a machine word is held at. */
+const U256: TypeExpr = { kind: "primitive", name: "u256" };
+
+/**
+ * The type a `BigInt(...)` of a written value is held at, or null where the
+ * argument is not a value the layout pass can read.
+ *
+ * The body builder folds the call to a literal, and this is the same fold at
+ * the one place that runs before it: the type a field holds is decided here,
+ * and it has to be the type the value the builder writes is held at.
+ */
+function bigIntInferred(argument: Expression | undefined): TypeExpr | null {
+  if (argument === undefined) return null;
+  const text = argument.k === "literal"
+    ? argument.text
+    : argument.k === "text" && argument.parts.length === 1 && argument.parts[0].k === "text"
+      ? argument.parts[0].value
+      : null;
+  if (text === null) return null;
+  const value = wholeText(text);
+  if (value === null) return null;
+  return value <= 9223372036854775807n && value >= -9223372036854775808n ? I64 : U256;
+}
+
 export const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 export const BOOL: TypeExpr = { kind: "primitive", name: "bool" };
 /** A reference to an object whose fields the source never pins down. */
@@ -279,6 +304,14 @@ class BodyTypes {
       }
       case "call": {
         for (const argument of expression.args) this.expression(argument);
+        // `BigInt(x)` of a value written out is the whole number it names, and
+        // the builder that lowers the body folds it to the literal. What the
+        // layout pass needs is the type it is held at, which is the type of the
+        // literal the fold produces.
+        if (expression.name === "BigInt") {
+          const inferred = bigIntInferred(expression.args[0]);
+          if (inferred !== null) return { kind: "type", type: inferred };
+        }
         const builtin = builtinFor(expression.name);
         if (builtin !== null) {
           const allowed = builtin.arities ?? [builtin.arity ?? builtin.params.length];

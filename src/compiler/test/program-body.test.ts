@@ -851,7 +851,7 @@ test("a bigint the language will not mix with a number is refused", () => {
   const refusals: [string, readonly string[]][] = [
     ["added", ["console.log(1n + 1);"]],
     ["compared", ["console.log(1n < 2);"]],
-    ["raised", ["console.log(2n ** 3n);"]],
+    ["raised by a number", ["console.log(2n ** 3);"]],
     ["shifted unsigned", ["console.log(2n >>> 1n);"]],
     ["given to a number", ["function half(n: number): number {", "  return n / 2;", "}", "console.log(half(9007199254740993n));"]],
     ["declared a number", ["const n: number = 9007199254740993n;", "console.log(n);"]],
