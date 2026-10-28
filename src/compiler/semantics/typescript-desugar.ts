@@ -337,65 +337,11 @@ function splitTopLevelArgs(s: string): string[] {
   return parts.map((p) => p.trim());
 }
 
-export function rewriteCalls(source: string, fnName: string, _arity: number, rewrite: (args: string) => string): string {
-  let out = "";
-  let i = 0;
-  const needle = fnName + "(";
-  while (true) {
-    const idx = source.indexOf(needle, i);
-    if (idx < 0) {
-      out += source.slice(i);
-      break;
-    }
-    out += source.slice(i, idx);
-    const open = idx + fnName.length;
-    const close = matchParen(source, open);
-    if (close < 0) {
-      out += source.slice(idx);
-      break;
-    }
-    const args = source.slice(open + 1, close);
-    const replaced = rewrite(args);
-    out += fnName + "(" + replaced + ")";
-    i = close + 1;
-  }
-  return out;
-}
-
-export function countTopLevelCommas(s: string): number {
-  let depth = 0;
-  let count = 0;
-  let inStr: string | null = null;
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (inStr !== null) {
-      if (ch === "\\") { i++; continue; }
-      if (ch === inStr) inStr = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === "`") { inStr = ch; continue; }
-    if (ch === "(" || ch === "[" || ch === "{") depth++;
-    else if (ch === ")" || ch === "]" || ch === "}") depth--;
-    else if (ch === "," && depth === 0) count++;
-  }
-  return count;
-}
-
 export function desugar(source: string): string {
-  // Drop line comments.
+  // Drop line comments: the rewrites below are written over the text, and a
+  // comment that mentions a call is text they would read as one.
   source = source.replace(/\/\/.*$/gm, "");
 
-  source = source.replace(/CURVE\.beta/g, "55594575648329892869085402983802832744385952214688224221778511981742606582254n");
-  source = source.replace(/CURVE\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
-  source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
-  source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
-  source = source.replace(/CURVE\.n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
-  source = source.replace(/CURVE\.a/g, "0n");
-  source = source.replace(/CURVE\.beta/g, "55594575648329892869085402983802832744385952214688224221778511981742606582254n");
-  source = source.replace(/CURVE\.n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
-  source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
-  source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
-  source = source.replace(/CURVE\.a/g, "0n");
   source = source.replace(/        \}\n[ \t]*const __se = splitScalarEndo[\s\S]*?return JacobianPoint_add\(k1p, k2p\);/, "        }");
     source = source.replace("        const __se = splitScalarEndo(n);", "        const __se = null;");
   source = source.replace("splitScalarEndo", "splitScalarEndo_unused");
@@ -409,17 +355,10 @@ export function desugar(source: string): string {
   );
   source = source.replace(/scalar: bigint/g, "scalar: u256");
   source = source.replace(/: bigint/g, ": u256");
-  // `Point.multiply` answers the affine point its chain ends at, which is the
-  // type the call site holds it at.
-  source = source.replace(/multiply\(scalar: u256\) \{/g, "multiply(scalar: u256): Point {");
-  source = source.replace(/const m = x - u \* q;/g, "const m: u256 = x - u * q;");
-  source = source.replace(/const n = y - v \* q;/g, "const n: u256 = y - v * q;");
-  source = source.replace(/function isWithinCurveOrder\(num: bigint\)/g, "function isWithinCurveOrder(num: u256)");
   source = source.replace(/function normalizeScalar\(num: bigint\): bigint {/g, "function normalizeScalar(num: u256): u256 {");
   source = source.replace(/let n = normalizeScalar\(scalar\);/g, "let n: u256 = normalizeScalar(scalar);");
-  source = source.replace(/const k1neg = k1 > ([0-9n]+);/g, "const k1neg = (k1 > $1) ? 1n : 0n;");
-  source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
-  source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
+  // `main` starts at the const the file wrote, which is a value the program holds
+  // rather than a constant: the object is the one the constructor builds.
   source = source.replace(/let point = G;/g, "let point = new Point(55066263022277343669578718895168534326250603453777594175500187360389116729240n, 32670510020758816978083085130507043184471273380659243275938904335757337482424n);");
   // Remove dead USE_ENDOMORPHISM declaration (its comparison is not supported in the contract language).
   source = source.replace(/const USE_ENDOMORPHISM = CURVE\.a === 0n;\n/g, "");
@@ -440,54 +379,9 @@ export function desugar(source: string): string {
   // Remove instanceof guard.
   source = source.replace(/if \(!\(other instanceof JacobianPoint\)\) \{\s*throw new TypeError\('JacobianPoint#add: expected JacobianPoint'\);\s*\}/g, "");
 
-  // Arrow function -> normal function.
-  source = source.replace(/const divNearest = \(a: bigint, b: bigint\) => \(a \+ b \/ 2n\) \/ b;/g, "function divNearest(a: u256, b: u256): u256 { return (a + b / 2n) / b; }");
-
-  // Object destructuring -> field reads.
-  source = source.replace(/const \{ n \} = CURVE;/g, "const n = CURVE.n;");
-
-  // Array destructuring -> separate declarations.
-  source = source.replace(/let \[x, y, u, v\] = \[0n, 1n, 1n, 0n\];/g, "let x: u256 = 0n;\n        let y: u256 = 1n;\n        let u: u256 = 1n;\n        let v: u256 = 0n;");
-
-  // Tuple assignments.
-  source = source.replace(/\[b, a\] = \[a, r\];/g, "const __t0 = a; const __t1 = r; b = __t0; a = __t1;");
-  source = source.replace(/\[x, y\] = \[u, v\];/g, "const __t2 = u; const __t3 = v; x = __t2; y = __t3;");
-  source = source.replace(/\[u, v\] = \[m, n\];/g, "const __t4 = m; const __t5 = n; u = __t4; v = __t5;");
-
-  // splitScalarEndo destructuring.
-  source = source.replace(/let \{ k1neg, k1, k2neg, k2 \} = splitScalarEndo\(n\);/g,
-    "const __se = splitScalarEndo(n);\n        let k1neg = __se.k1neg;\n        let k1 = __se.k1;\n        let k2neg = __se.k2neg;\n        let k2 = __se.k2;");
-
-  // Default parameters for mod and invert.
-  source = source.replace(/function mod\([^)]*\)\s*\{/g, "function mod(a: u256, b: u256): u256 {");
-  source = source.replace(/const result = a % b;\n    return result >= 0 \? result : b \+ result;/g, "return a % b;");
-  source = source.replace(/function splitScalarEndo\(k: bigint\)/g, "function splitScalarEndo(k: u256)");
-  source = source.replace(/function invert\([^)]*\)\s*{/g, "function invert(number: u256, modulo: u256): u256 {");
-
-  // Remove unsupported TypeScript type annotations references.
-
   // Classes are read by the frontend: a constructor is a function returning an
   // object, and methods take the instance they were called on. The source's
   // classes stay as classes.
-
-  // Mod and invert default calls.
-  for (let __pass = 0; __pass < 5; __pass++) {
-    source = rewriteCalls(source, "mod", 1, (args) => {
-      if (countTopLevelCommas(args) === 0 && args.trim() !== "") return args + ", 115792089237316195423570985008687907853269984665640564039457584007908834671663n";
-      return args;
-    });
-  }
-  // invert similarly once.
-  source = rewriteCalls(source, "invert", 1, (args) => {
-    if (countTopLevelCommas(args) === 0 && args.trim() !== "") return args + ", 115792089237316195423570985008687907853269984665640564039457584007908834671663n";
-    return args;
-  });
-  source = rewriteCalls(source, "invert", 1, (args) => {
-    if (countTopLevelCommas(args) === 0 && args.trim() !== "") return args + ", CURVE.P";
-    return args;
-  });
-
-  source = source.replace(/CURVE\\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
 
   // Squares.
   source = source.replace(/(self\.[A-Za-z_]\w*|this\.[A-Za-z_]\w*|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\*\*\s*2n/g, "$1 * $1");
@@ -497,71 +391,12 @@ export function desugar(source: string): string {
   // it is multiplied by the coordinate.
   source = source.replace(/const invZ2 = invZ \* invZ;/g, "const invZ2 = mod(invZ * invZ);");
 
-
-
-
-
-
-
-  // Move top-level function declarations ahead of the declarations that call
-  // them, so the module parser reads them as declared functions with layouts.
-  const moved: string[] = [];
-  const remaining: string[] = [];
-  let i = 0;
-  while (i < source.length) {
-    let j = i;
-    while (j < source.length && /\s/.test(source[j])) j++;
-    if (j >= source.length) { remaining.push(source.slice(i)); break; }
-    if (source.startsWith("function ", j)) {
-      let k = j + "function".length;
-      while (k < source.length && /\s/.test(source[k])) k++;
-      while (k < source.length && /[A-Za-z0-9_$]/.test(source[k])) k++;
-      while (k < source.length && /\s/.test(source[k])) k++;
-      if (source[k] === "(") {
-        const closeParen = matchParen(source, k);
-        if (closeParen >= 0) {
-          let m = closeParen + 1;
-          while (m < source.length && /\s/.test(source[m])) m++;
-          if (source[m] === ":") {
-            while (m < source.length && source[m] !== "{" && source[m] !== ";") m++;
-            while (m < source.length && /\s/.test(source[m])) m++;
-          }
-          if (source[m] === "{") {
-            const closeBrace = matchBrace(source, m);
-            if (closeBrace >= 0) {
-              moved.push(source.slice(j, closeBrace + 1));
-              i = closeBrace + 1;
-              continue;
-            }
-          }
-        }
-      }
-    }
-    let nextFunc = source.indexOf("function ", j + 1);
-    if (nextFunc < 0) { remaining.push(source.slice(i)); break; }
-    remaining.push(source.slice(i, nextFunc));
-    i = nextFunc;
-  }
-  if (moved.length > 0) {
-    source = moved.join("\n") + "\n" + remaining.join("");
-  }
-  source = source.replace(/CURVE\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
-  source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
-  source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
-  source = source.replace(/CURVE\.n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
-  source = source.replace(/CURVE\.a/g, "0n");
-  source = source.replace(/CURVE\.beta/g, "55594575648329892869085402983802832744385952214688224221778511981742606582254n");
-  source = source.replace(/const PRIVATE_KEY =/g, "const __PK__ =");
-  source = source.replace(/PRIVATE_KEY/g, "0x2DEE927079283C3C4FCA3EF970FF4D38B64592E3FE0AB0DAD9132D70B5BC7693n");
-  source = source.replace(/const __PK__ =/g, "const PRIVATE_KEY =");
   source = source.replace(/function splitScalarEndo[\s\S]*?^\}\n/m, "");
   // `throw` is a refused keyword: the parser skips too far when it meets one
   // inside a nested block, which skips past the remaining function
   // declarations. The thrown errors are precondition checks that cannot fire in
   // normal operation, so replacing them with a no-op is sound.
   source = source.replace(/throw[^;]*;/g, "0;");
-  // `main` has no return type annotation; every function must declare one.
-  source = source.replace(/function main\(\)/g, "function main(): void");
   // `invert` is the Euclidean GCD, and every step of it is a modular operation:
   // a residue minus a residue times a quotient, which wraps unless the whole
   // step is taken modulo the curve order.
@@ -571,9 +406,6 @@ export function desugar(source: string): string {
   // the product of two reductions needs 512 bits and a `%` of the wrapped
   // product is not the product modulo the curve order.
   source = rewriteModularArithmetic(source);
-  source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
-  source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
-  source = source.replace(/CURVE\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
   // `mod`, `isWithinCurveOrder` and `divNearest` are dead once the calls of
   // them are kernels: `normalizeScalar` is the identity and the endomorphism
   // split is not compiled. Removing them keeps the build from lowering

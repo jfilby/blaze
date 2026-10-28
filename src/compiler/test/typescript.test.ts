@@ -307,9 +307,6 @@ test("every construct outside the subset is reported at once", () => {
     contractOf(
       "typescript",
       [
-        "function noReturn() {",
-        "  return 1;",
-        "}",
         "export function spin(x: number): number {",
         "  switch (x) { return 1; }",
         "  return 0;",
@@ -326,11 +323,19 @@ test("every construct outside the subset is reported at once", () => {
     ),
   );
 
-  assert.match(message, /4 constructs of module\.ts are outside the subset the compiler reads/);
-  assert.match(message, /line 1: every function declares what it returns/);
-  assert.match(message, /line 5: "switch" is not supported/);
-  assert.match(message, /line 8: unsupported TypeScript type "Date"/);
-  assert.match(message, /line 12: "class" is not supported/);
+  assert.match(message, /3 constructs of module\.ts are outside the subset the compiler reads/);
+  assert.match(message, /line 2: "switch" is not supported/);
+  assert.match(message, /line 5: unsupported TypeScript type "Date"/);
+  assert.match(message, /line 9: "class" is not supported/);
+});
+
+test("a function that states no result has the one its returns are", () => {
+  // The language lets a function leave the annotation off, and the returns say
+  // it: a body that hands back a number is a number, and a body with no return
+  // at all is the `void` the function is called for what it does.
+  assert.equal(contractOf("typescript", "export function twice(x: number) {\n  return x + x;\n}\n").function.returns, "f64");
+  assert.equal(phaseOf("typescript", { "main.ts": "function say(x: number) {\n  console.log(x);\n}\nsay(1);\n" }, "main.ts").program.files[0]?.functions["say"]?.function.returns, "void");
+  assert.equal(contractOf("typescript", "export function big() {\n  return 9007199254740993n;\n}\n").function.returns, "i64");
 });
 
 test("a loop a reduction cannot state is contracted as a definition", () => {

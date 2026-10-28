@@ -478,7 +478,7 @@ test("a function the program declares is read back whole, body and all", () => {
   // theirs to bind them to.
   const { program, contract } = resolved({
     "main.ts": [
-      "const n = 3;",
+      "const n = Math.floor(3);",
       "function total(values: Float64Array): number {",
       "  let sum = 0;",
       "  for (let i = 0; i < n; i++) sum += values[i];",

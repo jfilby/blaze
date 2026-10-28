@@ -1333,7 +1333,14 @@ class FunctionBody {
         inferred: asType(returns),
       };
     }
-    const callee = this.context.functions[expression.name];
+    // A function with default parameters is callable at every arity from the
+    // last parameter without one up to all of them, and each shorter arity is
+    // the overload the module declared for it. The full function is the one the
+    // source named; the overload is the one that fills what the call left out.
+    const overloadName = `${expression.name}__${expression.args.length}`;
+    const overload = this.context.functions[overloadName];
+    const callee = overload ?? this.context.functions[expression.name];
+    const called = overload !== undefined ? overloadName : expression.name;
     if (callee === undefined) {
       throw this.error(
         `calls "${expression.name}", which the program does not compile`,
@@ -1342,7 +1349,7 @@ class FunctionBody {
       );
     }
     const signature = callee.function;
-    this.arity(expression.name, signature.params.length, expression.args.length, line);
+    this.arity(called, signature.params.length, expression.args.length, line);
     const args = expression.args.map((argument, at) => this.typed(argument, asType(parseType(signature.params[at].type)), line));
     const returns = parseType(signature.returns);
     return {

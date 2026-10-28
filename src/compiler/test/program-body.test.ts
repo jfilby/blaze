@@ -21,7 +21,7 @@ import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-va
 import { typeText, type SemanticFunction, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
-import type { BuildMode } from "../core/types.ts";
+import type { BuildMode, FunctionContract } from "../core/types.ts";
 import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
@@ -373,11 +373,17 @@ test("a construct outside the subset is named in a function body too", () => {
   }
 });
 
-test("a declaration after the program is refused, because a program runs last", () => {
-  assert.match(
-    diagnostic(() => bodyOf(["console.log(1);", "export function f(): number {", "  return 1;", "}"].join("\n"))),
-    /"export" is not a statement of a program/,
+test("a function declared after the program is hoisted, and the statements still run", () => {
+  // A function declaration is the module's wherever it is written, while the
+  // statements run in the order they are written: the call is the body's, and
+  // the function it calls is compiled beside it rather than as another
+  // statement of the body.
+  const analysis = typeScriptFrontend.analyze(
+    ["console.log(1);", "export function f(): number {", "  return 1;", "}"].join("\n"),
+    "main.ts",
   );
+  assert.deepEqual(analysis.functions.map((entry) => entry.name), ["f"]);
+  assert.equal(analysis.body?.length, 1, "the call is the body's one statement");
 });
 
 test("a value takes the type of the call it is passed to", () => {
@@ -900,10 +906,15 @@ test("a function that returns from every path is compiled", async () => {
   // `if` was written in ends where nothing arrives, because both its arms leave,
   // and the loop's body does the same. What is left of `firstOver` is the return
   // the source wrote after the loop, for the turns that never run.
-  const built = resolved({ "main.ts": source });
-  const pick = built.bodies.find((one) => one.name === "pick");
+  // The functions read no value the program holds, so they are compiled with
+  // the module: the IR the program resolves for one is the contract's, not a
+  // body of the program's own.
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const functions = Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions)));
+  const context = { objectNames: phase.objectNames, functions, language: "typescript" };
+  const pick = resolveFunction(functions["pick"] as FunctionContract, context);
   assert.equal(pick?.entry.terminator.k, "unreachable", "both arms return, so nothing arrives after the if");
-  const first = built.bodies.find((one) => one.name === "firstOver");
+  const first = resolveFunction(functions["firstOver"] as FunctionContract, context);
   assert.equal(first?.entry.terminator.k, "return", "the loop may run no turns, so the return after it stands");
   const turn = first?.entry.statements[0];
   assert.equal(
@@ -940,8 +951,12 @@ test("a function that falls off the end of a path is refused", () => {
     "",
   ].join("\n");
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
-  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
-  assert.deepEqual(semanticIrProblems(program, phase.program), [
+  const functions = Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions)));
+  const context = { objectNames: phase.objectNames, functions, language: "typescript" };
+  // The function reads no value the program holds: it is the module's, and the
+  // path that falls off the end is the contract's to refuse.
+  const maybe = resolveFunction(functions["maybe"] as FunctionContract, context);
+  assert.deepEqual(semanticFunctionProblems(maybe), [
     "maybe: entry: the body returns nothing and is declared to return a f64",
   ]);
 });
@@ -1620,7 +1635,7 @@ test("a function the program declares is a body of its own, and the IR says so",
   // like any other, with what it reads of the scope around it passed in.
   const program_ = resolved({
     "main.ts": [
-      "const n = 3;",
+      "const n = Math.floor(3);",
       "function scale(value: number): number {",
       "  return value * n;",
       "}",
@@ -1651,11 +1666,11 @@ test("a function that reads a name the scope around it does not hold is refused"
     diagnostic(() =>
       resolved({
         "main.ts": [
-          "const first = 1;",
+          "const first = Math.floor(1);",
           "function f(value: number): number {",
           "  return value + later;",
           "}",
-          "const later = 2;",
+          "const later = Math.floor(2);",
           "console.log(f(first));",
           "",
         ].join("\n"),
@@ -1674,9 +1689,10 @@ test("a function of a program that calls itself is refused rather than answered"
     diagnostic(() =>
       resolved({
         "main.ts": [
-          "const start = 3;",
+          "const start = Math.floor(3);",
+          "const floor = Math.floor(0);",
           "function down(n: number): number {",
-          "  if (n > 0) return down(n - 1);",
+          "  if (n > floor) return down(n - 1);",
           "  return 0;",
           "}",
           "console.log(down(start));",

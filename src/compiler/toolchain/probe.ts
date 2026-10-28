@@ -62,6 +62,8 @@ function cType(type: TypeExpr): string {
       u16: "uint16_t",
       u32: "uint32_t",
       u64: "uint64_t",
+      u256: "blaze_u256",
+      i256: "blaze_i256",
       f32: "float",
       f64: "double",
       usize: "size_t",

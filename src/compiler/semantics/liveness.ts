@@ -291,6 +291,13 @@ class Graph {
           break;
         case "call":
           for (const argument of statement.call.args) this.value(events, argument);
+          // A name handed to the call is used where the call is made, after
+          // every argument has been evaluated. Its read above is before a call
+          // another argument makes, so it is read again here: a value the
+          // callee is handed is live across every call between the two.
+          for (const argument of statement.call.args) {
+            if (argument.k === "local") events.push({ k: "read", name: argument.name });
+          }
           if (this.valueCalls(statement.call.callee)) events.push({ k: "call" });
           node = this.make(events);
           break;
@@ -391,6 +398,13 @@ class Graph {
         return;
       case "call":
         for (const argument of value.call.args) this.value(events, argument);
+        // A name handed to the call is used where the call is made, after every
+        // argument has been evaluated. Its read above is before a call another
+        // argument makes, so it is read again here: a value the callee is handed
+        // is live across every call between the two.
+        for (const argument of value.call.args) {
+          if (argument.k === "local") events.push({ k: "read", name: argument.name });
+        }
         // A builtin the backend answers with instructions is a call the IR
         // states and the code does not make, and a name live across one of
         // those is live across arithmetic.

@@ -19,8 +19,9 @@
  *     "./other.ts";` and `import name, { other } from "./other.ts";`, which
  *     bind a module's default export and its named ones; `export function`,
  *     `export default function`, `export { name }`, class declarations, and
- *     the statements of a program (see typescript-program.ts), which come
- *     after every declaration
+ *     the statements of a program (see typescript-program.ts). A function
+ *     declaration is hoisted: it is the module's wherever it is written, so a
+ *     statement may run before it.
  *
  *     A class is lowered to functions and objects: its constructor returns an
  *     object literal, each method is a function whose first parameter is the
@@ -29,6 +30,16 @@
  *     `instanceof` are part of the subset. A class that a module does not
  *     export is still compiled, because the functions the module does export
  *     may construct it.
+ *
+ *     A function may leave out the type of a parameter that has a default, and
+ *     the type of its result: the default says the one and the returns say the
+ *     other. A shorter call is answered by an overload whose body fills the
+ *     defaults the source wrote.
+ *
+ *     A function reads a top-level `const` of its own file where the source
+ *     reads the name: a compiled function is handed no scope to read the file
+ *     around it from, and a value the file writes at the top is the value it
+ *     reads.
  *
  *     A default export is bound under the name the function was declared with
  *     and not the name the importer wrote: this subset links by name, because
@@ -265,6 +276,203 @@ const PRIMITIVES: Record<string, string> = {
 /** A function that returns nothing declares `void`. */
 const NOTHING: TypeExpr = { kind: "void" };
 
+/** The result types an unannotated function is inferred at. */
+const NUMBER_RESULT: TypeExpr = { kind: "primitive", name: "f64" };
+const BOOLEAN_RESULT: TypeExpr = { kind: "primitive", name: "bool" };
+const TEXT_RESULT: TypeExpr = { kind: "text" };
+const BIGINT_RESULT: TypeExpr = { kind: "primitive", name: "i64" };
+const WIDE_RESULT: TypeExpr = { kind: "primitive", name: "u256" };
+
+/**
+ * The result type a function that states none has, read from every return in
+ * its body.
+ *
+ * A body with no return hands back nothing. A return is typed as the value it
+ * writes with the names the body declared in scope, so `return x % modulo`
+ * over two `u256` names is a `u256` and not the `any` a reader without the
+ * scope would have to guess. A body whose returns disagree is the `any` a
+ * value no annotation pinned holds.
+ */
+function inferredResult(body: readonly Statement[], params: readonly { name: string; type: TypeExpr }[]): TypeExpr {
+  const scope = new Map<string, TypeExpr>(params.map((param) => [param.name, param.type]));
+  describeDeclarations(body, scope);
+  const written: Expression[] = [];
+  collectResults(body, written);
+  if (written.length === 0) return NOTHING;
+  let found: TypeExpr | null = null;
+  for (const value of written) {
+    const type = resultType(value, scope);
+    if (found === null) {
+      found = type;
+      continue;
+    }
+    if (!sameResult(found, type)) return ANY_TYPE;
+  }
+  return found ?? NOTHING;
+}
+
+/** What each name the body declares holds, as the body reads it. */
+function describeDeclarations(statements: readonly Statement[], scope: Map<string, TypeExpr>): void {
+  const walk = (body: readonly Statement[]): void => {
+    for (const statement of body) {
+      switch (statement.kind) {
+        case "declare":
+          scope.set(statement.name, statement.type ?? resultType(statement.init, scope));
+          break;
+        case "loop":
+          scope.set(statement.variable, NUMBER_RESULT);
+          walk(statement.body);
+          break;
+        case "if":
+          walk(statement.then);
+          walk(statement.otherwise);
+          break;
+        case "while":
+        case "doWhile":
+        case "forOf":
+          walk(statement.body);
+          break;
+        case "try":
+          walk(statement.body);
+          if (statement.catchBody !== null) walk(statement.catchBody);
+          if (statement.finallyBody !== null) walk(statement.finallyBody);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  walk(statements);
+}
+
+/** Every value a body returns, nested arms included. */
+function collectResults(statements: readonly Statement[], into: Expression[]): void {
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "result":
+        into.push(statement.value);
+        break;
+      case "if":
+        collectResults(statement.then, into);
+        collectResults(statement.otherwise, into);
+        break;
+      case "while":
+      case "doWhile":
+      case "loop":
+      case "forOf":
+        collectResults(statement.body, into);
+        break;
+      case "try":
+        collectResults(statement.body, into);
+        if (statement.catchBody !== null) collectResults(statement.catchBody, into);
+        if (statement.finallyBody !== null) collectResults(statement.finallyBody, into);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+/** The type a value is held at, read with the names the body declared. */
+function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): TypeExpr {
+  switch (value.k) {
+    case "literal":
+      return NUMBER_RESULT;
+    case "bigint": {
+      let number: bigint | null = null;
+      try { number = BigInt(value.text); } catch { /* not a valid bigint */ }
+      return number !== null && (number > 9223372036854775807n || number < -9223372036854775808n) ? WIDE_RESULT : BIGINT_RESULT;
+    }
+    case "text":
+      return TEXT_RESULT;
+    case "ident":
+      return scope.get(value.name) ?? ANY_TYPE;
+    case "binary":
+      return binaryResultType(value, scope);
+    case "unary":
+      return value.op === "!" ? BOOLEAN_RESULT : resultType(value.operand, scope);
+    case "conditional":
+      return commonResult(resultType(value.then, scope), resultType(value.otherwise, scope));
+    default:
+      return ANY_TYPE;
+  }
+}
+
+/** The type an operation answers, from the types of its two sides. */
+function binaryResultType(value: Expression & { k: "binary" }, scope: ReadonlyMap<string, TypeExpr>): TypeExpr {
+  const compared = ["<", "<=", ">", ">=", "===", "!==", "==", "!="];
+  if (compared.includes(value.op)) return BOOLEAN_RESULT;
+  const left = resultType(value.left, scope);
+  const right = resultType(value.right, scope);
+  if (value.op === "&&" || value.op === "||" || value.op === "??") return commonResult(left, right);
+  if (left.kind === "text" || right.kind === "text") return TEXT_RESULT;
+  if (left.kind !== "primitive" || right.kind !== "primitive") return ANY_TYPE;
+  const whole = (name: string): boolean => name !== "f32" && name !== "f64" && name !== "bool";
+  if (!whole(left.name) || !whole(right.name)) return NUMBER_RESULT;
+  if (left.name === "u256" || right.name === "u256") return WIDE_RESULT;
+  if (left.name === "i256" || right.name === "i256") return { kind: "primitive", name: "i256" };
+  return BIGINT_RESULT;
+}
+
+/** The one type two results have in common, or `any` where they have none. */
+function commonResult(left: TypeExpr, right: TypeExpr): TypeExpr {
+  if (sameResult(left, right)) return left;
+  if (left.kind === "primitive" && right.kind === "primitive") {
+    if (left.name === "u256" || right.name === "u256") return WIDE_RESULT;
+    if (left.name === "i256" || right.name === "i256") return { kind: "primitive", name: "i256" };
+    if (left.name !== "bool" && right.name !== "bool") return NUMBER_RESULT;
+  }
+  return ANY_TYPE;
+}
+
+/** Whether two results are the same type. */
+function sameResult(left: TypeExpr, right: TypeExpr): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "primitive" && right.kind === "primitive") return left.name === right.name;
+  return true;
+}
+
+/**
+ * The type a parameter with a default and no annotation is held at.
+ *
+ * A number written as a number is a double, a text is a text, and a bigint —
+ * or an arithmetic expression of them, which may reach past a machine word —
+ * is the wide whole number.
+ */
+function defaultParameterType(value: Expression): TypeExpr {
+  switch (value.k) {
+    case "literal":
+      return NUMBER_RESULT;
+    case "bigint":
+      return resultType(value, new Map());
+    case "text":
+      return TEXT_RESULT;
+    case "unary":
+    case "binary":
+      return holdsBigint(value) ? WIDE_RESULT : NUMBER_RESULT;
+    default:
+      return ANY_TYPE;
+  }
+}
+
+/** Whether a value is written over a bigint, which makes the value a bigint. */
+function holdsBigint(value: Expression): boolean {
+  switch (value.k) {
+    case "bigint":
+      return true;
+    case "unary":
+      return holdsBigint(value.operand);
+    case "binary":
+      return holdsBigint(value.left) || holdsBigint(value.right);
+    case "conditional":
+      return holdsBigint(value.then) || holdsBigint(value.otherwise);
+    case "call":
+      return value.name === "BigInt" || value.args.some(holdsBigint);
+    default:
+      return false;
+  }
+}
+
 /** Maps a TypeScript type annotation onto a contract type. */
 export function mapTypeScriptType(text: string, position: string): TypeExpr {
   const source = text.trim();
@@ -284,6 +492,360 @@ function tokensAfterImports(tokens: Token[]): Token[] {
     position += 1;
   }
   return tokens.slice(position);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** One value written in the source, as the tokens it spans. */
+interface ConstantRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * A top-level constant a function may read: the expression it is written as, or
+ * the fields of an object literal it is written as.
+ *
+ * A constant of a compiled function is the value it was written with. The
+ * function is compiled on its own and has no environment to read the program
+ * around it from, so a value that is written down — a number, a curve's field,
+ * a `BigInt` of a string — is read where the source wrote it. A value computed
+ * at run time is not one of these and is left as the name it is.
+ */
+interface ConstantInfo {
+  expression?: ConstantRange;
+  fields?: ReadonlyMap<string, ConstantRange>;
+}
+
+/**
+ * The top-level `const` declarations of a source, and the constant expressions
+ * each is written as.
+ *
+ * Only a declaration at the top of the file is read: a declaration inside a
+ * function or a class is that body's own, and the names a function reads are
+ * the file's. A declaration whose value is not a constant expression is not
+ * recorded, so a name that holds a call or an object is left as itself.
+ */
+interface ScannedFile {
+  constants: Map<string, ConstantInfo>;
+  /** The top-level names that are values the running program holds, not constants. */
+  state: Set<string>;
+}
+
+function scanConstants(tokens: readonly Token[]): ScannedFile {
+  const found = new Map<string, ConstantInfo>();
+  const state = new Set<string>();
+  // A name a function or a class declares is that body's own, and a name that
+  // is also a constant of the file is not the constant where it is declared.
+  // The declarations are collected first so a body is never read as the file's
+  // constant: a parameter spelled `P` is the parameter, whatever the file
+  // writes at the top of it.
+  const locals = localNames(tokens);
+  const closing = (open: number): number => {
+    let depth = 0;
+    for (let index = open; index < tokens.length; index += 1) {
+      if (tokens[index].text === "{") depth += 1;
+      else if (tokens[index].text === "}") {
+        depth -= 1;
+        if (depth === 0) return index + 1;
+      }
+    }
+    return tokens.length;
+  };
+  let index = 0;
+  while (index < tokens.length && tokens[index].kind !== "end") {
+    const token = tokens[index] as Token;
+    if (token.text === "import") {
+      while (index < tokens.length && tokens[index].text !== ";") index += 1;
+      index += 1;
+      continue;
+    }
+    // A function or a class body is not the top of the file: the declaration a
+    // function writes is its own, and only the file's constants are read here.
+    if (token.text === "function" || token.text === "class") {
+      let brace = index;
+      while (brace < tokens.length && tokens[brace].text !== "{") brace += 1;
+      index = closing(brace);
+      continue;
+    }
+    if (
+      (token.text === "const" || token.text === "let" || token.text === "var") &&
+      tokens[index + 1]?.kind === "ident" &&
+      tokens[index + 2]?.text === "="
+    ) {
+      const name = (tokens[index + 1] as Token).text;
+      const mutable = token.text !== "const";
+      const start = index + 3;
+      if (tokens[start]?.text === "{") {
+        const end = closing(start);
+        const object = objectConstants(tokens, start, end);
+        // An object whose every field is a constant is the file's constant (a
+        // curve's fields are), and a body's read of one is the value written
+        // there. An object with a field computed at run time is state the
+        // running program holds, and a function that reads it is read where the
+        // program is.
+        if (!mutable && object.all) {
+          if (!locals.has(name)) found.set(name, { fields: object.fields });
+        } else {
+          state.add(name);
+        }
+        index = end;
+        continue;
+      }
+      let end = start;
+      let depth = 0;
+      while (end < tokens.length && tokens[end].kind !== "end") {
+        const written = tokens[end] as Token;
+        if (written.text === "(" || written.text === "[" || written.text === "{") depth += 1;
+        else if (written.text === ")" || written.text === "]" || written.text === "}") depth -= 1;
+        else if (written.text === ";" && depth === 0) break;
+        end += 1;
+      }
+      const constant = !mutable && constantRange(tokens, start, end);
+      if (!constant) state.add(name);
+      else if (!locals.has(name)) found.set(name, { expression: { start, end } });
+      index = end + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return { constants: found, state };
+}
+
+/**
+ * Every name a function, class or block declares anywhere in the file.
+ *
+ * A declaration at the top of the file is the file's constant and is not one of
+ * these; every other declaration is a body's own. The parameters are collected
+ * from the same shape a declaration is written in — an identifier and the colon
+ * that says its type — which over-collects a field of an object literal, and
+ * that only means a constant of the same name is not read where the source may
+ * mean the body's own.
+ */
+function localNames(tokens: readonly Token[]): Set<string> {
+  const names = new Set<string>();
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] as Token;
+    if (token.text === "{") {
+      depth += 1;
+      continue;
+    }
+    if (token.text === "}") {
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0 && (token.text === "let" || token.text === "const" || token.text === "var")) {
+      const name = tokens[index + 1];
+      if (name?.kind === "ident") names.add(name.text);
+    }
+    if (token.kind === "ident" && tokens[index + 1]?.text === ":") names.add(token.text);
+  }
+  return names;
+}
+
+/**
+ * Whether a function reads a value the running program holds.
+ *
+ * A top-level `const` of a constant expression, a function and a class are
+ * values a module function can read: the first is written into the function,
+ * and the other two are declarations of the same program. A `let`, or a `const`
+ * of a value computed at run time, is a value the program holds while it runs,
+ * and a function that reads one is compiled where that value is — the program's
+ * own functions are handed what they read of the program around them.
+ */
+function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean {
+  if (state.size === 0) return false;
+  let found = false;
+  const readName = (text: string): void => {
+    if (state.has(text)) found = true;
+  };
+  const read = (expression: Expression | null): void => {
+    if (expression === null || found) return;
+    switch (expression.k) {
+      case "literal":
+      case "bigint":
+      case "null":
+        return;
+      case "ident":
+        readName(expression.name);
+        return;
+      case "argv":
+        read(expression.index);
+        return;
+      case "length":
+        readName(expression.buffer);
+        return;
+      case "index":
+        read(expression.base);
+        read(expression.index);
+        return;
+      case "slice":
+        read(expression.base);
+        read(expression.start);
+        read(expression.stop);
+        read(expression.step);
+        return;
+      case "member":
+        read(expression.base);
+        return;
+      case "call":
+        for (const argument of expression.args) read(argument);
+        return;
+      case "object":
+        for (const field of expression.fields) read(field.value);
+        return;
+      case "sized":
+        read(expression.count);
+        return;
+      case "buffer":
+        for (const value of expression.values) read(value);
+        return;
+      case "text":
+        for (const part of expression.parts) if (part.k === "value") read(part.value);
+        return;
+      case "fixed":
+        read(expression.of);
+        return;
+      case "binary":
+        read(expression.left);
+        read(expression.right);
+        return;
+      case "unary":
+        read(expression.operand);
+        return;
+      case "conditional":
+        read(expression.condition);
+        read(expression.then);
+        read(expression.otherwise);
+        return;
+      case "update":
+        readName(expression.name);
+        return;
+    }
+  };
+  const statements = (body: readonly Statement[]): void => {
+    for (const statement of body) {
+      if (found) return;
+      switch (statement.kind) {
+        case "declare":
+          read(statement.init);
+          break;
+        case "loop":
+          read(statement.from);
+          read(statement.to);
+          read(statement.step);
+          statements(statement.body);
+          break;
+        case "assign":
+          readName(statement.target);
+          read(statement.value);
+          break;
+        case "memberAssign":
+          readName(statement.base);
+          read(statement.value);
+          break;
+        case "update":
+          readName(statement.name);
+          break;
+        case "result":
+          read(statement.value);
+          break;
+        case "if":
+          read(statement.condition);
+          statements(statement.then);
+          statements(statement.otherwise);
+          break;
+        case "while":
+        case "doWhile":
+          read(statement.condition);
+          statements(statement.body);
+          break;
+        case "forOf":
+          readName(statement.of);
+          statements(statement.body);
+          break;
+        case "print":
+        case "expression":
+          read(statement.value);
+          break;
+        case "indexAssign":
+          readName(statement.buffer);
+          read(statement.index);
+          read(statement.value);
+          break;
+        case "try":
+          statements(statement.body);
+          if (statement.catchBody !== null) statements(statement.catchBody);
+          if (statement.finallyBody !== null) statements(statement.finallyBody);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  for (const param of fn.params) if (param.default !== undefined) read(param.default);
+  statements(fn.body);
+  return found;
+}
+
+/** The constant fields of an object literal, by the name each is written under. */
+function objectConstants(tokens: readonly Token[], open: number, close: number): { fields: Map<string, ConstantRange>; all: boolean } {
+  const fields = new Map<string, ConstantRange>();
+  let total = 0;
+  let depth = 0;
+  let index = open + 1;
+  while (index < close - 1) {
+    const token = tokens[index] as Token;
+    if (token.text === "{" || token.text === "(" || token.text === "[") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (token.text === "}" || token.text === ")" || token.text === "]") {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && token.kind === "ident" && tokens[index + 1]?.text === ":") {
+      total += 1;
+      const start = index + 2;
+      let end = start;
+      let nested = 0;
+      while (end < close - 1) {
+        const written = tokens[end] as Token;
+        if (written.text === "{" || written.text === "(" || written.text === "[") nested += 1;
+        else if (written.text === "}" || written.text === ")" || written.text === "]") nested -= 1;
+        else if (written.text === "," && nested === 0) break;
+        end += 1;
+      }
+      if (constantRange(tokens, start, end)) fields.set(token.text, { start, end });
+      index = end + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return { fields, all: fields.size === total && total > 0 };
+}
+
+/**
+ * Whether the tokens between two positions are an expression the compiler can
+ * read without running anything: a number, a string, a `BigInt` of one, or an
+ * arithmetic expression of those.
+ */
+function constantRange(tokens: readonly Token[], start: number, end: number): boolean {
+  if (end <= start) return false;
+  const operators: ReadonlySet<string> = new Set(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", "(", ")"]);
+  for (let index = start; index < end; index += 1) {
+    const token = tokens[index] as Token;
+    if (token.kind === "number" || token.kind === "bigint" || token.kind === "string") continue;
+    if (token.kind === "punct" && operators.has(token.text)) continue;
+    if (token.kind === "ident" && token.text === "BigInt") continue;
+    return false;
+  }
+  return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -430,7 +992,12 @@ export function tokenize(source: string): Token[] {
 
 export interface TypeScriptFunction {
   name: string;
-  params: { name: string; type: TypeExpr }[];
+  /**
+   * The parameters the function is written with. A parameter with a default is
+   * callable without it, which the module answers with an overload: see
+   * `defaultWrappers`.
+   */
+  params: { name: string; type: TypeExpr; default?: Expression }[];
   returns: TypeExpr;
   body: Statement[];
   line: number;
@@ -442,7 +1009,7 @@ const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 class TypeScriptParser {
   tokens: Token[];
   private readonly path: string;
-  private readonly diagnostics: Diagnostics;
+  private diagnostics: Diagnostics;
   private position = 0;
   /** How many loops the statement being read is written in. */
   private loops = 0;
@@ -455,14 +1022,31 @@ class TypeScriptParser {
   /** The class each name of the function being read holds. */
   private valueClasses = new Map<string, string>();
 
-  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, allTokens?: Token[]) {
+  constructor(
+    tokens: Token[],
+    path: string,
+    diagnostics: Diagnostics,
+    classTable?: ClassTable,
+    allTokens?: Token[],
+    constants: ReadonlyMap<string, ConstantInfo> = new Map(),
+    state: ReadonlySet<string> = new Set(),
+  ) {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
     this.classTable = classTable ?? scanClasses(tokens);
     this.allTokens = allTokens ?? tokens;
+    this.constants = constants;
+    this.state = state;
     this.position = 0;
   }
+
+  /** The file's constants, which a compiled function reads where it was written. */
+  private readonly constants: ReadonlyMap<string, ConstantInfo>;
+  /** The names the running program holds, which a module function cannot read. */
+  private readonly state: ReadonlySet<string>;
+  /** The constants being read, so one that names itself is not read forever. */
+  private readonly expanding = new Set<string>();
 
   /** A nested function declaration is handled by the program parsing, not the module one. */
   nestedFunction = false;
@@ -558,6 +1142,17 @@ class TypeScriptParser {
     this.tokens = savedTokens;
     this.position = savedPosition;
     return value;
+  }
+
+  /** A constant's expression, read in place of the name that holds it. */
+  private constantExpression(name: string, range: ConstantRange | undefined): Expression | null {
+    if (range === undefined || this.expanding.has(name)) return null;
+    this.expanding.add(name);
+    try {
+      return this.readRange(range.start, range.end);
+    } finally {
+      this.expanding.delete(name);
+    }
   }
 
   /**
@@ -741,6 +1336,36 @@ class TypeScriptParser {
     };
   }
 
+  /**
+   * The overloads a function with default parameters is callable through. The
+   * full function takes every parameter; each shorter arity is a function whose
+   * body calls the full one with the defaults the source wrote, evaluated where
+   * the call is made and with the parameters before it in scope.
+   */
+  private defaultWrappers(fn: TypeScriptFunction, exported: boolean): DeclaredFunction[] {
+    let required = 0;
+    fn.params.forEach((param, index) => {
+      if (param.default === undefined) required = index + 1;
+    });
+    const out: DeclaredFunction[] = [];
+    for (let arity = required; arity < fn.params.length; arity += 1) {
+      const written = fn.params.slice(0, arity).map(({ name, type }) => ({ name, type }));
+      // A default is read once, under a name of its own, before the call: it may
+      // be a call of its own, and a call written among the arguments would run
+      // while the earlier arguments are pinned in the registers it uses.
+      const statements: Statement[] = [];
+      const args: Expression[] = fn.params.map((param, index) => {
+        if (index < arity) return { k: "ident", name: param.name };
+        const name = `__default${index}`;
+        statements.push({ kind: "declare", name, type: null, init: param.default as Expression, line: fn.line });
+        return { k: "ident", name };
+      });
+      statements.push({ kind: "result", value: { k: "call", name: fn.name, args }, line: fn.line });
+      out.push(this.declared(`${fn.name}__${arity}`, written, fn.returns, statements, exported, fn.line));
+    }
+    return out;
+  }
+
   /** The parameters of a method, where a class-typed one is a reference. */
   private methodParams(params: readonly ClassParam[]): { name: string; type: TypeExpr }[] {
     return params.map((param) => ({
@@ -774,22 +1399,21 @@ class TypeScriptParser {
     for (let arity = required; arity < params.length; arity += 1) {
       const written = params.slice(0, arity);
       const paramsOut = self ? [{ name: "self", type: this.referenceTo(info.name) }, ...this.methodParams(written)] : this.methodParams(written);
-      const args = params.map((param, index) =>
-        index < arity
-          ? ({ k: "ident", name: param.name } satisfies Expression)
-          : this.withClassContext(info, params, self, () => this.readRange(param.defaultStart, param.defaultEnd)),
-      );
+      // A default is read once, under a name of its own, before the call: it
+      // may be a call of its own, and a call written among the arguments would
+      // run while the receiver and the earlier arguments are pinned in the
+      // registers it uses.
+      const statements: Statement[] = [];
+      const args = params.map((param, index): Expression => {
+        if (index < arity) return { k: "ident", name: param.name };
+        const name = `__default${index}`;
+        const value = this.withClassContext(info, params, self, () => this.readRange(param.defaultStart, param.defaultEnd));
+        statements.push({ kind: "declare", name, type: null, init: value, line: method.line });
+        return { k: "ident", name };
+      });
       const callArgs = self ? [{ k: "ident", name: "self" } satisfies Expression, ...args] : args;
-      out.push(
-        this.declared(
-          `${baseName}__${arity}`,
-          paramsOut,
-          returns,
-          [{ kind: "result", value: { k: "call", name: baseName, args: callArgs }, line: method.line }],
-          exported,
-          method.line,
-        ),
-      );
+      statements.push({ kind: "result", value: { k: "call", name: baseName, args: callArgs }, line: method.line });
+      out.push(this.declared(`${baseName}__${arity}`, paramsOut, returns, statements, exported, method.line));
     }
     return out;
   }
@@ -979,96 +1603,76 @@ class TypeScriptParser {
     /** The names `export { f }` offered, which a declaration may name later. */
     const namesExported: Record<string, true> = {};
     let defaultExport: string | null = this.classTable.defaultName;
+    const read = (): string | null => this.readFunctionDeclaration(functions, namesExported);
+    // The declarations before the first statement are read first, imports and
+    // functions alike, and a file that is only declarations is a library.
     while (this.peek().kind !== "end") {
       if (this.at("import")) {
         this.next();
         imports.push(this.readImport());
         continue;
       }
-      const token = this.peek();
-      // `async` and `export async` both reach a function the subset does not
-      // read. They are named here, where they were written, rather than left
-      // to the declaration parser reporting whatever token it found next.
-      if (this.at("async")) {
-        const at = this.next();
-        this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
-        this.skipBlock();
+      if (this.at("function") || this.at("export") || this.at("async")) {
+        const isDefault = read();
+        if (isDefault !== null) defaultExport = isDefault;
         continue;
       }
-      if (token.kind !== "ident" || (token.text !== "export" && token.text !== "function")) {
-        // The body runs to the end of the file: a declaration after it belongs
-        // to a library, not to a program.
-        return {
-          path,
-          imports,
-          functions,
-          default: defaultExport,
-          body: parseProgramBody(this.tokens.slice(this.position), path, this.diagnostics, this.classTable),
-        };
-      }
-      const exported = this.accept("export");
-      if (exported && this.at("async")) {
-        const at = this.next();
-        this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
-        this.skipBlock();
-        continue;
-      }
-      let isDefault = false;
-      if (exported && this.at("default")) {
-        this.next();
-        // `export default function f() {}` offers `f` as the module's default.
-        // It is offered under the name it was declared with, because this
-        // subset links by name: there is one table of functions for the whole
-        // program, so one name cannot stand for two of them.
-        if (!this.at("function")) {
-          this.report(
-            "only a function can be a default export",
-            `as in export default function f(): number { ... }, not ${this.peek().text}`,
-            this.peek(),
-          );
-          this.skipBlock();
+      break;
+    }
+    const bodyStart = this.position;
+    // A function declaration is hoisted: the functions of a file are the
+    // module's wherever they are written, so the body that runs before one does
+    // not decide whether it is compiled, and a program and the functions it
+    // calls are one source rather than one source reordered.
+    const written: [number, number][] = [];
+    while (this.peek().kind !== "end") {
+      if (this.at("function") || this.at("export") || this.at("async")) {
+        const start = this.position;
+        const before = functions.length;
+        // The declaration is read against diagnostics of its own: one the
+        // module parser cannot read — an async function, a Promise executor, a
+        // parameter a program function leaves to its callers — is a function of
+        // the program, and is left where it was written rather than reported as
+        // a declaration the module refused.
+        const saved = this.diagnostics;
+        const trial = new Diagnostics();
+        this.diagnostics = trial;
+        let isDefault: string | null = null;
+        try {
+          isDefault = read();
+        } finally {
+          this.diagnostics = saved;
+        }
+        const added = functions.slice(before);
+        const readable = trial.entries.length === 0 && added.length > 0;
+        const stays = readable && added.some((entry) => readsState(entry.handle as TypeScriptFunction, this.state));
+        if (!readable || stays) {
+          // A function the module parser could not read, or one that reads a
+          // value the running program holds, is left where it was written: a
+          // function of the program, with the names it reads around it.
+          functions.length = before;
+          this.position = start;
+          this.skipFunctionBody(start);
           continue;
         }
-        isDefault = true;
-      }
-      if (exported && this.at("{")) {
-        for (const name of this.readExportNames()) namesExported[name] = true;
+        written.push([start, this.position]);
+        if (isDefault !== null) defaultExport = isDefault;
         continue;
       }
-      if (exported && !this.at("function")) {
-        this.report(
-          "only functions can be exported",
-          `a module offers functions, not ${this.peek().text}; a value another module reads is written into a function that returns it`,
-          this.peek(),
-        );
-        this.skipBlock();
-        continue;
-      }
-      this.expect("function");
-      const name = this.next();
-      // `function* name()`: a generator is refused by the star, which is where
-      // it was written rather than by the name the parser went looking for.
-      if (name.text === "*") {
-        this.report("a generator is not supported", REFUSED_KEYWORDS.yield, name);
-        this.skipBlock();
-        continue;
-      }
-      if (name.kind !== "ident") {
-        this.report("expected a function name", `near "${name.text}"`, name);
-        this.synchronize();
-        continue;
-      }
-      const parsed = this.parseFunction(name);
-      if (parsed === null) continue;
-      functions.push({
-        name: parsed.name,
-        exported,
-        params: parsed.params,
-        returns: parsed.returns,
-        handle: parsed,
-      });
-      if (isDefault) defaultExport = parsed.name;
+      this.synchronize();
+      this.accept(";");
     }
+    // The body is the statements that run, without the functions the module
+    // holds: the parser that reads a program reads statements, and a function
+    // body is not one of them.
+    const bodyTokens: Token[] = [];
+    let at = bodyStart;
+    for (const [start, end] of written) {
+      bodyTokens.push(...this.tokens.slice(at, start));
+      at = end;
+    }
+    bodyTokens.push(...this.tokens.slice(at));
+    const body = parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable);
     // `export { f }` may name a function the file declared after it, so the
     // names are applied once the whole file has been read. A name no
     // declaration answers is refused here, where every other export is.
@@ -1083,7 +1687,121 @@ class TypeScriptParser {
         );
       }
     }
-    return { path, imports, functions, default: defaultExport, body: [] };
+    return { path, imports, functions, default: defaultExport, body };
+  }
+
+  /** Moves past the body of the declaration at a token, whatever it holds. */
+  private skipFunctionBody(start: number): void {
+    // The parameters are read first, because a default value may hold braces of
+    // its own and the body is the first `{` after the `)`.
+    let index = start;
+    while (index < this.tokens.length && this.tokens[index].text !== "(") index += 1;
+    let parens = 0;
+    for (; index < this.tokens.length; index += 1) {
+      const token = this.tokens[index] as Token;
+      if (token.text === "(") parens += 1;
+      else if (token.text === ")") {
+        parens -= 1;
+        if (parens === 0) {
+          index += 1;
+          break;
+        }
+      }
+    }
+    while (index < this.tokens.length && this.tokens[index].text !== "{") index += 1;
+    let depth = 0;
+    for (; index < this.tokens.length; index += 1) {
+      const token = this.tokens[index] as Token;
+      if (token.text === "{") depth += 1;
+      else if (token.text === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          this.position = index + 1;
+          return;
+        }
+      }
+    }
+    this.position = this.tokens.length;
+  }
+
+  /**
+   * One function declaration, at the `export` or `function` the parser is at.
+   *
+   * The declaration is pushed onto `functions` together with the overloads its
+   * defaults make callable, and the name it offers as the module's default is
+   * answered. A construct here that is not a function is reported and skipped,
+   * and answers no default.
+   */
+  private readFunctionDeclaration(functions: DeclaredFunction[], namesExported: Record<string, true>): string | null {
+    if (this.at("async")) {
+      const at = this.next();
+      this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
+      this.skipBlock();
+      return null;
+    }
+    const exported = this.accept("export");
+    if (exported && this.at("async")) {
+      const at = this.next();
+      this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
+      this.skipBlock();
+      return null;
+    }
+    let isDefault = false;
+    if (exported && this.at("default")) {
+      this.next();
+      // `export default function f() {}` offers `f` as the module's default.
+      // It is offered under the name it was declared with, because this subset
+      // links by name: there is one table of functions for the whole program,
+      // so one name cannot stand for two of them.
+      if (!this.at("function")) {
+        this.report(
+          "only a function can be a default export",
+          `as in export default function f(): number { ... }, not ${this.peek().text}`,
+          this.peek(),
+        );
+        this.skipBlock();
+        return null;
+      }
+      isDefault = true;
+    }
+    if (exported && this.at("{")) {
+      for (const name of this.readExportNames()) namesExported[name] = true;
+      return null;
+    }
+    if (exported && !this.at("function")) {
+      this.report(
+        "only functions can be exported",
+        `a module offers functions, not ${this.peek().text}; a value another module reads is written into a function that returns it`,
+        this.peek(),
+      );
+      this.skipBlock();
+      return null;
+    }
+    this.expect("function");
+    const name = this.next();
+    // `function* name()`: a generator is refused by the star, which is where it
+    // was written rather than by the name the parser went looking for.
+    if (name.text === "*") {
+      this.report("a generator is not supported", REFUSED_KEYWORDS.yield, name);
+      this.skipBlock();
+      return null;
+    }
+    if (name.kind !== "ident") {
+      this.report("expected a function name", `near "${name.text}"`, name);
+      this.synchronize();
+      return null;
+    }
+    const parsed = this.parseFunction(name);
+    if (parsed === null) return null;
+    functions.push({
+      name: parsed.name,
+      exported,
+      params: parsed.params,
+      returns: parsed.returns,
+      handle: parsed,
+    });
+    functions.push(...this.defaultWrappers(parsed, exported));
+    return isDefault ? parsed.name : null;
   }
 
   /** `export { f, g }`: the names the file offers, and the `from` they may come from. */
@@ -1192,28 +1910,45 @@ class TypeScriptParser {
           this.synchronize();
           break;
         }
-        this.expect(":");
-        const type = this.next();
-        if (type.kind !== "ident") {
-          this.report("expected a parameter type", `near "${type.text}"`, type);
-          this.synchronize();
-          break;
+        // A parameter states its type, or states a default and has the type
+        // that default is. `function invert(n: bigint, modulo = CURVE.P)` is
+        // the second form: the default says what the parameter holds.
+        let mapped: TypeExpr | null = null;
+        if (this.accept(":")) {
+          const type = this.next();
+          if (type.kind !== "ident") {
+            this.report("expected a parameter type", `near "${type.text}"`, type);
+            this.synchronize();
+            break;
+          }
+          mapped = this.mapType(type);
+          if (this.classTable.names.has(type.text)) this.valueClasses.set(parameter.text, type.text);
         }
-        params.push({ name: parameter.text, type: this.mapType(type) });
-        if (this.classTable.names.has(type.text)) this.valueClasses.set(parameter.text, type.text);
+        const fallback = this.accept("=") ? this.readExpression() : undefined;
+        if (mapped === null) {
+          if (fallback === undefined) {
+            this.report("expected a parameter type", `near "${this.peek().text}"`, this.peek());
+            this.synchronize();
+            break;
+          }
+          mapped = defaultParameterType(fallback);
+        }
+        params.push({
+          name: parameter.text,
+          type: mapped,
+          ...(fallback === undefined ? {} : { default: fallback }),
+        });
         if (this.accept(",")) continue;
         this.expect(")");
         break;
       }
     }
     if (!this.at(":")) {
-      this.report(
-        "every function declares what it returns",
-        `as in function ${name.text}(): number { ... }`,
-        name,
-      );
-      this.skipBlock();
-      return null;
+      // A function that states no result has the one its returns are. The body
+      // is read here rather than refused, because the language lets a function
+      // omit the annotation and the returns are what say it.
+      const body = this.readBlock();
+      return { name: name.text, params, returns: inferredResult(body, params), body, line: name.line };
     }
     this.next();
     const returns = this.next();
@@ -1944,6 +2679,17 @@ class TypeScriptParser {
         this.next();
         const field = this.next();
         if (field.kind !== "ident") return this.missing("expected the property of a value", field);
+        // A field of a constant object is the value the file wrote for it: the
+        // object is not a value a compiled function can read, and the field it
+        // asks for is one the source already answered.
+        if (base.k === "ident") {
+          const constant = this.constants.get(base.name);
+          const expanded = this.constantExpression(base.name, constant?.fields?.get(field.text));
+          if (expanded !== null) {
+            base = expanded;
+            continue;
+          }
+        }
         if (field.text === "length" && base.k === "ident") {
           base = { k: "length", buffer: base.name };
           continue;
@@ -2125,6 +2871,14 @@ class TypeScriptParser {
         );
         if (this.at("(")) this.readCallArguments();
         return this.hole();
+      }
+      // A constant of the file is the value it was written with: a compiled
+      // function reads the value itself, because there is no environment for
+      // it to read the file's scope from.
+      const constant = this.constants.get(token.text);
+      if (constant !== undefined) {
+        const expanded = this.constantExpression(token.text, constant.expression);
+        if (expanded !== null) return expanded;
       }
       return { k: "ident", name: token.text };
     }
@@ -2979,7 +3733,8 @@ export const typeScriptFrontend: Frontend = {
     // the program body is lowered against the same table.
     const tokens = tokenize(source);
     const classTable = scanClasses(tokens);
-    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens);
+    const scanned = scanConstants(tokens);
+    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state);
     const analysis = parser.parseModule(path);
     // A file read as a program has its whole text readable as statements, so a
     // nested function inside a function that the module parser stopped for is

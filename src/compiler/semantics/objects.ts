@@ -326,14 +326,19 @@ class BodyTypes {
           // reference.
           return { kind: "type", type: builtin.returns.kind === "text" ? ANY_REF : builtin.returns };
         }
-        const returns = this.callees.get(expression.name);
+        // A function with default parameters is callable at a shorter arity
+        // through the overload the module declares for it, which is the name
+        // with the count the call is written with.
+        const overloadName = `${expression.name}__${expression.args.length}`;
+        const overload = this.callees.get(overloadName);
+        const returns = overload ?? this.callees.get(expression.name);
         if (returns === undefined) {
           throw objectsError(
             `${this.path}: ${this.functionName} calls "${expression.name}", which the program does not compile`,
             "a function may only call the functions of the program it is part of",
           );
         }
-        this.call(expression.name);
+        this.call(overload !== undefined ? overloadName : expression.name);
         return { kind: "type", type: returns };
       }
       case "object":

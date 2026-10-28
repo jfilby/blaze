@@ -4002,7 +4002,12 @@ class ProgramResolver {
             : null,
       };
     }
-    const contract = this.contracts.get(value.function);
+    // A function with default parameters is callable at a shorter arity
+    // through the overload the module declares for it, which is the name with
+    // the count the call is written with.
+    const overloadName = `${value.function}__${value.args.length}`;
+    const overload = this.contracts.get(overloadName);
+    const contract = overload ?? this.contracts.get(value.function);
     if (contract === undefined) {
       const compiled = [...this.contracts.keys()];
       throw programError(
@@ -4421,11 +4426,19 @@ class ProgramLowering {
    * that reads them.
    */
   private readonly rules: LanguageRules;
+  /** The layout of every object the program lays out, by the name it has. */
+  private readonly layouts: Record<string, ObjectLayout>;
 
-  constructor(used: Set<string>, boxedTexts?: Set<string>, language: string = "typescript") {
+  constructor(
+    used: Set<string>,
+    boxedTexts?: Set<string>,
+    language: string = "typescript",
+    layouts: Record<string, ObjectLayout> = {},
+  ) {
     this.used = used;
     this.boxedTexts = boxedTexts ?? new Set();
     this.language = language;
+    this.layouts = layouts;
     this.rules = rulesFor(language);
   }
 
@@ -4574,7 +4587,7 @@ class ProgramLowering {
     });
     // The body is lowered on its own: its own entry block, its own names, and
     // a value of its own for each parameter it is given.
-    const inner = new ProgramLowering(new Set(this.used), this.boxedTexts, this.language);
+    const inner = new ProgramLowering(new Set(this.used), this.boxedTexts, this.language, this.layouts);
     const entry = inner.body(draft.compiled as DraftProgram);
     const allocates = entry.releases.length > 0;
     return {
@@ -5150,8 +5163,13 @@ class ProgramLowering {
       case "object": {
         // The fields are written as the values the literal holds, not as the
         // text they print: an object field is whatever type the layout gives
-        // it, and a number printed as text is not a number.
-        const fields = value.fields.map((field) => ({ name: field.name, value: this.value(field.value, null, line) }));
+        // it, and a number printed as text is not a number. A field the layout
+        // holds at a wide width takes a whole constant written at a narrower
+        // one widened to the width it is stored at.
+        const fields = value.fields.map((field) => ({
+          name: field.name,
+          value: this.stored(value.layout, field.name, this.value(field.value, null, line)),
+        }));
         return { k: "newObject", type: value.type, layout: value.layout, fields };
       }
       case "length":
@@ -5452,6 +5470,27 @@ class ProgramLowering {
   }
 
   /**
+   * A whole number written into a field, at the width the layout holds it at.
+   *
+   * The layout says a field is a `u256` because the field is what the source
+   * writes a bigint into, and a constant written at a narrower width is the
+   * same number widened into the field. A computed value is left as it is: the
+   * conversion of one is a value the lowering would have to write down, and
+   * the layout pass and the resolver agree on the width of every expression
+   * that computes one.
+   */
+  private stored(layout: string, field: string, value: SemanticValue): SemanticValue {
+    const declared = this.layouts[layout]?.fields.find((entry) => entry.name === field)?.type;
+    if (declared === undefined) return value;
+    const type = parseType(declared);
+    if (type.kind !== "primitive" || !isWhole(type.name)) return value;
+    if (value.k !== "const" || value.type.kind !== "primitive" || !isWhole(value.type.name)) return value;
+    const number = wholeText(value.text);
+    if (number === null) return value;
+    return wholeConstant(number, type) ?? value;
+  }
+
+  /**
    * A whole-number operation on two constants, answered here rather than by
    * the target.
    *
@@ -5688,7 +5727,7 @@ export function resolveProgram(
       objectKeys,
       program.language,
     );
-    resolved = new ProgramLowering(resolver.taken(), undefined, program.language).lower(resolver.resolve());
+    resolved = new ProgramLowering(resolver.taken(), undefined, program.language, layouts).lower(resolver.resolve());
     if (!observed.changed) break;
   }
   return resolved as SemanticProgram;
