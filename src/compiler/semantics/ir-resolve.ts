@@ -3095,6 +3095,20 @@ class ProgramResolver {
             // layout; read its field through the JSON runtime.
             laid = "JSON";
           }
+        } else if (base.k === "call") {
+          // A field of what a call answered is a field of the layout the call
+          // says it returns: `new Point(1, 2).x` reads the object the
+          // constructor just built, and a method whose answer names its class
+          // names the layout a caller reads.
+          laid = referenceLayout(base.call.returns);
+          if (laid === undefined) {
+            throw programError(
+              `the answer of "${base.call.signature.name}" has no layout to read a field of`,
+              this.body,
+              line,
+              `line ${line} of ${this.body.file}: a field read is a field of a layout, and a program reads the fields of the objects it laid out`,
+            );
+          }
         } else {
           throw programError(
             base.k === "reference" ? `"${base.name}" is not an object the layout names` : "a field is read of something a program does not hold by name",
@@ -4999,7 +5013,7 @@ class ProgramLowering {
         // the field of one the resolver has already read, and both answer as
         // the value a field is read of.
         const object = value.object;
-        if (object.k !== "reference" && object.k !== "field") {
+        if (object.k !== "reference" && object.k !== "field" && object.k !== "call") {
           throw new CompilerError({
             category: "ContractError",
             stage: "program",

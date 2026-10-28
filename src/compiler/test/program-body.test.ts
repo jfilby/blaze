@@ -268,7 +268,7 @@ test("a construct outside the subset is named, with what to write instead", () =
   // `function*` said the same. They are named where they were written.
   for (const [source, what] of [
     ["const x = yield 1;\n", /"yield" is not part of a program[\s\S]*hands back with return/],
-    ["class C { }\n", /"class" is not part of a program[\s\S]*object written where it is made/],
+    ["class C { get x(): number { return 1; } }\n", /a get accessor is not supported[\s\S]*write the member as a method and call it/],
     ["enum E { A }\n", /"enum" is not part of a program[\s\S]*const RED = 0/],
     ["function* g(): number { yield 1; }\n", /a generator is not supported/],
     ["async function g(): number { return 1; }\n", /an async function is not supported/],
@@ -2738,4 +2738,36 @@ test("a text a program reads apart is read apart in the body and in a function",
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, original.stdout);
   assert.equal(delivered.stdout.trimEnd().split("\n")[0], "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B");
+});
+
+test("a program constructs classes and runs their methods", async () => {
+  // A class is a constructor, methods that take the instance, and static
+  // members that take none. The program builds one, calls a method that
+  // answers another, reads the fields of both, and calls a defaulted method
+  // without the argument it defaults.
+  const source = [
+    "class Counter {",
+    "  static START = 10;",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "  add(n: number = 1): number { this.value += n; return this.value; }",
+    "  bump(): void { this.value++; }",
+    "  static zero(): Counter { return new Counter(0); }",
+    "}",
+    "const c = new Counter(1);",
+    "c.add();",
+    "c.add(2);",
+    "c.bump();",
+    "c.value++;",
+    "const z = Counter.zero();",
+    "console.log(c.value, z.value, Counter.START, new Counter(4).add(3));",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.equal(delivered.stdout.trim(), "6 0 10 7");
 });

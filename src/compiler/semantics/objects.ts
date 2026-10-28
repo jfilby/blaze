@@ -1205,8 +1205,27 @@ export function resolveObjects(
     layouts.set(name, layOut(name, shape, names, programReads(bodies)));
   }
 
+  // A method that answers an instance names the class it answers with. The
+  // object pass has just named the class's constructor's layout `ObjectN` by
+  // its fields, so the class's own name is written beside it as the layout a
+  // caller that holds `ref<Class>` reads. It is the same bytes: one layout, two
+  // names, and a field read through either is the field at the same offset.
+  const aliases = new Map<string, string>();
+  for (const caller of callers.values()) {
+    const declared = parseType(caller.contract.function.returns);
+    if (declared.kind !== "ref" || declared.of !== null || declared.name === undefined) continue;
+    if (!callers.has(declared.name) || aliases.has(declared.name)) continue;
+    const result = bodies.get(declared.name)?.result();
+    if (result === undefined || result === null || result.kind !== "object") continue;
+    const layout = names.get(result.key);
+    if (layout !== undefined) aliases.set(declared.name, layout);
+  }
 
   const written: Record<string, ObjectLayout> = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
+  for (const [alias, layout] of aliases) {
+    const target = written[layout];
+    if (target !== undefined) written[alias] = { ...target, name: alias };
+  }
   for (const caller of callers.values()) {
     const definition = caller.contract.definition;
     const body = bodies.get(caller.name);
@@ -1221,7 +1240,7 @@ export function resolveObjects(
     if (result === null || result.kind !== "object") continue;
     // `any` said a reference without saying to what; the body says which.
     const declared = parseType(caller.contract.function.returns);
-    if (declared.kind === "ref" && declared.of === null) {
+    if (declared.kind === "ref" && declared.of === null && declared.name === undefined) {
       caller.contract.function.returns = `ref<${names.get(result.key)}>`;
     }
   }

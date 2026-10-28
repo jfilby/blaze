@@ -72,7 +72,8 @@
  * escapes in ESCAPES resolved and any other escape left as written. A negative
  * number is a unary `-` over the number, not a number of its own.
  *
- * Anything else — a `switch`, a declaration of a class, a generator, a call of
+ * Anything else — a `switch`, a class declared inside a function, a generator,
+ * a call of
  * a method the two above are not — is refused with the line it was written on
  * and what to write instead, and the rest of the file is still read, so one
  * program reports every construct it cannot run.
@@ -90,6 +91,15 @@ import type { Diagnostics, Token } from "./typescript.ts";
 import { ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
 import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
+import {
+  findField,
+  findMethod,
+  methodFunctionName,
+  scanClasses,
+  type ClassInfo,
+  type ClassMethod,
+  type ClassTable,
+} from "./typescript-classes.ts";
 
 /** The array views a program can allocate, and the element each one holds. */
 const VIEWS: Record<string, PrimitiveTypeName> = {
@@ -209,11 +219,18 @@ class ProgramParser {
   private refused = false;
   /** Set while the value being read is the operand of a unary operator. */
   private unaryOperand = false;
+  /** The classes the file declares, lowered by the module frontend. */
+  private readonly classTable: ClassTable;
+  /** The class each name of the function being read holds. */
+  private valueClasses = new Map<string, string>();
+  /** The class whose method is being read, or null in the program body. */
+  private currentClass: ClassInfo | null = null;
 
-  constructor(tokens: Token[], path: string, diagnostics: Diagnostics) {
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable) {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
+    this.classTable = classTable ?? scanClasses(tokens);
   }
 
   private peek(offset = 0): Token {
@@ -479,9 +496,18 @@ class ProgramParser {
     const keyword = this.next().text;
     const name = this.identifier("the name of a declared value");
     let type: string | null = null;
-    if (this.accept(":")) type = this.annotation("the type of a declared value");
+    let annotationClass: string | null = null;
+    if (this.accept(":")) {
+      const annotation = this.peek();
+      if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) annotationClass = annotation.text;
+      type = this.annotation("the type of a declared value");
+    }
     this.expect("=");
-    return { kind: "declare", name, mutable: keyword !== "const", type, value: this.value(), line };
+    const value = this.value();
+    const held = annotationClass ?? this.classOfValue(value);
+    if (held === null) this.valueClasses.delete(name);
+    else this.valueClasses.set(name, held);
+    return { kind: "declare", name, mutable: keyword !== "const", type, value, line };
   }
 
   /** `: Type`, which a program names with a single token. */
@@ -498,6 +524,9 @@ class ProgramParser {
       this.fail("a program names a type with one word, as in const n: usize = 0", token);
       this.skipAngles();
     }
+    // A class names a value the program holds as a reference, which is the one
+    // type the source needs no fields spelled for.
+    if (this.classTable.names.has(token.text)) return "any";
     return token.text;
   }
 
@@ -704,12 +733,19 @@ class ProgramParser {
     }
     const name = this.identifier("the name of a function");
     const params: { name: string; type: string | null }[] = [];
+    const previous = new Map(this.valueClasses);
     this.expect("(");
     if (!this.at(")")) {
       for (;;) {
         const parameter = this.identifier("the name of a parameter");
         let type: string | null = null;
-        if (this.accept(":")) type = this.annotation("the type of a parameter");
+        let held: string | null = null;
+        if (this.accept(":")) {
+          const annotation = this.peek();
+          if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) held = annotation.text;
+          type = this.annotation("the type of a parameter");
+        }
+        if (held !== null) this.valueClasses.set(parameter, held);
         // A parameter the source wrote no type for is read at the type its
         // callers pass it at, which is what the call sites of the program say.
         params.push({ name: parameter, type });
@@ -721,6 +757,7 @@ class ProgramParser {
     // function that returns something says so with its `return`.
     if (this.accept(":")) this.annotation("the type a function returns");
     const body = this.at("{") ? this.braces() : this.statements();
+    this.valueClasses = previous;
     return { kind: "function", name, params, body, line };
   }
 
@@ -793,7 +830,7 @@ class ProgramParser {
       return { kind: "invoke", function: name.text, args: this.arguments(), line: name.line };
     }
     if (token.text === "." && this.peek(2).kind === "ident" && this.peek(3).text === "(") {
-      const object = name.text;
+      const object = name.text === "this" ? "self" : name.text;
       const method = this.peek(2).text;
       this.next();
       this.next();
@@ -801,6 +838,27 @@ class ProgramParser {
       this.next();
       const methodArgs = this.arguments();
       this.accept(";");
+      // A method of a class is a function of the class, with the instance it
+      // was written on as its first argument; a static method has none.
+      if (!this.valueClasses.has(object)) {
+        const owner = this.classNamed(object);
+        if (owner !== undefined) {
+          const found = this.methodOwner(owner.name, method, true);
+          if (found !== null) {
+            return { kind: "invoke", function: this.methodName(found.owner, found.method, methodArgs.length), args: methodArgs, line: name.line };
+          }
+        }
+      }
+      const hint = this.valueClasses.get(object) ?? (this.classNamed(object) !== undefined ? object : null);
+      const found = this.methodOwner(hint, method, false);
+      if (found !== null) {
+        return {
+          kind: "invoke",
+          function: this.methodName(found.owner, found.method, methodArgs.length),
+          args: [{ k: "name", name: object }, ...methodArgs],
+          line: name.line,
+        };
+      }
       const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "sqlite"]);
       const args = namespaces.has(object) ? methodArgs : [{ k: "name", name: object } as ProgramValue, ...methodArgs];
       return { kind: "invoke", function: methodCall(object, method), args, line: name.line };
@@ -812,6 +870,18 @@ class ProgramParser {
       this.next();
       this.next();
       const field = this.identifier("the property of a value");
+      if (this.at("++") || this.at("--")) {
+        const op = this.next().text === "++" ? "+=" : "-=";
+        this.accept(";");
+        return {
+          kind: "fieldAssign",
+          object: name.text === "this" ? "self" : name.text,
+          field,
+          op,
+          value: { k: "number", text: "1" },
+          line: name.line,
+        };
+      }
       const op = this.assignOperator();
       if (op === null) {
         if (this.refused) {
@@ -822,7 +892,14 @@ class ProgramParser {
         this.synchronize();
         return null;
       }
-      return { kind: "fieldAssign", object: name.text, field, op, value: this.value(), line: name.line };
+      return {
+        kind: "fieldAssign",
+        object: name.text === "this" ? "self" : name.text,
+        field,
+        op,
+        value: this.value(),
+        line: name.line,
+      };
     }
     if (ASSIGN_OPS.includes(token.text as ProgramAssignOp)) {
       this.next();
@@ -879,6 +956,22 @@ class ProgramParser {
     let left = this.binary(level + 1);
     for (;;) {
       const token = this.peek();
+      // `x instanceof C` asks whether the value is there as an instance of a
+      // class. A compiled instance is the object itself, so the answer is
+      // whether the reference is one at all.
+      if (level === 7 && token.kind === "ident" && token.text === "instanceof") {
+        this.next();
+        const name = this.identifier("the name of a class");
+        if (!this.classTable.names.has(name)) {
+          this.fail(`instanceof names a class of this module, not "${name}"`, token);
+        }
+        const held = this.classOfValue(left);
+        left =
+          held === null
+            ? { k: "binary", op: "!==", left, right: { k: "null" } }
+            : { k: "number", text: held === name ? "1" : "0" };
+        continue;
+      }
       if (token.kind !== "punct" || !ops.includes(token.text as ProgramBinaryOp)) return left;
       this.next();
       left = { k: "binary", op: token.text as ProgramBinaryOp, left, right: this.binary(level + 1) };
@@ -1041,6 +1134,30 @@ class ProgramParser {
         }
         if (this.at("(")) {
           this.next();
+          // `C.method(args)`: a static method is a function of the class.
+          if (value.k === "name" && !this.valueClasses.has(value.name)) {
+            const owner = this.classNamed(value.name);
+            if (owner !== undefined) {
+              const found = this.methodOwner(owner.name, member, true);
+              if (found !== null) {
+                const args = this.arguments();
+                value = { k: "call", function: this.methodName(found.owner, found.method, args.length), args };
+                continue;
+              }
+            }
+          }
+          // `p.method(args)`: the instance the call is written on is the first
+          // argument of the function the method lowers to.
+          const found = this.methodOwner(this.classOfValue(value), member, false);
+          if (found !== null) {
+            const args = [value, ...this.arguments()];
+            value = {
+              k: "call",
+              function: this.methodName(found.owner, found.method, args.length - 1),
+              args,
+            };
+            continue;
+          }
           const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance", "sqlite"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
@@ -1052,6 +1169,17 @@ class ProgramParser {
           const object = this.valuePath(value);
           value = { k: "call", function: methodCall(object, member), args };
           continue;
+        }
+        // `C.FIELD`: a static field is a function that answers the value.
+        if (value.k === "name" && !this.valueClasses.has(value.name)) {
+          const owner = this.classNamed(value.name);
+          if (owner !== undefined) {
+            const field = findField(this.classTable, owner.name, member, true);
+            if (field !== null) {
+              value = { k: "call", function: `${field.owner}_${field.field.name}`, args: [] };
+              continue;
+            }
+          }
         }
         if (value.k === "name" || value.k === "field" || value.k === "call") {
           value = { k: "field", object: value, field: member };
@@ -1272,6 +1400,23 @@ class ProgramParser {
           this.expect(")");
           return { k: "call", function: "Promise", args: [callback] };
         }
+        const constructed = this.peek();
+        if (constructed.kind === "ident" && this.classTable.names.has(constructed.text)) {
+          const info = this.classNamed(constructed.text) as ClassInfo;
+          this.next();
+          this.expect("(");
+          const args = this.arguments();
+          const params = info.constructor?.params ?? [];
+          const method: ClassMethod = {
+            name: "constructor",
+            params,
+            returnTypeName: info.name,
+            bodyStart: -1,
+            bodyEnd: -1,
+            line: info.line,
+          };
+          return { k: "call", function: this.methodName(info.name, method, args.length), args };
+        }
         return this.bufferLiteral();
       }
       if (token.text === "null" || token.text === "undefined") {
@@ -1298,6 +1443,13 @@ class ProgramParser {
       }
       if (token.text === "Math" && this.peek(1).text === ".") return this.math();
       if (token.text in VIEWS && this.peek(1).text === ".") return this.viewWidth(token);
+      if (token.text === "this") {
+        this.next();
+        if (this.currentClass === null) {
+          this.fail('"this" is not a value outside a class method', token);
+        }
+        return { k: "name", name: "self" };
+      }
       this.next();
       return { k: "name", name: token.text };
     }
@@ -1469,6 +1621,85 @@ class ProgramParser {
   /** The value a statement the parser could not read stands for. */
   private nothing(): ProgramValue {
     return { k: "number", text: "0" };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Classes                                                                */
+  /* ---------------------------------------------------------------------- */
+
+  private classNamed(name: string): ClassInfo | undefined {
+    return this.classTable.classes.get(name);
+  }
+
+  private classTypeName(typeName: string): string | null {
+    return this.classTable.names.has(typeName) ? typeName : null;
+  }
+
+  /** The class a value is known to hold, or null where nothing says. */
+  private classOfValue(value: ProgramValue): string | null {
+    switch (value.k) {
+      case "name": {
+        const known = this.valueClasses.get(value.name);
+        if (known !== undefined) return known;
+        return this.classTable.names.has(value.name) ? value.name : null;
+      }
+      case "field": {
+        if (value.object.k === "name" && !this.valueClasses.has(value.object.name)) {
+          const owner = this.classNamed(value.object.name);
+          if (owner !== undefined) {
+            const field = findField(this.classTable, owner.name, value.field, true);
+            return field === null ? null : this.classTypeName(field.field.typeName);
+          }
+        }
+        const base = this.classOfValue(value.object);
+        if (base === null) return null;
+        const field = findField(this.classTable, base, value.field, false);
+        return field === null ? null : this.classTypeName(field.field.typeName);
+      }
+      case "call":
+        return this.callReturnClass(value.function);
+      default:
+        return null;
+    }
+  }
+
+  private callReturnClass(name: string): string | null {
+    if (this.classTable.names.has(name)) return name;
+    for (const info of this.classTable.ordered) {
+      if (name.startsWith(`${info.name}__`) && /^\d+$/.test(name.slice(info.name.length + 2))) return info.name;
+      const prefix = `${info.name}_`;
+      if (!name.startsWith(prefix)) continue;
+      let member = name.slice(prefix.length);
+      const arity = /__(\d+)$/.exec(member);
+      if (arity !== null) member = member.slice(0, arity.index);
+      const method = [...info.methods, ...info.staticMethods].find((entry) => entry.name === member);
+      if (method !== undefined) return this.classTypeName(method.returnTypeName);
+      const field = info.statics.find((entry) => entry.name === member);
+      if (field !== undefined) return this.classTypeName(field.typeName);
+    }
+    return null;
+  }
+
+  private methodOwner(hint: string | null, name: string, isStatic: boolean): { owner: string; method: ClassMethod } | null {
+    if (hint !== null) {
+      const found = findMethod(this.classTable, hint, name, isStatic);
+      if (found !== null) return found;
+    }
+    if (this.currentClass !== null) {
+      const found = findMethod(this.classTable, this.currentClass.name, name, isStatic);
+      if (found !== null) return found;
+    }
+    const matches: { owner: string; method: ClassMethod }[] = [];
+    for (const info of this.classTable.ordered) {
+      const found = findMethod(this.classTable, info.name, name, isStatic);
+      if (found !== null && !matches.some((entry) => entry.method === found.method)) matches.push(found);
+    }
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /** The function a construction or method call names, with defaults filled. */
+  private methodName(owner: string, method: ClassMethod, arity: number): string {
+    return methodFunctionName(owner, method, arity);
   }
 
   /**
@@ -1651,6 +1882,11 @@ class ProgramParser {
  * of the file. A program is the last thing a module says, so the caller checks
  * that no declaration follows.
  */
-export function parseProgramBody(tokens: Token[], path: string, diagnostics: Diagnostics): ProgramStatement[] {
-  return new ProgramParser(tokens, path, diagnostics).body();
+export function parseProgramBody(
+  tokens: Token[],
+  path: string,
+  diagnostics: Diagnostics,
+  classes?: ClassTable,
+): ProgramStatement[] {
+  return new ProgramParser(tokens, path, diagnostics, classes).body();
 }

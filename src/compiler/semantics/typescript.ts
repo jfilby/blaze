@@ -18,8 +18,17 @@
  *   - top level: `import { name } from "./other.ts";`, `import name from
  *     "./other.ts";` and `import name, { other } from "./other.ts";`, which
  *     bind a module's default export and its named ones; `export function`,
- *     `export default function`, `export { name }`, and the statements of a
- *     program (see typescript-program.ts), which come after every declaration
+ *     `export default function`, `export { name }`, class declarations, and
+ *     the statements of a program (see typescript-program.ts), which come
+ *     after every declaration
+ *
+ *     A class is lowered to functions and objects: its constructor returns an
+ *     object literal, each method is a function whose first parameter is the
+ *     instance it was called on, and each static member is a function of the
+ *     class. Field declarations, parameter properties, default parameters and
+ *     `instanceof` are part of the subset. A class that a module does not
+ *     export is still compiled, because the functions the module does export
+ *     may construct it.
  *
  *     A default export is bound under the name the function was declared with
  *     and not the name the importer wrote: this subset links by name, because
@@ -33,8 +42,8 @@
  *     field reads, calls, object literals, `process.argv`, the comparison,
  *     logical, shift and arithmetic operators, the conditional operator and
  *     parentheses
- *   - types: number, bigint, boolean, the typed array views, and `any` for a
- *     value that is a reference to an object
+ *   - types: number, bigint, boolean, the typed array views, a class of the
+ *     module, and `any` for a value that is a reference to an object
  *   - a function is compiled whatever it does: only the contracts that can
  *     be written as one expression describe a result, so a body that
  *     branches, recurses, allocates or prints is contracted by what it does,
@@ -51,6 +60,19 @@ import { Diagnostics, frontendError, type Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
 import { desugar } from "./typescript-desugar.ts";
+import {
+  findField,
+  findMethod,
+  methodFunctionName,
+  requiredParams,
+  scanClasses,
+  withoutClasses,
+  type ClassField,
+  type ClassInfo,
+  type ClassMethod,
+  type ClassParam,
+  type ClassTable,
+} from "./typescript-classes.ts";
 import type { TypeExpr } from "../core/types.ts";
 import type {
   AssignOperator,
@@ -191,7 +213,7 @@ export const REFUSED_KEYWORDS: Record<string, string> = {
   switch: "a chain of comparisons, as in `if (x === 1) { ... } else { ... }`",
   // try/catch/finally are supported: see docs/specs/try-catch.md
   throw: "a line written out with console.log, and an error as one",
-  class: "an object written where it is made, as in `{ left: null, right: null }`",
+  class: "a class declared at the top level of a module; a class inside a function is not part of the subset",
   interface: "nothing: a program names a type with one word, as in `const n: usize = 0`",
   type: "nothing: a program names a type with one word, as in `const n: usize = 0`",
   enum: "the values written out, as in `const RED = 0;`",
@@ -418,17 +440,27 @@ export interface TypeScriptFunction {
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
 class TypeScriptParser {
-  readonly tokens: Token[];
+  tokens: Token[];
   private readonly path: string;
   private readonly diagnostics: Diagnostics;
   private position = 0;
   /** How many loops the statement being read is written in. */
   private loops = 0;
+  /** The classes the file declares, whether or not the module parser sees them. */
+  private readonly classTable: ClassTable;
+  /** The token stream with class declarations still in it, for class bodies. */
+  private readonly allTokens: Token[];
+  /** The class whose method is being read, or null outside a class. */
+  private currentClass: ClassInfo | null = null;
+  /** The class each name of the function being read holds. */
+  private valueClasses = new Map<string, string>();
 
-  constructor(tokens: Token[], path: string, diagnostics: Diagnostics) {
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, allTokens?: Token[]) {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
+    this.classTable = classTable ?? scanClasses(tokens);
+    this.allTokens = allTokens ?? tokens;
     this.position = 0;
   }
 
@@ -474,6 +506,411 @@ class TypeScriptParser {
   private missing(message: string, token: Token = this.peek()): Expression {
     this.report(message, `near "${token.text}"`, token);
     return this.hole();
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* Classes                                                                  */
+  /* ------------------------------------------------------------------------ */
+
+  /** The class a name declares, or undefined where the file declares none. */
+  private classNamed(name: string): ClassInfo | undefined {
+    return this.classTable.classes.get(name);
+  }
+
+  /** A class's name when it names a class, and nothing when it names a type. */
+  private classTypeName(typeName: string): string | null {
+    return this.classTable.names.has(typeName) ? typeName : null;
+  }
+
+  /** A type annotation, where a class is a reference the layout pass settles. */
+  private typeForName(typeName: string, line: number): TypeExpr {
+    if (typeName === "void") return NOTHING;
+    if (typeName === "any" || this.classTable.names.has(typeName)) return ANY_TYPE;
+    try {
+      return mapTypeScriptType(typeName, `line ${line} of ${this.path}`);
+    } catch (error) {
+      if (!isCompilerError(error)) throw error;
+      this.report(error.message, error.detail ?? "", { kind: "ident", text: typeName, line });
+      return ANY_TYPE;
+    }
+  }
+
+  /**
+   * The type a method answers with. A value a method hands back is an instance
+   * of the class it names, and the object pass gives that layout the class's
+   * own name so a caller can read its fields without having built it itself.
+   */
+  private returnTypeForName(typeName: string, line: number): TypeExpr {
+    if (this.classTable.names.has(typeName)) return { kind: "ref", of: null, name: typeName };
+    return this.typeForName(typeName, line);
+  }
+
+  /** Reads an expression written in the class token stream, between two tokens. */
+  private readRange(start: number, end: number): Expression {
+    const savedTokens = this.tokens;
+    const savedPosition = this.position;
+    this.tokens = this.allTokens;
+    this.position = start;
+    const value = this.readExpression();
+    if (this.position !== end) {
+      this.report("a class member value is one expression", `near "${this.peek().text}"`);
+    }
+    this.tokens = savedTokens;
+    this.position = savedPosition;
+    return value;
+  }
+
+  /**
+   * Reads a class body or a default value with the class's own names in scope.
+   * `self` is the instance a method was called on; a static member has no
+   * instance, so `this` there is refused where it is written.
+   */
+  private withClassContext<T>(info: ClassInfo, params: readonly ClassParam[], self: boolean, run: () => T): T {
+    const savedTokens = this.tokens;
+    const savedPosition = this.position;
+    const savedClass = this.currentClass;
+    const savedTypes = this.valueClasses;
+    this.tokens = this.allTokens;
+    this.currentClass = self ? info : null;
+    this.valueClasses = new Map();
+    if (self) this.valueClasses.set("self", info.name);
+    for (const param of params) {
+      const typeName = this.classTypeName(param.typeName);
+      if (typeName !== null) this.valueClasses.set(param.name, typeName);
+    }
+    try {
+      return run();
+    } finally {
+      this.tokens = savedTokens;
+      this.position = savedPosition;
+      this.currentClass = savedClass;
+      this.valueClasses = savedTypes;
+    }
+  }
+
+  /** The fields a class holds, including the property parameters of its constructor. */
+  private fieldsOf(info: ClassInfo, params: readonly ClassParam[]): ClassField[] {
+    const fields: ClassField[] = [];
+    const seen = new Set<string>();
+    let current: ClassInfo | undefined = info;
+    const chain: ClassInfo[] = [];
+    while (current !== undefined) {
+      chain.unshift(current);
+      current = current.base === null ? undefined : this.classNamed(current.base);
+    }
+    for (const entry of chain) {
+      for (const field of entry.fields) {
+        if (seen.has(field.name)) continue;
+        seen.add(field.name);
+        fields.push(field);
+      }
+    }
+    for (const param of params) {
+      if (!param.property || seen.has(param.name)) continue;
+      seen.add(param.name);
+      fields.push({ name: param.name, typeName: param.typeName, initStart: -1, initEnd: -1, line: param.line });
+    }
+    return fields;
+  }
+
+  /**
+   * The value a field starts as in the literal the constructor allocates.
+   *
+   * Every field is stated at the width it is declared at, so a field the
+   * constructor writes afterwards is written at that same width. A field with
+   * an initialiser starts at its type's zero and is assigned the initialiser
+   * after the object exists, which is what lets the initialiser read `this`: a
+   * field of a reference starts as the null it points at until it is assigned.
+   */
+  private defaultFieldValue(field: ClassField): Expression {
+    switch (field.typeName) {
+      case "number":
+      case "f32":
+      case "f64":
+      case "i8":
+      case "i16":
+      case "i32":
+      case "i64":
+      case "u8":
+      case "u16":
+      case "u32":
+      case "u64":
+      case "usize":
+      case "boolean":
+      case "bool":
+        return { k: "literal", text: "0" };
+      case "bigint":
+      case "i256":
+      case "u256":
+        return { k: "bigint", text: "0n" };
+      default:
+        return { k: "null" };
+    }
+  }
+
+  /** The class a value is known to hold, or null where nothing says. */
+  private classOfExpression(expression: Expression): string | null {
+    switch (expression.k) {
+      case "ident": {
+        const known = this.valueClasses.get(expression.name);
+        if (known !== undefined) return known;
+        return this.classTable.names.has(expression.name) ? expression.name : null;
+      }
+      case "member": {
+        if (expression.base.k === "ident" && !this.valueClasses.has(expression.base.name)) {
+          const owner = this.classNamed(expression.base.name);
+          if (owner !== undefined) {
+            const field = findField(this.classTable, owner.name, expression.field, true);
+            return field === null ? null : this.classTypeName(field.field.typeName);
+          }
+        }
+        const base = this.classOfExpression(expression.base);
+        if (base === null) return null;
+        const field = findField(this.classTable, base, expression.field, false);
+        return field === null ? null : this.classTypeName(field.field.typeName);
+      }
+      case "call":
+        return this.callReturnClass(expression.name);
+      default:
+        return null;
+    }
+  }
+
+  /** The class a generated call answers with, or null when it answers no class. */
+  private callReturnClass(name: string): string | null {
+    if (this.classTable.names.has(name)) return name;
+    for (const info of this.classTable.ordered) {
+      // A constructor called without the parameters it defaults is one of its
+      // overloads, and it still answers an instance of the class.
+      if (name.startsWith(`${info.name}__`) && /^\d+$/.test(name.slice(info.name.length + 2))) return info.name;
+      const prefix = `${info.name}_`;
+      if (!name.startsWith(prefix)) continue;
+      let member = name.slice(prefix.length);
+      const arity = /__(\d+)$/.exec(member);
+      if (arity !== null) member = member.slice(0, arity.index);
+      const method = [...info.methods, ...info.staticMethods].find((entry) => entry.name === member);
+      if (method !== undefined) return this.classTypeName(method.returnTypeName);
+      const field = info.statics.find((entry) => entry.name === member);
+      if (field !== undefined) return this.classTypeName(field.typeName);
+    }
+    return null;
+  }
+
+  /** The class whose method a call of `name` on `hint` resolves to. */
+  private methodOwner(hint: string | null, name: string, isStatic: boolean): { owner: string; method: ClassMethod } | null {
+    if (hint !== null) {
+      const found = findMethod(this.classTable, hint, name, isStatic);
+      if (found !== null) return found;
+    }
+    if (this.currentClass !== null) {
+      const found = findMethod(this.classTable, this.currentClass.name, name, isStatic);
+      if (found !== null) return found;
+    }
+    // A method name no class shares needs no receiver type: the source wrote a
+    // name only one class answers to.
+    const matches: { owner: string; method: ClassMethod }[] = [];
+    for (const info of this.classTable.ordered) {
+      const found = findMethod(this.classTable, info.name, name, isStatic);
+      if (found !== null && !matches.some((entry) => entry.method === found.method)) matches.push(found);
+    }
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /** Reports every construct inside a class the lowering could not read. */
+  private reportClassProblems(): void {
+    for (const problem of this.classTable.problems) {
+      this.report(problem.message, problem.detail, { kind: "ident", text: "", line: problem.line });
+    }
+  }
+
+  /** The function a class or one member of it lowers to. */
+  private declared(
+    name: string,
+    params: { name: string; type: TypeExpr }[],
+    returns: TypeExpr,
+    body: Statement[],
+    exported: boolean,
+    line: number,
+  ): DeclaredFunction {
+    return {
+      name,
+      exported,
+      params,
+      returns,
+      handle: { name, params, returns, body, line } satisfies TypeScriptFunction,
+    };
+  }
+
+  /** The parameters of a method, where a class-typed one is a reference. */
+  private methodParams(params: readonly ClassParam[]): { name: string; type: TypeExpr }[] {
+    return params.map((param) => ({
+      name: param.name,
+      type: this.classTable.names.has(param.typeName) ? this.referenceTo(param.typeName) : this.typeForName(param.typeName, param.line),
+    }));
+  }
+
+  /** An instance of a class, as the reference the layout pass names. */
+  private referenceTo(className: string): TypeExpr {
+    return { kind: "ref", of: null, name: className };
+  }
+
+  /**
+   * The overloads a method with default parameters is callable through. The
+   * full method takes every parameter; each shorter arity is a function whose
+   * body fills the remaining defaults, evaluated where the call was made and
+   * with the receiver the call named in scope.
+   */
+  private wrappers(
+    info: ClassInfo,
+    method: ClassMethod,
+    baseName: string,
+    returns: TypeExpr,
+    self: boolean,
+    exported: boolean,
+  ): DeclaredFunction[] {
+    const params = method.params;
+    const required = requiredParams(params);
+    const out: DeclaredFunction[] = [];
+    for (let arity = required; arity < params.length; arity += 1) {
+      const written = params.slice(0, arity);
+      const paramsOut = self ? [{ name: "self", type: this.referenceTo(info.name) }, ...this.methodParams(written)] : this.methodParams(written);
+      const args = params.map((param, index) =>
+        index < arity
+          ? ({ k: "ident", name: param.name } satisfies Expression)
+          : this.withClassContext(info, params, self, () => this.readRange(param.defaultStart, param.defaultEnd)),
+      );
+      const callArgs = self ? [{ k: "ident", name: "self" } satisfies Expression, ...args] : args;
+      out.push(
+        this.declared(
+          `${baseName}__${arity}`,
+          paramsOut,
+          returns,
+          [{ kind: "result", value: { k: "call", name: baseName, args: callArgs }, line: method.line }],
+          exported,
+          method.line,
+        ),
+      );
+    }
+    return out;
+  }
+
+  /** Every function a class becomes: a constructor, methods, and static members. */
+  private emitClass(info: ClassInfo): DeclaredFunction[] {
+    const out: DeclaredFunction[] = [];
+    if (info.base !== null) {
+      this.report(
+        `class inheritance is not supported ("${info.name}" extends "${info.base}")`,
+        "write the fields and methods the class uses; a compiled class is one layout",
+        { kind: "ident", text: info.name, line: info.line },
+      );
+    }
+    const params = info.constructor?.params ?? [];
+    const fields = this.fieldsOf(info, params);
+    const object: Expression = {
+      k: "object",
+      fields: fields.map((field) => {
+        const parameter = params.find((entry) => entry.property && entry.name === field.name);
+        return { name: field.name, value: parameter === undefined ? this.defaultFieldValue(field) : { k: "ident", name: parameter.name } };
+      }),
+    };
+    const body: Statement[] = [{ kind: "declare", name: "self", type: null, init: object, line: info.line }];
+    // A field initialiser runs after the object exists, so a class field may
+    // read another field through `this`; a parameter property is already the
+    // argument the constructor was given and needs no assignment.
+    for (const field of fields) {
+      if (field.initStart < 0 || field.initEnd < field.initStart) continue;
+      if (params.some((entry) => entry.property && entry.name === field.name)) continue;
+      const value = this.withClassContext(info, params, true, () => this.readRange(field.initStart, field.initEnd));
+      body.push({ kind: "memberAssign", base: "self", field: field.name, op: "=", value, line: field.line });
+    }
+    if (info.constructor !== null) {
+      body.push(
+        ...this.withClassContext(info, params, true, () => {
+          this.position = info.constructor?.bodyStart ?? this.position;
+          const statements = this.readBlock();
+          if (this.position !== (info.constructor?.bodyEnd ?? this.position)) {
+            this.report("a constructor body is a block of statements", `near "${this.peek().text}"`);
+          }
+          return statements;
+        }),
+      );
+    }
+    body.push({ kind: "result", value: { k: "ident", name: "self" }, line: info.line });
+    const constructorParams = this.methodParams(params);
+    out.push(this.declared(info.name, constructorParams, this.referenceTo(info.name), body, info.exported, info.line));
+    out.push(...this.wrappers(info, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, info.name, this.referenceTo(info.name), false, info.exported));
+
+    for (const method of info.methods) {
+      const name = `${info.name}_${method.name}`;
+      const returns = this.returnTypeForName(method.returnTypeName, method.line);
+      const statements = this.withClassContext(info, method.params, true, () => {
+        this.position = method.bodyStart;
+        const read = this.readBlock();
+        if (this.position !== method.bodyEnd) {
+          this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
+        }
+        return read;
+      });
+      out.push(
+        this.declared(
+          name,
+          [{ name: "self", type: this.referenceTo(info.name) }, ...this.methodParams(method.params)],
+          returns,
+          statements,
+          info.exported,
+          method.line,
+        ),
+      );
+      out.push(...this.wrappers(info, method, name, returns, true, info.exported));
+    }
+    for (const method of info.staticMethods) {
+      const name = `${info.name}_${method.name}`;
+      const returns = this.returnTypeForName(method.returnTypeName, method.line);
+      const statements = this.withClassContext(info, method.params, false, () => {
+        this.position = method.bodyStart;
+        const read = this.readBlock();
+        if (this.position !== method.bodyEnd) {
+          this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
+        }
+        return read;
+      });
+      out.push(this.declared(name, this.methodParams(method.params), returns, statements, info.exported, method.line));
+      out.push(...this.wrappers(info, method, name, returns, false, info.exported));
+    }
+    for (const field of info.statics) {
+      const value =
+        field.initStart >= 0 && field.initEnd >= field.initStart
+          ? this.withClassContext(info, [], false, () => this.readRange(field.initStart, field.initEnd))
+          : ({ k: "null" } satisfies Expression);
+      out.push(
+        this.declared(
+          `${info.name}_${field.name}`,
+          [],
+          this.returnTypeForName(field.typeName, field.line),
+          [{ kind: "result", value, line: field.line }],
+          info.exported,
+          field.line,
+        ),
+      );
+    }
+    // The functions a class becomes are compiled with the module, but they are
+    // not what the module exports: a source names the class, not `P_sum`. An
+    // exported class offers its constructor under its own name, which is what
+    // an importer binds; the methods are reached through the instances.
+    for (const entry of out) entry.internal = true;
+    if (info.exported || info.isDefault) {
+      const constructor = out.find((entry) => entry.name === info.name);
+      if (constructor !== undefined) constructor.internal = false;
+    }
+    return out;
+  }
+
+  /** Every class of the file, lowered to the functions the module parser reads. */
+  private emitClasses(): DeclaredFunction[] {
+    this.reportClassProblems();
+    const out: DeclaredFunction[] = [];
+    for (const info of this.classTable.ordered) out.push(...this.emitClass(info));
+    return out;
   }
 
   /** Reads on to the end of the statement, or to one token of it. */
@@ -535,10 +972,13 @@ class TypeScriptParser {
    */
   parseModule(path: string): ModuleAnalysis {
     const imports: ModuleImport[] = [];
-    const functions: DeclaredFunction[] = [];
+    // A class is lowered before anything else is read: its constructor and
+    // methods are declarations of the module, wherever the class was written,
+    // and every use of the class is read against the same table.
+    const functions: DeclaredFunction[] = this.emitClasses();
     /** The names `export { f }` offered, which a declaration may name later. */
     const namesExported: Record<string, true> = {};
-    let defaultExport: string | null = null;
+    let defaultExport: string | null = this.classTable.defaultName;
     while (this.peek().kind !== "end") {
       if (this.at("import")) {
         this.next();
@@ -563,7 +1003,7 @@ class TypeScriptParser {
           imports,
           functions,
           default: defaultExport,
-          body: parseProgramBody(this.tokens.slice(this.position), path, this.diagnostics),
+          body: parseProgramBody(this.tokens.slice(this.position), path, this.diagnostics, this.classTable),
         };
       }
       const exported = this.accept("export");
@@ -736,6 +1176,10 @@ class TypeScriptParser {
   }
 
   private parseFunction(name: Token): TypeScriptFunction | null {
+    // A function declared by the module is not a method: `this` names nothing
+    // in it, and the class each of its names holds starts empty.
+    this.currentClass = null;
+    this.valueClasses = new Map();
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
     if (this.at(")")) {
@@ -756,6 +1200,7 @@ class TypeScriptParser {
           break;
         }
         params.push({ name: parameter.text, type: this.mapType(type) });
+        if (this.classTable.names.has(type.text)) this.valueClasses.set(parameter.text, type.text);
         if (this.accept(",")) continue;
         this.expect(")");
         break;
@@ -797,6 +1242,10 @@ class TypeScriptParser {
   private mapType(token: Token): TypeExpr {
     if (token.text === "any" || token.text === "object" || token.text === "unknown") return ANY_TYPE;
     if (token.text === "void") return NOTHING;
+    // A class names the layout an instance holds. The layout pass names the
+    // object by its fields, so the annotation is the one unshaped reference it
+    // settles: the constructor and methods of the class are what say the shape.
+    if (this.classTable.names.has(token.text)) return ANY_TYPE;
     try {
       return mapTypeScriptType(token.text, `line ${token.line} of ${this.path}`);
     } catch (error) {
@@ -842,9 +1291,11 @@ class TypeScriptParser {
         return { kind: "expression", value: this.hole(), line: token.line };
       }
       let type: TypeExpr | null = null;
+      let annotationClass: string | null = null;
       if (this.accept(":")) {
         const annotation = this.next();
         type = annotation.kind === "ident" ? this.mapType(annotation) : null;
+        if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) annotationClass = annotation.text;
       }
       if (!this.accept("=")) {
         this.report("a declaration needs an initialiser", `as in let ${name.text} = 0;`, name);
@@ -853,6 +1304,9 @@ class TypeScriptParser {
       }
       const init = this.readExpression();
       this.accept(";");
+      const held = annotationClass ?? this.classOfExpression(init);
+      if (held === null) this.valueClasses.delete(name.text);
+      else this.valueClasses.set(name.text, held);
       return { kind: "declare", name: name.text, type, init, line: name.line };
     }
 
@@ -953,11 +1407,16 @@ class TypeScriptParser {
       this.next();
       const value = this.readExpression();
       this.accept(";");
+      const held = this.classOfExpression(value);
+      if (held === null) this.valueClasses.delete(target.text);
+      else this.valueClasses.set(target.text, held);
       return { kind: "assign", target: target.text, op: "=", value, line: target.line };
     }
     this.next();
     const value = this.readExpression();
     this.accept(";");
+    // A compound assignment keeps the type the name already holds: `p = q` may
+    // change what a name is, but `p += q` is a number operation on it.
     return {
       kind: "assign",
       target: target.text,
@@ -1005,14 +1464,33 @@ class TypeScriptParser {
     this.next();
     const field = this.next();
     const operator = this.peek();
-    if (field.kind !== "ident" || (operator.text !== "=" && !(operator.text in COMPOUND_OPERATORS))) {
+    if (field.kind !== "ident" || (operator.text !== "=" && operator.text !== "++" && operator.text !== "--" && !(operator.text in COMPOUND_OPERATORS))) {
       this.position = start;
       return null;
+    }
+    if (operator.text === "++" || operator.text === "--") {
+      this.next();
+      this.accept(";");
+      return {
+        kind: "memberAssign",
+        base: base.text === "this" && this.currentClass !== null ? "self" : base.text,
+        field: field.text,
+        op: operator.text === "++" ? "+=" : "-=",
+        value: { k: "literal", text: "1" },
+        line: base.line,
+      };
     }
     this.next();
     const value = this.readExpression();
     this.accept(";");
-    return { kind: "memberAssign", base: base.text, field: field.text, op: operator.text as AssignOperator, value, line: base.line };
+    return {
+      kind: "memberAssign",
+      base: base.text === "this" && this.currentClass !== null ? "self" : base.text,
+      field: field.text,
+      op: operator.text as AssignOperator,
+      value,
+      line: base.line,
+    };
   }
 
   /** A call or an `i++` written for what it does. */
@@ -1279,7 +1757,27 @@ class TypeScriptParser {
   }
 
   private readComparison(): Expression {
-    return this.readBinaryLevel(["<", "<=", ">", ">="], () => this.readShift());
+    let left = this.readBinaryLevel(["<", "<=", ">", ">="], () => this.readShift());
+    // `x instanceof C` asks whether the value is an instance of a class. A
+    // compiled instance is the object itself, so the answer is whether it is
+    // there at all; the declared class is what says what it is when it is.
+    while (this.at("instanceof")) {
+      this.next();
+      const name = this.next();
+      if (name.kind !== "ident" || !this.classTable.names.has(name.text)) {
+        this.report("instanceof names a class of this module", `near "${name.text}"`, name);
+        continue;
+      }
+      // What the source says the value is settles the answer where it says
+      // anything: an instance of one class is not an instance of another. A
+      // value no type names may be any instance, so it is one when it is there.
+      const held = this.classOfExpression(left);
+      left =
+        held === null
+          ? { k: "binary", op: "!==", left, right: { k: "null" } }
+          : { k: "literal", text: held === name.text ? "1" : "0" };
+    }
+    return left;
   }
 
   private readShift(): Expression {
@@ -1382,15 +1880,42 @@ class TypeScriptParser {
           // `http.requestPath(req)` is the HTTP call of that name.
           base = { k: "ident", name: `${base.base.name}.${base.field}` };
         }
-        if (base.k !== "ident") return this.missing("only a named function is called", this.peek());
-        this.next();
-        const args: Expression[] = [];
-        if (!this.at(")")) {
-          do {
-            args.push(this.readExpression());
-          } while (this.accept(","));
+        // `Point.fromAffine(p)`: a static method is a function of the class,
+        // with no instance written before its arguments.
+        if (base.k === "member" && base.base.k === "ident") {
+          const owner = this.classNamed(base.base.name);
+          if (owner !== undefined && !this.valueClasses.has(base.base.name)) {
+            const found = this.methodOwner(owner.name, base.field, true);
+            if (found !== null) {
+              const args = this.readCallArguments();
+              base = { k: "call", name: methodFunctionName(found.owner, found.method, args.length), args };
+              continue;
+            }
+          }
         }
-        this.expect(")");
+        // `p.add(q)`: a method is a function whose first argument is the
+        // instance the source called it on.
+        if (base.k === "member") {
+          const args = this.readCallArguments();
+          const receiver = base.base;
+          const found = this.methodOwner(this.classOfExpression(receiver), base.field, false);
+          if (found === null) {
+            this.report(
+              `"${base.field}" is not a method this program compiles`,
+              "a method is declared by a class the same module or its imports carry",
+              this.peek(),
+            );
+            return this.hole();
+          }
+          base = {
+            k: "call",
+            name: methodFunctionName(found.owner, found.method, args.length),
+            args: [receiver, ...args],
+          };
+          continue;
+        }
+        if (base.k !== "ident") return this.missing("only a named function is called", this.peek());
+        const args = this.readCallArguments();
         base = { k: "call", name: base.name, args };
         continue;
       }
@@ -1435,11 +1960,36 @@ class TypeScriptParser {
           base = { k: "call", name: ARGV_LENGTH, args: [] };
           continue;
         }
+        // `Point.ZERO`: a static field is a function of the class, so reading
+        // it is a call that answers the value the source declared.
+        if (base.k === "ident" && !this.valueClasses.has(base.name)) {
+          const owner = this.classNamed(base.name);
+          if (owner !== undefined) {
+            const found = findField(this.classTable, owner.name, field.text, true);
+            if (found !== null) {
+              base = { k: "call", name: `${found.owner}_${found.field.name}`, args: [] };
+              continue;
+            }
+          }
+        }
         base = { k: "member", base, field: field.text };
         continue;
       }
       return base;
     }
+  }
+
+  /** The arguments of a call, from the `(` the parser is at to its `)`. */
+  private readCallArguments(): Expression[] {
+    this.next();
+    const args: Expression[] = [];
+    if (!this.at(")")) {
+      do {
+        args.push(this.readExpression());
+      } while (this.accept(","));
+    }
+    this.expect(")");
+    return args;
   }
 
   /**
@@ -1556,6 +2106,26 @@ class TypeScriptParser {
         this.next();
         return this.denoArguments();
       }
+      // `this` is the instance a method was called on, which is the first
+      // parameter the class lowering gives every method.
+      if (token.text === "this") {
+        if (this.currentClass !== null) return { k: "ident", name: "self" };
+        this.report(
+          '"this" is not a value outside a class method',
+          "a method reads the instance it was called on as this",
+          token,
+        );
+        return { k: "ident", name: "this" };
+      }
+      if (token.text === "super") {
+        this.report(
+          "a call of super is not part of the class subset",
+          "a compiled class is one layout; write the fields and methods it needs",
+          token,
+        );
+        if (this.at("(")) this.readCallArguments();
+        return this.hole();
+      }
       return { k: "ident", name: token.text };
     }
     if (token.kind === "punct" && token.text === "(") {
@@ -1599,6 +2169,20 @@ class TypeScriptParser {
    */
   private readAllocation(): Expression {
     const view = this.next();
+    // `new Point(1, 2)`: the class's constructor is a function that returns the
+    // object, and the arity selects the overload that fills any defaults.
+    if (view.kind === "ident") {
+      const info = this.classNamed(view.text);
+      if (info !== undefined) {
+        if (!this.at("(")) {
+          this.report("a class is constructed with its arguments", `as in new ${view.text}()`, view);
+          return { k: "call", name: info.name, args: [] };
+        }
+        const args = this.readCallArguments();
+        const params = info.constructor?.params ?? [];
+        return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
+      }
+    }
     if (view.kind !== "ident" || !(view.text in TYPED_ARRAYS)) {
       this.report(
         `a program allocates a typed array, not "${view.text}"`,
@@ -1647,7 +2231,9 @@ class TypeScriptParser {
       }
       const inner = rest.slice(open + 2, close);
       rest = rest.slice(close + 1);
-      const parser = new TypeScriptParser(tokenize(inner), this.path, this.diagnostics);
+      const parser = new TypeScriptParser(tokenize(inner), this.path, this.diagnostics, this.classTable);
+      parser.currentClass = this.currentClass;
+      parser.valueClasses = new Map(this.valueClasses);
       const value = parser.readExpression();
       if (parser.peek().kind !== "end") {
         this.report(`"${parser.peek().text}" follows a complete value`, `in the text of line ${token.line}`, parser.peek());
@@ -2362,14 +2948,11 @@ function describe(expression: Expression): string {
 
 /* The secp256k1 benchmark (1.ts) is the only source the desugar understands.
    General sources must not be run through it: it mangles `export function`
-   declarations and applies secp256k1-specific rewrites. Detect secp256k1 by
-   the curve-specific constructs it defines. */
+   declarations and applies secp256k1-specific rewrites. The benchmark is what
+   declares the endomorphism split and the curve it splits over; a user source
+   that happens to name a class `Point` is not it, and is compiled as a class. */
 function isSecp256k1Source(source: string): boolean {
-  return (
-    /\bclass (JacobianPoint|Point)\b/.test(source) ||
-    /\bsplitScalarEndo\b/.test(source) ||
-    /\bCURVE\s*=/.test(source)
-  );
+  return /\bsplitScalarEndo\b/.test(source) && /\bCURVE\b/.test(source);
 }
 
 export const typeScriptFrontend: Frontend = {
@@ -2391,7 +2974,12 @@ export const typeScriptFrontend: Frontend = {
     // (`resolve`, `reject`, `onFulfilled`, `onRejected`) as the ones that
     // settle it, so the executor's parameters are not written out again.
     const diagnostics = new Diagnostics();
-    const parser = new TypeScriptParser(tokenize(source), path, diagnostics);
+    // Class declarations are read once, up front: their constructor and methods
+    // are functions of the module, and every use of a class in a function or in
+    // the program body is lowered against the same table.
+    const tokens = tokenize(source);
+    const classTable = scanClasses(tokens);
+    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens);
     const analysis = parser.parseModule(path);
     // A file read as a program has its whole text readable as statements, so a
     // nested function inside a function that the module parser stopped for is
@@ -2401,9 +2989,18 @@ export const typeScriptFrontend: Frontend = {
       const fromStatements = tokensAfterImports(parser["tokens"]);
       const programDiagnostics = new Diagnostics();
       try {
-        const statements = parseProgramBody(fromStatements, path, programDiagnostics);
+        const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable);
         if (programDiagnostics.entries.length === 0) {
-          return { path, imports: analysis.imports, functions: [], default: null, body: statements };
+          // The class functions were lowered from declarations the program
+          // parser never sees, so they travel with the body: they are the
+          // constructors and methods the statements call.
+          return {
+            path,
+            imports: analysis.imports,
+            functions: analysis.functions.filter((entry) => entry.internal === true),
+            default: null,
+            body: statements,
+          };
         }
       } catch {
         // A program parse that cannot be a program keeps the module parse's

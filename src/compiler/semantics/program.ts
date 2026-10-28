@@ -175,7 +175,7 @@ function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isPro
   const entries: (readonly [string, FunctionContract])[] = [];
   const declaredNames = new Set<string>();
   for (const declared of record.analysis.functions) {
-    if (!declared.exported && !isProgram) continue;
+    if (!declared.exported && !isProgram && declared.internal !== true) continue;
     if (declaredNames.has(declared.name)) {
       throw contractPhaseError(`${record.path} declares "${declared.name}" more than once`);
     }
@@ -198,7 +198,11 @@ function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isPro
  */
 function validateImports(records: ModuleRecord[], contracts: Map<string, FileContract>): ContractEdge[] {
   const analyses: Record<string, string | null> = {};
-  for (const record of records) analyses[record.path] = record.analysis.default;
+  const internal: Record<string, Set<string>> = {};
+  for (const record of records) {
+    analyses[record.path] = record.analysis.default;
+    internal[record.path] = new Set(record.analysis.functions.filter((entry) => entry.internal === true).map((entry) => entry.name));
+  }
   const edges: ContractEdge[] = [];
   for (const record of records) {
     const declaredHere = new Set(record.analysis.functions.filter((entry) => entry.exported).map((entry) => entry.name));
@@ -206,7 +210,7 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
     for (const [index, entry] of record.analysis.imports.entries()) {
       const to = record.resolved[index];
       const target = contracts.get(to) as FileContract;
-      const available = Object.keys(target.functions);
+      const available = Object.keys(target.functions).filter((name) => internal[to]?.has(name) !== true);
       if (available.length === 0) {
         throw contractPhaseError(`${record.path} imports "${entry.specifier}" (line ${entry.line}), which exports nothing`);
       }
@@ -226,7 +230,7 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
         // default joins the list rather than standing in for it.
         names = [...names, offered];
       }
-      const missing = names.filter((name) => target.functions[name] === undefined);
+      const missing = names.filter((name) => !available.includes(name));
       if (missing.length > 0) {
         throw contractPhaseError(
           `${record.path} imports ${missing.map((name) => `"${name}"`).join(", ")} from "${entry.specifier}", which does not export ${missing.length === 1 ? "it" : "them"}`,
@@ -287,8 +291,9 @@ function resolveEntry(
   input: SourceInput,
   entryFile: FileContract,
   body: ProgramBody | undefined,
+  internal: ReadonlySet<string>,
 ): { file: string; function: string | null } {
-  const available = Object.keys(entryFile.functions);
+  const available = Object.keys(entryFile.functions).filter((name) => !internal.has(name));
   const requested = input.entry;
   if (body !== undefined) {
     if (requested !== undefined && requested !== "") {
@@ -380,10 +385,14 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   // a property of the whole graph, so it is decided here, once the graph is
   // complete and before anything is generated from it.
   resolveCalls(files);
+  const entryRecord = records.find((record) => record.path === request.entry.path);
+  const internalEntry = new Set(
+    (entryRecord?.analysis.functions ?? []).filter((entry) => entry.internal === true).map((entry) => entry.name),
+  );
   const program: ProgramContract = {
     version: "1",
     language: request.input.language,
-    entry: resolveEntry(request.input, contracts.get(request.entry.path) as FileContract, body),
+    entry: resolveEntry(request.input, contracts.get(request.entry.path) as FileContract, body, internalEntry),
     files,
     edges,
   };

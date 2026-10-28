@@ -36,6 +36,12 @@ export interface DeclaredFunction {
   returns: TypeExpr;
   /** The frontend's own parse of this declaration, opaque to the phase. */
   handle: unknown;
+  /**
+   * A symbol the frontend lowered from a language construct, such as a class's
+   * constructor. It is compiled with the file but it is not an export of it: a
+   * user names the class, not the functions the class becomes.
+   */
+  internal?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
