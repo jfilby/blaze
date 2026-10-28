@@ -1208,15 +1208,20 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       }
       case "res.end": {
         const body = call.args[1];
-        const bodyExpr = argument(1);
+        // `res.end()` ends the response with no body at all, which is how a
+        // 204 is answered. The text the runtime is handed is the empty one,
+        // not the zero argument a missing call argument would be read as.
+        const bodyExpr = body === undefined ? '""' : argument(1);
         /* Convert any Blaze value to its text form so JSON.stringify results
            (boxed dynamic values) and raw strings both reach the wire as bytes.
            A number is written as the language writes it, and only a value the
            runtime holds is rendered by the runtime: a number the program holds
            is not a handle the runtime knows. */
-        const bodyPtr = (body.type.kind === "ptr" || body.type.kind === "text")
+        const bodyPtr = body === undefined
           ? bodyExpr
-          : this.toText(bodyExpr, body.type, null, this.style);
+          : (body.type.kind === "ptr" || body.type.kind === "text")
+            ? bodyExpr
+            : this.toText(bodyExpr, body.type, null, this.style);
         /* Hold the body pointer in a temporary so it is evaluated once: it is
            both passed to blaze_http_resp_body and measured with strlen, and a
            complex expression (such as program_number_text) would otherwise be

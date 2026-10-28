@@ -251,7 +251,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `res.setHeader(name, value)` sets a header of the response, and is
    *  written before the body is sent. */
   "res.setHeader": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
-  "res.end": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** A response may end with a body or with none: `res.end()` is the empty
+   * response a `res.writeHead(204)` answers with. */
+  "res.end": { params: [ANY, ANY], returns: ANY, arities: [1, 2] },
   "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
   /** `http.sseSubscribe(res)` turns a response into an event stream: the
    *  connection stays open and every event published afterwards is written to

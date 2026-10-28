@@ -250,6 +250,17 @@ function resolved(source: string) {
   return resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 }
 
+test("a response that ends with no body answers with the empty text", () => {
+  // `res.end()` is the empty response a 204 is answered with. It used to take
+  // exactly two arguments, so the form Node programs are written with was
+  // refused for the body it did not write.
+  const source = `const server = http.createServer((req, res) => { res.writeHead(204); res.end(); });\n` +
+    `server.listen(18096, "127.0.0.1", () => {});\n`;
+  const written = generateProgramDriver(resolved(source), true);
+  assert.match(written, /blaze_http_resp_body_text = \(const char \*\) ""/, "the body is the empty text");
+  assert.match(written, /blaze_http_resp_complete/, "the response is completed");
+});
+
 test("server.listen starts the event loop in the background and server.close stops the held server", () => {
   const source = `const port = 18090;\n` +
     `const server = http.createServer((req, res) => { res.writeHead(200); res.end("closed\n"); });\n` +
