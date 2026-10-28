@@ -125,6 +125,76 @@ test("a function declared after a statement is compiled with the module", async 
   assert.equal(output.trim(), "3");
 });
 
+test("a module function that calls one the module cannot hold is read by the program", async () => {
+  // The module reads a function whose body is inside the subset it holds, and
+  // leaves the ones it cannot read — a body that searches a text, that opens
+  // the database — where the program reads them. A function that calls one of
+  // those is not a function the module can hold either: a contract names only
+  // the functions of the module, so the caller is read beside its callee as a
+  // function of the program. The file is one source: a function of it is a
+  // function of the module only if everything it calls is.
+  const source = [
+    "function nameOf(header: string): string {",
+    '  const at = header.indexOf("=");',
+    '  return at < 0 ? "" : header.slice(at + 1);',
+    "}",
+    "function greeting(header: string): string {",
+    "  const name = nameOf(header);",
+    '  return name === "" ? "hello" : `hello ${name}`;',
+    "}",
+    'console.log(greeting("who=blaze"));',
+    'console.log(greeting("none"));',
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  assert.deepEqual(
+    Object.keys(phase.program.files[0]?.functions ?? {}),
+    [],
+    "the caller is read where the callee is, not as a function of the module",
+  );
+  assert.equal(await agreesWithNode(source), "hello blaze\nhello\n");
+});
+
+test("a function declared before the program that calls one the module cannot hold is read by the program", async () => {
+  // A declaration is hoisted from wherever it is written, so a function at the
+  // top of a program is read by the module when it can be. When a function it
+  // calls is one the module cannot hold, the caller is read by the program too,
+  // beside the callee, whichever of the two is written first.
+  const source = [
+    "function fromText(text: string): number {",
+    '  const at = text.indexOf("3");',
+    "  return at < 0 ? 0 : 3;",
+    "}",
+    "function twice(raw: number): number {",
+    "  return fromText(`${raw}`) * 2;",
+    "}",
+    "console.log(twice(3));",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  assert.deepEqual(
+    Object.keys(phase.program.files[0]?.functions ?? {}),
+    [],
+    "the caller is read by the program, beside the callee it calls",
+  );
+  assert.equal(await agreesWithNode(source), "6\n");
+});
+
+test("a parameter named like a value the program holds is the parameter", () => {
+  // A name a function declares is its own, whatever the file calls it. A
+  // parameter spelled like a value the program computes while it runs is the
+  // parameter, so the function that reads it needs no scope to read it from
+  // and the module can hold it.
+  const source = [
+    "const total = Math.floor(2.5);",
+    "function bump(total: number): number { return total + 1; }",
+    "console.log(bump(total));",
+    "",
+  ].join("\n");
+  const functions = phaseOf("typescript", { "main.ts": source }, "main.ts").program.files[0]?.functions ?? {};
+  assert.ok(functions["bump"], "the parameter is the function's own name, not the file's value");
+});
+
 test("a name a function declares is not the file's constant", async () => {
   // A parameter spelled like a constant of the file is the parameter: the
   // constant is not read where the body declared its own name.

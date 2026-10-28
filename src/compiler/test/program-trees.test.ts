@@ -489,7 +489,10 @@ test("a function of a program is given every name of the scope it touches", () =
   const source = [
     "const data = new Float64Array([1, 2, 3]);",
     "let total = 0;",
-    "const base = 5;",
+    // A value the program computes while it runs, rather than a constant the
+    // module writes into the function that reads it: the functions here are
+    // read by the program, and each is handed the names it touches.
+    "const base = Math.floor(5);",
     "",
     "function inner(x: number): number {",
     "  return x + base;",

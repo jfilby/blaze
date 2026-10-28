@@ -368,7 +368,10 @@ test("a construct outside the subset is named in a function body too", () => {
     ["return await n;", /"await" is not supported/],
     ["return yield n;", /"yield" is not supported/],
   ] as const) {
-    const source = `function f(n: number): number { ${body} }\nmain();\n`;
+    // A module has no body to read the function in, so what the function writes
+    // outside the subset is refused where it was written. A program reads the
+    // same function, and names the construct with the program's own wording.
+    const source = `export function f(n: number): number { ${body} }\n`;
     assert.match(diagnostic(() => typeScriptFrontend.analyze(source, "lib.ts")), what);
   }
 });

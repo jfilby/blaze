@@ -775,25 +775,57 @@ function localNames(tokens: readonly Token[]): Set<string> {
  */
 function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean {
   if (state.size === 0) return false;
+  // A name the function declares is its own, whatever the file calls it: a
+  // parameter spelled like a value the program holds is the parameter, and the
+  // function that reads it needs no scope to read it from.
+  const local = declaredNames(fn);
   let found = false;
-  const readName = (text: string): void => {
-    if (state.has(text)) found = true;
-  };
+  walkFunction(fn, (name) => {
+    if (!local.has(name) && state.has(name)) found = true;
+  });
+  return found;
+}
+
+/** Every name a function binds: its parameters, its declarations and the names it counts with. */
+function declaredNames(fn: TypeScriptFunction): Set<string> {
+  const names = new Set<string>(fn.params.map((param) => param.name));
+  walkFunction(fn, () => {}, undefined, (name) => names.add(name));
+  return names;
+}
+
+/** Every function a body calls, by the name the source wrote. */
+function callsOf(fn: TypeScriptFunction): Set<string> {
+  const called = new Set<string>();
+  walkFunction(fn, () => {}, (name) => called.add(name));
+  return called;
+}
+
+/**
+ * Every name a function body reads, and every function it calls, in the order
+ * the body writes them. One walk answers both questions, so a name and a call
+ * are found by the same reading of the body.
+ */
+function walkFunction(
+  fn: TypeScriptFunction,
+  onName: (text: string) => void,
+  onCall: (name: string) => void = () => {},
+  onDeclare: (name: string) => void = () => {},
+): void {
   const read = (expression: Expression | null): void => {
-    if (expression === null || found) return;
+    if (expression === null) return;
     switch (expression.k) {
       case "literal":
       case "bigint":
       case "null":
         return;
       case "ident":
-        readName(expression.name);
+        onName(expression.name);
         return;
       case "argv":
         read(expression.index);
         return;
       case "length":
-        readName(expression.buffer);
+        onName(expression.buffer);
         return;
       case "index":
         read(expression.base);
@@ -809,6 +841,7 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
         read(expression.base);
         return;
       case "call":
+        onCall(expression.name);
         for (const argument of expression.args) read(argument);
         return;
       case "object":
@@ -839,33 +872,34 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
         read(expression.otherwise);
         return;
       case "update":
-        readName(expression.name);
+        onName(expression.name);
         return;
     }
   };
   const statements = (body: readonly Statement[]): void => {
     for (const statement of body) {
-      if (found) return;
       switch (statement.kind) {
         case "declare":
+          onDeclare(statement.name);
           read(statement.init);
           break;
         case "loop":
+          onDeclare(statement.variable);
           read(statement.from);
           read(statement.to);
           read(statement.step);
           statements(statement.body);
           break;
         case "assign":
-          readName(statement.target);
+          onName(statement.target);
           read(statement.value);
           break;
         case "memberAssign":
-          readName(statement.base);
+          onName(statement.base);
           read(statement.value);
           break;
         case "update":
-          readName(statement.name);
+          onName(statement.name);
           break;
         case "result":
           read(statement.value);
@@ -884,7 +918,8 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
           statements(statement.body);
           break;
         case "forOf":
-          readName(statement.of);
+          onDeclare(statement.variable);
+          onName(statement.of);
           statements(statement.body);
           break;
         case "print":
@@ -892,11 +927,12 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
           read(statement.value);
           break;
         case "indexAssign":
-          readName(statement.buffer);
+          onName(statement.buffer);
           read(statement.index);
           read(statement.value);
           break;
         case "try":
+          if (statement.catchParam !== null) onDeclare(statement.catchParam);
           statements(statement.body);
           if (statement.catchBody !== null) statements(statement.catchBody);
           if (statement.finallyBody !== null) statements(statement.finallyBody);
@@ -908,7 +944,29 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
   };
   for (const param of fn.params) if (param.default !== undefined) read(param.default);
   statements(fn.body);
-  return found;
+}
+
+/** The tokens one construct of a file is written in. */
+interface Span {
+  start: number;
+  end: number;
+}
+
+/** One declaration of a module, and where the parser read it. */
+interface Declaration extends Span {
+  /** The functions the declaration adds, whether the module or the body holds them. */
+  entries: DeclaredFunction[];
+  /**
+   * True when the body holds the declaration, so it is a function of the
+   * program: a construct the module refused, or a function that reads one.
+   */
+  program: boolean;
+  /** Everything the declaration calls, by the name the source wrote. */
+  calls: ReadonlySet<string>;
+  /** Why the module could not hold it, where it could not. */
+  refusal: readonly Diagnostic[];
+  /** The name it offers as the module's default, where it offers one. */
+  offers: string | null;
 }
 
 /** The constant fields of an object literal, by the name each is written under. */
@@ -1775,8 +1833,15 @@ class TypeScriptParser {
 
   /**
    * Parses a module: the imports it binds, the functions it declares, and the
-   * statements it runs. A program is the last thing a module says, so the
-   * first statement ends the declarations.
+   * statements it runs.
+   *
+   * A function declaration is hoisted: the functions of a file are the
+   * module's wherever they are written, so the body that runs before one does
+   * not decide whether it is compiled, and a program and the functions it
+   * calls are one source rather than one source reordered. A declaration the
+   * module cannot hold is left where it was written, and so is every
+   * declaration that calls it: a module function is compiled from a contract,
+   * and a contract names only the functions the module holds.
    */
   parseModule(path: string): ModuleAnalysis {
     const imports: ModuleImport[] = [];
@@ -1787,91 +1852,192 @@ class TypeScriptParser {
     /** The names `export { f }` offered, which a declaration may name later. */
     const namesExported: Record<string, true> = {};
     let defaultExport: string | null = this.classTable.defaultName;
-    const read = (): string | null => this.readFunctionDeclaration(functions, namesExported);
-    // The declarations before the first statement are read first, imports and
-    // functions alike, and a file that is only declarations is a library.
+    /**
+     * Every declaration of the file, in the order it is written. Each is read
+     * against diagnostics of its own and decided afterwards: whether the module
+     * can hold it is not known until the whole file has been read, because a
+     * function it calls may be one the module cannot hold.
+     */
+    const declarations: Declaration[] = [];
+    /** The spans of the file that are imports rather than the module's own. */
+    const importsWritten: Span[] = [];
+    // An import is written at the top of the file, before anything runs; a
+    // declaration is hoisted from wherever it is written.
+    let atTop = true;
+    /** Whether the file runs anything: a file that runs nothing is a library. */
+    let runs = false;
     while (this.peek().kind !== "end") {
-      if (this.at("import")) {
+      if (atTop && this.at("import")) {
+        const start = this.position;
         this.next();
         imports.push(this.readImport());
+        importsWritten.push({ start, end: this.position });
         continue;
       }
       if (this.at("function") || this.at("export") || this.at("async")) {
-        const isDefault = read();
-        if (isDefault !== null) defaultExport = isDefault;
-        continue;
-      }
-      break;
-    }
-    const bodyStart = this.position;
-    // A function declaration is hoisted: the functions of a file are the
-    // module's wherever they are written, so the body that runs before one does
-    // not decide whether it is compiled, and a program and the functions it
-    // calls are one source rather than one source reordered.
-    const written: [number, number][] = [];
-    while (this.peek().kind !== "end") {
-      if (this.at("function") || this.at("export") || this.at("async")) {
-        const start = this.position;
-        const before = functions.length;
-        // The declaration is read against diagnostics of its own: one the
-        // module parser cannot read — an async function, a Promise executor, a
-        // parameter a program function leaves to its callers — is a function of
-        // the program, and is left where it was written rather than reported as
-        // a declaration the module refused.
-        const saved = this.diagnostics;
-        const trial = new Diagnostics();
-        this.diagnostics = trial;
-        let isDefault: string | null = null;
-        try {
-          isDefault = read();
-        } finally {
-          this.diagnostics = saved;
-        }
-        const added = functions.slice(before);
-        const readable = trial.entries.length === 0 && added.length > 0;
-        const stays = readable && added.some((entry) => readsState(entry.handle as TypeScriptFunction, this.state));
-        if (!readable || stays) {
-          // A function the module parser could not read, or one that reads a
-          // value the running program holds, is left where it was written: a
-          // function of the program, with the names it reads around it.
-          functions.length = before;
-          this.position = start;
-          this.skipFunctionBody(start);
-          continue;
-        }
-        written.push([start, this.position]);
-        if (isDefault !== null) defaultExport = isDefault;
+        const declaration = this.readDeclaration(functions, namesExported);
+        declarations.push(declaration);
+        if (declaration.offers !== null) defaultExport = declaration.offers;
         continue;
       }
       this.synchronize();
       this.accept(";");
+      atTop = false;
+      runs = true;
+    }
+    // The calls decide where a declaration is read. A function the module
+    // cannot hold is a function of the program, and a module function that
+    // calls one would name a function its contract does not hold, so it is
+    // read where its callee is, and so is every function that calls it. Where
+    // the file is a program, a function of it is a function of the module only
+    // if everything it calls is.
+    const staying = new Set<string>();
+    for (const declaration of declarations) {
+      if (!declaration.program) continue;
+      for (const entry of declaration.entries) staying.add(entry.name);
+    }
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const declaration of declarations) {
+        if (declaration.program) continue;
+        let callsOne = false;
+        for (const name of declaration.calls) {
+          if (!staying.has(name)) continue;
+          callsOne = true;
+          break;
+        }
+        if (!callsOne) continue;
+        declaration.program = true;
+        for (const entry of declaration.entries) staying.add(entry.name);
+        moved = true;
+      }
+    }
+    const programEntries = new Set<DeclaredFunction>();
+    for (const declaration of declarations) {
+      if (!declaration.program) continue;
+      for (const entry of declaration.entries) programEntries.add(entry);
+    }
+    if (programEntries.size > 0) {
+      functions.splice(0, functions.length, ...functions.filter((entry) => !programEntries.has(entry)));
     }
     // The body is the statements that run, without the functions the module
     // holds: the parser that reads a program reads statements, and a function
-    // body is not one of them.
+    // body is not one of them. A declaration the body keeps stays in place,
+    // because a program function is read where the program runs.
+    const held: Span[] = [...importsWritten];
+    for (const declaration of declarations) {
+      if (!declaration.program) held.push({ start: declaration.start, end: declaration.end });
+    }
+    held.sort((left, right) => left.start - right.start);
+    let bodyStart = 0;
+    for (const span of held) {
+      if (span.start !== bodyStart) break;
+      bodyStart = span.end;
+    }
     const bodyTokens: Token[] = [];
     let at = bodyStart;
-    for (const [start, end] of written) {
-      bodyTokens.push(...this.tokens.slice(at, start));
-      at = end;
+    for (const span of held) {
+      if (span.start < at) continue;
+      bodyTokens.push(...this.tokens.slice(at, span.start));
+      at = span.end;
     }
     bodyTokens.push(...this.tokens.slice(at));
-    const body = parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable);
+    // A file that runs nothing is a library: it has no body for a function the
+    // module cannot hold to be read in, so the refusal the declaration earned
+    // is the module's, reported where it was written.
+    if (!runs) {
+      for (const declaration of declarations) {
+        if (!declaration.program) continue;
+        for (const entry of declaration.refusal) this.diagnostics.report(entry.message, entry.detail, entry.line);
+      }
+    }
+    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable) : [];
     // `export { f }` may name a function the file declared after it, so the
     // names are applied once the whole file has been read. A name no
     // declaration answers is refused here, where every other export is.
     for (const entry of functions) {
       if (namesExported[entry.name] === true) entry.exported = true;
     }
+    const declared = new Set<string>(functions.map((entry) => entry.name));
+    for (const declaration of declarations) {
+      for (const entry of declaration.entries) declared.add(entry.name);
+    }
     for (const name of Object.keys(namesExported)) {
-      if (!functions.some((entry) => entry.name === name)) {
+      if (!declared.has(name)) {
         this.report(
           `"${name}" is exported but not declared here`,
-          `a module offers the functions it declares; ${path} declares ${functions.length === 0 ? "none" : functions.map((entry) => `"${entry.name}"`).join(", ")}`,
+          `a module offers the functions it declares; ${path} declares ${declared.size === 0 ? "none" : [...declared].map((name) => `"${name}"`).join(", ")}`,
         );
       }
     }
     return { path, imports, functions, default: defaultExport, body };
+  }
+
+  /**
+   * One declaration of the file, read with diagnostics of its own.
+   *
+   * A construct the module parser cannot read — an `async` function, a Promise
+   * executor, a method a class does not declare — may still be a function of
+   * the program, so what it earned is a refusal of the module and not of the
+   * file. The declaration is left where it was written, and the refusal is
+   * kept for a file that has no body to read it in.
+   */
+  private readDeclaration(functions: DeclaredFunction[], namesExported: Record<string, true>): Declaration {
+    const start = this.position;
+    const before = functions.length;
+    const saved = this.diagnostics;
+    const trial = new Diagnostics();
+    this.diagnostics = trial;
+    let offers: string | null = null;
+    try {
+      offers = this.readFunctionDeclaration(functions, namesExported);
+    } finally {
+      this.diagnostics = saved;
+    }
+    const end = this.position;
+    const entries = functions.slice(before);
+    // Everything the module cannot hold is read by the program instead: a
+    // construct the module refused, or a function that reads a value the
+    // running program holds. `export { f }` adds no function and refuses
+    // nothing: it names functions, and is not a statement the body runs.
+    const readsProgramState = entries.length > 0 && entries.some((entry) => readsState(entry.handle as TypeScriptFunction, this.state));
+    const program = trial.entries.length > 0 || readsProgramState;
+    if (program) {
+      functions.length = before;
+      this.position = start;
+      // A function is skipped by the braces it is written in, whatever the
+      // parser read of it; a construct that is not one is skipped as the
+      // statement it is, so a refusal does not swallow what is written after it.
+      if (this.declaresFunction(start)) this.skipFunctionBody(start);
+      else this.synchronize();
+    }
+    const calls = new Set<string>();
+    if (!program) {
+      for (const entry of entries) {
+        for (const name of callsOf(entry.handle as TypeScriptFunction)) calls.add(name);
+      }
+    }
+    return {
+      start,
+      end: program ? this.position : end,
+      entries: [...entries],
+      program,
+      calls,
+      refusal: [...trial.entries],
+      offers,
+    };
+  }
+
+  /** Whether the declaration at a token writes a function, which has a body to skip. */
+  private declaresFunction(start: number): boolean {
+    let index = start;
+    while (index < this.tokens.length) {
+      const text = this.tokens[index]?.text;
+      if (text === "function") return true;
+      if (text !== "export" && text !== "default" && text !== "async") return false;
+      index += 1;
+    }
+    return false;
   }
 
   /** Moves past the body of the declaration at a token, whatever it holds. */
