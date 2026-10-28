@@ -890,6 +890,17 @@ class FunctionEmitter {
         `${RUNTIME_NAME}_u256_div(&${out}, &${left}, &${right}); ${out}; })`
       );
     }
+    if (call.callee === "u256_invert_mod") {
+      const out = this.temporary("blaze_wide");
+      const value = this.temporary("blaze_wide");
+      const mod = this.temporary("blaze_wide");
+      return (
+        `({ blaze_u256 ${out}; ` +
+        `const blaze_u256 ${value} = ${args[0]}; ` +
+        `const blaze_u256 ${mod} = ${args[1]}; ` +
+        `${RUNTIME_NAME}_u256_invert_mod(&${out}, &${value}, &${mod}); ${out}; })`
+      );
+    }
     if (call.callee === "fetch" || call.callee === "http.request") {
       const url = this.expression(call.args[0], null, depth);
       const method = this.expression(call.args[1], null, depth);

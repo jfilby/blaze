@@ -336,6 +336,7 @@ const WIDE_BUILTINS: Record<string, string> = {
   "u256_sub_mod": "blaze_rt_u256_sub_mod",
   "u256_mul_mod": "blaze_rt_u256_mul_mod",
   "u256_div": "blaze_rt_u256_div",
+  "u256_invert_mod": "blaze_rt_u256_invert_mod",
 };
 
 /** The width one element of a buffer takes, which is the width the host lays it out at. */

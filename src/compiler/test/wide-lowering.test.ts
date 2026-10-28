@@ -166,12 +166,14 @@ test("the lowered program keeps the source's loop over the command line's count"
   assert.match(rewritten, /function invert\(/, "the inversion is kept for the affine conversion");
 });
 
-test("the lowered inversion takes every step modulo the curve's order", () => {
-  // The extended Euclidean algorithm over signed arbitrary precision integers
-  // is written as residues: `x - u * q` wraps unless the whole step is taken
-  // modulo the order, and a wrapped step is a different inverse.
+test("the lowered inversion is the kernel that halves rather than divides", () => {
+  // The source's extended Euclidean algorithm divides on every turn, and a
+  // 256 bit division is the widest operation the kernel has. The inverse is
+  // the same number when it is found by halving the pair instead, which is the
+  // binary extended Euclidean algorithm, so the body becomes that one call.
   const source = readFileSync(new URL("../../benchmarks/machine_backend/secp256k1/1.ts", import.meta.url).pathname, "utf8");
   const rewritten = lowerWideArithmetic(source);
-  assert.match(rewritten, /u256_sub_mod\(x, u256_mul_mod\(u, q, modulo\), modulo\)/);
-  assert.match(rewritten, /u256_sub_mod\(y, u256_mul_mod\(v, q, modulo\), modulo\)/);
+  assert.match(rewritten, /function invert\([\s\S]*?u256_invert_mod\(number, modulo\)/);
+  assert.doesNotMatch(rewritten, /let a: u256 = number % modulo/, "the division is not left behind");
+  assert.doesNotMatch(rewritten, /b \/ a/, "no division of the order is left in the body");
 });

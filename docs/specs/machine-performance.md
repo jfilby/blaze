@@ -299,19 +299,68 @@ of the eleven multiplies in the doubling of `secp256k1`'s source are of that
 kind.
 
 Three is `(x + x) + x` and two is `x + x`. A count above three is left as the
-multiply it is, and the reason is not the arithmetic but the binding: eight is
-three doublings only if the first doubling is written once and read three times,
-and a value that is not bound is computed at every read, so a chain of three
-additions is a tree of seven. The count is read from the side the compiler can
-see, which is a literal or a `u256_from_u64x2`/`u256_from_u64x4` of literal
-limbs.
+multiply *by this rewrite*, for a reason that is not the arithmetic but the
+binding: eight is three doublings only if the first doubling is written once
+and read three times, and a value that is not bound is computed at every read,
+so a chain of three additions is a tree of seven. The count is read from the
+side the compiler can see, which is a literal or a
+`u256_from_u64x2`/`u256_from_u64x4` of literal limbs. The rewrite that binds the
+steps is the one after this, and it is what takes the count above three and the
+side that is not free to write twice.
 
 The other side is read for the same reason. The answer is that side written
 once or twice, so doubling a value that itself computes something is two copies
 of every operation in it. `2 * ((x + y) - z)` is therefore left as the multiply
-it is; only a name, a literal, or a wide constant built from its limbs is free
-to write twice. A curve's doubling multiplies a name by two, and the one
+it is *here*; a name, a literal, or a wide constant built from its limbs is
+free to write twice. A curve's doubling multiplies a name by two, and the one
 compound operand it has — the square of `x + y` — is left alone.
+
+### A count above three is a chain, with a binding at every step
+
+What the rewrite above could not take was the count whose other side is read
+more than twice, and the count above three: the first is a computation written
+once per copy, and the second is a tree of additions because nothing holds the
+partial sum. Both are the same missing name, and giving it a name is the whole
+of the fix. The pass reads a `u256_mul_mod` whose multiplier is a literal from
+two to sixteen, binds the other side if it is not a name already, and walks the
+count from its highest bit down: a doubling at every step and the value added
+where the bit is set, with each step bound before the next reads it.
+
+A doubling reads its binding on both sides, so every step is read twice and no
+pass inlines it back into a tree. Eight is then three additions between three
+bindings, where the multiply is the sixteen limb products and the reduction the
+kernel executes; the point doubling of `secp256k1`'s source multiplies by eight
+and by two, and the two of them are the two multiplies the doubling no longer
+makes.
+
+The count is bounded at sixteen because the chain is a doubling per bit: a
+count of sixteen is four additions and a count of a thousand is ten, against a
+multiply that is the same kernel for every count. Above the bound the kernel is
+the cheaper of the two.
+
+### An inverse is found by halving, not by dividing
+
+`invert` in the source is the extended Euclidean algorithm, and every turn of
+it divides one 256 bit number by another. A division is the widest operation
+the kernel has: Knuth's algorithm is four estimates and four multiply-subtract
+passes, and the Euclidean loop makes a few hundred of them for one inverse. The
+inverse is the same number when the pair is halved instead, which is the binary
+extended Euclidean algorithm: a turn is a shift of a value that is even, or a
+subtraction of the smaller from the larger, and the coefficients are halved
+modulo the modulus by adding it first. There is no division in it at all.
+
+The lowering writes `invert` as the one kernel call that answers an inverse,
+and the kernel is the halving algorithm. It is reached through the same wide
+argument passing as the other kernels, so the answer is written straight into
+the binding's slot, and the kernel is a narrow one: an inverse of a secp256k1
+coordinate went from 275 thousand instructions to under 70 thousand, and the
+whole program is a sixth faster for it.
+
+The halving of a coefficient is the halving of a residue only when the modulus
+is odd, which a curve's prime and its order both are. A value that shares a
+factor with the modulus has no inverse, and an even modulus has no halving
+rule; both answer zero, which is the answer the lowering documents and the one
+the source's own check refuses before the call.
 
 ### A modulus the compiler read is the arithmetic of that prime
 

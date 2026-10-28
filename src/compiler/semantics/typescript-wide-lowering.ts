@@ -5,8 +5,9 @@
  * defaults, classes, `instanceof`, `throw`, `typeof`, unions, string literals
  * and squares are parsed and lowered directly. What remains here is the part
  * that is arithmetic rather than syntax: a `mod` over a mathematical value is
- * the modular kernels, the inversion's steps are taken modulo the order, and
- * the endomorphism branch asks for a 384 bit quotient the IR does not hold.
+ * the modular kernels, the inversion is the kernel that answers one by
+ * halving rather than dividing, and the endomorphism branch asks for a 384 bit
+ * quotient the IR does not hold.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -295,28 +296,22 @@ function replaceFunctionBody(source: string, name: string, body: string): string
  * The body `invert` is lowered to.
  *
  * The source's extended Euclidean algorithm is over signed arbitrary precision
- * integers; a `u256` is neither. Every step of the algorithm is a modular
- * operation — a residue minus a residue times a quotient, taken modulo the
- * curve order — so it is written as exactly that, which is the same number the
- * source computes and is what the machine's kernels answer without wrapping.
+ * integers; a `u256` is neither, and its every step divides. The kernel that
+ * answers an inverse is the binary extended Euclidean algorithm, which is the
+ * same inverse without a division in it: a halving is a shift and a turn is a
+ * subtraction. It is one call rather than a loop of the wide IR, because the
+ * loop's own control is a question about limbs -- even, zero, less -- that the
+ * IR's wide numbers have no operation for, and the kernel has them.
+ *
+ * The modulus is odd for a curve's prime and for its order, which is what the
+ * halving of a coefficient needs; a value that shares a factor with the
+ * modulus has no inverse and answers zero. The source refuses both of those
+ * before the call, so the lowering is reached only where the source's own test
+ * said the inverse exists.
  */
 const INVERT_BODY = `{
-    let a: u256 = number % modulo;
-    let b: u256 = modulo;
-    let x: u256 = 0n;
-    let y: u256 = 1n;
-    let u: u256 = 1n;
-    let v: u256 = 0n;
-    while (a !== 0n) {
-        const q: u256 = b / a;
-        const r: u256 = b % a;
-        const m: u256 = u256_sub_mod(x, u256_mul_mod(u, q, modulo), modulo);
-        const n: u256 = u256_sub_mod(y, u256_mul_mod(v, q, modulo), modulo);
-        const t0 = a; const t1 = r; b = t0; a = t1;
-        const t2 = u; const t3 = v; x = t2; y = t3;
-        const t4 = m; const t5 = n; u = t4; v = t5;
-    }
-    return x % modulo;
+    let inverse: u256 = u256_invert_mod(number, modulo);
+    return inverse;
 }`;
 
 function matchBrace(source: string, openIndex: number): number {
@@ -425,10 +420,11 @@ export function lowerWideArithmetic(source: string): string {
   source = source.replace(/const invZ2 = invZ \*\* 2n;/g, "const invZ2 = mod(invZ * invZ);");
 
   // `invert` is the extended Euclidean algorithm over signed arbitrary
-  // precision integers. Every step of it is a modular operation -- a residue
-  // minus a residue times a quotient, taken modulo the curve order -- so it
-  // is written as exactly that, which is the same number the source computes
-  // and is what the machine's kernels answer without wrapping.
+  // precision integers, and every step of it is a division. The kernel that
+  // answers the same inverse is the binary extended Euclidean algorithm, whose
+  // steps are shifts and subtractions over the wide numbers the IR does hold,
+  // so the function becomes that call. The answers are the same number the
+  // source computes for every value the source lets through.
   source = replaceFunctionBody(source, "invert", INVERT_BODY);
 
   // The source's `mod(a, b)` is a reduction over mathematical values, so the

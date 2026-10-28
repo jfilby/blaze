@@ -4089,14 +4089,27 @@ test("a wide kernel answers four limbs, including the ones the reduction carried
   assert.match(await emitted(fn), /u256_mul_mod/, "the kernel is the one the runtime provides");
 });
 
-test("a modular multiply by a count the compiler does not answer with additions is the multiply it is", async () => {
-  // Eight is three doublings only if the doubling is written down once and read
-  // three times. Without a binding the chain is a tree of seven additions,
-  // which costs more than the multiply, so eight is left as the kernel's.
+test("a modular multiply by a count above three is the chain of additions it is, with a binding at every step", async () => {
+  // Eight is three doublings only if each doubling is written down once and
+  // read twice, which is what a binding does: the optimizer binds the value
+  // and binds the chain's steps, so the turn is three additions rather than
+  // the multiply's sixteen limb products or a tree of seven additions. The
+  // value is a name of the body's, because a written-out one would be folded.
   const value = 0xdeadbeefcafebaben;
-  const fn = optimizeSemanticFunction(wideSubjectOf(modularCall("u256_mul_mod", wideOf(8n), wideOf(value), wideOf(WIDE_P))));
+  const entry: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", line: 1, slot: { kind: "value", name: "x", mutable: false, type: U256 }, value: wideOf(value) },
+      { k: "let", line: 2, slot: { kind: "value", name: "p", mutable: false, type: U256 }, value: wideOf(WIDE_P) },
+    ],
+    terminator: { k: "return", value: modularCall("u256_mul_mod", wideOf(8n), local("x", U256), local("p", U256)) },
+  };
+  const fn = optimizeSemanticFunction({ ...wideSubjectOf(wideOf(0n)), entry });
   assert.equal(await lowered(fn, wideDriver), wideLimbs((8n * value) % WIDE_P));
-  assert.match(await emitted(fn), /u256_mul_mod/, "the multiply by eight is the kernel's");
+  const text = await emitted(fn);
+  assert.doesNotMatch(text, /u256_mul_mod/, "the multiply by eight is the additions it is");
+  assert.match(text, /blaze_rt_u256_add_mod/, "the chain is the addition kernel's");
 });
 
 test("a modulus the compiler reads is lowered to the arithmetic of that prime", async () => {

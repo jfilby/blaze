@@ -514,6 +514,7 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_sub_mod_special(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, uint64_t c)",
   "void blaze_rt_u256_div(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
+  "void blaze_rt_u256_invert_mod(blaze_u256* out, const blaze_u256* value, const blaze_u256* mod)",
   "void blaze_rt_u256_redc(blaze_u256* out, const blaze_u256* T_hi, const blaze_u256* T_lo, const blaze_u256* mod, uint64_t pinv)",
   "void blaze_rt_u256_and(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
   "void blaze_rt_u256_or(blaze_u256* out, const blaze_u256* left, const blaze_u256* right)",
@@ -1474,6 +1475,124 @@ void blaze_rt_u256_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256
   blaze_u256 quotient;
   blaze_u256_divmod(&quotient, out, &tmp, right);
   (void)quotient;
+}
+
+/* The value of value * 2^-1 modulo an odd modulus, where the value is below
+   it: the halving of a residue. An odd residue cannot be halved as an integer,
+   so the modulus is added first -- which changes the value by a multiple of
+   the modulus -- and the sum, which is even, is halved. The sum may carry past
+   2^256, and the carry is the bit the halving shifts in at the top, so it is
+   kept while the four limbs are moved down. */
+static void blaze_u256_halve_mod(blaze_u256* value, const blaze_u256* mod) {
+  if ((value->limbs[0] & 1u) == 0u) {
+    for (unsigned i = 0; i < 3; i += 1) {
+      value->limbs[i] = (value->limbs[i] >> 1) | (value->limbs[i + 1] << 63);
+    }
+    value->limbs[3] >>= 1;
+    return;
+  }
+  unsigned __int128 sum = (unsigned __int128)value->limbs[0] + mod->limbs[0];
+  value->limbs[0] = (uint64_t)sum;
+  uint64_t carry = (uint64_t)(sum >> 64);
+  for (unsigned i = 1; i < 4; i += 1) {
+    sum = (unsigned __int128)value->limbs[i] + mod->limbs[i] + carry;
+    value->limbs[i] = (uint64_t)sum;
+    carry = (uint64_t)(sum >> 64);
+  }
+  for (unsigned i = 0; i < 3; i += 1) {
+    value->limbs[i] = (value->limbs[i] >> 1) | (value->limbs[i + 1] << 63);
+  }
+  value->limbs[3] = (value->limbs[3] >> 1) | (carry << 63);
+}
+
+/* left - right modulo the modulus, for both sides below it. A borrow means
+   the difference is negative, and what is left after the wrap is the
+   difference plus 2^256; adding the modulus once brings it to the residue,
+   because the residue is below the modulus and the sum is one modulus under
+   the width. */
+static void blaze_u256_sub_below_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod) {
+  unsigned __int128 borrow = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 difference = (unsigned __int128)left->limbs[i] - right->limbs[i] - borrow;
+    out->limbs[i] = (uint64_t)difference;
+    borrow = (difference >> 64) & 1u;
+  }
+  if (borrow == 0) return;
+  unsigned __int128 carry = 0;
+  for (unsigned i = 0; i < 4; i += 1) {
+    const unsigned __int128 sum = (unsigned __int128)out->limbs[i] + mod->limbs[i] + carry;
+    out->limbs[i] = (uint64_t)sum;
+    carry = sum >> 64;
+  }
+}
+
+static int blaze_u256_is_one(const blaze_u256* value) {
+  return value->limbs[0] == 1u && value->limbs[1] == 0u && value->limbs[2] == 0u && value->limbs[3] == 0u;
+}
+
+/* The inverse of a value modulo an odd modulus: the number below the modulus
+   whose product with the value is one modulo it, or zero when the value has
+   no inverse.
+
+   This is the binary extended Euclidean algorithm (HAC 14.61). It keeps two
+   values u and v, starting as the value and the modulus, and two coefficients
+   x1 and x2 for which u is value * x1 and v is value * x2 modulo the modulus.
+   A turn halves whichever of the pair is even -- halving a coefficient by the
+   rule above -- and otherwise subtracts the smaller from the larger,
+   subtracting the coefficients the same way. The pair is a pair of greatest
+   common divisors all the way down, so the turn that leaves one of them one
+   has the other's coefficient as the inverse.
+
+   What this replaces is the extended Euclidean algorithm over divisions: every
+   turn of that one divides, and a 256 bit division is the widest operation the
+   kernel has. This one has no division at all -- a halving is a shift and a
+   subtraction is a borrow chain -- so an inversion costs a few hundred turns
+   of limb arithmetic rather than a few hundred divisions.
+
+   The halving of a coefficient is the halving of a residue only for an odd
+   modulus, so an even modulus, and a value with no inverse, answer zero: the
+   ring has no inverse to answer, and the source's own check refuses the case
+   before the call rather than asking this kernel. */
+void blaze_rt_u256_invert_mod(blaze_u256* out, const blaze_u256* value, const blaze_u256* mod) {
+  *out = blaze_u256_zero();
+  if ((mod->limbs[0] & 1u) == 0u) return;
+  if (blaze_u256_is_zero(mod)) return;
+  /* The algorithm holds the value below the modulus, and the caller's value is
+     any wide number. */
+  blaze_u256 u;
+  blaze_u256 quotient;
+  blaze_u256_divmod(&quotient, &u, value, mod);
+  blaze_u256 v = *mod;
+  blaze_u256 x1 = blaze_u256_of_u64(1u);
+  blaze_u256 x2 = blaze_u256_zero();
+  if (blaze_u256_is_zero(&u)) return;
+  /* Each turn takes a bit off the pair or takes them a subtraction closer, so
+     four turns per bit of the width is more turns than a pair of four limbs
+     has; the bound is what makes a value with no inverse stop rather than
+     spin. */
+  for (unsigned turn = 0; turn < 4u * 256u; turn += 1) {
+    if (blaze_u256_is_one(&u) || blaze_u256_is_one(&v)) break;
+    if (blaze_u256_is_zero(&u) || blaze_u256_is_zero(&v)) break;
+    if ((u.limbs[0] & 1u) == 0u) {
+      blaze_u256_halve_mod(&u, mod);
+      blaze_u256_halve_mod(&x1, mod);
+      continue;
+    }
+    if ((v.limbs[0] & 1u) == 0u) {
+      blaze_u256_halve_mod(&v, mod);
+      blaze_u256_halve_mod(&x2, mod);
+      continue;
+    }
+    if (blaze_rt_u256_less(&u, &v)) {
+      blaze_rt_u256_sub(&v, &v, &u);
+      blaze_u256_sub_below_mod(&x2, &x2, &x1, mod);
+    } else {
+      blaze_rt_u256_sub(&u, &u, &v);
+      blaze_u256_sub_below_mod(&x1, &x1, &x2, mod);
+    }
+  }
+  if (blaze_u256_is_one(&u)) *out = x1;
+  else if (blaze_u256_is_one(&v)) *out = x2;
 }
 
 /* Montgomery REDC: computes (T_hi * 2^256 + T_lo) * R^{-1} mod mod, where

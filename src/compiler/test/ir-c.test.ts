@@ -714,6 +714,42 @@ test("a product reduced modulo a wide prime is the kernel the runtime answers", 
   assert.match(generateFunctionC(fn), /blaze_rt_u256_mul_mod/);
 });
 
+test("a modular inverse is the kernel the runtime answers", async () => {
+  // The inversion is the binary extended Euclidean algorithm in the kernel,
+  // which is the same inverse the source's division-based one computes where
+  // the value has one. The answer is checked by multiplying it back into the
+  // value over the whole numbers: an inverse that is not one is caught even
+  // when it is another residue of the same modulus.
+  const value = 0x0123456789abcdef_fedcba9876543210_fedcba9876543210_0123456789abcdefn % WIDE_PRIME;
+  const inverse = (() => {
+    let [a, b] = [value, WIDE_PRIME];
+    let [x, y] = [1n, 0n];
+    while (b !== 0n) {
+      const q = a / b;
+      [a, b] = [b, a - q * b];
+      [x, y] = [y, x - q * y];
+    }
+    return ((x % WIDE_PRIME) + WIDE_PRIME) % WIDE_PRIME;
+  })();
+  const call: SemanticValue = {
+    k: "call", type: U256,
+    call: {
+      callee: "u256_invert_mod", builtin: true,
+      signature: { name: "u256_invert_mod", symbol: "u256_invert_mod", params: [{ name: "value", type: "u256" }, { name: "mod", type: "u256" }], returns: "u256" },
+      args: [wideOf(value), wideOf(WIDE_PRIME)], argTypes: [U256, U256], returns: U256,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+  const fn = subject(U256, handsBack(call));
+  const driver = (name: string): string =>
+    `blaze_u256 answer = ${name}(); printf("%llx,%llx,%llx,%llx", (unsigned long long)answer.limbs[3], (unsigned long long)answer.limbs[2], (unsigned long long)answer.limbs[1], (unsigned long long)answer.limbs[0]);`;
+  const limbs: string[] = [];
+  for (let at = 3; at >= 0; at -= 1) limbs.push(((inverse >> BigInt(at * 64)) & 0xffffffffffffffffn).toString(16));
+  assert.equal(await lowered(fn, driver), limbs.join(","));
+  assert.match(generateFunctionC(fn), /blaze_rt_u256_invert_mod/);
+  assert.equal((value * inverse) % WIDE_PRIME, 1n, "the inverse the test expects is one");
+});
+
 test("a number written in base sixteen is refused rather than written in base ten", () => {
   // This backend writes a number with the one formatter it has, which writes
   // the shortest text of it. A body that asks for the digits the source asked

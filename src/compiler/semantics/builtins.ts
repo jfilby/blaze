@@ -124,6 +124,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "u256_mul_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
   /** `u256_div(a, b)` computes integer division a / b. */
   "u256_div": { params: [U256, U256], returns: U256, arity: 2 },
+  /** `u256_invert_mod(a, m)` computes the number `x` below `m` for which
+   *  `a * x` is one modulo `m`. The modulus must be odd; a value with no
+   *  inverse answers zero. */
+  "u256_invert_mod": { params: [U256, U256], returns: U256, arity: 2 },
   "require": { params: [ANY], returns: ANY, arity: 1 },
   /** `text.indexOf(needle)` answers where the needle first says itself in the
    *  text, counted in bytes from the front, and -1 where it never does. */

@@ -8234,10 +8234,12 @@ class Machine {
    * the answer straight to the binding's slot saves the four loads and four
    * stores of copying it there.
    *
-   * `u256_div` is not written this way: its kernel clears the quotient before
-   * it reads the dividend, so an answer written over an operand would clear
-   * the operand with it. The modular kernels read each limb before they write
-   * the limb over it, so the callers allow the aliasing the division does not.
+   * `u256_div` and `u256_invert_mod` are not written this way: the division
+   * kernel clears the quotient before it reads the dividend, and the inversion
+   * clears the answer before it reads the value, so an answer written over an
+   * operand would clear the operand with it. The modular kernels read each limb
+   * before they write the limb over it, so the callers allow the aliasing those
+   * two do not.
    */
   private wideKernelCall(value: SemanticValue & { k: "call" }, out: Held): void {
     const callee = value.call.callee;
@@ -8248,6 +8250,15 @@ class Machine {
       this.code.leaMemReg(mem(RSP, left.offset), RSI);
       this.code.leaMemReg(mem(RSP, right.offset), RDX);
       this.library(`${RUNTIME_NAME}_u256_div`);
+      return;
+    }
+    if (callee === "u256_invert_mod") {
+      const operand = this.wideArgument(value.call.args[0] as SemanticValue, "blaze_wide_left", value.type);
+      const mod = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
+      this.code.leaMemReg(mem(RSP, out.offset), RDI);
+      this.code.leaMemReg(mem(RSP, operand.offset), RSI);
+      this.code.leaMemReg(mem(RSP, mod.offset), RDX);
+      this.library(`${RUNTIME_NAME}_u256_invert_mod`);
       return;
     }
     // A modulus the compiler has read is a modulus whose reduction is known:
@@ -8373,7 +8384,7 @@ class Machine {
   private isWideKernelCall(value: SemanticValue): value is SemanticValue & { k: "call" } {
     if (value.k !== "call") return false;
     const callee = value.call.callee;
-    if (callee === "u256_div") return true;
+    if (callee === "u256_div" || callee === "u256_invert_mod") return true;
     if (callee !== "u256_add_mod" && callee !== "u256_sub_mod" && callee !== "u256_mul_mod") return false;
     return value.call.args.length === 3;
   }
@@ -8399,7 +8410,8 @@ class Machine {
    * taken exactly where it is known to be the same answer.
    */
   private wideBind(name: string, held: Held, value: SemanticValue): void {
-    if (this.isWideKernelCall(value) && value.call.callee !== "u256_div" && !this.reads(value, name)) {
+    const aliasing = value.k === "call" && (value.call.callee === "u256_div" || value.call.callee === "u256_invert_mod");
+    if (this.isWideKernelCall(value) && !aliasing && !this.reads(value, name)) {
       this.wideKernelCall(value, held);
       return;
     }
@@ -8508,6 +8520,14 @@ class Machine {
         }
         // Integer division: left / right.
         if (value.call.callee === "u256_div") {
+          const out = this.hold(value.type, "blaze_wide_out");
+          this.wideKernelCall(value, out);
+          this.wideLoad(out);
+          return;
+        }
+        // The inverse of a value modulo a modulus: the binary extended
+        // Euclidean kernel's answer.
+        if (value.call.callee === "u256_invert_mod") {
           const out = this.hold(value.type, "blaze_wide_out");
           this.wideKernelCall(value, out);
           this.wideLoad(out);

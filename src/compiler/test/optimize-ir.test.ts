@@ -1916,15 +1916,19 @@ test("a modular multiply by two is the doubling it is", () => {
   assert.match(doubled, /arg\[u256\] local\[u256\] x arg\[u256\] local\[u256\] x/);
 });
 
-test("a modular multiply by three is two additions, and eight is left as the multiply", () => {
+test("a modular multiply by three is two additions, and eight is three doublings with a binding between them", () => {
   const times = (count: string): string => printed(wideSubject(modular("u256_mul_mod", wideFrom(count), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
   const three = times("3");
   assert.equal((three.match(/u256_add_mod/g) ?? []).length, 2, "3x is (x + x) + x");
   assert.doesNotMatch(three, /u256_mul_mod/);
-  // Eight is three doublings only if the doubling is written down once and read
-  // three times. A value that is not bound is computed at every read, so the
-  // chain is a tree of seven additions — slower than the multiply it replaced.
-  assert.match(times("8"), /u256_mul_mod/);
+  // Eight is three doublings only if each doubling is written down once and
+  // read twice, which is what a binding does: the chain is three additions
+  // between three bindings, not a tree of seven additions and not the
+  // sixteen limb products of the multiply.
+  const eight = times("8");
+  assert.doesNotMatch(eight, /u256_mul_mod/, "8x is not the kernel's multiply");
+  assert.equal((eight.match(/u256_add_mod/g) ?? []).length, 3, "8x is three doublings");
+  assert.equal((eight.match(/smallCountStep/g) ?? []).length, 6, "each doubling is bound once and read twice");
 });
 
 test("a modular multiply of two wide numbers is left as the multiply it is", () => {
@@ -1936,12 +1940,11 @@ test("a modular multiply of two wide numbers is left as the multiply it is", () 
   assert.doesNotMatch(product, /u256_add_mod/);
 });
 
-test("a modular multiply by two of a computed value is not two copies of it", () => {
-  // `2 * ((x + y) - z)` written as additions would be the sum and the
-  // difference twice, because the value is not bound to a name, and two copies
-  // of a chain of kernels is more work than the one multiply the source wrote.
-  // Only a value that is free to write twice — a name, a literal, or a wide
-  // constant built from its limbs — is doubled.
+test("a modular multiply by two of a computed value binds it once and doubles the binding", () => {
+  // `2 * ((x + y) - z)` written as two copies of the sum and the difference
+  // would compute every kernel twice, which is more work than the one multiply
+  // the source wrote. The sum is therefore bound to a name first, and the
+  // name is what the doubling reads on both sides.
   const computed = modular(
     "u256_add_mod",
     { k: "local", type: U256, name: "x" },
@@ -1949,14 +1952,27 @@ test("a modular multiply by two of a computed value is not two copies of it", ()
     { k: "local", type: U256, name: "p" },
   );
   const doubled = printed(wideSubject(modular("u256_mul_mod", wideFrom("2"), computed, { k: "local", type: U256, name: "p" })));
-  assert.match(doubled, /u256_mul_mod/, "the product by two stays the multiply it is");
-  assert.equal((doubled.match(/u256_add_mod/g) ?? []).length, 1, "the sum inside it is written once, not once per copy");
+  assert.doesNotMatch(doubled, /u256_mul_mod/, "the product by two is the doubling it is");
+  assert.equal((doubled.match(/u256_add_mod/g) ?? []).length, 2, "the sum is written once and read by one doubling");
+  assert.match(doubled, /let value\[u256\] smallCountOperand1 immutable = \[call\[u256\] u256_add_mod/, "the computed value is bound once");
+  assert.match(doubled, /u256_add_mod \[arg\[u256\] local\[u256\] smallCountOperand1 arg\[u256\] local\[u256\] smallCountOperand1/, "both sides of the doubling read the binding");
 });
 
 test("a modular multiply by one is the value it multiplies", () => {
   const once = printed(wideSubject(modular("u256_mul_mod", wideFrom("1"), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
   assert.doesNotMatch(once, /u256_mul_mod/);
   assert.doesNotMatch(once, /u256_add_mod/);
+});
+
+test("a count past the chain's limit is left as the multiply it is", () => {
+  // The chain is a doubling per bit and the multiply is one call whatever the
+  // count is, so the rewrite is only worth making where the count is small.
+  // Sixteen is four doublings; seventeen is a multiplier the kernel answers
+  // with the same sixteen limb products as one.
+  const times = (count: string): string => printed(wideSubject(modular("u256_mul_mod", wideFrom(count), { k: "local", type: U256, name: "x" }, { k: "local", type: U256, name: "p" })));
+  assert.doesNotMatch(times("16"), /u256_mul_mod/, "sixteen is four doublings");
+  assert.equal((times("16").match(/u256_add_mod/g) ?? []).length, 4, "sixteen is four doublings and no additions");
+  assert.match(times("17"), /u256_mul_mod/, "seventeen is past the limit and stays the multiply");
 });
 
 /* -------------------------------------------------------------------------- */

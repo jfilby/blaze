@@ -131,6 +131,7 @@ const WIDE_SERVICES: readonly HostService[] = [
   { symbol: "blaze_rt_u256_mul", params: ["i32", "i32", "i32"], result: null },
   { symbol: "blaze_rt_u256_div", params: ["i32", "i32", "i32"], result: null },
   { symbol: "blaze_rt_u256_mod", params: ["i32", "i32", "i32"], result: null },
+  { symbol: "blaze_rt_u256_invert_mod", params: ["i32", "i32", "i32"], result: null },
   { symbol: "blaze_rt_u256_add_mod", params: ["i32", "i32", "i32", "i32"], result: null },
   { symbol: "blaze_rt_u256_sub_mod", params: ["i32", "i32", "i32", "i32"], result: null },
   { symbol: "blaze_rt_u256_mul_mod", params: ["i32", "i32", "i32", "i32"], result: null },
@@ -1083,6 +1084,20 @@ export function blaze_rt_u256_mod(out, left, right) {
 `,
   },
   {
+    service: "blaze_rt_u256_invert_mod",
+    source: `
+export function blaze_rt_u256_invert_mod(out, value, mod) {
+  const modulus = wideToBig(readWide(mod));
+  if (modulus === 0n || (modulus & 1n) === 0n) {
+    writeWide(out, [0n, 0n, 0n, 0n]);
+    return;
+  }
+  const whole = wideToBig(readWide(value)) % modulus;
+  writeWide(out, wideFromBig(wideInvertMod(whole, modulus)));
+}
+`,
+  },
+  {
     service: "blaze_rt_u256_add_mod",
     source: `
 export function blaze_rt_u256_add_mod(out, left, right, mod) {
@@ -1276,6 +1291,37 @@ function wideDiv(left, right) {
 
 function wideMod(left, right) {
   return wideFromBig(wideToBig(left) % wideToBig(right));
+}
+
+function wideInvertMod(value, modulus) {
+  let u = value % modulus;
+  let v = modulus;
+  let x1 = 1n;
+  let x2 = 0n;
+  if (u === 0n) return 0n;
+  for (let turn = 0; turn < 1024; turn += 1) {
+    if (u === 1n) return x1;
+    if (v === 1n) return x2;
+    if (u === 0n || v === 0n) return 0n;
+    if ((u & 1n) === 0n) {
+      u >>= 1n;
+      x1 = (x1 & 1n) === 0n ? x1 >> 1n : (x1 + modulus) >> 1n;
+      continue;
+    }
+    if ((v & 1n) === 0n) {
+      v >>= 1n;
+      x2 = (x2 & 1n) === 0n ? x2 >> 1n : (x2 + modulus) >> 1n;
+      continue;
+    }
+    if (u < v) {
+      v -= u;
+      x2 = (x2 - x1 + modulus) % modulus;
+    } else {
+      u -= v;
+      x1 = (x1 - x2 + modulus) % modulus;
+    }
+  }
+  return 0n;
 }
 
 function wideText(left) {

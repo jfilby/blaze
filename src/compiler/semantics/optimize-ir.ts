@@ -444,12 +444,14 @@ function smallWideOf(value: SemanticValue): number | null {
  * the multiply. The elliptic-curve code this was written for doubles a point
  * on every turn, and two of the multiplies in that doubling are by 2 and 3.
  *
- * Only two and three are taken, and the reason is what a count above them
+ * Only two and three are taken here, and the reason is what a count above them
  * costs without a binding to hold the doubling: `8 * x` is three doublings
  * only if the first is written down once and read three times, and a value
  * that is not bound is computed again at every read — so the three additions
  * of the chain are seven additions of the tree, which is slower than the
- * multiply it replaced. A count of four and above is left as the multiply.
+ * multiply it replaced. A count of four and above is left as the multiply by
+ * this function, and taken by `chainSmallProducts`, which binds the steps and
+ * so does not have that tree to pay for.
  *
  * The rewrite is exact for every modulus: `k * x` is `x` added to itself `k`
  * times, and a modular addition answers the same residue whether the additions
@@ -483,6 +485,173 @@ function modularMultiplyOf(
   if (multiplier === 2) return addMod(other, other);
   if (multiplier === 3) return addMod(addMod(other, other), other);
   return null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* A small multiplier written as a chain, with a binding at every step          */
+/* -------------------------------------------------------------------------- */
+
+/** The largest count a modular multiply is written as a chain of additions for. */
+const SMALL_COUNT_LIMIT = 16;
+
+/**
+ * The small count a modular multiply is written as a chain for, or null when
+ * the value is not one.
+ *
+ * A count is read the way the count in `modularMultiplyOf` is: a literal, or a
+ * wide constant built from its limbs. A count above the limit stays a multiply,
+ * because the chain is a doubling per bit and a product is one kernel call: the
+ * chain answers a count of sixteen with four additions where the multiply is
+ * the sixteen limb products the kernel executes, but a count of a thousand
+ * would be nine additions against the same kernel, and the kernel is the one
+ * thing that answers the whole range.
+ */
+function smallCountOf(value: SemanticValue): number | null {
+  const written = smallWideOf(value);
+  if (written === null || written < 2 || written > SMALL_COUNT_LIMIT) return null;
+  return written;
+}
+
+/**
+ * `k * x` as `x` added to itself, with a binding between the steps.
+ *
+ * `modularMultiplyOf` writes a multiply by two or three as the additions it is,
+ * but only where the other side is free to write twice: a name, a literal, or a
+ * wide constant built from its limbs. The curve's doubling multiplies a sum it
+ * computed by two, and eight times a square by eight, and both of those sides
+ * are read more than once — so the rewrite it makes is not available, and the
+ * multiply stays.
+ *
+ * A binding makes it available: the side is computed once into a name, and then
+ * read. The count is walked from its highest bit down, doubling the accumulator
+ * at every step and adding the side where the bit is set, which is the binary
+ * form of the multiply and costs a doubling per bit plus one addition per set
+ * bit. A doubling reads the accumulator twice, so each step's binding is read
+ * more than once and stays where it is put; the multiply by eight that a
+ * doubling of a point begins with is three additions rather than sixteen limb
+ * products.
+ *
+ * A count of two or three over a side that is free is already the rewrite
+ * `modularMultiplyOf` makes, so this one only has the chain to add: it is
+ * applied after the fold, and it takes what the fold left.
+ */
+function chainOf(
+  value: SemanticValue & { k: "call" },
+  bindings: SemanticStatement[],
+  taken: Set<string>,
+  line: number,
+): SemanticValue | null {
+  if (value.call.callee !== "u256_mul_mod" || !isWideType(value.type)) return null;
+  const [left, right, mod] = value.call.args;
+  if (left === undefined || right === undefined || mod === undefined) return null;
+  const count = smallCountOf(left) ?? smallCountOf(right);
+  if (count === null) return null;
+  const other = smallCountOf(left) !== null ? right : left;
+  // The side is computed once, so it has to be a value that may be computed
+  // where the multiply was: a read through an object is not one, because the
+  // binding is built before the statement that read it, and a call with an
+  // effect is not one either.
+  if (!isSafeToCompute(other)) return null;
+  let seed = other;
+  if (other.k !== "local" && other.k !== "const") {
+    const name = freshName(taken, "smallCountOperand");
+    bindings.push({ k: "let", slot: slotFor(other, name), value: other, line });
+    seed = { k: "local", type: value.type, name };
+  }
+  const addMod = (a: SemanticValue, b: SemanticValue): SemanticValue => ({
+    k: "call",
+    type: value.type,
+    call: {
+      ...value.call,
+      callee: "u256_add_mod",
+      signature: { ...value.call.signature, name: "u256_add_mod", symbol: "u256_add_mod" },
+      args: [a, b, mod],
+    },
+  });
+  const bind = (step: SemanticValue): SemanticValue => {
+    const name = freshName(taken, "smallCountStep");
+    bindings.push({ k: "let", slot: slotFor(step, name), value: step, line });
+    return { k: "local", type: value.type, name };
+  };
+  let acc = seed;
+  for (let bit = Math.floor(Math.log2(count)) - 1; bit >= 0; bit -= 1) {
+    acc = bind(addMod(acc, acc));
+    if (((count >> bit) & 1) !== 0) acc = bind(addMod(acc, seed));
+  }
+  return acc;
+}
+
+/** The outermost multiply by a small count in a value, or null. */
+function smallProductIn(value: SemanticValue): (SemanticValue & { k: "call" }) | null {
+  let found: (SemanticValue & { k: "call" }) | null = null;
+  walkValues(value, (one) => {
+    if (found !== null || one.k !== "call") return;
+    if (one.call.callee !== "u256_mul_mod" || !isWideType(one.type)) return;
+    if (one.call.args.length !== 3) return;
+    if (smallCountOf(one.call.args[0] as SemanticValue) !== null) found = one;
+    else if (smallCountOf(one.call.args[1] as SemanticValue) !== null) found = one;
+  });
+  return found;
+}
+
+/**
+ * Every small multiply in a body written as the chain of additions it is.
+ *
+ * One product is rewritten per statement per round, because the chain's own
+ * bindings may hold another product, and the rounds of this pass reach it the
+ * same way they reach a fold the previous one exposed.
+ */
+function chainSmallProducts(body: Body): boolean {
+  const taken = new Set<string>(body.params.map((param) => param.name));
+  for (const block of nestedSemanticBlocks(body.entry)) {
+    taken.add(block.id);
+    for (const statement of block.statements) if (statement.k === "let") taken.add(statement.slot.name);
+  }
+  let changed = false;
+  const walk = (block: SemanticBlock): void => {
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) walk(nested);
+    }
+    if (chainOne(block, taken)) changed = true;
+  };
+  walk(body.entry);
+  return changed;
+}
+
+function chainOne(block: SemanticBlock, taken: Set<string>): boolean {
+  const statements: SemanticStatement[] = [];
+  let changed = false;
+  for (const statement of block.statements) {
+    const value = statement.k === "let" || statement.k === "set" ? statement.value : null;
+    const product = value === null ? null : smallProductIn(value);
+    if (product !== null) {
+      const bindings: SemanticStatement[] = [];
+      const chained = chainOf(product, bindings, taken, statement.line);
+      if (chained !== null) {
+        const replacements = new Map([[valueKey(product), chained]]);
+        statements.push(...bindings);
+        statements.push(replaceValues(statement, replacements) as SemanticStatement);
+        changed = true;
+        continue;
+      }
+    }
+    statements.push(statement);
+  }
+  if (block.terminator.k === "return" && block.terminator.value !== null) {
+    const product = smallProductIn(block.terminator.value);
+    if (product !== null) {
+      const bindings: SemanticStatement[] = [];
+      const chained = chainOf(product, bindings, taken, block.statements[0]?.line ?? 0);
+      if (chained !== null) {
+        const replacements = new Map([[valueKey(product), chained]]);
+        statements.push(...bindings);
+        block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, replacements) };
+        changed = true;
+      }
+    }
+  }
+  if (changed) block.statements = statements;
+  return changed;
 }
 
 /**
@@ -3168,6 +3337,11 @@ function optimizeBody(body: Body, callees: Callees): void {
     // one instruction rather than four — and the fold can only see it once the
     // binding that carries the shift down is one it can read.
     if (maskLimbResidues(body)) changed = true;
+    // A multiply by a small count is the chain of additions it is, with a
+    // binding between the steps so the side is computed once. It reads the
+    // fold's answer: a side that is free to write twice is already an addition
+    // by the time the fold is done, and what is left is the side that is not.
+    if (chainSmallProducts(body)) changed = true;
     if (pruneAll(body)) changed = true;
     // A scalar multiplication written a bit at a time is the one loop here
     // whose rewrite is a different algorithm rather than a cheaper spelling of

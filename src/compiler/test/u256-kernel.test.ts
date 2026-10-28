@@ -249,3 +249,89 @@ test("the special-prime kernels agree with BigInt over the whole sweep", async (
     }
   }
 });
+
+/** A C harness over the inversion, driven by the value and the modulus. */
+const INVERT_HARNESS = `
+#include <stdio.h>
+#include <stdint.h>
+#include "${RUNTIME_NAME}.h"
+
+static void write_u256(blaze_u256 value) {
+  for (int i = 3; i >= 0; i -= 1) printf("%016llx", (unsigned long long)value.limbs[i]);
+}
+
+static blaze_u256 read_u256(const char* hex) {
+  blaze_u256 value;
+  for (int limb = 0; limb < 4; limb += 1) {
+    uint64_t accumulator = 0;
+    for (int j = 0; j < 16; j += 1) {
+      const char digit = hex[limb * 16 + j];
+      const unsigned nibble = (digit >= '0' && digit <= '9') ? (unsigned)(digit - '0') : (unsigned)(digit - 'a' + 10);
+      accumulator = (accumulator << 4) | (uint64_t)nibble;
+    }
+    value.limbs[3 - limb] = accumulator;
+  }
+  return value;
+}
+
+int main(int argc, char** argv) {
+  blaze_u256 value = read_u256(argv[1]);
+  blaze_u256 mod = read_u256(argv[2]);
+  blaze_u256 out;
+  blaze_rt_u256_invert_mod(&out, &value, &mod);
+  write_u256(out);
+  printf("\\n");
+  return 0;
+}
+`;
+
+/** The greatest common divisor of two whole numbers, which is what decides
+ *  whether an inverse exists: one exists exactly when it is one. */
+function gcd(left: bigint, right: bigint): bigint {
+  let a = left < 0n ? -left : left;
+  let b = right < 0n ? -right : right;
+  while (b !== 0n) [a, b] = [b, a % b];
+  return a;
+}
+
+test("the modular inverse agrees with BigInt, and a value with none answers zero", async () => {
+  // The inversion is the binary extended Euclidean algorithm: a halving and a
+  // subtraction per turn, and no division. What makes it right is the
+  // definition rather than the steps: `value * answer` is one modulo the
+  // modulus. The sweep is over the primes the program uses -- secp256k1's P
+  // and its order -- and over small odd moduli where a value can share a
+  // factor with the modulus and so have no inverse at all. Both of those, and
+  // an even modulus, are the cases a halving cannot answer, and zero is the
+  // answer the lowering documents for them.
+  const directory = await scratch("blaze-u256-invert-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("danger"), "utf8");
+  await writeFile(join(directory, "harness.c"), INVERT_HARNESS, "utf8");
+  const binary = join(directory, "harness");
+  const built = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "harness.c"), join(directory, "runtime.c"), "-o", binary],
+    { timeoutMs: 180_000 },
+  );
+  assert.equal(built.code, 0, built.stderr);
+
+  const P = (1n << 256n) - (1n << 32n) - 977n;
+  const N = (1n << 256n) - 432420386565659656852420866394968145599n;
+  const moduli = [P, N, 3n, 5n, 97n, 65537n, (1n << 255n) - 19n, 12n];
+  const values = [...cases(), ...randoms(120, 256n), 2n, P - 1n, P - 2n, N - 1n];
+  for (const modulus of moduli) {
+    for (const raw of values) {
+      const value = raw % modulus;
+      const result = run(binary, [digits(raw), digits(modulus)], { timeoutMs: 60_000 });
+      assert.equal(result.code, 0, result.stderr);
+      const answer = BigInt(`0x${result.stdout.trim()}`);
+      const invertible = modulus > 1n && (modulus & 1n) === 1n && gcd(value, modulus) === 1n;
+      if (!invertible) {
+        assert.equal(answer, 0n, `${digits(value)} modulo ${digits(modulus)} has no inverse and answers zero`);
+        continue;
+      }
+      assert.ok(answer < modulus, "an inverse is below its modulus");
+      assert.equal((value * answer) % modulus, 1n, `${digits(value)} times its inverse is one modulo ${digits(modulus)}`);
+    }
+  }
+});
