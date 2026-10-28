@@ -1243,9 +1243,9 @@ class TypeScriptParser {
     if (token.text === "any" || token.text === "object" || token.text === "unknown") return ANY_TYPE;
     if (token.text === "void") return NOTHING;
     // A class names the layout an instance holds. The layout pass names the
-    // object by its fields, so the annotation is the one unshaped reference it
-    // settles: the constructor and methods of the class are what say the shape.
-    if (this.classTable.names.has(token.text)) return ANY_TYPE;
+    // object by its fields and the class's own name is an alias of it, so the
+    // annotation is the reference a caller reads its fields through.
+    if (this.classTable.names.has(token.text)) return this.referenceTo(token.text);
     try {
       return mapTypeScriptType(token.text, `line ${token.line} of ${this.path}`);
     } catch (error) {

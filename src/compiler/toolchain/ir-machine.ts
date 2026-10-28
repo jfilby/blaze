@@ -9969,7 +9969,7 @@ class Machine {
     const wideArguments = types.some((type) => isWideType(type));
     const spilling = wideArguments ? -1 : firstArgumentOnStack(handed);
     const intoLast =
-      wideArguments || trailing || spilling !== handed.length
+      last < 0 || wideArguments || trailing || spilling !== handed.length
         ? undefined
         : lastArgumentRegister(handed, handed.length - 1);
     let fresh = -1;

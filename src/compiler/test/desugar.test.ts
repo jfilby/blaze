@@ -131,7 +131,8 @@ test("the whole source has every reduction written as the kernels, and none as a
   // before the remainder saw it.
   assert.doesNotMatch(rewritten, /(?<![A-Za-z0-9_])mod\s*\(/, "no `mod(...)` call is left");
   assert.match(rewritten, /u256_mul_mod\(Z1, Z1, /, "the square of a coordinate is the kernel's");
-  assert.match(rewritten, /u256_sub_mod\(D, X3d, /, "the doubling subtracts the point it computed from D");
+  assert.match(rewritten, /u256_mul_mod\(invZ, invZ, /, "the inverse's square is reduced before the coordinate uses it");
+  assert.match(rewritten, /u256_sub_mod\(D, X3, /, "the doubling subtracts the point it computed from D");
   assert.match(rewritten, /u256_add_mod\(X1, B, /, "the sum a doubled point squares is the addition kernel's");
 });
 
@@ -144,9 +145,12 @@ test("the lowered program keeps the source's loop over the command line's count"
   const rewritten = desugar(source);
   assert.match(rewritten, /const n = \+Deno\.args\[0\] \|\| 1;/, "the count is the argument the source reads");
   assert.match(rewritten, /for \(let i = 0; i < n; i\+\+\) \{/, "the loop is the source's own");
-  assert.match(rewritten, /point = Point_multiply\(point\.x, point\.y, /, "each turn multiplies the point the turn before answered");
+  assert.match(rewritten, /let point = new Point\(/, "the point starts as the class's own constructor");
+  assert.match(rewritten, /point = point\.multiply\(/, "each turn multiplies the point the turn before answered");
   assert.match(rewritten, /console\.log\(`\$\{point\.x\.toString\(16\)\},\$\{point\.y\.toString\(16\)\}`\)/, "the print is the source's own");
-  assert.match(rewritten, /function Point_multiply\(/, "the multiplication is a function the loop calls");
+  assert.match(rewritten, /class Point \{/, "the source's class is kept for the frontend");
+  assert.match(rewritten, /class JacobianPoint \{/, "the point type is kept for the frontend");
+  assert.doesNotMatch(rewritten, /function Point_multiply\(/, "the class is no longer rewritten into free functions");
   assert.match(rewritten, /function invert\(/, "the inversion is kept for the affine conversion");
 });
 

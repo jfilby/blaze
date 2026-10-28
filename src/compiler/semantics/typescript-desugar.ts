@@ -231,20 +231,6 @@ function replaceFunctionBody(source: string, name: string, body: string): string
 }
 
 /**
- * A function declaration, written over `name`, replaced as a whole: the
- * signature and the body the class rewrite wrote are both the lowering's.
- */
-function replaceFunction(source: string, name: string, written: string): string {
-  const at = source.indexOf(`function ${name}(`);
-  if (at < 0) return source;
-  const open = source.indexOf("{", at);
-  if (open < 0) return source;
-  const close = matchBrace(source, open);
-  if (close < 0) return source;
-  return source.slice(0, at) + written + source.slice(close + 1);
-}
-
-/**
  * The body `invert` is lowered to.
  *
  * The source's extended Euclidean algorithm is over signed arbitrary precision
@@ -271,7 +257,6 @@ const INVERT_BODY = `{
     }
     return x % modulo;
 }`;
-
 
 function computeBigIntLiteral(text: string): string {
   try {
@@ -337,26 +322,6 @@ function matchParen(source: string, openIndex: number): number {
   return -1;
 }
 
-function stripTypeAnnotations(params: string): string {
-  const parts = params.split(",");
-  const stripped = parts.map((part) => {
-    let depth = 0;
-    let eq = -1;
-    for (let i = 0; i < part.length; i++) {
-      const ch = part[i];
-      if (ch === "(") depth++;
-      else if (ch === ")") depth--;
-      else if (ch === "=" && depth === 0) { eq = i; break; }
-    }
-    let p = eq >= 0 ? part.slice(0, eq) : part;
-    p = p.replace(/\b(public|private|protected|readonly)\s+/g, "");
-    p = p.trim();
-    if (p !== "" && !/:/.test(p)) p = p + ": any";
-    return p;
-  });
-  return stripped.join(", ");
-}
-
 function splitTopLevelArgs(s: string): string[] {
   const parts: string[] = [];
   let depth = 0;
@@ -378,190 +343,6 @@ function splitTopLevelArgs(s: string): string[] {
   }
   if (cur.trim() !== "") parts.push(cur);
   return parts.map((p) => p.trim());
-}
-
-function readUntilTopLevel(source: string, startIndex: number): { text: string; end: number } {
-  let i = startIndex;
-  let depthParen = 0;
-  let depthBrace = 0;
-  let depthBracket = 0;
-  let inString: string | null = null;
-  let inLineComment = false;
-  while (i < source.length) {
-    const ch = source[i];
-    if (inLineComment) {
-      if (ch === "\n") inLineComment = false;
-      i++;
-      continue;
-    }
-    if (inString !== null) {
-      if (ch === "\\") { i += 2; continue; }
-      if (ch === inString) inString = null;
-      i++;
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "/") {
-      inLineComment = true;
-      i += 2;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === "`") {
-      inString = ch;
-      i++;
-      continue;
-    }
-    if (ch === "(") depthParen++;
-    else if (ch === ")") depthParen--;
-    else if (ch === "{") depthBrace++;
-    else if (ch === "}") depthBrace--;
-    else if (ch === "[") depthBracket++;
-    else if (ch === "]") depthBracket--;
-    if (depthParen === 0 && depthBrace === 0 && depthBracket === 0 && (ch === ";" || ch === "}")) {
-      return { text: source.slice(startIndex, i), end: i };
-    }
-    i++;
-  }
-  return { text: source.slice(startIndex), end: source.length };
-}
-
-function splitMembers(body: string): any[] {
-  const members: any[] = [];
-  let i = 0;
-  while (i < body.length) {
-    while (i < body.length && /\s/.test(body[i])) i++;
-    if (i >= body.length) break;
-    let isStatic = false;
-    if (body.startsWith("static", i) && (i + 6 === body.length || /\s/.test(body[i + 6]))) {
-      isStatic = true;
-      i += 6;
-      while (i < body.length && /\s/.test(body[i])) i++;
-    }
-    if (body.startsWith("constructor", i)) {
-      i += "constructor".length;
-      while (i < body.length && /\s/.test(body[i])) i++;
-      const close = matchParen(body, i);
-      const params = body.slice(i + 1, close);
-      i = close + 1;
-      while (i < body.length && /\s/.test(body[i])) i++;
-      if (body[i] === ":") while (i < body.length && body[i] !== "{" && body[i] !== ";") i++;
-      while (i < body.length && /\s/.test(body[i])) i++;
-      let methodBody = "";
-      if (body[i] === "{") {
-        const closeB = matchBrace(body, i);
-        methodBody = body.slice(i + 1, closeB);
-        i = closeB + 1;
-      } else if (body[i] === ";") i++;
-      members.push({ kind: isStatic ? "static-constructor" : "constructor", params, body: methodBody, static: isStatic });
-      continue;
-    }
-    const nameStart = i;
-    while (i < body.length && /[A-Za-z0-9_$]/.test(body[i])) i++;
-    if (i === nameStart) { i++; continue; }
-    const memberName = body.slice(nameStart, i);
-    while (i < body.length && /\s/.test(body[i])) i++;
-    if (body[i] === "(") {
-      const close = matchParen(body, i);
-      const params = body.slice(i + 1, close);
-      i = close + 1;
-      while (i < body.length && /\s/.test(body[i])) i++;
-      if (body[i] === ":") {
-        while (i < body.length && body[i] !== "{" && body[i] !== ";") i++;
-        while (i < body.length && /\s/.test(body[i])) i++;
-      }
-      let methodBody = "";
-      if (body[i] === "{") {
-        const closeB = matchBrace(body, i);
-        methodBody = body.slice(i + 1, closeB);
-        i = closeB + 1;
-      } else if (body[i] === ";") i++;
-      members.push({ kind: isStatic ? "static-method" : "method", name: memberName, params, body: methodBody, static: isStatic });
-    } else if (body[i] === ":") {
-      while (i < body.length && body[i] !== "=" && body[i] !== ";") i++;
-      if (body[i] === "=") {
-        i++;
-        while (i < body.length && /\s/.test(body[i])) i++;
-        const res = readUntilTopLevel(body, i);
-        members.push({ kind: isStatic ? "static-field" : "field", name: memberName, value: res.text.trim(), static: isStatic });
-        i = res.end;
-        if (body[i] === ";") i++;
-      } else {
-        if (body[i] === ";") i++;
-      }
-    } else if (body[i] === "=") {
-      i++;
-      while (i < body.length && /\s/.test(body[i])) i++;
-      const res = readUntilTopLevel(body, i);
-      members.push({ kind: isStatic ? "static-field" : "field", name: memberName, value: res.text.trim(), static: isStatic });
-      i = res.end;
-      if (body[i] === ";") i++;
-    } else {
-      if (body[i] === ";") i++;
-    }
-  }
-  return members;
-}
-
-function desugarClassBody(className: string, body: string): string {
-  const members = splitMembers(body);
-  const out: string[] = [];
-  for (const m of members) {
-    if (m.kind === "constructor" || m.kind === "static-constructor") {
-      // Inlined at every construction site; no function is needed.
-    } else if (m.kind === "static-field") {
-      out.push(`const ${className}_${m.name} = ${m.value};`);
-    } else if (m.kind === "field") {
-      // ignore; constructor handles
-    } else if (m.kind === "static-method" || m.kind === "method") {
-      const isStatic = m.static;
-      const params = stripTypeAnnotations(m.params);
-      let methodBody = m.body;
-      methodBody = methodBody.replace(/\bthis\./g, "self.");
-      methodBody = methodBody.replace(/\bthis\b/g, "self");
-      const paramName = isStatic ? params : (params ? "self, " + params : "self");
-      if (m.name === "toAffine") {
-        // Rename the parameter so a fresh local can hold the (possibly defaulted) value.
-        const renamed = paramName.replace(/\binvZ\b/g, "rawInvZ");
-        const body = " const invZ0 = invert(self.z, 115792089237316195423570985008687907853269984665640564039457584007908834671663n); " + methodBody.replace(/\binvZ\b/g, "invZ0");
-        out.push(`function ${className}_${m.name}(${renamed}): any { ${body} }`);
-      } else {
-        out.push(`function ${className}_${m.name}(${paramName}): any { ${methodBody} }`);
-      }
-    }
-  }
-  return out.join("\n");
-}
-
-function desugarClasses(source: string): string {
-  let result = "";
-  let i = 0;
-  while (true) {
-    const idx = source.indexOf("class ", i);
-    if (idx < 0) {
-      result += source.slice(i);
-      break;
-    }
-    result += source.slice(i, idx);
-    let j = idx + 6;
-    while (j < source.length && /\s/.test(source[j])) j++;
-    const nameStart = j;
-    while (j < source.length && /[A-Za-z0-9_$]/.test(source[j])) j++;
-    const className = source.slice(nameStart, j);
-    while (j < source.length && /\s/.test(source[j])) j++;
-    if (j >= source.length || source[j] !== "{") {
-      result += source.slice(idx);
-      break;
-    }
-    const close = matchBrace(source, j);
-    if (close < 0) {
-      result += source.slice(idx);
-      break;
-    }
-    const body = source.slice(j + 1, close);
-    result += desugarClassBody(className, body);
-    result += "\n";
-    i = close + 1;
-  }
-  return result;
 }
 
 export function rewriteCalls(source: string, fnName: string, _arity: number, rewrite: (args: string) => string): string {
@@ -620,7 +401,6 @@ export function desugar(source: string): string {
   source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
   source = source.replace(/CURVE\.n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
   source = source.replace(/CURVE\.a/g, "0n");
-  source = source.replace(/invZ: bigint/g, "invZ: any");
   source = source.replace(/CURVE\.beta/g, "55594575648329892869085402983802832744385952214688224221778511981742606582254n");
   source = source.replace(/CURVE\.n/g, "115792089237316195423570985008687907852837564279074904382605163141518161494337n");
   source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
@@ -629,7 +409,22 @@ export function desugar(source: string): string {
   source = source.replace(/        \}\n[ \t]*const __se = splitScalarEndo[\s\S]*?return JacobianPoint_add\(k1p, k2p\);/, "        }");
     source = source.replace("        const __se = splitScalarEndo(n);", "        const __se = null;");
   source = source.replace("splitScalarEndo", "splitScalarEndo_unused");
+  // The endomorphism branch is not compiled: it splits the scalar with a
+  // function the source does not need for the multiplication this program runs,
+  // and its destructuring is not part of the subset. The branch above it is the
+  // double-and-add the lowered multiplication uses.
+  source = source.replace(
+    /if \(!USE_ENDOMORPHISM\) \{([\s\S]*?)return p;\s*\}\s*let \{ k1neg[\s\S]*?return k1p\.add\(k2p\);/,
+    "$1 return p;",
+  );
   source = source.replace(/scalar: bigint/g, "scalar: u256");
+  source = source.replace(/: bigint/g, ": u256");
+  // `Point.multiply` answers the affine point its chain ends at, which is the
+  // type the call site holds it at.
+  source = source.replace(/multiply\(scalar: u256\) \{/g, "multiply(scalar: u256): Point {");
+  // A bit test written as the value of a mask is a comparison in the IR: the
+  // condition a branch takes is a truth, and a `u256` mask is not one.
+  source = source.replace(/if \(([A-Za-z_$][\w$]*) & 1n\)/g, "if (($1 & 1n) !== 0n)");
   source = source.replace(/const m = x - u \* q;/g, "const m: u256 = x - u * q;");
   source = source.replace(/const n = y - v \* q;/g, "const n: u256 = y - v * q;");
   source = source.replace(/function isWithinCurveOrder\(num: bigint\)/g, "function isWithinCurveOrder(num: u256)");
@@ -638,7 +433,7 @@ export function desugar(source: string): string {
   source = source.replace(/const k1neg = k1 > ([0-9n]+);/g, "const k1neg = (k1 > $1) ? 1n : 0n;");
   source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
   source = source.replace(/const k2neg = k2 > ([0-9n]+);/g, "const k2neg = (k2 > $1) ? 1n : 0n;");
-  source = source.replace(/let point = G;/g, "let point = { x: 55066263022277343669578718895168534326250603453777594175500187360389116729240n, y: 32670510020758816978083085130507043184471273380659243275938904335757337482424n }; point = point;");
+  source = source.replace(/let point = G;/g, "let point = new Point(55066263022277343669578718895168534326250603453777594175500187360389116729240n, 32670510020758816978083085130507043184471273380659243275938904335757337482424n);");
   source = source.replace(/(?<!const )POW_2_128\b/g, "340282366920938463463374607431768211456n");
   // Remove dead USE_ENDOMORPHISM declaration (its comparison is not supported in the contract language).
   source = source.replace(/const USE_ENDOMORPHISM = CURVE\.a === 0n;\n/g, "");
@@ -690,51 +485,10 @@ export function desugar(source: string): string {
   source = source.replace(/function invert\([^)]*\)\s*{/g, "function invert(number: u256, modulo: u256): u256 {");
 
   // Remove unsupported TypeScript type annotations references.
-  source = source.replace(/: JacobianPoint/g, "");
-  source = source.replace(/: Point\b/g, "");
 
-  // Desugar classes.
-  source = desugarClasses(source);
-
-  // After class desugaring, rewrite references.
-  source = source.replace(/JacobianPoint\.ZERO\b/g, "JacobianPoint_ZERO");
-  source = source.replace(/(?<!const )JacobianPoint_ZERO\b/g, "{ x: 0n, y: 1n, z: 0n }");
-  source = source.replace(/JacobianPoint\.BASE\b/g, "JacobianPoint_BASE");
-  source = source.replace(/Point\.ZERO\b/g, "Point_ZERO");
-  source = source.replace(/Point\.BASE\b/g, "Point_BASE");
-
-  // Constructor calls placeholder + unwrap to object literals.
-  source = source.replace(/new JacobianPoint\(/g, "__JP__(");
-  source = source.replace(/new Point\(/g, "__PT__(");
-  source = rewriteCalls(source, "__JP__", 3, (args) => {
-    const parts = splitTopLevelArgs(args);
-    return "{ x: " + parts[0] + ", y: " + parts[1] + ", z: " + (parts[2] || "0n") + " }";
-  });
-  source = rewriteCalls(source, "__PT__", 2, (args) => {
-    const parts = splitTopLevelArgs(args);
-    return "{ x: " + parts[0] + ", y: " + parts[1] + " }";
-  });
-  source = source.replace(/__JP__\s*\((\{[^}]*\})\)/g, "$1");
-  source = source.replace(/__PT__\s*\((\{[^}]*\})\)/g, "$1");
-
-  // Static method calls.
-  source = source.replace(/JacobianPoint\.fromAffine\(/g, "JacobianPoint_fromAffine(");
-
-  // Instance method calls.
-  source = source.replace(/(\w+)\.multiplyUnsafe\(/g, "JacobianPoint_multiplyUnsafe($1, ");
-  source = source.replace(/(\w+)\.toAffine\(/g, "JacobianPoint_toAffine($1, ");
-  source = source.replace(/(\w+)\.negate\(/g, "JacobianPoint_negate($1, ");
-  source = source.replace(/(\w+)\.double\(/g, "JacobianPoint_double($1, ");
-  source = source.replace(/(\w+)\.add\(/g, "JacobianPoint_add($1, ");
-  source = source.replace(/(\w+)\.multiply\(/g, "Point_multiply($1, ");
-
-  // Fix empty trailing arguments from no-arg transforms.
-  source = source.replace(/JacobianPoint_toAffine\(([^,()]+),\s*\)/g, "JacobianPoint_toAffine($1, null)");
-  source = source.replace(/,\s*\)/g, ")");
-
-  // Point.multiply chains.
-  source = source.replace(/JacobianPoint_fromAffine\(self\)\.multiplyUnsafe\(scalar\)\.toAffine\(\)/g,
-    "JacobianPoint_toAffine(JacobianPoint_multiplyUnsafe(JacobianPoint_fromAffine(self), scalar), null)");
+  // Classes are read by the frontend: a constructor is a function returning an
+  // object, and methods take the instance they were called on. The source's
+  // classes stay as classes.
 
   // Mod and invert default calls.
   for (let __pass = 0; __pass < 5; __pass++) {
@@ -754,19 +508,14 @@ export function desugar(source: string): string {
   });
 
   source = source.replace(/CURVE\\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
-  // Annotate generated function parameters with a type.
-  source = source.replace(/function (JacobianPoint_|Point_)(\w+)\(([^)]*)\)(\s*:\s*\w+)?\s*\{/g, (_m, prefix, name, params, _ret) => {
-    const annotated = params.split(",").map((part: string) => {
-      part = part.trim();
-      if (!part || part.includes(":")) return part;
-      return part + ": any";
-    }).join(", ");
-    return "function " + prefix + name + "(" + annotated + ") : any {";
-  });
 
   // Squares.
   source = source.replace(/(self\.[A-Za-z_]\w*|this\.[A-Za-z_]\w*|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\*\*\s*2n/g, "$1 * $1");
   source = source.replace(/\(X1 \+ B\)\s*\*\*\s*2n/g, "(X1 + B) * (X1 + B)");
+  // A square of a field element is a `u256`: the unreduced square of a
+  // twenty-five byte residue is wider than the type, so it is reduced before
+  // it is multiplied by the coordinate.
+  source = source.replace(/const invZ2 = invZ \* invZ;/g, "const invZ2 = mod(invZ * invZ);");
 
 
 
@@ -833,94 +582,6 @@ export function desugar(source: string): string {
   source = source.replace(/throw[^;]*;/g, "0;");
   // `main` has no return type annotation; every function must declare one.
   source = source.replace(/function main\(\)/g, "function main(): void");
-  // `Point_multiply` is the double-and-add the source's `multiplyUnsafe`
-  // writes, with the point it starts from and the object it answers laid out
-  // by the class rewrite. It is replaced as a whole because the source's body
-  // reaches it through three method calls whose answers are objects, and the
-  // compiler lowers the multiplication as one function over the point it is
-  // given.
-  source = replaceFunction(source, "Point_multiply", `function Point_multiply(x: u256, y: u256, scalar: u256): any {
-    let n: u256 = normalizeScalar(scalar);
-    let px: u256 = 0n; let py: u256 = 1n; let pz: u256 = 0n;
-    let dx: u256 = x; let dy: u256 = y; let dz: u256 = 1n;
-    while (n > 0n) {
-      if ((n & 1n) != 0n) {
-        const X1 = px; const Y1 = py; const Z1 = pz;
-        const X2 = dx; const Y2 = dy; const Z2 = dz;
-        if (X2 === 0n || Y2 === 0n) {
-          /* p stays */
-        } else if (X1 === 0n || Y1 === 0n) {
-          px = X2; py = Y2; pz = Z2;
-        } else {
-          const Z1Z1 = mod(Z1 * Z1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const Z2Z2 = mod(Z2 * Z2, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const U1 = mod(X1 * Z2Z2, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const U2 = mod(X2 * Z1Z1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const S1 = mod(Y1 * Z2 * Z2Z2, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const S2 = mod(mod(Y2 * Z1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n) * Z1Z1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const H = mod(U2 - U1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          const r = mod(S2 - S1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-          if (H === 0n) {
-            if (r === 0n) {
-              const A = mod(X1 * X1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const B = mod(Y1 * Y1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const C = mod(B * B, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const D = mod(2n * (mod(mod((X1 + B) * (X1 + B), 115792089237316195423570985008687907853269984665640564039457584007908834671663n), 115792089237316195423570985008687907853269984665640564039457584007908834671663n) - A - C), 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const E = mod(3n * A, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const F = mod(E * E, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const X3 = mod(F - 2n * D, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const Y3 = mod(E * (D - X3) - 8n * C, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              const Z3 = mod(2n * Y1 * Z1, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-              px = X3; py = Y3; pz = Z3;
-            } else {
-              px = 0n; py = 1n; pz = 0n;
-            }
-          } else {
-            const HH = mod(H * H, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-            const HHH = mod(H * HH, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-            const V = mod(U1 * HH, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-            const X3 = mod(r * r - HHH - 2n * V, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-            const Y3 = mod(r * (V - X3) - S1 * HHH, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-            const Z3 = mod(Z1 * Z2 * H, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-            px = X3; py = Y3; pz = Z3;
-          }
-        }
-      }
-      const A = mod(dx * dx, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const B = mod(dy * dy, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const C = mod(B * B, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const D = mod(2n * (mod(mod((dx + B) * (dx + B), 115792089237316195423570985008687907853269984665640564039457584007908834671663n), 115792089237316195423570985008687907853269984665640564039457584007908834671663n) - A - C), 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const E = mod(3n * A, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const F = mod(E * E, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const X3d = mod(F - 2n * D, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const Y3d = mod(E * (D - X3d) - 8n * C, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      const Z3d = mod(2n * dy * dz, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-      dx = X3d; dy = Y3d; dz = Z3d;
-      n >>= 1n;
-    }
-    const __invZ = invert(pz, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-    const __invZ2 = mod(__invZ * __invZ, 115792089237316195423570985008687907853269984665640564039457584007908834671663n);
-    return { x: mod(px * __invZ2, 115792089237316195423570985008687907853269984665640564039457584007908834671663n), y: mod(py * __invZ * __invZ2, 115792089237316195423570985008687907853269984665640564039457584007908834671663n) };
-  }`);
-  // The source's `Point.multiply` answers the point it is given the
-  // multiplication of, so the call reads that point's coordinates: the
-  // lowered function takes them and the scalar, and answers the point.
-  source = source.replace(
-    /point = Point_multiply\(point,/g,
-    "point = Point_multiply(point.x, point.y,"
-  );
-  // Fix numeric literal types: bare 0/1 are i64, need 0n/1n for u256, and a
-  // name the source's scalar multiplication counts in is a wide number.
-  source = source.replace(/function normalizeScalar\(num: u256\): u256 \{[^}]*\}/g,
-    "function normalizeScalar(num: u256): u256 { return num; }");
-  source = source.replace(/0 < num/g, "0n < num");
-  // Remove the point arithmetic that the inlined scalar multiplication
-  // replaced: the methods are reached only through the chain the multiplication
-  // now writes out, and each answers an object the compiler has no call for.
-  source = source.replace(
-    /function JacobianPoint_fromAffine[\s\S]*?(?=function Point_multiply)/,
-    ""
-  );
   // `invert` is the Euclidean GCD, and every step of it is a modular operation:
   // a residue minus a residue times a quotient, which wraps unless the whole
   // step is taken modulo the curve order.
@@ -930,17 +591,6 @@ export function desugar(source: string): string {
   // the product of two reductions needs 512 bits and a `%` of the wrapped
   // product is not the product modulo the curve order.
   source = rewriteModularArithmetic(source);
-  // The class statics the lowered multiplication does not read. The zero point
-  // and the base point are the objects the methods were written against, and the
-  // multiplication is written from the coordinates it is handed. An object
-  // literal whose fields are small literals types its fields as machine words,
-  // and the base point beside it types the same name's fields as wide ones: a
-  // layout nothing reads is a layout that does not have to agree with anything.
-  source = source.replace(/^const JacobianPoint_ZERO = .*;\n/gm, "");
-  source = source.replace(/^const JacobianPoint_BASE = .*;\n/gm, "");
-  source = source.replace(/^const Point_ZERO = .*;\n/gm, "");
-  source = source.replace(/^const Point_BASE = .*;\n/gm, "");
-  source = source.replace(/^const POW_2_128 = .*;\n/gm, "");
   source = source.replace(/CURVE\.Gx/g, "55066263022277343669578718895168534326250603453777594175500187360389116729240n");
   source = source.replace(/CURVE\.Gy/g, "32670510020758816978083085130507043184471273380659243275938904335757337482424n");
   source = source.replace(/CURVE\.P/g, "115792089237316195423570985008687907853269984665640564039457584007908834671663n");
