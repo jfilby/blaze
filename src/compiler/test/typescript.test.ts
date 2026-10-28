@@ -418,6 +418,24 @@ test("a string that is never closed is reported instead of read again and again"
   assert.match(diagnostic(() => typescript.analyze("const t = `;\n", "main.ts")), /unterminated string/);
 });
 
+test("a renamed import is refused where it is written, and the file is read past it", () => {
+  // The alias was reported but not consumed, so the `}` that closes the import
+  // was read as the end of a statement and left the parser on the same token:
+  // a file whose only mistake was a rename never came back at all. The alias
+  // is read with the rest of the statement, and the refusal is still reported.
+  assert.match(
+    diagnostic(() => typescript.analyze('import { scale as fromB } from "./b.ts";\nconsole.log(1);\n', "main.ts")),
+    /renaming an import is not supported/,
+  );
+  // A stray closing brace is not a statement, and reading it is what makes the
+  // rest of the file reachable: a scanner that stops before one must not stop
+  // on it forever.
+  assert.match(
+    diagnostic(() => typescript.analyze("export function f(): number { return 1; }\n}\n", "main.ts")),
+    /"\}" is not a statement of a program/,
+  );
+});
+
 test("a quote an escape covers does not end the string", () => {
   // The escape has to be read before the string is closed, or the token ends
   // at the escaped quote and the rest of the string is read as a new

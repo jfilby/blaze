@@ -1880,8 +1880,13 @@ class TypeScriptParser {
         if (declaration.offers !== null) defaultExport = declaration.offers;
         continue;
       }
+      const before = this.position;
       this.synchronize();
       this.accept(";");
+      // `synchronize` stops before a closing brace it does not own. A stray one
+      // at the top of a file would leave the parser on the same token forever,
+      // so it is read as the statement it ended rather than left to end it.
+      if (this.position === before) this.next();
       atTop = false;
       runs = true;
     }
@@ -2217,7 +2222,14 @@ class TypeScriptParser {
         this.report("expected an imported name", `near "${name.text}"`, name);
         continue;
       }
-      if (this.at("as")) this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
+      if (this.at("as")) {
+        this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
+        // The alias is read even though it is refused: the import is skipped as
+        // the statement it is, so the `}` that closes it must be read here and
+        // not left to end the statement.
+        this.next();
+        if (this.peek().kind === "ident") this.next();
+      }
       names.push(name.text);
       if (!this.accept(",")) break;
     }
