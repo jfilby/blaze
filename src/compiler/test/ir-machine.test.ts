@@ -4284,3 +4284,81 @@ test("a whole number narrowed to a machine word is written in base sixteen too",
   const fn = subject(TEXT, handsBack(text(local("v", I64))), [{ kind: "value", name: "v", mutable: false, type: I64 }]);
   assert.equal(await lowered(fn, (name) => `printf("%s", ${name}(255));`), "ff");
 });
+
+test("a promise handle is the number its address is, where the runtime reads it back", async () => {
+  // The runtime makes a promise by answering the address it holds, and the
+  // language holds a handle as the number that address is. The executor the
+  // machine calls has to be handed that address back, and the call has to
+  // answer the number a caller awaits — a handle written down in one form and
+  // read in the other resolves a promise nothing points at.
+  const directory = await scratch("blaze-machine-promise-");
+  const runtime = await buildStandaloneRuntime(directory);
+  const executor: SemanticValue = {
+    k: "functionRef",
+    type: { kind: "ref", of: null },
+    name: "executor",
+    captures: [],
+  };
+  const created: SemanticValue = {
+    k: "call",
+    type: F64,
+    call: {
+      callee: "Promise",
+      builtin: true,
+      signature: { name: "Promise", symbol: "Promise", params: [{ name: "executor", type: "ref<any>" }], returns: "f64" },
+      args: [executor],
+      argTypes: [{ kind: "ref", of: null }],
+      returns: F64,
+      effects: [],
+      ownership: "none",
+      retain: false,
+    },
+  };
+  const awaited: SemanticValue = {
+    k: "call",
+    type: F64,
+    call: {
+      callee: "Promise.await",
+      builtin: true,
+      signature: { name: "Promise.await", symbol: "Promise.await", params: [{ name: "promise", type: "f64" }], returns: "f64" },
+      args: [created],
+      argTypes: [F64],
+      returns: F64,
+      effects: [],
+      ownership: "none",
+      retain: false,
+    },
+  };
+  const fn = subject(F64, handsBack(awaited));
+  const object = join(directory, "subject.o");
+  await buildObject({
+    fn,
+    contract: contracted(fn),
+    target: TARGET,
+    callable: new Set(["executor"]),
+    objectPath: object,
+  });
+  await writeFile(
+    join(directory, "driver.c"),
+    [
+      "#include <stdio.h>",
+      "#include \"blaze_rt.h\"",
+      "extern double subject(void);",
+      "void executor(void);",
+      "void executor(void) { blaze_promise_resolve_current(6.0); }",
+      "int main(void) { blaze_rt_initialize(); printf(\"%.1f\\n\", subject()); return 0; }",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const binary = join(directory, "run");
+  const linked = run(
+    "gcc",
+    ["-std=c11", "-O2", "-I", directory, join(directory, "driver.c"), object, runtime.objectPath, "-o", binary, "-lm"],
+    { timeoutMs: 120_000 },
+  );
+  assert.equal(linked.code, 0, `the machine code must link:\n${linked.stderr}`);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, `the machine code must run:\n${result.stderr}`);
+  assert.equal(result.stdout.trim(), "6.0");
+});

@@ -10247,7 +10247,12 @@ class Machine {
     if (call.callee === "Promise") {
       this.external("blaze_promise_new");
       this.code.call("blaze_promise_new");
-      const slot = this.holdSlot(NUMBER, "blaze_promise");
+      // The runtime answers the promise as the address it holds, and the
+      // language holds a handle as the number that address is. The address is
+      // kept as the pointer it is while the executor runs, because the call
+      // that sets it as current takes a pointer, and it is turned into the
+      // number the call answers with at the end.
+      const slot = this.holdSlot(POINTER, "blaze_promise");
       this.store(slot);
       this.load(slot);
       this.code.movRegReg(RDI, RAX);
@@ -10263,10 +10268,16 @@ class Machine {
       this.external("blaze_promise_clear_current");
       this.code.call("blaze_promise_clear_current");
       this.load(slot);
+      this.code.zeroFloat(XMM0);
+      this.code.cvtIntToFloat(XMM0, RAX, false);
+      this.accumulator = null;
       return;
     }
     if (call.callee === "Promise.await") {
       this.at(call.args[0], NUMBER);
+      // The handle is the number the promise's address is, and the runtime
+      // reads the promise that address points at.
+      this.code.cvtFloatToInt(RAX, XMM0, false, true);
       this.code.movRegReg(RDI, RAX);
       this.external("blaze_promise_await");
       this.code.call("blaze_promise_await");
