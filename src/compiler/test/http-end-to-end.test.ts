@@ -339,6 +339,25 @@ test("every value a client callback captured is carried to the callback", () => 
   );
 });
 
+test("a server whose port is already held does not wait on a thread it never started", async () => {
+  // A program that cannot bind its port has no event loop to join. The thread
+  // id it would have joined is the zero an unstarted thread is, and joining
+  // that is a write through nothing: the second program crashed rather than
+  // running its callback and returning. A busy test machine binds the same
+  // port twice when two suites run together, which is how it was found.
+  const port = 18095;
+  const first = await buildHttpBinary("c", createServerSource(port));
+  const running = await startServer(first);
+  try {
+    const second = await buildHttpBinary("c", createServerSource(port));
+    const answered = run(second, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
 test("C backend answers a request made by a callback that captured two values", async () => {
   const port = 18092;
   const server = await buildHttpBinary("c", createServerSource(port));

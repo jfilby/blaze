@@ -156,8 +156,11 @@ export function facilAdapterSource(): string {
 static void *blaze_http_server_handle = NULL;
 
 /* The thread the event loop runs on once "blaze_http_server_start_background"
-   has started it. "blaze_http_server_join" waits for it. */
+   has started it. "blaze_http_server_join" waits for it. The flag is what says
+   the id is a thread at all: a server that could not bind did not start one,
+   and joining the zero an unstarted thread is would dereference nothing. */
 static pthread_t blaze_http_server_thread;
+static int blaze_http_server_thread_started = 0;
 
 /* Returns the server handle "blaze_http_server_new" last created, or NULL when
    no server has been created yet. */
@@ -852,7 +855,12 @@ void blaze_http_server_start_background(void *server) {
     pthread_cond_broadcast(&held->cond);
     pthread_mutex_unlock(&held->lock);
     blaze_http_server_background = NULL;
+    /* The thread that would have owned the server does not exist, so nothing
+       will free it: it is freed here. */
+    blaze_http_server_free(held);
+    return;
   }
+  blaze_http_server_thread_started = 1;
 }
 
 /* Waits for the background event loop to finish. "blaze_http_server_stop"
@@ -861,7 +869,13 @@ void blaze_http_server_start_background(void *server) {
    "server.listen" does not close the server, this waits for as long as the
    server runs, which keeps the process alive to serve requests. */
 void blaze_http_server_join(void) {
+  /* A server that could not bind started no thread, and the id of the thread
+     that was never started is not one to wait for: joining it is a write
+     through nothing. The callback the program passed to "server.listen" has
+     run by now, and there is nothing left to wait for. */
+  if (!blaze_http_server_thread_started) return;
   pthread_join(blaze_http_server_thread, NULL);
+  blaze_http_server_thread_started = 0;
   /* The loop has ended, so nothing waits on the pair that woke it, and the
      descriptors are given back. */
   blaze_http_wake_close();
