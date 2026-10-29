@@ -11,6 +11,7 @@
  *   AI_MODEL=openrouter/anthropic/claude-sonnet-4.5
  *   AI_MODEL=opencode-go/glm-5.3-flash    OpenCode Go, see backend.ts
  *   AI_MODEL=opencode-zen/deepseek-v4-pro   OpenCode Zen, see backend.ts
+ *   AI_MODEL=nebius/nvidia/Nemotron-3_5-Lightning   Nebius Token Factory
  *   AI_MODEL=openai-compatible/my-model   with AI_BASE_URL
  *   AI_MODEL=commandcode/stealth/pixel-canary  CommandCode, see commandcode.ts
  *   AI_MODEL=replay:./candidate.json      offline backend, see backend.ts
@@ -21,6 +22,8 @@
  *   OPENCODE_API_KEY  enables the opencode-go and opencode-zen providers
  *   OPENCODE_GO_BASE_URL endpoint for opencode-go
  *   OPENCODE_ZEN_BASE_URL endpoint for opencode-zen
+ *   NEBIUS_API_KEY  enables the nebius provider
+ *   NEBIUS_BASE_URL endpoint for nebius
  *   AI_BASE_URL     endpoint for openai-compatible providers
  *   AI_REPLAY_FILE  default file for the replay backend
  *   OPENROUTER_SITE_URL, OPENROUTER_APP_NAME  optional OpenRouter attribution
@@ -31,10 +34,17 @@ import { randomUUID } from "node:crypto";
 import { CompilerError } from "../core/errors.ts";
 import { COMMANDCODE_BASE_URL } from "./commandcode.ts";
 
-export type ProviderName = "openai" | "anthropic" | "google" | "openrouter" | "opencode-go" | "opencode-zen" | "openai-compatible" | "commandcode" | "replay";
+export type ProviderName = "openai" | "anthropic" | "google" | "openrouter" | "opencode-go" | "opencode-zen" | "nebius" | "openai-compatible" | "commandcode" | "replay";
 
 /** OpenRouter serves every model behind one OpenAI compatible endpoint. */
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/**
+ * Nebius Token Factory serves every model it hosts behind one OpenAI compatible
+ * endpoint, and names a model by its vendor and its own id, such as
+ * `nvidia/Nemotron-3_5-Lightning`.
+ */
+export const NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
 
 /**
  * OpenCode Go and OpenCode Zen are two relays of one gateway, behind one
@@ -65,6 +75,7 @@ const ENV_KEYS: Record<ProviderName, readonly string[]> = {
   openrouter: ["OPENROUTER_API_KEY"],
   "opencode-go": ["OPENCODE_API_KEY"],
   "opencode-zen": ["OPENCODE_API_KEY"],
+  nebius: ["NEBIUS_API_KEY"],
   "openai-compatible": [],
   commandcode: ["COMMANDCODE_API_KEY", "COMMAND_CODE_API_KEY"],
   replay: [],
@@ -92,10 +103,10 @@ function firstEnvKey(env: NodeJS.ProcessEnv, keys: readonly string[]): string | 
 /**
  * The endpoint a gateway is asked at, where it names one.
  *
- * Go, Zen and CommandCode are each pointable elsewhere: a relay in front of the
- * real one answers the same requests the real one does, and a stand-in for one
- * is where a test drives the provider from. OpenRouter is not, because every
- * model it serves is behind the one endpoint it publishes, and
+ * Go, Zen, Nebius and CommandCode are each pointable elsewhere: a relay in
+ * front of the real one answers the same requests the real one does, and a
+ * stand-in for one is where a test drives the provider from. OpenRouter is not,
+ * because every model it serves is behind the one endpoint it publishes, and
  * `openai-compatible` has no endpoint of its own to fall back to — `AI_BASE_URL`
  * names it or the provider cannot be used at all.
  */
@@ -104,6 +115,7 @@ function endpointFor(name: ProviderName, env: NodeJS.ProcessEnv): string | undef
   if (name === "commandcode") return env.COMMANDCODE_BASE_URL || COMMANDCODE_BASE_URL;
   if (name === "opencode-go") return env.OPENCODE_GO_BASE_URL || OPENCODE_GO_BASE_URL;
   if (name === "opencode-zen") return env.OPENCODE_ZEN_BASE_URL || OPENCODE_ZEN_BASE_URL;
+  if (name === "nebius") return env.NEBIUS_BASE_URL || NEBIUS_BASE_URL;
   if (name === "openai-compatible") return env.AI_BASE_URL;
   return undefined;
 }

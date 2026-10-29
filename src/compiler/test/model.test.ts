@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReviewRequest } from "../ai/review.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
-import { resolveModel, OPENROUTER_BASE_URL, OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL } from "../ai/model.ts";
+import { resolveModel, OPENROUTER_BASE_URL, OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL, NEBIUS_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
 import { createBackend, ReplayBackend, VercelAiBackend } from "../ai/backend.ts";
 import { chatEndpoint } from "./model-endpoint.ts";
@@ -128,10 +128,42 @@ test("an opencode-zen model object is constructible without contacting it", () =
   assert.equal(backend.id, "opencode-zen/deepseek-v4-pro");
 });
 
-/** A review that finds nothing to change, which is what most rounds answer. */
-const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
+test("NEBIUS_API_KEY configures the nebius provider", () => {
+  const configuration = resolveModel("nebius/nvidia/Nemotron-3_5-Lightning", { NEBIUS_API_KEY: "nb_test" });
+  assert.equal(configuration.provider, "nebius");
+  assert.equal(configuration.id, "nebius/nvidia/Nemotron-3_5-Lightning");
+  assert.equal(configuration.model, "nvidia/Nemotron-3_5-Lightning", "a vendor prefix stays part of the model id");
+  assert.equal(configuration.apiKey, "nb_test");
+  assert.equal(configuration.baseUrl, NEBIUS_BASE_URL);
+  // Nebius routes by the model, not by a session a request carries, so a build
+  // adds no header of its own here the way it does for the OpenCode relays.
+  assert.equal(configuration.headers, undefined);
+});
 
-test("a review asked of OpenCode Zen reaches its relay with the session header", async (t) => {
+test("nebius is pointable at a stand-in endpoint", () => {
+  const configuration = resolveModel("nebius/nvidia/Nemotron-3_5-Lightning", {
+    NEBIUS_API_KEY: "nb_test",
+    NEBIUS_BASE_URL: "http://127.0.0.1:9/v1",
+  });
+  assert.equal(configuration.baseUrl, "http://127.0.0.1:9/v1");
+});
+
+test("nebius without a key fails with the names to set", () => {
+  const message = diagnostic(() => resolveModel("nebius/nvidia/Nemotron-3_5-Lightning", {}));
+  assert.match(message, /missing API key for provider "nebius"/);
+  assert.match(message, /NEBIUS_API_KEY/);
+});
+
+test("a nebius model object is constructible without contacting it", () => {
+  // The endpoint is only reached on a request, so this proves the provider
+  // package accepts the configuration the resolver produced.
+  const backend = createBackend(resolveModel("nebius/nvidia/Nemotron-3_5-Lightning", { NEBIUS_API_KEY: "nb_test" }));
+  assert.ok(backend instanceof VercelAiBackend);
+  assert.equal(backend.id, "nebius/nvidia/Nemotron-3_5-Lightning");
+});
+
+/** A review that finds nothing to change, which is what most rounds answer. */
+const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";test("a review asked of OpenCode Zen reaches its relay with the session header", async (t) => {
   const endpoint = await chatEndpoint(t, [SOUND]);
   const previous = { key: process.env.OPENCODE_API_KEY, url: process.env.OPENCODE_ZEN_BASE_URL };
   process.env.OPENCODE_API_KEY = "oc_test";
@@ -163,6 +195,37 @@ test("a review asked of OpenCode Zen reaches its relay with the session header",
   assert.match(endpoint.requests[0]?.session ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
+test("a review asked of Nebius reaches its endpoint as a chat completion", async (t) => {
+  const endpoint = await chatEndpoint(t, [SOUND]);
+  const previous = { key: process.env.NEBIUS_API_KEY, url: process.env.NEBIUS_BASE_URL };
+  process.env.NEBIUS_API_KEY = "nb_test";
+  process.env.NEBIUS_BASE_URL = endpoint.url;
+  t.after(() => {
+    for (const [name, value] of [
+      ["NEBIUS_API_KEY", previous.key],
+      ["NEBIUS_BASE_URL", previous.url],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  // Token Factory serves the model behind the same chat completions wire the
+  // compiler already asks the other OpenAI compatible providers at, so the
+  // request is the one the model is documented for.
+  const review = await createBackend(resolveModel("nebius/nvidia/Nemotron-3_5-Lightning", process.env)).review(
+    reviewRequest(),
+    1,
+  );
+
+  assert.equal(review.verdict, "sound");
+  assert.equal(endpoint.requests[0]?.url, "/v1/chat/completions");
+  assert.equal(endpoint.requests[0]?.authorization, "Bearer nb_test");
+  // The session header belongs to the OpenCode relays; a Nebius request carries
+  // no header the provider did not ask for.
+  assert.equal(endpoint.requests[0]?.session, undefined);
+});
+
 test("openrouter without a key fails with the names to set", () => {
   const message = diagnostic(() => resolveModel("openrouter/openai/gpt-5", {}));
   assert.match(message, /missing API key for provider "openrouter"/);
@@ -188,6 +251,10 @@ test("every provider is selected by its prefix and validated", () => {
   assert.equal(resolveModel("anthropic/claude-sonnet-4-5", { ANTHROPIC_API_KEY: "k" }).provider, "anthropic");
   assert.equal(resolveModel("google/gemini-2.5-pro", { GOOGLE_GENERATIVE_AI_API_KEY: "k" }).provider, "google");
   assert.equal(resolveModel("opencode-zen/deepseek-v4-pro", { OPENCODE_API_KEY: "k" }).provider, "opencode-zen");
+  assert.equal(
+    resolveModel("nebius/nvidia/Nemotron-3_5-Lightning", { NEBIUS_API_KEY: "k" }).provider,
+    "nebius",
+  );
   assert.equal(
     resolveModel("openai-compatible/local-model", { AI_API_KEY: "k", AI_BASE_URL: "http://localhost:1234/v1" }).baseUrl,
     "http://localhost:1234/v1",

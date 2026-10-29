@@ -302,7 +302,7 @@ export function languageModelFor(configuration: ModelConfiguration): LanguageMod
   if (configuration.provider === "openai") {
     return createOpenAI(apiKey === "" ? undefined : { apiKey, ...(baseURL === undefined ? {} : { baseURL }) })(configuration.model);
   }
-  if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible" || configuration.provider === "opencode-go" || configuration.provider === "opencode-zen") {
+  if (configuration.provider === "openrouter" || configuration.provider === "openai-compatible" || configuration.provider === "opencode-go" || configuration.provider === "opencode-zen" || configuration.provider === "nebius") {
     if (baseURL === undefined) throw reviewError(`${configuration.provider} has no endpoint`);
     return createOpenAICompatible({
       name: configuration.provider,
