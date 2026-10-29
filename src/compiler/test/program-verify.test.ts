@@ -44,6 +44,13 @@ test("a comment or a string that names HTTP is not a program that serves it", ()
   assert.equal(servesHttp("// served over http in the paper\nconsole.log(1);\n"), false);
   assert.equal(servesHttp('console.log("http is a protocol");\n'), false);
   assert.equal(servesHttp("http.serve(8080);\n"), true);
+  // A fetch is a call to the facility even when the URL it asks carries no
+  // "http" of its own: "https" does not contain the word, and a URL held in a
+  // variable names nothing at all. The source of such a program is run with
+  // the HTTP prelude, and a request waits, so it gets the deadline a server
+  // gets.
+  assert.equal(servesHttp('const body = fetch("https://example.com/", "GET", "", "");\n'), true);
+  assert.equal(servesHttp('fetch(url, "GET", "", "");\n'), true);
 });
 
 test("a program that prints what its source prints is the program the source is", async () => {

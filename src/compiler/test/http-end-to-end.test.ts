@@ -202,6 +202,42 @@ test("C backend asks a server at an IPv6 address", async () => {
   }
 });
 
+/**
+ * A program that makes the synchronous client calls the compiler provides:
+ * `fetch(url, method, headers, body)` and the four-argument `http.request`.
+ * Node's own `fetch` takes an options object, so without a prelude that runs
+ * the call the way the compiled client does, the source cannot be checked at
+ * all.
+ */
+function synchronousClientSource(port: number): string {
+  return `const port = ${port};\n` +
+    `const first = fetch(\`http://127.0.0.1:\${port}/\`, "POST", "content-type: text/plain\\r\\n", "one");\n` +
+    `console.log(first);\n` +
+    `const second = http.request(\`http://127.0.0.1:\${port}/\`, "PUT", "", "two");\n` +
+    `console.log(second);\n`;
+}
+
+function methodEchoServerSource(port: number): string {
+  return `const port = ${port};\n` +
+    `const server = http.createServer((req, res) => { res.writeHead(200); res.end(\`\${req.method()}:\${req.text()}\`); });\n` +
+    `server.listen(port, "127.0.0.1", () => {});\n`;
+}
+
+test("the synchronous fetch and http.request calls run against the source's toolchain", async () => {
+  const port = 18116;
+  const server = await buildHttpBinary("c", methodEchoServerSource(port));
+  const running = await startServer(server);
+  try {
+    const client = await buildHttpBinary("c", synchronousClientSource(port));
+    const answered = run(client, [], { timeoutMs: 30_000 });
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.equal(answered.stdout, "POST:one\nPUT:two\n", "both synchronous calls answered what the server sent");
+  } finally {
+    running.kill();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+});
+
 /** A program that reads the request body with req.text. */
 function echoServerSource(port: number): string {
   return `const port = ${port};\n` +

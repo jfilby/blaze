@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import { usesSqliteSource } from "../runtime/sqlite.ts";
-import { codeOnly } from "../util/source.ts";
+import { mentionsHttpModule } from "../runtime/http-needs.ts";
 import type { ProgramMismatch, Runner } from "../core/types.ts";
 
 /**
@@ -37,9 +37,15 @@ import type { ProgramMismatch, Runner } from "../core/types.ts";
  * that serves it. Reading a mention in either as a server gave every such
  * program the server's five second deadline, which turned a program that
  * computes for longer than that into a verification that "did not finish".
+ *
+ * A `fetch` is the facility as much as an `http.` is: it makes a request, and
+ * a request waits on a server, so the deadline a program that asks is given is
+ * the one a program that serves is given. The question is the one the runtime
+ * link is decided by, so that the source is run with the HTTP prelude whenever
+ * the program the compiler builds carries the HTTP runtime.
  */
 export function servesHttp(source: string): boolean {
-  return /\bhttp\b/.test(codeOnly(source));
+  return mentionsHttpModule(source);
 }
 
 /**
@@ -73,23 +79,79 @@ const DENO_PRELUDE = "data:text/javascript,globalThis.Deno={args:process.argv.sl
  * node, the calls the compiler provides beside it, and the HTTP API of a
  * module function, which the program body does not use but the module beside
  * it may.
+ *
+ * The three-argument `http.request(url, options, callback)` is node's own. The
+ * synchronous forms — `http.request(url, method, headers, body)` and
+ * `fetch(url, method, headers, body)` — are the compiler's: they perform one
+ * request and answer its body, and node has no synchronous request to answer
+ * them with. Node's own `fetch` is not the compiler's either: it takes an
+ * options object, and handed a method it refuses the call before the program
+ * runs at all. A child process makes the request, the way the compiled client
+ * makes it, and hands its body back.
  */
-const HTTP_PRELUDE = [
-  "globalThis.http=Object.assign({}, await import('node:http'));",
-  "globalThis.http.serve=function(){};",
-  "globalThis.http.createServer=function(){return{listen:function(){}}};",
-  "globalThis.http.serveSettings=function(){};",
-  "globalThis.http.serveTls=function(){};",
-  "globalThis.http.requestPath=function(){return '';};",
-  "globalThis.http.requestMethod=function(){return '';};",
-  "globalThis.http.requestHeader=function(){return '';};",
-  "globalThis.http.requestBody=function(){return '';};",
-  "globalThis.http.responseStatus=function(){};",
-  "globalThis.http.responseHeader=function(){};",
-  "globalThis.http.responseBody=function(){};",
-  "globalThis.http.responseEnd=function(){};",
-].join("");
-const HTTP_PRELUDE_URL = `data:text/javascript,${HTTP_PRELUDE}`;
+const HTTP_PRELUDE_SOURCE = `
+globalThis.http = Object.assign({}, await import("node:http"));
+const blazeNodeRequest = globalThis.http.request;
+const { spawnSync } = await import("node:child_process");
+const blazeRequestScript = [
+  'const { readFileSync } = await import("node:fs");',
+  'const { request } = await import("node:http");',
+  'const { request: requestTls } = await import("node:https");',
+  'const spec = JSON.parse(readFileSync(0, "utf8"));',
+  'const url = new URL(spec.url);',
+  'const headers = {};',
+  'for (const [name, value] of spec.headers) headers[name] = value;',
+  'const options = { method: spec.method || "GET", headers };',
+  'const send = url.protocol === "https:" ? requestTls : request;',
+  'const outgoing = send(url, options, (response) => {',
+  '  const chunks = [];',
+  '  response.on("data", (chunk) => chunks.push(chunk));',
+  '  response.on("end", () => process.stdout.write(Buffer.concat(chunks)));',
+  '});',
+  'outgoing.on("error", () => process.stdout.write(""));',
+  'outgoing.setTimeout(10000, () => outgoing.destroy());',
+  'if (spec.body !== "") outgoing.write(spec.body);',
+  'outgoing.end();',
+].join("\\n");
+function blazeHeaders(text) {
+  const pairs = [];
+  for (const line of String(text).split(/\\r?\\n/)) {
+    if (line === "") continue;
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    pairs.push([line.slice(0, colon).trim(), line.slice(colon + 1).trim()]);
+  }
+  return pairs;
+}
+function blazeRequest(url, method, headers, body) {
+  const answer = spawnSync(process.execPath, ["--input-type=module", "-e", blazeRequestScript], {
+    input: JSON.stringify({ url: String(url), method: String(method), headers: blazeHeaders(headers), body: String(body) }),
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return answer.stdout || "";
+}
+globalThis.fetch = function (url, method, headers, body) {
+  return blazeRequest(url, method, headers, body);
+};
+globalThis.http.request = function (url, options, callback, body) {
+  if (arguments.length >= 4) return blazeRequest(url, options, callback, body);
+  return blazeNodeRequest(url, options, callback);
+};
+globalThis.http.serve = function () {};
+globalThis.http.createServer = function () { return { listen: function () {} }; };
+globalThis.http.serveSettings = function () {};
+globalThis.http.serveTls = function () {};
+globalThis.http.requestPath = function () { return ""; };
+globalThis.http.requestMethod = function () { return ""; };
+globalThis.http.requestHeader = function () { return ""; };
+globalThis.http.requestBody = function () { return ""; };
+globalThis.http.responseStatus = function () {};
+globalThis.http.responseHeader = function () {};
+globalThis.http.responseBody = function () {};
+globalThis.http.responseEnd = function () {};
+`;
+const HTTP_PRELUDE_URL = `data:text/javascript,${encodeURIComponent(HTTP_PRELUDE_SOURCE)}`;
 
 /**
  * The SQLite facility, as the source of a program runs it.
