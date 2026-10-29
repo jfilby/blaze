@@ -231,9 +231,9 @@ export const REFUSED_KEYWORDS: Record<string, string> = {
   namespace: "the names written as they are",
   struct: "an object written where it is made, as in `{ left: null, right: null }`",
   with: "a plain block, as in `{ ... }`",
-  await: "a straight line: a compiled program has no promise to wait for",
+  await: "a value the promise it is written before carries",
   yield: "a value the function hands back with return",
-  async: "a straight line: a compiled program has nothing to wait for",
+  async: "a function whose answer is a promise carrying what its body returns",
 };
 
 
@@ -1183,6 +1183,18 @@ export function tokenize(source: string): Token[] {
 export interface TypeScriptFunction {
   name: string;
   /**
+   * The source wrote `async` in front of the function. The body runs when the
+   * function is called and what it answers is a promise carrying what the body
+   * returns: `returns` is the type of that value.
+   */
+  async?: boolean;
+  /**
+   * The value the promise the function answers carries, for a function that
+   * answers a promise its body did not make: the overload that fills a default
+   * parameter calls the async function itself and hands its promise on.
+   */
+  promise?: TypeExpr;
+  /**
    * The parameters the function is written with. A parameter with a default is
    * callable without it, which the module answers with an overload: see
    * `defaultWrappers`.
@@ -1580,13 +1592,14 @@ class TypeScriptParser {
     body: Statement[],
     exported: boolean,
     line: number,
+    promise?: TypeExpr,
   ): DeclaredFunction {
     return {
       name,
       exported,
       params,
       returns,
-      handle: { name, params, returns, body, line } satisfies TypeScriptFunction,
+      handle: { name, params, returns, body, line, ...(promise === undefined ? {} : { promise }) } satisfies TypeScriptFunction,
     };
   }
 
@@ -1615,7 +1628,21 @@ class TypeScriptParser {
         return { k: "ident", name };
       });
       statements.push({ kind: "result", value: { k: "call", name: fn.name, args }, line: fn.line });
-      out.push(this.declared(`${fn.name}__${arity}`, written, fn.returns, statements, exported, fn.line));
+      // A wrapper of an async function answers the promise the function it
+      // calls makes: it settles nothing itself, and what it carries is what
+      // the function carries.
+      const promise = fn.async === true ? fn.returns : fn.promise;
+      out.push(
+        this.declared(
+          `${fn.name}__${arity}`,
+          written,
+          promise === undefined ? fn.returns : { kind: "ref", of: null },
+          statements,
+          exported,
+          fn.line,
+          promise,
+        ),
+      );
     }
     return out;
   }
@@ -1993,10 +2020,9 @@ class TypeScriptParser {
   /**
    * One declaration of the file, read with diagnostics of its own.
    *
-   * A construct the module parser cannot read — an `async` function, a Promise
-   * executor, a method a class does not declare — may still be a function of
-   * the program, so what it earned is a refusal of the module and not of the
-   * file. The declaration is left where it was written, and the refusal is
+   * A construct the module parser cannot read — a Promise executor, a method a
+   * class does not declare — may still be a function of the program, so what
+   * it earned is a refusal of the module and not of the file. The declaration is left where it was written, and the refusal is
    * kept for a file that has no body to read it in.
    */
   private readDeclaration(functions: DeclaredFunction[], namesExported: Record<string, true>): Declaration {
@@ -2100,22 +2126,25 @@ class TypeScriptParser {
    * and answers no default.
    */
   private readFunctionDeclaration(functions: DeclaredFunction[], namesExported: Record<string, true>): string | null {
+    let isAsync = false;
     if (this.at("async")) {
-      const at = this.next();
-      this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
-      this.skipBlock();
-      return null;
+      this.next();
+      isAsync = true;
     }
     const exported = this.accept("export");
     if (exported && this.at("async")) {
-      const at = this.next();
-      this.report("an async function is not supported", REFUSED_KEYWORDS.async, at);
-      this.skipBlock();
-      return null;
+      this.next();
+      isAsync = true;
     }
     let isDefault = false;
     if (exported && this.at("default")) {
       this.next();
+      // `export default async function f() {}`: the promise is behind a default
+      // export as well as behind a named one.
+      if (this.at("async")) {
+        this.next();
+        isAsync = true;
+      }
       // `export default function f() {}` offers `f` as the module's default.
       // It is offered under the name it was declared with, because this subset
       // links by name: there is one table of functions for the whole program,
@@ -2158,7 +2187,7 @@ class TypeScriptParser {
       this.synchronize();
       return null;
     }
-    const parsed = this.parseFunction(name);
+    const parsed = this.parseFunction(name, isAsync);
     if (parsed === null) return null;
     functions.push({
       name: parsed.name,
@@ -2267,12 +2296,20 @@ class TypeScriptParser {
     return { specifier: specifier.text, names, default: isDefault, line: start.line };
   }
 
-  private parseFunction(name: Token): TypeScriptFunction | null {
+  private parseFunction(name: Token, isAsync = false): TypeScriptFunction | null {
     // A function declared by the module is not a method: `this` names nothing
     // in it, and the class each of its names holds starts empty.
     this.currentClass = null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    const declared = (returns: TypeExpr, body: Statement[]): TypeScriptFunction => ({
+      name: name.text,
+      params,
+      returns,
+      body,
+      line: name.line,
+      ...(isAsync ? { async: true } : {}),
+    });
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
     if (this.at(")")) {
@@ -2324,7 +2361,7 @@ class TypeScriptParser {
       // is read here rather than refused, because the language lets a function
       // omit the annotation and the returns are what say it.
       const body = this.readBlock();
-      return { name: name.text, params, returns: inferredResult(body, params), body, line: name.line };
+      return declared(inferredResult(body, params), body);
     }
     this.next();
     const returns = this.peek();
@@ -2338,15 +2375,9 @@ class TypeScriptParser {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
       const value = this.readExpression();
       this.accept(";");
-      return {
-        name: name.text,
-        params,
-        returns: returnType,
-        body: [{ kind: "result", value, line: name.line }],
-        line: name.line,
-      };
+      return declared(returnType, [{ kind: "result", value, line: name.line }]);
     }
-    return { name: name.text, params, returns: returnType, body: this.readBlock(), line: name.line };
+    return declared(returnType, this.readBlock());
   }
 
   /**
@@ -3591,12 +3622,10 @@ class TypeScriptParser {
       return this.hole();
     }
     if (token.kind === "ident" && token.text === "await") {
-      // A function body is a straight line: there is no promise to wait for
-      // inside one, so the word is named where it was written rather than read
-      // past as the name of a value.
-      this.report(`"${token.text}" is not supported`, REFUSED_KEYWORDS[token.text], token);
-      this.readExpression();
-      return this.hole();
+      // `await v` is the value the promise `v` carries. The word binds like a
+      // unary operator, so `await f() + 1` is the value of the promise plus
+      // one, and the resolver reads which value that is.
+      return { k: "call", name: "Promise.await", args: [this.readUnary()] };
     }
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
@@ -4481,6 +4510,69 @@ function isSecp256k1Source(source: string): boolean {
   return /\bsplitScalarEndo\b/.test(source) && /\bCURVE\b/.test(source);
 }
 
+/**
+ * The builtin an async function settles its promise with, for the value its
+ * body returns: a string is resolved as the text it is, a truth as the truth,
+ * a number as the number, nothing as nothing, and a value of a shape the
+ * runtime holds as the dynamic value it is.
+ */
+function promiseResolveName(payload: TypeExpr): string {
+  if (payload.kind === "text") return "Promise.settle.text";
+  if (payload.kind === "void") return "Promise.settle.nothing";
+  if (payload.kind === "primitive") {
+    if (payload.name === "bool") return "Promise.settle.bool";
+    if (!["i256", "u256"].includes(payload.name)) return "Promise.settle";
+  }
+  return "Promise.settle.value";
+}
+
+/**
+ * An async function's body with every way out of it settling the promise the
+ * function answers. A body that falls off the end settles it with nothing,
+ * which is what the language's own function does when it runs out of
+ * statements.
+ */
+function settledBody(statements: readonly Statement[], payload: TypeExpr): Statement[] {
+  const name = promiseResolveName(payload);
+  const settle = (statement: Statement): Statement => {
+    switch (statement.kind) {
+      case "result":
+        // A function that returns nothing settles the promise with nothing,
+        // which is the call that takes no value.
+        if (payload.kind === "void" || statement.value.k === "null") {
+          return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
+        }
+        return { ...statement, value: { k: "call", name, args: [statement.value] } };
+      case "if":
+        return {
+          ...statement,
+          then: statement.then.map(settle),
+          otherwise: statement.otherwise.map(settle),
+        };
+      case "while":
+      case "doWhile":
+        return { ...statement, body: statement.body.map(settle) };
+      case "loop":
+        return { ...statement, body: statement.body.map(settle) };
+      case "forOf":
+        return { ...statement, body: statement.body.map(settle) };
+      case "try":
+        return {
+          ...statement,
+          body: statement.body.map(settle),
+          catchBody: statement.catchBody === null ? null : statement.catchBody.map(settle),
+          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map(settle),
+        };
+      default:
+        return statement;
+    }
+  };
+  return [
+    ...statements.map(settle),
+    { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: statements[0]?.line ?? 1 },
+  ];
+}
+
 export const typeScriptFrontend: Frontend = {
   analyze(source, path) {
     if (typeof source !== "string" || source.trim() === "") {
@@ -4559,21 +4651,28 @@ export const typeScriptFrontend: Frontend = {
       );
     }
     const usage = usageOf(declaration);
-    return assembleContract({
+    // An async function answers a promise carrying what its body returns, so
+    // every way out of the body settles that promise. The function's own type
+    // is the handle the runtime holds the promise in, and the payload travels
+    // beside the contract so a caller's `await` knows what it reads.
+    const async = declaration.async === true;
+    const promise = async ? declaration.returns : declaration.promise;
+    const contract = assembleContract({
       name: declaration.name,
       symbol: declaration.name === "main" ? PROGRAM_ENTRY_SYMBOL : declaration.name,
       params: declaration.params,
-      returns: declaration.returns,
-      result: body.result,
+      returns: promise === undefined ? declaration.returns : { kind: "ref", of: null },
+      result: promise === undefined ? body.result : null,
       accesses: usage.accesses,
       definition: {
-        statements: declaration.body,
+        statements: async ? settledBody(declaration.body, declaration.returns) : declaration.body,
         allocates: usage.allocates,
         prints: usage.prints,
         readsArgv: usage.readsArgv,
       },
       input,
     });
+    return promise === undefined ? contract : { ...contract, promise: typeToString(promise) };
   },
 
   resolveImport(specifier) {

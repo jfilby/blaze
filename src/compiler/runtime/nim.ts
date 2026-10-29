@@ -1195,11 +1195,17 @@ proc blaze_rt_monotonic_ms*(): float64 {.exportc, cdecl.} =
 
 ## A promise a program holds. A handle is one past the index of the promise in
 ## the table below, so a promise is never the null pointer.
-type BlazePromise = object
-  settled: bool
-  failed: bool
-  value: float64
-  message: cstring
+type
+  BlazePromiseKind = enum
+    promiseNumber, promiseText, promiseNull, promiseValue
+
+  BlazePromise = object
+    settled: bool
+    failed: bool
+    kind: BlazePromiseKind
+    value: float64
+    text: cstring
+    message: cstring
 
 var blazePromises: seq[BlazePromise] = @[]
 
@@ -1230,7 +1236,39 @@ proc blaze_promise_resolve*(promise: pointer, value: float64) {.exportc, cdecl.}
   if index < 0: return
   blazePromises[index].settled = true
   blazePromises[index].failed = false
+  blazePromises[index].kind = promiseNumber
   blazePromises[index].value = value
+  blazePromises[index].text = nil
+  blazePromises[index].message = nil
+
+proc blaze_promise_resolve_text*(promise: pointer, value: cstring) {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return
+  blazePromises[index].settled = true
+  blazePromises[index].failed = false
+  blazePromises[index].kind = promiseText
+  blazePromises[index].value = 0.0
+  blazePromises[index].text = value
+  blazePromises[index].message = nil
+
+proc blaze_promise_resolve_null*(promise: pointer) {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return
+  blazePromises[index].settled = true
+  blazePromises[index].failed = false
+  blazePromises[index].kind = promiseNull
+  blazePromises[index].value = 0.0
+  blazePromises[index].text = nil
+  blazePromises[index].message = nil
+
+proc blaze_promise_resolve_value*(promise: pointer, value: float64) {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return
+  blazePromises[index].settled = true
+  blazePromises[index].failed = false
+  blazePromises[index].kind = promiseValue
+  blazePromises[index].value = value
+  blazePromises[index].text = nil
   blazePromises[index].message = nil
 
 proc blaze_promise_reject*(promise: pointer, message: cstring) {.exportc, cdecl.} =
@@ -1238,7 +1276,9 @@ proc blaze_promise_reject*(promise: pointer, message: cstring) {.exportc, cdecl.
   if index < 0: return
   blazePromises[index].settled = true
   blazePromises[index].failed = true
+  blazePromises[index].kind = promiseNull
   blazePromises[index].value = blazeNaN()
+  blazePromises[index].text = nil
   blazePromises[index].message = message
   ## The failure is pending, which is what a catch arm reads.
   blazeErrorSet(message)
@@ -1246,8 +1286,107 @@ proc blaze_promise_reject*(promise: pointer, message: cstring) {.exportc, cdecl.
 proc blaze_promise_await*(promise: pointer): float64 {.exportc, cdecl.} =
   let index = blazePromiseIndex(promise)
   if index < 0: return 0.0
+  let held = blazePromises[index]
+  if held.failed: blazeErrorSet(held.message)
+  case held.kind
+  of promiseNumber, promiseNull: held.value
+  of promiseText: blaze_rt_to_number(blaze_rt_box_string(held.text))
+  of promiseValue: blaze_rt_to_number(held.value)
+
+proc blaze_promise_await_text*(promise: pointer): cstring {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return blazeTextOf("")
+  let held = blazePromises[index]
+  if held.failed: blazeErrorSet(held.message)
+  case held.kind
+  of promiseText: (if held.text == nil: blazeTextOf("") else: held.text)
+  of promiseValue: blaze_rt_to_text(held.value)
+  of promiseNumber: blaze_rt_to_text(blaze_rt_box_number(held.value))
+  of promiseNull: blazeTextOf("")
+
+proc blaze_promise_await_value*(promise: pointer): float64 {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return blaze_rt_box_null()
+  let held = blazePromises[index]
+  if held.failed:
+    blazeErrorSet(held.message)
+    return blaze_rt_box_null()
+  case held.kind
+  of promiseValue: held.value
+  of promiseText: blaze_rt_box_string(held.text)
+  of promiseNumber: blaze_rt_box_number(held.value)
+  of promiseNull: blaze_rt_box_null()
+
+proc blaze_promise_await_nothing*(promise: pointer) {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return
   if blazePromises[index].failed: blazeErrorSet(blazePromises[index].message)
-  blazePromises[index].value
+
+proc blaze_promise_resolved_number*(value: float64): pointer {.exportc, cdecl.} =
+  let promise = blaze_promise_new()
+  blaze_promise_resolve(promise, value)
+  promise
+
+proc blaze_promise_resolved_text*(value: cstring): pointer {.exportc, cdecl.} =
+  let promise = blaze_promise_new()
+  blaze_promise_resolve_text(promise, value)
+  promise
+
+proc blaze_promise_resolved_null*(): pointer {.exportc, cdecl.} =
+  let promise = blaze_promise_new()
+  blaze_promise_resolve_null(promise)
+  promise
+
+proc blaze_promise_resolved_value*(value: float64): pointer {.exportc, cdecl.} =
+  let promise = blaze_promise_new()
+  blaze_promise_resolve_value(promise, value)
+  promise
+
+proc blaze_promise_rejected*(message: cstring): pointer {.exportc, cdecl.} =
+  let promise = blaze_promise_new()
+  blaze_promise_reject(promise, message)
+  promise
+
+## A promise a body settles on its way out. A failure the body left pending is
+## what an async function rejects with: the flag is left as it is, so the await
+## that reads the promise reports the failure to the try block it is written in.
+proc blazePromiseFailedWith(message: cstring): pointer =
+  let promise = blaze_promise_new()
+  let index = blazePromiseIndex(promise)
+  if index >= 0:
+    blazePromises[index].settled = true
+    blazePromises[index].failed = true
+    blazePromises[index].kind = promiseNull
+    blazePromises[index].value = blazeNaN()
+    blazePromises[index].text = nil
+    blazePromises[index].message = message
+  promise
+
+proc blaze_promise_settled_number*(value: float64): pointer {.exportc, cdecl.} =
+  if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
+  else: blaze_promise_resolved_number(value)
+
+proc blaze_promise_settled_text*(value: cstring): pointer {.exportc, cdecl.} =
+  if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
+  else: blaze_promise_resolved_text(value)
+
+proc blaze_promise_settled_null*(): pointer {.exportc, cdecl.} =
+  if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
+  else: blaze_promise_resolved_null()
+
+proc blaze_promise_settled_value*(value: float64): pointer {.exportc, cdecl.} =
+  if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
+  else: blaze_promise_resolved_value(value)
+
+proc blaze_promise_failed*(promise: pointer): cint {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return 0
+  if blazePromises[index].failed: 1 else: 0
+
+proc blaze_promise_message*(promise: pointer): cstring {.exportc, cdecl.} =
+  let index = blazePromiseIndex(promise)
+  if index < 0: return nil
+  blazePromises[index].message
 
 proc blaze_promise_set_current*(promise: pointer) {.exportc, cdecl.} =
   blazeCurrentPromise = promise
@@ -1257,6 +1396,15 @@ proc blaze_promise_clear_current*() {.exportc, cdecl.} =
 
 proc blaze_promise_resolve_current*(value: float64) {.exportc, cdecl.} =
   if blazeCurrentPromise != nil: blaze_promise_resolve(blazeCurrentPromise, value)
+
+proc blaze_promise_resolve_current_text*(value: cstring) {.exportc, cdecl.} =
+  if blazeCurrentPromise != nil: blaze_promise_resolve_text(blazeCurrentPromise, value)
+
+proc blaze_promise_resolve_current_null*() {.exportc, cdecl.} =
+  if blazeCurrentPromise != nil: blaze_promise_resolve_null(blazeCurrentPromise)
+
+proc blaze_promise_resolve_current_value*(value: float64) {.exportc, cdecl.} =
+  if blazeCurrentPromise != nil: blaze_promise_resolve_value(blazeCurrentPromise, value)
 
 proc blaze_promise_reject_current*(message: cstring) {.exportc, cdecl.} =
   if blazeCurrentPromise != nil: blaze_promise_reject(blazeCurrentPromise, message)

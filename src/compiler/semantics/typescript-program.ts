@@ -36,10 +36,11 @@
  *     or on one element of a buffer
  *   - `name++`, `name--` and their prefix forms, as a statement of their own
  *   - a call kept for what it does, as in `main();`
- *   - an `async` function, read as a plain function: a compiled program has
- *     nothing to wait for, so the `async` keyword is dropped where written
- *   - `await v`, read as `v`: a compiled program has no promise to wait for,
- *     so the `await` keyword is dropped where written
+ *   - an `async` function, which answers a promise carrying what its body
+ *     returns. The body runs when the function is called, so the promise is
+ *     settled by the time the call answers
+ *   - `await v`, which is the value the promise `v` carries. A value that is
+ *     not a promise is awaited as itself
  *   - `try { ... } catch (e) { ... }` and `finally { ... }`: a compiled program
  *     cannot raise, so there is nothing to catch; the blocks are read past
  *
@@ -327,10 +328,17 @@ class ProgramParser {
       this.next();
       if (!this.at("function")) {
         const at = this.peek();
-        this.fail("an async function is not part of a program", at, REFUSED_KEYWORDS.async);
+        this.fail(
+          '"async" is read in front of a function',
+          at,
+          "write `async function f() { ... }` or an async arrow, as in `async (x) => x`",
+        );
         this.skipBlock();
         return null;
       }
+      // `async function f() { ... }` is a function like any other, and what it
+      // answers is a promise carrying what its body returns.
+      return this.declaredFunction(true);
     }
     if (this.at("break")) {
       this.next();
@@ -719,7 +727,7 @@ class ProgramParser {
    * inside another function as well as at the top of the program, and what it
    * reads of the scope around it is given to it at every call.
    */
-  private declaredFunction(): ProgramStatement {
+  private declaredFunction(isAsync = false): ProgramStatement {
     const line = this.peek().line;
     this.expect("function");
     // `function* name()`: the star is where the generator was written, and it
@@ -758,7 +766,7 @@ class ProgramParser {
     if (this.accept(":")) this.annotation("the type a function returns");
     const body = this.at("{") ? this.braces() : this.statements();
     this.valueClasses = previous;
-    return { kind: "function", name, params, body, line };
+    return { kind: "function", name, params, body, line, ...(isAsync ? { async: true } : {}) };
   }
 
   /** `console.log(v, ...)`: the values a program writes out. */
@@ -1158,7 +1166,7 @@ class ProgramParser {
             };
             continue;
           }
-          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance", "sqlite"]);
+          const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance", "sqlite", "Promise"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
           if (value.k === "name" && value.name === "http" && member === "createServer") {
@@ -1282,8 +1290,9 @@ class ProgramParser {
     const token = this.peek();
     if (token.kind === "ident" && token.text === "async") {
       this.next();
-      // `async (...) => body` and `async x => body`: read past an arrow function
-      // a compiled program cannot run, so the expression is nothing.
+      // `async (...) => body` and `async x => body`: an arrow function whose
+      // body runs when it is called, and whose answer is a promise carrying
+      // what that body returns.
       if (this.peek().text === "(") {
         let depth = 1;
         let i = 1;
@@ -1315,10 +1324,10 @@ class ProgramParser {
           this.accept("=>");
           if (this.at("{")) {
             const body = this.braces();
-            return { k: "arrow", params, body };
+            return { k: "arrow", params, body, async: true };
           }
           const value = this.value();
-          return { k: "arrow", params, body: [{ kind: "result", value, line }] };
+          return { k: "arrow", params, body: [{ kind: "result", value, line }], async: true };
         }
       }
       if (this.peek().kind === "ident" && this.peek(1).text === "=>") {
@@ -1327,10 +1336,28 @@ class ProgramParser {
         this.next(); // =>
         if (this.at("{")) {
           const body = this.braces();
-          return { k: "arrow", params: [{ name, type: null }], body };
+          return { k: "arrow", params: [{ name, type: null }], body, async: true };
         }
         const value = this.value();
-        return { k: "arrow", params: [{ name, type: null }], body: [{ kind: "result", value, line }] };
+        return { k: "arrow", params: [{ name, type: null }], body: [{ kind: "result", value, line }], async: true };
+      }
+      // `async function () { ... }`: a function expression written the long
+      // way, which is the same arrow with a promise behind it.
+      if (this.peek().kind === "ident" && this.peek().text === "function") {
+        this.next();
+        const params: { name: string; type: string | null }[] = [];
+        if (this.accept("(")) {
+          while (!this.at(")") && this.peek().kind !== "end") {
+            const name = this.peek().text;
+            this.next();
+            params.push({ name, type: null });
+            if (!this.accept(",")) break;
+          }
+          this.expect(")");
+        }
+        if (this.peek().kind === "ident") this.next();
+        const body = this.at("{") ? this.braces() : [];
+        return { k: "arrow", params, body, async: true };
       }
       return this.nothing();
     }

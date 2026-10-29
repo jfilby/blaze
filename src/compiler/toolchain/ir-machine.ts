@@ -10446,26 +10446,130 @@ class Machine {
       this.accumulator = null;
       return;
     }
-    if (call.callee === "Promise.await") {
+    if (call.callee === "Promise.await" || call.callee === "Promise.await.whole" || call.callee === "Promise.await.text" || call.callee === "Promise.await.bool" || call.callee === "Promise.await.value" || call.callee === "Promise.await.nothing") {
       this.at(call.args[0], NUMBER);
       // The handle is the number the promise's address is, and the runtime
       // reads the promise that address points at.
       this.code.cvtFloatToInt(RAX, XMM0, false, true);
       this.code.movRegReg(RDI, RAX);
+      if (call.callee === "Promise.await.text") {
+        this.external("blaze_promise_await_text");
+        this.code.call("blaze_promise_await_text");
+        return;
+      }
+      if (call.callee === "Promise.await.whole") {
+        this.external("blaze_promise_await");
+        this.code.call("blaze_promise_await");
+        this.code.cvtFloatToInt(RAX, XMM0, false, true);
+        return;
+      }
+      if (call.callee === "Promise.await.bool") {
+        this.external("blaze_promise_await");
+        this.code.call("blaze_promise_await");
+        this.code.cvtFloatToInt(RAX, XMM0, false, true);
+        this.code.test(RAX);
+        this.code.setcc("ne", RAX);
+        return;
+      }
+      if (call.callee === "Promise.await.value") {
+        this.external("blaze_promise_await_value");
+        this.code.call("blaze_promise_await_value");
+        return;
+      }
+      if (call.callee === "Promise.await.nothing") {
+        this.external("blaze_promise_await_nothing");
+        this.code.call("blaze_promise_await_nothing");
+        this.code.xorFloat(XMM0, XMM0);
+        return;
+      }
       this.external("blaze_promise_await");
       this.code.call("blaze_promise_await");
       return;
     }
+    if (call.callee.startsWith("Promise.resolve") || call.callee.startsWith("Promise.settle")) {
+      const settled = call.callee.startsWith("Promise.settle");
+      const symbol = settled ? "blaze_promise_settled" : "blaze_promise_resolved";
+      if (call.callee.endsWith(".text")) {
+        this.at(call.args[0], TEXT);
+        this.code.movRegReg(RDI, RAX);
+        this.external(`${symbol}_text`);
+        this.code.call(`${symbol}_text`);
+      } else if (call.callee.endsWith(".bool")) {
+        this.at(call.args[0], TRUTH);
+        this.code.cvtIntToFloat(XMM0, RAX, false);
+        this.external(`${symbol}_number`);
+        this.code.call(`${symbol}_number`);
+      } else {
+        this.at(call.args[0], NUMBER);
+        const name = call.callee.endsWith(".value") ? `${symbol}_value` : `${symbol}_number`;
+        this.external(name);
+        this.code.call(name);
+      }
+      // The runtime answers the promise as the address it holds, and the
+      // language holds a handle as the number that address is.
+      this.code.cvtIntToFloat(XMM0, RAX, false);
+      return;
+    }
+    if (call.callee === "Promise.resolve.nothing" || call.callee === "Promise.settle.nothing") {
+      const name = call.callee === "Promise.settle.nothing" ? "blaze_promise_settled_null" : "blaze_promise_resolved_null";
+      this.external(name);
+      this.code.call(name);
+      this.code.cvtIntToFloat(XMM0, RAX, false);
+      return;
+    }
+    if (call.callee === "Promise.reject") {
+      const message = call.args[0];
+      if (message !== undefined && isTextType(message.type)) {
+        this.at(message, TEXT);
+        this.code.movRegReg(RDI, RAX);
+      } else if (message !== undefined) {
+        this.at(message, NUMBER);
+        this.external("blaze_rt_box_number");
+        this.code.call("blaze_rt_box_number");
+        this.external("blaze_rt_to_text");
+        this.code.call("blaze_rt_to_text");
+        this.code.movRegReg(RDI, RAX);
+      }
+      this.external("blaze_promise_rejected");
+      this.code.call("blaze_promise_rejected");
+      this.code.cvtIntToFloat(XMM0, RAX, false);
+      return;
+    }
     if (call.callee === "resolve") {
-      this.at(call.args[0], call.argTypes[0] ?? NUMBER);
-      this.external("blaze_promise_resolve_current");
-      this.code.call("blaze_promise_resolve_current");
+      const value = call.args[0];
+      if (value !== undefined && isTextType(value.type)) {
+        this.at(value, TEXT);
+        this.code.movRegReg(RDI, RAX);
+        this.external("blaze_promise_resolve_current_text");
+        this.code.call("blaze_promise_resolve_current_text");
+      } else if (value !== undefined && value.k === "nothing") {
+        this.external("blaze_promise_resolve_current_null");
+        this.code.call("blaze_promise_resolve_current_null");
+      } else if (value !== undefined && value.type.kind === "ref") {
+        this.at(value, NUMBER);
+        this.external("blaze_promise_resolve_current_value");
+        this.code.call("blaze_promise_resolve_current_value");
+      } else {
+        this.at(call.args[0], call.argTypes[0] ?? NUMBER);
+        this.external("blaze_promise_resolve_current");
+        this.code.call("blaze_promise_resolve_current");
+      }
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
     if (call.callee === "reject") {
-      this.at(call.args[0], call.argTypes[0] ?? NUMBER);
-      this.code.movRegReg(RDI, RAX);
+      const message = call.args[0];
+      if (message !== undefined && isTextType(message.type)) {
+        this.at(message, TEXT);
+        this.code.movRegReg(RDI, RAX);
+      } else if (message !== undefined) {
+        this.at(message, NUMBER);
+        this.external("blaze_rt_box_number");
+        this.code.call("blaze_rt_box_number");
+        this.external("blaze_rt_to_text");
+        this.code.call("blaze_rt_to_text");
+        this.code.movRegReg(RDI, RAX);
+      }
       this.external("blaze_promise_reject_current");
       this.code.call("blaze_promise_reject_current");
       this.code.xorFloat(XMM0, XMM0);

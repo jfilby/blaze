@@ -21,8 +21,10 @@ The scope is the first version: a Python **module** (a library of functions) and
 a Python **program** (the statements of the entry module), the compiler's value
 model (a number, text, an array, an object, a reference), and the arithmetic
 and the text of a value that Python spells its own way. Not in scope: classes,
-generators, coroutines, context managers, pattern
-matching, `async`, and the standard library. A Python program is a program of
+generators, coroutines that suspend, context managers, pattern matching, and
+the standard library. An `async def` runs straight through and answers a
+promise carrying what its body returns; `await` reads that value, and a
+program reads a coroutine with `asyncio.run`. A Python program is a program of
 this compiler that was written in Python, not a Python runtime: the source is
 compiled, and what runs is a native binary.
 
@@ -200,7 +202,8 @@ matter are the ones a Python program is most likely to write:
 | Refused | Why, and what to write instead |
 |---|---|
 | `class` | an object written where it is made, as in `{"left": None, "right": None}` |
-| `yield`, `async`, `await` | a straight line: a compiled program has nothing to wait for |
+| `yield` | a value the function hands back with `return` |
+| an `async` construct but `async def` | a straight line: a function's body runs when it is called |
 | `in`, `not in` | a loop that looks for the value |
 | `for x in a:` | a loop walks a range: `for i in range(len(a))` |
 | `**kwargs` | a fixed list of parameters; a dict is written with named keys |
@@ -606,9 +609,10 @@ a new section and needs nothing else.
 
 ## What is not done
 
-- **No classes, no generators, no context
-  managers, no pattern matching, no `async`.** Each is refused with the line
-  it was written on.
+- **No classes, no generators, no context managers, no pattern matching.**
+  Each is refused with the line it was written on. An `async def` is a
+  function whose answer is a promise, and `asyncio.run` reads one at the top
+  of a program; a coroutine that suspends is not part of the subset.
 - **No standard library.** A module of the project is a file of the project:
   `from helpers import dot` is the only import there is, beside the two
   modules of the standard library the compiler knows: `math` and `sys`. The

@@ -208,9 +208,13 @@ function elementNim(type: TypeExpr): string {
   return nimType(type);
 }
 
-/** The Nim type of one parameter: a reference is a pointer to a struct. */
+/**
+ * The Nim type of one parameter: a reference to an object the program lays out
+ * is a pointer to its struct, and one the compiler does not shape is the double
+ * handle a dynamic value is carried as.
+ */
 function nimParameter(type: TypeExpr): string {
-  if (type.kind === "ref") return type.name === undefined ? "pointer" : `ptr ${type.name}`;
+  if (type.kind === "ref") return type.name === undefined ? "float64" : `ptr ${type.name}`;
   if (type.kind === "void") return "void";
   if (type.kind === "primitive") return elementNim(type);
   return `ptr ${elementNim(bufferElement(type))}`;
@@ -367,8 +371,13 @@ class NimDriver implements ProgramTarget {
   }
 
   prelude(program: SemanticProgram): string {
-    const externs = program.functions.map((signature) => this.declaration(signature)).join("\n");
-    const anchor = RUNTIME_ANCHOR.map((symbol) => `  cast[pointer](${symbol}),`).join("\n");
+    // A function the program declares is written into this host, and one the
+    // program only calls is compiled on its own and linked beside it. A body
+    // the host writes is not a symbol it imports: importing it as well is the
+    // same proc declared twice.
+    const written = new Set(program.bodies.map((body) => body.symbol));
+    const linked = program.functions.filter((signature) => !written.has(signature.symbol));
+    const externs = linked.map((signature) => this.declaration(signature)).join("\n");
     return `${HOST_PRELUDE}
 
 {.emit: """
@@ -377,22 +386,7 @@ ${externs}
 
 ${nimObjectDeclarations(program.objects)}
 
-${program.functions.map((signature) => this.importc(signature)).join("\n\n")}
-
-proc main() =
-  # Every entry point is named here, so the linker keeps the ones a candidate
-  # calls even when this program does not call them itself.
-  let runtimeAbi = [
-${anchor}
-  ]
-  discard runtimeAbi.len
-  ${RUNTIME_NAME}_initialize()
-  let programArguments = programNumbers()
-  if programArguments.len > 0:
-    var argumentStorage = programArguments
-    ${RUNTIME_NAME}_arguments_set(cast[ptr UncheckedArray[float64]](addr argumentStorage[0]), csize_t(argumentStorage.len))
-  else:
-    ${RUNTIME_NAME}_arguments_set(nil, 0)`;
+${linked.map((signature) => this.importc(signature)).join("\n\n")}`;
   }
 
   openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[] {
@@ -421,7 +415,26 @@ ${anchor}
   }
 
   openProgram(): string[] {
-    return [];
+    // `proc main()` is opened here rather than in the prelude because the
+    // functions the program declares are written above it. The newline at the
+    // front lets the line that opens it sit at the top level of the file: the
+    // emitter indents one line of the target's opening, and the indentation is
+    // spent on the blank line rather than on the proc.
+    const anchor = RUNTIME_ANCHOR.map((symbol) => `    cast[pointer](${symbol}),`).join("\n");
+    return [`\nproc main() =
+  # Every entry point is named here, so the linker keeps the ones a candidate
+  # calls even when this program does not call them itself.
+  let runtimeAbi = [
+${anchor}
+  ]
+  discard runtimeAbi.len
+  ${RUNTIME_NAME}_initialize()
+  let programArguments = programNumbers()
+  if programArguments.len > 0:
+    var argumentStorage = programArguments
+    ${RUNTIME_NAME}_arguments_set(cast[ptr UncheckedArray[float64]](addr argumentStorage[0]), csize_t(argumentStorage.len))
+  else:
+    ${RUNTIME_NAME}_arguments_set(nil, 0)`];
   }
 
   closeProgram(releases: readonly string[]): string[] {
@@ -721,6 +734,54 @@ ${anchor}
 
   builtin(call: SemanticCall, argumentsText: string[]): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
+    // A promise is the handle the runtime holds it in, and the language holds a
+    // handle as the number that address is.
+    if (call.callee === "Promise") {
+      // The executor is a function of the program, and the Nim driver has no
+      // way to hand a runtime a function of its own: an async function settles
+      // its promise on the way out, and the runtime settles the one a program
+      // awaited. A promise the program makes itself is refused here rather
+      // than written as a call nothing can make.
+      throw hostError("the Nim driver cannot write down a Promise executor");
+    }
+    if (call.callee.startsWith("Promise.await")) {
+      const handle = `cast[pointer](uint(${argument(0)}))`;
+      if (call.callee === "Promise.await.text") return `$blaze_promise_await_text(${handle})`;
+      if (call.callee === "Promise.await.whole") return `int64(blaze_promise_await(${handle}))`;
+      if (call.callee === "Promise.await.bool") return `(blaze_promise_await(${handle}) != 0.0)`;
+      if (call.callee === "Promise.await.value") return `blaze_promise_await_value(${handle})`;
+      if (call.callee === "Promise.await.nothing") return `(blaze_promise_await_nothing(${handle}); 0.0)`;
+      return `blaze_promise_await(${handle})`;
+    }
+    if (call.callee === "resolve" || call.callee === "onFulfilled") {
+      const type = call.argTypes[0];
+      if (type !== undefined && isTextType(type)) return `(blaze_promise_resolve_current_text(${argument(0)}); 0.0)`;
+      if (type !== undefined && type.kind === "ref") return `(blaze_promise_resolve_current_value(${argument(0)}); 0.0)`;
+      return `(blaze_promise_resolve_current(${argument(0)}); 0.0)`;
+    }
+    if (call.callee === "reject" || call.callee === "onRejected") {
+      const type = call.argTypes[0];
+      const text = type !== undefined && isTextType(type) ? argument(0) : `$${RUNTIME_NAME}_to_text(${argument(0)})`;
+      return `(blaze_promise_reject_current(${text}); 0.0)`;
+    }
+    if (call.callee.startsWith("Promise.resolve") || call.callee.startsWith("Promise.settle")) {
+      const settled = call.callee.startsWith("Promise.settle") ? "blaze_promise_settled" : "blaze_promise_resolved";
+      const handle = call.callee.endsWith(".text")
+        ? `${settled}_text(${argument(0)})`
+        : call.callee.endsWith(".bool")
+          ? `${settled}_number(if ${argument(0)}: 1.0 else: 0.0)`
+          : call.callee.endsWith(".nothing")
+            ? `${settled}_null()`
+            : call.callee.endsWith(".value")
+              ? `${settled}_value(${argument(0)})`
+              : `${settled}_number(${argument(0)})`;
+      return `float64(cast[uint](${handle}))`;
+    }
+    if (call.callee === "Promise.reject") {
+      const type = call.argTypes[0];
+      const text = type !== undefined && isTextType(type) ? argument(0) : `$${RUNTIME_NAME}_to_text(${argument(0)})`;
+      return `float64(cast[uint](blaze_promise_rejected(${text})))`;
+    }
     switch (call.callee) {
       case "Math.abs":
         return `abs(${argument(0)})`;
@@ -742,8 +803,8 @@ ${anchor}
         return `blaze_had_error()`;
       case "blaze_last_error":
         // The message of the failure is a text, and a program holds a text as
-        // the pointer to it.
-        return `cast[pointer](blaze_last_error())`;
+        // the string it is.
+        return `$blaze_last_error()`;
       default:
         throw hostError(`the driver cannot write down ${call.callee}`);
     }

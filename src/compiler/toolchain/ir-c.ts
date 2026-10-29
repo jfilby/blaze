@@ -233,6 +233,41 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_last_error":
       // The message of the failure is a text, and a reference is a pointer.
       return `((void*)blaze_last_error())`;
+    // The value an `await` reads out of a promise, and the promise an async
+    // function answers on its way out. The handle is the address the runtime
+    // holds the promise in, carried as the number a value is.
+    case "Promise.await":
+      return `blaze_promise_await((void*)(uintptr_t)(${args[0]}))`;
+    case "Promise.await.text":
+      return `blaze_promise_await_text((void*)(uintptr_t)(${args[0]}))`;
+    case "Promise.await.whole":
+      return `(long long)blaze_promise_await((void*)(uintptr_t)(${args[0]}))`;
+    case "Promise.await.bool":
+      return `(blaze_promise_await((void*)(uintptr_t)(${args[0]})) != 0.0)`;
+    case "Promise.await.value":
+      return `blaze_promise_await_value((void*)(uintptr_t)(${args[0]}))`;
+    case "Promise.await.nothing":
+      return `(blaze_promise_await_nothing((void*)(uintptr_t)(${args[0]})), 0.0)`;
+    case "Promise.resolve":
+      return `(double)(uintptr_t)blaze_promise_resolved_number(${args[0]})`;
+    case "Promise.resolve.text":
+      return `(double)(uintptr_t)blaze_promise_resolved_text(${args[0]})`;
+    case "Promise.resolve.bool":
+      return `(double)(uintptr_t)blaze_promise_resolved_number((${args[0]}) ? 1.0 : 0.0)`;
+    case "Promise.resolve.value":
+      return `(double)(uintptr_t)blaze_promise_resolved_value(${args[0]})`;
+    case "Promise.resolve.nothing":
+      return `(double)(uintptr_t)blaze_promise_resolved_null()`;
+    case "Promise.settle":
+      return `(double)(uintptr_t)blaze_promise_settled_number(${args[0]})`;
+    case "Promise.settle.text":
+      return `(double)(uintptr_t)blaze_promise_settled_text(${args[0]})`;
+    case "Promise.settle.bool":
+      return `(double)(uintptr_t)blaze_promise_settled_number((${args[0]}) ? 1.0 : 0.0)`;
+    case "Promise.settle.value":
+      return `(double)(uintptr_t)blaze_promise_settled_value(${args[0]})`;
+    case "Promise.settle.nothing":
+      return `(double)(uintptr_t)blaze_promise_settled_null()`;
     // The whole numbers: a magnitude, a smaller, a larger, and the three
     // roundings that answer a whole number. The `Math` builtins above answer a
     // fraction, and a whole number is written as one, so each of these is the

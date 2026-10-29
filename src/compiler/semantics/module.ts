@@ -103,8 +103,15 @@ export type ProgramValue =
   | { k: "binary"; op: ProgramBinaryOp; left: ProgramValue; right: ProgramValue }
   | { k: "unary"; op: ProgramUnaryOp; operand: ProgramValue }
   | { k: "conditional"; condition: ProgramValue; then: ProgramValue; otherwise: ProgramValue }
-  /** An arrow function, as a block of statements with parameters. */
-  | { k: "arrow"; params: { name: string; type: string | null }[]; body: ProgramStatement[] };
+  /**
+   * An arrow function, as a block of statements with parameters.
+   *
+   * `async` is what the source wrote in front of the arrow. A compiled program
+   * runs the body straight through, so the body is the same either way; the
+   * flag is what says the value the arrow answers is a promise, which is what
+   * `await` unwraps and a caller of it holds.
+   */
+  | { k: "arrow"; params: { name: string; type: string | null }[]; body: ProgramStatement[]; async?: boolean };
 
 /** The operators a program value may use, as the source language writes them. */
 export type ProgramBinaryOp =
@@ -181,7 +188,19 @@ export type ProgramStatement =
   /** A call kept for what it does, as in `main();`. */
   | { kind: "invoke"; function: string; args: ProgramValue[]; line: number; grid?: ProgramValue }
   /** A function the program declares, which runs when it is called. */
-  | { kind: "function"; name: string; params: { name: string; type: string | null }[]; body: ProgramStatement[]; line: number }
+  | {
+      kind: "function";
+      name: string;
+      params: { name: string; type: string | null }[];
+      body: ProgramStatement[];
+      line: number;
+      /**
+       * The source wrote `async` in front of the function. The body still runs
+       * when the function is called, and what the function answers is a
+       * promise carrying what its body returns: `await f()` is that value.
+       */
+      async?: boolean;
+    }
   /** What a function hands back, as `return value;` is written. */
   | { kind: "result"; value: ProgramValue; line: number };
 

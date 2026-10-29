@@ -154,7 +154,7 @@ test("the modules of the standard library the compiler knows are read", () => {
     phaseOf("python", { "main.py": "import os\nprint(1)\n" }, "main.py"),
   );
   assert.match(refused, /"os" is not a module the compiler knows/);
-  assert.match(refused, /math, sys, triton, triton\.language/);
+  assert.match(refused, /math, sys, asyncio, triton, triton\.language/);
 });
 
 test("a call of a name the compiler does not know is refused", () => {

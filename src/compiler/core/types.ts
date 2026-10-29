@@ -152,6 +152,13 @@ export type Effect =
 export interface FunctionContract {
   version: "1";
   function: FunctionSignature;
+  /**
+   * The value the promise an async function answers carries, as a contract
+   * type. The function itself answers the handle the runtime holds the promise
+   * in, which is what `function.returns` states; this is what `await` reads out
+   * of it. Absent for a function that is not async.
+   */
+  promise?: string;
   requires: string[];
   /**
    * What the result must equal, when one expression can say it. A postcondition

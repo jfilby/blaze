@@ -210,12 +210,58 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `blaze_had_error()` is 1 when the last awaited call failed, else 0. */
   "blaze_had_error": { params: [], returns: F64, arity: 0 },
   /** `blaze_last_error()` is the message of the last failure, for `catch (e)`. */
-  "blaze_last_error": { params: [], returns: ANY, arity: 0 },
+  "blaze_last_error": { params: [], returns: TEXT, arity: 0 },
   "http.createServer": { params: [ANY], returns: ANY, arity: 1 },
   "server.listen": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
   "server.close": { params: [ANY], returns: ANY, arity: 1 },
-  "Promise": { params: [ANY], returns: ANY, arity: 1 },
-  "Promise.await": { params: [ANY], returns: F64, arity: 1 },
+  "Promise": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
+  /**
+   * `await v` on a promise carrying a number: the value it was settled with.
+   * The promise a program makes is settled before it is read, so the await is
+   * the reading of it rather than a wait.
+   */
+  "Promise.await": { params: [ANY], returns: F64, arity: 1, effects: ["memory"] },
+  /**
+   * `await v` on a promise carrying a whole number: a language whose whole
+   * numbers are whole reads one out as it was settled, not as a fraction.
+   */
+  "Promise.await.whole": { params: [ANY], returns: I64, arity: 1, effects: ["memory"] },
+  /** `await v` on a promise carrying a string. */
+  "Promise.await.text": { params: [ANY], returns: TEXT, arity: 1, effects: ["memory"] },
+  /** `await v` on a promise carrying a truth. */
+  "Promise.await.bool": { params: [ANY], returns: { kind: "primitive", name: "bool" }, arity: 1, effects: ["memory"] },
+  /**
+   * `await v` on a promise whose value the compiler does not know, or on one
+   * carrying a value of a shape the caller reads dynamically.
+   */
+  "Promise.await.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
+  /** `await v` on a promise carrying nothing: the promise is still read, so
+   *  the failure it may hold becomes the failure a catch arm sees. */
+  "Promise.await.nothing": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: ["memory"] },
+  /** `Promise.resolve(v)` answers a settled promise carrying `v`. */
+  "Promise.resolve": { params: [F64], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.resolve.text": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.resolve.bool": { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.resolve.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.resolve.nothing": { params: [], returns: ANY, arity: 0, effects: ["memory"] },
+  /**
+   * The promise an async function answers on its way out. It carries the value
+   * the body returned, unless the body left a failure pending — what an awaited
+   * call that failed does — and then it is a promise that has failed, carrying
+   * the message. Awaiting it reports that failure where the await is written.
+   */
+  "Promise.settle": { params: [F64], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.settle.text": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.settle.bool": { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.settle.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.settle.nothing": { params: [], returns: ANY, arity: 0, effects: ["memory"] },
+  /** `Promise.reject(message)` answers a promise that has already failed. */
+  "Promise.reject": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
+  /**
+   * `asyncio.run(coroutine)` is the value the coroutine's promise carries: a
+   * Python program has no top-level `await`, so this is how it reads one.
+   */
+  "asyncio.run": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
   "resolve": { params: [ANY], returns: ANY, arity: 1 },
   "reject": { params: [ANY], returns: ANY, arity: 1 },
   /** The longer names a Promise executor is written with for the same pair:

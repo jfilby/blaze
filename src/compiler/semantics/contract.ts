@@ -1145,6 +1145,9 @@ export function parseContract(contract: FunctionContract): ParsedContract {
 
   const env = signatureTypeEnv(contract);
   parseType(contract.function.returns);
+  // The value a promise carries travels beside the signature, so a contract
+  // that states one states a type the contract language reads.
+  if (contract.promise !== undefined) parseType(contract.promise);
   const seen = new Set<string>();
   for (const param of contract.function.params) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(param.name)) throw contractError(`invalid parameter name "${param.name}"`);

@@ -1114,7 +1114,7 @@ class FunctionBody {
       case "member":
         return this.field(expression, expect, line);
       case "call":
-        return this.call(expression, line);
+        return this.call(expression, line, expect);
       case "object":
         return this.allocated(expression, line);
       case "sized": {
@@ -1293,7 +1293,61 @@ class FunctionBody {
   }
 
   /** A call, or the one builtin that is an operation rather than a call. */
-  private call(expression: Expression & { k: "call" }, line: number): Typed {
+  private call(expression: Expression & { k: "call" }, line: number, expect: Inferred | null = null): Typed {
+    // `await v` is the value the promise `v` carries. A value that is not a
+    // promise is awaited as itself, and a promise's value is the type the use
+    // asks for: a function's body is typed before it is written, so the use is
+    // what says which value is read out of the promise.
+    if (expression.name === "Promise.await") {
+      const operand = this.typed(expression.args[0] as Expression, null, line);
+      const inferred = operand.inferred;
+      const promise = inferred.kind === "type" && inferred.type.kind === "ref" && inferred.type.of === null && inferred.type.name === undefined;
+      if (!promise) return operand;
+      let payload: TypeExpr = expect !== null && expect.kind === "type" ? expect.type : ANY_REF;
+      // A use that fixes no type is a use of the value the promise carries,
+      // which the contract of an async function states beside its own.
+      if (payload.kind === "ref" && payload.of === null && payload.name === undefined) {
+        const awaited = expression.args[0];
+        if (awaited !== undefined && awaited.k === "call") {
+          const contract = this.context.functions[awaited.name] ?? this.context.functions[`${awaited.name}__${awaited.args.length}`];
+          if (contract?.promise !== undefined) payload = parseType(contract.promise);
+        }
+      }
+      const callee = payload.kind === "text"
+        ? "Promise.await.text"
+        : payload.kind === "primitive" && payload.name === "bool"
+          ? "Promise.await.bool"
+          : payload.kind === "primitive" && isWhole(payload.name)
+            ? "Promise.await.whole"
+            : payload.kind === "void"
+              ? "Promise.await.nothing"
+              : payload.kind === "ref"
+                ? "Promise.await.value"
+                : "Promise.await";
+      const awaited = builtinFor(callee) as BuiltinSignature;
+      const returns = awaited.returns;
+      return {
+        value: {
+          k: "call",
+          type: returns,
+          call: this.semanticCall(
+            callee,
+            {
+              name: callee,
+              symbol: callee,
+              params: awaited.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+              returns: contractText(returns),
+            },
+            [operand.value],
+            returns,
+            [],
+            true,
+            [operand.value.type],
+          ),
+        },
+        inferred: asType(returns),
+      };
+    }
     // `BigInt(x)` is the whole number a value names, and a literal argument is
     // a value the compiler already holds: folding it is what lets a constant
     // expression be written the way the language writes one, `2n ** BigInt(8n)`.

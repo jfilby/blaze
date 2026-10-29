@@ -151,6 +151,12 @@ interface ObjectHeld {
   name: string;
   mutable: boolean;
   type: TypeExpr;
+  /**
+   * The value a promise held carries, or undefined when the name does not hold
+   * a promise. A promise is a handle the runtime owns, so the name holds it as
+   * a reference; what `await` reads out of it is the value here.
+   */
+  promise?: { payload: TypeExpr };
 }
 
 /** A string, as text when the program wrote it out, or built at run time. */
@@ -217,6 +223,19 @@ interface DraftCall {
    * body the callee returns. Null where the callee is not one this build holds.
    */
   wide: boolean | null;
+  /**
+   * What the call answers when it answers a promise: the type of the value the
+   * promise carries. A promise is a handle, so its type alone says nothing
+   * about the value `await` reads out of it.
+   */
+  promise?: { payload: TypeExpr };
+  /**
+   * True when the call is an `await`, whose argument is the promise the source
+   * wrote the word before. The resolver reads the argument's type at the use
+   * and answers the promise's value, or the value itself when what was awaited
+   * is not a promise.
+   */
+  awaiting?: true;
 }
 
 /** One piece of a string: text as written, or a value interpolated into it. */
@@ -758,6 +777,212 @@ function draftType(value: DraftValue): TypeExpr | null {
 }
 
 /**
+ * The type of the value a resolved value carries, for a promise that is settled
+ * with it: a string is the text it is, a value the type does not fix is a
+ * number, and a value of a shape nothing names is read dynamically.
+ */
+function payloadTypeOf(value: DraftValue): TypeExpr {
+  if (holdsText(value)) return TEXT;
+  return draftType(value) ?? numeric("f64");
+}
+
+/**
+ * The promise a value is, or undefined when the value is not one.
+ *
+ * A promise is a handle the runtime owns, and a name that holds one holds the
+ * handle. What the name says beside the handle is the type of the value the
+ * promise carries, which is what `await` answers; a handle with no payload
+ * named is a promise whose value is read dynamically.
+ */
+function promiseOf(value: DraftValue): { payload: TypeExpr } | undefined {
+  switch (value.k) {
+    case "reference":
+      return value.held.kind === "object" ? value.held.promise : undefined;
+    case "call":
+      return value.call.promise;
+    case "conditional": {
+      // Both arms have to be promises for the choice to be one: an arm that is
+      // a number is awaited as itself, and reading it as a handle would read
+      // the number as an address.
+      const then = promiseOf(value.then);
+      const otherwise = promiseOf(value.otherwise);
+      if (then === undefined || otherwise === undefined) return undefined;
+      return contractTextOfType(then.payload) === contractTextOfType(otherwise.payload) ? then : { payload: { kind: "ref", of: null } };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** How a type is written, for comparing two payload types. */
+function contractTextOfType(type: TypeExpr): string {
+  return type.kind === "text" ? "text" : typeToString(type);
+}
+
+/**
+ * The type a promise built from an executor carries, read off the values the
+ * executor settles the promise with. A promise settled with a number carries a
+ * number and one settled with a string carries a string; a promise settled with
+ * both, or with a value this cannot see, carries a value read dynamically.
+ */
+function executorPayload(program: DraftProgram, callee?: (name: string) => DraftProgram | null): TypeExpr {
+  const found: TypeExpr[] = [];
+  const seen = new Set<string>();
+  const note = (value: DraftValue): void => {
+    switch (value.k) {
+      case "call": {
+        const settled = value.call.name === "resolve" || value.call.name === "onFulfilled";
+        if (settled && value.call.args[0] !== undefined) found.push(payloadTypeOf(value.call.args[0]));
+        for (const argument of value.call.args) {
+          note(argument);
+          // A callback the executor hands to a call settles the promise too:
+          // `res.on("end", () => resolve(body))` is where a promise built
+          // around an event is settled.
+          if (argument.k === "function" && argument.name !== undefined && !seen.has(argument.name)) {
+            seen.add(argument.name);
+            const nested = callee?.(argument.name) ?? null;
+            if (nested !== null) walk(nested.statements);
+          }
+        }
+        if (value.call.grid !== undefined) note(value.call.grid);
+        return;
+      }
+      case "text":
+        for (const part of value.parts) if (part.k === "value") note(part.value);
+        return;
+      case "binary":
+        note(value.left);
+        note(value.right);
+        return;
+      case "unary":
+        note(value.operand);
+        return;
+      case "conditional":
+        note(value.condition);
+        note(value.then);
+        note(value.otherwise);
+        return;
+      case "field":
+        note(value.object);
+        return;
+      case "object":
+        for (const field of value.fields) note(field.value);
+        return;
+      case "fixed":
+        note(value.of);
+        return;
+      default:
+        return;
+    }
+  };
+  const walk = (statements: readonly DraftStatement[]): void => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "declare":
+        case "assign":
+        case "result":
+          note(statement.value);
+          continue;
+        case "elementAssign":
+          note(statement.index);
+          note(statement.value);
+          continue;
+        case "fieldAssign":
+          note(statement.value);
+          continue;
+        case "print":
+          statement.values.forEach(note);
+          continue;
+        case "fill":
+          note(statement.value);
+          continue;
+        case "if":
+          note(statement.condition);
+          walk(statement.then);
+          walk(statement.otherwise);
+          continue;
+        case "while":
+        case "doWhile":
+          note(statement.condition);
+          walk(statement.body);
+          continue;
+        case "for":
+          note(statement.from);
+          note(statement.to);
+          if (statement.step !== null) note(statement.step);
+          walk(statement.body);
+          continue;
+        case "forOf":
+          walk(statement.body);
+          continue;
+        case "try":
+          walk(statement.body);
+          if (statement.catchBody !== null) walk(statement.catchBody);
+          if (statement.finallyBody !== null) walk(statement.finallyBody);
+          continue;
+        case "block":
+          walk(statement.body);
+          continue;
+        default:
+          continue;
+      }
+    }
+  };
+  walk(program.statements);
+  const first = found[0];
+  if (first === undefined) return { kind: "ref", of: null };
+  const written = contractTextOfType(first);
+  return found.every((type) => contractTextOfType(type) === written) ? first : { kind: "ref", of: null };
+}
+
+/** Every value a body returns, as the statements of it were resolved. */
+function returnedValues(statements: readonly DraftStatement[]): DraftValue[] {
+  const values: DraftValue[] = [];
+  const walk = (list: readonly DraftStatement[]): void => {
+    for (const statement of list) {
+      switch (statement.kind) {
+        case "result":
+          values.push(statement.value);
+          continue;
+        case "if":
+          walk(statement.then);
+          walk(statement.otherwise);
+          continue;
+        case "while":
+        case "doWhile":
+          walk(statement.body);
+          continue;
+        case "for":
+        case "forOf":
+          walk(statement.body);
+          continue;
+        case "try":
+          walk(statement.body);
+          if (statement.catchBody !== null) walk(statement.catchBody);
+          if (statement.finallyBody !== null) walk(statement.finallyBody);
+          continue;
+        case "block":
+          walk(statement.body);
+          continue;
+        default:
+          continue;
+      }
+    }
+  };
+  walk(statements);
+  return values;
+}
+
+/** The promise a plain function's body answers, when its returns are one. */
+function returnedPromise(statements: readonly DraftStatement[]): { payload: TypeExpr } | undefined {
+  for (const value of returnedValues(statements)) {
+    const promise = promiseOf(value);
+    if (promise !== undefined) return promise;
+  }
+  return undefined;
+}
+
+/**
  * The type a declared name is read as. A number no use has fixed is a double,
  * as it is in the language it was written in, and an array is a slice of the
  * element type a use of it fixes.
@@ -800,6 +1025,7 @@ function contractsOf(program: ProgramContract): Map<string, CompiledFunction> {
         signature: contract.function,
         effects: contract.effects,
         body: contract.definition.statements,
+        ...(contract.promise === undefined ? {} : { promise: contract.promise }),
       });
     }
   }
@@ -1513,6 +1739,15 @@ interface ProgramFunctionDraft {
   /** The body, resolved, once the names it reads are all declared. */
   compiled: DraftProgram | null;
   /**
+   * The source wrote `async` in front of the function. The body runs when the
+   * function is called and what the function answers is a promise carrying
+   * what the body returns; `payload` is the type of that value, and what a
+   * caller's `await` reads out of the promise.
+   */
+  async?: boolean;
+  /** The value the promise an async function answers carries. */
+  payload?: TypeExpr;
+  /**
    * True when the program handed this function to something as a callback.
    * What calls it is not a program, and passes it two values rather than the
    * arguments the source wrote, so it is called through a trampoline of its own.
@@ -1629,6 +1864,8 @@ interface CompiledFunction {
   signature: FunctionSignature;
   effects: Effect[];
   body: readonly Statement[];
+  /** The value the promise an async function answers carries. */
+  promise?: string;
 }
 
 class ProgramResolver {
@@ -1783,6 +2020,7 @@ class ProgramResolver {
       compiled: null,
       callback: false,
       serverHandler: false,
+      ...(statement.async === true ? { async: true } : {}),
     };
     this.functions.table.set(statement.name, draft);
     this.functions.used.add(statement.name);
@@ -1912,6 +2150,21 @@ class ProgramResolver {
         );
       } else {
         returns = first;
+      }
+      if (draft.async === true) {
+        // An async function answers a promise carrying what its body returns:
+        // the value the body made is the promise's payload, and the type the
+        // function itself returns is the handle the runtime holds it in. The
+        // promise is settled before the call returns, so what `await` reads is
+        // what the body returned.
+        draft.payload = returns;
+        returns = { kind: "ref", of: null };
+      } else {
+        // A plain function whose body returns a promise answers one to its
+        // callers: `function get() { return new Promise(...); }` is awaited as
+        // the promise it made, which is the one the value it returns carries.
+        const promise = returnedPromise(body.statements);
+        if (promise !== undefined) draft.payload = promise.payload;
       }
       draft.signature = { ...(draft.signature as FunctionSignature), returns: typeToString(returns) };
       draft.compiled = body;
@@ -2195,6 +2448,19 @@ class ProgramResolver {
           line: statement.line,
         };
       case "invoke": {
+        // `await v;` written as a statement: what the promise carries is not
+        // read, but awaiting it still runs what settling it ran and still makes
+        // the failure it carries one a catch arm sees. A value that is not a
+        // promise is nothing to wait for: a call written there is the call the
+        // statement runs, and a name is a reading with no effect.
+        if (statement.function === "Promise.await") {
+          const operand = this.value(statement.args[0] as ProgramValue, null, statement.line);
+          if (promiseOf(operand) === undefined) {
+            if (operand.k === "call") return { kind: "invoke", call: operand.call, line: statement.line };
+            return { kind: "block", body: [], line: statement.line };
+          }
+          return { kind: "invoke", call: this.awaitCall(operand), line: statement.line };
+        }
         const call = this.call({ k: "call", function: statement.function, args: statement.args }, statement.line);
         if (statement.grid !== undefined) {
           call.grid = this.value(statement.grid, null, statement.line);
@@ -2357,7 +2623,14 @@ class ProgramResolver {
           return { kind: "declare", name: named.name, held: named, value, line: statement.line };
         }
         if (held.kind === "text") return declare({ kind: "text", mutable, value: held.value });
-        if (held.kind === "object") return declare({ kind: "object", mutable, type: held.type });
+        if (held.kind === "object") {
+          return declare({
+            kind: "object",
+            mutable,
+            type: held.type,
+            ...(held.promise === undefined ? {} : { promise: held.promise }),
+          });
+        }
         // A name bound to `process.argv` is a reference to an argument value.
         return declare({ kind: "object", mutable, type: { kind: "ref", of: null } });
       }
@@ -2406,6 +2679,12 @@ class ProgramResolver {
       case "isNull":
         return declare({ kind: "number", mutable, type: "bool", text: "" });
       case "call": {
+        const promise = value.call.promise;
+        if (promise !== undefined) {
+          // A promise is a handle the program holds, and what it carries is
+          // what `await` reads out of it: the name keeps both.
+          return declare({ kind: "object", mutable, type: value.call.returns, promise });
+        }
         const returns = primitive(value.call.returns);
         if (returns !== null) {
           // A `u256` is the compiler's own spelling of a bigint, and a call that
@@ -2437,6 +2716,12 @@ class ProgramResolver {
       case "binary":
       case "unary":
       case "conditional": {
+        const promise = promiseOf(value);
+        if (promise !== undefined) {
+          // A choice between promises is a promise: what it carries is what
+          // the arm that was taken carries.
+          return declare({ kind: "object", mutable, type: REF_NULL, promise });
+        }
         // A string the program built is a string: `+` over two texts is one,
         // and a name bound to one holds a string rather than the number the
         // contract type language has no word for. The type of a text is
@@ -2561,6 +2846,10 @@ class ProgramResolver {
         );
       }
       const written = this.value(statement.value, null, statement.line);
+      // What the name holds after the write is what was written: a promise is
+      // a promise and a value that is not one clears what the name said before.
+      if (promiseOf(written) === undefined) delete held.promise;
+      else held.promise = promiseOf(written);
       return { kind: "assign", name: held.name, op: statement.op, value: written, type: null, line: statement.line };
     }
     if (held.kind === "text") {
@@ -2883,6 +3172,7 @@ class ProgramResolver {
           params,
           body: value.body,
           line,
+          ...(value.async === true ? { async: true } : {}),
         };
         this.declared(statement);
         const declaredFn = this.functions.table.get(name);
@@ -3805,6 +4095,9 @@ class ProgramResolver {
     if (a.kind === "primitive" && b.kind === "primitive" && a.name === b.name) return a;
     if (primitive(a) === null || primitive(b) === null) {
       if (a.kind === "slice" && b.kind === "slice") return a;
+      // Two references are references: a choice between two promises, or
+      // between two values the runtime holds, is a value the runtime holds.
+      if (a.kind === "ref" || b.kind === "ref") return a.kind === "ref" ? a : b;
       throw programError(
         `a value of ${typeToString(a)} cannot be used where ${typeToString(b)} is`,
         this.body,
@@ -3842,6 +4135,106 @@ class ProgramResolver {
     return answered === null ? { name, builtin } : { name: whole, builtin: answered };
   }
 
+  /**
+   * The call `await v` becomes, against the value `v` carries.
+   *
+   * A promise is a handle the runtime owns, and what is read out of it is the
+   * value it was settled with: a string is read as the bytes it is, a number as
+   * the number, a truth as the truth, and a value of a shape the compiler does
+   * not name as the dynamic value it is.
+   */
+  private awaitCall(operand: DraftValue): DraftCall {
+    const known = promiseOf(operand)?.payload;
+    const payload = known ?? numeric("f64");
+    const callee = known === undefined
+      ? "Promise.await"
+      : payload.kind === "text"
+        ? "Promise.await.text"
+        : isBoolean(payload)
+          ? "Promise.await.bool"
+          : payload.kind === "primitive" && isWhole(payload.name)
+            ? "Promise.await.whole"
+            : payload.kind === "void"
+              ? "Promise.await.nothing"
+              : payload.kind === "ref"
+                ? "Promise.await.value"
+                : "Promise.await";
+    const builtin = builtinFor(callee) as BuiltinSignature;
+    return {
+      name: callee,
+      signature: {
+        name: callee,
+        symbol: callee,
+        params: [{ name: "promise", type: "ref<any>" }],
+        returns: contractText(builtin.returns),
+      },
+      args: [operand],
+      returns: builtin.returns,
+      effects: [],
+      builtin: true,
+      bigint: false,
+      wide: null,
+      awaiting: true,
+    };
+  }
+
+  /**
+   * What a builtin that answers a promise says about the value that promise
+   * carries. `Promise.resolve(v)` carries `v` and a promise built from an
+   * executor carries what the executor settles it with. A promise whose value
+   * cannot be read here carries a value read dynamically.
+   */
+  /** The call a resolved promise is written as, against the value it carries. */
+  private resolvedCall(operand: DraftValue, callee: string): DraftCall {
+    const builtin = builtinFor(callee) as BuiltinSignature;
+    return {
+      name: callee,
+      signature: {
+        name: callee,
+        symbol: callee,
+        params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+        returns: contractText(builtin.returns),
+      },
+      args: [operand],
+      returns: builtin.returns,
+      effects: [],
+      builtin: true,
+      bigint: false,
+      wide: null,
+      promise: { payload: payloadTypeOf(operand) },
+    };
+  }
+
+  private builtinPromise(name: string, args: readonly DraftValue[]): { promise?: { payload: TypeExpr } } | null {
+    const payload = { payload: { kind: "ref", of: null } as TypeExpr };
+    if (name === "Promise") {
+      const executor = args[0];
+      let carried: TypeExpr = payload.payload;
+      if (executor !== undefined && executor.k === "function" && typeof executor.name === "string") {
+        const draft = this.functions.table.get(executor.name);
+        if (draft !== undefined) {
+          this.settle(draft);
+          if (draft.compiled !== null) {
+            carried = executorPayload(draft.compiled, (name) => {
+              const nested = this.functions.table.get(name);
+              if (nested === undefined) return null;
+              this.settle(nested);
+              return nested.compiled;
+            });
+          }
+        }
+      }
+      return { promise: { payload: carried } };
+    }
+    if (name === "Promise.resolve") return { promise: { payload: payloadTypeOf(args[0] as DraftValue) } };
+    if (name === "Promise.resolve.text") return { promise: { payload: TEXT } };
+    if (name === "Promise.resolve.bool") return { promise: { payload: BOOLEAN } };
+    if (name === "Promise.resolve.nothing") return { promise: { payload: VOID } };
+    if (name === "Promise.resolve.value") return { promise: payload };
+    if (name === "Promise.reject") return { promise: payload };
+    return null;
+  }
+
   private call(value: ProgramValue & { k: "call" }, line: number): DraftCall {
     const builtin = builtinFor(value.function);
     if (builtin !== null) {
@@ -3864,6 +4257,33 @@ class ProgramResolver {
       const args = value.args.map((argument, position) =>
         this.value(argument, builtin.params[position].kind === "text" ? null : builtin.params[position], line),
       );
+      // `await v` is not a call the runtime makes before the operand is read:
+      // what is awaited decides which value is read out of the promise, so the
+      // call is written as the one that reads that value.
+      if (value.function === "Promise.await") {
+        return this.awaitCall(args[0] as DraftValue);
+      }
+      // `asyncio.run(v)` is the value the coroutine's promise carries: a
+      // Python program has no top-level `await`, so this is where it reads one.
+      if (value.function === "asyncio.run") {
+        return this.awaitCall(args[0] as DraftValue);
+      }
+      // `Promise.resolve(v)` carries the value `v` is, so the call is written
+      // as the one that resolves a value of that shape: a string as a string,
+      // a truth as a truth, and a value of a shape nothing names as the dynamic
+      // value it is.
+      if (value.function === "Promise.resolve") {
+        const argument = args[0] as DraftValue;
+        const payload = payloadTypeOf(argument);
+        const callee = payload.kind === "text"
+          ? "Promise.resolve.text"
+          : isBoolean(payload)
+            ? "Promise.resolve.bool"
+            : payload.kind === "ref"
+              ? "Promise.resolve.value"
+              : "Promise.resolve";
+        return this.resolvedCall(argument, callee);
+      }
       // The answer of a call that takes a number and answers a number keeps the
       // kind of the number it was given, in a language that says so: Python's
       // `abs` of a whole number is a whole number, and the compiler's
@@ -3911,6 +4331,7 @@ class ProgramResolver {
         // A builtin is written by the compiler and returns a number of its
         // own, so the question a wide number asks it does not arise.
         wide: null,
+        ...(answered.name.startsWith("Promise") ? { ...(this.builtinPromise(answered.name, args) ?? {}) } : {}),
       };
     }
     // A function the program declared is called like any other: it is compiled
@@ -4000,6 +4421,7 @@ class ProgramResolver {
                 signature.params.slice(0, arity).map((param) => param.name),
               )
             : null,
+        ...(declared.payload === undefined ? {} : { promise: { payload: declared.payload } }),
       };
     }
     // A function with default parameters is callable at a shorter arity
@@ -4045,6 +4467,9 @@ class ProgramResolver {
               signature.params.map((param) => param.name),
             )
           : null,
+      // A function of another file that is async answers a promise, and what
+      // the promise carries is stated beside its contract.
+      ...(contract.promise === undefined ? {} : { promise: { payload: parseType(contract.promise) } }),
     };
   }
 
@@ -4589,6 +5014,12 @@ class ProgramLowering {
     // a value of its own for each parameter it is given.
     const inner = new ProgramLowering(new Set(this.used), this.boxedTexts, this.language, this.layouts);
     const entry = inner.body(draft.compiled as DraftProgram);
+    // An async function answers a promise carrying what its body returns, so
+    // every way out of the body settles that promise before the call returns.
+    // The body itself is unchanged: it runs straight through, which is what a
+    // compiled program does, and the promise is settled with the value the
+    // return made.
+    if (draft.async === true) inner.settleReturns(entry);
     const allocates = entry.releases.length > 0;
     return {
       name: signature.name,
@@ -4624,6 +5055,56 @@ class ProgramLowering {
     // is nothing at all unless the source returns something.
     if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
     return entry;
+  }
+
+  /**
+   * Every way out of an async function settles the promise the function
+   * answers. A body that returns a value settles it with that value, and one
+   * that falls off the end settles it with nothing — which is what the
+   * language's own function does when it runs out of statements.
+   */
+  private settleReturns(block: SemanticBlock): void {
+    if (block.terminator.k === "return") {
+      block.terminator = { k: "return", value: this.settled(block.terminator.value) };
+    }
+    for (const statement of block.statements) {
+      for (const nested of statementBlocksOf(statement)) this.settleReturns(nested);
+    }
+  }
+
+  /** The promise a settled return answers, carrying the value it returned. */
+  private settled(value: SemanticValue | null): SemanticValue {
+    const payload: SemanticType = value === null ? VOID : value.type;
+    const callee = value === null
+      ? "Promise.settle.nothing"
+      : payload.kind === "text"
+        ? "Promise.settle.text"
+        : isBoolean(payload)
+          ? "Promise.settle.bool"
+          : payload.kind === "ref"
+            ? "Promise.settle.value"
+            : "Promise.settle";
+    const builtin = builtinFor(callee) as BuiltinSignature;
+    return {
+      k: "call",
+      type: REF_NULL,
+      call: {
+        callee,
+        signature: {
+          name: callee,
+          symbol: callee,
+          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          returns: contractText(builtin.returns),
+        },
+        args: value === null ? [] : [value],
+        argTypes: value === null ? [] : [payload],
+        returns: builtin.returns,
+        effects: ["memory"],
+        ownership: "none",
+        retain: false,
+        builtin: true,
+      },
+    };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -5184,6 +5665,12 @@ class ProgramLowering {
           index: this.value(value.index, USIZE, line),
         };
       case "call":
+        if (value.call.awaiting === true) {
+          // A value that is not a promise is awaited as itself: the operand is
+          // the value, and the call is only how the word was written down.
+          const operand = value.call.args[0] as DraftValue;
+          if (promiseOf(operand) === undefined) return this.value(operand, as, line);
+        }
         return this.builtin(value.call, line);
       case "compare": {
         // Two strings are compared as the strings they are, at no number at

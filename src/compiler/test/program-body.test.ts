@@ -271,7 +271,6 @@ test("a construct outside the subset is named, with what to write instead", () =
     ["class C { get x(): number { return 1; } }\n", /a get accessor is not supported[\s\S]*write the member as a method and call it/],
     ["enum E { A }\n", /"enum" is not part of a program[\s\S]*const RED = 0/],
     ["function* g(): number { yield 1; }\n", /a generator is not supported/],
-    ["async function g(): number { return 1; }\n", /an async function is not supported/],
   ] as const) {
     assert.match(diagnostic(() => bodyOf(source)), what);
   }
@@ -365,7 +364,6 @@ test("an awaited call in a program body is read as a promise await", () => {
 
 test("a construct outside the subset is named in a function body too", () => {
   for (const [body, what] of [
-    ["return await n;", /"await" is not supported/],
     ["return yield n;", /"yield" is not supported/],
   ] as const) {
     // A module has no body to read the function in, so what the function writes
@@ -712,8 +710,9 @@ test("a string is given to a function of a program by value", () => {
 });
 
 test("an awaited call in a program body is a statement that runs", () => {
-  // `await x;` is a call of the promise the value is, written as a statement:
-  // what it waits for has already run by the time the program reads it.
+  // `await f();` where `f` answers nothing is the call itself: there is no
+  // promise to read a value out of, and what the statement runs is what `f`
+  // does.
   const program = resolved({
     "main.ts": [
       "const start = 1;",
@@ -725,7 +724,7 @@ test("an awaited call in a program body is a statement that runs", () => {
   const statement = program.entry.statements.find((one) => one.k === "call");
   assert.ok(statement !== undefined, "the awaited call is a statement of the program");
   if (statement === undefined) throw new Error("expected a call");
-  assert.equal(statement.call.callee, "Promise.await", "the statement awaits the promise");
+  assert.equal(statement.call.callee, "f", "the statement runs the call it awaits");
 });
 
 test("an element of a dynamic array is read through the runtime", () => {

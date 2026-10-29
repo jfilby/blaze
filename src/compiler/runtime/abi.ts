@@ -460,7 +460,37 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
       ["promise", "void*"],
       ["value", "double"],
     ],
-    "Resolves a promise with a value.",
+    "Resolves a promise with a number.",
+    "The promise handle remains valid.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolve_text",
+    "void",
+    [
+      ["promise", "void*"],
+      ["value", "const char*"],
+    ],
+    "Resolves a promise with a string.",
+    "The promise handle remains valid.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolve_null",
+    "void",
+    [["promise", "void*"]],
+    "Resolves a promise with nothing.",
+    "The promise handle remains valid.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolve_value",
+    "void",
+    [
+      ["promise", "void*"],
+      ["value", "double"],
+    ],
+    "Resolves a promise with a dynamic value.",
     "The promise handle remains valid.",
     { tags: ["host"] },
   ),
@@ -479,13 +509,114 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "blaze_promise_await",
     "double",
     [["promise", "void*"]],
-    "Blocks until the promise settles and returns its value.",
-    "Returns NaN on rejection.",
+    "Reads the number a promise carries.",
+    "A rejected promise leaves the failure pending, and answers 0.",
     { tags: ["host"] },
   ),
+  entry(
+    "blaze_promise_await_text",
+    "const char*",
+    [["promise", "void*"]],
+    "Reads the string a promise carries.",
+    "A rejected promise leaves the failure pending, and answers the empty text.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_await_value",
+    "double",
+    [["promise", "void*"]],
+    "Reads the dynamic value a promise carries.",
+    "A rejected promise leaves the failure pending, and answers nothing as a dynamic value.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_await_nothing",
+    "void",
+    [["promise", "void*"]],
+    "Reads a promise that carries nothing.",
+    "A rejected promise leaves the failure pending.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolved_number",
+    "void*",
+    [["value", "double"]],
+    "Answers a settled promise carrying a number.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolved_text",
+    "void*",
+    [["value", "const char*"]],
+    "Answers a settled promise carrying a string.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolved_null",
+    "void*",
+    [],
+    "Answers a settled promise carrying nothing.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_resolved_value",
+    "void*",
+    [["value", "double"]],
+    "Answers a settled promise carrying a dynamic value.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_rejected",
+    "void*",
+    [["message", "const char*"]],
+    "Answers a promise that has already failed.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_settled_number",
+    "void*",
+    [["value", "double"]],
+    "Answers a settled promise carrying a number, or a failed one when the body left a failure pending.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_settled_text",
+    "void*",
+    [["value", "const char*"]],
+    "Answers a settled promise carrying a string, or a failed one when the body left a failure pending.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_settled_null",
+    "void*",
+    [],
+    "Answers a settled promise carrying nothing, or a failed one when the body left a failure pending.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_promise_settled_value",
+    "void*",
+    [["value", "double"]],
+    "Answers a settled promise carrying a dynamic value, or a failed one when the body left a failure pending.",
+    "Owned by the caller.",
+    { tags: ["host"] },
+  ),
+  entry("blaze_promise_failed", "int", [["promise", "void*"]], "Is 1 when the promise failed.", "", { tags: ["host"] }),
+  entry("blaze_promise_message", "const char*", [["promise", "void*"]], "The message a failed promise carries.", "Borrowed.", { tags: ["host"] }),
   entry("blaze_promise_set_current", "void", [["promise", "void*"]], "Sets the current promise.", "For resolve/reject lowering.", { tags: ["host"] }),
   entry("blaze_promise_clear_current", "void", [], "Clears the current promise.", "", { tags: ["host"] }),
-  entry("blaze_promise_resolve_current", "void", [["value", "double"]], "Resolves the current promise.", "", { tags: ["host"] }),
+  entry("blaze_promise_resolve_current", "void", [["value", "double"]], "Resolves the current promise with a number.", "", { tags: ["host"] }),
+  entry("blaze_promise_resolve_current_text", "void", [["value", "const char*"]], "Resolves the current promise with a string.", "", { tags: ["host"] }),
+  entry("blaze_promise_resolve_current_null", "void", [], "Resolves the current promise with nothing.", "", { tags: ["host"] }),
+  entry("blaze_promise_resolve_current_value", "void", [["value", "double"]], "Resolves the current promise with a dynamic value.", "", { tags: ["host"] }),
   entry("blaze_promise_reject_current", "void", [["message", "const char*"]], "Rejects the current promise.", "", { tags: ["host"] }),
 ];
 
@@ -4336,17 +4467,103 @@ void blaze_error_set(const char* message);
 double blaze_had_error(void);
 const char* blaze_last_error(void);
 
-/* Minimal promise implementation. */
-typedef struct { int settled; int failed; double value; const char* message; } blaze_promise;
-void* blaze_promise_new(void) { blaze_promise* p = malloc(sizeof(blaze_promise)); p->settled = 0; p->failed = 0; p->value = 0.0; p->message = NULL; return p; }
-void blaze_promise_resolve(void* promise, double value) { blaze_promise* p = promise; p->settled = 1; p->failed = 0; p->value = value; p->message = NULL; }
-void blaze_promise_reject(void* promise, const char* message) { blaze_promise* p = promise; p->settled = 1; p->failed = 1; p->value = 0.0/0.0; p->message = message; blaze_error_set(message); }
-double blaze_promise_await(void* promise) { blaze_promise* p = promise; if (p && p->failed) blaze_error_set(p->message); return p ? p->value : 0.0; }
-int blaze_promise_failed(void* promise) { blaze_promise* p = promise; return p ? p->failed : 0; }
+/* Promises.
+
+   A promise is the value an async function answers and what await reads. A
+   compiled program runs a function's body when the function is called, so a
+   promise made here is settled by the time the call returns: what is left for
+   the runtime is to carry the value it was settled with, which is a number, a
+   string, nothing, or a dynamic value the program holds, and to carry the
+   message when it was rejected.
+
+   The payload is tagged rather than boxed, because a number is what most
+   promises carry and boxing one would allocate for every async call. A value
+   read dynamically is the box the runtime already holds it in. */
+typedef enum { BLAZE_PROMISE_NUMBER, BLAZE_PROMISE_TEXT, BLAZE_PROMISE_NULL, BLAZE_PROMISE_VALUE } blaze_promise_kind;
+typedef struct {
+  int settled;
+  int failed;
+  blaze_promise_kind kind;
+  double value;
+  const char* text;
+  const char* message;
+} blaze_promise;
+void* blaze_promise_new(void) {
+  blaze_promise* p = malloc(sizeof(blaze_promise));
+  p->settled = 0;
+  p->failed = 0;
+  p->kind = BLAZE_PROMISE_NULL;
+  p->value = 0.0;
+  p->text = NULL;
+  p->message = NULL;
+  return p;
+}
+void blaze_promise_resolve(void* promise, double value) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 0; p->kind = BLAZE_PROMISE_NUMBER; p->value = value; p->text = NULL; p->message = NULL; }
+void blaze_promise_resolve_text(void* promise, const char* value) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 0; p->kind = BLAZE_PROMISE_TEXT; p->value = 0.0; p->text = value; p->message = NULL; }
+void blaze_promise_resolve_null(void* promise) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 0; p->kind = BLAZE_PROMISE_NULL; p->value = 0.0; p->text = NULL; p->message = NULL; }
+void blaze_promise_resolve_value(void* promise, double value) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 0; p->kind = BLAZE_PROMISE_VALUE; p->value = value; p->text = NULL; p->message = NULL; }
+void blaze_promise_reject(void* promise, const char* message) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 1; p->kind = BLAZE_PROMISE_NULL; p->value = 0.0/0.0; p->text = NULL; p->message = message; blaze_error_set(message); }
+double blaze_promise_await(void* promise) {
+  blaze_promise* p = promise;
+  if (!p) return 0.0;
+  if (p->failed) blaze_error_set(p->message);
+  if (p->kind == BLAZE_PROMISE_VALUE) return blaze_rt_to_number(p->value);
+  if (p->kind == BLAZE_PROMISE_TEXT) return blaze_rt_to_number(blaze_rt_box_string(p->text));
+  return p->value;
+}
+const char* blaze_promise_await_text(void* promise) {
+  blaze_promise* p = promise;
+  if (!p) return "";
+  if (p->failed) blaze_error_set(p->message);
+  if (p->kind == BLAZE_PROMISE_TEXT) return p->text ? p->text : "";
+  if (p->kind == BLAZE_PROMISE_VALUE) return blaze_rt_to_text(p->value);
+  if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_rt_to_text(blaze_rt_box_number(p->value));
+  return "";
+}
+double blaze_promise_await_value(void* promise) {
+  blaze_promise* p = promise;
+  if (!p) return blaze_rt_box_null();
+  if (p->failed) { blaze_error_set(p->message); return blaze_rt_box_null(); }
+  if (p->kind == BLAZE_PROMISE_VALUE) return p->value;
+  if (p->kind == BLAZE_PROMISE_TEXT) return blaze_rt_box_string(p->text);
+  if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_rt_box_number(p->value);
+  return blaze_rt_box_null();
+}
+void blaze_promise_await_nothing(void* promise) {
+  blaze_promise* p = promise;
+  if (p && p->failed) blaze_error_set(p->message);
+}
+void* blaze_promise_resolved_number(double value) { void* p = blaze_promise_new(); blaze_promise_resolve(p, value); return p; }
+void* blaze_promise_resolved_text(const char* value) { void* p = blaze_promise_new(); blaze_promise_resolve_text(p, value); return p; }
+void* blaze_promise_resolved_null(void) { void* p = blaze_promise_new(); blaze_promise_resolve_null(p); return p; }
+void* blaze_promise_resolved_value(double value) { void* p = blaze_promise_new(); blaze_promise_resolve_value(p, value); return p; }
+void* blaze_promise_rejected(const char* message) { void* p = blaze_promise_new(); blaze_promise_reject(p, message); return p; }
+/* A promise a body settles on its way out. A failure the body left pending is
+   what an async function rejects with: what it awaited failed, and the failure
+   travels on the promise rather than only through the flag the catch arm reads.
+   The flag is left as it is, so the await that reads the promise is what
+   reports the failure to the try block it is written in. */
+static void* blaze_promise_failed_with(const char* message) {
+  blaze_promise* p = blaze_promise_new();
+  p->settled = 1;
+  p->failed = 1;
+  p->kind = BLAZE_PROMISE_NULL;
+  p->value = 0.0/0.0;
+  p->message = message;
+  return p;
+}
+void* blaze_promise_settled_number(double value) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_number(value); }
+void* blaze_promise_settled_text(const char* value) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_text(value); }
+void* blaze_promise_settled_null(void) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_null(); }
+void* blaze_promise_settled_value(double value) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_value(value); }
+int blaze_promise_failed(void* promise) { return promise ? ((blaze_promise*)promise)->failed : 0; }
 const char* blaze_promise_message(void* promise) { blaze_promise* p = promise; return p ? p->message : NULL; }
 void blaze_promise_set_current(void* promise) { blaze_current_promise = promise; }
 void blaze_promise_clear_current(void) { blaze_current_promise = NULL; }
 void blaze_promise_resolve_current(double value) { if (blaze_current_promise) blaze_promise_resolve(blaze_current_promise, value); }
+void blaze_promise_resolve_current_text(const char* value) { if (blaze_current_promise) blaze_promise_resolve_text(blaze_current_promise, value); }
+void blaze_promise_resolve_current_null(void) { if (blaze_current_promise) blaze_promise_resolve_null(blaze_current_promise); }
+void blaze_promise_resolve_current_value(double value) { if (blaze_current_promise) blaze_promise_resolve_value(blaze_current_promise, value); }
 void blaze_promise_reject_current(const char* message) { if (blaze_current_promise) blaze_promise_reject(blaze_current_promise, message); }
 void *blaze_current_promise = NULL;
 static int blaze_error_flag = 0;

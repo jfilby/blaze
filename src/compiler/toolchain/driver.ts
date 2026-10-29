@@ -688,6 +688,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // overwritten, then the old object is released. A self-assignment (`x = x`)
     // releases nothing: the name keeps the same object.
     if (operator === "=" && type !== null && isReference(type) && name !== value) {
+      // A value the runtime holds (`ref<any>`) is a handle rather than an
+      // object the program laid out: nothing releases it, and a promise is a
+      // handle the runtime owns for the life of the run.
+      if (type.kind === "ref" && type.of === null && type.name === undefined) return `${name} = ${value};`;
       const old = `blaze_old_${this.builds += 1}`;
       return `{ void* ${old} = ${name}; ${name} = ${value}; ${RUNTIME_NAME}_release(${old}); }`;
     }
@@ -941,7 +945,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "blaze_last_error":
         // The message of the failure is a text, and a program holds a text as
         // the pointer to it.
-        return `((double)(uintptr_t)blaze_last_error())`;
+        return `blaze_last_error()`;
       // The whole numbers: a magnitude, a smaller, a larger, and the three
       // roundings that answer a whole number. The compiler's `Math` builtins
       // answer a fraction, and a whole number is written as one, so each of
@@ -1266,11 +1270,24 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         }
         return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
       }
-      case "Promise.await": {
+      case "Promise.await":
+      case "Promise.await.whole":
+      case "Promise.await.text":
+      case "Promise.await.bool":
+      case "Promise.await.value":
+      case "Promise.await.nothing": {
+        // What is awaited is a promise when it is one, and the promise a
+        // program made is settled by the time it is read. The callee the
+        // resolver chose says which value is read out of it: a string, a
+        // truth, a number, a value the runtime holds, or nothing at all.
+        if (call.callee === "Promise.await.text") return `blaze_promise_await_text((void*)(uintptr_t)${argument(0)})`;
+        if (call.callee === "Promise.await.whole") return `(long long)blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
+        if (call.callee === "Promise.await.bool") return `(blaze_promise_await((void*)(uintptr_t)${argument(0)}) != 0.0)`;
+        if (call.callee === "Promise.await.value") return `blaze_promise_await_value((void*)(uintptr_t)${argument(0)})`;
+        if (call.callee === "Promise.await.nothing") return `(blaze_promise_await_nothing((void*)(uintptr_t)${argument(0)}), 0.0)`;
         // A value that is not a promise is the value itself: awaiting a number
         // is the number, and awaiting a function that hands back nothing is
-        // nothing. What is awaited is a promise when it is one, and the
-        // promise the program is running is settled by the time it is read.
+        // nothing.
         const awaited = call.args[0];
         const kind = awaited === undefined
           ? null
@@ -1285,9 +1302,49 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         if (kind !== null && isNumber(kind)) return argument(0);
         return `blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
       }
+      case "Promise.resolve":
+        return `(double)(uintptr_t)blaze_promise_resolved_number(${argument(0)})`;
+      case "Promise.resolve.text":
+        return `(double)(uintptr_t)blaze_promise_resolved_text(${argument(0)})`;
+      case "Promise.resolve.bool":
+        return `(double)(uintptr_t)blaze_promise_resolved_number((${argument(0)}) ? 1.0 : 0.0)`;
+      case "Promise.resolve.value":
+        return `(double)(uintptr_t)blaze_promise_resolved_value(${argument(0)})`;
+      case "Promise.resolve.nothing":
+        return `(double)(uintptr_t)blaze_promise_resolved_null()`;
+      case "Promise.settle":
+        return `(double)(uintptr_t)blaze_promise_settled_number(${argument(0)})`;
+      case "Promise.settle.text":
+        return `(double)(uintptr_t)blaze_promise_settled_text(${argument(0)})`;
+      case "Promise.settle.bool":
+        return `(double)(uintptr_t)blaze_promise_settled_number((${argument(0)}) ? 1.0 : 0.0)`;
+      case "Promise.settle.value":
+        return `(double)(uintptr_t)blaze_promise_settled_value(${argument(0)})`;
+      case "Promise.settle.nothing":
+        return `(double)(uintptr_t)blaze_promise_settled_null()`;
+      case "Promise.reject": {
+        const arg = call.args[0];
+        const text = arg === undefined
+          ? `""`
+          : (arg.k === "text" || arg.k === "const" || isTextType(arg.type))
+            ? argument(0)
+            : this.toText(argument(0), arg.type, null, this.style);
+        return `(double)(uintptr_t)blaze_promise_rejected(${text})`;
+      }
       case "resolve":
-      case "onFulfilled":
-        return `(blaze_promise_resolve(blaze_current_promise, ${argument(0)}), 0.0)`;
+      case "onFulfilled": {
+        const arg = call.args[0];
+        if (arg !== undefined && isTextType(arg.type)) {
+          return `(blaze_promise_resolve_current_text(${argument(0)}), 0.0)`;
+        }
+        if (arg !== undefined && arg.k === "nothing") {
+          return `(blaze_promise_resolve_current_null(), 0.0)`;
+        }
+        if (arg !== undefined && arg.type.kind === "ref") {
+          return `(blaze_promise_resolve_current_value(${argument(0)}), 0.0)`;
+        }
+        return `(blaze_promise_resolve_current(${argument(0)}), 0.0)`;
+      }
       case "reject":
       case "onRejected": {
         const arg = call.args[0];

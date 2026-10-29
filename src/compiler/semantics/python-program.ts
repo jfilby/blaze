@@ -178,6 +178,10 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       return { k: "null" };
     case "name":
       return { k: "name", name: one.name };
+    case "await":
+      // `await v` is the value the promise `v` carries, which the program body
+      // reads where it is written.
+      return { k: "call", function: "Promise.await", args: [programValue(one.value, bindings)] };
     case "call": {
       // A name bound to a function (a lambda) is called by inlining its body
       // with the arguments bound to its parameters.

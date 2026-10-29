@@ -23,6 +23,9 @@
  *   - expressions: whole and fractional numbers, text and f-strings, `True`,
  *     `False`, `None`, names, calls, indexing, field reads, list and dict
  *     literals, and the arithmetic, the comparison and the logical operators
+ *   - `async def` and `await`: a function whose answer is a promise carrying
+ *     what its body returns, and the value the promise it is written before
+ *     carries. A program reads a coroutine with `asyncio.run`
  *   - types: `int`, `float`, `bool`, `str`, `list[float]`, `list[int]` and
  *     `None`
  *
@@ -38,6 +41,7 @@
  */
 
 import { assembleContract, type AccessRange } from "./contract-build.ts";
+import { typeToString } from "./contract.ts";
 import { isCompilerError } from "../core/errors.ts";
 import { Diagnostics, frontendError } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
@@ -397,6 +401,8 @@ export type PyValue =
   | { k: "dict"; entries: { name: string; value: PyValue }[] }
   | { k: "binary"; op: string; left: PyValue; right: PyValue }
   | { k: "unary"; op: string; operand: PyValue }
+  /** `await v`: the value the promise `v` carries. */
+  | { k: "await"; value: PyValue }
   | { k: "conditional"; condition: PyValue; then: PyValue; otherwise: PyValue }
   | { k: "lambda"; params: { name: string; type: null }[]; body: PyValue }
   | { k: "walrus"; name: string; value: PyValue };
@@ -446,6 +452,11 @@ export interface PyFunction {
   params: PyParam[];
   returns: TypeExpr;
   body: PyStatement[];
+  /**
+   * The source wrote `async def`. The body runs when the function is called and
+   * what the function answers is a promise carrying what the body returns.
+   */
+  async?: boolean;
   /** The decorators written above the function, such as `@triton.jit`. */
   decorators: string[];
   line: number;
@@ -483,7 +494,7 @@ export interface PyModule {
  * Triton source declares. Every other import is refused, because a module of
  * the standard library is a file the compiler does not read.
  */
-export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "triton", "triton.language", "__future__"]);
+export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "asyncio", "triton", "triton.language", "__future__"]);
 
 /**
  * The keywords the subset does not read, and what a source writes instead of
@@ -681,6 +692,7 @@ export const MODULE_BUILTINS: readonly string[] = [
   "min",
   "max",
   "print",
+  "asyncio.run",
   "dict_new",
   "dict_get",
   "dict_set",
@@ -801,10 +813,15 @@ class PythonParser {
         continue;
       }
       if (token.kind === "name" && token.text === "async") {
-        // `async` names nothing the compiler keeps: an async function is a
-        // function, an async class is a class, and the keyword is dropped
-        // where it was written.
         this.next();
+        // `async def` is a function whose answer is a promise carrying what
+        // its body returns. Other uses of `async` name nothing the compiler
+        // keeps: an async class is a class, an async loop is a loop.
+        if (this.peek().kind === "name" && this.peek().text === "def") {
+          const parsed = this.functionDefinition(decorators, true);
+          if (parsed !== null) functions.push(parsed);
+          decorators = [];
+        }
         continue;
       }
       if (token.kind === "name" && token.text === "class") {
@@ -1072,7 +1089,7 @@ class PythonParser {
   }
 
   /** `def name(a: int, b: float) -> float:` and the body it holds. */
-  private functionDefinition(decorators: string[] = []): PyFunction | null {
+  private functionDefinition(decorators: string[] = [], isAsync = false): PyFunction | null {
     const start = this.next();
     const name = this.peek();
     if (name.kind !== "name") {
@@ -1178,7 +1195,7 @@ class PythonParser {
       return null;
     }
     const body = this.block();
-    return { name: name.text, params, returns, body, decorators, line: start.line };
+    return { name: name.text, params, returns, body, decorators, line: start.line, ...(isAsync ? { async: true } : {}) };
   }
 
   /**
@@ -2026,7 +2043,9 @@ class PythonParser {
     const token = this.peek();
     if (token.kind === "name" && token.text === "await") {
       this.next();
-      return this.unary();
+      // `await v` binds like a unary operator, so `await f() + 1` is the value
+      // of the promise plus one.
+      return { k: "await", value: this.unary() };
     }
     if (token.kind === "op" && (token.text === "-" || token.text === "+")) {
       this.next();
@@ -3452,6 +3471,10 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       const known = names.get(value.name);
       return known ?? "unknown";
     }
+    case "await":
+      // The value a promise carries is not known until the function it was
+      // awaited from is read, so the frontend says it does not know it.
+      return "unknown";
     case "call": {
       if (value.name === "len" || value.name === "range") return "int";
       if (value.name === "int") return "int";
@@ -3751,6 +3774,10 @@ export function lowerValue(value: PyValue): Expression {
       }
       return expr;
     }
+    case "await":
+      // `await v` is the value the promise `v` carries; the IR reads the value
+      // out of the promise at the use.
+      return { k: "call", name: "Promise.await", args: [lowerValue(value.value)] };
     case "binary": {
       // Set operations in a function are not lowered: the function's lists are
       // fixed buffers, and a set operation needs a buffer of a size the
@@ -4402,6 +4429,8 @@ function dependsOn(value: PyValue, name: string): boolean {
       return false;
     case "unary":
       return dependsOn(value.operand, name);
+    case "await":
+      return dependsOn(value.value, name);
     case "binary":
       return dependsOn(value.left, name) || dependsOn(value.right, name);
     case "index":
@@ -4756,6 +4785,62 @@ function conversionInValue(value: PyValue): string | null {
  * so the split is the one the contract phase already makes: a file is a
  * program when it has a top level statement that is not a definition.
  */
+/**
+ * The builtin an async function settles its promise with, for the value its
+ * body returns: a string as the text it is, a truth as the truth, a number as
+ * the number, nothing as nothing, and a value of a shape the runtime holds as
+ * the dynamic value it is.
+ */
+function promiseSettleName(payload: TypeExpr): string {
+  if (payload.kind === "text") return "Promise.settle.text";
+  if (payload.kind === "void") return "Promise.settle.nothing";
+  if (payload.kind === "primitive") {
+    if (payload.name === "bool") return "Promise.settle.bool";
+    if (!["i256", "u256"].includes(payload.name)) return "Promise.settle";
+  }
+  return "Promise.settle.value";
+}
+
+/**
+ * An async function's body with every way out of it settling the promise the
+ * function answers. A body that falls off the end settles it with nothing.
+ */
+function settledPythonBody(statements: readonly Statement[], payload: TypeExpr): Statement[] {
+  const name = promiseSettleName(payload);
+  const settle = (statement: Statement): Statement => {
+    switch (statement.kind) {
+      case "result": {
+        // `return None` settles the promise with nothing, which is the call
+        // that takes no value.
+        if (payload.kind === "void" || statement.value.k === "null") {
+          return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
+        }
+        return { ...statement, value: { k: "call", name, args: [statement.value] } };
+      }
+      case "if":
+        return { ...statement, then: statement.then.map(settle), otherwise: statement.otherwise.map(settle) };
+      case "while":
+      case "doWhile":
+      case "loop":
+      case "forOf":
+        return { ...statement, body: statement.body.map(settle) };
+      case "try":
+        return {
+          ...statement,
+          body: statement.body.map(settle),
+          catchBody: statement.catchBody === null ? null : statement.catchBody.map(settle),
+          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map(settle),
+        };
+      default:
+        return statement;
+    }
+  };
+  return [
+    ...statements.map(settle),
+    { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: statements[0]?.line ?? 1 },
+  ];
+}
+
 export const pythonFrontend: Frontend = {
   analyze(source, path): ModuleAnalysis {
     if (typeof source !== "string" || source.trim() === "") {
@@ -4868,20 +4953,27 @@ export const pythonFrontend: Frontend = {
     }
     const body = new BodyAnalysis(declaration).run();
     const usage = usageOf(declaration);
-    return assembleContract({
+    // An async function answers a promise carrying what its body returns, so
+    // every way out of the body settles that promise. The function's own type
+    // is the handle the runtime holds the promise in, and the payload travels
+    // beside the contract so a caller's `await` knows what it reads.
+    const async = declaration.async === true;
+    const statements = expandStoreSlices(declaration.body).map(lowerStatement);
+    const contract = assembleContract({
       name: declaration.name,
       params: declaration.params.map((param) => ({ name: param.name, type: param.type })),
-      returns: declaration.returns,
-      result: body.result,
+      returns: async ? { kind: "ref", of: null } : declaration.returns,
+      result: async ? null : body.result,
       accesses: usage.accesses,
       definition: {
-        statements: expandStoreSlices(declaration.body).map(lowerStatement),
+        statements: async ? settledPythonBody(statements, declaration.returns) : statements,
         allocates: usage.allocates,
         prints: usage.prints,
         readsArgv: usage.readsArgv,
       },
       input,
     });
+    return async ? { ...contract, promise: typeToString(declaration.returns) } : contract;
   },
 
   resolveImport(specifier) {
