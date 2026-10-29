@@ -17,6 +17,7 @@
  * the reference for what the IR means.
  */
 
+import { readFileSync } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
@@ -63,7 +64,7 @@ import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.t
 import { nameLiveness, overlaps } from "../semantics/liveness.ts";
 import { isSafeToCompute, substituteLocals, valueKey } from "../semantics/repair.ts";
 import { turnIsTooCheap } from "../semantics/parallel.ts";
-import { describeObject, writeObject, type DataLabel } from "./elf64.ts";
+import { describeObject, objectSymbols, writeObject, type DataLabel } from "./elf64.ts";
 import { NameScope } from "./names.ts";
 import {
   Encoder,
@@ -2126,21 +2127,18 @@ const CPU_HAS_SSE41: RegExp =
 
 /** What the linker sees in the object that was written. */
 function inspectWrittenObject(objectPath: string, functionName: string): { defined: string[]; undefined: string[] } {
-  const definedResult = run("nm", ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
-  const undefinedResult = run("nm", ["--undefined-only", objectPath], { timeoutMs: 30_000 });
-  if (definedResult.code !== 0 || undefinedResult.code !== 0) {
+  // The object was written by this compiler, and reading it back is what says
+  // it holds what was meant: the symbol table it wrote is the whole answer, and
+  // `nm` was two processes per function asked to repeat it.
+  try {
+    return objectSymbols(readFileSync(objectPath));
+  } catch (reason) {
     throw machineError(
       `cannot inspect the object of ${functionName}`,
-      `${definedResult.stderr}${undefinedResult.stderr}`.trim(),
+      reason instanceof Error ? reason.message : String(reason),
       functionName,
     );
   }
-  const symbolNames = (result: typeof definedResult): string[] =>
-    result.stdout
-      .split("\n")
-      .map((line) => line.trim().split(/\s+/).pop() ?? "")
-      .filter((symbol) => symbol !== "");
-  return { defined: symbolNames(definedResult), undefined: symbolNames(undefinedResult) };
 }
 
 /* -------------------------------------------------------------------------- */

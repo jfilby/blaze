@@ -7,18 +7,20 @@
  * never calls facil.io directly. `--runtime none` never touches facil.io.
  *
  * facil.io is a vendored dependency, pinned below. Its source lives at
- * `deps/facil.io/` (relative to the repository root) and is compiled once per
- * work directory, then bundled together with the adapter into a single
- * relocatable object that the program driver links.
+ * `deps/facil.io/` (relative to the repository root) and its translation units
+ * are compiled at once, one per core, then bundled together with the adapter
+ * into a single relocatable object that the program driver links.
  */
 
 import { readdir, stat, writeFile } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import { CompilerError } from "../core/errors.ts";
-import { run } from "../core/process.ts";
+import { run, runAsync } from "../core/process.ts";
+import { mapConcurrent } from "../core/concurrency.ts";
 import { httpHeaderSource, HTTP_NAME } from "./http.ts";
 import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./http-needs.ts";
 import { RUNTIME_NAME, runtimeSourceSource } from "./abi.ts";
-import { writeRuntimeHeader } from "./standalone.ts";
+import { compileRuntimeSource, writeRuntimeHeader } from "./standalone.ts";
 import { cTargetOptions, optimizationOptions } from "../core/target.ts";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -1850,6 +1852,22 @@ const char *blaze_http_client_resp_body(void *handle, size_t *length) {
 
 }
 
+/**
+ * How many translation units of facil.io are compiled at once.
+ *
+ * One `gcc` compiling one file uses one core, so the set of units can use the
+ * whole machine; it was compiled one after another, which spent all but one of
+ * them waiting. The count is bounded by the machine and not by the number of
+ * units, because each compiler holds its own copy of the headers it read and of
+ * the tree it builds, and a compiler per unit is a build that runs out of
+ * memory before it runs out of work.
+ */
+const MAX_COMPILE_JOBS = 8;
+
+function compileJobs(): number {
+  return Math.max(1, Math.min(MAX_COMPILE_JOBS, availableParallelism()));
+}
+
 /** Builds and compiles facil.io together with the adapter, bundled into one object. */
 export async function buildFacilRuntime(
   workDirectory: string,
@@ -1970,61 +1988,63 @@ export async function buildFacilRuntime(
     ...includeDirs.map((dir) => `-I${dir}`),
   ];
 
-  /* Compile each facil.io translation unit into its own object. */
-  const facilObjects: string[] = [];
-  facilSources.forEach((source, index) => {
-    const objectPath = `${workDirectory}/facil_${index}.o`;
-    const compiled = run(
+  /* The core compiler runtime and the adapter are what the units are bundled
+     with, and neither depends on how a unit was compiled: the core runtime is
+     the compiler's own source, kept from an earlier build when the flags match,
+     and the adapter is one file of the program's own ABI. Both are started
+     before the units are, so they compile while the units do. */
+  const core = compileRuntimeSource({
+    workDirectory,
+    name: RUNTIME_NAME,
+    source: runtimeSourceSource(mode),
+    flags: cFlags,
+  });
+  const adapter = (async () => {
+    /* The adapter is told whether the runtime it is built for speaks TLS, so
+       that the entry point that starts a TLS server is not compiled into a
+       runtime that has no TLS behind it. */
+    const compiled = await runAsync(
       "gcc",
-      [...cFlags, "-c", "-o", objectPath, source],
+      [...cFlags, ...(needs.tls ? ["-DBLAZE_HTTP_TLS=1"] : []), "-c", "-o", adapterObject, adapterSource],
       { timeoutMs: 300_000 },
     );
     if (compiled.spawnError !== undefined || compiled.code !== 0) {
       throw new CompilerError({
         category: "LinkError",
         stage: "compile",
-        message: "facil.io did not compile",
-        detail: `${source}\\n${compiled.stderr.trim() ?? compiled.spawnError ?? ""}`,
+        message: "the HTTP adapter did not compile",
+        detail: `${adapterSource}\n${compiled.stderr.trim() || compiled.spawnError || ""}`,
       });
     }
-    facilObjects.push(objectPath);
+  })();
+  // A build that stops on a unit must not leave the two promises above to fail
+  // on their own: a rejection nothing is waiting for is reported against the
+  // process rather than against the build.
+  core.catch(() => undefined);
+  adapter.catch(() => undefined);
+
+  /* Compile each facil.io translation unit into its own object. The units do
+     not know about each other, so the machine's cores decide how long the set
+     takes: one gcc after another spends all but one of them waiting. What is
+     assembled is the same objects either way, so this is one compile per unit
+     with as many in flight as the machine can run. */
+  const facilObjects = await mapConcurrent(facilSources, compileJobs(), async (source, index) => {
+    const objectPath = `${workDirectory}/facil_${index}.o`;
+    const compiled = await runAsync("gcc", [...cFlags, "-c", "-o", objectPath, source], {
+      timeoutMs: 300_000,
+    });
+    if (compiled.spawnError !== undefined || compiled.code !== 0) {
+      throw new CompilerError({
+        category: "LinkError",
+        stage: "compile",
+        message: "facil.io did not compile",
+        detail: `${source}\n${compiled.stderr.trim() || compiled.spawnError || ""}`,
+      });
+    }
+    return objectPath;
   });
-
-  /* Compile the adapter. The adapter is told whether the runtime it is built
-     for speaks TLS, so that the entry point that starts a TLS server is not
-     compiled into a runtime that has no TLS behind it. */
-  const compiled = run(
-    "gcc",
-    [...cFlags, ...(needs.tls ? ["-DBLAZE_HTTP_TLS=1"] : []), "-c", "-o", adapterObject, adapterSource],
-    { timeoutMs: 300_000 },
-  );
-  if (compiled.spawnError !== undefined || compiled.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "the HTTP adapter did not compile",
-      detail: `${adapterSource}\\n${compiled.stderr.trim() ?? compiled.spawnError ?? ""}`,
-    });
-  }
-
-  /* The core compiler runtime is needed beside facil.io: the driver links it
-     for allocate, print, and the rest of the blaze_rt ABI. */
-  const rtSource = `${workDirectory}/${RUNTIME_NAME}.c`;
-  const rtObject = `${workDirectory}/${RUNTIME_NAME}.o`;
-  await writeFile(rtSource, runtimeSourceSource(mode), "utf8");
-  const rtCompiled = run(
-    "gcc",
-    [...cFlags, "-c", "-o", rtObject, rtSource],
-    { timeoutMs: 120_000 },
-  );
-  if (rtCompiled.spawnError !== undefined || rtCompiled.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "the compiler runtime did not build",
-      detail: `${rtSource}\\n${rtCompiled.stderr.trim() ?? rtCompiled.spawnError ?? ""}`,
-    });
-  }
+  await adapter;
+  const rtObject = (await core).objectPath;
 
   /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links.
      OpenSSL symbols stay undefined here and are resolved when the final program is linked with -lssl -lcrypto. */

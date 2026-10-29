@@ -28,6 +28,9 @@ const SHT_RELA = 4;
 const SHF_ALLOC = 0x2;
 const SHF_EXECINSTR = 0x4;
 const STB_GLOBAL = 1;
+const STB_WEAK = 2;
+/** A binding the compiler's targets do not write, which `nm` still counts as external. */
+const STB_GNU_UNIQUE = 10;
 const STT_NOTYPE = 0;
 const STT_FUNC = 2;
 const SHN_UNDEF = 0;
@@ -338,6 +341,78 @@ interface ReadSection {
   readonly size: number;
   readonly link: number;
   readonly entrySize: number;
+}
+
+/**
+ * The symbols an object carries, in the two lists a linker reads it for.
+ *
+ * The compiler writes the object and then has to know what it says, because the
+ * one thing a lowering owes the program it is linked into is that the object
+ * defines exactly the symbol the program calls it by and refers only to what
+ * something else defines. Reading that back out of the file is the point — it
+ * is what the object says, not what the writer meant — but asking an external
+ * program costs a process per question, and an object holds both answers in one
+ * symbol table.
+ *
+ * The lists are the two `nm` is asked for elsewhere: the defined ones are the
+ * external ones (global and weak bindings), because a local symbol is the
+ * object's own business and nothing links against it, and the undefined ones are
+ * every symbol whose section is not there. Neither list is ordered by anything
+ * the object chose, so a reader that reports a difference sorts it.
+ */
+export interface ObjectSymbols {
+  /** The symbols the object defines that another object may refer to. */
+  defined: string[];
+  /** The symbols the object refers to and does not define. */
+  undefined: string[];
+}
+
+export function objectSymbols(bytes: Uint8Array): ObjectSymbols {
+  // A file that is not an object, or an object of the wrong class, is a read
+  // that would answer garbage rather than nothing: a 32 bit object's offsets
+  // are laid out where a 64 bit one's are not.
+  if (
+    bytes.length < ELF_HEADER_SIZE ||
+    bytes[0] !== 0x7f ||
+    bytes[1] !== 0x45 ||
+    bytes[2] !== 0x4c ||
+    bytes[3] !== 0x46 ||
+    bytes[4] !== 2
+  ) {
+    throw new Error("not an ELF object");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const headersAt = Number(view.getBigUint64(40, true));
+  const count = view.getUint16(60, true);
+  let symbolsAt = 0;
+  let symbolsSize = 0;
+  let entrySize = 0;
+  let stringsAt = 0;
+  for (let at = 0; at < count; at += 1) {
+    const where = headersAt + at * SECTION_HEADER_SIZE;
+    if (view.getUint32(where + 4, true) !== SHT_SYMTAB) continue;
+    symbolsAt = Number(view.getBigUint64(where + 24, true));
+    symbolsSize = Number(view.getBigUint64(where + 32, true));
+    entrySize = Number(view.getBigUint64(where + 56, true));
+    // The string table a symbol table names its symbols out of is the section
+    // its `sh_link` points at.
+    const strings = headersAt + view.getUint32(where + 40, true) * SECTION_HEADER_SIZE;
+    stringsAt = Number(view.getBigUint64(strings + 24, true));
+    break;
+  }
+
+  const defined: string[] = [];
+  const undefined: string[] = [];
+  if (entrySize === 0) return { defined, undefined };
+  for (let at = symbolsAt; at < symbolsAt + symbolsSize; at += entrySize) {
+    const name = readString(bytes, stringsAt + view.getUint32(at, true));
+    if (name === "") continue;
+    const binding = view.getUint8(at + 4) >> 4;
+    const section = view.getUint16(at + 6, true);
+    if (section === SHN_UNDEF) undefined.push(name);
+    else if (binding === STB_GLOBAL || binding === STB_WEAK || binding === STB_GNU_UNIQUE) defined.push(name);
+  }
+  return { defined, undefined };
 }
 
 /**

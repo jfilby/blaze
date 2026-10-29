@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 export interface RunOptions {
   cwd?: string;
@@ -162,4 +162,111 @@ export function run(command: string, args: readonly string[], options: RunOption
             ? command
             : spawnFailure.message,
   };
+}
+
+/**
+ * The same run, awaited rather than waited on.
+ *
+ * `run` blocks the process it is called in, so a caller that has ten
+ * independent programs to run runs them one after another whatever the machine
+ * has cores to run. This is the same contract over a child process that does
+ * not block: the same options, the same result, the same reading of a deadline
+ * and of a program that was never there. What differs is only that the caller
+ * can have several of them in flight, which is what the language and the
+ * toolchain need to use more than one core.
+ *
+ * The deadline is enforced with the same signal, for the same reason: a run
+ * that is asked to stop is a run that may not. A run whose output outgrows the
+ * bound is stopped too, and reported as unable to be read rather than as a run
+ * that finished, because the output a consumer needs is exactly what did not
+ * fit.
+ */
+export function runAsync(command: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
+  const started = process.hrtime.bigint();
+  const spawned = options.heapBytes === undefined ? { command, args } : bounded(command, args, options.heapBytes);
+  const maxBuffer = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER;
+  const deadlineMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  return new Promise<RunResult>((settle) => {
+    const child = spawn(spawned.command, spawned.args, {
+      cwd: options.cwd,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let overflowed = false;
+    let launchError: NodeJS.ErrnoException | undefined;
+    let settled = false;
+
+    const finish = (status: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      const durationNs = process.hrtime.bigint() - started;
+      const missing = stderr.startsWith(MISSING) ? stderr.slice(MISSING.length).trim() : undefined;
+      const spawnFailure =
+        launchError ??
+        (overflowed
+          ? ({ code: "ENOBUFS", message: `the run wrote more than ${maxBuffer} bytes` } as NodeJS.ErrnoException)
+          : undefined);
+      settle({
+        command: formatCommand(command, args),
+        code: missing === undefined && !timedOut ? status : null,
+        signal: missing === undefined ? signal : null,
+        stdout,
+        stderr: missing === undefined ? stderr : "",
+        durationNs,
+        timedOut: missing === undefined && timedOut,
+        spawnError:
+          missing !== undefined
+            ? missing
+            : timedOut || spawnFailure === undefined
+              ? undefined
+              : spawnFailure.code === "ENOENT"
+                ? command
+                : spawnFailure.message,
+      });
+    };
+
+    const stop = (): void => {
+      child.kill(KILL_SIGNAL);
+    };
+
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, Math.max(1, deadlineMs));
+
+    const gather = (into: "stdout" | "stderr", chunk: string): void => {
+      if (into === "stdout") stdout += chunk;
+      else stderr += chunk;
+      if ((stdout.length > maxBuffer || stderr.length > maxBuffer) && !overflowed) {
+        overflowed = true;
+        stop();
+      }
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => gather("stdout", chunk));
+    child.stderr?.on("data", (chunk: string) => gather("stderr", chunk));
+
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      launchError = error;
+      // A child that never launched has no streams to drain and no exit to
+      // wait for, so the answer is the failure itself.
+      finish(null, null);
+    });
+    child.on("close", (status: number | null, signal: NodeJS.Signals | null) => finish(status, signal));
+    // A run that ends before it read what was written to it is the run's answer,
+    // not this process's: the pipe is closed under the write, and that is not the
+    // thing that went wrong.
+    child.stdin?.on("error", () => undefined);
+
+    if (options.input !== undefined) child.stdin?.end(options.input);
+    else child.stdin?.end();
+  });
 }
