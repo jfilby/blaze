@@ -214,6 +214,43 @@ const CONTRACT_OPERATORS: readonly BinaryOp[] = [
 const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
 
 /**
+ * Where an `as` or `satisfies` type ends. A type is followed by the rest of the
+ * expression it is written in, so the operators that continue an expression are
+ * the ones that stop it. A union and an intersection are type operators, not
+ * expression ones, and the scanner reads them as part of the type.
+ */
+const EXPRESSION_TYPE_STOPS: ReadonlySet<string> = new Set([
+  ",",
+  ")",
+  "]",
+  "}",
+  ";",
+  ".",
+  "?",
+  ":",
+  "=",
+  "==",
+  "===",
+  "!=",
+  "!==",
+  "<=",
+  ">",
+  ">=",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "<<",
+  ">>",
+  ">>>",
+  "^",
+  "&&",
+  "||",
+  "??",
+]);
+
+/**
  * The keywords the subset does not read, and what a source writes instead of
  * each one. They are named here rather than left to the parser reading past
  * them: a construct refused by a shape error is reported as whatever token
@@ -235,6 +272,9 @@ export const REFUSED_KEYWORDS: Record<string, string> = {
   yield: "a value the function hands back with return",
   async: "a function whose answer is a promise carrying what its body returns",
 };
+
+/** The refused constructs whose own `{ ... }` is skipped with them. */
+const REFUSED_WITH_BODY: ReadonlySet<string> = new Set(["class", "enum", "namespace", "struct", "with"]);
 
 
 
@@ -436,8 +476,43 @@ function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): Ty
       return binaryResultType(value, scope);
     case "unary":
       return value.op === "!" ? BOOLEAN_RESULT : resultType(value.operand, scope);
-    case "conditional":
+    case "conditional": {
+      // One arm written as null is the guard an optional access writes, and
+      // the value the other arm holds is what the conditional holds where it
+      // is there. Without that, `a?.[0]` was `any`, and `a?.[0] ?? 0` was a
+      // reference coalesced with a number.
+      const otherwiseNull = value.otherwise.k === "null";
+      const thenNull = value.then.k === "null";
+      if (otherwiseNull && !thenNull) return resultType(value.then, scope);
+      if (thenNull && !otherwiseNull) return resultType(value.otherwise, scope);
       return commonResult(resultType(value.then, scope), resultType(value.otherwise, scope));
+    }
+    case "index": {
+      const base = resultType(value.base, scope);
+      if (base.kind === "slice" || base.kind === "array" || base.kind === "ptr") return base.of;
+      if (base.kind === "text") return TEXT_RESULT;
+      return ANY_TYPE;
+    }
+    case "member": {
+      // `length` is the one field every sequence has; a field of an object is
+      // shaped by the layout pass, which the parser has not run.
+      if (value.field === "length") {
+        const base = resultType(value.base, scope);
+        if (base.kind === "slice" || base.kind === "array" || base.kind === "text" || base.kind === "ptr") return NUMBER_RESULT;
+      }
+      return ANY_TYPE;
+    }
+    case "length":
+      return NUMBER_RESULT;
+    case "sized":
+    case "buffer":
+      return { kind: "slice", of: parseType(value.element) };
+    case "fixed":
+      return TEXT_RESULT;
+    case "argv":
+      return TEXT_RESULT;
+    case "update":
+      return resultType({ k: "ident", name: value.name }, scope);
     default:
       return ANY_TYPE;
   }
@@ -518,16 +593,44 @@ function holdsBigint(value: Expression): boolean {
   }
 }
 
-/** Maps a TypeScript type annotation onto a contract type. */
-export function mapTypeScriptType(text: string, position: string, wideBigint = false): TypeExpr {
+/**
+ * Whether reading a value twice is reading the same value. An optional chain
+ * tests the value before `?.` and then reads it again inside the branch, so a
+ * call or an allocation may not be there: two reads of it are two of them.
+ */
+function repeatableExpression(value: Expression): boolean {
+  switch (value.k) {
+    case "ident":
+    case "literal":
+    case "bigint":
+    case "null":
+    case "length":
+      return true;
+    case "member":
+      return repeatableExpression(value.base);
+    case "index":
+      return repeatableExpression(value.base) && repeatableExpression(value.index);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Maps a TypeScript type annotation onto a contract type.
+ *
+ * A type the compiler does not know is a reference the layout pass holds no
+ * shape for, which is the contract's `ref<any>`. It is not a refusal: a module
+ * names its own interfaces, imports types from another module, and works over
+ * collections such as `Map` and `Promise`, and every one of those is a value
+ * the program already knows how to hold as an opaque reference. What a type
+ * says about a buffer or a number is kept; everything else is `any`.
+ */
+export function mapTypeScriptType(text: string, _position: string, wideBigint = false): TypeExpr {
   const source = text.trim();
   if (source === "bigint" && wideBigint) return parseType("u256");
   if (source in PRIMITIVES) return parseType(PRIMITIVES[source]);
   if (source in TYPED_ARRAYS) return { kind: "slice", of: parseType(TYPED_ARRAYS[source]) };
-  throw frontendError(
-    `unsupported TypeScript type "${source}"`,
-    `at ${position}; supported: ${Object.keys(PRIMITIVES).join(", ")}, ${Object.keys(TYPED_ARRAYS).join(", ")}`,
-  );
+  return ANY_TYPE;
 }
 
 /**
@@ -1247,6 +1350,14 @@ class TypeScriptParser {
   private position = 0;
   /** How many loops the statement being read is written in. */
   private loops = 0;
+  /**
+   * The constructs a `break` can leave, innermost last. A loop and a switch
+   * both own one, and a break belongs to the nearest: a switch inside a loop
+   * is left by its break, not the loop around it.
+   */
+  private breakTargets: ("loop" | "switch")[] = [];
+  /** Names the lowered switches have taken, so each has a temporary of its own. */
+  private switchCount = 0;
   /** The classes the file declares, whether or not the module parser sees them. */
   private readonly classTable: ClassTable;
   /** The token stream with class declarations still in it, for class bodies. */
@@ -1300,6 +1411,11 @@ class TypeScriptParser {
    * source wrote them.
    */
   private pending: Statement[] = [];
+  /**
+   * Statements a single read produced before the one it returns, as a switch
+   * needs the temporary its discriminant is held in before the comparisons.
+   */
+  private pendingBefore: Statement[] = [];
   /** The suffix that makes a destructuring temporary a name of its own. */
   private destructureCount = 0;
   private peek(offset = 0): Token {
@@ -1871,6 +1987,167 @@ class TypeScriptParser {
   }
 
   /**
+   * Whether the declaration at a token names only types, so the parser skips
+   * it rather than compiling it. A type alias, an interface and an ambient
+   * `declare` have no runtime value: the program is the same whether they were
+   * written or not, and a file that holds them still compiles.
+   *
+   * `type` is contextual, so a declaration spelled `type = value` is a value:
+   * the alias form always names a type or writes a `{ ... }` list of names.
+   */
+  private typeOnlyDeclarationAt(index = this.position): boolean {
+    let at = index;
+    if (this.tokens[at]?.text === "export") at += 1;
+    const keyword = this.tokens[at]?.text;
+    if (keyword === "declare") return true;
+    if (keyword === "interface") return this.tokens[at + 1]?.kind === "ident";
+    if (keyword === "type") {
+      const next = this.tokens[at + 1];
+      return next?.kind === "ident" || next?.text === "{";
+    }
+    return false;
+  }
+
+  /** Skips the type-only declaration at the parser, to the token after it. */
+  private skipTypeOnlyDeclaration(): void {
+    if (this.at("export")) this.next();
+    if (this.at("declare")) {
+      this.next();
+      this.skipBalancedTypeTokens(new Set([";"]));
+      this.accept(";");
+      return;
+    }
+    if (this.at("interface")) {
+      this.next();
+      if (this.peek().kind === "ident") this.next();
+      if (this.at("<")) this.skipTypeParameters();
+      while (!this.at("{") && this.peek().kind !== "end") this.next();
+      this.skipBalancedBraces();
+      this.accept(";");
+      return;
+    }
+    // `type A = ...;` and `type { A, B } from "./x.ts";`. The list form names
+    // types another module declares, so there is nothing to skip but the list
+    // and the module it names.
+    this.next();
+    if (this.at("{")) {
+      this.skipBalancedBraces();
+      while (!this.at(";") && this.peek().kind !== "end") this.next();
+      this.accept(";");
+      return;
+    }
+    if (this.peek().kind === "ident") this.next();
+    if (this.at("<")) this.skipTypeParameters();
+    if (this.accept("=")) this.skipBalancedTypeTokens(new Set([";"]));
+    this.accept(";");
+  }
+
+  /** Skips the `{ ... }` a declaration writes, and the braces it nests. */
+  private skipBalancedBraces(): void {
+    if (!this.at("{")) return;
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      if (token.text === "{") depth += 1;
+      else if (token.text === "}") {
+        depth -= 1;
+        if (depth === 0) return;
+      }
+    }
+  }
+
+  /** Skips a `<...>` type parameter list, including the `>>` a nested one writes. */
+  private skipTypeParameters(): void {
+    if (!this.at("<")) return;
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      if (token.text === "<") depth += 1;
+      else if (token.text === ">") {
+        depth -= 1;
+        if (depth <= 0) return;
+      } else if (token.text === ">>") {
+        depth -= 2;
+        if (depth <= 0) return;
+      } else if (token.text === ">>>") {
+        depth -= 3;
+        if (depth <= 0) return;
+      }
+    }
+  }
+
+  /**
+   * Skips a run of type tokens, stopping at one of `stops` outside every
+   * bracket. Type arguments nest with `<`, which the tokeniser writes as `>>`
+   * and `>>>` where two or three close together, so those close as many as
+   * they name.
+   */
+  private skipBalancedTypeTokens(stops: ReadonlySet<string>): void {
+    let parens = 0;
+    let brackets = 0;
+    let braces = 0;
+    let angles = 0;
+    const first = this.position;
+    let at = first;
+    while (this.peek().kind !== "end") {
+      const token = this.peek();
+      const text = token.text;
+      // A literal type such as `">>"` is a string token with the brackets in
+      // its text: the brackets are punctuation, and only punctuation nests.
+      const punctuated = token.kind === "punct";
+      const flat = parens === 0 && brackets === 0 && braces === 0 && angles === 0;
+      // A stop is read before the bracket it may open. `{` is the one that is
+      // both: it starts an object type where the type expects one, and it
+      // opens the function body where the annotation has ended.
+      if (punctuated && flat && stops.has(text)) {
+        const opener = text === "(" || text === "[" || text === "{" || text === "<";
+        const previous = this.tokens[at - 1]?.text;
+        const continues =
+          previous === "|" ||
+          previous === "&" ||
+          previous === ":" ||
+          previous === "?" ||
+          previous === "=>" ||
+          previous === "," ||
+          previous === "<";
+        if (!opener || (at > first && !continues)) return;
+      }
+      if (!punctuated) {
+        this.next();
+        at += 1;
+        continue;
+      }
+      if (text === "(") parens += 1;
+      else if (text === ")") {
+        if (parens === 0) return;
+        parens -= 1;
+      } else if (text === "[") brackets += 1;
+      else if (text === "]") {
+        if (brackets === 0) return;
+        brackets -= 1;
+      } else if (text === "{") braces += 1;
+      else if (text === "}") {
+        if (braces === 0) return;
+        braces -= 1;
+      } else if (text === "<") angles += 1;
+      else if (text === ">") {
+        if (angles === 0) return;
+        angles -= 1;
+      } else if (text === ">>") {
+        if (angles < 2) return;
+        angles -= 2;
+      } else if (text === ">>>") {
+        if (angles < 3) return;
+        angles -= 3;
+      }
+      this.next();
+      at += 1;
+    }
+  }
+
+  /**
    * Parses a module: the imports it binds, the functions it declares, and the
    * statements it runs.
    *
@@ -1909,11 +2186,25 @@ class TypeScriptParser {
       if (atTop && this.at("import")) {
         const start = this.position;
         this.next();
-        imports.push(this.readImport());
+        // `import type { T } from "./x.ts"` binds a type and no value, so the
+        // module it names is never read at run time and is not an import.
+        const typeOnly = this.at("type");
+        if (typeOnly) this.next();
+        const imported = this.readImport(typeOnly);
         importsWritten.push({ start, end: this.position });
+        if (!typeOnly && !(imported.names !== null && imported.names.length === 0 && !imported.default)) {
+          imports.push(imported);
+        }
         continue;
       }
-      if (this.at("function") || this.at("export") || this.at("async")) {
+      if (
+        this.at("function") ||
+        this.at("export") ||
+        this.at("async") ||
+        this.at("type") ||
+        this.at("interface") ||
+        this.at("declare")
+      ) {
         const declaration = this.readDeclaration(functions, namesExported);
         declarations.push(declaration);
         if (declaration.offers !== null) defaultExport = declaration.offers;
@@ -2126,6 +2417,13 @@ class TypeScriptParser {
    * and answers no default.
    */
   private readFunctionDeclaration(functions: DeclaredFunction[], namesExported: Record<string, true>): string | null {
+    // A declaration that names only types writes no value and runs nothing, so
+    // it is skipped where it is written and the declarations after it are read
+    // as if it were not there.
+    if (this.typeOnlyDeclarationAt()) {
+      this.skipTypeOnlyDeclaration();
+      return null;
+    }
     let isAsync = false;
     if (this.at("async")) {
       this.next();
@@ -2187,6 +2485,9 @@ class TypeScriptParser {
       this.synchronize();
       return null;
     }
+    // The type parameters a generic function declares are erased with the
+    // types themselves: they say what the body may hold, not what it does.
+    if (this.at("<")) this.skipTypeParameters();
     const parsed = this.parseFunction(name, isAsync);
     if (parsed === null) return null;
     functions.push({
@@ -2210,6 +2511,18 @@ class TypeScriptParser {
         this.report("expected an exported name", `near "${name.text}"`, name);
         continue;
       }
+      // `export { type T }` offers a type, not a function: the list still ends
+      // where the source wrote it. `{ type as alias }` offers the value named
+      // `type`, so an `as` after it is not the type modifier.
+      if (name.text === "type" && this.peek().kind === "ident" && this.peek().text !== "as") {
+        this.next();
+        if (this.at("as")) {
+          this.next();
+          if (this.peek().kind === "ident") this.next();
+        }
+        if (!this.accept(",")) break;
+        continue;
+      }
       names.push(name.text);
       if (!this.accept(",")) break;
     }
@@ -2230,14 +2543,33 @@ class TypeScriptParser {
    * binds the exports it names, and `import f from "./other.ts";`, which binds
    * whatever the module exports as its default.
    */
-  private readImport(): ModuleImport {
+  private readImport(typeOnly = false): ModuleImport {
     const start = this.peek();
+    // `import * as ns from "./x.ts"` binds every export under one name. This
+    // linker is by function name, so a namespace has no name to bind: the form
+    // is read and the names it brings in are not. A type-only namespace names
+    // no value at all, so it is skipped without a refusal.
+    if (this.at("*")) {
+      this.next();
+      if (this.at("as")) {
+        this.next();
+        if (this.peek().kind === "ident") this.next();
+      }
+      if (!typeOnly) {
+        this.report(
+          "namespace imports are not supported",
+          'import the functions by name, as in import { f } from "./other.ts"',
+          start,
+        );
+      }
+      return this.readImportTail(start, [], false);
+    }
     // `import d from "./x.ts"` and `import d, { a, b } from "./x.ts"`. The
     // local name a default import writes is not carried, because the programs
     // of this subset are linked by the name a function was declared with: one
     // table holds every function of every file, so a second name for one of
     // them would be a second compilation of it.
-    if (!this.at("{") && !this.at("*") && (this.peek(1).kind === "ident" || this.peek(1).text === ",")) {
+    if (!this.at("{") && (this.peek(1).kind === "ident" || this.peek(1).text === ",")) {
       this.next();
       return this.readImportTail(start, this.accept(",") ? this.readImportedNames() : [], true);
     }
@@ -2261,6 +2593,19 @@ class TypeScriptParser {
       const name = this.next();
       if (name.kind !== "ident") {
         this.report("expected an imported name", `near "${name.text}"`, name);
+        continue;
+      }
+      // `{ type T }` names a type the import does not bind at run time. The
+      // alias, where one is written, is read with it so the list still ends
+      // where the source wrote it. `{ type as alias }` imports the value named
+      // `type`, so an `as` after it is not the type modifier.
+      if (name.text === "type" && this.peek().kind === "ident" && this.peek().text !== "as") {
+        this.next();
+        if (this.at("as")) {
+          this.next();
+          if (this.peek().kind === "ident") this.next();
+        }
+        if (!this.accept(",")) break;
         continue;
       }
       if (this.at("as")) {
@@ -2327,14 +2672,11 @@ class TypeScriptParser {
         // the second form: the default says what the parameter holds.
         let mapped: TypeExpr | null = null;
         if (this.accept(":")) {
-          const type = this.peek();
-          if (type.kind !== "ident") {
-            this.report("expected a parameter type", `near "${type.text}"`, type);
-            this.synchronize();
-            break;
-          }
-          mapped = this.readTypeAnnotation("a parameter type");
-          if (type.text && this.classTable.names.has(type.text)) this.valueClasses.set(parameter.text, type.text);
+          // A type may be a named type, a union, a generic, an object or a
+          // function type: every one of them is read to its end and erased.
+          const head = this.peek().kind === "ident" ? this.peek().text : "";
+          mapped = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
+          if (head !== "" && this.classTable.names.has(head)) this.valueClasses.set(parameter.text, head);
         }
         const fallback = this.accept("=") ? this.readExpression() : undefined;
         if (mapped === null) {
@@ -2364,13 +2706,7 @@ class TypeScriptParser {
       return declared(inferredResult(body, params), body);
     }
     this.next();
-    const returns = this.peek();
-    if (returns.kind !== "ident") {
-      this.report("expected a return type", `near "${returns.text}"`, returns);
-      this.skipBlock();
-      return null;
-    }
-    const returnType = this.readTypeAnnotation("a return type");
+    const returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
     if (this.accept("=")) {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
       const value = this.readExpression();
@@ -2381,44 +2717,113 @@ class TypeScriptParser {
   }
 
   /**
-   * A type annotation, which may name a union of types. The union is held at
-   * the one type that holds both members, so `number | bigint` is the bigint
-   * member at the width the file's bigints reach.
+   * Reads a type annotation to one of the types the contract has.
+   *
+   * TypeScript's type language is larger than the value language this frontend
+   * compiles, and none of it runs: an interface, a union, a type argument and a
+   * function type are all erased. What the annotation says about a number, a
+   * buffer or a class is kept, and everything else is the opaque reference
+   * `any`. The tokens are read to their end by `skipBalancedTypeTokens`, so a
+   * nested `Map<string, Array<number>>` is one annotation and not a run of
+   * expressions.
+   *
+   * `promisePayload` reads `Promise<T>` as `T`: an async function's result is
+   * the value its promise carries, which is what the contract describes.
    */
-  private readTypeAnnotation(what: string): TypeExpr {
-    const first = this.next();
-    if (first.kind !== "ident") {
-      this.report(`expected ${what}`, `near "${first.text}"`, first);
+  private readTypeAnnotation(what: string, stops: ReadonlySet<string>, promisePayload = false): TypeExpr {
+    const start = this.position;
+    this.skipBalancedTypeTokens(stops);
+    const end = this.position;
+    if (start === end) {
+      this.report(`expected ${what}`, `near "${this.peek().text}"`, this.peek());
       return ANY_TYPE;
     }
-    let name = first.text;
-    while (this.accept("|")) {
-      const other = this.next();
-      if (other.kind !== "ident") {
-        this.report(`expected ${what} after "|"`, `near "${other.text}"`, other);
-        continue;
-      }
-      name = unionTypeName(name, other.text);
-    }
-    return this.mapType({ ...first, text: name });
+    return this.typeFromTokens(start, end, promisePayload);
   }
 
-  /** A type annotation as the contract sees it; an unreadable one is `any`. */
-  private mapType(token: Token): TypeExpr {
-    if (token.text === "any" || token.text === "object" || token.text === "unknown") return ANY_TYPE;
-    if (token.text === "void") return NOTHING;
-    if (token.text === "bigint" && this.wideBigint) return parseType("u256");
+  /** The type a run of annotation tokens names, or `any` where none does. */
+  private typeFromTokens(start: number, end: number, promisePayload: boolean): TypeExpr {
+    let from = start;
+    // `readonly` is a promise about writes, and a value the compiler holds is
+    // already the one its declaration states.
+    while (this.tokens[from]?.text === "readonly") from += 1;
+    if (from >= end) return ANY_TYPE;
+    if (promisePayload) {
+      const payload = this.promisePayload(from, end);
+      if (payload !== null) return this.typeFromTokens(payload.start, payload.end, false);
+    }
+    const first = this.tokens[from] as Token;
+    // A function type, an object type, a tuple and a literal type all describe
+    // something the contract can hold only as an opaque reference.
+    if (first.text === "(" || first.text === "{" || first.text === "[" || first.kind !== "ident") return ANY_TYPE;
+    if (first.text === "typeof" || first.text === "keyof" || first.text === "infer" || first.text === "unique" || first.text === "new") {
+      return ANY_TYPE;
+    }
+    // A conditional or an intersection has no one member the contract can
+    // name, so it is the reference.
+    let depth = 0;
+    for (let at = from; at < end; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      const text = token.text;
+      // An array, tuple, function or object type is a value the runtime does
+      // not hold as a buffer: only a typed array annotation names one, and that
+      // is a plain name. A type argument's brackets are inside `<` already.
+      if (depth === 0 && (text === "[" || text === "(" || text === "{")) return ANY_TYPE;
+      if (text === "(" || text === "[" || text === "{" || text === "<") depth += 1;
+      else if (text === ")" || text === "]" || text === "}" || text === ">") depth -= 1;
+      else if (text === ">>") depth -= 2;
+      else if (text === ">>>") depth -= 3;
+      else if (depth === 0 && (text === "&" || text === "extends" || text === "?")) return ANY_TYPE;
+    }
+    // A union is held at the one member that holds both, as `number | bigint`
+    // is the bigint: the wider numeric member, and otherwise the first one.
+    let name = first.text;
+    depth = 0;
+    for (let at = from + 1; at < end; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      if (token.text === "(" || token.text === "[" || token.text === "{" || token.text === "<") depth += 1;
+      else if (token.text === ")" || token.text === "]" || token.text === "}" || token.text === ">") depth -= 1;
+      else if (token.text === ">>") depth -= 2;
+      else if (token.text === ">>>") depth -= 3;
+      else if (depth === 0 && token.text === "|") {
+        const nextToken = this.tokens[at + 1];
+        if (nextToken?.kind === "ident") name = unionTypeName(name, nextToken.text);
+      }
+    }
+    if (name === "void") return NOTHING;
+    if (name === "any" || name === "object" || name === "unknown" || name === "never") return ANY_TYPE;
+    if (name === "bigint" && this.wideBigint) return parseType("u256");
     // A class names the layout an instance holds. The layout pass names the
     // object by its fields and the class's own name is an alias of it, so the
     // annotation is the reference a caller reads its fields through.
-    if (this.classTable.names.has(token.text)) return this.referenceTo(token.text);
-    try {
-      return mapTypeScriptType(token.text, `line ${token.line} of ${this.path}`);
-    } catch (error) {
-      if (!isCompilerError(error)) throw error;
-      this.report(error.message, error.detail ?? "", token);
-      return ANY_TYPE;
+    if (this.classTable.names.has(name)) return this.referenceTo(name);
+    return mapTypeScriptType(name, `line ${first.line} of ${this.path}`);
+  }
+
+  /** The `<...>` of `Promise<T>`, or null where the run is not a promise. */
+  private promisePayload(start: number, end: number): { start: number; end: number } | null {
+    if (this.tokens[start]?.text !== "Promise" || this.tokens[start + 1]?.text !== "<") return null;
+    const open = start + 1;
+    let depth = 0;
+    for (let at = open; at < end; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      const text = token.text;
+      if (text === "<") depth += 1;
+      else if (text === ">") {
+        depth -= 1;
+        if (depth === 0) return at > open + 1 ? { start: open + 1, end: at } : null;
+      } else if (text === ">>") {
+        depth -= 2;
+        if (depth <= 0) return at > open + 1 ? { start: open + 1, end: at } : null;
+      } else if (text === ">>>") {
+        depth -= 3;
+        if (depth <= 0) return at > open + 1 ? { start: open + 1, end: at } : null;
+      }
     }
+    return null;
   }
 
   private readBlock(): Statement[] {
@@ -2433,6 +2838,12 @@ class TypeScriptParser {
       // postcondition and left the build reporting a function it could not
       // check.
       if (this.accept(";")) continue;
+      // A type declared in a body names nothing the body runs, so it is
+      // skipped where it is written.
+      if (this.typeOnlyDeclarationAt()) {
+        this.skipTypeOnlyDeclaration();
+        continue;
+      }
       statements.push(...this.withPending(this.readStatement()));
     }
     this.expect("}");
@@ -2441,6 +2852,10 @@ class TypeScriptParser {
 
   /** A body that follows a keyword: a block, or the one statement written. */
   private readBody(): Statement[] {
+    if (this.typeOnlyDeclarationAt()) {
+      this.skipTypeOnlyDeclaration();
+      return [];
+    }
     return this.at("{") ? this.readBlock() : this.withPending(this.readStatement());
   }
 
@@ -2450,10 +2865,12 @@ class TypeScriptParser {
    * has to run before the names read it.
    */
   private withPending(statement: Statement): Statement[] {
-    if (this.pending.length === 0) return [statement];
+    const before = this.pendingBefore;
+    this.pendingBefore = [];
+    if (before.length === 0 && this.pending.length === 0) return [statement];
     const rest = this.pending;
     this.pending = [];
-    return [statement, ...rest];
+    return [...before, statement, ...rest];
   }
 
   readStatement(): Statement {
@@ -2472,9 +2889,9 @@ class TypeScriptParser {
       let type: TypeExpr | null = null;
       let annotationClass: string | null = null;
       if (this.accept(":")) {
-        const annotation = this.peek();
-        type = annotation.kind === "ident" ? this.readTypeAnnotation("a variable type") : null;
-        if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) annotationClass = annotation.text;
+        const head = this.peek().kind === "ident" ? this.peek().text : "";
+        type = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
+        if (head !== "" && this.classTable.names.has(head)) annotationClass = head;
       }
       if (!this.accept("=")) {
         this.report("a declaration needs an initialiser", `as in let ${name.text} = 0;`, name);
@@ -2495,6 +2912,7 @@ class TypeScriptParser {
     if (this.at("try")) return this.readTry();
     if (this.at("while")) return this.readWhile();
     if (this.at("do")) return this.readDoWhile();
+    if (this.at("switch")) return this.readSwitch();
     if (this.at("break") || this.at("continue")) {
       const keyword = this.next();
       if (this.peek().kind === "ident") {
@@ -2508,7 +2926,9 @@ class TypeScriptParser {
         this.synchronize();
         return { kind: "expression", value: this.hole(), line: keyword.line };
       }
-      if (this.loops === 0) {
+      const leavesSwitch =
+        keyword.text === "break" && this.breakTargets[this.breakTargets.length - 1] === "switch";
+      if (!leavesSwitch && this.loops === 0) {
         this.report(
           `"${keyword.text}" is not within a loop`,
           "a function leaves a loop with break, and goes on with continue",
@@ -2549,7 +2969,12 @@ class TypeScriptParser {
     const refused = REFUSED_KEYWORDS[token.text];
     if (refused !== undefined) {
       this.report(`"${token.text}" is not supported`, refused, token);
-      this.skipBlock();
+      // A refused construct that carries a body is skipped as the body it
+      // writes; one that does not is skipped as the statement it is. Skipping
+      // `yield x;` as a block ran to the next `{` in the file, which was a
+      // function or class the source wrote after it.
+      if (REFUSED_WITH_BODY.has(token.text)) this.skipBlock();
+      else this.synchronize();
       return { kind: "expression", value: this.hole(), line: token.line };
     }
     if (this.at("{")) {
@@ -2805,6 +3230,23 @@ class TypeScriptParser {
       return this.readMemberAssignment();
     }
     const operator = this.peek();
+    // `x ??= value` writes only where x is null. It is an `if`, not a compound
+    // assignment: the value is not computed where x holds one.
+    if (operator.text === "??=") {
+      this.next();
+      const value = this.readExpression();
+      this.accept(";");
+      // The write is the `??` the operator names: `x ??= value` is `x = x ??
+      // value`. A null check spelled `x == null` is not the same question for
+      // a number, where zero is a value and not the absence of one.
+      return {
+        kind: "assign",
+        target: target.text,
+        op: "=",
+        value: { k: "binary", op: "??", left: { k: "ident", name: target.text }, right: value },
+        line: target.line,
+      };
+    }
     if (operator.kind !== "punct" || !(operator.text in COMPOUND_OPERATORS)) {
       if (operator.text !== "=") {
         this.position = start;
@@ -2843,13 +3285,28 @@ class TypeScriptParser {
     const index = this.readExpression();
     this.expect("]");
     const operator = this.peek();
-    if (operator.kind !== "punct" || (operator.text !== "=" && !(operator.text in COMPOUND_OPERATORS))) {
+    if (operator.kind !== "punct" || (operator.text !== "=" && operator.text !== "??=" && !(operator.text in COMPOUND_OPERATORS))) {
       this.position = start;
       return null;
     }
     this.next();
     const value = this.readExpression();
     this.accept(";");
+    if (operator.text === "??=") {
+      return {
+        kind: "indexAssign",
+        buffer: buffer.text,
+        index,
+        op: "=",
+        value: {
+          k: "binary",
+          op: "??",
+          left: { k: "index", base: { k: "ident", name: buffer.text }, index },
+          right: value,
+        },
+        line: buffer.line,
+      };
+    }
     return {
       kind: "indexAssign",
       buffer: buffer.text,
@@ -2870,7 +3327,14 @@ class TypeScriptParser {
     this.next();
     const field = this.next();
     const operator = this.peek();
-    if (field.kind !== "ident" || (operator.text !== "=" && operator.text !== "++" && operator.text !== "--" && !(operator.text in COMPOUND_OPERATORS))) {
+    if (
+      field.kind !== "ident" ||
+      (operator.text !== "=" &&
+        operator.text !== "??=" &&
+        operator.text !== "++" &&
+        operator.text !== "--" &&
+        !(operator.text in COMPOUND_OPERATORS))
+    ) {
       this.position = start;
       return null;
     }
@@ -2889,9 +3353,25 @@ class TypeScriptParser {
     this.next();
     const value = this.readExpression();
     this.accept(";");
+    const writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
+    if (operator.text === "??=") {
+      return {
+        kind: "memberAssign",
+        base: writtenBase,
+        field: field.text,
+        op: "=",
+        value: {
+          k: "binary",
+          op: "??",
+          left: { k: "member", base: { k: "ident", name: writtenBase }, field: field.text },
+          right: value,
+        },
+        line: base.line,
+      };
+    }
     return {
       kind: "memberAssign",
-      base: base.text === "this" && this.currentClass !== null ? "self" : base.text,
+      base: writtenBase,
       field: field.text,
       op: operator.text as AssignOperator,
       value,
@@ -3028,6 +3508,112 @@ class TypeScriptParser {
     return { kind: "try", body, catchParam, catchBody, finallyBody, line: start.line };
   }
 
+  /**
+   * `switch (value) { case a: ... }`, lowered to the comparisons it is.
+   *
+   * The discriminant is read once into a temporary, because a case test reads
+   * it however many cases there are. A case without a `break` falls into the
+   * next one, so what a matching case runs is its own statements and every
+   * case after it until one that breaks. The default runs when no case
+   * matches, and a default that is not last is reached by falling into the
+   * cases after it as the source says.
+   */
+  private readSwitch(): Statement {
+    const start = this.next();
+    this.expect("(");
+    const discriminant = this.readExpression();
+    this.expect(")");
+    if (!this.accept("{")) {
+      this.report('expected "{"', "a switch body is written in braces");
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
+    interface SwitchCase {
+      test: Expression | null;
+      body: Statement[];
+      breaks: boolean;
+      line: number;
+    }
+    const cases: SwitchCase[] = [];
+    while (!this.at("}") && this.peek().kind !== "end") {
+      const line = this.peek().line;
+      let test: Expression | null = null;
+      if (this.accept("case")) {
+        test = this.readExpression();
+        this.expect(":");
+      } else if (this.accept("default")) {
+        this.expect(":");
+      } else {
+        this.report("a switch body holds cases", `near "${this.peek().text}"`);
+        this.synchronize();
+        continue;
+      }
+      const body: Statement[] = [];
+      let breaks = false;
+      this.breakTargets.push("switch");
+      while (!this.at("case") && !this.at("default") && !this.at("}") && this.peek().kind !== "end") {
+        // A `break` at the level of the case leaves the switch. A labelled one
+        // is left to the statement reader, which refuses the label where it is
+        // written.
+        if (this.at("break") && this.peek(1).kind !== "ident") {
+          this.next();
+          this.accept(";");
+          breaks = true;
+          break;
+        }
+        body.push(...this.withPending(this.readStatement()));
+      }
+      this.breakTargets.pop();
+      // The statements after a break are unreachable. They are read past so
+      // the next case starts where the source wrote it.
+      while (breaks && !this.at("case") && !this.at("default") && !this.at("}") && this.peek().kind !== "end") {
+        this.next();
+      }
+      cases.push({ test, body, breaks, line });
+    }
+    this.expect("}");
+    return this.lowerSwitch(start.line, discriminant, cases);
+  }
+
+  /** The if-chain a switch is, with the fallthrough its cases write. */
+  private lowerSwitch(
+    line: number,
+    discriminant: Expression,
+    cases: { test: Expression | null; body: Statement[]; breaks: boolean; line: number }[],
+  ): Statement {
+    const executions = cases.map((_one, index) => {
+      const body: Statement[] = [];
+      for (let at = index; at < cases.length; at += 1) {
+        body.push(...cases[at].body);
+        if (cases[at].breaks) break;
+      }
+      return body;
+    });
+    const defaultIndex = cases.findIndex((one) => one.test === null);
+    let chain: Statement[] = defaultIndex >= 0 ? [...executions[defaultIndex]] : [];
+    const temporary = `__switch${this.switchCount}`;
+    this.switchCount += 1;
+    for (let index = cases.length - 1; index >= 0; index -= 1) {
+      const one = cases[index] as { test: Expression | null; body: Statement[]; breaks: boolean; line: number };
+      if (one.test === null) continue;
+      chain = [
+        {
+          kind: "if",
+          condition: { k: "binary", op: "===", left: { k: "ident", name: temporary }, right: one.test },
+          then: executions[index] as Statement[],
+          otherwise: chain,
+          line: one.line,
+        },
+      ];
+    }
+    if (chain.length === 0) {
+      return { kind: "expression", value: { k: "literal", text: "0" }, line };
+    }
+    this.pendingBefore.push({ kind: "declare", name: temporary, type: null, init: discriminant, line });
+    if (chain.length === 1) return chain[0] as Statement;
+    this.pendingBefore.push(...(chain.slice(0, -1) as Statement[]));
+    return chain[chain.length - 1] as Statement;
+  }
+
   private readIf(): Statement {
     const start = this.next();
     this.expect("(");
@@ -3110,7 +3696,9 @@ class TypeScriptParser {
    */
   private loopBody(): Statement[] {
     this.loops += 1;
+    this.breakTargets.push("loop");
     const body = this.readBody();
+    this.breakTargets.pop();
     this.loops -= 1;
     return body;
   }
@@ -3392,131 +3980,193 @@ class TypeScriptParser {
     return { k: "argv", index: null };
   }
 
-  /** A primary, then any number of indexings, field reads, calls and updates. */
+  /**
+   * A primary, then any number of indexings, field reads, calls and updates.
+   *
+   * An optional access, `a?.b`, is read into a chain of conditional values:
+   * `a != null ? a.b : null`. The value before the `?` is what the condition
+   * tests, and every access after it belongs inside the `then`, so
+   * `a?.b.c` reads `a.b.c` only where `a` is not null. A second `?.` nests
+   * another conditional inside the first.
+   */
   private readPostfix(): Expression {
+    interface OptionalLink {
+      condition: Expression;
+      then: Expression;
+      child: OptionalLink | null;
+    }
     let base = this.readPrimary();
+    let optionalRoot: OptionalLink | null = null;
+    let optional: OptionalLink | null = null;
+    const current = (): Expression => (optional === null ? base : optional.then);
+    const replace = (next: Expression): void => {
+      if (optional === null) base = next;
+      else optional.then = next;
+    };
+    const beginOptional = (): void => {
+      const target = current();
+      // The value before `?.` is read by the condition and again inside the
+      // branch, so it has to be a value reading twice does not change.
+      if (!repeatableExpression(target)) {
+        this.report(
+          "an optional chain reads the value before `?.` twice",
+          "write the value into a name first, as in const value = f(); value?.field",
+          this.peek(),
+        );
+      }
+      const link: OptionalLink = {
+        condition: { k: "binary", op: "!=", left: target, right: { k: "null" } },
+        then: target,
+        child: null,
+      };
+      if (optionalRoot === null) optionalRoot = link;
+      else (optional as OptionalLink).child = link;
+      optional = link;
+    };
+    const finish = (): Expression => {
+      const fold = (link: OptionalLink): Expression => {
+        const inside = link.child === null ? link.then : fold(link.child);
+        return { k: "conditional", condition: link.condition, then: inside, otherwise: { k: "null" } };
+      };
+      return optionalRoot === null ? base : fold(optionalRoot);
+    };
     for (;;) {
+      // `?.` is the optional access. A lone `?` is the conditional operator,
+      // which the expression reader above reads from the value this returns.
+      // `?.[i]` also writes the dot, so the token after the question is the
+      // one that decides.
+      if (this.at("?") && this.peek(1).text === ".") {
+        beginOptional();
+        this.next();
+        // `?.[i]` and `?.(args)` write a dot between the question and the
+        // bracket; the access that follows is the one the loop reads.
+        if (this.at(".") && (this.peek(1).text === "[" || this.peek(1).text === "(")) this.next();
+        continue;
+      }
       if (this.at("[")) {
+        const target = current();
         this.next();
         const index = this.readExpression();
         this.expect("]");
-        base = base.k === "argv" ? { k: "argv", index } : { k: "index", base, index };
+        replace(target.k === "argv" ? { k: "argv", index } : { k: "index", base: target, index });
         continue;
       }
       if (this.at("(")) {
-        if (base.k === "member" && base.base.k === "ident" && NAMESPACES.has(base.base.name)) {
+        const target = current();
+        if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
-          // `http.requestPath(req)` is the HTTP call of that name.
-          base = { k: "ident", name: `${base.base.name}.${base.field}` };
+          // `http.requestPath(req)` is the HTTP call of that name. It is not a
+          // static method of a class, so the class checks below are skipped.
+          replace({ k: "ident", name: `${target.base.name}.${target.field}` });
+          continue;
         }
         // `Point.fromAffine(p)`: a static method is a function of the class,
         // with no instance written before its arguments.
-        if (base.k === "member" && base.base.k === "ident") {
-          const owner = this.classNamed(base.base.name);
-          if (owner !== undefined && !this.valueClasses.has(base.base.name)) {
-            const found = this.methodOwner(owner.name, base.field, true);
+        if (target.k === "member" && target.base.k === "ident") {
+          const owner = this.classNamed(target.base.name);
+          if (owner !== undefined && !this.valueClasses.has(target.base.name)) {
+            const found = this.methodOwner(owner.name, target.field, true);
             if (found !== null) {
               const args = this.readCallArguments();
-              base = { k: "call", name: methodFunctionName(found.owner, found.method, args.length), args };
+              replace({ k: "call", name: methodFunctionName(found.owner, found.method, args.length), args });
               continue;
             }
           }
         }
         // `p.add(q)`: a method is a function whose first argument is the
         // instance the source called it on.
-        if (base.k === "member") {
+        if (target.k === "member") {
           const args = this.readCallArguments();
-          const receiver = base.base;
-          const found = this.methodOwner(this.classOfExpression(receiver), base.field, false);
+          const receiver = target.base;
+          const found = this.methodOwner(this.classOfExpression(receiver), target.field, false);
           if (found === null) {
             this.report(
-              `"${base.field}" is not a method this program compiles`,
+              `"${target.field}" is not a method this program compiles`,
               "a method is declared by a class the same module or its imports carry",
               this.peek(),
             );
             return this.hole();
           }
-          base = {
+          replace({
             k: "call",
             name: methodFunctionName(found.owner, found.method, args.length),
             args: [receiver, ...args],
-          };
+          });
           continue;
         }
-        if (base.k !== "ident") return this.missing("only a named function is called", this.peek());
+        if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
         const args = this.readCallArguments();
-        base = { k: "call", name: base.name, args };
+        replace({ k: "call", name: target.name, args });
         continue;
       }
       if (this.at("++") || this.at("--")) {
+        const target = current();
         const op = this.next().text as "++" | "--";
-        if (base.k !== "ident") return this.missing(`"${op}" needs a name to change`, this.peek());
-        return { k: "update", name: base.name, op, prefix: false };
+        if (target.k !== "ident") return this.missing(`"${op}" needs a name to change`, this.peek());
+        return { k: "update", name: target.name, op, prefix: false };
       }
-      // These follow a value, so they are read here rather than as the name of
-      // the next expression statement: `n as number` and `n!` are not
-      // identifiers, and reading them as names reported the use of a name the
-      // source never wrote instead of the construct it wrote.
-      if (this.at("as") || this.at("satisfies") || this.at("!")) {
-        const operator = this.next();
-        this.report(
-          `"${operator.text}" is not supported`,
-          operator.text === "!"
-            ? "a compiled function takes the value a name holds, as it is"
-            : "a compiled function states the type a value already has, as its signature does",
-          operator,
-        );
-        if (operator.text !== "!") this.next();
+      // These follow a value, and none of them changes it: `as` and
+      // `satisfies` assert a type the value already has, and `!` says a value
+      // that may be null is not. The type they write is erased like every
+      // other annotation, and the value is the one before them.
+      if (this.at("as") || this.at("satisfies")) {
+        this.next();
+        this.skipBalancedTypeTokens(EXPRESSION_TYPE_STOPS);
+        continue;
+      }
+      if (this.at("!")) {
+        this.next();
         continue;
       }
       if (this.at(".")) {
+        const target = current();
         this.next();
         const field = this.next();
         if (field.kind !== "ident") return this.missing("expected the property of a value", field);
         // A field of a constant object is the value the file wrote for it: the
         // object is not a value a compiled function can read, and the field it
         // asks for is one the source already answered.
-        if (base.k === "ident") {
-          const constant = this.constants.get(base.name);
-          const expanded = this.constantExpression(base.name, constant?.fields?.get(field.text));
+        if (target.k === "ident") {
+          const constant = this.constants.get(target.name);
+          const expanded = this.constantExpression(target.name, constant?.fields?.get(field.text));
           if (expanded !== null) {
-            base = expanded;
+            replace(expanded);
             continue;
           }
         }
-        if (field.text === "length" && base.k === "ident") {
-          base = { k: "length", buffer: base.name };
+        if (field.text === "length" && target.k === "ident") {
+          replace({ k: "length", buffer: target.name });
           continue;
         }
         if (field.text === "toFixed" && this.at("(")) {
-          base = this.fixed(base);
+          replace(this.fixed(target));
           continue;
         }
         if (field.text === "toString" && this.at("(")) {
-          base = this.hexadecimal(base);
+          replace(this.hexadecimal(target));
           continue;
         }
-        if (field.text === "length" && base.k === "argv") {
-          base = { k: "call", name: ARGV_LENGTH, args: [] };
+        if (field.text === "length" && target.k === "argv") {
+          replace({ k: "call", name: ARGV_LENGTH, args: [] });
           continue;
         }
         // `Point.ZERO`: a static field is a function of the class, so reading
         // it is a call that answers the value the source declared.
-        if (base.k === "ident" && !this.valueClasses.has(base.name)) {
-          const owner = this.classNamed(base.name);
+        if (target.k === "ident" && !this.valueClasses.has(target.name)) {
+          const owner = this.classNamed(target.name);
           if (owner !== undefined) {
             const found = findField(this.classTable, owner.name, field.text, true);
             if (found !== null) {
-              base = { k: "call", name: `${found.owner}_${found.field.name}`, args: [] };
+              replace({ k: "call", name: `${found.owner}_${found.field.name}`, args: [] });
               continue;
             }
           }
         }
-        base = { k: "member", base, field: field.text };
+        replace({ k: "member", base: target, field: field.text });
         continue;
       }
-      return base;
+      return finish();
     }
   }
 

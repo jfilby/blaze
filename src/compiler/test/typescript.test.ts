@@ -282,17 +282,19 @@ test("a body no one expression states still states what the function does", asyn
   );
 });
 
-test("a type or a name the compiler cannot read is still refused", async () => {
+test("a type the compiler does not know is an opaque reference, and an unknown name is still refused", async () => {
   // `string` is the text the contract states, so a function that takes one
   // and hands one back is read: its parameter is the text it is written at.
   const textual = contractOf("typescript", `export function echo(raw: string): string { return raw; }\n`);
   assert.deepEqual(textual.function.params.map((param) => param.type), ["text"]);
   assert.equal(textual.function.returns, "text");
 
-  assert.match(
-    diagnostic(() => contractOf("typescript", `export function odd(x: Date): number { return 0; }\n`)),
-    /unsupported TypeScript type "Date"/,
-  );
+  // A type the compiler has no shape for is the reference the layout pass
+  // leaves opaque. It is not a refusal: a module names its own interfaces and
+  // imports types from another module, and every one of those is a value the
+  // program already knows how to hold.
+  const opaque = contractOf("typescript", `export function odd(x: Date): number { return 0; }\n`);
+  assert.equal(opaque.function.params[0]?.type, "ref<any>");
 
   assert.match(
     diagnostic(() => contractOf("typescript", `export function unknown(x: number): number { return y + x; }\n`)),
@@ -308,7 +310,7 @@ test("every construct outside the subset is reported at once", () => {
       "typescript",
       [
         "export function spin(x: number): number {",
-        "  switch (x) { return 1; }",
+        "  yield x;",
         "  return 0;",
         "}",
         "export function odd(x: Date): number {",
@@ -323,10 +325,126 @@ test("every construct outside the subset is reported at once", () => {
     ),
   );
 
-  assert.match(message, /3 constructs of module\.ts are outside the subset the compiler reads/);
-  assert.match(message, /line 2: "switch" is not supported/);
-  assert.match(message, /line 5: unsupported TypeScript type "Date"/);
+  assert.match(message, /2 constructs of module\.ts are outside the subset the compiler reads/);
+  assert.match(message, /line 2: "yield" is not supported/);
   assert.match(message, /line 9: "class" is not supported/);
+});
+
+test("type-only syntax is erased, and a generic annotation is read to its end", () => {
+  // A module is written in TypeScript, and the types it declares are not
+  // values: an interface, a type alias, an ambient declaration, an `import
+  // type` and an `export type` are all skipped. The annotations that remain are
+  // read to their closing bracket, so `Map<string, Array<number>>` is one type
+  // and not a comparison against a name.
+  const source = [
+    'import type { Missing } from "./nowhere.ts";',
+    "export interface Shape { readonly width: number; height?: number }",
+    "type Pair<T> = { left: T; right: T };",
+    "declare const ambient: number;",
+    "export type { Shape };",
+    "export function area<T extends object>(shape: Shape, values: Map<string, Array<number>>): number {",
+    "  const pair = { left: shape.width, right: 1 } as Pair<number>;",
+    "  const none = null as Shape | null;",
+    "  return pair.left! + pair.right + none!.width;",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(analysis.imports, [], "a type-only import names no module to resolve");
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["area"],
+  );
+  assert.equal(analysis.functions[0]?.params[0]?.type.kind, "ref", "an interface is an opaque reference");
+  assert.equal(analysis.functions[0]?.params[1]?.type.kind, "ref", "a generic annotation is an opaque reference");
+});
+
+test("a switch is lowered to the comparisons and the fallthrough it writes", () => {
+  // The discriminant is read once, each case is the comparison the source
+  // wrote, a case with no break falls into the next, and the default is what
+  // runs when none matches.
+  const analysis = typescript.analyze(
+    [
+      "export function label(x: number): number {",
+      "  let total = 0;",
+      "  switch (x) {",
+      "    case 1: total += 1; break;",
+      "    case 2:",
+      "    case 3: total += 2; break;",
+      "    default: total = 9;",
+      "  }",
+      "  return total;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; condition?: { k: string; op?: string }; then?: { kind: string }[] }[];
+  }).body;
+  assert.deepEqual(
+    body.map((statement) => statement.kind),
+    ["declare", "declare", "if", "result"],
+  );
+  assert.equal(body[2]?.condition?.k, "binary");
+  assert.equal(body[2]?.condition?.op, "===");
+  assert.deepEqual(
+    body[2]?.then?.map((statement) => statement.kind),
+    ["assign"],
+    "a case that breaks runs only its own statements",
+  );
+});
+
+test("`??=` writes only where the target is null", () => {
+  // It is a conditional write, not a compound assignment: the value is not
+  // evaluated where the target already holds one.
+  const analysis = typescript.analyze(
+    [
+      "export function fill(x: number): number {",
+      "  let value: number | null = null;",
+      "  value ??= x;",
+      "  return value;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; op?: string; value?: { k: string; op?: string } }[];
+  }).body;
+  assert.deepEqual(
+    body.map((statement) => statement.kind),
+    ["declare", "assign", "result"],
+  );
+  assert.equal(body[1]?.op, "=");
+  assert.equal(body[1]?.value?.k, "binary");
+  assert.equal(body[1]?.value?.op, "??");
+});
+
+test("an optional access guards the accesses written after it", () => {
+  // `a?.b.c` is `a != null ? a.b.c : null`: the `.c` is inside the branch, not
+  // applied to the null the guard answers. A second `?.` nests another guard
+  // inside the first, so each value is tested where it is read.
+  const analysis = typescript.analyze(
+    [
+      "export function read(o: any): number {",
+      "  return o?.a?.b ?? 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; op?: string; left?: unknown; then?: unknown; otherwise?: { k: string } } }[];
+  }).body;
+  const value = body[0]?.value;
+  assert.equal(value?.k, "binary");
+  assert.equal(value?.op, "??");
+  const guard = value?.left as { k: string; condition?: { op?: string }; then?: { k: string }; otherwise?: { k: string } };
+  assert.equal(guard.k, "conditional");
+  assert.equal(guard.condition?.op, "!=");
+  assert.equal(guard.otherwise?.k, "null");
+  assert.equal((guard.then as { k?: string }).k, "conditional", "the second ?. is a second guard");
 });
 
 test("a function that states no result has the one its returns are", () => {
@@ -442,11 +560,11 @@ test("a quote an escape covers does not end the string", () => {
   // statement. The construct after it is refused on the line it is written on.
   const message = diagnostic(() =>
     typescript.analyze(
-      'export function f(x: number): number {\n  const s = "a\\"b";\n  switch (x) {}\n  return x;\n}\n',
+      'export function f(x: number): number {\n  const s = "a\\"b";\n  yield x;\n  return x;\n}\n',
       "main.ts",
     ),
   );
-  assert.match(message, /line 3: "switch" is not supported/);
+  assert.match(message, /line 3: "yield" is not supported/);
   assert.doesNotMatch(message, /line 2/);
 });
 
@@ -456,11 +574,11 @@ test("a string that spans lines moves the line every later diagnostic names", ()
   // three lines short of where the user wrote it.
   const message = diagnostic(() =>
     typescript.analyze(
-      "export function g(x: number): number {\n  console.log(`\nreport\nhere\n`);\n  switch (x) {}\n  return x;\n}\n",
+      "export function g(x: number): number {\n  console.log(`\nreport\nhere\n`);\n  yield x;\n  return x;\n}\n",
       "main.ts",
     ),
   );
-  assert.match(message, /line 6: "switch" is not supported/);
+  assert.match(message, /line 6: "yield" is not supported/);
 });
 
 test("an interpolation ends at the brace that closes it, not the first one", () => {

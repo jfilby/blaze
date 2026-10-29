@@ -324,3 +324,48 @@ test("a constant instance read once is the constructor where it is read", async 
   ].join("\n"));
   assert.equal(output.trim(), "7");
 });
+
+test("a switch runs the case its value matches, and falls through the cases that do not break", async () => {
+  // The lowering is the comparisons the source wrote: a case with no break runs
+  // the case after it, and the default runs when none matches.
+  const output = await agreesWithNode([
+    "function label(x: number): number {",
+    "  switch (x) {",
+    "    case 0: return 10;",
+    "    case 1:",
+    "    case 2: return 20;",
+    "    default: return 30;",
+    "  }",
+    "}",
+    "console.log(label(0), label(1), label(2), label(9));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10 20 20 30");
+});
+
+test("a nullish write keeps a value the target already holds", async () => {
+  // `value ??= x` is `value = value ?? x`, and zero is a value the target
+  // holds rather than the absence of one.
+  const output = await agreesWithNode([
+    "function fill(value: number, x: number): number { value ??= x; return value; }",
+    "console.log(fill(0, 4), fill(9, 4));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "0 9");
+});
+
+test("a type-only declaration is not a value the program carries", async () => {
+  // An interface, a type alias, an `as` and a generic parameter say what the
+  // values are, not what they compute, so the program is the one without them.
+  const output = await agreesWithNode([
+    "type Pair<T> = { a: T; b: T };",
+    "interface Shape { width: number }",
+    "function first(x: number): number {",
+    "  const p = { a: x, b: 1 } as Pair<number>;",
+    "  return p.a!;",
+    "}",
+    "console.log(first(5));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "5");
+});
