@@ -28,6 +28,13 @@ compiled to multiple backends.
 
 ## What it does
 
+Use of AI (e.g. Nemotron models via Nebius Token Factory):
+- Programs can be compiled with an AI model specified in blaze.toml to perform
+compile-time optimizations. This is useful for logs to boost agentic coding.
+- The blazeup utility uses AI with the Pi SDK to automate coding loops that
+improve the compiler.
+- Agentic coding to continue developing the compiler.
+
 A frontend supports a language like TypeScript or Python, but only a subset due
 to time and resource constraints. Backends are the output, with C and machine
 code the current focus.
