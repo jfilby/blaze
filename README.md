@@ -21,12 +21,13 @@ Now that AI has become capable of coding we should raise our ambitions. Blaze
 is an experiment in writing a compiler for languages like Python and
 TypeScript, that generates very fast machine code (and other backends).
 
-My research found that this is possible with the right approach. The compiler
-uses an internal representation (IR) language to support multiple frontends
-compiled to multiple backends.
+My research found that this is possible with the right approach.
 
 
 ## What it does
+
+The compiler uses an internal representation (IR) language to support multiple
+frontends compiled to multiple backends.
 
 Use of AI (e.g. Nemotron models via Nebius Token Factory):
 - Programs can be compiled with an AI model specified in blaze.toml to perform
