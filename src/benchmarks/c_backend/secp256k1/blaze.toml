@@ -5,11 +5,8 @@ backend = "c"
 mode = "danger"
 
 [model]
-# provider = "openrouter"
-model = "stealth/space-bunny-alpha"
-
-provider = "commandcode"
-# model = "stealth/pixel-canary"
+# provider = "nebius"
+# model = "nvidia/Nemotron-3_5-Lightning"
 
 [target]
 arch = "x86_64"

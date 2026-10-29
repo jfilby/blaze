@@ -3,3 +3,7 @@ sourceFile = "main.ts"
 output = "machine"
 backend = "machine"
 mode = "debug"
+
+[model]
+# provider = "nebius"
+# model = "nvidia/Nemotron-3_5-Lightning"

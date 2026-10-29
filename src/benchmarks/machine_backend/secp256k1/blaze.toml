@@ -5,8 +5,8 @@ backend = "machine"
 mode = "danger"
 
 [model]
-# provider = "commandcode"
-# model = "stealth/pixel-canary"
+# provider = "nebius"
+# model = "nvidia/Nemotron-3_5-Lightning"
 
 [target]
 arch = "x86_64"

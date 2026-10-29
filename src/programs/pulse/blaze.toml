@@ -5,6 +5,10 @@ backend = "machine"
 runtime = "facil"
 mode = "danger"
 
+[model]
+# provider = "nebius"
+# model = "nvidia/Nemotron-3_5-Lightning"
+
 [target]
 arch = "x86_64"
 os = "linux"

@@ -4,6 +4,11 @@ output = "machine"
 backend = "machine"
 runtime = "facil"
 mode = "danger"
+
+[model]
+# provider = "nebius"
+# model = "nvidia/Nemotron-3_5-Lightning"
+
 # The program serves, and it reads its API key from a file that is beside the
 # binary when it runs and not when it is built, so there is no output of the
 # delivered program for the build to compare with the source's.
