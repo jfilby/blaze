@@ -1201,6 +1201,12 @@ class FunctionBody {
       }
       case "update":
         return this.updated(expression, line);
+      case "arrow":
+        throw this.error(
+          `is bound to the arrow function ${expression.name}, which is called by the name it is bound to and never read as a value`,
+          line,
+          "an arrow function is a function of the file once its body is lifted, so a value of it would be a closure with an environment, which this compiler does not carry",
+        );
     }
   }
 

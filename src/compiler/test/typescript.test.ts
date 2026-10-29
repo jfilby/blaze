@@ -683,3 +683,185 @@ test("a function that declares a value and returns none is still refused", () =>
     /tally never returns a value/,
   );
 });
+
+test("an arrow function is lifted into a function of the file, with what it captured in front", () => {
+  // An arrow is bound to the name it is declared under and called by that name.
+  // Its body becomes a function of the file whose leading parameters are the
+  // values it captured, so a call of the name writes those values in front of
+  // its own arguments and the body reads them as it read the names around it.
+  const analysis = typescript.analyze(
+    [
+      "export function add(x: number): number {",
+      "  const plus = (y: number): number => y + x;",
+      "  return plus(2);",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["add", "__closure_0"],
+  );
+  const lifted = analysis.functions[1];
+  assert.equal(lifted?.internal, true, "an arrow is not an export of the file");
+  assert.deepEqual(
+    lifted?.params.map((param) => param.name),
+    ["x", "y"],
+    "the captured value is the leading parameter",
+  );
+
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; name?: string; value?: { k: string; name?: string; args?: { k: string; name?: string }[] } }[];
+  }).body;
+  const call = body[1]?.value;
+  assert.equal(call?.k, "call");
+  assert.equal(call?.name, "__closure_0");
+  assert.deepEqual(
+    call?.args?.map((arg) => (arg.k === "ident" ? arg.name : arg.k)),
+    ["x", "literal"],
+    "the capture is written in front of the argument the source wrote",
+  );
+});
+
+test("an arrow written where it is called is a call of the function it lifted to", () => {
+  const analysis = typescript.analyze(
+    "export function f(x: number): number {\n  return ((a: number): number => a + x)(2);\n}\n",
+    "main.ts",
+  );
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["f", "__closure_0"],
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; name?: string } }[];
+  }).body;
+  assert.equal(body[0]?.value?.k, "call");
+  assert.equal(body[0]?.value?.name, "__closure_0");
+});
+
+test("an arrow that escapes the name it is bound to is refused", () => {
+  // A value of an arrow would be a closure with an environment, which this
+  // compiler does not carry. Passing one is refused where it is written rather
+  // than lowered to something no backend would read the same way.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        "export function f(x: number): number {\n  const g = (y: number): number => y + 1;\n  return h(g);\n}\n",
+        "main.ts",
+      ),
+    ),
+    /an arrow function is called by the name it is bound to, not read as a value/,
+  );
+});
+
+test("an arrow that writes a name of the function around it is refused", () => {
+  // A lifted arrow is handed the values it captured, and a parameter carries a
+  // value in but cannot write one back. Silently writing a copy would be a
+  // program that answers 0 where the source answers 2.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "export function f(x: number): number {",
+          "  let total = 0;",
+          "  const add = (v: number): void => { total += v; };",
+          "  add(x);",
+          "  return total;",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /an arrow function writes "total", a name of the function around it/,
+  );
+});
+
+test("an arrow that calls itself is refused", () => {
+  // A call of the name passes the values the arrow captured, and the arrow
+  // cannot name them until the declaration it is bound to is complete. A
+  // function that recurses is declared with `function`.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "export function f(x: number): number {",
+          "  const fact = (n: number): number => n <= 1 ? 1 : n * fact(n - 1);",
+          "  return fact(x);",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /fact calls itself, which an arrow function is not/,
+  );
+});
+
+test("an arrow's body is a function of its own, so a break leaves a loop of that body", () => {
+  // The loop the arrow is written in is not a loop the function it lifted to is
+  // inside, so a `break` written in the arrow's body cannot leave it. Reading it
+  // as the enclosing loop's break left a stray statement in the lifted body.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "export function f(n: number): number {",
+          "  let total = 0;",
+          "  for (let i = 0; i < n; i++) {",
+          "    const step = (): number => { break; };",
+          "    total += step();",
+          "  }",
+          "  return total;",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /"break" is not within a loop/,
+  );
+  // A loop written inside the arrow's own body is one its break can leave.
+  const analysis = typescript.analyze(
+    [
+      "export function f(n: number): number {",
+      "  const sum = (k: number): number => {",
+      "    let total = 0;",
+      "    for (let i = 0; i < k; i++) total += i;",
+      "    return total;",
+      "  };",
+      "  return sum(n);",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["f", "__closure_0"],
+  );
+});
+
+test("an arrow that writes through a value it captured is still a capture", () => {
+  // A field or an element written through a reference is a write the lifted
+  // function can make: what it holds is the object itself, so the write is the
+  // one the source wrote. Only a write to the captured name is refused.
+  const analysis = typescript.analyze(
+    [
+      "export function f(x: number): number {",
+      "  const o = { a: 1 };",
+      "  const set = (v: number): void => { o.a = v; };",
+      "  set(x);",
+      "  return o.a;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const lifted = analysis.functions[1];
+  assert.deepEqual(
+    lifted?.params.map((param) => param.name),
+    ["o", "v"],
+  );
+});

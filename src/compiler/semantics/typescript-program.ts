@@ -242,6 +242,91 @@ class ProgramParser {
     return this.tokens[this.position++];
   }
 
+  /**
+   * The parameters of an arrow, which are read to their closing bracket and
+   * whose annotations the program erases: a program has one type for a number
+   * and one for a text, and the words the source writes for them say nothing it
+   * can act on.
+   */
+  private arrowParams(): { name: string; type: string | null }[] {
+    const params: { name: string; type: string | null }[] = [];
+    this.expect("(");
+    if (!this.at(")")) {
+      for (;;) {
+        const name = this.identifier("the name of a parameter");
+        this.accept("?");
+        let type: string | null = null;
+        if (this.accept(":")) {
+          type = this.skipArrowType(new Set([",", ")"]));
+        }
+        params.push({ name, type });
+        if (!this.accept(",")) break;
+      }
+    }
+    this.expect(")");
+    return params;
+  }
+
+  /** The result type an arrow states, which the program erases with it. */
+  private arrowResultType(): void {
+    if (!this.at(":")) return;
+    this.next();
+    this.skipArrowType(new Set(["=>"]));
+  }
+
+  /** Reads past a type written in an arrow's annotation, to the first stop. */
+  private skipArrowType(stops: ReadonlySet<string>): string {
+    const written: string[] = [];
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.peek();
+      if (token.kind === "punct") {
+        if (depth === 0 && stops.has(token.text)) break;
+        if (depth === 0 && (token.text === "{" || token.text === ";" || token.text === "}")) break;
+        if (token.text === "(" || token.text === "[" || token.text === "<") depth += 1;
+        else if (token.text === ")" || token.text === "]" || token.text === ">") {
+          if (depth === 0) break;
+          depth -= 1;
+        }
+      }
+      written.push(token.text);
+      this.next();
+    }
+    return written.join("");
+  }
+
+  /**
+   * Whether the `=>` of an arrow follows the closing bracket at `index`, with
+   * the result type an arrow may state between them.
+   *
+   * `(a: number): number => a` writes a type where `(a: number) => a` writes
+   * nothing, and the arrow is the same arrow either way. Reading only the second
+   * form found the arrow in neither, so the parameter list was read as a
+   * parenthesised value and the build complained about the `:` after the name.
+   */
+  private arrowFollows(index: number): boolean {
+    let at = index + 1;
+    if (this.peek(at).text === "=>") return true;
+    if (this.peek(at).text !== ":") return false;
+    at += 1;
+    let depth = 0;
+    while (this.peek(at).kind !== "end") {
+      const token = this.peek(at);
+      if (token.kind === "punct") {
+        if (token.text === "=>") return depth === 0;
+        if (token.text === "(" || token.text === "[" || token.text === "<") depth += 1;
+        else if (token.text === ")" || token.text === "]" || token.text === ">") {
+          if (depth === 0) return false;
+          depth -= 1;
+        } else if (depth === 0 && (token.text === "{" || token.text === ";" || token.text === "," || token.text === "}")) {
+          return false;
+        }
+      }
+      at += 1;
+    }
+    return false;
+  }
+
   private at(text: string): boolean {
     const token = this.peek();
     return (token.kind === "punct" || token.kind === "ident") && token.text === text;
@@ -1307,20 +1392,10 @@ class ProgramParser {
           }
           i += 1;
         }
-        if (this.peek(i + 1).text === "=>") {
+        if (this.arrowFollows(i)) {
           const line = this.peek().line;
-          this.expect("(");
-          const params: { name: string; type: string | null }[] = [];
-          if (!this.at(")")) {
-            for (;;) {
-              const name = this.identifier("the name of a parameter");
-              let type: string | null = null;
-              if (this.accept(":")) type = this.annotation("the type of a parameter");
-              params.push({ name, type });
-              if (!this.accept(",")) break;
-            }
-          }
-          this.expect(")");
+          const params = this.arrowParams();
+          this.arrowResultType();
           this.accept("=>");
           if (this.at("{")) {
             const body = this.braces();
@@ -1502,20 +1577,10 @@ class ProgramParser {
         }
         i += 1;
       }
-      if (this.peek(i + 1).text === "=>") {
+      if (this.arrowFollows(i)) {
         const line = this.peek().line;
-        this.expect("(");
-        const params: { name: string; type: string | null }[] = [];
-        if (!this.at(")")) {
-          for (;;) {
-            const name = this.identifier("the name of a parameter");
-            let type: string | null = null;
-            if (this.accept(":")) type = this.annotation("the type of a parameter");
-            params.push({ name, type });
-            if (!this.accept(",")) break;
-          }
-        }
-        this.expect(")");
+        const params = this.arrowParams();
+        this.arrowResultType();
         this.accept("=>");
         if (this.at("{")) {
           const body = this.braces();

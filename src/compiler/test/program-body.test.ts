@@ -212,6 +212,13 @@ test("Deno names the command line node names", () => {
 
 test("an arrow function's body is read", () => {
   assert.match(diagnostic(() => bodyOf("console.log((x) => { console.error(1); });\n")), /console\.error is not part of a program/);
+  // A parameter that states its type and a result type written before the
+  // arrow are the same arrow as the bare one, so the body is still the place
+  // the refusal is reported rather than the `:` after the parameter's name.
+  assert.match(
+    diagnostic(() => bodyOf("console.log(((x: number): number => { console.error(1); })(2));\n")),
+    /console\.error is not part of a program/,
+  );
 });
 
 test("a statement a program cannot run is refused", () => {

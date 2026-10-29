@@ -396,6 +396,11 @@ class BodyTypes {
       }
       case "update":
         return this.environment.get(expression.name) ?? { kind: "type", type: F64 };
+      case "arrow":
+        // An arrow is lifted into a function of the file and called by the name
+        // it is bound to, so what it is laid out as is the reference every other
+        // value the layout pass does not shape is.
+        return { kind: "type", type: ANY_REF };
     }
   }
 

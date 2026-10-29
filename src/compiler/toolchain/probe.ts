@@ -127,7 +127,19 @@ function buildValue(
   if (type.kind === "ref") return type.name === undefined ? "NULL" : `(struct ${type.name}*)NULL`;
   if (type.kind === "primitive") return defaultScalar(type);
   if (type.kind === "void") return "NULL";
-  if (type.kind === "text") return "NULL";
+  // A text is a real empty string rather than a null pointer, for the reason a
+  // buffer is built rather than left null: a function that reads the length of
+  // the text it was handed is doing what it was written to do, and a probe that
+  // hands it NULL kills the candidate for it. The C backend's length helper
+  // reads a null string as empty and the machine backend's `strlen` faults on
+  // one, so passing NULL made the same function verify on one backend and fail
+  // on the other.
+  if (type.kind === "text") {
+    const pointer = `${name}_probe_text`;
+    statements.push(`const char* ${pointer} = ${RUNTIME_NAME}_string_new((const unsigned char*)"", 0);`);
+    statements.push(`if (${pointer} == NULL) { fprintf(stderr, "probe: out of memory\\n"); exit(2); }`);
+    return pointer;
+  }
   // A buffer is built as a real one, of the length the contract states, and
   // not as a null pointer. The preconditions are read against a buffer that
   // is there — `probeValue` reports an empty buffer as a buffer, not as a null

@@ -81,7 +81,29 @@ export type Expression =
   | { k: "unary"; op: UnaryOp; operand: Expression }
   | { k: "conditional"; condition: Expression; then: Expression; otherwise: Expression }
   /** `i++` as a value: the old value of `name`, after the change. */
-  | { k: "update"; name: string; op: "++" | "--"; prefix: boolean };
+  | { k: "update"; name: string; op: "++" | "--"; prefix: boolean }
+  /**
+   * An arrow function the source wrote, and the function it was lifted to.
+   *
+   * An arrow is bound to the name it is declared under and called by that
+   * name. The frontend lifts its body into a function of the file whose leading
+   * parameters are the values the arrow captured, so a call of the name is a
+   * call of that function with those values written in front. The value itself
+   * is not one this IR carries: an arrow that escapes the function it was
+   * written in would have to be a closure with an environment, and it is
+   * refused where it is written rather than lowered to something no backend
+   * would read the same way.
+   */
+  | {
+      k: "arrow";
+      /** The function the arrow was lifted to. */
+      name: string;
+      /**
+       * The names the arrow reads from the function around it, in the order the
+       * lifted function takes them.
+       */
+      captures: string[];
+    };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 

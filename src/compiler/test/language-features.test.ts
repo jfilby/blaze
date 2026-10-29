@@ -369,3 +369,93 @@ test("a type-only declaration is not a value the program carries", async () => {
   ].join("\n"));
   assert.equal(output.trim(), "5");
 });
+
+test("an arrow function runs as the function its body lifted to", async () => {
+  // An arrow is bound to the name it is declared under and called by that name.
+  // Its body becomes a function of the file whose leading parameters are the
+  // values it captured, so a captured number is the value it held when the call
+  // was made.
+  const output = await agreesWithNode([
+    "function add(x: number): number {",
+    "  const plus = (y: number): number => y + x;",
+    "  return plus(2) + plus(3);",
+    "}",
+    "console.log(add(10));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "25");
+});
+
+test("an arrow with a block body runs the statements it wrote", async () => {
+  const output = await agreesWithNode([
+    "function sumTo(n: number): number {",
+    "  const sum = (k: number): number => {",
+    "    let total = 0;",
+    "    for (let i = 0; i < k; i++) total += i;",
+    "    return total;",
+    "  };",
+    "  return sum(n);",
+    "}",
+    "console.log(sumTo(5));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});
+
+test("an arrow written where it is called runs where it is written", async () => {
+  const output = await agreesWithNode([
+    "function f(x: number): number {",
+    "  return ((a: number): number => a * 3 + x)(2);",
+    "}",
+    "console.log(f(4));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});
+
+test("an arrow inside an arrow captures the outer arrow's own value", async () => {
+  // The inner arrow captures a parameter of the outer one, which is a parameter
+  // of the function the outer body lifted to: the capture is read there.
+  const output = await agreesWithNode([
+    "function f(x: number): number {",
+    "  const outer = (a: number): number => {",
+    "    const inner = (b: number): number => a + b + x;",
+    "    return inner(2);",
+    "  };",
+    "  return outer(3);",
+    "}",
+    "console.log(f(10));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "15");
+});
+
+test("an arrow captures the element a loop is on, and a buffer it was handed", async () => {
+  // A loop's index and a parameter's buffer are values of the function around
+  // the arrow, so both are handed to the function it lifted to.
+  const output = await agreesWithNode([
+    "function walk(a: Float64Array): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < a.length; i++) {",
+    "    const at = (k: number): number => a[k] + i;",
+    "    total += at(i);",
+    "  }",
+    "  return total;",
+    "}",
+    "console.log(walk(new Float64Array([1, 2, 3])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "9");
+});
+
+test("an arrow reads the buffer length of the text it captured", async () => {
+  const output = await agreesWithNode([
+    "function size(s: string): number {",
+    "  const len = (): number => s.length;",
+    "  return len();",
+    "}",
+    "console.log(size(`hello`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "5");
+});

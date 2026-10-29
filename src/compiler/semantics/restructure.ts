@@ -325,7 +325,12 @@ function directCallees(fn: SemanticFunction): string[] {
   const seen = new Set<string>();
   const visit = (value: SemanticValue): void => {
     walkValues(value, (one) => {
-      if (one.k !== "call" || seen.has(one.call.callee)) return;
+      // A builtin is the compiler's own rather than a function of the program,
+      // so it is not a name the program's call graph states. Writing one into
+      // the graph made a fused body declare `call Math.floor`, which the reader
+      // of that body then refused: the contract it is read against names the
+      // functions of the program and never the compiler's own.
+      if (one.k !== "call" || one.call.builtin || seen.has(one.call.callee)) return;
       seen.add(one.call.callee);
       names.push(one.call.callee);
     });
