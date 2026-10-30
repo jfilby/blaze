@@ -4508,6 +4508,25 @@ class TypeScriptParser {
   private readLoop(): Statement {
     const start = this.next();
     this.expect("(");
+    // `for (;;)` is the loop that runs until a `break` in its body: it names
+    // no index and stops for no condition, which is a while loop whose
+    // condition is the constant truth.
+    if (this.at(";")) {
+      this.next();
+      if (this.at(";")) {
+        this.next();
+        this.expect(")");
+        return {
+          kind: "while",
+          condition: { k: "literal", text: "1" },
+          body: this.loopBody(),
+          line: start.line,
+        };
+      }
+      this.report("a for loop states its condition and its step together", "as in for (;;) { ... }");
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
     if (!this.at("let") && !this.at("const") && !this.at("var")) {
       this.report("a loop must declare its index", "as in for (let i = 0; ...)", start);
       this.synchronize();

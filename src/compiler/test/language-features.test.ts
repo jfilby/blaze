@@ -498,6 +498,24 @@ test("a for-of names the parts of the element it walks", async () => {
   assert.equal(output.trim(), "10");
 });
 
+test("a for loop with no condition runs until its body breaks", async () => {
+  // `for (;;)` names no index and states no condition, so it is the loop whose
+  // only way out is the break its body writes.
+  const output = await agreesWithNode([
+    "function firstPowerOfTwo(n: number): number {",
+    "  let value = 1;",
+    "  for (;;) {",
+    "    if (value >= n) break;",
+    "    value *= 2;",
+    "  }",
+    "  return value;",
+    "}",
+    "console.log(firstPowerOfTwo(10));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "16");
+});
+
 test("a getter is a method a member read calls", async () => {
   // `get double()` is a body with no parameters whose name is read as a member:
   // the read is the call, and a getter may read another getter.
