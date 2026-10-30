@@ -142,11 +142,31 @@ function skipAngles(tokens: readonly Token[], open: number): number {
   return open;
 }
 
-/** The first name of a type annotation, or `"any"` where none is written. */
+/**
+ * The type an annotation names, or `"any"` where none is written.
+ *
+ * The name is more than the first identifier: `number[]` says the field is a
+ * list and `Array<Point>` names the element inside the brackets. Both are the
+ * text `typeForName` reads, so the suffix and the type arguments travel with
+ * the name rather than being cut off where the identifier ends.
+ */
 function typeNameAt(tokens: readonly Token[], index: number): string {
   const token = tokens[index];
   if (token === undefined || token.kind !== "ident") return "any";
-  return token.text;
+  let name = token.text;
+  let at = index + 1;
+  if (isPunct(tokens[at], "<")) {
+    const end = skipAngles(tokens, at);
+    if (end > at) {
+      name += tokens.slice(at, end).map((one) => one.text).join("");
+      at = end;
+    }
+  }
+  while (isPunct(tokens[at], "[") && isPunct(tokens[at + 1], "]")) {
+    name += "[]";
+    at += 2;
+  }
+  return name;
 }
 
 /**

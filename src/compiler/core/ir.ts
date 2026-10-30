@@ -142,7 +142,16 @@ export type Expression =
    * statement and not a value: written for what it does, it is the assignment
    * the frontend writes; written for what it answers, there is nothing to give.
    */
-  | { k: "append"; target: string; helper: string; op: "push" | "pop"; value: Expression | null };
+  | {
+      k: "append";
+      /** The array name, or the field of `base` the append is written on. */
+      target: string;
+      /** The name the target field belongs to, or null where the target is a name. */
+      base: string | null;
+      helper: string;
+      op: "push" | "pop";
+      value: Expression | null;
+    };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 

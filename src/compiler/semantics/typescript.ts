@@ -1014,7 +1014,7 @@ function walkFunction(
         for (const argument of expression.args) read(argument);
         return;
       case "append":
-        read({ k: "ident", name: expression.target });
+        read(appendArray(expression));
         read(expression.value);
         return;
     }
@@ -1210,7 +1210,7 @@ function arrowCaptures(
         for (const argument of expression.args) read(argument);
         return;
       case "append":
-        read({ k: "ident", name: expression.target });
+        read(appendArray(expression));
         read(expression.value);
         return;
     }
@@ -1739,6 +1739,12 @@ class TypeScriptParser {
    * the array is built with.
    */
   private expecting: TypeExpr | null = null;
+  /**
+   * The type the function being read hands back, which is what a returned list
+   * is built at. A bare `return []` names no element of its own, and the
+   * function's result type is the one the source wrote to say what it holds.
+   */
+  private returns: TypeExpr | null = null;
   /** The signature each name of the function is a function at, when it holds one. */
   private valueFunctions = new Map<string, FunctionType>();
   /** The map or the set each name of the function holds, when it holds one. */
@@ -1926,6 +1932,37 @@ class TypeScriptParser {
   private returnTypeForName(typeName: string, line: number): TypeExpr {
     if (this.classTable.names.has(typeName)) return { kind: "ref", of: null, name: typeName };
     return this.typeForName(typeName, line);
+  }
+
+  /**
+   * A body read with the type its returns are read by.
+   *
+   * The type travels with the read rather than being passed to each statement,
+   * so a `return []` written anywhere in the body is built at the type the
+   * function declares, and a nested block or an if arm reads it the same way.
+   */
+  private readReturning(returns: TypeExpr | null, read: () => Statement[]): Statement[] {
+    const saved = this.returns;
+    this.returns = returns;
+    try {
+      return read();
+    } finally {
+      this.returns = saved;
+    }
+  }
+
+  /**
+   * An expression read as the type a use fixes it at, which is what says what
+   * an empty list written there holds.
+   */
+  private readAt(type: TypeExpr | null, read: () => Expression): Expression {
+    const saved = this.expecting;
+    this.expecting = type !== null && type.kind === "slice" ? type.of : null;
+    try {
+      return read();
+    } finally {
+      this.expecting = saved;
+    }
   }
 
   /** Reads an expression written in the class token stream, between two tokens. */
@@ -2280,7 +2317,13 @@ class TypeScriptParser {
     for (const field of fields) {
       if (field.initStart < 0 || field.initEnd < field.initStart) continue;
       if (params.some((entry) => entry.property && entry.name === field.name)) continue;
-      const value = this.withClassContext(info, params, true, () => this.readRange(field.initStart, field.initEnd));
+      // The field's declared type is what an empty list in its initialiser is
+      // built at: `private seen: string[] = []` names no element itself.
+      const value = this.withClassContext(info, params, true, () =>
+        this.readAt(this.typeForName(field.typeName, field.line), () =>
+          this.readRange(field.initStart, field.initEnd),
+        ),
+      );
       body.push({ kind: "memberAssign", base: "self", field: field.name, op: "=", value, line: field.line });
     }
     if (info.constructor !== null) {
@@ -2305,14 +2348,16 @@ class TypeScriptParser {
     for (const method of [...info.methods, ...info.getters]) {
       const name = `${info.name}_${method.name}`;
       const returns = this.returnTypeForName(method.returnTypeName, method.line);
-      const statements = this.withClassContext(info, method.params, true, () => {
-        this.position = method.bodyStart;
-        const read = this.readBlock();
-        if (this.position !== method.bodyEnd) {
-          this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
-        }
-        return read;
-      });
+      const statements = this.withClassContext(info, method.params, true, () =>
+        this.readReturning(returns, () => {
+          this.position = method.bodyStart;
+          const read = this.readBlock();
+          if (this.position !== method.bodyEnd) {
+            this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
+          }
+          return read;
+        }),
+      );
       out.push(
         this.declared(
           name,
@@ -2328,21 +2373,26 @@ class TypeScriptParser {
     for (const method of [...info.staticMethods, ...info.staticGetters]) {
       const name = `${info.name}_${method.name}`;
       const returns = this.returnTypeForName(method.returnTypeName, method.line);
-      const statements = this.withClassContext(info, method.params, false, () => {
-        this.position = method.bodyStart;
-        const read = this.readBlock();
-        if (this.position !== method.bodyEnd) {
-          this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
-        }
-        return read;
-      });
+      const statements = this.withClassContext(info, method.params, false, () =>
+        this.readReturning(returns, () => {
+          this.position = method.bodyStart;
+          const read = this.readBlock();
+          if (this.position !== method.bodyEnd) {
+            this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
+          }
+          return read;
+        }),
+      );
       out.push(this.declared(name, this.methodParams(method.params), returns, statements, info.exported, method.line));
       out.push(...this.wrappers(info, method, name, returns, false, info.exported));
     }
     for (const field of info.statics) {
+      const fieldType = this.returnTypeForName(field.typeName, field.line);
       const value =
         field.initStart >= 0 && field.initEnd >= field.initStart
-          ? this.withClassContext(info, [], false, () => this.readRange(field.initStart, field.initEnd))
+          ? this.withClassContext(info, [], false, () =>
+              this.readAt(fieldType, () => this.readRange(field.initStart, field.initEnd)),
+            )
           : ({ k: "null" } satisfies Expression);
       out.push(
         this.declared(
@@ -3314,7 +3364,7 @@ class TypeScriptParser {
       this.accept(";");
       return declared(returnType, [{ kind: "result", value, line: name.line }]);
     }
-    return declared(returnType, [...prelude, ...this.readBlock()]);
+    return declared(returnType, [...prelude, ...this.readReturning(returnType, () => this.readBlock())]);
   }
 
   /**
@@ -3918,7 +3968,16 @@ class TypeScriptParser {
       if (this.at("}")) {
         return { kind: "result", value: null, line: token.line };
       }
-      const value = this.readExpression();
+      // A returned list is the value the function declares, and an empty one
+      // is built at the element type that declaration names.
+      const wasExpecting = this.expecting;
+      this.expecting = this.returns !== null && this.returns.kind === "slice" ? this.returns.of : null;
+      let value: Expression;
+      try {
+        value = this.readExpression();
+      } finally {
+        this.expecting = wasExpecting;
+      }
       this.accept(";");
       return { kind: "result", value, line: token.line };
     }
@@ -4376,14 +4435,22 @@ class TypeScriptParser {
     const value = this.readExpression();
     this.accept(";");
     // `a.push(x)` answers the array the name holds afterwards, so written on
-    // its own line it is the write that keeps it.
+    // its own line it is the write that keeps it. A field is written back into
+    // the field it was read from, with the object it belongs to unchanged.
     if (value.k === "append") {
+      const array: Expression =
+        value.base === null
+          ? { k: "ident", name: value.target }
+          : { k: "member", base: { k: "ident", name: value.base }, field: value.target };
       const call: Expression = {
         k: "call",
         name: value.helper,
-        args: [{ k: "ident", name: value.target }, ...(value.value === null ? [] : [value.value])],
+        args: [array, ...(value.value === null ? [] : [value.value])],
       };
-      return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
+      if (value.base === null) {
+        return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
+      }
+      return { kind: "memberAssign", base: value.base, field: value.target, op: "=", value: call, line: token.line };
     }
     return { kind: "expression", value, line: token.line };
   }
@@ -5191,14 +5258,28 @@ class TypeScriptParser {
           }
           // `a.push(x)` and `a.pop()` change the array the name holds, so they
           // are statements: the call answers the array the name has afterwards,
-          // and the frontend writes the assignment that keeps it.
-          if ((target.field === "push" || target.field === "pop") && receiver.k === "ident") {
-            const sequence = this.valueTypeOf(receiver);
-            if ((sequence.kind === "slice" || sequence.kind === "array") && args.length === (target.field === "push" ? 1 : 0)) {
+          // and the frontend writes the assignment that keeps it. A field of
+          // an object is a place the same way, and the write goes back into the
+          // field the source named.
+          if (target.field === "push" || target.field === "pop") {
+            const place =
+              receiver.k === "ident"
+                ? { target: receiver.name, base: null }
+                : receiver.k === "member" && receiver.base.k === "ident"
+                  ? { target: receiver.field, base: receiver.base.name }
+                  : null;
+            const sequence = place === null ? null : this.valueTypeOf(receiver);
+            if (
+              place !== null &&
+              sequence !== null &&
+              (sequence.kind === "slice" || sequence.kind === "array") &&
+              args.length === (target.field === "push" ? 1 : 0)
+            ) {
               const helper = this.appendHelper(target.field, sequence.of, callLine);
               replace({
                 k: "append",
-                target: receiver.name,
+                target: place.target,
+                base: place.base,
                 helper: helper.name,
                 op: target.field,
                 value: args[0] ?? null,
@@ -5590,10 +5671,18 @@ class TypeScriptParser {
         this.valueClasses.set(param.name, param.typeName);
       }
     }
-    const body: Statement[] = [
-      ...prelude,
-      ...(this.at("{") ? this.readBlock() : [{ kind: "result" as const, value: this.readExpression(), line }]),
-    ];
+    const body: Statement[] = this.readReturning(stated, () => {
+      if (this.at("{")) return [...prelude, ...this.readBlock()];
+      // A concise body is the return the source wrote without the word, so an
+      // empty list it answers is built at the type the arrow declares.
+      const wasExpecting = this.expecting;
+      this.expecting = stated !== null && stated.kind === "slice" ? stated.of : null;
+      try {
+        return [...prelude, { kind: "result" as const, value: this.readExpression(), line }];
+      } finally {
+        this.expecting = wasExpecting;
+      }
+    });
     this.valueTypes = savedTypes;
     this.valueClasses = savedClasses;
     this.valueArrows = savedArrows;
@@ -6679,6 +6768,15 @@ class TypeScriptParser {
     }
     this.expect("]");
     flush();
+    // An empty list joins the empty list in front of it for the same reason a
+    // list with elements does: the block it answers is its own, so a list a
+    // caller or a field keeps is not a window into the frame that wrote it.
+    // The element type comes from the use, which is what says what the list
+    // holds before any element has been written.
+    if (joined === null && element !== null) {
+      joined = { k: "buffer", element: typeToString(element), values: [] };
+      pieces = 1;
+    }
     if (joined !== null) {
       // `[...a]` is a list of its own and not the list `a` holds: two names
       // that hold one block are one array, and a write through either is a
@@ -6688,15 +6786,12 @@ class TypeScriptParser {
       }
       return joined;
     }
-    if (element === null) {
-      this.report(
-        "an empty array needs the type of its elements",
-        "write the declaration with the element type, as in const names: string[] = []",
-        open,
-      );
-      return this.hole();
-    }
-    return this.bufferValue(element, run, open);
+    this.report(
+      "an empty array needs the type of its elements",
+      "write the declaration with the element type, as in const names: string[] = []",
+      open,
+    );
+    return this.hole();
   }
 
   /** An array of values written out, at the element type it is held at. */
@@ -7565,7 +7660,7 @@ function dependsOn(expression: Expression, name: string): boolean {
     case "invoke":
       return dependsOn(expression.callee, name) || expression.args.some((argument) => dependsOn(argument, name));
     case "append":
-      return expression.target === name || (expression.value !== null && dependsOn(expression.value, name));
+      return dependsOn(appendArray(expression), name) || (expression.value !== null && dependsOn(expression.value, name));
   }
 }
 
@@ -7617,8 +7712,15 @@ function describe(expression: Expression): string {
     case "invoke":
       return `a call of ${describe(expression.callee)}`;
     case "append":
-      return `${expression.target}.${expression.op}`;
+      return `${describe(appendArray(expression))}.${expression.op}`;
   }
+}
+
+/** The array a push or pop is written on, as the value expression it is. */
+function appendArray(value: Expression & { k: "append" }): Expression {
+  return value.base === null
+    ? { k: "ident", name: value.target }
+    : { k: "member", base: { k: "ident", name: value.base }, field: value.target };
 }
 
 /* -------------------------------------------------------------------------- */

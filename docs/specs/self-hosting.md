@@ -73,8 +73,8 @@ Reading `Object.keys` and `Object.values` of a constant object lowered it to
 name, a parameter written as a pattern, and a trailing comma in a list lowered
 it to 5194, a `for..of` that names the parts of its element lowered it to 5123,
 a getter to 5121, the `_` separator in a number to 5068, a block statement to
-4723, and an `await` written as a statement to 4691. The refusals fall into six
-frontiers:
+4723, an `await` written as a statement to 4691, and an array returned empty or
+held in a class field to 4513. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -199,12 +199,16 @@ to carry those without a rewrite into numeric arrays:
   the layout pass keeps its static objects beside it.
 - **Arrays.** A length inside the block so `push` is linear, arrays of arrays,
   and `slice`, `splice`, `shift`, `unshift`, `concat`, `Array.from` and
-  `Array.isArray`. Text and reference arrays already exist; the growth, the
-  nested shape and an array as a class field do not. An empty list written in a
-  slice context, `const xs: string[] = []`, is carried; a function that answers
-  `[]` where it declares a slice is not yet: the literal's block is the frame's,
-  and the caller is handed a pointer into a frame that has returned. That needs
-  the value copied into an owned block before the return.
+  `Array.isArray`. Text and reference arrays already exist, and the growth the
+  source does through a name or a field is lowered to the helper that walks the
+  block. A written-out list is now a block the runtime hands out, in the C
+  backend as in the machine backend, so a list a function returns or a
+  constructor stores in a field outlives the frame that wrote it; an empty list
+  is built the same way when the declaration, field or return type names its
+  element. `this.items.push(x)` writes the field back into the object it was
+  read from. What is still missing is `splice`, `shift`, `unshift`, `concat` and
+  the `Array` constructors, and a list whose element is itself a list as a
+  field of a class.
 - **Maps and sets.** Values that are text or references, keys that are not only
   text, iteration (`for..of`, `keys`, `values`, `entries`) and `Map`/`Set` as
   fields. A compiler's symbol tables are maps of references.

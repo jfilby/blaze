@@ -379,6 +379,12 @@ class BodyTypes {
         // of its operands, so a reference stays a reference instead of
         // becoming the double every other operator is.
         if (expression.op === "??") return coalesce(left, right);
+        // A list added to a list is one list, not a number: the layout a field
+        // written from a list is given has to hold the array, and reading the
+        // two sides as numbers shaped the field as a double.
+        const sequence = (one: Inferred): boolean =>
+          one.kind === "type" && (one.type.kind === "slice" || one.type.kind === "array" || one.type.kind === "ptr");
+        if (expression.op === "+" && sequence(left) && sequence(right)) return left;
         return { kind: "type", type: numeric(left, right) };
       }
       case "unary": {

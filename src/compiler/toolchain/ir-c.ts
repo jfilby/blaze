@@ -1612,10 +1612,27 @@ class FunctionEmitter {
         `if (${block} == NULL) ${RUNTIME_NAME}_raise("out of memory"); ${block}; })`
       );
     }
-    // The elements written out: a braced initializer is the only spelling that
-    // says which element is which, and it carries the length with it.
-    const initialised = value.values.map((one) => `(${this.raw(one, depth)})`).join(", ");
-    return `(((${element}[]){${initialised}}))`;
+    // The elements written out, in a block the runtime hands out rather than in
+    // the frame that wrote them.
+    //
+    // A compound literal is the shorter spelling and it is the wrong lifetime:
+    // the block it makes belongs to the statement around it, so a list a caller
+    // returns or a constructor stores in a field is a pointer into a frame that
+    // has gone. The runtime's block is live until the program lets it go, which
+    // is what a value the source may keep needs. It is cleared too, so a read
+    // past the last element is the zero the language answers rather than
+    // whatever the previous frame wrote there. This is the same allocation the
+    // machine backend makes for a written-out list, so the two answer the same
+    // program.
+    const length = value.length ?? value.values.length;
+    const block = this.temporary(`${element}_block`);
+    const written = value.values.map(
+      (one, at) => `${block}[${at}] = ${this.expression(one, value.element, depth)};`,
+    );
+    return (
+      `({ ${element}* ${block} = (${element}*)${RUNTIME_NAME}_array_new(${length}, sizeof(${element})); ` +
+      `if (${block} == NULL) ${RUNTIME_NAME}_raise("out of memory"); ${written.join(" ")} ${block}; })`
+    );
   }
 
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {

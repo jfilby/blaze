@@ -1080,6 +1080,56 @@ test("push and pop change the array a name holds", async () => {
   assert.equal(output.trim(), "402");
 });
 
+test("an empty list a function answers is a block of its own", async () => {
+  // The list is built where it is returned, so it cannot be the frame of the
+  // function that answered it: each call takes a block of its own, and a write
+  // through one is not a write through the other.
+  const output = await agreesWithNode([
+    "function empty(): number[] {",
+    "  return [];",
+    "}",
+    "function g(): number {",
+    "  const a = empty();",
+    "  const b = empty();",
+    "  a.push(1);",
+    "  b.push(2);",
+    "  b.push(3);",
+    "  return a.length * 10 + b.length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "12");
+});
+
+test("a class field holds a list and grows it", async () => {
+  // `private items: number[] = []` is a field whose type is the list the
+  // initialiser writes, and `this.items.push(x)` writes the field back into the
+  // object the method was called on.
+  const output = await agreesWithNode([
+    "class Bag {",
+    "  private items: number[] = [];",
+    "  add(value: number): void {",
+    "    this.items.push(value);",
+    "  }",
+    "  size(): number {",
+    "    return this.items.length;",
+    "  }",
+    "  total(): number {",
+    "    let sum = 0;",
+    "    for (const item of this.items) sum += item;",
+    "    return sum;",
+    "  }",
+    "}",
+    "const bag = new Bag();",
+    "bag.add(3);",
+    "bag.add(4);",
+    "console.log(bag.size(), bag.total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2 7");
+});
+
 test("an array of numbers written out is the same array a typed one is", async () => {
   // `[1, 2, 3]` and `new Float64Array([1, 2, 3])` are one value: an array of
   // numbers, with the length the values give it.
