@@ -12,11 +12,7 @@
  * library as one translation unit, which is what makes it one file to compile.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createHash, existsSync, readFileSync, writeFile, dirname, resolve, fileURLToPath } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions, optimizationOptions } from "../core/target.ts";

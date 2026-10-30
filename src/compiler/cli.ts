@@ -14,10 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
-import { parseArgs } from "node:util";
+import { existsSync, writeFileSync, resolve, createInterface, parseArgs } from "./core/platform.ts";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,

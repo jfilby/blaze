@@ -17,8 +17,7 @@
  * the reference for what the IR means.
  */
 
-import { readFileSync } from "node:fs";
-import { stat, writeFile } from "node:fs/promises";
+import { readFileSync, stat, writeFile } from "../core/platform.ts";
 import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { DEFAULT_ALIGNMENT, isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";

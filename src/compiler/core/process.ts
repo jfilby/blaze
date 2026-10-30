@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;

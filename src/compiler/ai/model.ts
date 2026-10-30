@@ -30,7 +30,7 @@
  *   COMMANDCODE_API_KEY, COMMAND_CODE_API_KEY  enables the commandcode provider
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { COMMANDCODE_BASE_URL } from "./commandcode.ts";
 

@@ -13,7 +13,7 @@
  * of the program, and the linker is what resolves what it calls.
  */
 
-import { stat, writeFile } from "node:fs/promises";
+import { stat, writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { inspectObject } from "./assembler.ts";
 import { run } from "../core/process.ts";

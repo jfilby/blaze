@@ -36,9 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { existsSync, readFileSync, copyFile, mkdir, readdir, readFile, rename, writeFile, basename, dirname, extname, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";

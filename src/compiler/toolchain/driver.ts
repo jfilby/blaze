@@ -11,7 +11,7 @@
  * what it allocates, and the strings and arithmetic it builds on the way.
  */
 
-import { writeFile } from "node:fs/promises";
+import { writeFile } from "../core/platform.ts";
 import { contractText, parseType, typeToString } from "../semantics/contract.ts";
 import { slotType } from "../core/semantic-ir.ts";
 import { rulesFor, type TextStyle } from "../semantics/language.ts";

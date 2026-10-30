@@ -22,7 +22,7 @@
  * never touches the file system and a test can contract a program from a map.
  */
 
-import { posix } from "node:path";
+import { posix } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { byName } from "../core/named-record.ts";
 import { parseContract } from "./contract.ts";

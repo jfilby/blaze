@@ -23,10 +23,7 @@
  * object that may be linked as it stands.
  */
 
-import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createHash, readFile, readdir, join, relative, sep, fileURLToPath } from "./platform.ts";
 
 export const COMPILER_VERSION = "0.1.0";
 

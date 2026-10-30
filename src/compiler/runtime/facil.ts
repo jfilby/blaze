@@ -12,8 +12,7 @@
  * into a single relocatable object that the program driver links.
  */
 
-import { readdir, stat, writeFile } from "node:fs/promises";
-import { availableParallelism } from "node:os";
+import { readdir, stat, writeFile, availableParallelism, fileURLToPath, dirname, resolve } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run, runAsync } from "../core/process.ts";
 import { mapConcurrent } from "../core/concurrency.ts";
@@ -22,8 +21,6 @@ import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./http-needs.ts"
 import { RUNTIME_NAME, runtimeSourceSource } from "./abi.ts";
 import { compileRuntimeSource, writeRuntimeHeader } from "./standalone.ts";
 import { cTargetOptions, optimizationOptions } from "../core/target.ts";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 
 export interface FacilRuntime {

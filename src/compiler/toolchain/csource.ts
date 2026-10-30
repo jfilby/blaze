@@ -8,7 +8,7 @@
  * the compiler having to understand C.
  */
 
-import { stat, writeFile } from "node:fs/promises";
+import { stat, writeFile } from "../core/platform.ts";
 import { inspectObject } from "./assembler.ts";
 import { cDeclarationType } from "./linker.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";

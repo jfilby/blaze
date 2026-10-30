@@ -20,9 +20,7 @@
  * instead of asking the C compiler the same question again.
  */
 
-import { createHash } from "node:crypto";
-import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { cpus } from "node:os";
+import { createHash, copyFile, mkdir, rename, rm, stat, writeFile, cpus } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "./abi.ts";

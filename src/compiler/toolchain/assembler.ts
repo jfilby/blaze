@@ -13,7 +13,7 @@
  * functions of the program, which the build links beside it.
  */
 
-import { stat, writeFile } from "node:fs/promises";
+import { stat, writeFile } from "../core/platform.ts";
 import { archOptions } from "../core/target.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";

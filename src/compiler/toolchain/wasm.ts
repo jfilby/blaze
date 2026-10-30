@@ -14,7 +14,7 @@
  * the module reads it at the offsets the contract gives.
  */
 
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "../core/platform.ts";
 import { bufferElement, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";

@@ -22,8 +22,7 @@
  *   node offline-build.ts <project directory> <work directory>
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, writeFile, join, resolve } from "./core/platform.ts";
 import { parse as parseToml } from "smol-toml";
 
 import { frontendFor } from "./semantics/frontend.ts";

@@ -18,10 +18,7 @@
  * against `node`, which runs TypeScript directly.
  */
 
-import { readFileSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, mkdtemp, writeFile, tmpdir, join } from "../core/platform.ts";
 import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
 import { CompilerError } from "../core/errors.ts";
 import { usesSqliteSource } from "../runtime/sqlite.ts";

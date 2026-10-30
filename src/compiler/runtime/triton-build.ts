@@ -71,9 +71,7 @@ int blaze_triton_launch(const char* kernel_name,
 `;
 }
 
-import { writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { writeFile, dirname, fileURLToPath } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions, optimizationOptions } from "../core/target.ts";

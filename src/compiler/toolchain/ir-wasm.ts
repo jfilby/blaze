@@ -20,7 +20,7 @@
  * placed — which is what a `wasm` build verifies against test vectors.
  */
 
-import { stat, writeFile } from "node:fs/promises";
+import { stat, writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { boundaryProblems, bodyOf, DATA_BASE_EXPORT, generateWasmHost, generateWasmProgramHost, INSPECT_MODULE, moduleServices, readVaruint, wasmValueType } from "./wasm.ts";

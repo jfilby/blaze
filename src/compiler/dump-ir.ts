@@ -1,5 +1,4 @@
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readFile, join, resolve } from "./core/platform.ts";
 import { parse as parseToml } from "smol-toml";
 import { frontendFor } from "./semantics/frontend.ts";
 import { runContractPhase } from "./semantics/program.ts";

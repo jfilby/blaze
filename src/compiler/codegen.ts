@@ -76,8 +76,7 @@ export interface PreparedLibrary {
   headerPath: string;
   objectPath: string;
 }
-import { readFile, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile, stat, writeFile, dirname } from "./core/platform.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";

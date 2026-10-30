@@ -12,7 +12,7 @@
  * and the benchmark never learn which runtime a candidate was built against.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { EXECUTABLE_SUFFIX, nimOptimizationOptions } from "../core/target.ts";

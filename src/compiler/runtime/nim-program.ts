@@ -10,7 +10,7 @@
  * is for a function build (see runtime/nim.ts).
  */
 
-import { writeFile } from "node:fs/promises";
+import { writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { bufferElement, parseType, typeToString } from "../semantics/contract.ts";
 import type { TextStyle } from "../semantics/language.ts";

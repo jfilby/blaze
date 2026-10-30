@@ -33,7 +33,7 @@ import type {
   LanguageModelV4Usage,
   SharedV4Warning,
 } from "@ai-sdk/provider";
-import { randomUUID } from "node:crypto";
+import { randomUUID } from "../core/platform.ts";
 import { z } from "zod";
 
 /** The API host, and the only path that a CommandCode subscription can reach. */

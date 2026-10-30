@@ -7,9 +7,7 @@
  * has been renamed into place is still there after the power goes out.
  */
 
-import { createHash } from "node:crypto";
-import { readFile, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import { createHash, readFile, mkdir, open, readdir, rename, rm, stat, writeFile, dirname, isAbsolute, normalize, relative, resolve, sep } from "./platform.ts";
 import { CompilerError } from "./errors.ts";
 
 export interface JsonStore {
