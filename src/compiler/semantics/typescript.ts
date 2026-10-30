@@ -2618,7 +2618,7 @@ class TypeScriptParser {
    * exception: it is the module's interface, so what it wrote outside the
    * subset is the module's refusal and is never read again as a program.
    */
-  parseModule(path: string): ModuleAnalysis {
+  parseModule(path: string, entry = true): ModuleAnalysis {
     const imports: ModuleImport[] = [];
     // A class is lowered before anything else is read: its constructor and
     // methods are declarations of the module, wherever the class was written,
@@ -2669,15 +2669,16 @@ class TypeScriptParser {
         if (declaration.offers !== null) defaultExport = declaration.offers;
         continue;
       }
-      // A top-level value is a declaration, not a statement that makes the file
-      // run. The functions of the file read a constant expression where it was
-      // written (see `scanConstants`), and a file of declarations alone is a
-      // library. The declaration stays in the body tokens for a file that does
-      // run, where the program reads it as the value it initialises.
+      // A top-level value is a declaration, not a statement that makes a
+      // library run. The functions of the file read a constant expression where
+      // it was written (see `scanConstants`), and a file of declarations alone
+      // is a library. In the entry module the value is a statement the program
+      // runs, so the body tokens keep it for the program parser.
       if (this.at("const") || this.at("let") || this.at("var")) {
         this.synchronize();
         this.accept(";");
         atTop = false;
+        if (entry) runs = true;
         continue;
       }
       const before = this.position;
@@ -7390,7 +7391,7 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
 }
 
 export const typeScriptFrontend: Frontend = {
-  analyze(source, path) {
+  analyze(source, path, entry = true) {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
@@ -7414,7 +7415,7 @@ export const typeScriptFrontend: Frontend = {
     const scanned = scanConstants(tokens);
     const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state);
     parser.wideBigint = wideBigint;
-    const analysis = parser.parseModule(path);
+    const analysis = parser.parseModule(path, entry);
     // A file read as a program has its whole text readable as statements, so a
     // nested function inside a function that the module parser stopped for is
     // read by the one parser whose grammar carries that shape. The module

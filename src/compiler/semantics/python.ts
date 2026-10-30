@@ -4842,7 +4842,7 @@ function settledPythonBody(statements: readonly Statement[], payload: TypeExpr):
 }
 
 export const pythonFrontend: Frontend = {
-  analyze(source, path): ModuleAnalysis {
+  analyze(source, path, _entry = true): ModuleAnalysis {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }

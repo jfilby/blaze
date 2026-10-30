@@ -793,7 +793,7 @@ function dependsOn(expression: NimExpr, name: string): boolean {
 /* -------------------------------------------------------------------------- */
 
 export const nimFrontend: Frontend = {
-  analyze(source, path) {
+  analyze(source, path, _entry = true) {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }

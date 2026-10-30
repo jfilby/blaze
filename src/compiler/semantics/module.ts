@@ -260,8 +260,13 @@ export interface Frontend {
   /**
    * Parses a module. It never contracts anything: a file is parsed once, and
    * the phase asks for a contract per exported function.
+   *
+   * `entry` says whether this is the module the program starts from. A top-level
+   * value in the entry module is a statement the program runs; the same value in
+   * a module the program imports is a declaration the module holds, and a file
+   * of declarations is a library.
    */
-  analyze(source: string, path: string): ModuleAnalysis;
+  analyze(source: string, path: string, entry?: boolean): ModuleAnalysis;
 
   /**
    * Contracts one declared function. The contract describes the semantics the

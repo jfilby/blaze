@@ -126,7 +126,7 @@ export async function selfHostGap(directory = COMPILER_ROOT): Promise<SelfHostGa
     const source = await readFile(path, "utf8");
     const name = projectPath(path);
     try {
-      typeScriptFrontend.analyze(source, name);
+      typeScriptFrontend.analyze(source, name, name === "cli.ts");
       clean.push(name);
     } catch (error) {
       const message = isCompilerError(error) ? error.message : String(error);

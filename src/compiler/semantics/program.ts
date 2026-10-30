@@ -120,7 +120,7 @@ function discover(request: ContractPhaseRequest, read: (path: string) => string 
     if (source === null) throw contractPhaseError(`cannot read module ${path}`);
     if (source.trim() === "") throw contractPhaseError(`module ${path} is empty`);
 
-    const record: ModuleRecord = { path, source, analysis: request.frontend.analyze(source, path), resolved: [] };
+    const record: ModuleRecord = { path, source, analysis: request.frontend.analyze(source, path, path === request.entry.path), resolved: [] };
     records.set(path, record);
     for (const entry of record.analysis.imports) {
       const resolved = resolveImport(request, read, path, entry);
