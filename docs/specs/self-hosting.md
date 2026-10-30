@@ -73,8 +73,9 @@ Reading `Object.keys` and `Object.values` of a constant object lowered it to
 name, a parameter written as a pattern, and a trailing comma in a list lowered
 it to 5194, a `for..of` that names the parts of its element lowered it to 5123,
 a getter to 5121, the `_` separator in a number to 5068, a block statement to
-4723, an `await` written as a statement to 4691, and an array returned empty or
-held in a class field to 4513. The refusals fall into six frontiers:
+4723, an `await` written as a statement to 4691, an array returned empty or
+held in a class field to 4513, and a declaration that states its type and no
+value to 4489. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model

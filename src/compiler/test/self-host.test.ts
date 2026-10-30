@@ -32,11 +32,12 @@ import { selfHostGap } from "./self-host-gap.ts";
  * `_` separator in a number to 5068, and a block written as a statement to 4723.
  * Reading an `await` written as a statement lowered it to 4691, and carrying an
  * array as a value of its own — returned empty, held in a class field, or
- * grown through the field — to 4513. Lower it with every slice; raise it only
+ * grown through the field — to 4513, and a declaration that states its type and
+ * no value to 4489. Lower it with every slice; raise it only
  * when the measurement changes which parser reads a body, or when the compiler
  * itself grows a construct the frontend has not learned yet.
  */
-const REFUSAL_BUDGET = 4513;
+const REFUSAL_BUDGET = 4489;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

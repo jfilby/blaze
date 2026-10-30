@@ -1952,6 +1952,29 @@ class TypeScriptParser {
   }
 
   /**
+   * The value a declaration without an initialiser starts at.
+   *
+   * The source writes `let text: string;` and assigns it before reading it, and
+   * the language it is written in starts the name as an absent value. A value
+   * here has no absence, so the name starts at the zero of the type it declares:
+   * an empty text, a zero, a null reference, or an empty list. The assignment
+   * the source writes then replaces it before anything reads it.
+   */
+  private zeroFor(type: TypeExpr): Expression {
+    if (type.kind === "primitive") {
+      if (type.name === "i256" || type.name === "u256") {
+        return { k: "bigint", text: "0n" };
+      }
+      return { k: "literal", text: "0" };
+    }
+    if (type.kind === "text") return { k: "text", parts: [{ k: "text", value: "" }] };
+    if (type.kind === "slice" || type.kind === "array") {
+      return { k: "buffer", element: typeToString(type.of), values: [] };
+    }
+    return { k: "null" };
+  }
+
+  /**
    * An expression read as the type a use fixes it at, which is what says what
    * an empty list written there holds.
    */
@@ -3860,25 +3883,32 @@ class TypeScriptParser {
         type = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
         if (head !== "" && this.classTable.names.has(head)) annotationClass = head;
       }
-      if (!this.accept("=")) {
+      let init: Expression;
+      if (this.accept("=")) {
+        // The arrow this declaration binds is a direct call by the name it is
+        // given, so it is not turned into a closure here.
+        const wasBinding = this.bindingArrow;
+        this.bindingArrow = true;
+        const wasExpecting = this.expecting;
+        this.expecting = type !== null && type.kind === "slice" ? type.of : null;
+        try {
+          init = this.readExpression();
+        } finally {
+          this.bindingArrow = wasBinding;
+          this.expecting = wasExpecting;
+        }
+        this.accept(";");
+      } else if (type === null) {
         this.report("a declaration needs an initialiser", `as in let ${name.text} = 0;`, name);
         this.synchronize();
         return { kind: "expression", value: this.hole(), line: name.line };
+      } else {
+        // A declaration that states its type and no value starts at the zero
+        // of that type: the source assigns it before it reads it, and the
+        // assignment is what the body does.
+        init = this.zeroFor(type);
+        this.accept(";");
       }
-      // The arrow this declaration binds is a direct call by the name it is
-      // given, so it is not turned into a closure here.
-      const wasBinding = this.bindingArrow;
-      this.bindingArrow = true;
-      const wasExpecting = this.expecting;
-      this.expecting = type !== null && type.kind === "slice" ? type.of : null;
-      let init: Expression;
-      try {
-        init = this.readExpression();
-      } finally {
-        this.bindingArrow = wasBinding;
-        this.expecting = wasExpecting;
-      }
-      this.accept(";");
       // An arrow is called by the name it is bound to: the function it lifted to
       // already carries the values it captured, so the name is not a slot the
       // body reads. A name bound to a value that is not an arrow is not one.

@@ -1080,6 +1080,28 @@ test("push and pop change the array a name holds", async () => {
   assert.equal(output.trim(), "402");
 });
 
+test("a declaration without a value starts at the zero of its type", async () => {
+  // `let text: string;` states the type and leaves the value to the assignment
+  // the source writes next. A value here has no absent one, so the name starts
+  // at the zero of its type and the assignment replaces it before it is read.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  let text: string;",
+    "  let n: number;",
+    "  let flag: boolean;",
+    "  let values: number[];",
+    "  text = ` ab `;",
+    "  n = 4;",
+    "  flag = true;",
+    "  values = [1, 2, 3];",
+    "  return text.trim().length * 10 + (flag ? n : 0) + values.length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "27");
+});
+
 test("an empty list a function answers is a block of its own", async () => {
   // The list is built where it is returned, so it cannot be the frame of the
   // function that answered it: each call takes a block of its own, and a write
