@@ -2961,6 +2961,16 @@ class TypeScriptParser {
       for (const name of this.readExportNames()) namesExported[name] = true;
       return null;
     }
+    // A top-level `const`, `let` or `var` is a value the file holds. A function
+    // that reads one of its constant expressions is compiled with the value
+    // written where it was read (see `scanConstants`), so the declaration is
+    // skipped here rather than refused: the module's function is the thing the
+    // build needs. A value another module imports is a different question, and
+    // the import phase answers it.
+    if (exported && (this.at("const") || this.at("let") || this.at("var"))) {
+      this.synchronize();
+      return null;
+    }
     if (exported && !this.at("function")) {
       this.report(
         "only functions can be exported",

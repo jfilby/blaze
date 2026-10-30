@@ -384,6 +384,21 @@ test("a text method is the runtime call that answers it", async () => {
   assert.equal(output.trim(), "true false false ab 1 1");
 });
 
+test("a top-level constant a function reads is the value it was written with", async () => {
+  // A function is compiled on its own, so a top-level constant it reads is
+  // written into the body where the source read the name. The `export` says
+  // another module may read it, which is a question for the import phase; for
+  // the function in this file, the value is the one written here.
+  const output = await agreesWithNode([
+    "export const BASE = 10;",
+    "export const TABLE = { a: 1, b: 2 };",
+    "export function add(x: number): number { return x + BASE + TABLE.b; }",
+    "console.log(add(1));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "13");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

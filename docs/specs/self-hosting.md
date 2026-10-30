@@ -64,8 +64,8 @@ sources (`semantics/module.ts`, which is types alone) was read and 6339
 constructs were refused. The type-only slice below lowered the count to 6248.
 The platform boundary added two sources that are values and re-exports, which
 raised it to 6313: the compiler is now 93 sources, and 1 is read. Object
-shorthand and the text methods lowered it to 5856. The refusals fall into six
-frontiers:
+shorthand and the text methods lowered it to 5856, and reading a module's own
+top-level values lowered it to 5802. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -74,9 +74,10 @@ frontiers:
   nullish coalescing (`??`), spread, destructuring, object shorthand, `switch`,
   `throw`, class getters, and the module forms (`import * as`, renamed imports,
   re-exports).
-- **Values a module exports.** The frontend's module is a list of functions. The
-  compiler exports constants, tables and the platform adapter's host services,
-  and a module that exports a value is refused at `export const`.
+- **Values a module exports.** A top-level constant is read by the functions of
+  its own file, where the value is written into the body. A value another module
+  imports is not carried: the module graph still offers functions only, and
+  `export const` in another file is refused at the import that names it.
 - **The value model.** The compiler relies on `undefined`/absence, dynamic
   objects with text keys, maps and sets of references as well as numbers,
   arrays that grow, arrays of arrays, and text methods including regular
@@ -155,10 +156,11 @@ below are independent enough to land one at a time, in this order:
   stand for. Inheritance is limited to `extends Error` and one internal reader
   hierarchy; support it or write those three classes out. Do not carry a general
   inheritance model to compile four uses.
-- Module forms: `import * as`, renamed imports, re-exports, and an `export const`
-  or a `export { value }` that names a value rather than a function. A
-  self-hosting compiler has a module graph, so the linker's "one name per
-  function" rule has to become a module-scoped name.
+- Module forms: `import * as`, renamed imports, re-exports, and a module value
+  another module imports. A top-level constant is already read by the functions
+  of its own file; what is missing is the module graph carrying that value
+  across files. A self-hosting compiler has a module graph, so the linker's "one
+  name per function" rule has to become a module-scoped name.
 
 Exit criterion: the source's control flow and expressions parse; only data and
 host refusals remain.
