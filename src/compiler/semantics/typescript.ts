@@ -5376,6 +5376,16 @@ class TypeScriptParser {
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
         const args = this.readCallArguments();
+        // `String(x)` is the text the value is written as, which is the value a
+        // template string interpolates: the builder is the same one.
+        if (target.name === "String") {
+          const value = args[0];
+          const text: Expression = value === undefined ? { k: "text", parts: [] } : { k: "text", parts: [{ k: "value", value }] };
+          this.expressionTypes.set(text, TEXT_RESULT);
+          replace(text);
+          continue;
+        }
+
         replace({ k: "call", name: target.name, args });
         continue;
       }

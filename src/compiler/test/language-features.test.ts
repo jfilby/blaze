@@ -1022,6 +1022,19 @@ test("the functions the frontend writes are named by the file that wrote them", 
   assert.equal(delivered.stdout.trim(), "5");
 });
 
+test("String writes a value as the text a template string writes it as", async () => {
+  // `String(x)` is the text a value is written as, which is the builder a
+  // template string already uses.
+  const output = await agreesWithNode([
+    "function g(n: number, s: string): number {",
+    "  return (String(n) + s).length + String(n).length;",
+    "}",
+    "console.log(g(12, `34`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});
+
 test("an array of text is a value a body writes, indexes and walks", async () => {
   const output = await agreesWithNode([
     "function g(): number {",
