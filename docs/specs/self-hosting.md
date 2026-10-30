@@ -63,15 +63,17 @@ holds the refusal count as a budget. When the report was added, 1 of the 91
 sources (`semantics/module.ts`, which is types alone) was read and 6339
 constructs were refused. The type-only slice below lowered the count to 6248.
 The platform boundary added two sources that are values and re-exports, which
-raised it to 6313: the compiler is now 93 sources, and 1 is read. The refusals
-fall into six frontiers:
+raised it to 6313: the compiler is now 93 sources, and 1 is read. Object
+shorthand and the text methods lowered it to 5856. The refusals fall into six
+frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
   does not have yet.
 - **The JavaScript expressions the source uses.** Optional chaining (`?.`),
-  nullish coalescing (`??`), spread and destructuring, `switch`, `throw`, class
-  getters, and the module forms (`import * as`, renamed imports, re-exports).
+  nullish coalescing (`??`), spread, destructuring, object shorthand, `switch`,
+  `throw`, class getters, and the module forms (`import * as`, renamed imports,
+  re-exports).
 - **Values a module exports.** The frontend's module is a list of functions. The
   compiler exports constants, tables and the platform adapter's host services,
   and a module that exports a value is refused at `export const`.
@@ -143,9 +145,10 @@ below are independent enough to land one at a time, in this order:
 - `?.` and `??`, which lower to the conditional and the null check the source
   would have written.
 - Spread and destructuring in declarations, parameters, calls, array literals
-  and object literals.
-- `switch` (202 occurrences), lowered to the chain of comparisons the current
-  subset already has.
+  and object literals. Object shorthand, `{ line }`, is read as the field it
+  names.
+- `switch` (about 200 occurrences), lowered to the chain of comparisons the
+  current subset already has.
 - `throw` and `new Error`, plus `error.message` in a catch arm. Try/catch and
   `finally` are already carried; only the throwing side is missing.
 - Class getters (8 occurrences), either as methods or as the field read they
@@ -180,12 +183,12 @@ to carry those without a rewrite into numeric arrays:
 - **Maps and sets.** Values that are text or references, keys that are not only
   text, iteration (`for..of`, `keys`, `values`, `entries`) and `Map`/`Set` as
   fields. A compiler's symbol tables are maps of references.
-- **Text.** `trim`, `includes`, `startsWith`, `endsWith`, `replace`, `split`,
-  `slice`, `indexOf`, `toLowerCase` and the numeric conversions the source uses.
-  A runtime regular-expression engine is a decision of its own: the source has
-  about 180 regex literals, and rewriting them as hand-written scanners is a
-  larger and more fragile change than carrying a small engine. Choose the engine
-  before porting `semantics/contract.ts`.
+- **Text.** `trim`, `includes`, `startsWith`, `endsWith`, `indexOf` and `slice`
+  are carried. Still missing: `replace`, `split`, `toLowerCase`, `repeat` and
+  `padStart`/`padEnd`. A runtime regular-expression engine is a decision of its
+  own: the source has about 180 regex literals, and rewriting them as
+  hand-written scanners is a larger and more fragile change than carrying a
+  small engine. Choose the engine before porting `semantics/contract.ts`.
 
 Exit criterion: a compiler module that does no host I/O runs natively and its
 existing tests pass.

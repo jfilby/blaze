@@ -1198,6 +1198,46 @@ class ProgramParser {
           value = { k: "call", function: "text.indexOf", args };
           continue;
         }
+        if ((member === "includes" || member === "startsWith") && this.at("(")) {
+          // A needle at or after the start is `includes`; a needle at the
+          // start is `startsWith`. Both are where `text.indexOf` says the
+          // needle is.
+          this.next();
+          const args = [value, ...this.arguments()];
+          if (args.length !== 2) {
+            this.fail(`s.${member}(needle) takes the one text it looks for`, this.peek());
+          }
+          value = {
+            k: "binary",
+            op: member === "includes" ? "!==" : "===",
+            left: { k: "call", function: "text.indexOf", args },
+            right: { k: "number", text: member === "includes" ? "-1" : "0" },
+          };
+          continue;
+        }
+        if (member === "endsWith" && this.at("(")) {
+          // The suffix a text ends with is the slice from its length less the
+          // needle's, and the text ends with the needle where that slice is
+          // the needle. Both lengths are read from a name or a literal, which
+          // is what a program function's text is.
+          this.next();
+          const args = [value, ...this.arguments()];
+          if (args.length === 2) {
+            const needle = args[1] as ProgramValue;
+            const start = args[0] === undefined ? null : textLength(args[0]);
+            const end = textLength(needle);
+            if (start !== null && end !== null) {
+              value = {
+                k: "binary",
+                op: "===",
+                left: { k: "call", function: "text.slice", args: [value, { k: "binary", op: "-", left: start, right: end }] },
+                right: needle,
+              };
+              continue;
+            }
+          }
+          this.fail("s.endsWith(needle) takes the one text it looks for", this.peek());
+        }
         if (member === "slice" && this.at("(") && value.k !== "argv") {
           // `s.slice(start, end)` answers the text between two indexes, and
           // `s.slice(start)` the text from one index to the end. The slice of
@@ -1967,6 +2007,20 @@ class ProgramParser {
     }
     return value;
   }
+}
+
+/**
+ * The length of a text a program value holds, where the value is a name or a
+ * literal: a length is what `text.slice` and `endsWith` need, and a value the
+ * program builds is not one the parser can measure.
+ */
+function textLength(value: ProgramValue): ProgramValue | null {
+  if (value.k === "name") return { k: "length", of: value.name };
+  if (value.k === "text" && value.parts.length === 1) {
+    const part = value.parts[0];
+    if (part !== undefined && part.k === "text") return { k: "number", text: String(part.value.length) };
+  }
+  return null;
 }
 
 /**

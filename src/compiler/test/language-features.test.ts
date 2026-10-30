@@ -133,18 +133,15 @@ test("a function declared after a statement is compiled with the module", async 
   assert.equal(output.trim(), "3");
 });
 
-test("a module function that calls one the module cannot hold is read by the program", async () => {
-  // The module reads a function whose body is inside the subset it holds, and
-  // leaves the ones it cannot read — a body that searches a text, that opens
-  // the database — where the program reads them. A function that calls one of
-  // those is not a function the module can hold either: a contract names only
-  // the functions of the module, so the caller is read beside its callee as a
-  // function of the program. The file is one source: a function of it is a
-  // function of the module only if everything it calls is.
+test("a module function that calls a text method is a function of the module", async () => {
+  // A text method is carried by the frontend now, so a function that reads one
+  // is a function of the module and is contracted, compiled and linked like any
+  // other. The file is one source: a function of it is a function of the module
+  // whatever it calls.
   const source = [
     "function nameOf(header: string): string {",
     '  const at = header.indexOf("=");',
-    '  return at < 0 ? "" : header.slice(at + 1);',
+    '  return at < 0 ? "" : header.slice(at + 1, header.length);',
     "}",
     "function greeting(header: string): string {",
     "  const name = nameOf(header);",
@@ -156,18 +153,17 @@ test("a module function that calls one the module cannot hold is read by the pro
   ].join("\n");
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   assert.deepEqual(
-    Object.keys(phase.program.files[0]?.functions ?? {}),
-    [],
-    "the caller is read where the callee is, not as a function of the module",
+    Object.keys(phase.program.files[0]?.functions ?? {}).sort(),
+    ["greeting", "nameOf"],
+    "a body of text methods is a function of the module",
   );
   assert.equal(await agreesWithNode(source), "hello blaze\nhello\n");
 });
 
-test("a function declared before the program that calls one the module cannot hold is read by the program", async () => {
+test("a function declared before the program that calls a text method is a function of the module", async () => {
   // A declaration is hoisted from wherever it is written, so a function at the
-  // top of a program is read by the module when it can be. When a function it
-  // calls is one the module cannot hold, the caller is read by the program too,
-  // beside the callee, whichever of the two is written first.
+  // top of a program is read by the module when it can be. A text method is a
+  // construct the module carries, so both the caller and the callee are.
   const source = [
     "function fromText(text: string): number {",
     '  const at = text.indexOf("3");',
@@ -181,9 +177,9 @@ test("a function declared before the program that calls one the module cannot ho
   ].join("\n");
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   assert.deepEqual(
-    Object.keys(phase.program.files[0]?.functions ?? {}),
-    [],
-    "the caller is read by the program, beside the callee it calls",
+    Object.keys(phase.program.files[0]?.functions ?? {}).sort(),
+    ["fromText", "twice"],
+    "the caller and its callee are functions of the module",
   );
   assert.equal(await agreesWithNode(source), "6\n");
 });
@@ -360,6 +356,32 @@ test("a nullish write keeps a value the target already holds", async () => {
     "",
   ].join("\n"));
   assert.equal(output.trim(), "0 9");
+});
+
+test("an object literal names a field by the name it holds", async () => {
+  // `{ line }` is `{ line: line }`, and the value is the name the source wrote.
+  const output = await agreesWithNode([
+    "function make(line: number, message: string): string {",
+    "  const entry = { line, message };",
+    "  return `${entry.line}:${entry.message}`;",
+    "}",
+    "console.log(make(3, `ok`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3:ok");
+});
+
+test("a text method is the runtime call that answers it", async () => {
+  // `trim`, `indexOf` and `slice` are the runtime's text helpers; `includes`,
+  // `startsWith` and `endsWith` are written over `indexOf` and `slice`.
+  const output = await agreesWithNode([
+    "const s = ` ab `;",
+    "const n = `ab`;",
+    "const head = s.slice(0, 1);",
+    "console.log(s.includes(n), s.startsWith(n), s.endsWith(n), s.trim(), s.indexOf(n), head.length);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "true false false ab 1 1");
 });
 
 test("a type-only declaration is not a value the program carries", async () => {

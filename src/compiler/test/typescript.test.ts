@@ -410,6 +410,25 @@ test("an angle-bracket type assertion is erased", () => {
   assert.match(ir, /return \[element\[f64\]/);
 });
 
+test("a text method lowers to the runtime call that answers it", () => {
+  const source = [
+    "export function score(s: string, n: string): number {",
+    "  let total = 0;",
+    "  if (s.includes(n)) total += 1;",
+    "  if (s.startsWith(n)) total += 2;",
+    "  if (s.endsWith(n)) total += 4;",
+    "  const head = s.trim();",
+    "  return total + head.length + s.indexOf(n) + s.slice(0, 1).length;",
+    "}",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "module.ts": `${source}\nconsole.log(score("a", "a"));\n` }, "module.ts");
+  const ir = printSemanticFunction(semanticsOf(phase)["score"]);
+  assert.match(ir, /text\.indexOf/);
+  assert.match(ir, /text\.slice/);
+  assert.match(ir, /text\.trim/);
+});
+
 test("a switch is lowered to the comparisons and the fallthrough it writes", () => {
   // The discriminant is read once, each case is the comparison the source
   // wrote, a case with no break falls into the next, and the default is what

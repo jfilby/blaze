@@ -19,13 +19,13 @@ import { selfHostGap } from "./self-host-gap.ts";
 /**
  * The refusals the compiler's sources earn today.
  *
- * It was 6339 when the report was added and 6248 after the type-only slices.
- * The platform boundary added two sources, which are values and re-exports the
- * frontend does not read yet, so it is 6313. Lower it with every slice; raise it
- * only when the compiler itself starts using a construct the frontend has not
+ * It was 6339 when the report was added, 6248 after the type-only slice, and
+ * 6313 when the platform boundary added its two sources. Object shorthand and
+ * the text methods lowered it to 5856. Lower it with every slice; raise it only
+ * when the compiler itself starts using a construct the frontend has not
  * learned yet.
  */
-const REFUSAL_BUDGET = 6313;
+const REFUSAL_BUDGET = 5856;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

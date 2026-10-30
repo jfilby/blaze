@@ -620,6 +620,7 @@ function repeatableExpression(value: Expression): boolean {
     case "ident":
     case "literal":
     case "bigint":
+    case "text":
     case "null":
     case "length":
       return true;
@@ -4954,6 +4955,17 @@ class TypeScriptParser {
             replace(collected);
             continue;
           }
+          // A text method is a call of the runtime over the text. The three
+          // helpers the runtime already carries are used directly, and the
+          // three that ask where a needle is are written over `text.indexOf`
+          // so a text needs no new service.
+          if (this.valueTypeOf(receiver).kind === "text") {
+            const lowered = this.textMethod(receiver, target.field, args);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           const found = this.methodOwner(this.classOfExpression(receiver), target.field, false);
           if (found === null) {
             this.report(
@@ -5486,8 +5498,80 @@ class TypeScriptParser {
       if (written !== undefined) return written.returns;
       const declared = this.declaredReturns.get(value.name);
       if (declared !== undefined) return declared;
+      // A builtin answers the type it is declared with, so `line.trim()` is a
+      // text and the method written after it is a text method.
+      const builtin = builtinFor(value.name);
+      if (builtin !== null) return builtin.returns;
+    }
+    // A field of a class is typed by the declaration that wrote it, which is
+    // what makes `this.text.trim()` a text method rather than an unknown one.
+    if (value.k === "member") {
+      const owner = this.classOfExpression(value.base);
+      if (owner !== null) {
+        const field = findField(this.classTable, owner, value.field, true) ??
+          findField(this.classTable, owner, value.field, false);
+        if (field !== null) return this.typeForName(field.field.typeName, field.field.line);
+      }
     }
     return resultType(value, this.valueTypes);
+  }
+
+  /**
+   * A method of a text, lowered to the runtime call that answers it.
+   *
+   * `trim`, `indexOf` and `slice` are the text helpers the runtime already
+   * carries. `includes`, `startsWith` and `endsWith` ask where a needle is,
+   * and are the same `text.indexOf` the runtime has: a needle at or after the
+   * start is `includes`, a needle at the start is `startsWith`, and a needle
+   * whose slice is the whole suffix is `endsWith`.
+   *
+   * A needle an `endsWith` reads twice must be a value that reads the same
+   * twice; a call would run twice, which is not what the source wrote.
+   */
+  private textMethod(
+    receiver: Expression,
+    method: string,
+    args: readonly Expression[],
+  ): Expression | null {
+    const call = (name: string, values: Expression[]): Expression => ({ k: "call", name, args: values });
+    if (method === "trim" && args.length === 0) return call("text.trim", [receiver]);
+    if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);
+    if (method === "slice" && (args.length === 1 || args.length === 2)) {
+      return call("text.slice", [receiver, ...args]);
+    }
+    if (method === "includes" && args.length === 1) {
+      return {
+        k: "binary",
+        op: "!==",
+        left: call("text.indexOf", [receiver, args[0] as Expression]),
+        right: { k: "literal", text: "-1" },
+      };
+    }
+    if (method === "startsWith" && args.length === 1) {
+      return {
+        k: "binary",
+        op: "===",
+        left: call("text.indexOf", [receiver, args[0] as Expression]),
+        right: { k: "literal", text: "0" },
+      };
+    }
+    if (method === "endsWith" && args.length === 1) {
+      const needle = args[0] as Expression;
+      if (!repeatableExpression(needle)) return null;
+      const start: Expression = {
+        k: "binary",
+        op: "-",
+        left: { k: "lengthOf", of: receiver },
+        right: { k: "lengthOf", of: needle },
+      };
+      return {
+        k: "binary",
+        op: "===",
+        left: call("text.slice", [receiver, start]),
+        right: needle,
+      };
+    }
+    return null;
   }
 
   /**
@@ -6169,9 +6253,14 @@ class TypeScriptParser {
       const name = key.kind === "ident" || key.kind === "string" ? key.text : null;
       if (name === null) {
         this.report("an object field is named", `near "${key.text}"`, key);
-      } else {
-        this.expect(":");
+      } else if (this.accept(":")) {
         fields.push({ name, value: this.readExpression() });
+      } else if (key.kind === "ident") {
+        // `{ line }` is `{ line: line }`: the field is named by the name the
+        // value is held at, and the value is that name.
+        fields.push({ name, value: { k: "ident", name } });
+      } else {
+        this.report("an object field needs a value", `write ${name}: value`, key);
       }
       if (!this.accept(",")) break;
     }
