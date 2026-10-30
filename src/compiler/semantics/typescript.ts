@@ -3935,6 +3935,12 @@ class TypeScriptParser {
       };
     }
 
+    // `await f();` is a statement the body runs and does not keep the answer
+    // of, which is what an expression statement is. The word is a refused
+    // keyword when it names a statement, and an operator when it starts an
+    // expression, so reading it as the expression it is keeps the two apart.
+    if (this.at("await")) return this.readEffect();
+
     const refused = REFUSED_KEYWORDS[token.text];
     if (refused !== undefined) {
       this.report(`"${token.text}" is not supported`, refused, token);

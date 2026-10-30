@@ -87,6 +87,21 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
+  test(`${backend} backend awaits a call written as a statement`, async () => {
+    // The answer of `await f();` is not kept, so the statement is the call and
+    // not a declaration of a value: the word is an operator here and not the
+    // refused keyword it is where a statement cannot start with one.
+    await agrees(
+      [
+        "async function f(n) { return n + 1; }",
+        "async function g() { await f(2); return 3; }",
+        "console.log(await g());",
+        "",
+      ].join("\n"),
+      { backend },
+    );
+  });
+
   test(`${backend} backend awaits inside an expression and a loop`, async () => {
     await agrees(
       [
