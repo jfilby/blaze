@@ -78,7 +78,8 @@ held in a class field to 4513, and a declaration that states its type and no
 value to 4489, and a `for (;;)` loop to 4405. Reading the class methods written
 after one whose result is an object type raised it to 5505: the scanner had
 taken the type's brace for the method body, so those methods were never read.
-The refusals fall into six frontiers:
+Reading `at` and `slice` of an array lowered it to 5496. The refusals fall into
+six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -210,9 +211,9 @@ to carry those without a rewrite into numeric arrays:
   constructor stores in a field outlives the frame that wrote it; an empty list
   is built the same way when the declaration, field or return type names its
   element. `this.items.push(x)` writes the field back into the object it was
-  read from. What is still missing is `splice`, `shift`, `unshift`, `concat` and
-  the `Array` constructors, and a list whose element is itself a list as a
-  field of a class.
+  read from, and `at` and `slice` read one element and copy a range. What is
+  still missing is `splice`, `shift`, `unshift`, `concat` and the `Array`
+  constructors, and a list whose element is itself a list as a field of a class.
 - **Maps and sets.** Values that are text or references, keys that are not only
   text, iteration (`for..of`, `keys`, `values`, `entries`) and `Map`/`Set` as
   fields. A compiler's symbol tables are maps of references.

@@ -1674,6 +1674,8 @@ const COLLECTION_METHODS: ReadonlySet<string> = new Set([
   "join",
   "includes",
   "indexOf",
+  "at",
+  "slice",
 ]);
 
 /** The operators that stand in front of a value, as opposed to between two. */
@@ -5872,7 +5874,13 @@ class TypeScriptParser {
     if (!COLLECTION_METHODS.has(method)) return null;
     const sequence = this.valueTypeOf(receiver);
     if (sequence.kind !== "slice" && sequence.kind !== "array") return null;
-    if (method === "join" || method === "includes" || method === "indexOf") {
+    if (
+      method === "join" ||
+      method === "includes" ||
+      method === "indexOf" ||
+      method === "at" ||
+      method === "slice"
+    ) {
       return this.sequenceMethod(method, sequence.of, receiver, args, line);
     }
     const callback = args[0];
@@ -6061,7 +6069,7 @@ class TypeScriptParser {
     args: readonly Expression[],
     line: number,
   ): Expression {
-    const wanted = method === "join" ? [0, 1] : [1];
+    const wanted = method === "join" ? [0, 1] : method === "slice" ? [1, 2] : [1];
     if (!wanted.includes(args.length)) {
       this.report(
         `${method} takes ${wanted.join(" or ")} argument${wanted.length === 1 && wanted[0] === 1 ? "" : "s"}`,
@@ -6148,6 +6156,108 @@ class TypeScriptParser {
             },
           ]),
           answer(method === "includes" ? number("0") : { k: "unary", op: "-", operand: number("1") }),
+        ];
+        break;
+      }
+      case "at": {
+        // An index below zero counts back from the end, as `a.length + index`:
+        // the same read the source would have written.
+        params = [
+          { name: "items", type: items },
+          { name: "index", type: NUMBER_RESULT },
+        ];
+        returns = element;
+        body = [
+          { kind: "declare", name: "i", type: null, init: ident("index"), line },
+          {
+            kind: "if",
+            condition: { k: "binary", op: "<", left: ident("i"), right: number("0") },
+            then: [{ kind: "assign", target: "i", op: "+=", value: length(), line }],
+            otherwise: [],
+            line,
+          },
+          answer(at(ident("i"))),
+        ];
+        break;
+      }
+      case "slice": {
+        // The elements between two indexes, as a list of its own. Both ends
+        // count back from the end when they are below zero, and both are held
+        // inside the list, which is what the language does with either.
+        const stop = written === 1 ? length() : ident("stop");
+        params = [
+          { name: "items", type: items },
+          { name: "start", type: NUMBER_RESULT },
+          ...(written === 1 ? [] : [{ name: "stop", type: NUMBER_RESULT }]),
+        ];
+        returns = items;
+        const elementText = typeToString(element);
+        body = [
+          { kind: "declare", name: "from", type: null, init: ident("start"), line },
+          {
+            kind: "if",
+            condition: { k: "binary", op: "<", left: ident("from"), right: number("0") },
+            then: [{ kind: "assign", target: "from", op: "+=", value: length(), line }],
+            otherwise: [],
+            line,
+          },
+          {
+            kind: "if",
+            condition: { k: "binary", op: ">", left: ident("from"), right: length() },
+            then: [{ kind: "assign", target: "from", op: "=", value: length(), line }],
+            otherwise: [],
+            line,
+          },
+          { kind: "declare", name: "to", type: null, init: stop, line },
+          {
+            kind: "if",
+            condition: { k: "binary", op: "<", left: ident("to"), right: number("0") },
+            then: [{ kind: "assign", target: "to", op: "+=", value: length(), line }],
+            otherwise: [],
+            line,
+          },
+          {
+            kind: "if",
+            condition: { k: "binary", op: ">", left: ident("to"), right: length() },
+            then: [{ kind: "assign", target: "to", op: "=", value: length(), line }],
+            otherwise: [],
+            line,
+          },
+          {
+            kind: "if",
+            condition: { k: "binary", op: "<", left: ident("to"), right: ident("from") },
+            then: [{ kind: "assign", target: "to", op: "=", value: ident("from"), line }],
+            otherwise: [],
+            line,
+          },
+          {
+            kind: "declare",
+            name: "out",
+            type: null,
+            init: { k: "sized", element: elementText, count: { k: "binary", op: "-", left: ident("to"), right: ident("from") } },
+            line,
+          },
+          {
+            kind: "loop",
+            variable: "i",
+            from: ident("from"),
+            to: ident("to"),
+            inclusive: false,
+            step: null,
+            down: false,
+            body: [
+              {
+                kind: "indexAssign",
+                buffer: "out",
+                index: { k: "binary", op: "-", left: ident("i"), right: ident("from") },
+                op: "=",
+                value: at(ident("i")),
+                line,
+              },
+            ],
+            line,
+          },
+          answer(ident("out")),
         ];
         break;
       }

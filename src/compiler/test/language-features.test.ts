@@ -1049,6 +1049,24 @@ test("an array of text is built from the lists in front of it and joined", async
   assert.equal(output.trim(), "88");
 });
 
+test("at reads one element and slice copies a range", async () => {
+  // An index below zero counts back from the end, and a slice is a list of its
+  // own: writing into it is not a write into the list it was taken from.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [`ab`, `cde`, `f`];",
+    "  const b = a.slice(1, 3);",
+    "  const c = a.slice(2);",
+    "  b[0] = `zz`;",
+    "  return a.at(-1).length * 100 + a.at(0).length * 10 + c.length + b[0].length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  // 100 + 20 + 1 + 2.
+  assert.equal(output.trim(), "123");
+});
+
 test("includes and indexOf read an array of text by what it says", async () => {
   // Two texts that say the same thing are two different pointers, so an
   // element is found by what it holds and not by where it is.
