@@ -1272,6 +1272,9 @@ function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
 function writeProblems(prefix: string, what: string, declared: SemanticType, value: SemanticValue): string[] {
   const problems: string[] = [];
   if (isTextType(value.type) && isNumber(declared)) return problems;
+  // Nothing is held at an unshaped reference, and an object being laid out
+  // starts every field as nothing: nothing fits a field of any type.
+  if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return problems;
   if (!convertibleTo(value.type, declared)) {
     problems.push(`${prefix}${what} is a ${typeText(declared)}, not a ${typeText(value.type)}`);
   }

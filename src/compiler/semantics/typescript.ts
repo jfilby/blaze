@@ -503,6 +503,7 @@ function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): Ty
       return ANY_TYPE;
     }
     case "length":
+    case "lengthOf":
       return NUMBER_RESULT;
     case "sized":
     case "buffer":
@@ -517,6 +518,8 @@ function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): Ty
       return value.type;
     case "invoke":
       return value.returns;
+    case "append":
+      return ANY_TYPE;
     case "arrow":
       return ANY_TYPE;
     default:
@@ -935,6 +938,9 @@ function walkFunction(
       case "length":
         onName(expression.buffer, bound(expression.buffer));
         return;
+      case "lengthOf":
+        read(expression.of);
+        return;
       case "index":
         read(expression.base);
         read(expression.index);
@@ -993,6 +999,10 @@ function walkFunction(
       case "invoke":
         read(expression.callee);
         for (const argument of expression.args) read(argument);
+        return;
+      case "append":
+        read({ k: "ident", name: expression.target });
+        read(expression.value);
         return;
     }
   };
@@ -1123,6 +1133,9 @@ function arrowCaptures(
           captures.push(expression.buffer);
         }
         return;
+      case "lengthOf":
+        read(expression.of);
+        return;
       case "index":
         read(expression.base);
         read(expression.index);
@@ -1182,6 +1195,10 @@ function arrowCaptures(
       case "invoke":
         read(expression.callee);
         for (const argument of expression.args) read(argument);
+        return;
+      case "append":
+        read({ k: "ident", name: expression.target });
+        read(expression.value);
         return;
     }
   };
@@ -1362,7 +1379,7 @@ export interface Token {
   /** The character the string was written with. */
   quote?: string;
 }
-const PUNCTUATION = ["===", "!==", "**=", "**", "==", "!=", "<=", ">=", ">>>=", ">>=", "<<=", "<<", ">>>", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
+const PUNCTUATION = ["...", "===", "!==", "**=", "**", "==", "!=", "<=", ">=", ">>>=", ">>=", "<<=", "<<", ">>>", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
@@ -1594,6 +1611,26 @@ function fileHoldsWideBigint(tokens: readonly Token[]): boolean {
   return false;
 }
 
+/**
+ * The methods a typed array is walked by: the ones this frontend writes a
+ * function of the file for. A method it has no reading of is a method of a
+ * class the source declared, and the class is what says what it is.
+ */
+const COLLECTION_METHODS: ReadonlySet<string> = new Set([
+  "map",
+  "filter",
+  "forEach",
+  "every",
+  "some",
+  "find",
+  "findIndex",
+  "reduce",
+  "sort",
+  "join",
+  "includes",
+  "indexOf",
+]);
+
 /** The operators that stand in front of a value, as opposed to between two. */
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
@@ -1633,10 +1670,28 @@ class TypeScriptParser {
   /** The arrow each lifted function was made from, by the function's name. */
   private arrowBindings = new Map<string, ArrowBinding>();
   /**
+   * What each function of the file answers, by its name.
+   *
+   * A call is typed by what its callee answers, and a callee the file declares
+   * itself is read here rather than asked of a program the parser has not
+   * assembled: `const names = build(4)` is an array of text because `build`
+   * answers one.
+   */
+  private declaredReturns = new Map<string, TypeExpr>();
+  /**
    * Whether the expression being read is the initialiser of a declaration, and
    * so may be an arrow that is only ever called by the name it is bound to.
    */
   private bindingArrow = false;
+  /**
+   * The element type an array written out is held at, when the declaration it
+   * initialises says what that is.
+   *
+   * `const a: string[] = []` names no element the frontend could read off the
+   * list, because there is no list: the type the name is declared at is the one
+   * the array is built with.
+   */
+  private expecting: TypeExpr | null = null;
   /** The signature each name of the function is a function at, when it holds one. */
   private valueFunctions = new Map<string, FunctionType>();
   /**
@@ -1792,6 +1847,13 @@ class TypeScriptParser {
   /** A type annotation, where a class is a reference the layout pass settles. */
   private typeForName(typeName: string, line: number): TypeExpr {
     if (typeName === "void") return NOTHING;
+    // A field or a class parameter names its type as one text, so `T[]` and
+    // `Array<T>` are read here rather than by the token walk an annotation in a
+    // body goes through.
+    const text = typeName.trim();
+    if (text.endsWith("[]")) return { kind: "slice", of: this.typeForName(text.slice(0, -2).trim(), line) };
+    const generic = /^(?:Readonly)?Array<(.+)>$/.exec(text);
+    if (generic !== null) return { kind: "slice", of: this.typeForName(generic[1] as string, line) };
     if (typeName === "any" || this.classTable.names.has(typeName)) return ANY_TYPE;
     if (typeName === "bigint" && this.wideBigint) return parseType("u256");
     try {
@@ -2827,7 +2889,11 @@ class TypeScriptParser {
       returns: parsed.returns,
       handle: parsed,
     });
-    functions.push(...this.defaultWrappers(parsed, exported));
+    this.declaredReturns.set(parsed.name, parsed.returns);
+    for (const wrapper of this.defaultWrappers(parsed, exported)) {
+      this.declaredReturns.set(wrapper.name, wrapper.returns);
+      functions.push(wrapper);
+    }
     return isDefault ? parsed.name : null;
   }
 
@@ -3152,6 +3218,40 @@ class TypeScriptParser {
     return this.typeFromTokens(start, end, promisePayload);
   }
 
+  /**
+   * The element type an annotation writes as `T[]`, `Array<T>` or
+   * `ReadonlyArray<T>`, or null where it writes none of them.
+   *
+   * An array of a type this frontend can already name is an array it can hold:
+   * a text is a pointer and a reference is a pointer, so an array of either is a
+   * block of pointers, which is the same shape a typed array is. What an array
+   * of a value this compiler has no type for is — a function, an unknown — is
+   * the opaque reference, as every other unnameable type is.
+   */
+  private arrayTypeFrom(start: number, end: number): TypeExpr | null {
+    // `Array<T>` and `ReadonlyArray<T>` name the same array.
+    const head = this.tokens[start];
+    if (head?.kind === "ident" && (head.text === "Array" || head.text === "ReadonlyArray") && this.tokens[start + 1]?.text === "<") {
+      const close = this.matchingToken(start + 1, "<", ">");
+      if (close >= 0 && close === end - 1) {
+        return { kind: "slice", of: this.typeFromTokens(start + 2, close, false) };
+      }
+      return null;
+    }
+    // `T[]`, and `T[][]` for an array of arrays. A `[` that closes a group is
+    // not one of these, so only the pairs at the end are read.
+    let stop = end;
+    let depth = 0;
+    while (stop - 2 >= start && this.tokens[stop - 1]?.text === "]" && this.tokens[stop - 2]?.text === "[") {
+      stop -= 2;
+      depth += 1;
+    }
+    if (depth === 0 || stop === start) return null;
+    let type = this.typeFromTokens(start, stop, false);
+    for (let at = 0; at < depth; at += 1) type = { kind: "slice", of: type };
+    return type;
+  }
+
   /** The type a run of annotation tokens names, or `any` where none does. */
   private typeFromTokens(start: number, end: number, promisePayload: boolean): TypeExpr {
     let from = start;
@@ -3163,6 +3263,8 @@ class TypeScriptParser {
       const payload = this.promisePayload(from, end);
       if (payload !== null) return this.typeFromTokens(payload.start, payload.end, false);
     }
+    const arrays = this.arrayTypeFrom(from, end);
+    if (arrays !== null) return arrays;
     const first = this.tokens[from] as Token;
     // A function type, an object type, a tuple and a literal type all describe
     // something the contract can hold only as an opaque reference.
@@ -3315,11 +3417,14 @@ class TypeScriptParser {
       // given, so it is not turned into a closure here.
       const wasBinding = this.bindingArrow;
       this.bindingArrow = true;
+      const wasExpecting = this.expecting;
+      this.expecting = type !== null && type.kind === "slice" ? type.of : null;
       let init: Expression;
       try {
         init = this.readExpression();
       } finally {
         this.bindingArrow = wasBinding;
+        this.expecting = wasExpecting;
       }
       this.accept(";");
       // An arrow is called by the name it is bound to: the function it lifted to
@@ -3843,6 +3948,16 @@ class TypeScriptParser {
     }
     const value = this.readExpression();
     this.accept(";");
+    // `a.push(x)` answers the array the name holds afterwards, so written on
+    // its own line it is the write that keeps it.
+    if (value.k === "append") {
+      const call: Expression = {
+        k: "call",
+        name: value.helper,
+        args: [{ k: "ident", name: value.target }, ...(value.value === null ? [] : [value.value])],
+      };
+      return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
+    }
     return { kind: "expression", value, line: token.line };
   }
 
@@ -4585,6 +4700,23 @@ class TypeScriptParser {
           const callLine = this.peek().line;
           const args = this.readCallArguments();
           const receiver = target.base;
+          // `a.push(x)` and `a.pop()` change the array the name holds, so they
+          // are statements: the call answers the array the name has afterwards,
+          // and the frontend writes the assignment that keeps it.
+          if ((target.field === "push" || target.field === "pop") && receiver.k === "ident") {
+            const sequence = this.valueTypeOf(receiver);
+            if ((sequence.kind === "slice" || sequence.kind === "array") && args.length === (target.field === "push" ? 1 : 0)) {
+              const helper = this.appendHelper(target.field, sequence.of, callLine);
+              replace({
+                k: "append",
+                target: receiver.name,
+                helper: helper.name,
+                op: target.field,
+                value: args[0] ?? null,
+              });
+              continue;
+            }
+          }
           // `a.map(f)`: a method of a typed array is a function of the file that
           // walks the array, so it is read before a method of a class is looked
           // for. A receiver that is not a sequence falls through to the classes
@@ -4666,6 +4798,13 @@ class TypeScriptParser {
           replace({ k: "call", name: ARGV_LENGTH, args: [] });
           continue;
         }
+        if (field.text === "length") {
+          // A length of a value no name holds — an element, a call — is the
+          // same length read where the value is.
+          replace({ k: "lengthOf", of: target });
+          continue;
+        }
+
         // `Point.ZERO`: a static field is a function of the class, so reading
         // it is a call that answers the value the source declared.
         if (target.k === "ident" && !this.valueClasses.has(target.name)) {
@@ -5047,8 +5186,14 @@ class TypeScriptParser {
     args: readonly Expression[],
     line: number,
   ): Expression | null {
+    // A method this frontend has no reading of is a method of a class, and the
+    // class is what says what it is.
+    if (!COLLECTION_METHODS.has(method)) return null;
     const sequence = this.valueTypeOf(receiver);
     if (sequence.kind !== "slice" && sequence.kind !== "array") return null;
+    if (method === "join" || method === "includes" || method === "indexOf") {
+      return this.sequenceMethod(method, sequence.of, receiver, args, line);
+    }
     const callback = args[0];
     if (callback === undefined) {
       this.report(`${method} takes a function`, `as in a.${method}((x: number): number => x)`, this.peek());
@@ -5063,10 +5208,10 @@ class TypeScriptParser {
       );
       return this.hole();
     }
-    if (method === "map" && signature.returns.kind !== "primitive") {
+    if (method === "map" && (signature.returns.kind === "void" || signature.returns.kind === "slice" || signature.returns.kind === "array" || signature.returns.kind === "ptr" || signature.returns.kind === "mask")) {
       this.report(
-        "the function map walks the array with must answer a number or a truth",
-        "a typed array holds numbers, so a map that answers text or a reference builds an array nothing here holds",
+        "the function map walks the array with must answer a number, a truth, a text or a reference",
+        "a map of a list is a list of what the function answered, and a list of lists is not a value here",
         this.peek(),
       );
       return this.hole();
@@ -5102,8 +5247,201 @@ class TypeScriptParser {
     if (value.k === "call") {
       const written = this.liftedArrows.get(value.name);
       if (written !== undefined) return written.returns;
+      const declared = this.declaredReturns.get(value.name);
+      if (declared !== undefined) return declared;
     }
     return resultType(value, this.valueTypes);
+  }
+
+  /**
+   * `join`, `includes` and `indexOf`: a method that reads every element and
+   * answers one value.
+   *
+   * Like the callback methods these are functions of the file that walk the
+   * array, written once per shape. `join` builds the text the separator puts
+   * between the elements, and a text element is the one the runtime already
+   * holds; a number is written as its text by the same interpolation every other
+   * text is written with.
+   */
+  private sequenceMethod(
+    method: string,
+    element: TypeExpr,
+    receiver: Expression,
+    args: readonly Expression[],
+    line: number,
+  ): Expression {
+    const wanted = method === "join" ? [0, 1] : [1];
+    if (!wanted.includes(args.length)) {
+      this.report(
+        `${method} takes ${wanted.join(" or ")} argument${wanted.length === 1 && wanted[0] === 1 ? "" : "s"}`,
+        `it was given ${args.length}`,
+        this.peek(),
+      );
+      return this.hole();
+    }
+    // `a.join()` writes the elements with a comma between them, as the
+    // language does when it is given no separator.
+    const extra = method === "join" && args.length === 0
+      ? [{ k: "text" as const, parts: [{ k: "text" as const, value: "," }] }]
+      : [...args];
+    const helper = this.sequenceMethodHelper(method, element, extra.length, line);
+    return { k: "call", name: helper.name, args: [receiver, ...extra] };
+  }
+
+  /** The helper one of the walking methods is lowered to, written once per shape. */
+  private sequenceMethodHelper(
+    method: string,
+    element: TypeExpr,
+    written: number,
+    line: number,
+  ): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["walk", method, element, written]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const items: TypeExpr = { kind: "slice", of: element };
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const length = (): Expression => ({ k: "length", buffer: "items" });
+    const at = (index: Expression): Expression => ({ k: "index", base: ident("items"), index });
+    const answer = (value: Expression): Statement => ({ kind: "result", value, line });
+    const loop = (body: Statement[]): Statement => ({
+      kind: "loop", variable: "i", from: number("0"), to: length(), inclusive: false, step: null, down: false, body, line,
+    });
+    /** The element written as the text it is, which is what a join joins. */
+    const asText = (value: Expression): Expression => ({ k: "text", parts: [{ k: "value", value }] });
+
+    let params: { name: string; type: TypeExpr }[];
+    let returns: TypeExpr;
+    let body: Statement[];
+    switch (method) {
+      case "join": {
+        params = [
+          { name: "items", type: items },
+          { name: "sep", type: TEXT_RESULT },
+        ];
+        returns = TEXT_RESULT;
+        body = [
+          { kind: "declare", name: "out", type: null, init: { k: "text", parts: [{ k: "text", value: "" }] }, line },
+          loop([
+            {
+              kind: "if",
+              condition: { k: "binary", op: ">", left: ident("i"), right: number("0") },
+              then: [{ kind: "assign", target: "out", op: "=", value: { k: "binary", op: "+", left: ident("out"), right: ident("sep") }, line }],
+              otherwise: [],
+              line,
+            },
+            { kind: "assign", target: "out", op: "=", value: { k: "binary", op: "+", left: ident("out"), right: asText(at(ident("i"))) }, line },
+          ]),
+          answer(ident("out")),
+        ];
+        break;
+      }
+      case "includes":
+      case "indexOf": {
+        params = [
+          { name: "items", type: items },
+          { name: "value", type: element },
+        ];
+        returns = method === "includes" ? BOOLEAN_RESULT : NUMBER_RESULT;
+        body = [
+          loop([
+            {
+              kind: "if",
+              condition: { k: "binary", op: "===", left: at(ident("i")), right: ident("value") },
+              then: [answer(method === "includes" ? number("1") : ident("i"))],
+              otherwise: [],
+              line,
+            },
+          ]),
+          answer(method === "includes" ? number("0") : { k: "unary", op: "-", operand: number("1") }),
+        ];
+        break;
+      }
+      default:
+        return { name: "", returns: ANY_TYPE };
+    }
+
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params: helper.params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
+  }
+
+  /**
+   * The function a `push` or a `pop` becomes: an array of one more element or
+   * one fewer, with the elements it keeps written into it.
+   *
+   * An array is a block and a length, and the length travels beside the block,
+   * so `a.push(x)` is `a = __push(a, x)` and not a write into the block the name
+   * already holds. That is a copy of the elements on every push; a compiler that
+   * grew a block in place would be a compiler that carried the length inside it,
+   * which is a different representation than the one a parameter is passed as.
+   */
+  private appendHelper(method: "push" | "pop", element: TypeExpr, line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["append", method, element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const items: TypeExpr = { kind: "slice", of: element };
+    const elementText = typeToString(element);
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const length = (): Expression => ({ k: "length", buffer: "items" });
+    const loop = (body: Statement[], to: Expression): Statement => ({
+      kind: "loop", variable: "i", from: number("0"), to, inclusive: false, step: null, down: false, body, line,
+    });
+
+    let body: Statement[];
+    if (method === "push") {
+      body = [
+        { kind: "declare", name: "out", type: null, init: { k: "sized", element: elementText, count: { k: "binary", op: "+", left: length(), right: number("1") } }, line },
+        loop([
+          { kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: { k: "index", base: ident("items"), index: ident("i") }, line },
+        ], length()),
+        { kind: "indexAssign", buffer: "out", index: length(), op: "=", value: ident("value"), line },
+        { kind: "result", value: ident("out"), line },
+      ];
+    } else {
+      // A pop keeps every element but the last, and an empty array has none to
+      // drop: what it answers is the array with one fewer element.
+      body = [
+        {
+          kind: "declare",
+          name: "keep",
+          type: null,
+          init: {
+            k: "conditional",
+            condition: { k: "binary", op: ">", left: length(), right: number("0") },
+            then: { k: "binary", op: "-", left: length(), right: number("1") },
+            otherwise: number("0"),
+          },
+          line,
+        },
+        { kind: "declare", name: "out", type: null, init: { k: "sized", element: elementText, count: ident("keep") }, line },
+        loop([
+          { kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: { k: "index", base: ident("items"), index: ident("i") }, line },
+        ], ident("keep")),
+        { kind: "result", value: ident("out"), line },
+      ];
+    }
+
+    const params = method === "push"
+      ? [{ name: "items", type: items }, { name: "value", type: element }]
+      : [{ name: "items", type: items }];
+    const returns: TypeExpr = { kind: "slice", of: element };
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
   }
 
   /** The signature the callback of a collection method is written at. */
@@ -5518,6 +5856,7 @@ class TypeScriptParser {
       }
       return { k: "ident", name: token.text };
     }
+    if (token.kind === "punct" && token.text === "[") return this.arrayLiteral(token);
     if (token.kind === "punct" && token.text === "(") {
       const inner = this.readExpression();
       this.expect(")");
@@ -5557,6 +5896,82 @@ class TypeScriptParser {
    * eight, and an array lowered at the wrong stride reads each element out of
    * the middle of the one before it.
    */
+  /**
+   * An array written out, as `[1, 2]` or `["a", "b"]` is.
+   *
+   * The element type is the one the declaration names where it names one, and
+   * otherwise the type of the first value written: a list of texts is a block of
+   * pointers to texts, and a list of objects is a block of references. A value
+   * spread into the list joins the ones in front of it, which is the same
+   * operation two lists added are.
+   */
+  private arrayLiteral(open: Token): Expression {
+    const expected = this.expecting;
+    this.expecting = null;
+    /** The values written since the last spread, in the order they were. */
+    let run: Expression[] = [];
+    /** The list so far, when a spread has joined one. */
+    let joined: Expression | null = null;
+    /** How many pieces have been joined, so a list of one is still a copy. */
+    let pieces = 0;
+    let element: TypeExpr | null = expected;
+    const flush = (): void => {
+      if (run.length === 0) return;
+      const written = this.bufferValue(element, run, open);
+      joined = joined === null ? written : { k: "binary", op: "+", left: joined, right: written };
+      run = [];
+      pieces += 1;
+    };
+    while (!this.at("]") && this.peek().kind !== "end") {
+      if (this.accept("...")) {
+        flush();
+        const spread = this.readExpression();
+        const type = this.valueTypeOf(spread);
+        if (element === null) element = type.kind === "slice" || type.kind === "array" ? type.of : type;
+        joined = joined === null ? spread : { k: "binary", op: "+", left: joined, right: spread };
+        pieces += 1;
+      } else {
+        const value = this.readExpression();
+        if (element === null) element = this.valueTypeOf(value);
+        run.push(value);
+      }
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    flush();
+    if (joined !== null) {
+      // `[...a]` is a list of its own and not the list `a` holds: two names
+      // that hold one block are one array, and a write through either is a
+      // write both see. Joining the list against an empty one copies it.
+      if (pieces === 1 && element !== null) {
+        return { k: "binary", op: "+", left: joined, right: { k: "buffer", element: typeToString(element), values: [] } };
+      }
+      return joined;
+    }
+    if (element === null) {
+      this.report(
+        "an empty array needs the type of its elements",
+        "write the declaration with the element type, as in const names: string[] = []",
+        open,
+      );
+      return this.hole();
+    }
+    return this.bufferValue(element, run, open);
+  }
+
+  /** An array of values written out, at the element type it is held at. */
+  private bufferValue(element: TypeExpr | null, values: Expression[], open: Token): Expression {
+    if (element === null) {
+      this.report(
+        "an array needs the type of its elements",
+        "write at least one value, or declare the element type",
+        open,
+      );
+      return this.hole();
+    }
+    return { k: "buffer", element: typeToString(element), values };
+  }
+
   private readAllocation(): Expression {
     const view = this.next();
     // `new Point(1, 2)`: the class's constructor is a function that returns the
@@ -5787,11 +6202,15 @@ function usageOf(declaration: TypeScriptFunction): {
       case "member":
         expression(value.base);
         return;
+      case "length":
+        return;
+      case "lengthOf":
+        expression(value.of);
+        return;
       case "literal":
       case "bigint":
       case "ident":
       case "null":
-      case "length":
       case "update":
         return;
       case "arrow":
@@ -5809,6 +6228,9 @@ function usageOf(declaration: TypeScriptFunction): {
       case "invoke":
         expression(value.callee);
         for (const argument of value.args) expression(argument);
+        return;
+      case "append":
+        expression(value.value ?? { k: "null" });
         return;
     }
   };
@@ -6272,11 +6694,23 @@ class BodyAnalysis {
           line,
           "a contracted function is computed from its parameters alone; call the function the arrow lifted to where it is declared",
         );
+      case "lengthOf":
+        this.uncontractable(
+          "reads a length of a value written out",
+          line,
+          "hold the value in a name first, as in const s = a[0]; s.length",
+        );
       case "capture":
         this.uncontractable(
           "reads a value a closure captured",
           line,
           "the closure is the function the arrow lifted to; call it where it is written",
+        );
+      case "append":
+        this.uncontractable(
+          "grows or shrinks an array",
+          line,
+          "a contracted function is computed from its parameters alone, and an array is one of them",
         );
       case "invoke":
         this.uncontractable(
@@ -6300,6 +6734,8 @@ function dependsOn(expression: Expression, name: string): boolean {
     case "argv":
     case "length":
       return false;
+    case "lengthOf":
+      return dependsOn(expression.of, name);
     case "unary":
       return dependsOn(expression.operand, name);
     case "binary":
@@ -6341,6 +6777,8 @@ function dependsOn(expression: Expression, name: string): boolean {
       return dependsOn(expression.closure, name);
     case "invoke":
       return dependsOn(expression.callee, name) || expression.args.some((argument) => dependsOn(argument, name));
+    case "append":
+      return expression.target === name || (expression.value !== null && dependsOn(expression.value, name));
   }
 }
 
@@ -6353,6 +6791,8 @@ function describe(expression: Expression): string {
       return `"${expression.name}"`;
     case "length":
       return `${expression.buffer}.length`;
+    case "lengthOf":
+      return `${describe(expression.of)}.length`;
     case "index":
       return `${describe(expression.base)}[]`;
     case "slice":
@@ -6389,6 +6829,8 @@ function describe(expression: Expression): string {
       return "a value a closure captured";
     case "invoke":
       return `a call of ${describe(expression.callee)}`;
+    case "append":
+      return `${expression.target}.${expression.op}`;
   }
 }
 

@@ -4,7 +4,7 @@ import { frontendFor } from "../semantics/frontend.ts";
 import { pythonFrontend } from "../semantics/python.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf, diagnostic, phaseOf, programOf, semanticsOf } from "./phase.ts";
+import { contractOf, diagnostic, phaseOf, programOf, programWithSemantics, semanticsOf } from "./phase.ts";
 import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
 import type { FunctionContract, ProgramContract } from "../core/types.ts";
 
@@ -988,13 +988,13 @@ test("a collection method whose callback is not a function of the compiler's is 
   );
 });
 
-test("a map that answers text is refused, because a typed array holds numbers", () => {
+test("a map that answers a list is refused, because a list of lists is not a value", () => {
   assert.match(
     diagnostic(() =>
       typescript.analyze(
         [
           "export function g(a: Float64Array): number {",
-          "  const b = a.map((x: number): string => `v`);",
+          "  const b = a.map((x: number): number[] => [x]);",
           "  return b.length;",
           "}",
           "",
@@ -1002,6 +1002,70 @@ test("a map that answers text is refused, because a typed array holds numbers", 
         "main.ts",
       ),
     ),
-    /the function map walks the array with must answer a number or a truth/,
+    /the function map walks the array with must answer a number, a truth, a text or a reference/,
+  );
+});
+
+test("an array of text is a slice of text, and its literal is a block written out", () => {
+  const analysis = typescript.analyze(
+    [
+      "class Node { value: number = 0; }",
+      "export function f(a: string[], b: Node[], c: number[][]): number {",
+      "  const d: string[] = [`x`];",
+      "  return a.length + b.length + c.length + d.length;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const f = analysis.functions.find((declared) => declared.name === "f");
+  assert.deepEqual(
+    f?.params.map((param) => param.type),
+    [
+      { kind: "slice", of: { kind: "text" } },
+      { kind: "slice", of: { kind: "ref", of: null, name: "Node" } },
+      { kind: "slice", of: { kind: "slice", of: { kind: "primitive", name: "f64" } } },
+    ],
+    "an array of a type the frontend can name is that slice; one it cannot is the reference",
+  );
+  assert.deepEqual(f?.returns, { kind: "primitive", name: "f64" });
+});
+
+test("Array<T> and ReadonlyArray<T> name the same array as T[]", () => {
+  for (const written of ["Array<string>", "ReadonlyArray<string>", "string[]", "readonly string[]"]) {
+    const analysis = typescript.analyze(
+      `export function f(a: ${written}): number {\n  return a.length;\n}\n`,
+      "main.ts",
+    );
+    assert.deepEqual(
+      analysis.functions[0]?.params[0]?.type,
+      { kind: "slice", of: { kind: "text" } },
+      written,
+    );
+  }
+});
+
+test("a push written for a value is refused, because it answers the array the name holds", () => {
+  // The refusal is the lowering's rather than the parser's: the push is read,
+  // and what it answers is what nothing here can give.
+  assert.match(
+    diagnostic(() =>
+      programWithSemantics(
+        "typescript",
+        {
+          "main.ts": [
+            "export function f(): number {",
+            "  const a: string[] = [];",
+            "  const n = a.push(`x`);",
+            "  return n;",
+            "}",
+            'console.log("run");',
+            "",
+          ].join("\n"),
+        },
+        "main.ts",
+      ),
+    ),
+    /reads the array a push answers/,
   );
 });

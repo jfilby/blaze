@@ -55,6 +55,11 @@ export type Expression =
   /** `process.argv`, or one of its arguments. */
   | { k: "argv"; index: Expression | null }
   | { k: "length"; buffer: string }
+  /**
+   * The length of a value written where no name holds it, as `a[0].length` and
+   * `f().length` are. A name that is already held is `length` above.
+   */
+  | { k: "lengthOf"; of: Expression }
   | { k: "index"; base: Expression; index: Expression }
   | { k: "slice"; base: Expression; start: Expression | null; stop: Expression | null; step: Expression | null }
   | { k: "member"; base: Expression; field: string }
@@ -128,7 +133,16 @@ export type Expression =
    * carry the types of its parameters: `params[i]` is the type the argument at
    * `i` is handed over as, and `returns` is what the call answers.
    */
-  | { k: "invoke"; callee: Expression; args: Expression[]; params: TypeExpr[]; returns: TypeExpr };
+  | { k: "invoke"; callee: Expression; args: Expression[]; params: TypeExpr[]; returns: TypeExpr }
+  /**
+   * `a.push(x)` and `a.pop()`: a change to the array the name holds.
+   *
+   * An array here is a block and a length, and growing one is a block of its
+   * own, so a push answers the array the name has afterwards. It is therefore a
+   * statement and not a value: written for what it does, it is the assignment
+   * the frontend writes; written for what it answers, there is nothing to give.
+   */
+  | { k: "append"; target: string; helper: string; op: "push" | "pop"; value: Expression | null };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 

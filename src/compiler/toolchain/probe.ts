@@ -51,6 +51,7 @@ const MAX_OBJECT_DEPTH = 4;
 /** The C type a contract type is declared with in a harness. */
 function cType(type: TypeExpr): string {
   if (type.kind === "void") return "void";
+  if (type.kind === "text") return "const char*";
   if (type.kind === "primitive") {
     const scalars: Record<string, string> = {
       bool: "bool",
@@ -72,6 +73,10 @@ function cType(type: TypeExpr): string {
     return scalars[type.name];
   }
   if (type.kind === "ref") return type.name === undefined ? "void*" : `struct ${type.name}*`;
+  // A buffer of a type is a pointer to the elements, so a probe hands the
+  // candidate a block whose element is the one the contract names: a buffer of
+  // text is a block of string pointers and not a block of `void*`.
+  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") return `${cType(type.of)}*`;
   return "void*";
 }
 

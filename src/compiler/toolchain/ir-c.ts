@@ -458,7 +458,10 @@ class FunctionEmitter {
 
   private temporary(prefix: string): string {
     this.temporaries += 1;
-    return this.names.reserve(`${prefix}_${this.temporaries}`);
+    // The prefix names the value the temporary holds, and a type name is not an
+    // identifier: `${element}_block` of a `const char*` is not C.
+    const safe = prefix.replace(/[^A-Za-z0-9_]/g, "_");
+    return this.names.reserve(`${safe}_${this.temporaries}`);
   }
 
   /**
@@ -503,11 +506,16 @@ class FunctionEmitter {
     this.pending = [];
   }
 
-  /** The declarations waiting to be written, taken rather than left pending. */
-  private takePending(): string[] {
-    const declared = this.pending;
-    this.pending = [];
-    return declared;
+  /**
+   * The declarations written since a mark, taken rather than left pending.
+   *
+   * A value that lays its parts out as one expression takes only what it
+   * declared itself: a part of a part is declared by the value inside it, and
+   * taking that too left the outer expression naming a name whose declaration
+   * had gone inside a value it was not part of.
+   */
+  private takePendingFrom(mark: number): string[] {
+    return this.pending.splice(mark);
   }
 
   private statement(statement: SemanticStatement, depth: number): void {
@@ -552,6 +560,17 @@ class FunctionEmitter {
           return;
         }
         this.write([`${pad(depth)}${target} ${cAssignOp(statement.op)} ${this.expression(statement.value, type, depth)};`]);
+        // A length that travels beside the name travels with what the name is
+        // written as: an array assigned to a name is as long as the array it is
+        // now, and a sidecar left saying what it was is a name whose length is
+        // the one it had two pushes ago.
+        if (statement.op === "=" && isSequence(type)) {
+          const written = this.names.read(statement.name);
+          const length = this.arrayParamLengths.get(statement.name) ?? (this.arrayLocals.has(statement.name) ? `${written}_length` : null);
+          if (length !== null) {
+            this.write([`${pad(depth)}${length} = ${this.boundLength(written, statement.value, type, depth)};`]);
+          }
+        }
         return;
       }
       case "setElement": {
@@ -1097,11 +1116,26 @@ class FunctionEmitter {
    * form that keeps an object inside the arm of a conditional it was written
    * in, which is what an object built as a value means.
    */
+  /** The type the layout of an object gives one of its fields. */
+  private declaredField(layout: string, field: string): SemanticType | null {
+    const found = this.fn.objects[layout]?.fields.find((one) => one.name === field);
+    return found === undefined ? null : parseType(found.type);
+  }
+
   private buildObject(value: SemanticValue & { k: "newObject" }): string {
     const name = this.temporary("blaze_object");
     const written = value.fields.map((field) => {
       const expr = this.expression(field.value, null, 0);
-      const assigned = expr === "NULL" ? "0.0" : expr;
+      // A field that holds no value starts as nothing, and nothing is written
+      // the way the field reads it: a number is zero and a pointer is null.
+      const declared = this.declaredField(value.layout, field.name);
+      // A reference the source left unshaped is a `double` here and not a
+      // pointer, so nothing is written into it as one.
+      const unshaped = declared !== null && declared.kind === "ref" && declared.of === null && declared.name === undefined;
+      const pointer = declared !== null && !unshaped && (
+        declared.kind === "text" || declared.kind === "slice" || declared.kind === "ptr" || declared.kind === "array" || declared.kind === "ref"
+      );
+      const assigned = expr === "NULL" ? (pointer ? "NULL" : "0.0") : expr;
       return `((${name})->${cMemberName(field.name)} = ${assigned});`;
     });
     const size = `sizeof(struct ${value.layout})`;
@@ -1966,6 +2000,7 @@ class FunctionEmitter {
     // in O(1) where the part is a managed string, and it grows a block
     // geometrically, so a string built in a loop copies its bytes a linear
     // number of times rather than a quadratic one.
+    const mark = this.pending.length;
     const parts: string[] = value.parts.map(() => this.temporary("blaze_part"));
     const joined = this.temporary("blaze_text");
     for (const [index, part] of value.parts.entries()) {
@@ -1989,7 +2024,7 @@ class FunctionEmitter {
     // declaration belongs inside this expression rather than above the
     // statement that holds it: the expression is the statement, and a buffer
     // declared outside it is not part of the value.
-    const declared = this.takePending();
+    const declared = this.takePendingFrom(mark);
     return `({ ${[...declared, ...lines].join(" ")} })`;
   }
 

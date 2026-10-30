@@ -91,6 +91,7 @@ import {
   isSequence,
   roundedBound,
   slotType,
+  typeEquals,
   typeText,
   valueKind,
   type ArithOp,
@@ -1089,6 +1090,11 @@ class FunctionBody {
         const held = this.read(expression.buffer, line);
         return { value: { k: "length", type: USIZE, of: { k: "local", type: slotType(held.slot), name: held.name } }, inferred: asType(USIZE) };
       }
+      case "lengthOf":
+        return {
+          value: { k: "length", type: USIZE, of: this.typed(expression.of, null, line).value },
+          inferred: asType(USIZE),
+        };
       case "index": {
         const base = this.typed(expression.base, null, line);
         if (base.inferred.kind === "object") {
@@ -1212,6 +1218,12 @@ class FunctionBody {
       }
       case "invoke":
         return this.invoke(expression, line);
+      case "append":
+        throw this.error(
+          `writes ${expression.target}.${expression.op} where a value is expected`,
+          line,
+          "a push and a pop answer the array the name holds afterwards, and the write that keeps it is a statement of its own",
+        );
     }
   }
 
@@ -2329,6 +2341,15 @@ function holds(declared: string, use: Inferred): boolean {
   const numeric = type.kind === "primitive" || isText(type);
   if (isText(use.type)) return numeric;
   if (use.type.kind === "primitive") return numeric;
+  // A field that holds an array holds any array of the same element type: a
+  // block written out is an `array` and one a name holds is a `slice`, and the
+  // two are the same value.
+  // An unshaped reference is what nothing is held at, and an object being laid
+  // out starts every field as nothing: nothing fits any field.
+  if (use.type.kind === "ref" && use.type.of === null && use.type.name === undefined) return true;
+  const arrayed = (one: SemanticType): one is Extract<SemanticType, { kind: "array" | "slice" | "ptr" }> =>
+    one.kind === "array" || one.kind === "slice" || one.kind === "ptr";
+  if (arrayed(type) && arrayed(use.type)) return typeEquals(type.of, use.type.of);
   return type.kind === use.type.kind;
 }
 

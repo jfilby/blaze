@@ -184,7 +184,8 @@ and it is the same rule the program body's own closures follow.
   one array of numbers.
 - A receiver that is a field of an object is not read as an array: the layout
   pass does not say what an `any` field holds, so `this.items.map(f)` is not
-  recognised. A local or a parameter is.
+  recognised. A local or a parameter is. (An array cannot be a class field at
+  all yet — see `typescript-arrays.md`.)
 - A collection method is read in a function body. The statements a program runs
   at the top of its entry module hold numbers and strings, so a name bound to
   the array a method answers is not a value a program body carries.

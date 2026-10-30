@@ -285,6 +285,11 @@ class BodyTypes {
         return { kind: "type", type: expression.index === null ? USIZE : F64 };
       case "length":
         return { kind: "type", type: USIZE };
+      case "lengthOf":
+        // The value the length is of is walked: a call written there is a call
+        // the body makes, and the contract states the calls the body makes.
+        this.expression(expression.of);
+        return { kind: "type", type: USIZE };
       case "index": {
         const base = this.expression(expression.base);
         this.expression(expression.index);
@@ -415,6 +420,13 @@ class BodyTypes {
         this.expression(expression.callee);
         for (const argument of expression.args) this.expression(argument);
         return { kind: "type", type: expression.returns };
+      case "append":
+        // A push or a pop is a statement, and a statement of the body is walked
+        // as the write it became. Reaching here is a value nobody wrote.
+        throw objectsError(
+          `${this.path}: ${this.functionName} reads the array a ${expression.op} answers`,
+          "a push and a pop change the array a name holds, and are written as statements",
+        );
     }
   }
 

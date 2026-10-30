@@ -17,6 +17,7 @@
 
 import {
   isReference,
+  isTextType,
   statementBlocksOf,
   statementValues,
   valueKind,
@@ -27,6 +28,7 @@ import {
   type SemanticStatement,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
+import { builtinFor } from "./builtins.ts";
 
 /** Why a loop's turns may not reuse the storage the turn before them took. */
 export type Refusal = string;
@@ -381,7 +383,11 @@ function statementRefusal(
  * turn's own block, and this gate then answered "number" and never asked.
  */
 function carriesRegionBlock(value: SemanticValue): boolean {
-  return valueKind(value) === "reference" || isReference(value.type) || value.type.kind === "array";
+  // A text is a block the runtime laid out as much as a buffer is, so a string a
+  // turn builds and puts somewhere that outlives the turn is the same escape.
+  // Reading only the reference kinds let a loop whose turn built a string into a
+  // buffer be reused, and the string the next turn built was written over it.
+  return valueKind(value) === "reference" || isTextType(value.type) || isReference(value.type) || value.type.kind === "array";
 }
 
 /**
@@ -457,7 +463,11 @@ function calleeBuilds(name: string, reach: Reach): boolean {
   const known = reach.makes.get(name);
   if (known !== undefined) return known;
   const callee = reach.callees.get(name);
-  if (callee === undefined) return false;
+  // A body nobody has read may build. A call through a closure is one: the
+  // value it calls is a function this build resolved but cannot name here, and
+  // what it answers may be a block the turn has to keep. A builtin is the
+  // compiler's own and is taken to build nothing.
+  if (callee === undefined) return builtinFor(name) === null;
   if (reach.reading.has(name)) return false;
   reach.reading.add(name);
   let builds = false;

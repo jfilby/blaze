@@ -1137,9 +1137,9 @@ class IrScanner {
     this.at += 1;
     if (this.peek() === "]") {
       this.at += 1;
-      return { kind: "slice", of: this.contract() };
+      return { kind: "slice", of: this.type() };
     }
-    const of = this.contract();
+    const of = this.type();
     this.skip();
     let length: number | null = null;
     if (this.peek() === ";") {
@@ -1158,12 +1158,12 @@ class IrScanner {
       case "ptr":
       case "slice":
       case "mask": {
-        const of = this.contract();
+        const of = this.type();
         this.expect(">");
         return { kind: head, of };
       }
       case "array": {
-        const of = this.contract();
+        const of = this.type();
         this.skip();
         const length = this.peek() === "," ? this.commaCount() : null;
         this.expect(">");
@@ -1858,7 +1858,7 @@ class BlockReader {
         };
       }
       case "for_of": {
-        const elementType = scanner.contractType();
+        const elementType = scanner.typed();
         const element = scanner.word();
         scanner.keyword("of");
         const of = scanner.word();

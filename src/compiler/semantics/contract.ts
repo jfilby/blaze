@@ -110,6 +110,12 @@ export function parseType(text: string): TypeExpr {
   const source = text.trim();
   if (source === "text") return { kind: "text" };
   if (source === "void") return { kind: "void" };
+  // `typeText` writes a slice as `[]T` and a pointer as `T*`, and the text the
+  // IR is written in is read back by this: the two forms have to name the type
+  // they were written from.
+  if (source.startsWith("[]")) return { kind: "slice", of: parseType(source.slice(2)) };
+  if (source.endsWith("[]")) return { kind: "slice", of: parseType(source.slice(0, -2)) };
+  if (source.endsWith("*")) return { kind: "ptr", of: parseType(source.slice(0, -1)) };
   const composite = /^([A-Za-z_][A-Za-z0-9_]*)\s*<(.+)>$/.exec(source);
   if (composite === null) {
     return { kind: "primitive", name: parsePrimitiveName(source) };
@@ -132,7 +138,9 @@ export function parseType(text: string): TypeExpr {
     if (parts.length === 1) return { kind: "array", of: parseType(parts[0]), length: null };
     if (parts.length === 2) {
       const length = Number.parseInt(parts[1].trim(), 10);
-      if (!Number.isInteger(length) || length <= 0) {
+      // An array of no elements is the array an empty literal is, and a layout
+      // states the type a field holds once it has been written.
+      if (!Number.isInteger(length) || length < 0) {
         throw new CompilerError({
           category: "ContractError",
           stage: "contract",

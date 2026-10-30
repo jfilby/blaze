@@ -779,3 +779,134 @@ test("the functions the frontend writes are named by the file that wrote them", 
   assert.equal(delivered.stdout, original.stdout);
   assert.equal(delivered.stdout.trim(), "5");
 });
+
+test("an array of text is a value a body writes, indexes and walks", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [`ab`, `cde`];",
+    "  let total = a.length * 100 + a[0].length;",
+    "  for (const s of a) total += s.length;",
+    "  return total;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "207");
+});
+
+test("an array of text is built from the lists in front of it and joined", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [`ab`];",
+    "  const b: string[] = [...a, `cde`, `f`];",
+    "  return b.join(`-`).length * 10 + b.join().length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "88");
+});
+
+test("includes and indexOf read an array of text by what it says", async () => {
+  // Two texts that say the same thing are two different pointers, so an
+  // element is found by what it holds and not by where it is.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [`ab`, `cde`];",
+    "  return (a.includes(`cde`) ? 100 : 0) + a.indexOf(`ab`) * 10 + a.indexOf(`zz`);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  // `indexOf` answers -1 where nothing matches, so 100 + 0 - 1.
+  assert.equal(output.trim(), "99");
+});
+
+test("the walking methods read an array of text", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [`ab`, `cde`, `f`];",
+    "  const shouted = a.map((s: string): string => s + `!`);",
+    "  const long = a.filter((s: string): boolean => s.length > 1);",
+    "  const found = a.find((s: string): boolean => s.length === 1);",
+    "  return shouted[0].length * 100 + long.length * 10 + found.length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "321");
+});
+
+test("push and pop change the array a name holds", async () => {
+  const output = await agreesWithNode([
+    "function build(n: number): string[] {",
+    "  const out: string[] = [];",
+    "  for (let i = 0; i < n; i++) out.push(`x`);",
+    "  return out;",
+    "}",
+    "function g(): number {",
+    "  const a = build(4);",
+    "  a.pop();",
+    "  a.push(`yz`);",
+    "  return a.length * 100 + a[3].length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "402");
+});
+
+test("an array of numbers written out is the same array a typed one is", async () => {
+  // `[1, 2, 3]` and `new Float64Array([1, 2, 3])` are one value: an array of
+  // numbers, with the length the values give it.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: number[] = [1, 2, 3];",
+    "  const b = a.filter((x: number): boolean => x > 1);",
+    "  return a.length * 100 + b.length * 10 + b[0];",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "322");
+});
+
+test("an array of references is passed to another function and read there", async () => {
+  const output = await agreesWithNode([
+    "class Pair { a: number = 0; b: number = 0; }",
+    "function total(pairs: Pair[]): number {",
+    "  let sum = 0;",
+    "  for (const p of pairs) sum += p.a + p.b;",
+    "  return sum;",
+    "}",
+    "function g(): number {",
+    "  const first = new Pair();",
+    "  first.a = 1;",
+    "  first.b = 2;",
+    "  const second = new Pair();",
+    "  second.a = 3;",
+    "  second.b = 4;",
+    "  const all: Pair[] = [first, second];",
+    "  return total(all);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});
+
+test("a list spread into a new one is a list of its own", async () => {
+  // Two names that hold one block are one array, and a write through either is
+  // a write both see: `[...a]` joins `a` against an empty list, which copies.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [`ab`, `cde`];",
+    "  const b = [...a];",
+    "  b[0] = `zz`;",
+    "  return a[0].length * 10 + b[0].length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "22");
+});
