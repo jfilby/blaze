@@ -27,12 +27,12 @@ import { selfHostGap } from "./self-host-gap.ts";
  * parser are now module functions, and the gaps in them are the ones the report
  * should show. Reading `Object.keys` and `Object.values` of a constant object
  * lowered it to 6280, and a for-of over an expression, a parameter written as a
- * pattern and a trailing comma in a list lowered it to 5194. Lower it with every
- * slice; raise it only when the measurement changes which parser reads a body,
+ * pattern and a trailing comma in a list lowered it to 5194. A for-of that names
+ * the parts of its element lowered it to 5123. Lower it with every slice; raise it only when the measurement changes which parser reads a body,
  * or when the compiler itself grows a construct the frontend has not learned
  * yet.
  */
-const REFUSAL_BUDGET = 5194;
+const REFUSAL_BUDGET = 5123;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

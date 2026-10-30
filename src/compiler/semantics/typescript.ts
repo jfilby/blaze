@@ -4398,13 +4398,22 @@ class TypeScriptParser {
       return { kind: "expression", value: this.hole(), line: start.line };
     }
     this.next();
+    // `for (const [key, value] of entries)` names the parts of one element
+    // rather than the element, and each part is a declaration read out of it.
+    const pattern = this.readParameterPattern();
+    if (pattern !== null) {
+      if (this.at("of")) return this.readForOf(start, "", pattern);
+      this.report("a counted loop declares one index", "a pattern names the parts of an element, which a for-of loop walks");
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
     const variable = this.next();
     if (variable.kind !== "ident") {
       this.report("expected a loop index name", `near "${variable.text}"`, variable);
       this.synchronize();
       return { kind: "expression", value: this.hole(), line: start.line };
     }
-    if (this.at("of")) return this.readForOf(start, variable.text);
+    if (this.at("of")) return this.readForOf(start, variable.text, null);
     this.expect("=");
     const from = this.readExpression();
     this.expect(";");
@@ -4642,7 +4651,11 @@ class TypeScriptParser {
    * loop's own before it starts: the value is the same one however many
    * elements the loop visits.
    */
-  private readForOf(start: Token, variable: string): Statement {
+  private readForOf(
+    start: Token,
+    variable: string,
+    pattern: { name: string; field: string | null; index: number }[] | null,
+  ): Statement {
     this.expect("of");
     const of = this.peek();
     let walked: string;
@@ -4661,14 +4674,18 @@ class TypeScriptParser {
     // is held at the element type an arrow capturing it would be handed.
     const walkedType = this.valueTypes.get(walked);
     const element = walkedType !== undefined && (walkedType.kind === "slice" || walkedType.kind === "array") ? walkedType.of : ANY_TYPE;
-    this.valueTypes.set(variable, element);
-    const body = this.loopBody();
+    // A pattern binds the parts of the element, so the loop walks a name of its
+    // own and the body reads each name out of that one.
+    const item = pattern === null ? variable : `__item${this.destructureCount++}`;
+    this.valueTypes.set(item, element);
+    const prelude = pattern === null ? [] : this.patternPrelude(pattern, item, element, start.line);
+    const body = [...prelude, ...this.loopBody()];
     // The value is read once, before the loop starts. It is recorded after the
     // body is read, because the body's own pending statements belong inside it.
     if (written !== null) {
       this.pendingBefore.push({ kind: "declare", name: walked, type: null, init: written, line: start.line });
     }
-    return { kind: "forOf", variable, of: walked, body, line: start.line };
+    return { kind: "forOf", variable: item, of: walked, body, line: start.line };
   }
 
   private readWhile(): Statement {

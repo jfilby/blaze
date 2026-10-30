@@ -482,6 +482,22 @@ test("a list may end with a comma, as may a list of parameters", async () => {
   assert.equal(output.trim(), "3");
 });
 
+test("a for-of names the parts of the element it walks", async () => {
+  // `for (const [a, b] of rows)` binds the parts of one element rather than the
+  // element: the loop walks a name of its own and each name is read out of it.
+  const output = await agreesWithNode([
+    "function total(): number {",
+    "  const rows: number[][] = [[1, 2], [3, 4]];",
+    "  let sum = 0;",
+    "  for (const [a, b] of rows) sum += a + b;",
+    "  return sum;",
+    "}",
+    "console.log(total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.
