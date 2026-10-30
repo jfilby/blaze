@@ -50,7 +50,7 @@ frontend, IR and backends.
 
 ## Where the source stands
 
-The compiler is 91 non-test, non-benchmark, non-scratch TypeScript sources, about
+The compiler is 93 non-test, non-benchmark, non-scratch TypeScript sources, about
 100,000 lines. It is already written as **erasable TypeScript**:
 `erasableSyntaxOnly` is on in `src/compiler/tsconfig.json`, so no `enum`,
 `namespace`, parameter property or `import =` carries runtime behaviour. Every
@@ -61,8 +61,10 @@ slice available, and it is why the type layer is first below.
 The gap is measured, not guessed: `test/self-host.test.ts` reads every source and
 holds the refusal count as a budget. When the report was added, 1 of the 91
 sources (`semantics/module.ts`, which is types alone) was read and 6339
-constructs were refused. The type-only slice below lowered the count to 6248. The
-refusals fall into five frontiers:
+constructs were refused. The type-only slice below lowered the count to 6248.
+The platform boundary added two sources that are values and re-exports, which
+raised it to 6313: the compiler is now 93 sources, and 1 is read. The refusals
+fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -70,16 +72,20 @@ refusals fall into five frontiers:
 - **The JavaScript expressions the source uses.** Optional chaining (`?.`),
   nullish coalescing (`??`), spread and destructuring, `switch`, `throw`, class
   getters, and the module forms (`import * as`, renamed imports, re-exports).
+- **Values a module exports.** The frontend's module is a list of functions. The
+  compiler exports constants, tables and the platform adapter's host services,
+  and a module that exports a value is refused at `export const`.
 - **The value model.** The compiler relies on `undefined`/absence, dynamic
   objects with text keys, maps and sets of references as well as numbers,
   arrays that grow, arrays of arrays, and text methods including regular
   expressions.
-- **The host.** 28 of the 91 sources imported `node:*` directly: 66 imports, led
-  by `fs/promises` (23), `path` (14), `fs` (8), `crypto` (8), `url` (6), `os`
-  (3), `child_process` and a few others. They now import `core/platform.ts`,
-  which answers from the Node adapter. The compiler also reads its own tree to
-  fingerprint it (`core/version.ts`), so a native build needs the sources or the
-  fingerprint at run time.
+- **The host.** Before the boundary, 28 of the sources imported `node:*`
+  directly: 66 imports, led by `fs/promises` (23), `path` (14), `fs` (8),
+  `crypto` (8), `url` (6), `os` (3), `child_process` and a few others. They now
+  import `core/platform.ts`, and `core/platform-node.ts` is the only file that
+  names a Node module. The compiler also reads its own tree to fingerprint it
+  (`core/version.ts`), so a native build needs the sources or the fingerprint at
+  run time.
 - **Packages.** `smol-toml` for project files, the Vercel AI SDK for model
   providers, and `zod` in one adapter. A native binary cannot import them from
   `node_modules`.
@@ -91,9 +97,11 @@ measured slices, not to become a second TypeScript implementation.
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap
-report (0), the type layer (1) and the platform boundary (4) — are in place. Each
-one made the next measurement smaller, and the slices that remain are ordered by
-what the report says is still refused.
+report (0), the type layer (1) and the platform boundary (4) — have landed what
+they can without the value model: the report and the boundary are in place, and
+the type layer carries everything except the optional parameter, which needs an
+absent value. The boundary also added two sources, so the budget records the
+value and module forms those sources use and the next slice has to carry.
 
 ### 0. Make the gap a number
 
@@ -144,9 +152,10 @@ below are independent enough to land one at a time, in this order:
   stand for. Inheritance is limited to `extends Error` and one internal reader
   hierarchy; support it or write those three classes out. Do not carry a general
   inheritance model to compile four uses.
-- Module forms: `import * as`, renamed imports and re-exports. A self-hosting
-  compiler has a module graph, so the linker's "one name per function" rule has
-  to become a module-scoped name.
+- Module forms: `import * as`, renamed imports, re-exports, and an `export const`
+  or a `export { value }` that names a value rather than a function. A
+  self-hosting compiler has a module graph, so the linker's "one name per
+  function" rule has to become a module-scoped name.
 
 Exit criterion: the source's control flow and expressions parse; only data and
 host refusals remain.
