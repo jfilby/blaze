@@ -4915,6 +4915,20 @@ class TypeScriptParser {
             continue;
           }
         }
+        // `Object.keys(TABLE)` and `Object.values(TABLE)` over a constant object
+        // are the names or the values it was written with, which the file
+        // already holds. An object built at run time has no shape the parser
+        // can name here, and is refused rather than read as nothing.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Object" &&
+          (target.field === "keys" || target.field === "values")
+        ) {
+          const args = this.readCallArguments();
+          replace(this.objectMembers(target.field, args));
+          continue;
+        }
         if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
@@ -5536,6 +5550,44 @@ class TypeScriptParser {
       }
     }
     return resultType(value, this.valueTypes);
+  }
+
+  /**
+   * `Object.keys(value)` and `Object.values(value)` over a constant object.
+   *
+   * A field name and the value written for it are both known where the object
+   * was written, so the answer is an array the parser can build. The object
+   * must be a name the file wrote as a constant: a value built at run time has
+   * fields the parser cannot enumerate.
+   */
+  private objectMembers(method: "keys" | "values", args: readonly Expression[]): Expression {
+    const value = args[0];
+    const constant = args.length === 1 && value !== undefined && value.k === "ident"
+      ? this.constants.get(value.name)
+      : undefined;
+    if (constant?.fields === undefined) {
+      this.report(
+        `Object.${method} reads a constant object`,
+        "write the object as a top-level constant, as in const TABLE = { a: 1 };",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const names = [...constant.fields.keys()];
+    if (method === "keys") {
+      return {
+        k: "buffer",
+        element: "text",
+        values: names.map((name): Expression => ({ k: "text", parts: [{ k: "text", value: name }] })),
+      };
+    }
+    const values: Expression[] = [];
+    for (const name of names) {
+      const read = this.constantExpression(value.k === "ident" ? value.name : "", constant.fields.get(name));
+      if (read !== null) values.push(read);
+    }
+    const element = values.length === 0 ? typeToString(ANY_TYPE) : typeToString(this.valueTypeOf(values[0] as Expression));
+    return { k: "buffer", element, values };
   }
 
   /**

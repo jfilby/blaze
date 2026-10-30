@@ -412,6 +412,20 @@ test("an object spread of a constant object is the fields it wrote", async () =>
   assert.equal(output.trim(), "6");
 });
 
+test("the names and values of a constant object are arrays", async () => {
+  const output = await agreesWithNode([
+    "const TABLE = { a: 1, b: 2 };",
+    "export function total(): number {",
+    "  const names = Object.keys(TABLE);",
+    "  const values = Object.values(TABLE);",
+    "  return names.length + values[0] + values[1];",
+    "}",
+    "console.log(total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "5");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

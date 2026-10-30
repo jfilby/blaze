@@ -68,7 +68,8 @@ shorthand and the text methods lowered it to 5856, and reading a module's own
 top-level values lowered it to 5802. Reading a file of declarations as a library
 rather than as a program rose it to 6298: functions that used to fall to the
 program parser are now module functions, so the report shows the gaps in them.
-The refusals fall into six frontiers:
+Reading `Object.keys` and `Object.values` of a constant object lowered it to
+6280. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -179,8 +180,10 @@ to carry those without a rewrite into numeric arrays:
   with its own identity; add one before the JSON-shaped code is ported.
 - **Dynamic objects.** Object literals, field writes, text-keyed lookup and the
   operations the source uses: `Object.keys`, `values`, `entries`,
-  `fromEntries`, `assign`, `hasOwn`, `isFrozen`. The runtime already has a
-  dynamic object for JSON; this makes that shape writable and iterable, while
+  `fromEntries`, `assign`, `hasOwn`, `isFrozen`. `Object.keys` and
+  `Object.values` of a constant object are already written out as arrays; the
+  rest still need the writable, iterable dynamic shape. The runtime already has
+  a dynamic object for JSON; this makes that shape writable and iterable, while
   the layout pass keeps its static objects beside it.
 - **Arrays.** A length inside the block so `push` is linear, arrays of arrays,
   and `slice`, `splice`, `shift`, `unshift`, `concat`, `Array.from` and
