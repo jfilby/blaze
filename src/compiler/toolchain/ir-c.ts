@@ -326,6 +326,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_has(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_len":
       return `blaze_rt_dict_len(${args[0]})`;
+    case "blaze_rt_dict_delete":
+      return `blaze_rt_dict_delete(${args[0]}, ${args[1]})`;
     default:
       throw backendError(
         `this backend cannot lower ${name}`,

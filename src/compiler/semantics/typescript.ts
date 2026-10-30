@@ -1547,6 +1547,22 @@ interface FunctionType {
   returns: TypeExpr;
 }
 
+/**
+ * What a name holds when it is a map or a set.
+ *
+ * A map is a value of this compiler like any other: one handle, which is the
+ * runtime's dictionary. What it holds is not a type the contract can spell, so
+ * the frontend keeps it beside the name: `m.get(k)` answers the value type the
+ * source declared, and `s.add(v)` answers the set.
+ */
+interface CollectionValue {
+  kind: "map" | "set";
+  /** The element a key is; this frontend keys by text. */
+  key: TypeExpr;
+  /** The value a map holds, which is the number `1` for a set. */
+  value: TypeExpr;
+}
+
 export interface TypeScriptFunction {
   name: string;
   /**
@@ -1570,6 +1586,13 @@ export interface TypeScriptFunction {
   returns: TypeExpr;
   body: Statement[];
   line: number;
+  /**
+   * The map or the set the function answers, when it answers one.
+   *
+   * A map is one handle and no type the contract spells, so a caller that holds
+   * what a function answered is told here what it holds.
+   */
+  collection?: CollectionValue;
   /**
    * True for the function an arrow's body was lifted into. Nobody outside the
    * declaration that wrote it can call it, so its contract states no
@@ -1694,6 +1717,12 @@ class TypeScriptParser {
   private expecting: TypeExpr | null = null;
   /** The signature each name of the function is a function at, when it holds one. */
   private valueFunctions = new Map<string, FunctionType>();
+  /** The map or the set each name of the function holds, when it holds one. */
+  private valueCollections = new Map<string, CollectionValue>();
+  /** The map or the set each function of the file answers, by its name. */
+  private declaredCollections = new Map<string, CollectionValue>();
+  /** The map or the set a `new Map(...)` written out is, by the expression. */
+  private collectionExpressions = new Map<Expression, CollectionValue>();
   /**
    * The arrows the file's bodies wrote, lifted into functions of the file.
    *
@@ -1914,12 +1943,14 @@ class TypeScriptParser {
     const savedValueTypes = this.valueTypes;
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
+    const savedCollections = this.valueCollections;
     this.tokens = this.allTokens;
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
+    this.valueCollections = new Map();
     if (self) this.valueClasses.set("self", info.name);
     for (const param of params) {
       const typeName = this.classTypeName(param.typeName);
@@ -1936,6 +1967,7 @@ class TypeScriptParser {
       this.valueTypes = savedValueTypes;
       this.valueArrows = savedArrows;
       this.valueFunctions = savedFunctions;
+      this.valueCollections = savedCollections;
     }
   }
 
@@ -2890,6 +2922,7 @@ class TypeScriptParser {
       handle: parsed,
     });
     this.declaredReturns.set(parsed.name, parsed.returns);
+    if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
     for (const wrapper of this.defaultWrappers(parsed, exported)) {
       this.declaredReturns.set(wrapper.name, wrapper.returns);
       functions.push(wrapper);
@@ -3045,6 +3078,8 @@ class TypeScriptParser {
     this.valueTypes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
+    this.valueCollections = new Map();
+    let answered: CollectionValue | null = null;
     const declared = (returns: TypeExpr, body: Statement[]): TypeScriptFunction => ({
       name: name.text,
       params,
@@ -3052,6 +3087,7 @@ class TypeScriptParser {
       body,
       line: name.line,
       ...(isAsync ? { async: true } : {}),
+      ...(answered === null ? {} : { collection: answered }),
     });
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
@@ -3070,11 +3106,13 @@ class TypeScriptParser {
         // the second form: the default says what the parameter holds.
         let mapped: TypeExpr | null = null;
         let functionType: FunctionType | null = null;
+        let collectionType: CollectionValue | null = null;
         if (this.accept(":")) {
           // A type may be a named type, a union, a generic, an object or a
           // function type: every one of them is read to its end and erased.
           const head = this.peek().kind === "ident" ? this.peek().text : "";
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
+          collectionType = this.annotationCollection(new Set([",", ")", "="]));
           mapped = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
           if (head !== "" && this.classTable.names.has(head)) this.valueClasses.set(parameter.text, head);
         }
@@ -3094,6 +3132,7 @@ class TypeScriptParser {
         });
         this.valueTypes.set(parameter.text, mapped);
         if (functionType !== null) this.valueFunctions.set(parameter.text, functionType);
+        if (collectionType !== null) this.valueCollections.set(parameter.text, collectionType);
         if (this.accept(",")) continue;
         this.expect(")");
         break;
@@ -3107,6 +3146,7 @@ class TypeScriptParser {
       return declared(inferredResult(body, params), body);
     }
     this.next();
+    answered = this.annotationCollection(new Set(["{", "=", ";"]));
     const returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
     if (this.accept("=")) {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
@@ -3115,6 +3155,70 @@ class TypeScriptParser {
       return declared(returnType, [{ kind: "result", value, line: name.line }]);
     }
     return declared(returnType, this.readBlock());
+  }
+
+  /**
+   * What a `Map<...>` or a `Set<...>` annotation names, or null where it names
+   * something else.
+   *
+   * A map is held as one handle, which is not a type the contract can spell, so
+   * what it holds is read here and kept beside the name. This frontend keys by
+   * text: a `Map` over any other key is refused where it is written, because the
+   * runtime's dictionary is keyed by a string.
+   */
+  private annotationCollection(stops: ReadonlySet<string>): CollectionValue | null {
+    return this.annotationCollectionAt(this.position, stops);
+  }
+
+  /** What a `Map<...>` or a `Set<...>` starting at one token names. */
+  private annotationCollectionAt(start: number, stops: ReadonlySet<string>): CollectionValue | null {
+    const end = this.typeEndAt(start, stops);
+    const head = this.tokens[start];
+    const kind = head?.text === "Map" || head?.text === "WeakMap"
+      ? "map" as const
+      : head?.text === "Set" || head?.text === "WeakSet"
+        ? "set" as const
+        : null;
+    if (kind === null) return null;
+    if (this.tokens[start + 1]?.text !== "<") return { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
+    const close = this.matchingToken(start + 1, "<", ">");
+    if (close < 0 || close >= end) return { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
+    const arguments_ = this.typeArguments(start + 2, close);
+    const key = arguments_[0] ?? TEXT_RESULT;
+    const value = kind === "map" ? (arguments_[1] ?? NUMBER_RESULT) : NUMBER_RESULT;
+    if (!this.isTextKey(key)) {
+      this.report(
+        `a ${head.text} here is keyed by text, not by ${typeToString(key)}`,
+        "a key is a string: write the key as the text it is, as in m.set(`${id}`, value)",
+        head,
+      );
+      return null;
+    }
+    return { kind, key, value };
+  }
+
+  /** Whether a key type is the text this frontend keys a map by. */
+  private isTextKey(type: TypeExpr): boolean {
+    return type.kind === "text";
+  }
+
+  /** The type arguments written between two angle brackets, one per argument. */
+  private typeArguments(start: number, close: number): TypeExpr[] {
+    const out: TypeExpr[] = [];
+    let depth = 0;
+    let from = start;
+    for (let at = start; at < close; at += 1) {
+      const token = this.tokens[at];
+      if (token?.kind !== "punct") continue;
+      if (token.text === "<" || token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
+      else if (token.text === ">" || token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+      else if (token.text === "," && depth === 0) {
+        out.push(this.typeFromTokens(from, at, false));
+        from = at + 1;
+      }
+    }
+    if (from < close) out.push(this.typeFromTokens(from, close, false));
+    return out;
   }
 
   /**
@@ -3402,9 +3506,11 @@ class TypeScriptParser {
       let type: TypeExpr | null = null;
       let annotationClass: string | null = null;
       let annotationFunction: FunctionType | null = null;
+      let annotationMap: CollectionValue | null = null;
       if (this.accept(":")) {
         const head = this.peek().kind === "ident" ? this.peek().text : "";
         annotationFunction = this.annotationFunctionType(new Set(["=", ";", ",", ")"]));
+        annotationMap = this.annotationCollection(new Set(["=", ";", ",", ")"]));
         type = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
         if (head !== "" && this.classTable.names.has(head)) annotationClass = head;
       }
@@ -3451,6 +3557,16 @@ class TypeScriptParser {
       this.valueArrows.delete(name.text);
       if (annotationFunction !== null) this.valueFunctions.set(name.text, annotationFunction);
       else this.valueFunctions.delete(name.text);
+      // A map is a handle and a set is a map, so what the name holds is kept
+      // beside it: the declaration says it, or the `new Map(...)` it is
+      // initialised with does.
+      const collection =
+        annotationMap ??
+        this.collectionExpressions.get(init) ??
+        (init.k === "call" ? this.declaredCollections.get(init.name) : undefined) ??
+        null;
+      if (collection !== null) this.valueCollections.set(name.text, collection);
+      else this.valueCollections.delete(name.text);
       const held = annotationClass ?? this.classOfExpression(init);
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
@@ -3811,6 +3927,9 @@ class TypeScriptParser {
       // held an arrow no longer does: a later `g(x)` would call a function the
       // call no longer reaches.
       this.valueArrows.delete(target.text);
+      const assigned = this.collectionExpressions.get(value);
+      if (assigned !== undefined) this.valueCollections.set(target.text, assigned);
+      else this.valueCollections.delete(target.text);
       const held = this.classOfExpression(value);
       if (held === null) this.valueClasses.delete(target.text);
       else this.valueClasses.set(target.text, held);
@@ -4700,6 +4819,15 @@ class TypeScriptParser {
           const callLine = this.peek().line;
           const args = this.readCallArguments();
           const receiver = target.base;
+          // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
+          // dictionary, and its methods are the dictionary's.
+          if (receiver.k === "ident" && this.valueCollections.has(receiver.name)) {
+            const lowered = this.collectionMethod(receiver, this.valueCollections.get(receiver.name) as CollectionValue, target.field, args);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           // `a.push(x)` and `a.pop()` change the array the name holds, so they
           // are statements: the call answers the array the name has afterwards,
           // and the frontend writes the assignment that keeps it.
@@ -4781,6 +4909,12 @@ class TypeScriptParser {
             replace(expanded);
             continue;
           }
+        }
+        if (field.text === "size" && target.k === "ident" && this.valueCollections.has(target.name)) {
+          const counted: Expression = { k: "call", name: "blaze_rt_dict_len", args: [target] };
+          this.expressionTypes.set(counted, NUMBER_RESULT);
+          replace(counted);
+          continue;
         }
         if (field.text === "length" && target.k === "ident") {
           replace({ k: "length", buffer: target.name });
@@ -5031,6 +5165,7 @@ class TypeScriptParser {
     const savedClasses = this.valueClasses;
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
+    const savedCollections = this.valueCollections;
     const savedLoops = this.loops;
     const savedTargets = this.breakTargets;
     this.valueTypes = new Map(savedTypes);
@@ -5040,6 +5175,7 @@ class TypeScriptParser {
     // same value the function that wrote it reads.
     this.valueArrows = new Map(savedArrows);
     this.valueFunctions = new Map(savedFunctions);
+    this.valueCollections = new Map(savedCollections);
     this.loops = 0;
     this.breakTargets = [];
     for (const param of params) {
@@ -5056,6 +5192,7 @@ class TypeScriptParser {
     this.valueClasses = savedClasses;
     this.valueArrows = savedArrows;
     this.valueFunctions = savedFunctions;
+    this.valueCollections = savedCollections;
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
     const returns =
@@ -5442,6 +5579,64 @@ class TypeScriptParser {
     const made = { name, returns };
     this.collectHelpers.set(key, made);
     return made;
+  }
+
+  /**
+   * One method of a map or a set, lowered to the runtime's dictionary.
+   *
+   * A set is a dictionary whose value is the number one, so `add` is `set` and
+   * `has` and `delete` are the dictionary's own. `get` answers the zero of the
+   * value type where the key is absent, because a value here has no `undefined`:
+   * what it answers is the same zero an element read outside a buffer answers.
+   */
+  private collectionMethod(
+    receiver: Expression & { k: "ident" },
+    collection: CollectionValue,
+    method: string,
+    args: readonly Expression[],
+  ): Expression | null {
+    const one: Expression = { k: "literal", text: "1" };
+    const take = (): { name: string; args: Expression[]; returns: TypeExpr } | null => {
+      if (collection.kind === "set") {
+        if (method === "add" && args.length === 1) return { name: "blaze_rt_dict_set", args: [receiver, args[0] as Expression, one], returns: NUMBER_RESULT };
+        if (method === "has" && args.length === 1) return { name: "blaze_rt_dict_has", args: [receiver, args[0] as Expression], returns: BOOLEAN_RESULT };
+        if (method === "delete" && args.length === 1) return { name: "blaze_rt_dict_delete", args: [receiver, args[0] as Expression], returns: NUMBER_RESULT };
+        return null;
+      }
+      if ((method === "set" || method === "has" || method === "delete") && args.length === (method === "set" ? 2 : 1)) {
+        const name = method === "set" ? "blaze_rt_dict_set" : method === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete";
+        return { name, args: [receiver, ...args], returns: method === "has" ? BOOLEAN_RESULT : NUMBER_RESULT };
+      }
+      return null;
+    };
+    if (method === "get" && collection.kind === "map" && args.length === 1) {
+      if (collection.value.kind !== "primitive" || !(collection.value.name === "f64" || collection.value.name === "f32")) {
+        this.report(
+          `a map here holds a number, and this one holds a ${typeToString(collection.value)}`,
+          "a key is text and a value is a number: hold a text or a reference in a map of its own",
+          this.peek(),
+        );
+        return this.hole();
+      }
+      // The key is asked for before the value is read, so an absent one answers
+      // zero rather than the NaN the dictionary uses to say it holds nothing.
+      const has: Expression = { k: "call", name: "blaze_rt_dict_has", args: [receiver, args[0] as Expression] };
+      const held: Expression = { k: "call", name: "blaze_rt_dict_get", args: [receiver, args[0] as Expression] };
+      const chosen: Expression = { k: "conditional", condition: has, then: held, otherwise: { k: "literal", text: "0" } };
+      this.expressionTypes.set(chosen, collection.value);
+      return chosen;
+    }
+    const lowered = take();
+    if (lowered === null) return null;
+    const call: Expression = { k: "call", name: lowered.name, args: lowered.args };
+    // The runtime answers a truth with the number one, and a body says what it
+    // means by it: `!s.has(k)` is a question about a truth, and a number is not
+    // one.
+    const answer: Expression = lowered.returns === BOOLEAN_RESULT
+      ? { k: "binary", op: "===", left: call, right: { k: "literal", text: "1" } }
+      : call;
+    this.expressionTypes.set(answer, lowered.returns);
+    return answer;
   }
 
   /** The signature the callback of a collection method is written at. */
@@ -5972,6 +6167,48 @@ class TypeScriptParser {
     return { k: "buffer", element: typeToString(element), values };
   }
 
+  /**
+   * `new Map<K, V>()` and `new Set<V>()`: one handle on the runtime's
+   * dictionary.
+   *
+   * Whether the value is a map or a set is what the name it is bound to holds,
+   * not the handle: a set is a dictionary whose value is the number one, so the
+   * two are one value and one pair of methods.
+   */
+  private readCollectionAllocation(view: Token): Expression {
+    const kind = view.text === "Map" || view.text === "WeakMap" ? "map" as const : "set" as const;
+    let collection: CollectionValue = { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
+    if (this.tokens[this.position]?.text === "<") {
+      const open = this.position;
+      const close = this.matchingToken(open, "<", ">");
+      if (close < 0) {
+        this.report(`a ${view.text} states the type it holds`, `as in new ${view.text}<string, number>()`, view);
+        return this.hole();
+      }
+      // The head of the annotation is the name the source wrote, which the
+      // parser has already read past.
+      const read = this.annotationCollectionAt(this.position - 1, new Set(["("]));
+      if (read !== null) collection = read;
+      this.position = close + 1;
+    }
+    if (!this.accept("(")) {
+      this.report(`a ${view.text} is created with its arguments`, `as in new ${view.text}()`, view);
+      return this.hole();
+    }
+    if (!this.at(")")) {
+      this.report(`a ${view.text} is created empty`, "a map is filled with set, and a set with add", this.peek());
+      while (!this.at(")") && this.peek().kind !== "end") {
+        this.readExpression();
+        if (!this.accept(",")) break;
+      }
+    }
+    this.expect(")");
+    const call: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
+    this.collectionExpressions.set(call, collection);
+    this.expressionTypes.set(call, ANY_TYPE);
+    return call;
+  }
+
   private readAllocation(): Expression {
     const view = this.next();
     // `new Point(1, 2)`: the class's constructor is a function that returns the
@@ -5987,6 +6224,9 @@ class TypeScriptParser {
         const params = info.constructor?.params ?? [];
         return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
       }
+    }
+    if (view.kind === "ident" && (view.text === "Map" || view.text === "Set" || view.text === "WeakMap" || view.text === "WeakSet")) {
+      return this.readCollectionAllocation(view);
     }
     if (view.kind !== "ident" || !(view.text in TYPED_ARRAYS)) {
       this.report(

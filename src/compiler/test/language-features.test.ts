@@ -910,3 +910,73 @@ test("a list spread into a new one is a list of its own", async () => {
   ].join("\n"));
   assert.equal(output.trim(), "22");
 });
+
+test("a map holds a number under a text key", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const m = new Map<string, number>();",
+    "  m.set(`a`, 1);",
+    "  m.set(`b`, 2);",
+    "  m.set(`a`, 5);",
+    "  return m.size * 100 + m.get(`a`) * 10 + m.get(`b`);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "252");
+});
+
+test("a set answers what it has seen, and forgets what it is told to", async () => {
+  const output = await agreesWithNode([
+    "function unique(words: string[]): number {",
+    "  const seen = new Set<string>();",
+    "  for (const w of words) seen.add(w);",
+    "  seen.delete(`b`);",
+    "  return seen.size * 10 + (seen.has(`a`) ? 1 : 0) + (seen.has(`b`) ? 2 : 0);",
+    "}",
+    "function g(): number {",
+    "  const words: string[] = [`a`, `b`, `a`, `c`, `b`];",
+    "  return unique(words);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "21");
+});
+
+test("an absent key answers zero, which is what the map is asked first to find out", async () => {
+  // A value here has no `undefined`, so a lookup that found nothing answers the
+  // zero of the value type: the same zero an element read outside a buffer
+  // answers.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const m = new Map<string, number>();",
+    "  m.set(`a`, 7);",
+    "  if (m.has(`zz`)) return 100;",
+    "  return m.get(`a`) + (m.has(`a`) ? 10 : 0) + m.size;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "18");
+});
+
+test("a map is a value a function is handed and a value it answers", async () => {
+  const output = await agreesWithNode([
+    "function build(): Map<string, number> {",
+    "  const m = new Map<string, number>();",
+    "  m.set(`x`, 9);",
+    "  return m;",
+    "}",
+    "function read(m: Map<string, number>, k: string): number {",
+    "  return m.get(k) + m.size;",
+    "}",
+    "function g(): number {",
+    "  const m = build();",
+    "  return read(m, `x`);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});

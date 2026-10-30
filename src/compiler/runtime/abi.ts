@@ -127,6 +127,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_set", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete", "double", [["dict", "double"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
@@ -3056,6 +3057,20 @@ double blaze_rt_dict_len(double dict) {
   blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
   if (d == NULL) return 0.0;
   return (double)d->count;
+}
+
+double blaze_rt_dict_delete(double dict, const char* key) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL || key == NULL) return 0.0 / 0.0;
+  blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
+  if (e == NULL) return (double)(uintptr_t)d;
+  free(e->key);
+  /* The last entry takes the place of the one that went, so the block stays
+     whole: no gap is left for the next lookup to walk into. */
+  blaze_rt_dict_entry* last = &d->entries[d->count - 1];
+  if (e != last) *e = *last;
+  d->count--;
+  return (double)(uintptr_t)d;
 }
 
 static const double* blaze_rt_arguments = NULL;

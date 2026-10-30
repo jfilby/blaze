@@ -1069,3 +1069,41 @@ test("a push written for a value is refused, because it answers the array the na
     /reads the array a push answers/,
   );
 });
+
+test("a map and a set are one handle on the runtime's dictionary", () => {
+  const analysis = typescript.analyze(
+    [
+      "export function g(): number {",
+      "  const m = new Map<string, number>();",
+      "  m.set(`a`, 1);",
+      "  const s = new Set<string>();",
+      "  s.add(`b`);",
+      "  return m.get(`a`);",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; init?: { k: string; name?: string }; value?: { k: string; name?: string } }[];
+  }).body;
+  assert.equal(body[0]?.init?.name, "blaze_rt_dict_new", "a map is the dictionary the runtime lays out");
+  assert.equal(body[1]?.value?.name, "blaze_rt_dict_set", "a set on a map is the dictionary's write");
+  assert.equal(body[2]?.init?.name, "blaze_rt_dict_new", "a set is the same dictionary");
+  // A lookup is guarded, because an absent key has no `undefined` to answer.
+  const result = body[4]?.value as unknown as { k: string; condition?: { name?: string } };
+  assert.equal(result?.k, "conditional");
+  assert.equal(result?.condition?.name, "blaze_rt_dict_has");
+});
+
+test("a map keyed by anything but text is refused, because a key is a string", () => {
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        "export function g(): number {\n  const s = new Set<number>();\n  return s.size;\n}\n",
+        "main.ts",
+      ),
+    ),
+    /a Set here is keyed by text, not by f64/,
+  );
+});

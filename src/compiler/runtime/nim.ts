@@ -1176,6 +1176,16 @@ proc blaze_rt_dict_len*(dict: float64): float64 {.exportc, cdecl.} =
   if at < 0: return 0.0
   float64(blazeDynValues[at].entries.len)
 
+proc blaze_rt_dict_delete*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+  ## One entry removed by its key, and the dictionary handed back. A key it does
+  ## not hold is not an error: the dictionary is the one it was.
+  let at = blazeDictIndex(dict)
+  if at < 0 or key == nil: return NaN
+  let position = blazeDictFind(at, $key)
+  if position >= 0:
+    blazeDynValues[at].entries.delete(position)
+  dict
+
 proc blaze_rt_random*(): float64 {.exportc, cdecl.} =
   ## A pseudo-random double in [0, 1), which is what the C runtime answers.
   ## Nim's own is in [0, 1) as well, and it is seeded the same way: a program
